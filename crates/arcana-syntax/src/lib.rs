@@ -250,6 +250,18 @@ pub enum Expr {
         text: String,
         attached: Vec<RawBlockEntry>,
     },
+    Path {
+        segments: Vec<String>,
+    },
+    BoolLiteral {
+        value: bool,
+    },
+    IntLiteral {
+        text: String,
+    },
+    StrLiteral {
+        text: String,
+    },
     Pair {
         left: Box<Expr>,
         right: Box<Expr>,
@@ -2010,10 +2022,41 @@ fn parse_postfix_expression(text: &str) -> Result<Expr, String> {
     if let Some(expr) = parse_collection_literal(text)? {
         return Ok(expr);
     }
+    if let Some(expr) = parse_literal_expression(text) {
+        return Ok(expr);
+    }
+    if let Some(expr) = parse_path_expression(text) {
+        return Ok(expr);
+    }
     Ok(Expr::Opaque {
         text: text.trim().to_string(),
         attached: Vec::new(),
     })
+}
+
+fn parse_literal_expression(text: &str) -> Option<Expr> {
+    let trimmed = text.trim();
+    match trimmed {
+        "true" => Some(Expr::BoolLiteral { value: true }),
+        "false" => Some(Expr::BoolLiteral { value: false }),
+        _ if is_int_literal(trimmed) => Some(Expr::IntLiteral {
+            text: trimmed.to_string(),
+        }),
+        _ if is_string_literal(trimmed) => Some(Expr::StrLiteral {
+            text: trimmed.to_string(),
+        }),
+        _ => None,
+    }
+}
+
+fn parse_path_expression(text: &str) -> Option<Expr> {
+    let trimmed = text.trim();
+    if is_identifier(trimmed) {
+        return Some(Expr::Path {
+            segments: vec![trimmed.to_string()],
+        });
+    }
+    None
 }
 
 fn parse_chain_expression(text: &str) -> Result<Option<Expr>, String> {
@@ -3673,6 +3716,10 @@ fn validate_statement_block_tuple_contract(statements: &[Statement]) -> Result<(
 fn validate_expr_tuple_contract(expr: &Expr, span: Span) -> Result<(), String> {
     match expr {
         Expr::Opaque { text, .. } => validate_tuple_expression_text(text, span),
+        Expr::Path { .. }
+        | Expr::BoolLiteral { .. }
+        | Expr::IntLiteral { .. }
+        | Expr::StrLiteral { .. } => Ok(()),
         Expr::Pair { left, right } => {
             validate_expr_tuple_contract(left, span)?;
             validate_expr_tuple_contract(right, span)
@@ -4211,6 +4258,30 @@ fn is_path_like(value: &str) -> bool {
     trimmed.split('.').all(is_identifier)
 }
 
+fn is_int_literal(value: &str) -> bool {
+    !value.is_empty() && value.chars().all(|ch| ch.is_ascii_digit())
+}
+
+fn is_string_literal(value: &str) -> bool {
+    if !value.starts_with('"') || !value.ends_with('"') || value.len() < 2 {
+        return false;
+    }
+    let mut escape = false;
+    let inner = &value[1..value.len() - 1];
+    for ch in inner.chars() {
+        if escape {
+            escape = false;
+            continue;
+        }
+        if ch == '\\' {
+            escape = true;
+        } else if ch == '"' {
+            return false;
+        }
+    }
+    !escape
+}
+
 fn is_identifier_start(ch: char) -> bool {
     ch == '_' || ch.is_ascii_alphabetic()
 }
@@ -4227,6 +4298,18 @@ mod tests {
         MatchPattern, ParamMode, PhraseArg, Statement, StatementKind, SymbolBody, SymbolKind,
         UnaryOp, parse_module,
     };
+
+    fn expr_is_path(expr: &Expr, name: &str) -> bool {
+        matches!(expr, Expr::Path { segments } if segments == &vec![name.to_string()])
+    }
+
+    fn expr_is_int_literal(expr: &Expr, text: &str) -> bool {
+        matches!(expr, Expr::IntLiteral { text: value } if value == text)
+    }
+
+    fn expr_is_str_literal(expr: &Expr, text: &str) -> bool {
+        matches!(expr, Expr::StrLiteral { text: value } if value == text)
+    }
 
     #[test]
     fn frozen_lists_are_unique() {
@@ -4370,10 +4453,7 @@ mod tests {
             } => {
                 assert!(*mutable);
                 assert_eq!(name, "frames");
-                assert!(matches!(
-                    value,
-                    Expr::Opaque { text, attached } if text == "0" && attached.is_empty()
-                ));
+                assert!(expr_is_int_literal(value, "0"));
             }
             other => panic!("expected let statement, got {other:?}"),
         }
@@ -4384,13 +4464,9 @@ mod tests {
                         assert_eq!(*op, BinaryOp::Lt);
                         assert!(matches!(
                             left.as_ref(),
-                            Expr::Opaque { text, attached }
-                                if text == "frames" && attached.is_empty()
+                            expr if expr_is_path(expr, "frames")
                         ));
-                        assert!(matches!(
-                            right.as_ref(),
-                            Expr::Opaque { text, attached } if text == "10" && attached.is_empty()
-                        ));
+                        assert!(matches!(right.as_ref(), expr if expr_is_int_literal(expr, "10")));
                     }
                     other => panic!("expected binary while condition, got {other:?}"),
                 }
@@ -4409,13 +4485,11 @@ mod tests {
                                         assert_eq!(*op, BinaryOp::Mod);
                                         assert!(matches!(
                                             left.as_ref(),
-                                            Expr::Opaque { text, attached }
-                                                if text == "frames" && attached.is_empty()
+                                            expr if expr_is_path(expr, "frames")
                                         ));
                                         assert!(matches!(
                                             right.as_ref(),
-                                            Expr::Opaque { text, attached }
-                                                if text == "2" && attached.is_empty()
+                                            expr if expr_is_int_literal(expr, "2")
                                         ));
                                     }
                                     other => panic!(
@@ -4424,8 +4498,7 @@ mod tests {
                                 }
                                 assert!(matches!(
                                     right.as_ref(),
-                                    Expr::Opaque { text, attached }
-                                        if text == "0" && attached.is_empty()
+                                    expr if expr_is_int_literal(expr, "0")
                                 ));
                             }
                             other => panic!("expected equality if condition, got {other:?}"),
@@ -4453,8 +4526,7 @@ mod tests {
                     Expr::Match { subject, arms } => {
                         assert!(matches!(
                             subject.as_ref(),
-                            Expr::Opaque { text, attached }
-                                if text == "frames" && attached.is_empty()
+                            expr if expr_is_path(expr, "frames")
                         ));
                         assert_eq!(arms.len(), 2);
                         assert_eq!(
@@ -4465,8 +4537,7 @@ mod tests {
                         );
                         assert!(matches!(
                             arms[0].value,
-                            Expr::Opaque { ref text, ref attached }
-                                if text == "1" && attached.is_empty()
+                            ref expr if expr_is_int_literal(expr, "1")
                         ));
                         assert_eq!(arms[1].patterns, vec![MatchPattern::Wildcard]);
                     }
@@ -4490,7 +4561,7 @@ mod tests {
                 Expr::Match { subject, arms } => {
                     assert!(matches!(
                         subject.as_ref(),
-                        Expr::Opaque { text, attached } if text == "t" && attached.is_empty()
+                        expr if expr_is_path(expr, "t")
                     ));
                     assert_eq!(
                         arms[0].patterns,
@@ -4525,7 +4596,7 @@ mod tests {
                     Expr::Match { subject, arms } => {
                         assert!(matches!(
                             subject.as_ref(),
-                            Expr::Opaque { text, attached } if text == "out" && attached.is_empty()
+                            expr if expr_is_path(expr, "out")
                         ));
                         assert_eq!(arms.len(), 2);
                         assert_eq!(
@@ -4766,8 +4837,7 @@ mod tests {
                     assert_eq!(args.len(), 1);
                     assert!(matches!(
                         &args[0],
-                        PhraseArg::Positional(Expr::Opaque { text, attached })
-                            if text == "\"bye\"" && attached.is_empty()
+                        PhraseArg::Positional(expr) if expr_is_str_literal(expr, "\"bye\"")
                     ));
                 }
                 other => panic!("expected defer phrase expression, got {other:?}"),
@@ -4797,10 +4867,7 @@ mod tests {
                 assert_eq!(name, "ready");
                 match value {
                     Expr::Await { expr } => {
-                        assert!(matches!(
-                            expr.as_ref(),
-                            Expr::Opaque { text, attached } if text == "task" && attached.is_empty()
-                        ));
+                        assert!(matches!(expr.as_ref(), expr if expr_is_path(expr, "task")));
                     }
                     other => panic!("expected await expression, got {other:?}"),
                 }
@@ -4837,8 +4904,7 @@ mod tests {
                                         }
                                         assert!(matches!(
                                             right.as_ref(),
-                                            Expr::Opaque { text, attached }
-                                                if text == "3" && attached.is_empty()
+                                            expr if expr_is_int_literal(expr, "3")
                                         ));
                                     }
                                     other => panic!(
@@ -4847,8 +4913,7 @@ mod tests {
                                 }
                                 assert!(matches!(
                                     right.as_ref(),
-                                    Expr::Opaque { text, attached }
-                                        if text == "8" && attached.is_empty()
+                                    expr if expr_is_int_literal(expr, "8")
                                 ));
                             }
                             other => panic!(
@@ -4881,8 +4946,8 @@ mod tests {
                         assert_eq!(args.len(), 1);
                         assert!(matches!(
                             &args[0],
-                            PhraseArg::Named { name, value: Expr::Opaque { text, attached } }
-                                if name == "clear" && text == "0" && attached.is_empty()
+                            PhraseArg::Named { name, value }
+                                if name == "clear" && expr_is_int_literal(value, "0")
                         ));
                     }
                     other => panic!("expected named-arg phrase, got {other:?}"),
@@ -4902,10 +4967,10 @@ mod tests {
                         attached,
                     } => {
                     assert_eq!(qualifier, "call");
-                    assert!(attached.is_empty());
-                    assert!(matches!(
-                        subject.as_ref(),
-                        Expr::GenericApply { expr, type_args }
+                        assert!(attached.is_empty());
+                        assert!(matches!(
+                            subject.as_ref(),
+                            Expr::GenericApply { expr, type_args }
                             if type_args == &vec!["Int".to_string()]
                                 && matches!(
                                     expr.as_ref(),
@@ -4924,7 +4989,7 @@ mod tests {
             StatementKind::Return { value } => {
                 assert!(matches!(
                     value.as_ref().expect("return should have value"),
-                    Expr::Opaque { text, attached } if text == "printed" && attached.is_empty()
+                    expr if expr_is_path(expr, "printed")
                 ));
             }
             other => panic!("expected return statement, got {other:?}"),
@@ -4964,14 +5029,8 @@ mod tests {
                 assert_eq!(name, "first");
                 match value {
                     Expr::Index { expr, index } => {
-                        assert!(matches!(
-                            expr.as_ref(),
-                            Expr::Opaque { text, attached } if text == "xs" && attached.is_empty()
-                        ));
-                        assert!(matches!(
-                            index.as_ref(),
-                            Expr::Opaque { text, attached } if text == "0" && attached.is_empty()
-                        ));
+                        assert!(matches!(expr.as_ref(), expr if expr_is_path(expr, "xs")));
+                        assert!(matches!(index.as_ref(), expr if expr_is_int_literal(expr, "0")));
                     }
                     other => panic!("expected index expression, got {other:?}"),
                 }
@@ -4991,8 +5050,7 @@ mod tests {
                         assert!(!inclusive_end);
                         assert!(matches!(
                             start.as_deref(),
-                            Some(Expr::Opaque { text, attached })
-                                if text == "1" && attached.is_empty()
+                            Some(expr) if expr_is_int_literal(expr, "1")
                         ));
                         assert!(end.is_none());
                     }
@@ -5014,13 +5072,11 @@ mod tests {
                         assert!(*inclusive_end);
                         assert!(matches!(
                             start.as_deref(),
-                            Some(Expr::Opaque { text, attached })
-                                if text == "1" && attached.is_empty()
+                            Some(expr) if expr_is_int_literal(expr, "1")
                         ));
                         assert!(matches!(
                             end.as_deref(),
-                            Some(Expr::Opaque { text, attached })
-                                if text == "2" && attached.is_empty()
+                            Some(expr) if expr_is_int_literal(expr, "2")
                         ));
                     }
                     other => panic!("expected mid slice, got {other:?}"),
@@ -5090,10 +5146,10 @@ mod tests {
                         right,
                     } if matches!(
                         left.as_ref(),
-                        Expr::Opaque { text, attached } if text == "left" && attached.is_empty()
+                        expr if expr_is_path(expr, "left")
                     ) && matches!(
                         right.as_ref(),
-                        Expr::Opaque { text, attached } if text == "right" && attached.is_empty()
+                        expr if expr_is_path(expr, "right")
                     )
                 ));
             }
@@ -5151,10 +5207,10 @@ mod tests {
                     &attached[0],
                     HeaderAttachment::Named {
                         name,
-                        value: Expr::Opaque { text, attached },
+                        value,
                         forewords,
                         ..
-                    } if name == "value" && text == "10" && attached.is_empty()
+                    } if name == "value" && expr_is_int_literal(value, "10")
                         && forewords.is_empty()
                 ));
                 assert!(matches!(
@@ -5278,10 +5334,7 @@ mod tests {
                         target.as_ref(),
                         AssignTarget::Name { text } if text == "xs"
                     ));
-                    assert!(matches!(
-                        index,
-                        Expr::Opaque { text, attached } if text == "1" && attached.is_empty()
-                    ));
+                    assert!(expr_is_int_literal(index, "1"));
                 }
                 other => panic!("expected indexed assignment target, got {other:?}"),
             },
@@ -5294,10 +5347,7 @@ mod tests {
                         target.as_ref(),
                         AssignTarget::Name { text } if text == "xs"
                     ));
-                    assert!(matches!(
-                        index,
-                        Expr::Opaque { text, attached } if text == "i" && attached.is_empty()
-                    ));
+                    assert!(expr_is_path(index, "i"));
                 }
                 other => panic!("expected indexed compound-assignment target, got {other:?}"),
             },
@@ -5323,7 +5373,7 @@ mod tests {
                         expr
                     } if matches!(
                         expr.as_ref(),
-                        Expr::Opaque { text, attached } if text == "local_x" && attached.is_empty()
+                        expr if expr_is_path(expr, "local_x")
                     )
                 ));
             }
@@ -5340,7 +5390,7 @@ mod tests {
                         expr
                     } if matches!(
                         expr.as_ref(),
-                        Expr::Opaque { text, attached } if text == "local_y" && attached.is_empty()
+                        expr if expr_is_path(expr, "local_y")
                     )
                 ));
             }
@@ -5363,7 +5413,7 @@ mod tests {
                             expr
                         } if matches!(
                             expr.as_ref(),
-                            Expr::Opaque { text, attached } if text == "x_ref" && attached.is_empty()
+                            expr if expr_is_path(expr, "x_ref")
                         )
                     ) && matches!(
                         right.as_ref(),
@@ -5372,7 +5422,7 @@ mod tests {
                             expr
                         } if matches!(
                             expr.as_ref(),
-                            Expr::Opaque { text, attached } if text == "y_mut" && attached.is_empty()
+                            expr if expr_is_path(expr, "y_mut")
                         )
                     )
                 ));

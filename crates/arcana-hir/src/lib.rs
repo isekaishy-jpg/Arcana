@@ -257,6 +257,18 @@ pub enum HirExpr {
         text: String,
         attached: Vec<HirRawBlockEntry>,
     },
+    Path {
+        segments: Vec<String>,
+    },
+    BoolLiteral {
+        value: bool,
+    },
+    IntLiteral {
+        text: String,
+    },
+    StrLiteral {
+        text: String,
+    },
     Pair {
         left: Box<HirExpr>,
         right: Box<HirExpr>,
@@ -1616,6 +1628,12 @@ fn lower_expr(expr: &ParsedExpr) -> HirExpr {
             text: text.clone(),
             attached: lower_raw_block_entries(attached),
         },
+        ParsedExpr::Path { segments } => HirExpr::Path {
+            segments: segments.clone(),
+        },
+        ParsedExpr::BoolLiteral { value } => HirExpr::BoolLiteral { value: *value },
+        ParsedExpr::IntLiteral { text } => HirExpr::IntLiteral { text: text.clone() },
+        ParsedExpr::StrLiteral { text } => HirExpr::StrLiteral { text: text.clone() },
         ParsedExpr::Pair { left, right } => HirExpr::Pair {
             left: Box::new(lower_expr(left)),
             right: Box::new(lower_expr(right)),
@@ -1852,6 +1870,18 @@ mod tests {
         derive_source_module_path, lower_module_text, resolve_workspace,
     };
 
+    fn expr_is_path(expr: &HirExpr, name: &str) -> bool {
+        matches!(expr, HirExpr::Path { segments } if segments == &vec![name.to_string()])
+    }
+
+    fn expr_is_int_literal(expr: &HirExpr, text: &str) -> bool {
+        matches!(expr, HirExpr::IntLiteral { text: value } if value == text)
+    }
+
+    fn expr_is_str_literal(expr: &HirExpr, text: &str) -> bool {
+        matches!(expr, HirExpr::StrLiteral { text: value } if value == text)
+    }
+
     #[test]
     fn frozen_hir_list_is_unique() {
         let mut kinds = FROZEN_HIR_NODE_KINDS.to_vec();
@@ -1943,10 +1973,7 @@ mod tests {
             } => {
                 assert!(*mutable);
                 assert_eq!(name, "frames");
-                assert!(matches!(
-                    value,
-                    HirExpr::Opaque { text, attached } if text == "0" && attached.is_empty()
-                ));
+                assert!(expr_is_int_literal(value, "0"));
             }
             other => panic!("expected let statement, got {other:?}"),
         }
@@ -1957,13 +1984,9 @@ mod tests {
                         assert_eq!(*op, HirBinaryOp::Lt);
                         assert!(matches!(
                             left.as_ref(),
-                            HirExpr::Opaque { text, attached }
-                                if text == "frames" && attached.is_empty()
+                            expr if expr_is_path(expr, "frames")
                         ));
-                        assert!(matches!(
-                            right.as_ref(),
-                            HirExpr::Opaque { text, attached } if text == "10" && attached.is_empty()
-                        ));
+                        assert!(matches!(right.as_ref(), expr if expr_is_int_literal(expr, "10")));
                     }
                     other => panic!("expected binary while condition, got {other:?}"),
                 }
@@ -1982,13 +2005,11 @@ mod tests {
                                         assert_eq!(*op, HirBinaryOp::Mod);
                                         assert!(matches!(
                                             left.as_ref(),
-                                            HirExpr::Opaque { text, attached }
-                                                if text == "frames" && attached.is_empty()
+                                            expr if expr_is_path(expr, "frames")
                                         ));
                                         assert!(matches!(
                                             right.as_ref(),
-                                            HirExpr::Opaque { text, attached }
-                                                if text == "2" && attached.is_empty()
+                                            expr if expr_is_int_literal(expr, "2")
                                         ));
                                     }
                                     other => panic!(
@@ -1997,8 +2018,7 @@ mod tests {
                                 }
                                 assert!(matches!(
                                     right.as_ref(),
-                                    HirExpr::Opaque { text, attached }
-                                        if text == "0" && attached.is_empty()
+                                    expr if expr_is_int_literal(expr, "0")
                                 ));
                             }
                             other => panic!("expected equality if condition, got {other:?}"),
@@ -2013,8 +2033,7 @@ mod tests {
                                 assert_eq!(*op, HirAssignOp::AddAssign);
                                 assert!(matches!(
                                     value,
-                                    HirExpr::Opaque { text, attached }
-                                        if text == "1" && attached.is_empty()
+                                    expr if expr_is_int_literal(expr, "1")
                                 ));
                             }
                             other => panic!("expected assignment, got {other:?}"),
@@ -2033,8 +2052,7 @@ mod tests {
                     HirExpr::Match { subject, arms } => {
                         assert!(matches!(
                             subject.as_ref(),
-                            HirExpr::Opaque { text, attached }
-                                if text == "frames" && attached.is_empty()
+                            expr if expr_is_path(expr, "frames")
                         ));
                         assert_eq!(arms.len(), 2);
                         assert_eq!(
@@ -2045,8 +2063,7 @@ mod tests {
                         );
                         assert!(matches!(
                             arms[0].value,
-                            HirExpr::Opaque { ref text, ref attached }
-                                if text == "1" && attached.is_empty()
+                            ref expr if expr_is_int_literal(expr, "1")
                         ));
                         assert_eq!(arms[1].patterns, vec![HirMatchPattern::Wildcard]);
                     }
@@ -2168,10 +2185,10 @@ mod tests {
             HirStatementKind::Return { value } => {
                 match value.as_ref().expect("match return expected") {
                     HirExpr::Match { subject, arms } => {
-                        assert!(matches!(
-                            subject.as_ref(),
-                            HirExpr::Opaque { text, attached } if text == "t" && attached.is_empty()
-                        ));
+                    assert!(matches!(
+                        subject.as_ref(),
+                        expr if expr_is_path(expr, "t")
+                    ));
                         assert_eq!(
                             arms[0].patterns,
                             vec![
@@ -2206,7 +2223,7 @@ mod tests {
                     HirExpr::Match { subject, arms } => {
                         assert!(matches!(
                             subject.as_ref(),
-                            HirExpr::Opaque { text, attached } if text == "out" && attached.is_empty()
+                            expr if expr_is_path(expr, "out")
                         ));
                         assert_eq!(arms.len(), 2);
                         assert_eq!(
@@ -2303,8 +2320,7 @@ mod tests {
                     assert_eq!(args.len(), 1);
                     assert!(matches!(
                         &args[0],
-                        HirPhraseArg::Positional(HirExpr::Opaque { text, attached })
-                            if text == "\"bye\"" && attached.is_empty()
+                        HirPhraseArg::Positional(expr) if expr_is_str_literal(expr, "\"bye\"")
                     ));
                 }
                 other => panic!("expected defer phrase expression, got {other:?}"),
@@ -2334,10 +2350,7 @@ mod tests {
                 assert_eq!(name, "ready");
                 match value {
                     HirExpr::Await { expr } => {
-                        assert!(matches!(
-                            expr.as_ref(),
-                            HirExpr::Opaque { text, attached } if text == "task" && attached.is_empty()
-                        ));
+                        assert!(matches!(expr.as_ref(), expr if expr_is_path(expr, "task")));
                     }
                     other => panic!("expected await expression, got {other:?}"),
                 }
@@ -2374,8 +2387,7 @@ mod tests {
                                         }
                                         assert!(matches!(
                                             right.as_ref(),
-                                            HirExpr::Opaque { text, attached }
-                                                if text == "3" && attached.is_empty()
+                                            expr if expr_is_int_literal(expr, "3")
                                         ));
                                     }
                                     other => panic!(
@@ -2384,8 +2396,7 @@ mod tests {
                                 }
                                 assert!(matches!(
                                     right.as_ref(),
-                                    HirExpr::Opaque { text, attached }
-                                        if text == "8" && attached.is_empty()
+                                    expr if expr_is_int_literal(expr, "8")
                                 ));
                             }
                             other => panic!(
@@ -2418,8 +2429,8 @@ mod tests {
                         assert_eq!(args.len(), 1);
                         assert!(matches!(
                             &args[0],
-                            HirPhraseArg::Named { name, value: HirExpr::Opaque { text, attached } }
-                                if name == "clear" && text == "0" && attached.is_empty()
+                            HirPhraseArg::Named { name, value }
+                                if name == "clear" && expr_is_int_literal(value, "0")
                         ));
                     }
                     other => panic!("expected named-arg phrase, got {other:?}"),
@@ -2461,8 +2472,7 @@ mod tests {
             HirStatementKind::Return { value } => {
                 assert!(matches!(
                     value.as_ref().expect("return should have value"),
-                    HirExpr::Opaque { text, attached }
-                        if text == "printed" && attached.is_empty()
+                    expr if expr_is_path(expr, "printed")
                 ));
             }
             other => panic!("expected return statement, got {other:?}"),
@@ -2503,14 +2513,8 @@ mod tests {
                 assert_eq!(name, "first");
                 match value {
                     HirExpr::Index { expr, index } => {
-                        assert!(matches!(
-                            expr.as_ref(),
-                            HirExpr::Opaque { text, attached } if text == "xs" && attached.is_empty()
-                        ));
-                        assert!(matches!(
-                            index.as_ref(),
-                            HirExpr::Opaque { text, attached } if text == "0" && attached.is_empty()
-                        ));
+                        assert!(matches!(expr.as_ref(), expr if expr_is_path(expr, "xs")));
+                        assert!(matches!(index.as_ref(), expr if expr_is_int_literal(expr, "0")));
                     }
                     other => panic!("expected index expression, got {other:?}"),
                 }
@@ -2530,8 +2534,7 @@ mod tests {
                         assert!(!inclusive_end);
                         assert!(matches!(
                             start.as_deref(),
-                            Some(HirExpr::Opaque { text, attached })
-                                if text == "1" && attached.is_empty()
+                            Some(expr) if expr_is_int_literal(expr, "1")
                         ));
                         assert!(end.is_none());
                     }
@@ -2553,13 +2556,11 @@ mod tests {
                         assert!(*inclusive_end);
                         assert!(matches!(
                             start.as_deref(),
-                            Some(HirExpr::Opaque { text, attached })
-                                if text == "1" && attached.is_empty()
+                            Some(expr) if expr_is_int_literal(expr, "1")
                         ));
                         assert!(matches!(
                             end.as_deref(),
-                            Some(HirExpr::Opaque { text, attached })
-                                if text == "2" && attached.is_empty()
+                            Some(expr) if expr_is_int_literal(expr, "2")
                         ));
                     }
                     other => panic!("expected mid slice, got {other:?}"),
@@ -2630,10 +2631,10 @@ mod tests {
                         right,
                     } if matches!(
                         left.as_ref(),
-                        HirExpr::Opaque { text, attached } if text == "left" && attached.is_empty()
+                        expr if expr_is_path(expr, "left")
                     ) && matches!(
                         right.as_ref(),
-                        HirExpr::Opaque { text, attached } if text == "right" && attached.is_empty()
+                        expr if expr_is_path(expr, "right")
                     )
                 ));
             }
@@ -2693,10 +2694,10 @@ mod tests {
                     &attached[0],
                     HirHeaderAttachment::Named {
                         name,
-                        value: HirExpr::Opaque { text, attached },
+                        value,
                         forewords,
                         ..
-                    } if name == "value" && text == "10" && attached.is_empty()
+                    } if name == "value" && expr_is_int_literal(value, "10")
                         && forewords.is_empty()
                 ));
                 assert!(matches!(
@@ -2821,10 +2822,7 @@ mod tests {
                         target.as_ref(),
                         HirAssignTarget::Name { text } if text == "xs"
                     ));
-                    assert!(matches!(
-                        index,
-                        HirExpr::Opaque { text, attached } if text == "1" && attached.is_empty()
-                    ));
+                    assert!(expr_is_int_literal(index, "1"));
                 }
                 other => panic!("expected indexed assignment target, got {other:?}"),
             },
@@ -2837,10 +2835,7 @@ mod tests {
                         target.as_ref(),
                         HirAssignTarget::Name { text } if text == "xs"
                     ));
-                    assert!(matches!(
-                        index,
-                        HirExpr::Opaque { text, attached } if text == "i" && attached.is_empty()
-                    ));
+                    assert!(expr_is_path(index, "i"));
                 }
                 other => panic!("expected indexed compound-assignment target, got {other:?}"),
             },
@@ -2867,7 +2862,7 @@ mod tests {
                         expr
                     } if matches!(
                         expr.as_ref(),
-                        HirExpr::Opaque { text, attached } if text == "local_x" && attached.is_empty()
+                        expr if expr_is_path(expr, "local_x")
                     )
                 ));
             }
@@ -2884,7 +2879,7 @@ mod tests {
                         expr
                     } if matches!(
                         expr.as_ref(),
-                        HirExpr::Opaque { text, attached } if text == "local_y" && attached.is_empty()
+                        expr if expr_is_path(expr, "local_y")
                     )
                 ));
             }
@@ -2907,7 +2902,7 @@ mod tests {
                             expr
                         } if matches!(
                             expr.as_ref(),
-                            HirExpr::Opaque { text, attached } if text == "x_ref" && attached.is_empty()
+                            expr if expr_is_path(expr, "x_ref")
                         )
                     ) && matches!(
                         right.as_ref(),
@@ -2916,7 +2911,7 @@ mod tests {
                             expr
                         } if matches!(
                             expr.as_ref(),
-                            HirExpr::Opaque { text, attached } if text == "y_mut" && attached.is_empty()
+                            expr if expr_is_path(expr, "y_mut")
                         )
                     )
                 ));

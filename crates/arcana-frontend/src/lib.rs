@@ -916,10 +916,21 @@ fn validate_expr_semantics(
             "value expression",
             diagnostics,
         ),
+        HirExpr::Path { segments } => validate_value_path_segments(
+            workspace,
+            resolved_module,
+            module_path,
+            scope,
+            segments,
+            span,
+            "value expression",
+            diagnostics,
+        ),
+        HirExpr::BoolLiteral { .. } | HirExpr::IntLiteral { .. } | HirExpr::StrLiteral { .. } => {}
         HirExpr::Pair { left, right } => {
-                validate_expr_semantics(
-                    workspace,
-                    resolved_module,
+            validate_expr_semantics(
+                workspace,
+                resolved_module,
                     module_path,
                     type_scope,
                     scope,
