@@ -91,7 +91,7 @@ mod tests {
                 },
             ],
             dependency_edge_count: 1,
-            exported_surface_rows: vec!["module=winspell:export:fn:open".to_string()],
+            exported_surface_rows: vec!["module=winspell:export:fn:fn open() -> Int:".to_string()],
         });
         assert_eq!(artifact.format, AOT_PLACEHOLDER_FORMAT);
         assert_eq!(artifact.package_name, "winspell");

@@ -65,6 +65,7 @@ pub struct SymbolDecl {
     pub name: String,
     pub kind: SymbolKind,
     pub exported: bool,
+    pub surface_text: String,
     pub span: Span,
 }
 
@@ -77,47 +78,32 @@ pub struct ParsedModule {
 }
 
 pub fn parse_module(source: &str) -> Result<ParsedModule, String> {
+    let lines = source.lines().collect::<Vec<_>>();
     let mut line_count = 0usize;
     let mut non_empty = 0usize;
     let mut directives = Vec::new();
     let mut symbols = Vec::new();
 
-    for (idx, line) in source.lines().enumerate() {
+    for (idx, line) in lines.iter().enumerate() {
         line_count = idx + 1;
-        let mut leading_spaces = 0usize;
-        for (column, ch) in line.chars().enumerate() {
-            match ch {
-                ' ' => {
-                    leading_spaces += 1;
-                    continue;
-                }
-                '\t' => {
-                    return Err(format!(
-                        "{}:{}: tabs are not allowed in indentation",
-                        idx + 1,
-                        column + 1
-                    ));
-                }
-                _ => break,
-            }
-        }
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
+        let analysis = analyze_line(line, idx)?;
+        if !analysis.counts_as_non_empty() {
             continue;
         }
 
         non_empty += 1;
-        if leading_spaces != 0 {
+        if analysis.leading_spaces != 0 {
             continue;
         }
 
         let span = Span::new(idx + 1, 1);
-        if let Some(directive) = parse_directive(trimmed, span)? {
+        if let Some(directive) = parse_directive(analysis.trimmed, span)? {
             directives.push(directive);
             continue;
         }
 
-        if let Some(symbol) = parse_symbol(trimmed, span) {
+        if let Some(mut symbol) = parse_symbol(analysis.trimmed, span) {
+            symbol.surface_text = collect_symbol_surface(&lines, idx, &symbol.kind)?;
             symbols.push(symbol);
         }
     }
@@ -126,6 +112,42 @@ pub fn parse_module(source: &str) -> Result<ParsedModule, String> {
         non_empty_line_count: non_empty,
         directives,
         symbols,
+    })
+}
+
+struct AnalyzedLine<'a> {
+    trimmed: &'a str,
+    leading_spaces: usize,
+}
+
+impl AnalyzedLine<'_> {
+    fn counts_as_non_empty(&self) -> bool {
+        !self.trimmed.is_empty() && !self.trimmed.starts_with('#')
+    }
+}
+
+fn analyze_line<'a>(line: &'a str, line_index: usize) -> Result<AnalyzedLine<'a>, String> {
+    let mut leading_spaces = 0usize;
+    for (column, ch) in line.chars().enumerate() {
+        match ch {
+            ' ' => {
+                leading_spaces += 1;
+                continue;
+            }
+            '\t' => {
+                return Err(format!(
+                    "{}:{}: tabs are not allowed in indentation",
+                    line_index + 1,
+                    column + 1
+                ));
+            }
+            _ => break,
+        }
+    }
+
+    Ok(AnalyzedLine {
+        trimmed: line.trim(),
+        leading_spaces,
     })
 }
 
@@ -223,10 +245,45 @@ fn parse_symbol(trimmed: &str, span: Span) -> Option<SymbolDecl> {
             name,
             kind,
             exported,
+            surface_text: trimmed.to_string(),
             span,
         });
     }
     None
+}
+
+fn collect_symbol_surface(
+    lines: &[&str],
+    start_index: usize,
+    kind: &SymbolKind,
+) -> Result<String, String> {
+    let line = analyze_line(lines[start_index], start_index)?;
+    let mut surface_lines = vec![
+        line.trimmed
+            .strip_prefix("export ")
+            .unwrap_or(line.trimmed)
+            .to_string(),
+    ];
+
+    if matches!(kind, SymbolKind::Fn | SymbolKind::Const) {
+        return Ok(surface_lines.join("\n"));
+    }
+
+    let mut index = start_index + 1;
+    while index < lines.len() {
+        let analysis = analyze_line(lines[index], index)?;
+        if !analysis.counts_as_non_empty() {
+            index += 1;
+            continue;
+        }
+        if analysis.leading_spaces == 0 {
+            break;
+        }
+        surface_lines.push(analysis.trimmed.to_string());
+        index += 1;
+    }
+
+    Ok(surface_lines.join("\n"))
 }
 
 fn parse_symbol_name(rest: &str) -> Option<String> {
@@ -293,7 +350,7 @@ mod tests {
     #[test]
     fn parse_module_collects_directives_and_symbols() {
         let parsed = parse_module(
-            "import std.io\nuse std.result.Result\nreexport types\nexport record Counter:\nfn main() -> Int:\n",
+            "import std.io\nuse std.result.Result\nreexport types\nexport record Counter:\n    value: Int\nfn main() -> Int:\n",
         )
         .expect("parse should pass");
 
@@ -306,8 +363,10 @@ mod tests {
         assert_eq!(parsed.symbols[0].name, "Counter");
         assert_eq!(parsed.symbols[0].kind.as_str(), "record");
         assert!(parsed.symbols[0].exported);
+        assert_eq!(parsed.symbols[0].surface_text, "record Counter:\nvalue: Int");
         assert_eq!(parsed.symbols[1].name, "main");
         assert_eq!(parsed.symbols[1].kind.as_str(), "fn");
         assert!(!parsed.symbols[1].exported);
+        assert_eq!(parsed.symbols[1].surface_text, "fn main() -> Int:");
     }
 }

@@ -3,7 +3,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use arcana_aot::{AOT_PLACEHOLDER_FORMAT, compile_package};
-use arcana_hir::{build_package_summary, derive_source_module_path, lower_module_text};
+use arcana_hir::{
+    HirWorkspacePackage, HirWorkspaceSummary, build_package_layout, build_package_summary,
+    build_workspace_package, build_workspace_summary, derive_source_module_path, lower_module_text,
+};
 use arcana_ir::lower_package;
 use pathdiff::diff_paths;
 use sha2::{Digest, Sha256};
@@ -288,6 +291,61 @@ pub fn load_workspace_graph(root_dir: &Path) -> PackageResult<WorkspaceGraph> {
         root_dir,
         members,
     })
+}
+
+pub fn load_workspace_hir(root_dir: &Path) -> PackageResult<HirWorkspaceSummary> {
+    let root_dir = canonicalize_dir(root_dir)?;
+    let graph = load_workspace_graph(&root_dir)?;
+    load_workspace_hir_from_graph(&root_dir, &graph)
+}
+
+pub fn load_workspace_hir_from_graph(
+    root_dir: &Path,
+    graph: &WorkspaceGraph,
+) -> PackageResult<HirWorkspaceSummary> {
+    let root_dir = canonicalize_dir(root_dir)?;
+    let mut packages = Vec::new();
+
+    let root_manifest = parse_manifest(&root_dir.join("book.toml"))?;
+    let root_already_in_graph = graph.members.iter().any(|member| member.abs_dir == root_dir);
+    if !root_already_in_graph && has_root_module(&root_dir, &root_manifest.kind) {
+        packages.push(load_package_hir(
+            &root_dir,
+            &root_manifest.name,
+            &root_manifest.kind,
+            root_manifest.deps.keys().cloned().collect(),
+        )?);
+    }
+
+    for member in &graph.members {
+        packages.push(load_member_hir_package(member)?);
+    }
+
+    if let Some(std_dir) = find_implicit_std(&root_dir)? {
+        let manifest = parse_manifest(&std_dir.join("book.toml"))?;
+        let has_std = packages
+            .iter()
+            .any(|package| package.summary.package_name == manifest.name);
+        if !has_std {
+            packages.push(load_package_hir(
+                &std_dir,
+                &manifest.name,
+                &manifest.kind,
+                BTreeSet::new(),
+            )?);
+        }
+    }
+
+    build_workspace_summary(packages)
+}
+
+pub fn load_member_hir_package(member: &WorkspaceMember) -> PackageResult<HirWorkspacePackage> {
+    load_package_hir(
+        &member.abs_dir,
+        &member.name,
+        &member.kind,
+        member.deps.iter().cloned().collect(),
+    )
 }
 
 pub fn plan_workspace(graph: &WorkspaceGraph) -> PackageResult<Vec<String>> {
@@ -898,7 +956,7 @@ fn compute_api_fingerprint(
     files: &[PathBuf],
 ) -> PackageResult<String> {
     let mut hasher = Sha256::new();
-    hasher.update(b"arcana_api_v1\n");
+    hasher.update(b"arcana_api_v2\n");
     hasher.update(format!("name={}\n", member.name).as_bytes());
     hasher.update(format!("kind={}\n", member.kind.as_str()).as_bytes());
     for dep in &member.deps {
@@ -914,30 +972,88 @@ fn compute_api_fingerprint(
 }
 
 fn load_member_package_summary(member: &WorkspaceMember) -> PackageResult<arcana_hir::HirPackageSummary> {
-    let files = collect_arc_files(&member.abs_dir.join("src"))?;
-    build_member_package_summary(member, &files)
+    Ok(load_member_hir_package(member)?.summary)
 }
 
 fn build_member_package_summary(
     member: &WorkspaceMember,
     files: &[PathBuf],
 ) -> PackageResult<arcana_hir::HirPackageSummary> {
+    Ok(build_package_hir(
+        &member.abs_dir,
+        &member.name,
+        &member.kind,
+        member.deps.iter().cloned().collect(),
+        files,
+    )?
+    .summary)
+}
+
+fn load_package_hir(
+    root_dir: &Path,
+    name: &str,
+    kind: &GrimoireKind,
+    direct_deps: BTreeSet<String>,
+) -> PackageResult<HirWorkspacePackage> {
+    let files = collect_arc_files(&root_dir.join("src"))?;
+    build_package_hir(root_dir, name, kind, direct_deps, &files)
+}
+
+fn build_package_hir(
+    root_dir: &Path,
+    name: &str,
+    kind: &GrimoireKind,
+    direct_deps: BTreeSet<String>,
+    files: &[PathBuf],
+) -> PackageResult<HirWorkspacePackage> {
+    let src_dir = root_dir.join("src");
+    let root_file = src_dir.join(kind.root_file_name());
+    if !root_file.is_file() {
+        return Err(format!(
+            "missing `{}` in `{}`",
+            kind.root_file_name(),
+            src_dir.display()
+        ));
+    }
+
+    let mut module_paths = BTreeMap::new();
     let mut modules = Vec::new();
+    let mut relative_to_absolute = BTreeMap::new();
     for file in files {
-        let module_id = derive_source_module_path(
-            &member.name,
-            member.kind.root_file_name(),
-            &member.abs_dir.join("src"),
-            file,
-        )?
-        .module_id;
+        let source_path = derive_source_module_path(name, kind.root_file_name(), &src_dir, file)?;
+        let relative_key = source_path.relative_segments.join(".");
+        let module_id = source_path.module_id;
         let source =
             fs::read_to_string(file).map_err(|e| format!("failed to read `{}`: {e}", file.display()))?;
         let module = lower_module_text(module_id, &source)
             .map_err(|err| format!("{}: {err}", file.display()))?;
+        if module_paths
+            .insert(module.module_id.clone(), file.to_path_buf())
+            .is_some()
+        {
+            return Err(format!(
+                "duplicate module path `{}` in `{}`",
+                module.module_id,
+                root_dir.display()
+            ));
+        }
+        if !relative_key.is_empty() {
+            if relative_to_absolute
+                .insert(relative_key.clone(), module.module_id.clone())
+                .is_some()
+            {
+                return Err(format!(
+                    "duplicate module path `{relative_key}` in `{}`",
+                    root_dir.display()
+                ));
+            }
+        }
         modules.push(module);
     }
-    Ok(build_package_summary(member.name.clone(), modules))
+
+    let summary = build_package_summary(name.to_string(), modules);
+    let layout = build_package_layout(&summary, module_paths, relative_to_absolute)?;
+    build_workspace_package(root_dir.to_path_buf(), direct_deps, summary, layout)
 }
 
 fn collect_arc_files(dir: &Path) -> PackageResult<Vec<PathBuf>> {
@@ -960,6 +1076,34 @@ fn collect_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> PackageResult<
         }
     }
     Ok(())
+}
+
+fn has_root_module(root_dir: &Path, kind: &GrimoireKind) -> bool {
+    root_dir.join("src").join(kind.root_file_name()).is_file()
+}
+
+fn find_implicit_std(start: &Path) -> PackageResult<Option<PathBuf>> {
+    let mut cursor = if start.is_file() {
+        start.parent().map(Path::to_path_buf)
+    } else {
+        Some(start.to_path_buf())
+    };
+
+    while let Some(dir) = cursor {
+        let candidate = dir.join("std").join("book.toml");
+        if candidate.is_file() {
+            let std_dir = candidate
+                .parent()
+                .ok_or_else(|| format!("failed to resolve implicit std from `{}`", candidate.display()))?;
+            let canonical = fs::canonicalize(std_dir).map_err(|err| {
+                format!("failed to open implicit std package `{}`: {err}", std_dir.display())
+            })?;
+            return Ok(Some(canonical));
+        }
+        cursor = dir.parent().map(Path::to_path_buf);
+    }
+
+    Ok(None)
 }
 
 fn canonicalize_dir(path: &Path) -> PackageResult<PathBuf> {
@@ -1079,6 +1223,42 @@ mod tests {
     }
 
     #[test]
+    fn load_workspace_hir_includes_root_package_and_implicit_std() {
+        let dir = temp_dir("workspace_hir");
+        write_file(
+            &dir.join("book.toml"),
+            "name = \"workspace\"\nkind = \"app\"\n[workspace]\nmembers = [\"app\"]\n",
+        );
+        write_file(
+            &dir.join("src").join("shelf.arc"),
+            "use std.io.print\nfn main() -> Int:\n    return 0\n",
+        );
+        write_file(&dir.join("src").join("types.arc"), "// types\n");
+        write_grimoire(&dir.join("app"), GrimoireKind::App, "app", &[]);
+        write_grimoire(&dir.join("std"), GrimoireKind::Lib, "std", &[]);
+        write_file(
+            &dir.join("std/src/book.arc"),
+            "export fn print() -> Int:\n    return 0\n",
+        );
+
+        let workspace = load_workspace_hir(&dir).expect("workspace hir should load");
+        assert!(workspace.package("workspace").is_some());
+        assert!(workspace.package("app").is_some());
+        assert!(workspace.package("std").is_some());
+        assert!(
+            workspace
+                .package("workspace")
+                .expect("root package should exist")
+                .summary
+                .dependency_edges
+                .iter()
+                .any(|edge| edge.target_path == vec!["std".to_string(), "io".to_string(), "print".to_string()])
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn plan_workspace_is_deterministic() {
         let dir = temp_dir("plan");
         write_file(
@@ -1193,9 +1373,9 @@ mod tests {
         assert!(artifact.contains("package = \"core\""));
         assert!(artifact.contains("module_count = 2"));
         assert!(artifact.contains("dependency_edge_count = 1"));
-        assert!(artifact.contains("module=core:export:fn:shared_value"));
+        assert!(artifact.contains("module=core:export:fn:fn shared_value() -> Int:"));
         assert!(artifact.contains("module=core:reexport:types"));
-        assert!(artifact.contains("module=core.types:export:record:Counter"));
+        assert!(artifact.contains("module=core.types:export:record:record Counter:\\\\nvalue: Int"));
         assert!(artifact.contains("module_rows = ["));
         assert!(artifact.contains("core:symbols=1:items=4"));
         let _ = fs::remove_dir_all(&dir);
@@ -1324,6 +1504,55 @@ mod tests {
         write_file(
             &dir.join("core/src/book.arc"),
             "export fn shared_value() -> Int:\n    return 0\n\nexport fn shared_value_v2() -> Int:\n    return 1\n",
+        );
+        let second_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
+        let second_statuses =
+            plan_build(&graph, &order, &second_fingerprints, Some(&existing)).expect("plan");
+        assert_eq!(second_statuses[0].member, "core");
+        assert_eq!(second_statuses[0].disposition, BuildDisposition::Built);
+        assert!(
+            second_statuses[1..]
+                .iter()
+                .all(|status| status.disposition == BuildDisposition::Built)
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn editing_public_signature_rebuilds_dependents() {
+        let dir = temp_dir("shared_signature");
+        write_file(
+            &dir.join("book.toml"),
+            "name = \"ws\"\nkind = \"app\"\n[workspace]\nmembers = [\"app\", \"tool\", \"core\"]\n",
+        );
+        write_grimoire(
+            &dir.join("app"),
+            GrimoireKind::App,
+            "app",
+            &[("core", "../core")],
+        );
+        write_grimoire(
+            &dir.join("tool"),
+            GrimoireKind::App,
+            "tool",
+            &[("core", "../core")],
+        );
+        write_grimoire(&dir.join("core"), GrimoireKind::Lib, "core", &[]);
+        write_file(
+            &dir.join("core/src/book.arc"),
+            "export fn shared_value() -> Int:\n    return 0\n",
+        );
+        let graph = load_workspace_graph(&dir).expect("load graph");
+        let order = plan_workspace(&graph).expect("plan");
+        let first_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
+        let first_statuses = plan_build(&graph, &order, &first_fingerprints, None).expect("plan");
+        execute_build(&graph, &first_statuses).expect("execute");
+        let lock_path = write_lockfile(&graph, &order, &first_statuses).expect("lock");
+        let existing = read_lockfile(&lock_path).expect("read").expect("lock");
+
+        write_file(
+            &dir.join("core/src/book.arc"),
+            "export fn shared_value(seed: Int) -> Int:\n    return seed\n",
         );
         let second_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
         let second_statuses =

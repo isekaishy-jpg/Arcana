@@ -1,13 +1,11 @@
-use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use arcana_hir::{
     HirDirectiveKind, HirModule, HirModuleSummary, HirWorkspacePackage, HirWorkspaceSummary,
-    build_package_layout, build_package_summary, build_workspace_package, build_workspace_summary,
-    derive_source_module_path, lower_module_text,
+    lower_module_text,
 };
-use arcana_package::{GrimoireKind, WorkspaceGraph, load_workspace_graph, parse_manifest};
+use arcana_package::load_workspace_hir as load_package_workspace_hir;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CheckSummary {
@@ -73,8 +71,7 @@ pub fn check_path(path: &Path) -> Result<CheckSummary, String> {
         ));
     }
 
-    let graph = load_workspace_graph(&root_dir)?;
-    let workspace = load_workspace_for_check(&root_dir, &graph)?;
+    let workspace = load_package_workspace_hir(&root_dir)?;
     validate_packages(&workspace)
 }
 
@@ -98,8 +95,7 @@ pub fn load_workspace_hir(path: &Path) -> Result<HirWorkspaceSummary, String> {
         ));
     }
 
-    let graph = load_workspace_graph(&root_dir)?;
-    load_workspace_for_check(&root_dir, &graph)
+    load_package_workspace_hir(&root_dir)
 }
 
 pub fn lower_to_hir(summary: &CheckSummary) -> HirModule {
@@ -121,50 +117,6 @@ fn check_file(path: &Path) -> Result<CheckSummary, String> {
         directive_count: hir.directives.len(),
         symbol_count: hir.symbols.len(),
     })
-}
-
-fn load_workspace_for_check(
-    root_dir: &Path,
-    graph: &WorkspaceGraph,
-) -> Result<HirWorkspaceSummary, String> {
-    let mut packages = Vec::new();
-
-    let root_manifest = parse_manifest(&root_dir.join("book.toml"))?;
-    let root_already_in_graph = graph.members.iter().any(|member| member.abs_dir == root_dir);
-    if !root_already_in_graph && has_root_module(root_dir, &root_manifest.kind) {
-        packages.push(load_package(
-            root_dir,
-            &root_manifest.name,
-            &root_manifest.kind,
-            root_manifest.deps.keys().cloned().collect(),
-        )?);
-    }
-
-    for member in &graph.members {
-        packages.push(load_package(
-            &member.abs_dir,
-            &member.name,
-            &member.kind,
-            member.deps.iter().cloned().collect(),
-        )?);
-    }
-
-    if let Some(std_dir) = find_implicit_std(root_dir)? {
-        let manifest = parse_manifest(&std_dir.join("book.toml"))?;
-        let has_std = packages
-            .iter()
-            .any(|package| package.summary.package_name == manifest.name);
-        if !has_std {
-            packages.push(load_package(
-                &std_dir,
-                &manifest.name,
-                &manifest.kind,
-                BTreeSet::new(),
-            )?);
-        }
-    }
-
-    build_workspace_summary(packages)
 }
 
 fn validate_packages(workspace: &HirWorkspaceSummary) -> Result<CheckSummary, String> {
@@ -220,92 +172,6 @@ fn validate_packages(workspace: &HirWorkspaceSummary) -> Result<CheckSummary, St
         .map(|diagnostic| diagnostic.render())
         .collect::<Vec<_>>()
         .join("\n"))
-}
-
-fn load_package(
-    root_dir: &Path,
-    name: &str,
-    kind: &GrimoireKind,
-    direct_deps: BTreeSet<String>,
-) -> Result<HirWorkspacePackage, String> {
-    let src_dir = root_dir.join("src");
-    let root_file = src_dir.join(kind.root_file_name());
-    if !root_file.is_file() {
-        return Err(format!(
-            "missing `{}` in `{}`",
-            kind.root_file_name(),
-            src_dir.display()
-        ));
-    }
-
-    let mut module_paths = BTreeMap::new();
-    let mut modules = Vec::new();
-    let mut relative_to_absolute = BTreeMap::new();
-
-    for module_path in collect_arc_files(&src_dir)? {
-        let source_path =
-            derive_source_module_path(name, kind.root_file_name(), &src_dir, &module_path)?;
-        let relative_key = join_segments(&source_path.relative_segments);
-        let absolute_key = source_path.module_id;
-        let source = fs::read_to_string(&module_path)
-            .map_err(|err| format!("failed to read `{}`: {err}", module_path.display()))?;
-        let hir = lower_module_text(absolute_key.clone(), &source)
-            .map_err(|err| format!("{}: {err}", module_path.display()))?;
-        if module_paths.insert(absolute_key.clone(), module_path).is_some()
-        {
-            return Err(format!(
-                "duplicate module path `{absolute_key}` in `{}`",
-                root_dir.display()
-            ));
-        }
-        if !relative_key.is_empty() {
-            if relative_to_absolute
-                .insert(relative_key.clone(), absolute_key.clone())
-                .is_some()
-            {
-                return Err(format!(
-                    "duplicate module path `{relative_key}` in `{}`",
-                    root_dir.display()
-                ));
-            }
-        }
-        modules.push(hir);
-    }
-
-    let summary = build_package_summary(name.to_string(), modules);
-    let layout = build_package_layout(&summary, module_paths, relative_to_absolute)?;
-    build_workspace_package(root_dir.to_path_buf(), direct_deps, summary, layout)
-}
-
-fn collect_arc_files(src_dir: &Path) -> Result<Vec<PathBuf>, String> {
-    let mut files = Vec::new();
-    collect_arc_files_recursive(src_dir, &mut files)?;
-    files.sort();
-    Ok(files)
-}
-
-fn collect_arc_files_recursive(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
-    let mut entries = fs::read_dir(dir)
-        .map_err(|err| format!("failed to read `{}`: {err}", dir.display()))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|err| format!("failed to read `{}`: {err}", dir.display()))?;
-    entries.sort_by_key(|entry| entry.file_name());
-
-    for entry in entries {
-        let path = entry.path();
-        let file_type = entry
-            .file_type()
-            .map_err(|err| format!("failed to inspect `{}`: {err}", path.display()))?;
-        if file_type.is_dir() {
-            collect_arc_files_recursive(&path, files)?;
-            continue;
-        }
-        if file_type.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("arc") {
-            files.push(path);
-        }
-    }
-
-    Ok(())
 }
 
 fn resolve_exact_module<'a>(
@@ -412,34 +278,6 @@ fn resolve_use_target(
 
 fn join_segments(segments: &[String]) -> String {
     segments.join(".")
-}
-
-fn has_root_module(root_dir: &Path, kind: &GrimoireKind) -> bool {
-    root_dir.join("src").join(kind.root_file_name()).is_file()
-}
-
-fn find_implicit_std(start: &Path) -> Result<Option<PathBuf>, String> {
-    let mut cursor = if start.is_file() {
-        start.parent().map(Path::to_path_buf)
-    } else {
-        Some(start.to_path_buf())
-    };
-
-    while let Some(dir) = cursor {
-        let candidate = dir.join("std").join("book.toml");
-        if candidate.is_file() {
-            let std_dir = candidate
-                .parent()
-                .ok_or_else(|| format!("failed to resolve implicit std from `{}`", candidate.display()))?;
-            let canonical = fs::canonicalize(std_dir).map_err(|err| {
-                format!("failed to open implicit std package `{}`: {err}", std_dir.display())
-            })?;
-            return Ok(Some(canonical));
-        }
-        cursor = dir.parent().map(Path::to_path_buf);
-    }
-
-    Ok(None)
 }
 
 #[cfg(test)]

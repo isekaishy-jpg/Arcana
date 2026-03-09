@@ -103,8 +103,8 @@ mod tests {
         assert_eq!(
             ir.exported_surface_rows,
             vec![
-                "module=winspell.window:export:record:Window".to_string(),
-                "module=winspell:export:fn:open".to_string(),
+                "module=winspell.window:export:record:record Window:\\ntitle: Text".to_string(),
+                "module=winspell:export:fn:fn open() -> Int:".to_string(),
                 "module=winspell:reexport:winspell.window".to_string(),
             ]
         );

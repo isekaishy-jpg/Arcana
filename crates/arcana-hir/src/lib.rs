@@ -67,6 +67,7 @@ pub struct HirSymbol {
     pub kind: HirSymbolKind,
     pub name: String,
     pub exported: bool,
+    pub surface_text: String,
     pub span: Span,
 }
 
@@ -95,7 +96,13 @@ impl HirModuleSummary {
             self.symbols
                 .iter()
                 .filter(|symbol| symbol.exported)
-                .map(|symbol| format!("export:{}:{}", symbol.kind.as_str(), symbol.name)),
+                .map(|symbol| {
+                    format!(
+                        "export:{}:{}",
+                        symbol.kind.as_str(),
+                        encode_surface_text(&symbol.surface_text)
+                    )
+                }),
         );
         rows.sort();
         rows
@@ -250,10 +257,15 @@ pub fn lower_parsed_module(module_id: impl Into<String>, parsed: &ParsedModule) 
                 kind: lower_symbol_kind(&symbol.kind),
                 name: symbol.name.clone(),
                 exported: symbol.exported,
+                surface_text: symbol.surface_text.clone(),
                 span: symbol.span,
             })
             .collect(),
     }
+}
+
+fn encode_surface_text(text: &str) -> String {
+    text.replace('\\', "\\\\").replace('\n', "\\n")
 }
 
 pub fn build_package_summary(
@@ -471,7 +483,10 @@ mod tests {
         assert!(module.has_symbol("helper"));
         assert_eq!(
             module.exported_surface_rows(),
-            vec!["export:fn:print".to_string(), "reexport:std.result".to_string()]
+            vec![
+                "export:fn:fn print() -> Int:".to_string(),
+                "reexport:std.result".to_string(),
+            ]
         );
     }
 
@@ -497,7 +512,7 @@ mod tests {
         assert_eq!(package.dependency_edges[0].kind, HirDirectiveKind::Reexport);
         assert_eq!(package.dependency_edges[1].source_module_id, "winspell.window");
         assert_eq!(package.exported_surface_rows(), vec![
-            "module=winspell:export:fn:open".to_string(),
+            "module=winspell:export:fn:fn open() -> Int:".to_string(),
             "module=winspell:reexport:winspell.window".to_string(),
         ]);
     }
