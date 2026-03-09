@@ -2264,6 +2264,34 @@ mod tests {
                 "`#inline` is not a valid statement-level contract",
             ),
             (
+                "qualified_phrase_too_many_args.arc",
+                "qualified phrase allows at most 3 top-level arguments",
+            ),
+            (
+                "memory_phrase_too_many_args.arc",
+                "memory phrase allows at most 3 top-level arguments",
+            ),
+            (
+                "unknown_chain_style.arc",
+                "unknown chain style `mystery`; supported: forward, lazy, parallel, async, plan, broadcast, collect",
+            ),
+            (
+                "reverse_parallel_chain.arc",
+                "chain style `parallel` does not support reverse-introduced chains",
+            ),
+            (
+                "unknown_memory_type.arc",
+                "unknown memory type `weird`; supported now: arena, frame, pool (reserved for future expansion)",
+            ),
+            (
+                "invalid_boundary_payload.arc",
+                "invalid payload for foreword `#boundary`: `target` must be a string or symbol",
+            ),
+            (
+                "test_payload.arc",
+                "invalid payload for foreword `#test`: expected no payload",
+            ),
+            (
                 "malformed_intrinsic.arc",
                 "malformed intrinsic function declaration",
             ),
@@ -2339,6 +2367,14 @@ mod tests {
     }
 
     #[test]
+    fn check_path_handles_boundary_interop_example() {
+        let summary = check_path(&repo_root().join("examples").join("interop_boundary_contracts"))
+            .expect("boundary interop example should check");
+        assert_eq!(summary.package_count, 2);
+        assert!(summary.module_count >= 3);
+    }
+
+    #[test]
     fn check_path_handles_std_intrinsics() {
         let summary = check_path(&repo_root().join("std")).expect("std should check");
         assert!(summary.package_count >= 1);
@@ -2366,6 +2402,26 @@ mod tests {
             err.contains("unresolved `lang` item target `Missing` for `result`"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn check_path_rejects_invalid_boundary_and_test_packages() {
+        let repo_root = repo_root()
+            .join("conformance")
+            .join("check_parity_packages");
+        for (package, expected) in [
+            (
+                "invalid_boundary_signature",
+                "`#boundary` target `lua` does not allow mutable borrows",
+            ),
+            (
+                "invalid_test_signature",
+                "`#test` functions must have zero parameters",
+            ),
+        ] {
+            let err = check_path(&repo_root.join(package)).expect_err("package should fail");
+            assert!(err.contains(expected), "{package}: {err}");
+        }
     }
 
     #[test]
@@ -2475,6 +2531,28 @@ mod tests {
             .expect("bound chain showcase should resolve");
         assert!(summary.package_count >= 3);
         assert!(summary.module_count >= 10);
+    }
+
+    #[test]
+    fn check_path_filters_only_forewords_for_current_target() {
+        let root = make_temp_package(
+            "only_filter_app",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    "#only[os = \"definitely_not_host\"]\nfn skipped() -> MissingType:\n    return 0\nfn main() -> Int:\n    return 0\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let summary = check_path(&root).expect("#only should exclude non-matching declarations");
+        assert_eq!(summary.package_count, 1);
+        assert_eq!(summary.module_count, 2);
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
     }
 
     #[test]

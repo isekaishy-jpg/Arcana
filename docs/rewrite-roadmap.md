@@ -15,6 +15,7 @@ Completed foundation work:
 - shared workspace/package HIR loading and symbol-based module and imported-name resolution over the current parser foundation
 - explicit rejection of unsupported top-level syntax instead of silent skipping
 - structured top-level declaration parsing for functions, async functions, systems, behaviors, lang items, intrinsic declarations, built-in forewords, generic/where headers, parameter modes, and impl declarations
+- syntax-level contract enforcement for phrase arity, chain-style families and reverse-introducer limits, memory-family allowlists, built-in foreword payload/target rules, `#test` function constraints, `#boundary[target = "lua" | "sql"]` signature checks, and current-target `#only[...]` filtering
 - structured interior-member parsing for records, enums, traits, and impl bodies
 - structured statement-block parsing for function-like bodies, including `defer`
 - structured block-form `match` expression and pattern parsing for the imported enum/result corpus
@@ -28,6 +29,7 @@ Completed foundation work:
 - impl header generic/lifetime params now survive syntax/HIR lowering instead of being discarded
 - frontend semantic validation now includes declaration-surface type and lifetime resolution for params, returns, fields, enum payloads, trait defaults, impl headers, and inherited trait/impl method scopes
 - frontend semantic validation now includes conservative body-level value resolution for locals, namespace-qualified member chains, enum variant constructors, module impl-method paths, structured chain stages and bound args, memory constructors, rollup handlers, package/module-qualified value roots, and expression generic-argument type references over the imported selfhost corpus
+- boundary-varietal example/negative conformance now covers Lua/SQL compile-time interop contracts, and ECS docs now preserve first-class scheduler/component direction without freezing general query authoring into the selfhost baseline
 
 ## Next Milestones
 

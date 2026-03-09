@@ -40,7 +40,7 @@ pub struct ModuleDirective {
     pub span: Span,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SymbolKind {
     Fn,
     System,
@@ -615,7 +615,7 @@ pub fn parse_module(source: &str) -> Result<ParsedModule, String> {
         ));
     }
 
-    let parsed = ParsedModule {
+    let mut parsed = ParsedModule {
         line_count: line_count.max(1),
         non_empty_line_count: non_empty,
         directives,
@@ -624,6 +624,7 @@ pub fn parse_module(source: &str) -> Result<ParsedModule, String> {
         impls,
     };
     validate_module_foreword_contract(&parsed)?;
+    apply_only_foreword_filters(&mut parsed)?;
     validate_module_rollup_contract(&parsed)?;
     validate_module_tuple_contract(&parsed)?;
     Ok(parsed)
@@ -2079,6 +2080,29 @@ fn parse_path_expression(text: &str) -> Option<Expr> {
     None
 }
 
+fn validate_chain_style(style: &str) -> Result<(), String> {
+    match style {
+        "forward" | "lazy" | "parallel" | "async" | "plan" | "broadcast" | "collect" => {
+            Ok(())
+        }
+        "reverse" => Err(
+            "chain style `reverse` was removed; use `<style> :=<` with `<=` connectors"
+                .to_string(),
+        ),
+        _ => Err(format!(
+            "unknown chain style `{style}`; supported: forward, lazy, parallel, async, plan, broadcast, collect"
+        )),
+    }
+}
+
+fn chain_style_supports_reverse_introducer(style: &str) -> bool {
+    matches!(style, "forward" | "lazy" | "async" | "plan" | "collect")
+}
+
+fn chain_style_supports_reverse_connectors(style: &str) -> bool {
+    matches!(style, "forward" | "lazy" | "async" | "plan" | "collect")
+}
+
 fn parse_chain_expression(text: &str) -> Result<Option<Expr>, String> {
     let (style_text, introducer, step_text) =
         if let Some(index) = find_top_level_token(text, ":=>") {
@@ -2092,7 +2116,8 @@ fn parse_chain_expression(text: &str) -> Result<Option<Expr>, String> {
     if !is_identifier(style) {
         return Ok(None);
     }
-    let Some(steps) = parse_chain_steps(step_text, introducer)? else {
+    validate_chain_style(style)?;
+    let Some(steps) = parse_chain_steps(step_text, style, introducer)? else {
         return Ok(None);
     };
     Ok(Some(Expr::Chain {
@@ -2104,6 +2129,7 @@ fn parse_chain_expression(text: &str) -> Result<Option<Expr>, String> {
 
 fn parse_chain_steps(
     text: &str,
+    style: &str,
     introducer: ChainIntroducer,
 ) -> Result<Option<Vec<ChainStep>>, String> {
     let parts = tokenize_chain_steps(text)?;
@@ -2117,6 +2143,11 @@ fn parse_chain_steps(
         .filter_map(|(incoming, _)| *incoming)
         .collect::<Vec<_>>();
     if matches!(introducer, ChainIntroducer::Reverse) {
+        if !chain_style_supports_reverse_introducer(style) {
+            return Err(format!(
+                "chain style `{style}` does not support reverse-introduced chains"
+            ));
+        }
         if connectors
             .iter()
             .any(|connector| *connector != ChainConnector::Reverse)
@@ -2139,7 +2170,14 @@ fn parse_chain_steps(
                     )
                 }
                 ChainConnector::Forward => {}
-                ChainConnector::Reverse => changed = true,
+                ChainConnector::Reverse => {
+                    if !chain_style_supports_reverse_connectors(style) {
+                        return Err(format!(
+                            "chain style `{style}` does not support reverse connectors"
+                        ));
+                    }
+                    changed = true;
+                }
             }
         }
     }
@@ -2301,7 +2339,12 @@ fn parse_memory_phrase(text: &str) -> Result<Option<Expr>, String> {
     if !is_identifier(family) || arena_text.is_empty() || constructor.is_empty() {
         return Ok(None);
     }
-    let init_args = match parse_phrase_args(init_text)? {
+    if !matches!(family, "arena" | "frame" | "pool") {
+        return Err(format!(
+            "unknown memory type `{family}`; supported now: arena, frame, pool (reserved for future expansion)"
+        ));
+    }
+    let init_args = match parse_phrase_args(init_text, PhraseArgContext::Memory)? {
         Some(args) => args,
         None => return Ok(None),
     };
@@ -2365,7 +2408,7 @@ fn parse_qualified_phrase(text: &str) -> Result<Option<Expr>, String> {
         return Ok(None);
     }
 
-    let args = match parse_phrase_args(args_text)? {
+    let args = match parse_phrase_args(args_text, PhraseArgContext::Qualified)? {
         Some(args) => args,
         None => return Ok(None),
     };
@@ -2432,13 +2475,44 @@ fn split_header_attachment_named_entry(text: &str) -> Option<(&str, &str)> {
     }
 }
 
-fn parse_phrase_args(text: &str) -> Result<Option<Vec<PhraseArg>>, String> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PhraseArgContext {
+    Qualified,
+    Memory,
+}
+
+impl PhraseArgContext {
+    fn max_args_error(self) -> &'static str {
+        match self {
+            Self::Qualified => "qualified phrase allows at most 3 top-level arguments",
+            Self::Memory => "memory phrase allows at most 3 top-level arguments",
+        }
+    }
+
+    fn trailing_comma_error(self) -> &'static str {
+        match self {
+            Self::Qualified => "trailing comma is not allowed before phrase qualifier",
+            Self::Memory => "trailing comma is not allowed before memory phrase qualifier",
+        }
+    }
+}
+
+fn parse_phrase_args(text: &str, context: PhraseArgContext) -> Result<Option<Vec<PhraseArg>>, String> {
     if text.is_empty() {
         return Ok(Some(Vec::new()));
     }
 
+    if text.trim_end().ends_with(',') {
+        return Err(context.trailing_comma_error().to_string());
+    }
+
+    let parts = split_top_level(text, ',');
+    if parts.len() > 3 {
+        return Err(context.max_args_error().to_string());
+    }
+
     let mut args = Vec::new();
-    for part in split_top_level(text, ',') {
+    for part in parts {
         let trimmed = part.trim();
         if trimmed.is_empty() {
             return Ok(None);
@@ -3189,7 +3263,9 @@ fn find_top_level_assignment_op(text: &str) -> Option<(usize, AssignOp, usize)> 
             if token == "=" {
                 let prev = text[..idx].chars().next_back();
                 let next = text[idx + 1..].chars().next();
-                if matches!(prev, Some('<' | '>' | '!' | '=')) || matches!(next, Some('=' | '>')) {
+                if matches!(prev, Some('<' | '>' | '!' | '=' | ':'))
+                    || matches!(next, Some('=' | '>' | '<'))
+                {
                     continue;
                 }
             }
@@ -3455,72 +3531,486 @@ fn expr_has_attached_block(expr: &Expr) -> bool {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ForewordTarget {
+    Import,
+    Reexport,
+    Use,
+    Function,
+    Record,
+    Enum,
+    Trait,
+    TraitMethod,
+    ImplMethod,
+    Behavior,
+    System,
+    Const,
+}
+
 fn validate_module_foreword_contract(parsed: &ParsedModule) -> Result<(), String> {
     for directive in &parsed.directives {
-        validate_top_level_forewords(&directive.forewords, true)?;
+        validate_foreword_list(
+            &directive.forewords,
+            match directive.kind {
+                DirectiveKind::Import => ForewordTarget::Import,
+                DirectiveKind::Use => ForewordTarget::Use,
+                DirectiveKind::Reexport => ForewordTarget::Reexport,
+            },
+            None,
+        )?;
     }
     for symbol in &parsed.symbols {
-        validate_symbol_foreword_contract(symbol)?;
+        validate_symbol_foreword_contract(symbol, symbol_foreword_target(symbol.kind), None)?;
     }
     for impl_decl in &parsed.impls {
         for method in &impl_decl.methods {
-            validate_symbol_foreword_contract(method)?;
+            validate_symbol_foreword_contract(method, ForewordTarget::ImplMethod, None)?;
         }
     }
     Ok(())
 }
 
-fn validate_top_level_forewords(
-    forewords: &[ForewordApp],
-    allow_builtin_only: bool,
+fn symbol_foreword_target(kind: SymbolKind) -> ForewordTarget {
+    match kind {
+        SymbolKind::Fn => ForewordTarget::Function,
+        SymbolKind::Record => ForewordTarget::Record,
+        SymbolKind::Enum => ForewordTarget::Enum,
+        SymbolKind::Trait => ForewordTarget::Trait,
+        SymbolKind::Behavior => ForewordTarget::Behavior,
+        SymbolKind::System => ForewordTarget::System,
+        SymbolKind::Const => ForewordTarget::Const,
+    }
+}
+
+fn foreword_target_allows(target: ForewordTarget, foreword_name: &str) -> bool {
+    match foreword_name {
+        "deprecated" => matches!(
+            target,
+            ForewordTarget::Function
+                | ForewordTarget::Record
+                | ForewordTarget::Enum
+                | ForewordTarget::Trait
+                | ForewordTarget::TraitMethod
+                | ForewordTarget::ImplMethod
+                | ForewordTarget::Const
+        ),
+        "only" => true,
+        "test" => matches!(target, ForewordTarget::Function),
+        "allow" | "deny" => matches!(
+            target,
+            ForewordTarget::Import
+                | ForewordTarget::Reexport
+                | ForewordTarget::Use
+                | ForewordTarget::Trait
+                | ForewordTarget::Behavior
+                | ForewordTarget::System
+                | ForewordTarget::Function
+                | ForewordTarget::Record
+                | ForewordTarget::Enum
+                | ForewordTarget::TraitMethod
+                | ForewordTarget::ImplMethod
+                | ForewordTarget::Const
+        ),
+        "inline" | "cold" => matches!(
+            target,
+            ForewordTarget::Function | ForewordTarget::TraitMethod | ForewordTarget::ImplMethod
+        ),
+        "boundary" => matches!(target, ForewordTarget::Function | ForewordTarget::ImplMethod),
+        "stage" => matches!(
+            target,
+            ForewordTarget::Function
+                | ForewordTarget::TraitMethod
+                | ForewordTarget::ImplMethod
+                | ForewordTarget::Behavior
+                | ForewordTarget::System
+        ),
+        _ => false,
+    }
+}
+
+fn validate_symbol_foreword_contract(
+    symbol: &SymbolDecl,
+    target: ForewordTarget,
+    inherited_boundary_target: Option<&str>,
 ) -> Result<(), String> {
-    for foreword in forewords {
-        let name = foreword.name.as_str();
-        let is_builtin = matches!(
-            name,
-            "deprecated" | "only" | "test" | "allow" | "deny" | "inline" | "cold"
-        );
-        if allow_builtin_only && !is_builtin {
-            return Err(format!(
-                "{}:{}: `#{}` is not a valid foreword for this target",
-                foreword.span.line, foreword.span.column, name
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn validate_symbol_foreword_contract(symbol: &SymbolDecl) -> Result<(), String> {
-    for foreword in &symbol.forewords {
-        let name = foreword.name.as_str();
-        let is_builtin = matches!(
-            name,
-            "deprecated" | "only" | "test" | "allow" | "deny" | "inline" | "cold"
-        );
-        let is_stage = name == "stage";
-        if !(is_builtin
-            || (is_stage
-                && matches!(
-                    symbol.kind,
-                    SymbolKind::Fn | SymbolKind::Behavior | SymbolKind::System
-                )))
-        {
-            return Err(format!(
-                "{}:{}: `#{}` is not a valid foreword for this target",
-                foreword.span.line, foreword.span.column, name
-            ));
-        }
-    }
+    let boundary_target = validate_foreword_list(&symbol.forewords, target, Some(symbol))?;
+    let active_boundary_target = boundary_target.as_deref().or(inherited_boundary_target);
     validate_statement_foreword_contract(
         &symbol.statements,
         matches!(symbol.kind, SymbolKind::Behavior | SymbolKind::System),
     )?;
+    if let Some(target) = active_boundary_target {
+        validate_boundary_signature(symbol, target)?;
+    }
     if let SymbolBody::Trait { methods, .. } = &symbol.body {
         for method in methods {
-            validate_symbol_foreword_contract(method)?;
+            validate_symbol_foreword_contract(method, ForewordTarget::TraitMethod, active_boundary_target)?;
         }
     }
     Ok(())
+}
+
+fn validate_foreword_list(
+    forewords: &[ForewordApp],
+    target: ForewordTarget,
+    symbol: Option<&SymbolDecl>,
+) -> Result<Option<String>, String> {
+    let mut boundary_target = None;
+    for foreword in forewords {
+        if !foreword_target_allows(target, foreword.name.as_str()) {
+            return Err(format!(
+                "{}:{}: `#{}` is not a valid foreword for this target",
+                foreword.span.line, foreword.span.column, foreword.name
+            ));
+        }
+        match foreword.name.as_str() {
+            "deprecated" => validate_deprecated_payload(foreword)?,
+            "only" => {
+                let _ = evaluate_only_foreword(foreword)?;
+            }
+            "test" => {
+                validate_empty_foreword_payload(foreword)?;
+                if let Some(symbol) = symbol {
+                    validate_test_contract(symbol, foreword)?;
+                }
+            }
+            "allow" | "deny" => validate_lint_payload(foreword)?,
+            "inline" | "cold" => validate_empty_foreword_payload(foreword)?,
+            "boundary" => {
+                let target_name = parse_boundary_payload(foreword)?;
+                if boundary_target.replace(target_name).is_some() {
+                    return Err(format!(
+                        "{}:{}: duplicate foreword `boundary` on declaration",
+                        foreword.span.line, foreword.span.column
+                    ));
+                }
+            }
+            "stage" => {}
+            _ => {}
+        }
+    }
+    Ok(boundary_target)
+}
+
+fn validate_empty_foreword_payload(foreword: &ForewordApp) -> Result<(), String> {
+    if foreword.args.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "{}:{}: invalid payload for foreword `#{}`: expected no payload",
+        foreword.span.line, foreword.span.column, foreword.name
+    ))
+}
+
+fn validate_deprecated_payload(foreword: &ForewordApp) -> Result<(), String> {
+    if foreword.args.len() != 1 {
+        return Err(format!(
+            "{}:{}: invalid payload for foreword `#deprecated`: expected one string argument",
+            foreword.span.line, foreword.span.column
+        ));
+    }
+    match &foreword.args[0] {
+        ForewordArg { name: None, value } if is_double_quoted_literal(value) => Ok(()),
+        _ => Err(format!(
+            "{}:{}: invalid payload for foreword `#deprecated`: expected one string argument",
+            foreword.span.line, foreword.span.column
+        )),
+    }
+}
+
+fn validate_lint_payload(foreword: &ForewordApp) -> Result<(), String> {
+    if foreword.args.is_empty() {
+        return Err(format!(
+            "{}:{}: invalid payload for foreword: expected one or more lint names",
+            foreword.span.line, foreword.span.column
+        ));
+    }
+    for arg in &foreword.args {
+        let Some(value) = arg.name.as_ref().is_none().then_some(arg.value.as_str()) else {
+            return Err(format!(
+                "{}:{}: invalid payload for foreword: lint names must be positional symbols",
+                foreword.span.line, foreword.span.column
+            ));
+        };
+        if !is_path_like(value) {
+            return Err(format!(
+                "{}:{}: invalid payload for foreword: lint names must be positional symbols",
+                foreword.span.line, foreword.span.column
+            ));
+        }
+        if !matches!(
+            value,
+            "deprecated_use"
+                | "unknown_foreword"
+                | "invalid_foreword_target"
+                | "invalid_foreword_payload"
+                | "type_like_name"
+                | "anon_shape_positional"
+        ) {
+            return Err(format!(
+                "{}:{}: invalid payload for foreword: unknown lint `{value}`",
+                foreword.span.line, foreword.span.column
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn parse_foreword_symbol_or_string(value: &str) -> Option<String> {
+    if let Some(unquoted) = unquote_double_quoted_literal(value) {
+        return Some(unquoted.to_string());
+    }
+    is_identifier(value).then(|| value.to_string())
+}
+
+fn parse_boundary_payload(foreword: &ForewordApp) -> Result<String, String> {
+    if foreword.args.len() != 1 {
+        return Err(format!(
+            "{}:{}: invalid payload for foreword `#boundary`: expected one named field `target`",
+            foreword.span.line, foreword.span.column
+        ));
+    }
+    let arg = &foreword.args[0];
+    if arg.name.as_deref() != Some("target") {
+        return Err(format!(
+            "{}:{}: invalid payload for foreword `#boundary`: expected `target = \"lua\"|\"sql\"`",
+            foreword.span.line, foreword.span.column
+        ));
+    }
+    let Some(target) = parse_foreword_symbol_or_string(arg.value.as_str()) else {
+        return Err(format!(
+            "{}:{}: invalid payload for foreword `#boundary`: `target` must be a string or symbol",
+            foreword.span.line, foreword.span.column
+        ));
+    };
+    if !matches!(target.as_str(), "lua" | "sql") {
+        return Err(format!(
+            "{}:{}: invalid payload for foreword `#boundary`: unsupported target `{target}`",
+            foreword.span.line, foreword.span.column
+        ));
+    }
+    Ok(target)
+}
+
+fn evaluate_only_foreword(foreword: &ForewordApp) -> Result<bool, String> {
+    if foreword.args.is_empty() {
+        return Err(format!(
+            "{}:{}: invalid payload for foreword `#only`: expected named fields like os=..., arch=...",
+            foreword.span.line, foreword.span.column
+        ));
+    }
+    let mut include = true;
+    for arg in &foreword.args {
+        let Some(key) = arg.name.as_deref() else {
+            return Err(format!(
+                "{}:{}: invalid payload for foreword `#only`: expected named fields",
+                foreword.span.line, foreword.span.column
+            ));
+        };
+        let Some(value) = parse_foreword_symbol_or_string(arg.value.as_str()) else {
+            return Err(format!(
+                "{}:{}: invalid payload for foreword `#only`: `os`/`arch` require string or symbol values",
+                foreword.span.line, foreword.span.column
+            ));
+        };
+        match key {
+            "os" => include &= value == std::env::consts::OS,
+            "arch" => include &= value == std::env::consts::ARCH,
+            _ => {
+                return Err(format!(
+                    "{}:{}: invalid payload for foreword `#only`: only `os` and `arch` keys are supported",
+                    foreword.span.line, foreword.span.column
+                ));
+            }
+        }
+    }
+    Ok(include)
+}
+
+fn apply_only_foreword_filters(parsed: &mut ParsedModule) -> Result<(), String> {
+    parsed.directives = filter_only_vec(std::mem::take(&mut parsed.directives), |directive| {
+        include_for_only_forewords(&directive.forewords)
+    })?;
+    parsed.symbols = filter_only_vec(std::mem::take(&mut parsed.symbols), |symbol| {
+        include_for_only_forewords(&symbol.forewords)
+    })?
+    .into_iter()
+    .map(filter_symbol_only_forewords)
+    .collect::<Result<Vec<_>, _>>()?;
+    parsed.impls = std::mem::take(&mut parsed.impls)
+        .into_iter()
+        .map(filter_impl_only_forewords)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(())
+}
+
+fn include_for_only_forewords(forewords: &[ForewordApp]) -> Result<bool, String> {
+    let mut include = true;
+    for foreword in forewords {
+        if foreword.name == "only" {
+            include &= evaluate_only_foreword(foreword)?;
+        }
+    }
+    Ok(include)
+}
+
+fn filter_only_vec<T, F>(items: Vec<T>, include: F) -> Result<Vec<T>, String>
+where
+    F: Fn(&T) -> Result<bool, String>,
+{
+    let mut filtered = Vec::new();
+    for item in items {
+        if include(&item)? {
+            filtered.push(item);
+        }
+    }
+    Ok(filtered)
+}
+
+fn filter_symbol_only_forewords(mut symbol: SymbolDecl) -> Result<SymbolDecl, String> {
+    if let SymbolBody::Trait { methods, .. } = &mut symbol.body {
+        *methods = filter_only_vec(std::mem::take(methods), |method| {
+            include_for_only_forewords(&method.forewords)
+        })?;
+    }
+    Ok(symbol)
+}
+
+fn filter_impl_only_forewords(mut impl_decl: ImplDecl) -> Result<ImplDecl, String> {
+    impl_decl.methods = filter_only_vec(std::mem::take(&mut impl_decl.methods), |method| {
+        include_for_only_forewords(&method.forewords)
+    })?;
+    Ok(impl_decl)
+}
+
+fn validate_test_contract(symbol: &SymbolDecl, foreword: &ForewordApp) -> Result<(), String> {
+    if symbol.exported {
+        return Err(format!(
+            "{}:{}: `#test` functions must not be exported in v1",
+            foreword.span.line, foreword.span.column
+        ));
+    }
+    if !symbol.params.is_empty() {
+        return Err(format!(
+            "{}:{}: `#test` functions must have zero parameters",
+            foreword.span.line, foreword.span.column
+        ));
+    }
+    if let Some(return_type) = &symbol.return_type {
+        let trimmed = return_type.trim();
+        if trimmed != "Unit" && trimmed != "Int" {
+            return Err(format!(
+                "{}:{}: `#test` functions must return Unit or Int",
+                foreword.span.line, foreword.span.column
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_boundary_signature(symbol: &SymbolDecl, target: &str) -> Result<(), String> {
+    for param in &symbol.params {
+        if matches!(param.mode, Some(ParamMode::Edit)) || type_text_is_mut_ref(&param.ty) {
+            return Err(format!(
+                "{}:{}: `#boundary` target `{target}` does not allow mutable borrows",
+                symbol.span.line, symbol.span.column
+            ));
+        }
+        if !type_text_is_boundary_safe(&param.ty) {
+            return Err(format!(
+                "{}:{}: type `{}` is not boundary-safe for target `{target}`",
+                symbol.span.line, symbol.span.column, param.ty
+            ));
+        }
+    }
+    if let Some(return_type) = &symbol.return_type {
+        if type_text_is_ref(return_type) {
+            return Err(format!(
+                "{}:{}: `#boundary` target `{target}` requires owned return type (no references)",
+                symbol.span.line, symbol.span.column
+            ));
+        }
+        if !type_text_is_boundary_safe(return_type) {
+            return Err(format!(
+                "{}:{}: type `{}` is not boundary-safe for target `{target}`",
+                symbol.span.line, symbol.span.column, return_type
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn type_text_is_ref(text: &str) -> bool {
+    let text = text.trim();
+    if !text.starts_with('&') {
+        return false;
+    }
+    let rest = text[1..].trim_start();
+    rest.starts_with('\'') || !rest.is_empty()
+}
+
+fn type_text_is_mut_ref(text: &str) -> bool {
+    let text = text.trim();
+    if !text.starts_with('&') {
+        return false;
+    }
+    let rest = text[1..].trim_start();
+    rest.starts_with("mut ") || (rest.starts_with('\'') && rest.contains(" mut "))
+}
+
+fn type_text_is_boundary_safe(text: &str) -> bool {
+    for token in type_name_tokens(text) {
+        if matches!(
+            token.as_str(),
+            "Task"
+                | "Thread"
+                | "Channel"
+                | "Mutex"
+                | "Arena"
+                | "ArenaId"
+                | "FrameArena"
+                | "FrameId"
+                | "PoolArena"
+                | "PoolId"
+                | "RangeInt"
+                | "Window"
+                | "Image"
+                | "AtomicInt"
+                | "AtomicBool"
+        ) {
+            return false;
+        }
+    }
+    true
+}
+
+fn type_name_tokens(text: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    for ch in text.chars() {
+        if ch == '_' || ch.is_ascii_alphanumeric() {
+            current.push(ch);
+        } else if !current.is_empty() {
+            tokens.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+}
+
+fn is_double_quoted_literal(value: &str) -> bool {
+    unquote_double_quoted_literal(value).is_some()
+}
+
+fn unquote_double_quoted_literal(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    if trimmed.len() >= 2 && trimmed.starts_with('"') && trimmed.ends_with('"') {
+        Some(&trimmed[1..trimmed.len() - 1])
+    } else {
+        None
+    }
 }
 
 fn validate_statement_foreword_contract(
@@ -4415,10 +4905,28 @@ fn split_top_level(source: &str, separator: char) -> Vec<&str> {
     let mut depth_paren = 0usize;
     let mut depth_bracket = 0usize;
     let mut depth_brace = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
     let mut start = 0usize;
 
     for (idx, ch) in source.char_indices() {
+        if in_string {
+            match ch {
+                '\\' if !escaped => {
+                    escaped = true;
+                }
+                '"' if !escaped => {
+                    in_string = false;
+                }
+                _ => {
+                    escaped = false;
+                }
+            }
+            continue;
+        }
+
         match ch {
+            '"' => in_string = true,
             '(' => depth_paren += 1,
             ')' => depth_paren = depth_paren.saturating_sub(1),
             '[' => depth_bracket += 1,
@@ -5043,6 +5551,83 @@ mod tests {
         let err = parse_module("widget Gizmo:\n    value: Int\n")
             .expect_err("unsupported top-level syntax should fail");
         assert!(err.contains("unsupported top-level syntax"), "{err}");
+    }
+
+    #[test]
+    fn parse_module_rejects_phrase_arg_overflow_and_unknown_memory_family() {
+        for (source, expected) in [
+            (
+                "fn main() -> Int:\n    return io.print :: 1, 2, 3, 4 :: call\n",
+                "qualified phrase allows at most 3 top-level arguments",
+            ),
+            (
+                "fn main() -> Int:\n    let node = arena: store :> a = 1, b = 2, c = 3, d = 4 <: Node\n    return 0\n",
+                "memory phrase allows at most 3 top-level arguments",
+            ),
+            (
+                "fn main() -> Int:\n    let item = weird: store :> value = 1 <: Item\n    return 0\n",
+                "unknown memory type `weird`; supported now: arena, frame, pool (reserved for future expansion)",
+            ),
+        ] {
+            let err = parse_module(source).expect_err("source should fail");
+            assert!(err.contains(expected), "{source}: {err}");
+        }
+    }
+
+    #[test]
+    fn parse_module_rejects_invalid_chain_styles() {
+        for (source, expected) in [
+            (
+                "fn main() -> Int:\n    mystery :=> seed => step\n    return 0\n",
+                "unknown chain style `mystery`; supported: forward, lazy, parallel, async, plan, broadcast, collect",
+            ),
+            (
+                "fn main() -> Int:\n    parallel :=< emit <= seed\n    return 0\n",
+                "chain style `parallel` does not support reverse-introduced chains",
+            ),
+        ] {
+            let err = parse_module(source).expect_err("source should fail");
+            assert!(err.contains(expected), "{source}: {err}");
+        }
+    }
+
+    #[test]
+    fn parse_module_validates_boundary_and_test_forewords() {
+        let parsed = parse_module(
+            "#boundary[target = \"lua\"]\nfn bridge(read text: Str) -> Str:\n    return text\nfn main() -> Int:\n    return 0\n",
+        )
+        .expect("boundary foreword should be accepted");
+        assert_eq!(parsed.symbols[0].forewords[0].name, "boundary");
+
+        for (source, expected) in [
+            (
+                "#boundary[target = lua.sql]\nfn bad() -> Int:\n    return 0\n",
+                "invalid payload for foreword `#boundary`: `target` must be a string or symbol",
+            ),
+            (
+                "#test[smoke]\nfn bad() -> Int:\n    return 0\n",
+                "invalid payload for foreword `#test`: expected no payload",
+            ),
+            (
+                "#test\nexport fn smoke() -> Int:\n    return 0\n",
+                "`#test` functions must not be exported in v1",
+            ),
+        ] {
+            let err = parse_module(source).expect_err("foreword contract should fail");
+            assert!(err.contains(expected), "{source}: {err}");
+        }
+    }
+
+    #[test]
+    fn parse_module_filters_only_forewords_for_current_target() {
+        let parsed = parse_module(
+            "#only[os = \"definitely_not_host\"]\nfn skipped() -> Missing:\n    return 0\nfn main() -> Int:\n    return 0\n",
+        )
+        .expect("non-matching #only target should filter declaration");
+        assert_eq!(
+            parsed.symbols.iter().map(|symbol| symbol.name.as_str()).collect::<Vec<_>>(),
+            vec!["main"]
+        );
     }
 
     #[test]

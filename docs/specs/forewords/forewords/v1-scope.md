@@ -17,11 +17,18 @@
 - `#deny[...]`
 - `#inline`
 - `#cold`
+- `#boundary[target = "lua" | "sql"]`
 
 ### v1 targets
 - top-level declarations
 - `import`, `reexport`, `use`
 - trait methods and impl methods
+
+Boundary contract notes:
+- `#boundary[...]` is compile-time only in v1
+- it targets functions and impl methods
+- it carries Lua/SQL varietal interop contracts, not embedding semantics
+- hot-path/reload workflows remain a carried direction for later host/backend work, not part of the current rewrite implementation
 
 Not supported in v1:
 - field-level/param-level targets
@@ -52,4 +59,3 @@ with:
 - trigger condition
 - owner
 - acceptance criteria
-

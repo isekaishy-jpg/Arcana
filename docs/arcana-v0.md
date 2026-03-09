@@ -16,7 +16,7 @@ This repository currently implements a working toy subset with:
 - Core operators: unary `-` / `not` / `~`, `%`, `!=`, `<=`, `>=`, `and`, `or`, bitwise `& | ^ << shr`, `Str + Str`, compound assignments
 - Collections v0.9: `List[T]`, list literals, slicing with ranges, indexed assignment, `RangeInt`, pair tuples `(A, B)`
 - Memory phrases v0.35: `arena|frame|pool: instance :> ... <: qualifier` with typed allocator storage (`Arena[T]`, `FrameArena[T]`, `PoolArena[T]` + corresponding ID handles)
-- Ownership/lifetimes v0.32: explicit refs (`&'a T`, `&'a mut T`), borrow/deref expressions (`&x`, `&mut x`, `*x`), lexical borrow checking, and `#boundary[target="lua|sql"]` signature contracts
+- Ownership/lifetimes v0.32 surface: explicit refs (`&'a T`, `&'a mut T`), borrow/deref expressions (`&x`, `&mut x`, `*x`), a carried lexical borrow contract, and `#boundary[target="lua|sql"]` signature contracts
 - Trait v2: associated types, default trait methods, supertrait bounds, projection equality in `where`
 - `arcana run/check/compile`
 
@@ -271,6 +271,7 @@ Arcana now supports qualified phrase invocation syntax:
 
 - `subject :: args :: qualifier`
 - args are comma-separated and limited to at most 3 top-level inline items
+- trailing comma before the qualifier is rejected
 - qualifier forms:
   - named/path (for example `call`, `join`, `std.io.print`)
   - symbols: `?`, `>`, `>>`
@@ -447,6 +448,7 @@ Std now includes a trait-based iterator foundation:
 - `impl std.iter.Iterator[SingletonCursor[T]] for SingletonCursor[T]`
 
 This demonstrates associated-type-based abstractions across std modules without adding new builtins.
+It does not freeze general ECS query syntax; Meadow carried first-class ECS direction, but broad query authoring remained incomplete.
 
 ## Std-Style Shelf Foundation
 
@@ -482,6 +484,7 @@ Memory phrase syntax:
 - v2 supports `memory_type = arena | frame | pool`
 - inline args are comma-separated, up to 3 top-level items
 - arg items support positional and named (`name = expr`)
+- trailing comma before the qualifier is rejected
 
 Allocator phrase lowering:
 
@@ -542,7 +545,7 @@ Runtime semantics:
 
 Notes:
 
-- Attached blocks on memory phrase statements only accept `name = expr`.
+- Attached blocks on memory phrase statements follow header-phrase rules: `name = expr` entries and chain lines are both valid.
 - Unknown memory types are rejected with a future-reserved diagnostic.
 - `std.memory` exposes allocator borrow APIs:
   - `borrow_read` / `borrow_edit` for `Arena`, `FrameArena`, and `PoolArena`.
@@ -582,6 +585,8 @@ Interop boundary contracts (compile-time only):
 - `#boundary[target = "lua"]`
 - `#boundary[target = "sql"]`
 - boundary fns/methods cannot return references and cannot accept mutable references
+- the carried contract is varietal interop, not embedding
+- optional hot-path/reload workflows remain part of the intended boundary direction, but the rewrite has not implemented that host/backend layer yet
 
 ## Chain Phrase (v0.24)
 
@@ -719,6 +724,8 @@ Where a domain scope exists under `docs/specs/**/v1-scope.md`, that domain scope
 - `edit` call arguments currently must be local bindings (not field expressions)
 - Access checking is currently root-binding based (conservative)
 - Moves inside `while` loops are currently rejected
+- boundary checks currently enforce payload/target rules plus direct signature-shape safety; full recursive boundary-safe typing will arrive with deeper typed frontend work
+- full ownership/borrow flow is still being re-established in the rewrite; current frontend covers declaration-surface lifetimes and conservative body resolution first
 
 ## Canvas/Window/Input (v0.16 shelf-first)
 
@@ -822,7 +829,8 @@ New modules:
 
 Runtime note:
 
-- Component-parameter systems iterate deterministic ECS query cursors over archetype-backed world data.
+- First-class ECS scheduling/components are part of the carried v0 surface through `behavior[...] fn`, `system[...] fn`, and `std.ecs`.
+- General ECS query authoring is not yet part of the frozen selfhost baseline; Meadow had direction here, but broad query support was not fully landed.
 - `affinity=worker` component systems run via worker execution when component arguments are transferable; non-transferable component values fall back to deterministic main-thread execution.
 - Worker-applied component writes are fail-fast checked; if a targeted component changed before apply, runtime reports an ECS worker apply conflict.
 - Worker-affinity systems require sendable component parameter types.
@@ -948,6 +956,7 @@ Supported built-ins in v1:
 - `#deny[...]`
 - `#inline`
 - `#cold`
+- `#boundary[target = "lua" | "sql"]`
 
 ### Foreword lint names (`#allow[...]` / `#deny[...]`)
 
@@ -973,6 +982,12 @@ v1 attachment targets:
 - top-level declarations (`fn`, `record`, `enum`, `trait`, `impl`, `behavior`, `system`)
 - `import`, `reexport`, `use`
 - trait methods and impl methods
+
+Boundary note:
+
+- `#boundary[...]` is compile-time only in v1
+- it is valid on functions and impl methods
+- it carries Lua/SQL varietal interop contracts, not embedding semantics
 
 Not in v1:
 

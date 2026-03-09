@@ -33,22 +33,37 @@ negative = ["conformance/check_parity_fixtures/unresolved_symbol.arc"]
 id = "qualified_phrases"
 status = "required"
 positive = ["examples/grimoire_std_methods_app", "examples/pair_try_pop"]
-negative = ["conformance/check_parity_fixtures/phrase_arg_shape.arc"]
+negative = [
+    "conformance/check_parity_fixtures/phrase_arg_shape.arc",
+    "conformance/check_parity_fixtures/qualified_phrase_too_many_args.arc",
+]
 
 [[feature]]
 id = "forewords_and_lang_items"
 status = "required"
-positive = ["examples/forewords_builtin_app", "examples/result_qmark"]
+positive = [
+    "examples/forewords_builtin_app",
+    "examples/result_qmark",
+    "examples/interop_boundary_contracts",
+]
 negative = [
     "conformance/check_parity_fixtures/invalid_statement_foreword.arc",
+    "conformance/check_parity_fixtures/invalid_boundary_payload.arc",
+    "conformance/check_parity_fixtures/test_payload.arc",
     "conformance/check_parity_packages/unresolved_lang_item",
+    "conformance/check_parity_packages/invalid_boundary_signature",
+    "conformance/check_parity_packages/invalid_test_signature",
 ]
 
 [[feature]]
 id = "chain_phrases"
 status = "required"
 positive = ["examples/chain_forward_pipeline", "examples/chain_styles_matrix"]
-negative = ["conformance/check_parity_fixtures/missing_chain_contract.arc"]
+negative = [
+    "conformance/check_parity_fixtures/missing_chain_contract.arc",
+    "conformance/check_parity_fixtures/unknown_chain_style.arc",
+    "conformance/check_parity_fixtures/reverse_parallel_chain.arc",
+]
 
 [[feature]]
 id = "collections_list_array_map"
@@ -81,7 +96,11 @@ negative = ["conformance/check_parity_fixtures/parse_error.arc"]
 id = "memory_phrase_allocators"
 status = "required"
 positive = ["examples/memory_phrase_frame_pool", "examples/pool_reuse_cycle"]
-negative = ["conformance/check_parity_fixtures/unresolved_symbol.arc"]
+negative = [
+    "conformance/check_parity_fixtures/unresolved_symbol.arc",
+    "conformance/check_parity_fixtures/memory_phrase_too_many_args.arc",
+    "conformance/check_parity_fixtures/unknown_memory_type.arc",
+]
 
 [[feature]]
 id = "intrinsic_kernel_abi"

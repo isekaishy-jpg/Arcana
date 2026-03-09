@@ -13,6 +13,7 @@ Arcana is a Rust-first rewrite of the frozen Arcana language and tooling stack. 
 - Symbol-based module and imported-name resolution now lives in HIR and is consumed by frontend diagnostics
 - Unsupported top-level syntax now fails explicitly instead of being silently skipped
 - The syntax/HIR layer now captures structured top-level declarations for functions, async functions, systems, behaviors, lang items, intrinsic declarations, generics/where clauses, parameter modes, built-in forewords, and impl headers
+- Syntax-level contract enforcement now matches carried Meadow v0 behavior for phrase arity, chain-style families and reverse-introducer limits, memory-family allowlists, built-in foreword payload/target rules, `#test` function constraints, `#boundary[target = "lua" | "sql"]` signature checks, and current-target `#only[...]` filtering
 - Record fields, enum variants, trait members, and impl members are now parsed into structured interior members instead of staying opaque body text
 - Function-like bodies now parse structured statement blocks for `let`, `return`, `defer`, `if`/`else`, `while`, `for`, assignments, `break`, and `continue`
 - Block-form `match` expressions now lower into structured expression and pattern nodes, including wildcard, literal, variant, and `A | B` arm shapes
@@ -24,6 +25,7 @@ Arcana is a Rust-first rewrite of the frozen Arcana language and tooling stack. 
 - Page rollups now parse and lower through syntax/HIR for function-like owners and block-owning statements, with subject-scope validation, cleanup-subject reassignment diagnostics, fixture coverage, and a real example package
 - `arcana check` now validates unresolved `lang` item targets plus declaration-surface type and lifetime references after workspace resolution
 - `arcana check` now also validates conservative body-level value resolution for locals, namespace-qualified member chains, enum variant constructors, module impl-method paths, structured chain stages and bound args, memory constructors, page-rollup handlers, and expression generic-argument type references within the active type scope
+- Lua/SQL boundary-varietal compile-time contracts now have example and negative conformance coverage, and the carried first-class ECS direction is documented without freezing generalized ECS query authoring into the selfhost baseline
 - Impl header generic/lifetime params now survive syntax/HIR lowering, so inherited `T`/`'a` scope is available to later frontend work
 - Remaining opaque/frontend debt is now mostly the genuinely ambiguous/harder expression leftovers plus deeper expression typing and ownership/borrow flow
 - Seed-imported docs, grimoires, `std`, examples, and conformance fixtures from MeadowLang
