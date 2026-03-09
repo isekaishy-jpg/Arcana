@@ -15,4 +15,3 @@ pub const FROZEN_HIR_NODE_KINDS: &[&str] = &[
     "Stmt",
     "Pattern",
 ];
-

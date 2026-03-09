@@ -1,0 +1,5 @@
+name = "arcana_compiler_core"
+kind = "lib"
+
+[deps]
+arcana_frontend = { path = "../arcana-frontend" }

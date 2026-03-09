@@ -1,0 +1,5 @@
+name = "showcase_verify"
+kind = "app"
+
+[deps]
+showcase_core = { path = "../showcase_core" }

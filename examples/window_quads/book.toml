@@ -1,0 +1,5 @@
+name = "window_quads"
+kind = "app"
+
+[deps]
+winspell = { path = "../../grimoires/winspell" }

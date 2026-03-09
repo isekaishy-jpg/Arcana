@@ -23,12 +23,18 @@ pub fn parse_module(source: &str) -> Result<ParsedModule, String> {
     let mut non_empty = 0usize;
     for (idx, line) in source.lines().enumerate() {
         line_count = idx + 1;
-        if line.trim_start().starts_with('\t') {
-            return Err(format!(
-                "{}:{}: tabs are not allowed in indentation",
-                idx + 1,
-                1
-            ));
+        for (column, ch) in line.chars().enumerate() {
+            match ch {
+                ' ' => continue,
+                '\t' => {
+                    return Err(format!(
+                        "{}:{}: tabs are not allowed in indentation",
+                        idx + 1,
+                        column + 1
+                    ));
+                }
+                _ => break,
+            }
         }
         if !line.trim().is_empty() {
             non_empty += 1;
@@ -64,4 +70,3 @@ mod tests {
         assert!(err.contains("tabs are not allowed"));
     }
 }
-

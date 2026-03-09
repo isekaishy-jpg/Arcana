@@ -1,0 +1,9 @@
+intrinsic fn ecs_set_singleton[T](take value: T) = EcsSetSingleton
+intrinsic fn ecs_has_singleton[T]() -> Bool = EcsHasSingleton
+intrinsic fn ecs_get_singleton[T]() -> T = EcsGetSingleton
+intrinsic fn ecs_spawn() -> Int = EcsSpawn
+intrinsic fn ecs_despawn(entity: Int) = EcsDespawn
+intrinsic fn ecs_set_component_at[T](entity: Int, take value: T) = EcsSetComponentAt
+intrinsic fn ecs_has_component_at[T](entity: Int) -> Bool = EcsHasComponentAt
+intrinsic fn ecs_get_component_at[T](entity: Int) -> T = EcsGetComponentAt
+intrinsic fn ecs_remove_component_at[T](entity: Int) = EcsRemoveComponentAt

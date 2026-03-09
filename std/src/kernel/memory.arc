@@ -1,0 +1,31 @@
+intrinsic fn arena_new[T](capacity: Int) -> Arena[T] = MemoryArenaNew
+intrinsic fn arena_alloc[T](edit arena: Arena[T], take value: T) -> ArenaId[T] = MemoryArenaAlloc
+intrinsic fn arena_len[T](read arena: Arena[T]) -> Int = MemoryArenaLen
+intrinsic fn arena_has[T](read arena: Arena[T], id: ArenaId[T]) -> Bool = MemoryArenaHas
+intrinsic fn arena_get[T](read arena: Arena[T], id: ArenaId[T]) -> T = MemoryArenaGet
+intrinsic fn arena_borrow_read['arena, T](read arena: Arena[T], id: ArenaId[T]) -> &'arena T = MemoryArenaBorrowRead
+intrinsic fn arena_borrow_edit['arena, T](edit arena: Arena[T], id: ArenaId[T]) -> &'arena mut T = MemoryArenaBorrowEdit
+intrinsic fn arena_set[T](edit arena: Arena[T], id: ArenaId[T], take value: T) = MemoryArenaSet
+intrinsic fn arena_remove[T](edit arena: Arena[T], id: ArenaId[T]) -> Bool = MemoryArenaRemove
+intrinsic fn arena_reset[T](edit arena: Arena[T]) = MemoryArenaReset
+
+intrinsic fn frame_new[T](capacity: Int) -> FrameArena[T] = MemoryFrameNew
+intrinsic fn frame_alloc[T](edit arena: FrameArena[T], take value: T) -> FrameId[T] = MemoryFrameAlloc
+intrinsic fn frame_len[T](read arena: FrameArena[T]) -> Int = MemoryFrameLen
+intrinsic fn frame_has[T](read arena: FrameArena[T], id: FrameId[T]) -> Bool = MemoryFrameHas
+intrinsic fn frame_get[T](read arena: FrameArena[T], id: FrameId[T]) -> T = MemoryFrameGet
+intrinsic fn frame_borrow_read['frame, T](read arena: FrameArena[T], id: FrameId[T]) -> &'frame T = MemoryFrameBorrowRead
+intrinsic fn frame_borrow_edit['frame, T](edit arena: FrameArena[T], id: FrameId[T]) -> &'frame mut T = MemoryFrameBorrowEdit
+intrinsic fn frame_set[T](edit arena: FrameArena[T], id: FrameId[T], take value: T) = MemoryFrameSet
+intrinsic fn frame_reset[T](edit arena: FrameArena[T]) = MemoryFrameReset
+
+intrinsic fn pool_new[T](capacity: Int) -> PoolArena[T] = MemoryPoolNew
+intrinsic fn pool_alloc[T](edit arena: PoolArena[T], take value: T) -> PoolId[T] = MemoryPoolAlloc
+intrinsic fn pool_len[T](read arena: PoolArena[T]) -> Int = MemoryPoolLen
+intrinsic fn pool_has[T](read arena: PoolArena[T], id: PoolId[T]) -> Bool = MemoryPoolHas
+intrinsic fn pool_get[T](read arena: PoolArena[T], id: PoolId[T]) -> T = MemoryPoolGet
+intrinsic fn pool_borrow_read['pool, T](read arena: PoolArena[T], id: PoolId[T]) -> &'pool T = MemoryPoolBorrowRead
+intrinsic fn pool_borrow_edit['pool, T](edit arena: PoolArena[T], id: PoolId[T]) -> &'pool mut T = MemoryPoolBorrowEdit
+intrinsic fn pool_set[T](edit arena: PoolArena[T], id: PoolId[T], take value: T) = MemoryPoolSet
+intrinsic fn pool_remove[T](edit arena: PoolArena[T], id: PoolId[T]) -> Bool = MemoryPoolRemove
+intrinsic fn pool_reset[T](edit arena: PoolArena[T]) = MemoryPoolReset

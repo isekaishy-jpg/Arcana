@@ -1,0 +1,7 @@
+name = "showcase_visual"
+kind = "app"
+
+[deps]
+showcase_core = { path = "../showcase_core" }
+winspell = { path = "../../../grimoires/winspell" }
+spell_events = { path = "../../../grimoires/spell-events" }

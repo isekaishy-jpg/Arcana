@@ -1,0 +1,12 @@
+[package]
+name = "arcana-cli"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+arcana-package.workspace = true
+
+[[bin]]
+name = "arcana"
+path = "src/main.rs"
+

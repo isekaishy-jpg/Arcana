@@ -18,4 +18,3 @@ mod tests {
         assert_eq!(kinds.len(), FROZEN_HIR_NODE_KINDS.len());
     }
 }
-

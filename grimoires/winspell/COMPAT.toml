@@ -1,0 +1,2 @@
+version = "1.0.1"
+supported_std_abi = ["std-abi-v1"]

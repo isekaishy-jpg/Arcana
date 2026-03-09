@@ -1,0 +1,8 @@
+name = "types_guard_workspace"
+kind = "app"
+
+[workspace]
+members = [
+  "core",
+  "app",
+]

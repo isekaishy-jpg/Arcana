@@ -125,4 +125,3 @@ pub const FROZEN_AST_NODE_KINDS: &[&str] = &[
     "ForewordArg",
     "ForewordValue",
 ];
-

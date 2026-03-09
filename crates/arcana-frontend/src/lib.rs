@@ -42,4 +42,3 @@ mod tests {
         assert_eq!(hir.symbol_count, 1);
     }
 }
-
