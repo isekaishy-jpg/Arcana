@@ -6,6 +6,7 @@ Arcana is a Rust-first rewrite of the frozen Arcana language and tooling stack. 
 
 - Rust workspace scaffold for syntax, HIR, frontend, package manager, IR, AOT, and CLI layers
 - Language-freeze policy and CI guardrails
+- Cross-cutting spec-status and contract docs now explicitly lock page rollups, pair tuples, callable/context direction, and the AnyBox ban before typed frontend hardening
 - Path-only package graph, deterministic workspace planning, `Arcana.lock` v1, placeholder build artifacts, and declaration-surface API fingerprints for rebuild propagation
 - Shared HIR module, package, and workspace summaries now sit between syntax parsing, frontend checks, and package graph consumers
 - Symbol-based module and imported-name resolution now lives in HIR and is consumed by frontend diagnostics

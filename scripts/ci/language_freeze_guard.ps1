@@ -13,14 +13,19 @@ $protected = @(
     "docs/arcana-v0.md",
     "conformance/selfhost_language_matrix.toml",
     "crates/arcana-syntax/src/freeze.rs",
-    "crates/arcana-hir/src/freeze.rs"
+    "crates/arcana-hir/src/freeze.rs",
+    "docs/specs/spec-status.md",
+    "docs/specs/page-rollups/page-rollups/v1-scope.md",
+    "docs/specs/tuples/tuples/v1-scope.md",
+    "docs/specs/backend/anybox-policy.md",
+    "docs/specs/callables/callables/v1-status.md"
 )
 
 $changed = @()
 if ($Base) {
     $changed = git diff --name-only $Base $Head 2>$null
 } else {
-    $changed = git status --porcelain | ForEach-Object {
+    $changed = git status --porcelain=v1 --untracked-files=all | ForEach-Object {
         if ($_.Length -ge 4) { $_.Substring(3) }
     }
 }

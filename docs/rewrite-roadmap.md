@@ -7,6 +7,7 @@ Arcana is being rewritten under a hard language freeze until selfhost.
 Completed foundation work:
 - Rust workspace scaffold with isolated crates for syntax, HIR, frontend, package/build, IR, AOT, and CLI
 - language freeze policy and CI freeze guard
+- explicit spec-status taxonomy plus pre-selfhost contract docs for page rollups, tuples, callable/context direction, and AnyBox ban
 - seed import of frozen contract docs, conformance matrix, first-party grimoires, std, and source examples
 - deterministic path-only package graph, lockfile v1, and foundation build cache
 - shared workspace/package HIR loading and symbol-based module and imported-name resolution over the current parser foundation
