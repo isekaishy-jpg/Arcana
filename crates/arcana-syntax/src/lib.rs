@@ -118,6 +118,43 @@ pub struct RawBlockEntry {
     pub children: Vec<RawBlockEntry>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MatchArm {
+    pub patterns: Vec<MatchPattern>,
+    pub value: Expr,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MatchPattern {
+    Wildcard,
+    Literal {
+        text: String,
+    },
+    Name {
+        text: String,
+    },
+    Variant {
+        path: String,
+        args: Vec<MatchPattern>,
+    },
+    Opaque {
+        text: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Expr {
+    Opaque {
+        text: String,
+        attached: Vec<RawBlockEntry>,
+    },
+    Match {
+        subject: String,
+        arms: Vec<MatchArm>,
+    },
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AssignOp {
     Assign,
@@ -156,25 +193,23 @@ pub enum StatementKind {
     Let {
         mutable: bool,
         name: String,
-        value: String,
-        attached: Vec<RawBlockEntry>,
+        value: Expr,
     },
     Return {
-        value: Option<String>,
-        attached: Vec<RawBlockEntry>,
+        value: Option<Expr>,
     },
     If {
-        condition: String,
+        condition: Expr,
         then_branch: Vec<Statement>,
         else_branch: Option<Vec<Statement>>,
     },
     While {
-        condition: String,
+        condition: Expr,
         body: Vec<Statement>,
     },
     For {
         binding: String,
-        iterable: String,
+        iterable: Expr,
         body: Vec<Statement>,
     },
     Break,
@@ -182,12 +217,10 @@ pub enum StatementKind {
     Assign {
         target: String,
         op: AssignOp,
-        value: String,
-        attached: Vec<RawBlockEntry>,
+        value: Expr,
     },
     Expr {
-        text: String,
-        attached: Vec<RawBlockEntry>,
+        expr: Expr,
     },
 }
 
@@ -877,7 +910,11 @@ fn parse_statement_block(
 
 fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement, String> {
     if let Some(rest) = entry.text.strip_prefix("if ") {
-        let condition = parse_block_header(rest, "if", entry.span)?;
+        let condition = parse_expression(
+            &parse_block_header(rest, "if", entry.span)?,
+            &[],
+            entry.span,
+        )?;
         return Ok(Statement {
             kind: StatementKind::If {
                 condition,
@@ -889,7 +926,11 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
     }
 
     if let Some(rest) = entry.text.strip_prefix("while ") {
-        let condition = parse_block_header(rest, "while", entry.span)?;
+        let condition = parse_expression(
+            &parse_block_header(rest, "while", entry.span)?,
+            &[],
+            entry.span,
+        )?;
         return Ok(Statement {
             kind: StatementKind::While {
                 condition,
@@ -918,7 +959,7 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
         return Ok(Statement {
             kind: StatementKind::For {
                 binding: binding.to_string(),
-                iterable: iterable.to_string(),
+                iterable: parse_expression(iterable, &[], entry.span)?,
                 body: parse_statement_block(&entry.children, loop_depth + 1)?,
             },
             span: entry.span,
@@ -949,8 +990,7 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
             kind: StatementKind::Let {
                 mutable,
                 name: name.to_string(),
-                value: value.to_string(),
-                attached: entry.children.clone(),
+                value: parse_expression(value, &entry.children, entry.span)?,
             },
             span: entry.span,
         });
@@ -958,14 +998,17 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
 
     if let Some(rest) = entry.text.strip_prefix("return") {
         let value = match rest.trim() {
-            "" => None,
-            value => Some(value.to_string()),
+            "" if entry.children.is_empty() => None,
+            "" => {
+                return Err(format!(
+                    "{}:{}: malformed `return` statement",
+                    entry.span.line, entry.span.column
+                ));
+            }
+            value => Some(parse_expression(value, &entry.children, entry.span)?),
         };
         return Ok(Statement {
-            kind: StatementKind::Return {
-                value,
-                attached: entry.children.clone(),
-            },
+            kind: StatementKind::Return { value },
             span: entry.span,
         });
     }
@@ -1001,8 +1044,7 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
             kind: StatementKind::Assign {
                 target,
                 op,
-                value,
-                attached: entry.children.clone(),
+                value: parse_expression(&value, &entry.children, entry.span)?,
             },
             span: entry.span,
         });
@@ -1010,11 +1052,154 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
 
     Ok(Statement {
         kind: StatementKind::Expr {
-            text: entry.text.clone(),
-            attached: entry.children.clone(),
+            expr: parse_expression(&entry.text, &entry.children, entry.span)?,
         },
         span: entry.span,
     })
+}
+
+fn parse_expression(text: &str, attached: &[RawBlockEntry], span: Span) -> Result<Expr, String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err(format!(
+            "{}:{}: malformed expression",
+            span.line, span.column
+        ));
+    }
+    if let Some(rest) = trimmed.strip_prefix("match ") {
+        return parse_match_expression(rest, attached, span);
+    }
+    Ok(Expr::Opaque {
+        text: trimmed.to_string(),
+        attached: attached.to_vec(),
+    })
+}
+
+fn parse_match_expression(
+    rest: &str,
+    attached: &[RawBlockEntry],
+    span: Span,
+) -> Result<Expr, String> {
+    let Some(subject) = rest.strip_suffix(':') else {
+        return Err(format!(
+            "{}:{}: malformed `match` expression",
+            span.line, span.column
+        ));
+    };
+    let subject = subject.trim();
+    if subject.is_empty() || attached.is_empty() {
+        return Err(format!(
+            "{}:{}: malformed `match` expression",
+            span.line, span.column
+        ));
+    }
+
+    let mut arms = Vec::new();
+    for entry in attached {
+        arms.push(parse_match_arm(entry)?);
+    }
+
+    Ok(Expr::Match {
+        subject: subject.to_string(),
+        arms,
+    })
+}
+
+fn parse_match_arm(entry: &RawBlockEntry) -> Result<MatchArm, String> {
+    let Some(index) = find_top_level_token(&entry.text, "=>") else {
+        return Err(format!(
+            "{}:{}: malformed `match` arm",
+            entry.span.line, entry.span.column
+        ));
+    };
+    let patterns_text = entry.text[..index].trim();
+    let value_text = entry.text[index + 2..].trim();
+    if patterns_text.is_empty() || value_text.is_empty() {
+        return Err(format!(
+            "{}:{}: malformed `match` arm",
+            entry.span.line, entry.span.column
+        ));
+    }
+
+    let patterns = split_top_level(patterns_text, '|')
+        .into_iter()
+        .map(str::trim)
+        .filter(|pattern| !pattern.is_empty())
+        .map(parse_match_pattern)
+        .collect::<Result<Vec<_>, _>>()?;
+    if patterns.is_empty() {
+        return Err(format!(
+            "{}:{}: malformed `match` arm",
+            entry.span.line, entry.span.column
+        ));
+    }
+
+    Ok(MatchArm {
+        patterns,
+        value: parse_expression(value_text, &entry.children, entry.span)?,
+        span: entry.span,
+    })
+}
+
+fn parse_match_pattern(text: &str) -> Result<MatchPattern, String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err("malformed `match` pattern".to_string());
+    }
+    if trimmed == "_" {
+        return Ok(MatchPattern::Wildcard);
+    }
+    if is_match_literal(trimmed) {
+        return Ok(MatchPattern::Literal {
+            text: trimmed.to_string(),
+        });
+    }
+    if let Some(variant) = parse_variant_pattern(trimmed)? {
+        return Ok(variant);
+    }
+    if is_path_like(trimmed) {
+        return Ok(MatchPattern::Name {
+            text: trimmed.to_string(),
+        });
+    }
+    Ok(MatchPattern::Opaque {
+        text: trimmed.to_string(),
+    })
+}
+
+fn parse_variant_pattern(text: &str) -> Result<Option<MatchPattern>, String> {
+    let Some(open_idx) = text.find('(') else {
+        return Ok(None);
+    };
+    let Some(close_idx) = find_matching_delim(text, open_idx, '(', ')') else {
+        return Ok(None);
+    };
+    if close_idx != text.len() - 1 {
+        return Ok(None);
+    }
+    let path = text[..open_idx].trim();
+    if !is_path_like(path) {
+        return Ok(None);
+    }
+    let inside = text[open_idx + 1..close_idx].trim();
+    let args = if inside.is_empty() {
+        Vec::new()
+    } else {
+        split_top_level(inside, ',')
+            .into_iter()
+            .map(str::trim)
+            .filter(|arg| !arg.is_empty())
+            .map(parse_match_pattern)
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    Ok(Some(MatchPattern::Variant {
+        path: path.to_string(),
+        args,
+    }))
+}
+
+fn is_match_literal(text: &str) -> bool {
+    matches!(text, "true" | "false") || text.starts_with('"') || text.parse::<i64>().is_ok()
 }
 
 fn parse_block_header(rest: &str, keyword: &str, span: Span) -> Result<String, String> {
@@ -1107,6 +1292,53 @@ fn find_top_level_assignment_op(text: &str) -> Option<(usize, AssignOp, usize)> 
                 }
             }
             return Some((idx, op, token.len()));
+        }
+    }
+
+    None
+}
+
+fn find_top_level_token(text: &str, token: &str) -> Option<usize> {
+    let mut depth_paren = 0usize;
+    let mut depth_bracket = 0usize;
+    let mut depth_brace = 0usize;
+    let mut in_string = false;
+    let mut escape = false;
+
+    for (idx, ch) in text.char_indices() {
+        if in_string {
+            if escape {
+                escape = false;
+                continue;
+            }
+            if ch == '\\' {
+                escape = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => {
+                in_string = true;
+                continue;
+            }
+            '(' => depth_paren += 1,
+            ')' => depth_paren = depth_paren.saturating_sub(1),
+            '[' => depth_bracket += 1,
+            ']' => depth_bracket = depth_bracket.saturating_sub(1),
+            '{' => depth_brace += 1,
+            '}' => depth_brace = depth_brace.saturating_sub(1),
+            _ => {}
+        }
+
+        if depth_paren == 0
+            && depth_bracket == 0
+            && depth_brace == 0
+            && text[idx..].starts_with(token)
+        {
+            return Some(idx);
         }
     }
 
@@ -1248,6 +1480,14 @@ fn is_identifier(value: &str) -> bool {
     chars.all(is_identifier_continue)
 }
 
+fn is_path_like(value: &str) -> bool {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    trimmed.split('.').all(is_identifier)
+}
+
 fn is_identifier_start(ch: char) -> bool {
     ch == '_' || ch.is_ascii_alphabetic()
 }
@@ -1259,7 +1499,10 @@ fn is_identifier_continue(ch: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::freeze::{FROZEN_AST_NODE_KINDS, FROZEN_TOKEN_KINDS};
-    use super::{DirectiveKind, ParamMode, StatementKind, SymbolBody, SymbolKind, parse_module};
+    use super::{
+        DirectiveKind, Expr, MatchPattern, ParamMode, StatementKind, SymbolBody, SymbolKind,
+        parse_module,
+    };
 
     #[test]
     fn frozen_lists_are_unique() {
@@ -1399,18 +1642,22 @@ mod tests {
                 mutable,
                 name,
                 value,
-                attached,
             } => {
                 assert!(*mutable);
                 assert_eq!(name, "frames");
-                assert_eq!(value, "0");
-                assert!(attached.is_empty());
+                assert!(matches!(
+                    value,
+                    Expr::Opaque { text, attached } if text == "0" && attached.is_empty()
+                ));
             }
             other => panic!("expected let statement, got {other:?}"),
         }
         match &statements[1].kind {
             StatementKind::While { condition, body } => {
-                assert_eq!(condition, "frames < 10");
+                assert!(matches!(
+                    condition,
+                    Expr::Opaque { text, attached } if text == "frames < 10" && attached.is_empty()
+                ));
                 assert_eq!(body.len(), 1);
                 match &body[0].kind {
                     StatementKind::If {
@@ -1418,7 +1665,11 @@ mod tests {
                         then_branch,
                         else_branch,
                     } => {
-                        assert_eq!(condition, "frames % 2 == 0");
+                        assert!(matches!(
+                            condition,
+                            Expr::Opaque { text, attached }
+                                if text == "frames % 2 == 0" && attached.is_empty()
+                        ));
                         assert_eq!(then_branch.len(), 1);
                         assert!(matches!(then_branch[0].kind, StatementKind::Assign { .. }));
                         let else_branch = else_branch.as_ref().expect("else branch should exist");
@@ -1431,13 +1682,88 @@ mod tests {
             other => panic!("expected while statement, got {other:?}"),
         }
         match &statements[2].kind {
-            StatementKind::Return { value, attached } => {
-                assert_eq!(value.as_deref(), Some("match frames:"));
-                assert_eq!(attached.len(), 2);
-                assert_eq!(attached[0].text, "10 => 1");
-                assert_eq!(attached[1].text, "_ => 0");
+            StatementKind::Return { value } => {
+                match value.as_ref().expect("return should carry a value") {
+                    Expr::Match { subject, arms } => {
+                        assert_eq!(subject, "frames");
+                        assert_eq!(arms.len(), 2);
+                        assert_eq!(
+                            arms[0].patterns,
+                            vec![MatchPattern::Literal {
+                                text: "10".to_string()
+                            }]
+                        );
+                        assert!(matches!(
+                            arms[0].value,
+                            Expr::Opaque { ref text, ref attached }
+                                if text == "1" && attached.is_empty()
+                        ));
+                        assert_eq!(arms[1].patterns, vec![MatchPattern::Wildcard]);
+                    }
+                    other => panic!("expected match expression, got {other:?}"),
+                }
             }
             other => panic!("expected return statement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_module_collects_match_expressions() {
+        let parsed = parse_module(
+            "fn score(t: Token) -> Int:\n    return match t:\n        Token.Plus | Token.Minus => 1\n        Token.IntLit(v) => v\nfn main() -> Int:\n    let out = score :: Token.Minus :: call\n    let v = match out:\n        0 => 0\n        _ => 1\n    return v\n",
+        )
+        .expect("parse should pass");
+
+        match &parsed.symbols[0].statements[0].kind {
+            StatementKind::Return { value } => match value.as_ref().expect("match return expected")
+            {
+                Expr::Match { subject, arms } => {
+                    assert_eq!(subject, "t");
+                    assert_eq!(
+                        arms[0].patterns,
+                        vec![
+                            MatchPattern::Name {
+                                text: "Token.Plus".to_string()
+                            },
+                            MatchPattern::Name {
+                                text: "Token.Minus".to_string()
+                            }
+                        ]
+                    );
+                    assert_eq!(
+                        arms[1].patterns,
+                        vec![MatchPattern::Variant {
+                            path: "Token.IntLit".to_string(),
+                            args: vec![MatchPattern::Name {
+                                text: "v".to_string()
+                            }]
+                        }]
+                    );
+                }
+                other => panic!("expected match expression, got {other:?}"),
+            },
+            other => panic!("expected return statement, got {other:?}"),
+        }
+
+        match &parsed.symbols[1].statements[1].kind {
+            StatementKind::Let { name, value, .. } => {
+                assert_eq!(name, "v");
+                match value {
+                    Expr::Match { subject, arms } => {
+                        assert_eq!(subject, "out");
+                        assert_eq!(arms.len(), 2);
+                        assert_eq!(
+                            arms[0].patterns,
+                            vec![MatchPattern::Literal {
+                                text: "0".to_string()
+                            }]
+                        );
+                        assert_eq!(arms[1].patterns, vec![MatchPattern::Wildcard]);
+                    }
+                    other => panic!("expected match expression, got {other:?}"),
+                }
+            }
+            other => panic!("expected let statement, got {other:?}"),
         }
     }
 
@@ -1452,5 +1778,12 @@ mod tests {
         let err = parse_module("fn main() -> Int:\n    else:\n        return 0\n")
             .expect_err("else should fail");
         assert!(err.contains("`else` without a preceding `if`"), "{err}");
+    }
+
+    #[test]
+    fn parse_module_rejects_match_without_arms() {
+        let err = parse_module("fn main() -> Int:\n    return match value:\n")
+            .expect_err("match should fail");
+        assert!(err.contains("malformed `match` expression"), "{err}");
     }
 }

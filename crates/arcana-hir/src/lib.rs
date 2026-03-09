@@ -4,9 +4,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use arcana_syntax::{
-    AssignOp as ParsedAssignOp, DirectiveKind as ParsedDirectiveKind, ParamMode as ParsedParamMode,
-    ParsedModule, Span, StatementKind as ParsedStatementKind, SymbolKind as ParsedSymbolKind,
-    parse_module,
+    AssignOp as ParsedAssignOp, DirectiveKind as ParsedDirectiveKind, Expr as ParsedExpr,
+    ParamMode as ParsedParamMode, ParsedModule, Span, StatementKind as ParsedStatementKind,
+    SymbolKind as ParsedSymbolKind, parse_module,
 };
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -124,6 +124,43 @@ pub struct HirRawBlockEntry {
     pub children: Vec<HirRawBlockEntry>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HirMatchArm {
+    pub patterns: Vec<HirMatchPattern>,
+    pub value: HirExpr,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HirMatchPattern {
+    Wildcard,
+    Literal {
+        text: String,
+    },
+    Name {
+        text: String,
+    },
+    Variant {
+        path: String,
+        args: Vec<HirMatchPattern>,
+    },
+    Opaque {
+        text: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HirExpr {
+    Opaque {
+        text: String,
+        attached: Vec<HirRawBlockEntry>,
+    },
+    Match {
+        subject: String,
+        arms: Vec<HirMatchArm>,
+    },
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HirAssignOp {
     Assign,
@@ -162,25 +199,23 @@ pub enum HirStatementKind {
     Let {
         mutable: bool,
         name: String,
-        value: String,
-        attached: Vec<HirRawBlockEntry>,
+        value: HirExpr,
     },
     Return {
-        value: Option<String>,
-        attached: Vec<HirRawBlockEntry>,
+        value: Option<HirExpr>,
     },
     If {
-        condition: String,
+        condition: HirExpr,
         then_branch: Vec<HirStatement>,
         else_branch: Option<Vec<HirStatement>>,
     },
     While {
-        condition: String,
+        condition: HirExpr,
         body: Vec<HirStatement>,
     },
     For {
         binding: String,
-        iterable: String,
+        iterable: HirExpr,
         body: Vec<HirStatement>,
     },
     Break,
@@ -188,12 +223,10 @@ pub enum HirStatementKind {
     Assign {
         target: String,
         op: HirAssignOp,
-        value: String,
-        attached: Vec<HirRawBlockEntry>,
+        value: HirExpr,
     },
     Expr {
-        text: String,
-        attached: Vec<HirRawBlockEntry>,
+        expr: HirExpr,
     },
 }
 
@@ -1289,6 +1322,43 @@ fn lower_raw_block_entries(entries: &[arcana_syntax::RawBlockEntry]) -> Vec<HirR
         .collect()
 }
 
+fn lower_expr(expr: &ParsedExpr) -> HirExpr {
+    match expr {
+        ParsedExpr::Opaque { text, attached } => HirExpr::Opaque {
+            text: text.clone(),
+            attached: lower_raw_block_entries(attached),
+        },
+        ParsedExpr::Match { subject, arms } => HirExpr::Match {
+            subject: subject.clone(),
+            arms: arms
+                .iter()
+                .map(|arm| HirMatchArm {
+                    patterns: arm.patterns.iter().map(lower_match_pattern).collect(),
+                    value: lower_expr(&arm.value),
+                    span: arm.span,
+                })
+                .collect(),
+        },
+    }
+}
+
+fn lower_match_pattern(pattern: &arcana_syntax::MatchPattern) -> HirMatchPattern {
+    match pattern {
+        arcana_syntax::MatchPattern::Wildcard => HirMatchPattern::Wildcard,
+        arcana_syntax::MatchPattern::Literal { text } => {
+            HirMatchPattern::Literal { text: text.clone() }
+        }
+        arcana_syntax::MatchPattern::Name { text } => HirMatchPattern::Name { text: text.clone() },
+        arcana_syntax::MatchPattern::Variant { path, args } => HirMatchPattern::Variant {
+            path: path.clone(),
+            args: args.iter().map(lower_match_pattern).collect(),
+        },
+        arcana_syntax::MatchPattern::Opaque { text } => {
+            HirMatchPattern::Opaque { text: text.clone() }
+        }
+    }
+}
+
 fn lower_statements(statements: &[arcana_syntax::Statement]) -> Vec<HirStatement> {
     statements.iter().map(lower_statement).collect()
 }
@@ -1300,28 +1370,25 @@ fn lower_statement(statement: &arcana_syntax::Statement) -> HirStatement {
                 mutable,
                 name,
                 value,
-                attached,
             } => HirStatementKind::Let {
                 mutable: *mutable,
                 name: name.clone(),
-                value: value.clone(),
-                attached: lower_raw_block_entries(attached),
+                value: lower_expr(value),
             },
-            ParsedStatementKind::Return { value, attached } => HirStatementKind::Return {
-                value: value.clone(),
-                attached: lower_raw_block_entries(attached),
+            ParsedStatementKind::Return { value } => HirStatementKind::Return {
+                value: value.as_ref().map(lower_expr),
             },
             ParsedStatementKind::If {
                 condition,
                 then_branch,
                 else_branch,
             } => HirStatementKind::If {
-                condition: condition.clone(),
+                condition: lower_expr(condition),
                 then_branch: lower_statements(then_branch),
                 else_branch: else_branch.as_ref().map(|branch| lower_statements(branch)),
             },
             ParsedStatementKind::While { condition, body } => HirStatementKind::While {
-                condition: condition.clone(),
+                condition: lower_expr(condition),
                 body: lower_statements(body),
             },
             ParsedStatementKind::For {
@@ -1330,25 +1397,18 @@ fn lower_statement(statement: &arcana_syntax::Statement) -> HirStatement {
                 body,
             } => HirStatementKind::For {
                 binding: binding.clone(),
-                iterable: iterable.clone(),
+                iterable: lower_expr(iterable),
                 body: lower_statements(body),
             },
             ParsedStatementKind::Break => HirStatementKind::Break,
             ParsedStatementKind::Continue => HirStatementKind::Continue,
-            ParsedStatementKind::Assign {
-                target,
-                op,
-                value,
-                attached,
-            } => HirStatementKind::Assign {
+            ParsedStatementKind::Assign { target, op, value } => HirStatementKind::Assign {
                 target: target.clone(),
                 op: lower_assign_op(op),
-                value: value.clone(),
-                attached: lower_raw_block_entries(attached),
+                value: lower_expr(value),
             },
-            ParsedStatementKind::Expr { text, attached } => HirStatementKind::Expr {
-                text: text.clone(),
-                attached: lower_raw_block_entries(attached),
+            ParsedStatementKind::Expr { expr } => HirStatementKind::Expr {
+                expr: lower_expr(expr),
             },
         },
         span: statement.span,
@@ -1362,9 +1422,9 @@ mod tests {
 
     use super::freeze::FROZEN_HIR_NODE_KINDS;
     use super::{
-        HirAssignOp, HirDirectiveKind, HirStatementKind, HirSymbolBody, build_package_layout,
-        build_package_summary, build_workspace_package, build_workspace_summary,
-        derive_source_module_path, lower_module_text, resolve_workspace,
+        HirAssignOp, HirDirectiveKind, HirExpr, HirMatchPattern, HirStatementKind, HirSymbolBody,
+        build_package_layout, build_package_summary, build_workspace_package,
+        build_workspace_summary, derive_source_module_path, lower_module_text, resolve_workspace,
     };
 
     #[test]
@@ -1450,18 +1510,23 @@ mod tests {
                 mutable,
                 name,
                 value,
-                attached,
             } => {
                 assert!(*mutable);
                 assert_eq!(name, "frames");
-                assert_eq!(value, "0");
-                assert!(attached.is_empty());
+                assert!(matches!(
+                    value,
+                    HirExpr::Opaque { text, attached } if text == "0" && attached.is_empty()
+                ));
             }
             other => panic!("expected let statement, got {other:?}"),
         }
         match &statements[1].kind {
             HirStatementKind::While { condition, body } => {
-                assert_eq!(condition, "frames < 10");
+                assert!(matches!(
+                    condition,
+                    HirExpr::Opaque { text, attached }
+                        if text == "frames < 10" && attached.is_empty()
+                ));
                 assert_eq!(body.len(), 1);
                 match &body[0].kind {
                     HirStatementKind::If {
@@ -1469,19 +1534,21 @@ mod tests {
                         then_branch,
                         else_branch,
                     } => {
-                        assert_eq!(condition, "frames % 2 == 0");
+                        assert!(matches!(
+                            condition,
+                            HirExpr::Opaque { text, attached }
+                                if text == "frames % 2 == 0" && attached.is_empty()
+                        ));
                         assert_eq!(then_branch.len(), 1);
                         match &then_branch[0].kind {
-                            HirStatementKind::Assign {
-                                target,
-                                op,
-                                value,
-                                attached,
-                            } => {
+                            HirStatementKind::Assign { target, op, value } => {
                                 assert_eq!(target, "frames");
                                 assert_eq!(*op, HirAssignOp::AddAssign);
-                                assert_eq!(value, "1");
-                                assert!(attached.is_empty());
+                                assert!(matches!(
+                                    value,
+                                    HirExpr::Opaque { text, attached }
+                                        if text == "1" && attached.is_empty()
+                                ));
                             }
                             other => panic!("expected assignment, got {other:?}"),
                         }
@@ -1494,13 +1561,90 @@ mod tests {
             other => panic!("expected while statement, got {other:?}"),
         }
         match &statements[2].kind {
-            HirStatementKind::Return { value, attached } => {
-                assert_eq!(value.as_deref(), Some("match frames:"));
-                assert_eq!(attached.len(), 2);
-                assert_eq!(attached[0].text, "10 => 1");
-                assert_eq!(attached[1].text, "_ => 0");
+            HirStatementKind::Return { value } => {
+                match value.as_ref().expect("return should carry a value") {
+                    HirExpr::Match { subject, arms } => {
+                        assert_eq!(subject, "frames");
+                        assert_eq!(arms.len(), 2);
+                        assert_eq!(
+                            arms[0].patterns,
+                            vec![HirMatchPattern::Literal {
+                                text: "10".to_string()
+                            }]
+                        );
+                        assert!(matches!(
+                            arms[0].value,
+                            HirExpr::Opaque { ref text, ref attached }
+                                if text == "1" && attached.is_empty()
+                        ));
+                        assert_eq!(arms[1].patterns, vec![HirMatchPattern::Wildcard]);
+                    }
+                    other => panic!("expected match expression, got {other:?}"),
+                }
             }
             other => panic!("expected return statement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lower_module_text_captures_match_expressions() {
+        let module = lower_module_text(
+            "match_demo",
+            "fn score(t: Token) -> Int:\n    return match t:\n        Token.Plus | Token.Minus => 1\n        Token.IntLit(v) => v\nfn main() -> Int:\n    let out = score :: Token.Minus :: call\n    let v = match out:\n        0 => 0\n        _ => 1\n    return v\n",
+        )
+        .expect("lowering should pass");
+
+        match &module.symbols[0].statements[0].kind {
+            HirStatementKind::Return { value } => {
+                match value.as_ref().expect("match return expected") {
+                    HirExpr::Match { subject, arms } => {
+                        assert_eq!(subject, "t");
+                        assert_eq!(
+                            arms[0].patterns,
+                            vec![
+                                HirMatchPattern::Name {
+                                    text: "Token.Plus".to_string()
+                                },
+                                HirMatchPattern::Name {
+                                    text: "Token.Minus".to_string()
+                                }
+                            ]
+                        );
+                        assert_eq!(
+                            arms[1].patterns,
+                            vec![HirMatchPattern::Variant {
+                                path: "Token.IntLit".to_string(),
+                                args: vec![HirMatchPattern::Name {
+                                    text: "v".to_string()
+                                }]
+                            }]
+                        );
+                    }
+                    other => panic!("expected match expression, got {other:?}"),
+                }
+            }
+            other => panic!("expected return statement, got {other:?}"),
+        }
+
+        match &module.symbols[1].statements[1].kind {
+            HirStatementKind::Let { name, value, .. } => {
+                assert_eq!(name, "v");
+                match value {
+                    HirExpr::Match { subject, arms } => {
+                        assert_eq!(subject, "out");
+                        assert_eq!(arms.len(), 2);
+                        assert_eq!(
+                            arms[0].patterns,
+                            vec![HirMatchPattern::Literal {
+                                text: "0".to_string()
+                            }]
+                        );
+                        assert_eq!(arms[1].patterns, vec![HirMatchPattern::Wildcard]);
+                    }
+                    other => panic!("expected match expression, got {other:?}"),
+                }
+            }
+            other => panic!("expected let statement, got {other:?}"),
         }
     }
 
