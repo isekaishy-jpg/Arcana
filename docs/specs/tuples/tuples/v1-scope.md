@@ -3,6 +3,7 @@
 Status: `approved-pre-selfhost`
 
 Tuples are part of the selfhost-facing language contract and must be explicit before typed frontend work hardens.
+Pair-only tuples are the current stabilization point, not the intended permanent ceiling for the language.
 
 ## Baseline Contract
 
@@ -11,6 +12,7 @@ Tuples are part of the selfhost-facing language contract and must be explicit be
 - Tuple literal syntax is `(a, b)`.
 - Nested pairs are allowed.
 - Three-or-more-element tuples are not part of the contract.
+- This is the current selfhost baseline, not a claim that generalized tuples are undesirable.
 
 ## Access Contract
 
@@ -46,3 +48,10 @@ Tuples are part of the selfhost-facing language contract and must be explicit be
 - Use tuples for small transient multi-value returns and protocol rows.
 - Prefer named records when repeated positional access starts carrying domain meaning.
 - The existing anonymous-shape positional-access lint direction remains valid and should stay part of diagnostics work.
+
+## Forward Path
+
+- Pair-only exists to keep the selfhost baseline tractable while typed ownership and layout rules are still settling; it is a staging constraint, not a philosophical rejection of standard richer tuple support.
+- Generalized tuples remain the intended expansion path once the typed frontend, ownership rules, and selfhost baseline are stable enough to absorb them cleanly.
+- If pair-only tuples become a demonstrated selfhost blocker, tuple enrichment may be reconsidered only through an explicit freeze exception and updated conformance coverage.
+- Deferred follow-up items are tracked in `docs/specs/tuples/tuples/deferred-roadmap.md`.

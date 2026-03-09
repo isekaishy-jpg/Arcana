@@ -350,6 +350,7 @@ Notes:
 - Bounds are strict runtime errors (no clamping / no negative indexing).
 - `RangeInt` values support equality and are primarily used for slicing.
 - Generic calls use phrase style (`foo[T] :: ... :: call`), while `foo[T]` without a qualifier remains subscript syntax.
+- Pair tuples are the current selfhost baseline. Richer tuple expansion is intentionally deferred rather than rejected outright; see `docs/specs/tuples/tuples/v1-scope.md` and `docs/specs/tuples/tuples/deferred-roadmap.md`.
 
 See `examples/list_core`.
 See `examples/list_slice_range`.
@@ -632,12 +633,12 @@ Style notes:
 | Style | v1 semantics | Output |
 |---|---|---|
 | `forward` | unary pipeline in source order | final stage value |
-| `lazy` | currently same observable behavior as `forward` | final stage value |
+| `lazy` | demand-sensitive left-to-right pipeline style; runtime lowering may skip unnecessary downstream work when needed, but only when that does not change required observable behavior | final stage value |
 | `async` | unary pipeline with auto-await for `Task[T]` stages | unwrapped final value |
 | `parallel` | fan-out with deterministic ordered collection (spawn/join when eligible, fallback otherwise) | `List[T]` |
 | `broadcast` | sequential fan-out over same input | `List[T]` |
 | `collect` | directional pipeline collecting intermediates in normalized order | `List[T]` |
-| `plan` | validate/typecheck only, no execution | pass-through input |
+| `plan` | validate/typecheck the pipeline/chain contract only; no stage execution, and expression-position use yields the original input unchanged | pass-through input |
 
 Directional topology rules:
 
@@ -647,6 +648,12 @@ Directional topology rules:
 - mixed executes as segment reorder: left forward segment then reversed right segment (`a, b, c, e, d`)
 - only one direction change is allowed
 - reverse-introduced chains are pure reverse only in this version
+
+Reading/composition model:
+
+- chain source is always written and read left-to-right
+- connectors determine the normalized execution order after directional parsing
+- conventional function-composition reasoning is still right-to-left over the normalized stage list; the source pipe itself is not
 
 Standalone seed rule:
 
@@ -696,11 +703,14 @@ See:
 - `examples/chain_header_attached`
 - `examples/chain_styles_matrix`
 
-## Current v0 Limits
+## Current Implementation Limits (Not Frozen Language Law)
 
-- `edit` call arguments must be local bindings (not field expressions) in v0
-- Access checking is root-binding based (conservative)
-- Moves inside `while` loops are rejected in v0
+These are current checker/runtime limits from the in-progress rewrite. They are not, by themselves, endorsed long-term language design and must not be treated as selfhost contract unless promoted explicitly.
+Where a domain scope exists under `docs/specs/**/v1-scope.md`, that domain scope wins over these notes.
+
+- `edit` call arguments currently must be local bindings (not field expressions)
+- Access checking is currently root-binding based (conservative)
+- Moves inside `while` loops are currently rejected
 
 ## Canvas/Window/Input (v0.16 shelf-first)
 

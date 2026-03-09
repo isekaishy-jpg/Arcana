@@ -9,6 +9,7 @@ Completed foundation work:
 - language freeze policy and CI freeze guard
 - AnyBox policy guard over code-bearing paths
 - explicit spec-status taxonomy plus pre-selfhost contract docs for page rollups, tuples, callable/context direction, and AnyBox ban
+- clarified frozen-doc interpretation so domain scopes beat descriptive implementation limits, tuple docs stay forward-looking, and chain-style semantics are explicit rather than inherited from Meadow-era behavior
 - seed import of frozen contract docs, conformance matrix, first-party grimoires, std, and source examples
 - deterministic path-only package graph, lockfile v1, and foundation build cache
 - shared workspace/package HIR loading and symbol-based module and imported-name resolution over the current parser foundation
