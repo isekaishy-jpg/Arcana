@@ -4,8 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use arcana_syntax::{
-    DirectiveKind as ParsedDirectiveKind, ParsedModule, Span, SymbolKind as ParsedSymbolKind,
-    parse_module,
+    DirectiveKind as ParsedDirectiveKind, ParamMode as ParsedParamMode, ParsedModule, Span,
+    SymbolKind as ParsedSymbolKind, parse_module,
 };
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -67,6 +67,44 @@ pub struct HirSymbol {
     pub kind: HirSymbolKind,
     pub name: String,
     pub exported: bool,
+    pub is_async: bool,
+    pub type_params: Vec<String>,
+    pub where_clause: Option<String>,
+    pub params: Vec<HirParam>,
+    pub return_type: Option<String>,
+    pub surface_text: String,
+    pub span: Span,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HirParamMode {
+    Read,
+    Edit,
+    Take,
+}
+
+impl HirParamMode {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Edit => "edit",
+            Self::Take => "take",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HirParam {
+    pub mode: Option<HirParamMode>,
+    pub name: String,
+    pub ty: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HirImplDecl {
+    pub trait_path: Option<String>,
+    pub target_type: String,
+    pub body_entries: Vec<String>,
     pub surface_text: String,
     pub span: Span,
 }
@@ -78,6 +116,7 @@ pub struct HirModuleSummary {
     pub non_empty_line_count: usize,
     pub directives: Vec<HirDirective>,
     pub symbols: Vec<HirSymbol>,
+    pub impls: Vec<HirImplDecl>,
 }
 
 impl HirModuleSummary {
@@ -100,12 +139,21 @@ impl HirModuleSummary {
                     format!(
                         "export:{}:{}",
                         symbol.kind.as_str(),
-                        encode_surface_text(&symbol.surface_text)
+                        encode_surface_text(&symbol.api_signature_text())
                     )
                 }),
         );
         rows.sort();
         rows
+    }
+}
+
+impl HirSymbol {
+    fn api_signature_text(&self) -> String {
+        match self.kind {
+            HirSymbolKind::Fn => render_function_signature(self),
+            _ => self.surface_text.clone(),
+        }
     }
 }
 
@@ -345,8 +393,32 @@ pub fn lower_parsed_module(module_id: impl Into<String>, parsed: &ParsedModule) 
                 kind: lower_symbol_kind(&symbol.kind),
                 name: symbol.name.clone(),
                 exported: symbol.exported,
+                is_async: symbol.is_async,
+                type_params: symbol.type_params.clone(),
+                where_clause: symbol.where_clause.clone(),
+                params: symbol
+                    .params
+                    .iter()
+                    .map(|param| HirParam {
+                        mode: param.mode.as_ref().map(lower_param_mode),
+                        name: param.name.clone(),
+                        ty: param.ty.clone(),
+                    })
+                    .collect(),
+                return_type: symbol.return_type.clone(),
                 surface_text: symbol.surface_text.clone(),
                 span: symbol.span,
+            })
+            .collect(),
+        impls: parsed
+            .impls
+            .iter()
+            .map(|impl_decl| HirImplDecl {
+                trait_path: impl_decl.trait_path.clone(),
+                target_type: impl_decl.target_type.clone(),
+                body_entries: impl_decl.body_entries.clone(),
+                surface_text: impl_decl.surface_text.clone(),
+                span: impl_decl.span,
             })
             .collect(),
     }
@@ -354,6 +426,47 @@ pub fn lower_parsed_module(module_id: impl Into<String>, parsed: &ParsedModule) 
 
 fn encode_surface_text(text: &str) -> String {
     text.replace('\\', "\\\\").replace('\n', "\\n")
+}
+
+fn render_function_signature(symbol: &HirSymbol) -> String {
+    let mut rendered = String::new();
+    if symbol.is_async {
+        rendered.push_str("async ");
+    }
+    rendered.push_str("fn ");
+    rendered.push_str(&symbol.name);
+    if !symbol.type_params.is_empty() || symbol.where_clause.is_some() {
+        rendered.push('[');
+        let mut parts = symbol.type_params.clone();
+        if let Some(where_clause) = &symbol.where_clause {
+            parts.push(format!("where {where_clause}"));
+        }
+        rendered.push_str(&parts.join(", "));
+        rendered.push(']');
+    }
+    rendered.push('(');
+    rendered.push_str(
+        &symbol
+            .params
+            .iter()
+            .map(render_param)
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+    rendered.push(')');
+    if let Some(return_type) = &symbol.return_type {
+        rendered.push_str(" -> ");
+        rendered.push_str(return_type);
+    }
+    rendered.push(':');
+    rendered
+}
+
+fn render_param(param: &HirParam) -> String {
+    match param.mode {
+        Some(mode) => format!("{} {}: {}", mode.as_str(), param.name, param.ty),
+        None => format!("{}: {}", param.name, param.ty),
+    }
 }
 
 fn resolve_module_target(
@@ -787,6 +900,14 @@ fn lower_symbol_kind(kind: &ParsedSymbolKind) -> HirSymbolKind {
     }
 }
 
+fn lower_param_mode(mode: &ParsedParamMode) -> HirParamMode {
+    match mode {
+        ParsedParamMode::Read => HirParamMode::Read,
+        ParsedParamMode::Edit => HirParamMode::Edit,
+        ParsedParamMode::Take => HirParamMode::Take,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
@@ -819,6 +940,7 @@ mod tests {
         assert_eq!(module.directives[1].kind, HirDirectiveKind::Reexport);
         assert!(module.has_symbol("print"));
         assert!(module.has_symbol("helper"));
+        assert_eq!(module.impls.len(), 0);
         assert_eq!(
             module.exported_surface_rows(),
             vec![
@@ -826,6 +948,29 @@ mod tests {
                 "reexport:std.result".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn lower_module_text_captures_async_functions_and_impls() {
+        let module = lower_module_text(
+            "async_demo",
+            "export async fn worker[T, where std.iter.Iterator[T]](read it: T, count: Int) -> Int:\n    return count\nimpl RangeIter:\n    fn next(edit self: RangeIter) -> (Bool, Int):\n        return (false, 0)\n",
+        )
+        .expect("lowering should pass");
+
+        assert_eq!(module.symbols.len(), 1);
+        let worker = &module.symbols[0];
+        assert!(worker.is_async);
+        assert_eq!(worker.type_params, vec!["T".to_string()]);
+        assert_eq!(worker.where_clause, Some("std.iter.Iterator[T]".to_string()));
+        assert_eq!(worker.params.len(), 2);
+        assert_eq!(worker.return_type, Some("Int".to_string()));
+        assert_eq!(
+            module.exported_surface_rows(),
+            vec!["export:fn:async fn worker[T, where std.iter.Iterator[T]](read it: T, count: Int) -> Int:".to_string()]
+        );
+        assert_eq!(module.impls.len(), 1);
+        assert_eq!(module.impls[0].target_type, "RangeIter");
     }
 
     #[test]

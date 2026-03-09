@@ -10,6 +10,7 @@ Completed foundation work:
 - seed import of frozen contract docs, conformance matrix, first-party grimoires, std, and source examples
 - deterministic path-only package graph, lockfile v1, and foundation build cache
 - shared workspace/package HIR loading and symbol-based module and imported-name resolution over the current placeholder parser
+- structured top-level declaration parsing for functions, async functions, generic/where headers, parameter modes, and impl declarations
 
 ## Next Milestones
 
