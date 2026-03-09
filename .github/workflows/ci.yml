@@ -22,6 +22,8 @@ jobs:
             $base = "${{ github.event.before }}"
           }
           ./scripts/ci/language_freeze_guard.ps1 -Base $base -Head "${{ github.sha }}"
+      - name: AnyBox Guard
+        shell: pwsh
+        run: ./scripts/ci/anybox_policy_guard.ps1
       - name: Cargo Test
         run: cargo test --workspace
-
