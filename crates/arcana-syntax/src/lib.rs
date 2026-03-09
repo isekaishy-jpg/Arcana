@@ -208,6 +208,25 @@ pub enum Expr {
         op: BinaryOp,
         right: Box<Expr>,
     },
+    MemberAccess {
+        expr: Box<Expr>,
+        member: String,
+    },
+    Index {
+        expr: Box<Expr>,
+        index: Box<Expr>,
+    },
+    Slice {
+        expr: Box<Expr>,
+        start: Option<Box<Expr>>,
+        end: Option<Box<Expr>>,
+        inclusive_end: bool,
+    },
+    Range {
+        start: Option<Box<Expr>>,
+        end: Option<Box<Expr>>,
+        inclusive_end: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1166,7 +1185,7 @@ fn parse_expression_core(text: &str) -> Result<Expr, String> {
     if let Some(inner) = strip_group_parens(trimmed) {
         return parse_expression_core(inner);
     }
-    parse_logical_or_expression(trimmed)
+    parse_range_expression(trimmed)
 }
 
 #[derive(Clone, Copy)]
@@ -1192,6 +1211,13 @@ impl BinaryOpSpec {
             keyword: false,
         }
     }
+}
+
+fn parse_range_expression(text: &str) -> Result<Expr, String> {
+    if let Some(expr) = parse_range(text)? {
+        return Ok(expr);
+    }
+    parse_logical_or_expression(text)
 }
 
 fn parse_logical_or_expression(text: &str) -> Result<Expr, String> {
@@ -1361,6 +1387,9 @@ fn parse_postfix_expression(text: &str) -> Result<Expr, String> {
     if let Some(expr) = parse_await_expression(text)? {
         return Ok(expr);
     }
+    if let Some(expr) = parse_access_expression(text)? {
+        return Ok(expr);
+    }
     Ok(Expr::Opaque {
         text: text.trim().to_string(),
         attached: Vec::new(),
@@ -1436,6 +1465,135 @@ fn parse_await_expression(text: &str) -> Result<Option<Expr>, String> {
     Ok(Some(Expr::Await {
         expr: Box::new(parse_expression_core(left)?),
     }))
+}
+
+fn parse_access_expression(text: &str) -> Result<Option<Expr>, String> {
+    if let Some((base, inside)) = split_trailing_bracket_suffix(text) {
+        let base = base.trim();
+        if base.is_empty() {
+            return Ok(None);
+        }
+        if let Some((start, end, inclusive_end)) = parse_range_parts(inside) {
+            return Ok(Some(Expr::Slice {
+                expr: Box::new(parse_expression_core(base)?),
+                start: parse_optional_range_bound(start)?,
+                end: parse_optional_range_bound(end)?,
+                inclusive_end,
+            }));
+        }
+        if should_parse_index_brackets(inside) {
+            return Ok(Some(Expr::Index {
+                expr: Box::new(parse_expression_core(base)?),
+                index: Box::new(parse_expression_core(inside.trim())?),
+            }));
+        }
+    }
+
+    if let Some((base, member)) = split_member_access(text) {
+        return Ok(Some(Expr::MemberAccess {
+            expr: Box::new(parse_expression_core(base.trim())?),
+            member: member.trim().to_string(),
+        }));
+    }
+
+    Ok(None)
+}
+
+fn parse_range(text: &str) -> Result<Option<Expr>, String> {
+    let Some((start, end, inclusive_end)) = parse_range_parts(text) else {
+        return Ok(None);
+    };
+    if start.trim().is_empty() && end.trim().is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(Expr::Range {
+        start: parse_optional_range_bound(start)?,
+        end: parse_optional_range_bound(end)?,
+        inclusive_end,
+    }))
+}
+
+fn parse_optional_range_bound(text: &str) -> Result<Option<Box<Expr>>, String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(Box::new(parse_logical_or_expression(trimmed)?)))
+}
+
+fn parse_range_parts(text: &str) -> Option<(&str, &str, bool)> {
+    if let Some(index) = find_top_level_token(text, "..=") {
+        return Some((&text[..index], &text[index + 3..], true));
+    }
+    find_top_level_token(text, "..").map(|index| (&text[..index], &text[index + 2..], false))
+}
+
+fn split_trailing_bracket_suffix(text: &str) -> Option<(&str, &str)> {
+    if !text.ends_with(']') {
+        return None;
+    }
+
+    let mut candidate = None;
+    for (index, ch) in text.char_indices() {
+        if ch != '[' {
+            continue;
+        }
+        let Some(close) = find_matching_delim(text, index, '[', ']') else {
+            continue;
+        };
+        if close == text.len() - 1 {
+            candidate = Some(index);
+        }
+    }
+
+    let open = candidate?;
+    Some((&text[..open], &text[open + 1..text.len() - 1]))
+}
+
+fn should_parse_index_brackets(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if parse_range_parts(trimmed).is_some() {
+        return true;
+    }
+    if matches!(trimmed, "true" | "false")
+        || trimmed.starts_with('"')
+        || trimmed.parse::<i64>().is_ok()
+    {
+        return true;
+    }
+    if trimmed.starts_with('(')
+        || trimmed.starts_with('[')
+        || trimmed.starts_with('-')
+        || trimmed.starts_with('~')
+    {
+        return true;
+    }
+    if trimmed.starts_with("not ")
+        || trimmed.starts_with("weave ")
+        || trimmed.starts_with("split ")
+        || trimmed.contains("::")
+        || trimmed.contains(">>")
+    {
+        return true;
+    }
+    if let Some(first) = trimmed.chars().next() {
+        return first.is_ascii_lowercase() || first == '_';
+    }
+    false
+}
+
+fn split_member_access(text: &str) -> Option<(&str, &str)> {
+    let positions = find_top_level_dot_positions(text);
+    let index = *positions.last()?;
+    let base = text[..index].trim();
+    let member = text[index + 1..].trim();
+    if base.is_empty() || member.is_empty() {
+        return None;
+    }
+    Some((base, member))
 }
 
 fn find_top_level_binary_op(text: &str, ops: &[BinaryOpSpec]) -> Option<(usize, BinaryOp, usize)> {
@@ -1647,6 +1805,16 @@ fn find_top_level_token_positions(text: &str, token: &str) -> Vec<usize> {
     }
 
     positions
+}
+
+fn find_top_level_dot_positions(text: &str) -> Vec<usize> {
+    find_top_level_token_positions(text, ".")
+        .into_iter()
+        .filter(|index| {
+            !matches!(text[..*index].chars().next_back(), Some('.'))
+                && !matches!(text[*index + 1..].chars().next(), Some('.'))
+        })
+        .collect()
 }
 
 fn parse_match_expression(
@@ -2421,8 +2589,7 @@ mod tests {
                     assert!(attached.is_empty());
                     assert!(matches!(
                         subject.as_ref(),
-                        Expr::Opaque { text, attached }
-                            if text == "io.print[Str]" && attached.is_empty()
+                        Expr::MemberAccess { member, .. } if member == "print[Str]"
                     ));
                     assert_eq!(args.len(), 1);
                     assert!(matches!(
@@ -2537,8 +2704,7 @@ mod tests {
                         assert!(attached.is_empty());
                         assert!(matches!(
                             subject.as_ref(),
-                            Expr::Opaque { text, attached }
-                                if text == "winspell.loop.FrameConfig" && attached.is_empty()
+                            Expr::MemberAccess { member, .. } if member == "FrameConfig"
                         ));
                         assert_eq!(args.len(), 1);
                         assert!(matches!(
@@ -2567,8 +2733,7 @@ mod tests {
                         assert!(attached.is_empty());
                         assert!(matches!(
                             subject.as_ref(),
-                            Expr::Opaque { text, attached }
-                                if text == "io.print[Int]" && attached.is_empty()
+                            Expr::MemberAccess { member, .. } if member == "print[Int]"
                         ));
                         assert_eq!(args.len(), 2);
                     }
@@ -2586,6 +2751,148 @@ mod tests {
                 ));
             }
             other => panic!("expected return statement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_module_collects_access_and_range_expressions() {
+        let parsed = parse_module(
+            "fn main() -> Int:\n    let tuple_head = pair.0\n    let color = spec.color\n    let xs = [1, 2, 3, 4]\n    let first = xs[0]\n    let tail = xs[1..]\n    let mid = xs[1..=2]\n    let whole = xs[..]\n    let r1 = 0..3\n    let r2 = ..=3\n    return first\n",
+        )
+        .expect("parse should pass");
+
+        let statements = &parsed.symbols[0].statements;
+        match &statements[0].kind {
+            StatementKind::Let { name, value, .. } => {
+                assert_eq!(name, "tuple_head");
+                assert!(matches!(
+                    value,
+                    Expr::MemberAccess { member, .. } if member == "0"
+                ));
+            }
+            other => panic!("expected tuple_head let, got {other:?}"),
+        }
+        match &statements[1].kind {
+            StatementKind::Let { name, value, .. } => {
+                assert_eq!(name, "color");
+                assert!(matches!(
+                    value,
+                    Expr::MemberAccess { member, .. } if member == "color"
+                ));
+            }
+            other => panic!("expected color let, got {other:?}"),
+        }
+        match &statements[3].kind {
+            StatementKind::Let { name, value, .. } => {
+                assert_eq!(name, "first");
+                match value {
+                    Expr::Index { expr, index } => {
+                        assert!(matches!(
+                            expr.as_ref(),
+                            Expr::Opaque { text, attached } if text == "xs" && attached.is_empty()
+                        ));
+                        assert!(matches!(
+                            index.as_ref(),
+                            Expr::Opaque { text, attached } if text == "0" && attached.is_empty()
+                        ));
+                    }
+                    other => panic!("expected index expression, got {other:?}"),
+                }
+            }
+            other => panic!("expected first let, got {other:?}"),
+        }
+        match &statements[4].kind {
+            StatementKind::Let { name, value, .. } => {
+                assert_eq!(name, "tail");
+                match value {
+                    Expr::Slice {
+                        start,
+                        end,
+                        inclusive_end,
+                        ..
+                    } => {
+                        assert!(!inclusive_end);
+                        assert!(matches!(
+                            start.as_deref(),
+                            Some(Expr::Opaque { text, attached })
+                                if text == "1" && attached.is_empty()
+                        ));
+                        assert!(end.is_none());
+                    }
+                    other => panic!("expected tail slice, got {other:?}"),
+                }
+            }
+            other => panic!("expected tail let, got {other:?}"),
+        }
+        match &statements[5].kind {
+            StatementKind::Let { name, value, .. } => {
+                assert_eq!(name, "mid");
+                match value {
+                    Expr::Slice {
+                        start,
+                        end,
+                        inclusive_end,
+                        ..
+                    } => {
+                        assert!(*inclusive_end);
+                        assert!(matches!(
+                            start.as_deref(),
+                            Some(Expr::Opaque { text, attached })
+                                if text == "1" && attached.is_empty()
+                        ));
+                        assert!(matches!(
+                            end.as_deref(),
+                            Some(Expr::Opaque { text, attached })
+                                if text == "2" && attached.is_empty()
+                        ));
+                    }
+                    other => panic!("expected mid slice, got {other:?}"),
+                }
+            }
+            other => panic!("expected mid let, got {other:?}"),
+        }
+        match &statements[6].kind {
+            StatementKind::Let { name, value, .. } => {
+                assert_eq!(name, "whole");
+                assert!(matches!(
+                    value,
+                    Expr::Slice {
+                        start: None,
+                        end: None,
+                        inclusive_end: false,
+                        ..
+                    }
+                ));
+            }
+            other => panic!("expected whole let, got {other:?}"),
+        }
+        match &statements[7].kind {
+            StatementKind::Let { name, value, .. } => {
+                assert_eq!(name, "r1");
+                assert!(matches!(
+                    value,
+                    Expr::Range {
+                        start: Some(_),
+                        end: Some(_),
+                        inclusive_end: false
+                    }
+                ));
+            }
+            other => panic!("expected r1 let, got {other:?}"),
+        }
+        match &statements[8].kind {
+            StatementKind::Let { name, value, .. } => {
+                assert_eq!(name, "r2");
+                assert!(matches!(
+                    value,
+                    Expr::Range {
+                        start: None,
+                        end: Some(_),
+                        inclusive_end: true
+                    }
+                ));
+            }
+            other => panic!("expected r2 let, got {other:?}"),
         }
     }
 

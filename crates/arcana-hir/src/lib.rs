@@ -214,6 +214,25 @@ pub enum HirExpr {
         op: HirBinaryOp,
         right: Box<HirExpr>,
     },
+    MemberAccess {
+        expr: Box<HirExpr>,
+        member: String,
+    },
+    Index {
+        expr: Box<HirExpr>,
+        index: Box<HirExpr>,
+    },
+    Slice {
+        expr: Box<HirExpr>,
+        start: Option<Box<HirExpr>>,
+        end: Option<Box<HirExpr>>,
+        inclusive_end: bool,
+    },
+    Range {
+        start: Option<Box<HirExpr>>,
+        end: Option<Box<HirExpr>>,
+        inclusive_end: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1420,6 +1439,34 @@ fn lower_expr(expr: &ParsedExpr) -> HirExpr {
             op: lower_binary_op(op),
             right: Box::new(lower_expr(right)),
         },
+        ParsedExpr::MemberAccess { expr, member } => HirExpr::MemberAccess {
+            expr: Box::new(lower_expr(expr)),
+            member: member.clone(),
+        },
+        ParsedExpr::Index { expr, index } => HirExpr::Index {
+            expr: Box::new(lower_expr(expr)),
+            index: Box::new(lower_expr(index)),
+        },
+        ParsedExpr::Slice {
+            expr,
+            start,
+            end,
+            inclusive_end,
+        } => HirExpr::Slice {
+            expr: Box::new(lower_expr(expr)),
+            start: start.as_ref().map(|expr| Box::new(lower_expr(expr))),
+            end: end.as_ref().map(|expr| Box::new(lower_expr(expr))),
+            inclusive_end: *inclusive_end,
+        },
+        ParsedExpr::Range {
+            start,
+            end,
+            inclusive_end,
+        } => HirExpr::Range {
+            start: start.as_ref().map(|expr| Box::new(lower_expr(expr))),
+            end: end.as_ref().map(|expr| Box::new(lower_expr(expr))),
+            inclusive_end: *inclusive_end,
+        },
     }
 }
 
@@ -1889,8 +1936,7 @@ mod tests {
                     assert!(attached.is_empty());
                     assert!(matches!(
                         subject.as_ref(),
-                        HirExpr::Opaque { text, attached }
-                            if text == "io.print[Str]" && attached.is_empty()
+                        HirExpr::MemberAccess { member, .. } if member == "print[Str]"
                     ));
                     assert_eq!(args.len(), 1);
                     assert!(matches!(
@@ -2005,8 +2051,7 @@ mod tests {
                         assert!(attached.is_empty());
                         assert!(matches!(
                             subject.as_ref(),
-                            HirExpr::Opaque { text, attached }
-                                if text == "winspell.loop.FrameConfig" && attached.is_empty()
+                            HirExpr::MemberAccess { member, .. } if member == "FrameConfig"
                         ));
                         assert_eq!(args.len(), 1);
                         assert!(matches!(
@@ -2035,8 +2080,7 @@ mod tests {
                         assert!(attached.is_empty());
                         assert!(matches!(
                             subject.as_ref(),
-                            HirExpr::Opaque { text, attached }
-                                if text == "io.print[Int]" && attached.is_empty()
+                            HirExpr::MemberAccess { member, .. } if member == "print[Int]"
                         ));
                         assert_eq!(args.len(), 2);
                     }
@@ -2055,6 +2099,149 @@ mod tests {
                 ));
             }
             other => panic!("expected return statement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lower_module_text_captures_access_and_range_expressions() {
+        let module = lower_module_text(
+            "access_demo",
+            "fn main() -> Int:\n    let tuple_head = pair.0\n    let color = spec.color\n    let xs = [1, 2, 3, 4]\n    let first = xs[0]\n    let tail = xs[1..]\n    let mid = xs[1..=2]\n    let whole = xs[..]\n    let r1 = 0..3\n    let r2 = ..=3\n    return first\n",
+        )
+        .expect("lowering should pass");
+
+        let statements = &module.symbols[0].statements;
+        match &statements[0].kind {
+            HirStatementKind::Let { name, value, .. } => {
+                assert_eq!(name, "tuple_head");
+                assert!(matches!(
+                    value,
+                    HirExpr::MemberAccess { member, .. } if member == "0"
+                ));
+            }
+            other => panic!("expected tuple_head let, got {other:?}"),
+        }
+        match &statements[1].kind {
+            HirStatementKind::Let { name, value, .. } => {
+                assert_eq!(name, "color");
+                assert!(matches!(
+                    value,
+                    HirExpr::MemberAccess { member, .. } if member == "color"
+                ));
+            }
+            other => panic!("expected color let, got {other:?}"),
+        }
+        match &statements[3].kind {
+            HirStatementKind::Let { name, value, .. } => {
+                assert_eq!(name, "first");
+                match value {
+                    HirExpr::Index { expr, index } => {
+                        assert!(matches!(
+                            expr.as_ref(),
+                            HirExpr::Opaque { text, attached } if text == "xs" && attached.is_empty()
+                        ));
+                        assert!(matches!(
+                            index.as_ref(),
+                            HirExpr::Opaque { text, attached } if text == "0" && attached.is_empty()
+                        ));
+                    }
+                    other => panic!("expected index expression, got {other:?}"),
+                }
+            }
+            other => panic!("expected first let, got {other:?}"),
+        }
+        match &statements[4].kind {
+            HirStatementKind::Let { name, value, .. } => {
+                assert_eq!(name, "tail");
+                match value {
+                    HirExpr::Slice {
+                        start,
+                        end,
+                        inclusive_end,
+                        ..
+                    } => {
+                        assert!(!inclusive_end);
+                        assert!(matches!(
+                            start.as_deref(),
+                            Some(HirExpr::Opaque { text, attached })
+                                if text == "1" && attached.is_empty()
+                        ));
+                        assert!(end.is_none());
+                    }
+                    other => panic!("expected tail slice, got {other:?}"),
+                }
+            }
+            other => panic!("expected tail let, got {other:?}"),
+        }
+        match &statements[5].kind {
+            HirStatementKind::Let { name, value, .. } => {
+                assert_eq!(name, "mid");
+                match value {
+                    HirExpr::Slice {
+                        start,
+                        end,
+                        inclusive_end,
+                        ..
+                    } => {
+                        assert!(*inclusive_end);
+                        assert!(matches!(
+                            start.as_deref(),
+                            Some(HirExpr::Opaque { text, attached })
+                                if text == "1" && attached.is_empty()
+                        ));
+                        assert!(matches!(
+                            end.as_deref(),
+                            Some(HirExpr::Opaque { text, attached })
+                                if text == "2" && attached.is_empty()
+                        ));
+                    }
+                    other => panic!("expected mid slice, got {other:?}"),
+                }
+            }
+            other => panic!("expected mid let, got {other:?}"),
+        }
+        match &statements[6].kind {
+            HirStatementKind::Let { name, value, .. } => {
+                assert_eq!(name, "whole");
+                assert!(matches!(
+                    value,
+                    HirExpr::Slice {
+                        start: None,
+                        end: None,
+                        inclusive_end: false,
+                        ..
+                    }
+                ));
+            }
+            other => panic!("expected whole let, got {other:?}"),
+        }
+        match &statements[7].kind {
+            HirStatementKind::Let { name, value, .. } => {
+                assert_eq!(name, "r1");
+                assert!(matches!(
+                    value,
+                    HirExpr::Range {
+                        start: Some(_),
+                        end: Some(_),
+                        inclusive_end: false
+                    }
+                ));
+            }
+            other => panic!("expected r1 let, got {other:?}"),
+        }
+        match &statements[8].kind {
+            HirStatementKind::Let { name, value, .. } => {
+                assert_eq!(name, "r2");
+                assert!(matches!(
+                    value,
+                    HirExpr::Range {
+                        start: None,
+                        end: Some(_),
+                        inclusive_end: true
+                    }
+                ));
+            }
+            other => panic!("expected r2 let, got {other:?}"),
         }
     }
 

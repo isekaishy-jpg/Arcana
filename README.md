@@ -13,7 +13,8 @@ Arcana is a Rust-first rewrite of the frozen Arcana language and tooling stack. 
 - Record fields, enum variants, trait members, and impl members are now parsed into structured interior members instead of staying opaque body text
 - Function-like bodies now parse structured statement blocks for `let`, `return`, `defer`, `if`/`else`, `while`, `for`, assignments, `break`, and `continue`
 - Block-form `match` expressions now lower into structured expression and pattern nodes, including wildcard, literal, variant, and `A | B` arm shapes
-- Non-`match` expressions now lower structured qualified phrases, named phrase args, unary/binary operators, `>> await`, and `weave`/`split`, while harder surfaces such as indexing, collection literals, chain phrases, and memory phrases still fall back to opaque atoms
+- Non-`match` expressions now lower structured qualified phrases, named phrase args, unary/binary operators, `>> await`, `weave`/`split`, member access, standalone ranges, and the unambiguous index/slice subset
+- Remaining opaque expression debt is now mostly collection literals, assignment targets, chain phrases, memory phrases, and the still-ambiguous generic-bracket versus index-bracket cases
 - Seed-imported docs, grimoires, `std`, examples, and conformance fixtures from MeadowLang
 - `arcana check` with shared package/HIR loading, symbol-based module and `use` resolution, direct-dependency enforcement, implicit `std`, and stable file/line/column diagnostics
 - `arcana build` now runs frontend validation, lowers packages through placeholder IR, and emits placeholder AOT artifacts
