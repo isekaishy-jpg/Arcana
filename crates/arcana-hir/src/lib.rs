@@ -1,6 +1,7 @@
 pub mod freeze;
 
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
 use arcana_syntax::{
     DirectiveKind as ParsedDirectiveKind, ParsedModule, Span, SymbolKind as ParsedSymbolKind,
@@ -139,6 +140,84 @@ impl HirPackageSummary {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HirPackageLayout {
+    pub module_paths: BTreeMap<String, PathBuf>,
+    pub relative_modules: BTreeMap<String, String>,
+    pub absolute_modules: BTreeMap<String, usize>,
+}
+
+impl HirPackageLayout {
+    pub fn module<'a>(
+        &self,
+        summary: &'a HirPackageSummary,
+        module_id: &str,
+    ) -> Option<&'a HirModuleSummary> {
+        self.absolute_modules
+            .get(module_id)
+            .and_then(|index| summary.modules.get(*index))
+    }
+
+    pub fn module_path(&self, module_id: &str) -> Option<&PathBuf> {
+        self.module_paths.get(module_id)
+    }
+
+    pub fn resolve_relative_module<'a>(
+        &self,
+        summary: &'a HirPackageSummary,
+        path: &[String],
+    ) -> Option<&'a HirModuleSummary> {
+        let key = path.join(".");
+        self.relative_modules
+            .get(&key)
+            .and_then(|module_id| self.module(summary, module_id))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HirWorkspacePackage {
+    pub root_dir: PathBuf,
+    pub direct_deps: BTreeSet<String>,
+    pub summary: HirPackageSummary,
+    pub layout: HirPackageLayout,
+}
+
+impl HirWorkspacePackage {
+    pub fn module(&self, module_id: &str) -> Option<&HirModuleSummary> {
+        self.layout.module(&self.summary, module_id)
+    }
+
+    pub fn module_path(&self, module_id: &str) -> Option<&PathBuf> {
+        self.layout.module_path(module_id)
+    }
+
+    pub fn resolve_relative_module(&self, path: &[String]) -> Option<&HirModuleSummary> {
+        self.layout.resolve_relative_module(&self.summary, path)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HirWorkspaceSummary {
+    pub packages: BTreeMap<String, HirWorkspacePackage>,
+}
+
+impl HirWorkspaceSummary {
+    pub fn package(&self, name: &str) -> Option<&HirWorkspacePackage> {
+        self.packages.get(name)
+    }
+
+    pub fn package_count(&self) -> usize {
+        self.packages.len()
+    }
+
+    pub fn module_count(&self) -> usize {
+        self.packages
+            .values()
+            .map(|package| package.summary.modules.len())
+            .sum()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SourceModulePath {
     pub relative_segments: Vec<String>,
     pub module_id: String,
@@ -212,6 +291,94 @@ pub fn build_package_summary(
     }
 }
 
+pub fn build_package_layout(
+    summary: &HirPackageSummary,
+    module_paths: BTreeMap<String, PathBuf>,
+    relative_modules: BTreeMap<String, String>,
+) -> Result<HirPackageLayout, String> {
+    let mut absolute_modules = BTreeMap::new();
+    for (index, module) in summary.modules.iter().enumerate() {
+        if absolute_modules
+            .insert(module.module_id.clone(), index)
+            .is_some()
+        {
+            return Err(format!(
+                "duplicate module id `{}` in package `{}`",
+                module.module_id, summary.package_name
+            ));
+        }
+    }
+
+    for module_id in absolute_modules.keys() {
+        if !module_paths.contains_key(module_id) {
+            return Err(format!(
+                "missing source path for module `{module_id}` in package `{}`",
+                summary.package_name
+            ));
+        }
+    }
+    for module_id in module_paths.keys() {
+        if !absolute_modules.contains_key(module_id) {
+            return Err(format!(
+                "source path provided for unknown module `{module_id}` in package `{}`",
+                summary.package_name
+            ));
+        }
+    }
+    for module_id in relative_modules.values() {
+        if !absolute_modules.contains_key(module_id) {
+            return Err(format!(
+                "relative module mapping targets unknown module `{module_id}` in package `{}`",
+                summary.package_name
+            ));
+        }
+    }
+
+    Ok(HirPackageLayout {
+        module_paths,
+        relative_modules,
+        absolute_modules,
+    })
+}
+
+pub fn build_workspace_package(
+    root_dir: PathBuf,
+    direct_deps: BTreeSet<String>,
+    summary: HirPackageSummary,
+    layout: HirPackageLayout,
+) -> Result<HirWorkspacePackage, String> {
+    if summary.modules.len() != layout.absolute_modules.len() {
+        return Err(format!(
+            "package `{}` has {} modules but layout indexes {}",
+            summary.package_name,
+            summary.modules.len(),
+            layout.absolute_modules.len()
+        ));
+    }
+
+    Ok(HirWorkspacePackage {
+        root_dir,
+        direct_deps,
+        summary,
+        layout,
+    })
+}
+
+pub fn build_workspace_summary(
+    packages: Vec<HirWorkspacePackage>,
+) -> Result<HirWorkspaceSummary, String> {
+    let mut package_map = BTreeMap::new();
+    for package in packages {
+        let name = package.summary.package_name.clone();
+        if package_map.insert(name.clone(), package).is_some() {
+            return Err(format!("duplicate package `{name}` in workspace summary"));
+        }
+    }
+    Ok(HirWorkspaceSummary {
+        packages: package_map,
+    })
+}
+
 pub fn derive_source_module_path(
     package_name: &str,
     root_file_name: &str,
@@ -272,10 +439,12 @@ fn lower_symbol_kind(kind: &ParsedSymbolKind) -> HirSymbolKind {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
     use std::path::Path;
 
     use super::{
-        HirDirectiveKind, build_package_summary, derive_source_module_path, lower_module_text,
+        HirDirectiveKind, build_package_layout, build_package_summary, build_workspace_package,
+        build_workspace_summary, derive_source_module_path, lower_module_text,
     };
     use super::freeze::FROZEN_HIR_NODE_KINDS;
 
@@ -331,6 +500,61 @@ mod tests {
             "module=winspell:export:fn:open".to_string(),
             "module=winspell:reexport:winspell.window".to_string(),
         ]);
+    }
+
+    #[test]
+    fn build_workspace_summary_indexes_module_paths() {
+        let book = lower_module_text(
+            "winspell",
+            "reexport winspell.window\nexport fn open() -> Int:\n    return 0\n",
+        )
+        .expect("lowering should pass");
+        let window = lower_module_text(
+            "winspell.window",
+            "import std.canvas\nfn helper() -> Int:\n    return 0\n",
+        )
+        .expect("lowering should pass");
+        let summary = build_package_summary("winspell", vec![book, window]);
+        let layout = build_package_layout(
+            &summary,
+            BTreeMap::from([
+                (
+                    "winspell".to_string(),
+                    Path::new("C:/repo/winspell/src/book.arc").to_path_buf(),
+                ),
+                (
+                    "winspell.window".to_string(),
+                    Path::new("C:/repo/winspell/src/window.arc").to_path_buf(),
+                ),
+            ]),
+            BTreeMap::from([("window".to_string(), "winspell.window".to_string())]),
+        )
+        .expect("layout should build");
+        let package = build_workspace_package(
+            Path::new("C:/repo/winspell").to_path_buf(),
+            BTreeSet::from(["std".to_string()]),
+            summary,
+            layout,
+        )
+        .expect("workspace package should build");
+        let workspace =
+            build_workspace_summary(vec![package]).expect("workspace summary should build");
+
+        let winspell = workspace.package("winspell").expect("package should exist");
+        assert_eq!(workspace.package_count(), 1);
+        assert_eq!(workspace.module_count(), 2);
+        assert!(winspell.module("winspell.window").is_some());
+        assert!(
+            winspell
+                .module_path("winspell.window")
+                .expect("module path should exist")
+                .ends_with("window.arc")
+        );
+        assert!(
+            winspell
+                .resolve_relative_module(&["window".to_string()])
+                .is_some()
+        );
     }
 
     #[test]

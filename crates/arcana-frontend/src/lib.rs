@@ -3,9 +3,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use arcana_hir::{
-    HirDirectiveKind, HirModule, HirModuleSummary, HirPackageSummary, build_package_summary,
-    derive_source_module_path,
-    lower_module_text,
+    HirDirectiveKind, HirModule, HirModuleSummary, HirWorkspacePackage, HirWorkspaceSummary,
+    build_package_layout, build_package_summary, build_workspace_package, build_workspace_summary,
+    derive_source_module_path, lower_module_text,
 };
 use arcana_package::{GrimoireKind, WorkspaceGraph, load_workspace_graph, parse_manifest};
 
@@ -16,17 +16,6 @@ pub struct CheckSummary {
     pub non_empty_lines: usize,
     pub directive_count: usize,
     pub symbol_count: usize,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct WorkspaceHir {
-    pub packages: BTreeMap<String, HirPackageSummary>,
-}
-
-impl WorkspaceHir {
-    pub fn package(&self, name: &str) -> Option<&HirPackageSummary> {
-        self.packages.get(name)
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -46,29 +35,6 @@ impl Diagnostic {
             self.column,
             self.message
         )
-    }
-}
-
-#[derive(Clone, Debug)]
-struct PackageRecord {
-    name: String,
-    root_dir: PathBuf,
-    direct_deps: BTreeSet<String>,
-    summary: HirPackageSummary,
-    module_paths: BTreeMap<String, PathBuf>,
-    relative_modules: BTreeMap<String, String>,
-    absolute_modules: BTreeMap<String, usize>,
-}
-
-impl PackageRecord {
-    fn module(&self, module_id: &str) -> Option<&HirModuleSummary> {
-        self.absolute_modules
-            .get(module_id)
-            .and_then(|index| self.summary.modules.get(*index))
-    }
-
-    fn module_path(&self, module_id: &str) -> Option<&PathBuf> {
-        self.module_paths.get(module_id)
     }
 }
 
@@ -108,11 +74,11 @@ pub fn check_path(path: &Path) -> Result<CheckSummary, String> {
     }
 
     let graph = load_workspace_graph(&root_dir)?;
-    let packages = load_packages_for_check(&root_dir, &graph)?;
-    validate_packages(&packages)
+    let workspace = load_workspace_for_check(&root_dir, &graph)?;
+    validate_packages(&workspace)
 }
 
-pub fn load_workspace_hir(path: &Path) -> Result<WorkspaceHir, String> {
+pub fn load_workspace_hir(path: &Path) -> Result<HirWorkspaceSummary, String> {
     let metadata =
         fs::metadata(path).map_err(|err| format!("failed to read `{}`: {err}", path.display()))?;
     if !metadata.is_dir() {
@@ -133,13 +99,7 @@ pub fn load_workspace_hir(path: &Path) -> Result<WorkspaceHir, String> {
     }
 
     let graph = load_workspace_graph(&root_dir)?;
-    let packages = load_packages_for_check(&root_dir, &graph)?;
-    Ok(WorkspaceHir {
-        packages: packages
-            .into_iter()
-            .map(|(name, package)| (name, package.summary))
-            .collect(),
-    })
+    load_workspace_for_check(&root_dir, &graph)
 }
 
 pub fn lower_to_hir(summary: &CheckSummary) -> HirModule {
@@ -163,53 +123,58 @@ fn check_file(path: &Path) -> Result<CheckSummary, String> {
     })
 }
 
-fn load_packages_for_check(
+fn load_workspace_for_check(
     root_dir: &Path,
     graph: &WorkspaceGraph,
-) -> Result<BTreeMap<String, PackageRecord>, String> {
-    let mut packages = BTreeMap::new();
+) -> Result<HirWorkspaceSummary, String> {
+    let mut packages = Vec::new();
 
     let root_manifest = parse_manifest(&root_dir.join("book.toml"))?;
     let root_already_in_graph = graph.members.iter().any(|member| member.abs_dir == root_dir);
     if !root_already_in_graph && has_root_module(root_dir, &root_manifest.kind) {
-        let record = load_package(
+        packages.push(load_package(
             root_dir,
             &root_manifest.name,
             &root_manifest.kind,
             root_manifest.deps.keys().cloned().collect(),
-        )?;
-        packages.insert(record.name.clone(), record);
+        )?);
     }
 
     for member in &graph.members {
-        let record = load_package(
+        packages.push(load_package(
             &member.abs_dir,
             &member.name,
             &member.kind,
             member.deps.iter().cloned().collect(),
-        )?;
-        packages.insert(record.name.clone(), record);
+        )?);
     }
 
     if let Some(std_dir) = find_implicit_std(root_dir)? {
         let manifest = parse_manifest(&std_dir.join("book.toml"))?;
-        if !packages.contains_key(&manifest.name) {
-            let record = load_package(&std_dir, &manifest.name, &manifest.kind, BTreeSet::new())?;
-            packages.insert(record.name.clone(), record);
+        let has_std = packages
+            .iter()
+            .any(|package| package.summary.package_name == manifest.name);
+        if !has_std {
+            packages.push(load_package(
+                &std_dir,
+                &manifest.name,
+                &manifest.kind,
+                BTreeSet::new(),
+            )?);
         }
     }
 
-    Ok(packages)
+    build_workspace_summary(packages)
 }
 
-fn validate_packages(packages: &BTreeMap<String, PackageRecord>) -> Result<CheckSummary, String> {
+fn validate_packages(workspace: &HirWorkspaceSummary) -> Result<CheckSummary, String> {
     let mut summary = CheckSummary {
-        package_count: packages.len(),
+        package_count: workspace.package_count(),
         ..CheckSummary::default()
     };
     let mut diagnostics = Vec::new();
 
-    for package in packages.values() {
+    for package in workspace.packages.values() {
         for module in &package.summary.modules {
             summary.module_count += 1;
             summary.non_empty_lines += module.non_empty_line_count;
@@ -220,9 +185,9 @@ fn validate_packages(packages: &BTreeMap<String, PackageRecord>) -> Result<Check
         for edge in &package.summary.dependency_edges {
             let outcome = match edge.kind {
                 HirDirectiveKind::Import | HirDirectiveKind::Reexport => {
-                    resolve_exact_module(package, packages, &edge.target_path).map(|_| ())
+                    resolve_exact_module(package, workspace, &edge.target_path).map(|_| ())
                 }
-                HirDirectiveKind::Use => resolve_use_target(package, packages, &edge.target_path),
+                HirDirectiveKind::Use => resolve_use_target(package, workspace, &edge.target_path),
             };
 
             if let Err(message) = outcome {
@@ -262,7 +227,7 @@ fn load_package(
     name: &str,
     kind: &GrimoireKind,
     direct_deps: BTreeSet<String>,
-) -> Result<PackageRecord, String> {
+) -> Result<HirWorkspacePackage, String> {
     let src_dir = root_dir.join("src");
     let root_file = src_dir.join(kind.root_file_name());
     if !root_file.is_file() {
@@ -273,15 +238,7 @@ fn load_package(
         ));
     }
 
-    let mut package = PackageRecord {
-        name: name.to_string(),
-        root_dir: root_dir.to_path_buf(),
-        direct_deps,
-        summary: build_package_summary(name.to_string(), Vec::new()),
-        module_paths: BTreeMap::new(),
-        relative_modules: BTreeMap::new(),
-        absolute_modules: BTreeMap::new(),
-    };
+    let mut module_paths = BTreeMap::new();
     let mut modules = Vec::new();
     let mut relative_to_absolute = BTreeMap::new();
 
@@ -294,14 +251,11 @@ fn load_package(
             .map_err(|err| format!("failed to read `{}`: {err}", module_path.display()))?;
         let hir = lower_module_text(absolute_key.clone(), &source)
             .map_err(|err| format!("{}: {err}", module_path.display()))?;
-        if package
-            .module_paths
-            .insert(absolute_key.clone(), module_path)
-            .is_some()
+        if module_paths.insert(absolute_key.clone(), module_path).is_some()
         {
             return Err(format!(
                 "duplicate module path `{absolute_key}` in `{}`",
-                package.root_dir.display()
+                root_dir.display()
             ));
         }
         if !relative_key.is_empty() {
@@ -311,32 +265,16 @@ fn load_package(
             {
                 return Err(format!(
                     "duplicate module path `{relative_key}` in `{}`",
-                    package.root_dir.display()
+                    root_dir.display()
                 ));
             }
         }
         modules.push(hir);
     }
 
-    package.summary = build_package_summary(name.to_string(), modules);
-    package.absolute_modules = package
-        .summary
-        .modules
-        .iter()
-        .enumerate()
-        .map(|(index, module)| (module.module_id.clone(), index))
-        .collect();
-    for (relative_key, absolute_key) in relative_to_absolute {
-        if !package.absolute_modules.contains_key(&absolute_key) {
-            return Err(format!(
-                "module `{absolute_key}` was not loaded for `{}`",
-                package.root_dir.display()
-            ));
-        }
-        package.relative_modules.insert(relative_key, absolute_key);
-    }
-
-    Ok(package)
+    let summary = build_package_summary(name.to_string(), modules);
+    let layout = build_package_layout(&summary, module_paths, relative_to_absolute)?;
+    build_workspace_package(root_dir.to_path_buf(), direct_deps, summary, layout)
 }
 
 fn collect_arc_files(src_dir: &Path) -> Result<Vec<PathBuf>, String> {
@@ -371,8 +309,8 @@ fn collect_arc_files_recursive(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(
 }
 
 fn resolve_exact_module<'a>(
-    package: &'a PackageRecord,
-    packages: &'a BTreeMap<String, PackageRecord>,
+    package: &'a HirWorkspacePackage,
+    workspace: &'a HirWorkspaceSummary,
     path: &[String],
 ) -> Result<&'a HirModuleSummary, String> {
     if path.is_empty() {
@@ -381,13 +319,13 @@ fn resolve_exact_module<'a>(
 
     let key = join_segments(path);
     let first = &path[0];
-    if first == &package.name {
+    if first == &package.summary.package_name {
         return package.module(&key).ok_or_else(|| format!("unresolved module `{key}`"));
     }
 
     if first == "std" {
-        return packages
-            .get("std")
+        return workspace
+            .package("std")
             .ok_or_else(|| "implicit package `std` is not available".to_string())
             .and_then(|std_package| {
                 std_package.module(&key).ok_or_else(|| format!("unresolved module `{key}`"))
@@ -395,31 +333,34 @@ fn resolve_exact_module<'a>(
     }
 
     if package.direct_deps.contains(first) {
-        return packages
-            .get(first)
-            .ok_or_else(|| format!("dependency `{first}` is not loaded for `{}`", package.name))
+        return workspace
+            .package(first)
+            .ok_or_else(|| {
+                format!(
+                    "dependency `{first}` is not loaded for `{}`",
+                    package.summary.package_name
+                )
+            })
             .and_then(|dependency| {
                 dependency.module(&key).ok_or_else(|| format!("unresolved module `{key}`"))
             });
     }
 
-    if packages.contains_key(first) {
+    if workspace.package(first).is_some() {
         return Err(format!(
             "package `{first}` is not a direct dependency of `{}`",
-            package.name
+            package.summary.package_name
         ));
     }
 
     package
-        .relative_modules
-        .get(&key)
-        .and_then(|module_id| package.module(module_id))
+        .resolve_relative_module(path)
         .ok_or_else(|| format!("unresolved module `{key}`"))
 }
 
 fn resolve_use_target(
-    package: &PackageRecord,
-    packages: &BTreeMap<String, PackageRecord>,
+    package: &HirWorkspacePackage,
+    workspace: &HirWorkspaceSummary,
     path: &[String],
 ) -> Result<(), String> {
     if path.is_empty() {
@@ -428,7 +369,7 @@ fn resolve_use_target(
 
     for prefix_len in (1..=path.len()).rev() {
         let prefix = &path[..prefix_len];
-        let Ok(module) = resolve_exact_module(package, packages, prefix) else {
+        let Ok(module) = resolve_exact_module(package, workspace, prefix) else {
             continue;
         };
         if prefix_len == path.len() {
@@ -454,13 +395,15 @@ fn resolve_use_target(
     }
 
     if let Some(first) = path.first() {
-        if packages.contains_key(first) && first != &package.name && first != "std" {
-            if !package.direct_deps.contains(first) {
-                return Err(format!(
-                    "package `{first}` is not a direct dependency of `{}`",
-                    package.name
-                ));
-            }
+        if workspace.package(first).is_some()
+            && first != &package.summary.package_name
+            && first != "std"
+            && !package.direct_deps.contains(first)
+        {
+            return Err(format!(
+                "package `{first}` is not a direct dependency of `{}`",
+                package.summary.package_name
+            ));
         }
     }
 
@@ -586,6 +529,7 @@ mod tests {
             workspace
                 .package("winspell")
                 .expect("winspell package should exist")
+                .summary
                 .dependency_edges
                 .iter()
                 .any(|edge| edge.target_path == vec!["std".to_string(), "canvas".to_string()])
