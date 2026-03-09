@@ -38,8 +38,33 @@ pub struct ModuleDirective {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SymbolKind {
+    Fn,
+    Record,
+    Enum,
+    Trait,
+    Behavior,
+    Const,
+}
+
+impl SymbolKind {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Fn => "fn",
+            Self::Record => "record",
+            Self::Enum => "enum",
+            Self::Trait => "trait",
+            Self::Behavior => "behavior",
+            Self::Const => "const",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SymbolDecl {
     pub name: String,
+    pub kind: SymbolKind,
+    pub exported: bool,
     pub span: Span,
 }
 
@@ -177,8 +202,16 @@ fn parse_path(path: &str) -> Result<Vec<String>, String> {
 }
 
 fn parse_symbol(trimmed: &str, span: Span) -> Option<SymbolDecl> {
+    let exported = trimmed.starts_with("export ");
     let rest = trimmed.strip_prefix("export ").unwrap_or(trimmed);
-    for keyword in ["fn", "record", "enum", "trait", "behavior", "const"] {
+    for (keyword, kind) in [
+        ("fn", SymbolKind::Fn),
+        ("record", SymbolKind::Record),
+        ("enum", SymbolKind::Enum),
+        ("trait", SymbolKind::Trait),
+        ("behavior", SymbolKind::Behavior),
+        ("const", SymbolKind::Const),
+    ] {
         let Some(rest) = rest.strip_prefix(keyword) else {
             continue;
         };
@@ -186,7 +219,12 @@ fn parse_symbol(trimmed: &str, span: Span) -> Option<SymbolDecl> {
             continue;
         };
         let name = parse_symbol_name(rest)?;
-        return Some(SymbolDecl { name, span });
+        return Some(SymbolDecl {
+            name,
+            kind,
+            exported,
+            span,
+        });
     }
     None
 }
@@ -266,6 +304,10 @@ mod tests {
         assert_eq!(parsed.directives[1].path, ["std", "result", "Result"]);
         assert_eq!(parsed.symbols.len(), 2);
         assert_eq!(parsed.symbols[0].name, "Counter");
+        assert_eq!(parsed.symbols[0].kind.as_str(), "record");
+        assert!(parsed.symbols[0].exported);
         assert_eq!(parsed.symbols[1].name, "main");
+        assert_eq!(parsed.symbols[1].kind.as_str(), "fn");
+        assert!(!parsed.symbols[1].exported);
     }
 }

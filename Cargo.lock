@@ -42,6 +42,7 @@ dependencies = [
 name = "arcana-package"
 version = "0.1.0"
 dependencies = [
+ "arcana-syntax",
  "pathdiff",
  "sha2",
  "toml",

@@ -41,7 +41,7 @@ struct ModuleRecord {
     relative_key: Option<String>,
     absolute_display: String,
     parsed: ParsedModule,
-    exported_symbols: BTreeSet<String>,
+    all_symbols: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -245,7 +245,7 @@ fn load_package(
             .map_err(|err| format!("failed to read `{}`: {err}", module_path.display()))?;
         let parsed = parse_module(&source)
             .map_err(|err| format!("{}: {err}", module_path.display()))?;
-        let exported_symbols = parsed
+        let all_symbols = parsed
             .symbols
             .iter()
             .map(|symbol| symbol.name.clone())
@@ -259,7 +259,7 @@ fn load_package(
             },
             absolute_display: absolute_key.clone(),
             parsed,
-            exported_symbols,
+            all_symbols,
         };
 
         let index = package.modules.len();
@@ -434,7 +434,7 @@ fn resolve_use_target(
         }
 
         let symbol_name = &suffix[0];
-        if module.exported_symbols.contains(symbol_name) {
+        if module.all_symbols.contains(symbol_name) {
             return Ok(());
         }
         return Err(format!(

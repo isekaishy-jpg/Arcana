@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use arcana_syntax::{DirectiveKind, parse_module};
 use pathdiff::diff_paths;
 use sha2::{Digest, Sha256};
 
@@ -111,6 +112,12 @@ pub struct BuildStatus {
     pub artifact_rel_path: String,
     pub kind: GrimoireKind,
     pub format: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemberFingerprints {
+    pub source: String,
+    pub api: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -332,7 +339,7 @@ pub fn plan_workspace(graph: &WorkspaceGraph) -> PackageResult<Vec<String>> {
 
 pub fn compute_member_fingerprints(
     graph: &WorkspaceGraph,
-) -> PackageResult<HashMap<String, String>> {
+) -> PackageResult<HashMap<String, MemberFingerprints>> {
     let mut out = HashMap::new();
     for member in &graph.members {
         out.insert(member.name.clone(), compute_member_fingerprint(member)?);
@@ -470,7 +477,7 @@ pub fn read_lockfile(path: &Path) -> PackageResult<Option<Lockfile>> {
 pub fn plan_build(
     graph: &WorkspaceGraph,
     order: &[String],
-    fingerprints: &HashMap<String, String>,
+    fingerprints: &HashMap<String, MemberFingerprints>,
     existing_lock: Option<&Lockfile>,
 ) -> PackageResult<Vec<BuildStatus>> {
     let mut statuses = Vec::new();
@@ -480,11 +487,11 @@ pub fn plan_build(
         let member = graph
             .member(name)
             .ok_or_else(|| format!("workspace planner missing member `{name}`"))?;
-        let fingerprint = fingerprints
+        let member_fingerprints = fingerprints
             .get(name)
-            .cloned()
             .ok_or_else(|| format!("missing fingerprint for member `{name}`"))?;
-        let api_fingerprint = fingerprint.clone();
+        let fingerprint = member_fingerprints.source.clone();
+        let api_fingerprint = member_fingerprints.api.clone();
         let artifact_rel_path = artifact_rel_path(name, &fingerprint, &member.kind);
         let existing = existing_lock.and_then(|lock| lock.members.get(name));
         let artifact_abs_path = graph.root_dir.join(&artifact_rel_path);
@@ -503,7 +510,7 @@ pub fn plan_build(
             || api_fingerprint_changed
             || upstream_api_changed
             || artifact_missing;
-        api_changed.insert(name.clone(), built);
+        api_changed.insert(name.clone(), api_fingerprint_changed);
         statuses.push(BuildStatus {
             member: name.clone(),
             disposition: if built {
@@ -825,13 +832,25 @@ fn validate_grimoire_layout(dir: &Path, kind: &GrimoireKind) -> PackageResult<()
     Ok(())
 }
 
-fn compute_member_fingerprint(member: &WorkspaceMember) -> PackageResult<String> {
-    let mut files = Vec::new();
-    collect_files(&member.abs_dir.join("src"), &mut files)?;
-    files.push(member.abs_dir.join("book.toml"));
-    files.sort();
+fn compute_member_fingerprint(member: &WorkspaceMember) -> PackageResult<MemberFingerprints> {
+    let files = collect_arc_files(&member.abs_dir.join("src"))?;
+    let manifest_path = member.abs_dir.join("book.toml");
+    let source = compute_source_fingerprint(member, &manifest_path, &files)?;
+    let api = compute_api_fingerprint(member, &files)?;
+    Ok(MemberFingerprints { source, api })
+}
+
+fn compute_source_fingerprint(
+    member: &WorkspaceMember,
+    manifest_path: &Path,
+    files: &[PathBuf],
+) -> PackageResult<String> {
     let mut hasher = Sha256::new();
-    for file in files {
+    for file in files
+        .iter()
+        .cloned()
+        .chain(std::iter::once(manifest_path.to_path_buf()))
+    {
         let rel = file
             .strip_prefix(&member.abs_dir)
             .unwrap_or(&file)
@@ -845,19 +864,103 @@ fn compute_member_fingerprint(member: &WorkspaceMember) -> PackageResult<String>
     Ok(format!("sha256:{:x}", hasher.finalize()))
 }
 
-fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) -> PackageResult<()> {
+fn compute_api_fingerprint(
+    member: &WorkspaceMember,
+    files: &[PathBuf],
+) -> PackageResult<String> {
+    let mut hasher = Sha256::new();
+    hasher.update(b"arcana_api_v1\n");
+    hasher.update(format!("name={}\n", member.name).as_bytes());
+    hasher.update(format!("kind={}\n", member.kind.as_str()).as_bytes());
+    for dep in &member.deps {
+        hasher.update(format!("dep={dep}\n").as_bytes());
+    }
+
+    for file in files {
+        let module_id = module_id_from_path(member, file)?;
+        let source =
+            fs::read_to_string(file).map_err(|e| format!("failed to read `{}`: {e}", file.display()))?;
+        let parsed = parse_module(&source)
+            .map_err(|err| format!("{}: {err}", file.display()))?;
+
+        hasher.update(format!("module={module_id}\n").as_bytes());
+
+        let mut reexports = parsed
+            .directives
+            .iter()
+            .filter(|directive| directive.kind == DirectiveKind::Reexport)
+            .map(|directive| directive.path.join("."))
+            .collect::<Vec<_>>();
+        reexports.sort();
+        for reexport in reexports {
+            hasher.update(format!("reexport={reexport}\n").as_bytes());
+        }
+
+        let mut exported_symbols = parsed
+            .symbols
+            .iter()
+            .filter(|symbol| symbol.exported)
+            .map(|symbol| (symbol.kind.as_str().to_string(), symbol.name.clone()))
+            .collect::<Vec<_>>();
+        exported_symbols.sort();
+        for (kind, name) in exported_symbols {
+            hasher.update(format!("export={kind}:{name}\n").as_bytes());
+        }
+    }
+    Ok(format!("sha256:{:x}", hasher.finalize()))
+}
+
+fn collect_arc_files(dir: &Path) -> PackageResult<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    collect_files_recursive(dir, &mut out)?;
+    out.sort();
+    Ok(out)
+}
+
+fn collect_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> PackageResult<()> {
     for entry in fs::read_dir(dir)
         .map_err(|e| format!("failed to read directory `{}`: {e}", dir.display()))?
     {
         let entry = entry.map_err(|e| format!("failed to read directory entry: {e}"))?;
         let path = entry.path();
         if path.is_dir() {
-            collect_files(&path, out)?;
+            collect_files_recursive(&path, out)?;
         } else if path.extension().and_then(|ext| ext.to_str()) == Some("arc") {
             out.push(path);
         }
     }
     Ok(())
+}
+
+fn module_id_from_path(member: &WorkspaceMember, path: &Path) -> PackageResult<String> {
+    let src_dir = member.abs_dir.join("src");
+    let relative = path
+        .strip_prefix(&src_dir)
+        .map_err(|e| format!("failed to resolve module path `{}`: {e}", path.display()))?;
+    let mut segments = relative
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    if segments.is_empty() {
+        return Err(format!("empty module path for `{}`", path.display()));
+    }
+    let file_name = segments
+        .pop()
+        .ok_or_else(|| format!("empty module path for `{}`", path.display()))?;
+    let stem = file_name
+        .strip_suffix(".arc")
+        .ok_or_else(|| format!("non-Arcana file `{}`", path.display()))?;
+    if stem == "book" || stem == "shelf" {
+        if file_name != member.kind.root_file_name() && !segments.is_empty() {
+            segments.push(stem.to_string());
+        }
+    } else {
+        segments.push(stem.to_string());
+    }
+
+    let mut full = vec![member.name.clone()];
+    full.extend(segments);
+    Ok(full.join("."))
 }
 
 fn canonicalize_dir(path: &Path) -> PackageResult<PathBuf> {
@@ -1099,7 +1202,7 @@ mod tests {
     }
 
     #[test]
-    fn editing_shared_dep_rebuilds_dependents() {
+    fn editing_private_dependency_code_does_not_rebuild_dependents() {
         let dir = temp_dir("shared");
         write_file(
             &dir.join("book.toml"),
@@ -1118,6 +1221,14 @@ mod tests {
             &[("core", "../core")],
         );
         write_grimoire(&dir.join("core"), GrimoireKind::Lib, "core", &[]);
+        write_file(
+            &dir.join("core/src/book.arc"),
+            "export fn shared_value() -> Int:\n    return helper()\n",
+        );
+        write_file(
+            &dir.join("core/src/helper.arc"),
+            "fn helper() -> Int:\n    return 0\n",
+        );
         let graph = load_workspace_graph(&dir).expect("load graph");
         let order = plan_workspace(&graph).expect("plan");
         let first_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
@@ -1126,7 +1237,58 @@ mod tests {
         let lock_path = write_lockfile(&graph, &order, &first_statuses).expect("lock");
         let existing = read_lockfile(&lock_path).expect("read").expect("lock");
 
-        write_file(&dir.join("core/src/book.arc"), "// changed\n");
+        write_file(
+            &dir.join("core/src/helper.arc"),
+            "fn helper() -> Int:\n    return 1\n",
+        );
+        let second_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
+        let second_statuses =
+            plan_build(&graph, &order, &second_fingerprints, Some(&existing)).expect("plan");
+        assert_eq!(second_statuses[0].member, "core");
+        assert_eq!(second_statuses[0].disposition, BuildDisposition::Built);
+        assert_eq!(second_statuses[1].member, "app");
+        assert_eq!(second_statuses[1].disposition, BuildDisposition::CacheHit);
+        assert_eq!(second_statuses[2].member, "tool");
+        assert_eq!(second_statuses[2].disposition, BuildDisposition::CacheHit);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn editing_exported_surface_rebuilds_dependents() {
+        let dir = temp_dir("shared_api");
+        write_file(
+            &dir.join("book.toml"),
+            "name = \"ws\"\nkind = \"app\"\n[workspace]\nmembers = [\"app\", \"tool\", \"core\"]\n",
+        );
+        write_grimoire(
+            &dir.join("app"),
+            GrimoireKind::App,
+            "app",
+            &[("core", "../core")],
+        );
+        write_grimoire(
+            &dir.join("tool"),
+            GrimoireKind::App,
+            "tool",
+            &[("core", "../core")],
+        );
+        write_grimoire(&dir.join("core"), GrimoireKind::Lib, "core", &[]);
+        write_file(
+            &dir.join("core/src/book.arc"),
+            "export fn shared_value() -> Int:\n    return 0\n",
+        );
+        let graph = load_workspace_graph(&dir).expect("load graph");
+        let order = plan_workspace(&graph).expect("plan");
+        let first_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
+        let first_statuses = plan_build(&graph, &order, &first_fingerprints, None).expect("plan");
+        execute_build(&graph, &first_statuses).expect("execute");
+        let lock_path = write_lockfile(&graph, &order, &first_statuses).expect("lock");
+        let existing = read_lockfile(&lock_path).expect("read").expect("lock");
+
+        write_file(
+            &dir.join("core/src/book.arc"),
+            "export fn shared_value() -> Int:\n    return 0\n\nexport fn shared_value_v2() -> Int:\n    return 1\n",
+        );
         let second_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
         let second_statuses =
             plan_build(&graph, &order, &second_fingerprints, Some(&existing)).expect("plan");
