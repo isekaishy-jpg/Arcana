@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use arcana_hir::lower_module_text;
+use arcana_hir::{build_package_summary, lower_module_text};
 use pathdiff::diff_paths;
 use sha2::{Digest, Sha256};
 
@@ -542,6 +542,11 @@ pub fn execute_build(graph: &WorkspaceGraph, statuses: &[BuildStatus]) -> Packag
         if status.disposition == BuildDisposition::CacheHit {
             continue;
         }
+        let member = graph
+            .member(&status.member)
+            .ok_or_else(|| format!("missing workspace member `{}`", status.member))?;
+        let package_summary = load_member_package_summary(member)?;
+        let surface_rows = package_summary.exported_surface_rows();
         let artifact_path = graph.root_dir.join(&status.artifact_rel_path);
         if let Some(parent) = artifact_path.parent() {
             fs::create_dir_all(parent).map_err(|e| {
@@ -552,12 +557,15 @@ pub fn execute_build(graph: &WorkspaceGraph, statuses: &[BuildStatus]) -> Packag
             })?;
         }
         let rendered = format!(
-            "format = \"{}\"\nmember = \"{}\"\nkind = \"{}\"\nfingerprint = \"{}\"\napi_fingerprint = \"{}\"\n",
+            "format = \"{}\"\nmember = \"{}\"\nkind = \"{}\"\nfingerprint = \"{}\"\napi_fingerprint = \"{}\"\nmodule_count = {}\ndependency_edge_count = {}\nsurface_rows = {}\n",
             status.format,
             status.member,
             status.kind.as_str(),
             status.fingerprint,
-            status.api_fingerprint
+            status.api_fingerprint,
+            package_summary.module_count(),
+            package_summary.dependency_edges.len(),
+            format_string_array(&surface_rows)
         );
         fs::write(&artifact_path, rendered).map_err(|e| {
             format!(
@@ -876,20 +884,33 @@ fn compute_api_fingerprint(
         hasher.update(format!("dep={dep}\n").as_bytes());
     }
 
+    let package = build_member_package_summary(member, files)?;
+    for row in package.exported_surface_rows() {
+        hasher.update(row.as_bytes());
+        hasher.update(b"\n");
+    }
+    Ok(format!("sha256:{:x}", hasher.finalize()))
+}
+
+fn load_member_package_summary(member: &WorkspaceMember) -> PackageResult<arcana_hir::HirPackageSummary> {
+    let files = collect_arc_files(&member.abs_dir.join("src"))?;
+    build_member_package_summary(member, &files)
+}
+
+fn build_member_package_summary(
+    member: &WorkspaceMember,
+    files: &[PathBuf],
+) -> PackageResult<arcana_hir::HirPackageSummary> {
+    let mut modules = Vec::new();
     for file in files {
         let module_id = module_id_from_path(member, file)?;
         let source =
             fs::read_to_string(file).map_err(|e| format!("failed to read `{}`: {e}", file.display()))?;
-        let module = lower_module_text(module_id.clone(), &source)
+        let module = lower_module_text(module_id, &source)
             .map_err(|err| format!("{}: {err}", file.display()))?;
-        hasher.update(format!("module={module_id}\n").as_bytes());
-
-        for row in module.exported_surface_rows() {
-            hasher.update(row.as_bytes());
-            hasher.update(b"\n");
-        }
+        modules.push(module);
     }
-    Ok(format!("sha256:{:x}", hasher.finalize()))
+    Ok(build_package_summary(member.name.clone(), modules))
 }
 
 fn collect_arc_files(dir: &Path) -> PackageResult<Vec<PathBuf>> {
@@ -1144,6 +1165,39 @@ mod tests {
                 .iter()
                 .all(|status| status.disposition == BuildDisposition::CacheHit)
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn built_artifact_includes_public_surface_rows() {
+        let dir = temp_dir("artifact_surface");
+        write_file(
+            &dir.join("book.toml"),
+            "name = \"ws\"\nkind = \"app\"\n[workspace]\nmembers = [\"core\"]\n",
+        );
+        write_grimoire(&dir.join("core"), GrimoireKind::Lib, "core", &[]);
+        write_file(
+            &dir.join("core/src/book.arc"),
+            "reexport types\nexport fn shared_value() -> Int:\n    return 0\n",
+        );
+        write_file(&dir.join("core/src/types.arc"), "export record Counter:\n    value: Int\n");
+        let graph = load_workspace_graph(&dir).expect("load graph");
+        let order = plan_workspace(&graph).expect("plan");
+        let fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
+        let statuses = plan_build(&graph, &order, &fingerprints, None).expect("plan");
+        execute_build(&graph, &statuses).expect("execute");
+
+        let core = statuses
+            .iter()
+            .find(|status| status.member == "core")
+            .expect("core status");
+        let artifact = fs::read_to_string(graph.root_dir.join(&core.artifact_rel_path))
+            .expect("artifact should exist");
+        assert!(artifact.contains("module_count = 2"));
+        assert!(artifact.contains("dependency_edge_count = 1"));
+        assert!(artifact.contains("module=core:export:fn:shared_value"));
+        assert!(artifact.contains("module=core:reexport:types"));
+        assert!(artifact.contains("module=core.types:export:record:Counter"));
         let _ = fs::remove_dir_all(&dir);
     }
 

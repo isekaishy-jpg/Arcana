@@ -2,7 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use arcana_hir::{HirDirectiveKind, HirModule, HirModuleSummary, lower_module_text};
+use arcana_hir::{
+    HirDirectiveKind, HirModule, HirModuleSummary, HirPackageSummary, build_package_summary,
+    lower_module_text,
+};
 use arcana_package::{GrimoireKind, WorkspaceGraph, load_workspace_graph, parse_manifest};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -12,6 +15,17 @@ pub struct CheckSummary {
     pub non_empty_lines: usize,
     pub directive_count: usize,
     pub symbol_count: usize,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WorkspaceHir {
+    pub packages: BTreeMap<String, HirPackageSummary>,
+}
+
+impl WorkspaceHir {
+    pub fn package(&self, name: &str) -> Option<&HirPackageSummary> {
+        self.packages.get(name)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -35,20 +49,26 @@ impl Diagnostic {
 }
 
 #[derive(Clone, Debug)]
-struct ModuleRecord {
-    path: PathBuf,
-    relative_key: Option<String>,
-    hir: HirModuleSummary,
-}
-
-#[derive(Clone, Debug)]
 struct PackageRecord {
     name: String,
     root_dir: PathBuf,
     direct_deps: BTreeSet<String>,
-    modules: Vec<ModuleRecord>,
-    relative_modules: BTreeMap<String, usize>,
+    summary: HirPackageSummary,
+    module_paths: BTreeMap<String, PathBuf>,
+    relative_modules: BTreeMap<String, String>,
     absolute_modules: BTreeMap<String, usize>,
+}
+
+impl PackageRecord {
+    fn module(&self, module_id: &str) -> Option<&HirModuleSummary> {
+        self.absolute_modules
+            .get(module_id)
+            .and_then(|index| self.summary.modules.get(*index))
+    }
+
+    fn module_path(&self, module_id: &str) -> Option<&PathBuf> {
+        self.module_paths.get(module_id)
+    }
 }
 
 pub fn check_sources<'a, I>(sources: I) -> Result<CheckSummary, String>
@@ -89,6 +109,36 @@ pub fn check_path(path: &Path) -> Result<CheckSummary, String> {
     let graph = load_workspace_graph(&root_dir)?;
     let packages = load_packages_for_check(&root_dir, &graph)?;
     validate_packages(&packages)
+}
+
+pub fn load_workspace_hir(path: &Path) -> Result<WorkspaceHir, String> {
+    let metadata =
+        fs::metadata(path).map_err(|err| format!("failed to read `{}`: {err}", path.display()))?;
+    if !metadata.is_dir() {
+        return Err(format!(
+            "workspace HIR requires a grimoire or workspace directory, got `{}`",
+            path.display()
+        ));
+    }
+
+    let root_dir =
+        fs::canonicalize(path).map_err(|err| format!("failed to open `{}`: {err}", path.display()))?;
+    let manifest_path = root_dir.join("book.toml");
+    if !manifest_path.is_file() {
+        return Err(format!(
+            "`{}` does not contain a `book.toml` manifest",
+            root_dir.display()
+        ));
+    }
+
+    let graph = load_workspace_graph(&root_dir)?;
+    let packages = load_packages_for_check(&root_dir, &graph)?;
+    Ok(WorkspaceHir {
+        packages: packages
+            .into_iter()
+            .map(|(name, package)| (name, package.summary))
+            .collect(),
+    })
 }
 
 pub fn lower_to_hir(summary: &CheckSummary) -> HirModule {
@@ -159,28 +209,31 @@ fn validate_packages(packages: &BTreeMap<String, PackageRecord>) -> Result<Check
     let mut diagnostics = Vec::new();
 
     for package in packages.values() {
-        for module in &package.modules {
+        for module in &package.summary.modules {
             summary.module_count += 1;
-            summary.non_empty_lines += module.hir.non_empty_line_count;
-            summary.directive_count += module.hir.directives.len();
-            summary.symbol_count += module.hir.symbols.len();
+            summary.non_empty_lines += module.non_empty_line_count;
+            summary.directive_count += module.directives.len();
+            summary.symbol_count += module.symbols.len();
+        }
 
-            for directive in &module.hir.directives {
-                let outcome = match directive.kind {
-                    HirDirectiveKind::Import | HirDirectiveKind::Reexport => {
-                        resolve_exact_module(package, packages, &directive.path).map(|_| ())
-                    }
-                    HirDirectiveKind::Use => resolve_use_target(package, packages, &directive.path),
-                };
-
-                if let Err(message) = outcome {
-                    diagnostics.push(Diagnostic {
-                        path: module.path.clone(),
-                        line: directive.span.line,
-                        column: directive.span.column,
-                        message,
-                    });
+        for edge in &package.summary.dependency_edges {
+            let outcome = match edge.kind {
+                HirDirectiveKind::Import | HirDirectiveKind::Reexport => {
+                    resolve_exact_module(package, packages, &edge.target_path).map(|_| ())
                 }
+                HirDirectiveKind::Use => resolve_use_target(package, packages, &edge.target_path),
+            };
+
+            if let Err(message) = outcome {
+                diagnostics.push(Diagnostic {
+                    path: package
+                        .module_path(&edge.source_module_id)
+                        .cloned()
+                        .unwrap_or_else(|| package.root_dir.join("src").join("unknown.arc")),
+                    line: edge.span.line,
+                    column: edge.span.column,
+                    message,
+                });
             }
         }
     }
@@ -223,10 +276,13 @@ fn load_package(
         name: name.to_string(),
         root_dir: root_dir.to_path_buf(),
         direct_deps,
-        modules: Vec::new(),
+        summary: build_package_summary(name.to_string(), Vec::new()),
+        module_paths: BTreeMap::new(),
         relative_modules: BTreeMap::new(),
         absolute_modules: BTreeMap::new(),
     };
+    let mut modules = Vec::new();
+    let mut relative_to_absolute = BTreeMap::new();
 
     for module_path in collect_arc_files(&src_dir)? {
         let relative_segments = module_segments(kind, &src_dir, &module_path)?;
@@ -243,20 +299,9 @@ fn load_package(
             .map_err(|err| format!("failed to read `{}`: {err}", module_path.display()))?;
         let hir = lower_module_text(absolute_key.clone(), &source)
             .map_err(|err| format!("{}: {err}", module_path.display()))?;
-        let module = ModuleRecord {
-            path: module_path,
-            relative_key: if relative_key.is_empty() {
-                None
-            } else {
-                Some(relative_key.clone())
-            },
-            hir,
-        };
-
-        let index = package.modules.len();
         if package
-            .absolute_modules
-            .insert(absolute_key.clone(), index)
+            .module_paths
+            .insert(absolute_key.clone(), module_path)
             .is_some()
         {
             return Err(format!(
@@ -264,10 +309,9 @@ fn load_package(
                 package.root_dir.display()
             ));
         }
-        if let Some(relative_key) = &module.relative_key {
-            if package
-                .relative_modules
-                .insert(relative_key.clone(), index)
+        if !relative_key.is_empty() {
+            if relative_to_absolute
+                .insert(relative_key.clone(), absolute_key.clone())
                 .is_some()
             {
                 return Err(format!(
@@ -276,7 +320,25 @@ fn load_package(
                 ));
             }
         }
-        package.modules.push(module);
+        modules.push(hir);
+    }
+
+    package.summary = build_package_summary(name.to_string(), modules);
+    package.absolute_modules = package
+        .summary
+        .modules
+        .iter()
+        .enumerate()
+        .map(|(index, module)| (module.module_id.clone(), index))
+        .collect();
+    for (relative_key, absolute_key) in relative_to_absolute {
+        if !package.absolute_modules.contains_key(&absolute_key) {
+            return Err(format!(
+                "module `{absolute_key}` was not loaded for `{}`",
+                package.root_dir.display()
+            ));
+        }
+        package.relative_modules.insert(relative_key, absolute_key);
     }
 
     Ok(package)
@@ -343,7 +405,7 @@ fn resolve_exact_module<'a>(
     package: &'a PackageRecord,
     packages: &'a BTreeMap<String, PackageRecord>,
     path: &[String],
-) -> Result<&'a ModuleRecord, String> {
+) -> Result<&'a HirModuleSummary, String> {
     if path.is_empty() {
         return Err("missing module path".to_string());
     }
@@ -351,11 +413,7 @@ fn resolve_exact_module<'a>(
     let key = join_segments(path);
     let first = &path[0];
     if first == &package.name {
-        return package
-            .absolute_modules
-            .get(&key)
-            .map(|index| &package.modules[*index])
-            .ok_or_else(|| format!("unresolved module `{key}`"));
+        return package.module(&key).ok_or_else(|| format!("unresolved module `{key}`"));
     }
 
     if first == "std" {
@@ -363,11 +421,7 @@ fn resolve_exact_module<'a>(
             .get("std")
             .ok_or_else(|| "implicit package `std` is not available".to_string())
             .and_then(|std_package| {
-                std_package
-                    .absolute_modules
-                    .get(&key)
-                    .map(|index| &std_package.modules[*index])
-                    .ok_or_else(|| format!("unresolved module `{key}`"))
+                std_package.module(&key).ok_or_else(|| format!("unresolved module `{key}`"))
             });
     }
 
@@ -376,11 +430,7 @@ fn resolve_exact_module<'a>(
             .get(first)
             .ok_or_else(|| format!("dependency `{first}` is not loaded for `{}`", package.name))
             .and_then(|dependency| {
-                dependency
-                    .absolute_modules
-                    .get(&key)
-                    .map(|index| &dependency.modules[*index])
-                    .ok_or_else(|| format!("unresolved module `{key}`"))
+                dependency.module(&key).ok_or_else(|| format!("unresolved module `{key}`"))
             });
     }
 
@@ -394,7 +444,7 @@ fn resolve_exact_module<'a>(
     package
         .relative_modules
         .get(&key)
-        .map(|index| &package.modules[*index])
+        .and_then(|module_id| package.module(module_id))
         .ok_or_else(|| format!("unresolved module `{key}`"))
 }
 
@@ -425,12 +475,12 @@ fn resolve_use_target(
         }
 
         let symbol_name = &suffix[0];
-        if module.hir.has_symbol(symbol_name) {
+        if module.has_symbol(symbol_name) {
             return Ok(());
         }
         return Err(format!(
             "unresolved symbol `{symbol_name}` in module `{}`",
-            module.hir.module_id
+            module.module_id
         ));
     }
 
@@ -482,7 +532,7 @@ fn find_implicit_std(start: &Path) -> Result<Option<PathBuf>, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_path, check_sources, lower_to_hir};
+    use super::{check_path, check_sources, load_workspace_hir, lower_to_hir};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -550,6 +600,27 @@ mod tests {
             .expect("first-party grimoire should check");
         assert!(summary.package_count >= 2);
         assert!(summary.module_count >= 5);
+    }
+
+    #[test]
+    fn load_workspace_hir_exposes_package_summaries() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .canonicalize()
+            .expect("repo root should resolve");
+        let workspace = load_workspace_hir(&repo_root.join("examples").join("workspace_vertical_slice"))
+            .expect("workspace hir should load");
+        assert!(workspace.package("desktop_app").is_some());
+        assert!(workspace.package("winspell").is_some());
+        assert!(
+            workspace
+                .package("winspell")
+                .expect("winspell package should exist")
+                .dependency_edges
+                .iter()
+                .any(|edge| edge.target_path == vec!["std".to_string(), "canvas".to_string()])
+        );
     }
 
     fn make_temp_package(
