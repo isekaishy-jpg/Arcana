@@ -16,14 +16,14 @@ Arcana is a Rust-first rewrite of the frozen Arcana language and tooling stack. 
 - Record fields, enum variants, trait members, and impl members are now parsed into structured interior members instead of staying opaque body text
 - Function-like bodies now parse structured statement blocks for `let`, `return`, `defer`, `if`/`else`, `while`, `for`, assignments, `break`, and `continue`
 - Block-form `match` expressions now lower into structured expression and pattern nodes, including wildcard, literal, variant, and `A | B` arm shapes
-- Non-`match` expressions now lower structured qualified phrases, named phrase args, path refs, bool/int/string literals, collection literals, direct chain phrases, memory phrases, unary/binary operators, `>> await`, `weave`/`split`, member access, standalone ranges, and the unambiguous index/slice subset
+- Non-`match` expressions now lower structured qualified phrases, named phrase args, path refs, bool/int/string literals, collection literals, chain phrases with mixed connectors and bound `with (...)` adapters, memory phrases, unary/binary operators, `>> await`, `weave`/`split`, member access, standalone ranges, and the unambiguous index/slice subset
 - Pair tuple literals now lower as structured expressions, and generic-argument brackets like `path[(K, V)]` are distinguished from runtime indexing so tuple type args no longer leak into value resolution
 - Header-phrase attached blocks now lower as structured named attachments and chain attachments for qualified and memory phrases instead of raw block entries
 - Assignment statements now carry structured name/member/index targets instead of raw target strings
 - Pair-tuple rules are now enforced in syntax/frontend diagnostics: `.0`/`.1` only, no tuple destructuring in `let`/`for`/params, no tuple field assignment, and no three-element tuple types or literals
 - Page rollups now parse and lower through syntax/HIR for function-like owners and block-owning statements, with subject-scope validation, cleanup-subject reassignment diagnostics, fixture coverage, and a real example package
 - `arcana check` now validates unresolved `lang` item targets plus declaration-surface type and lifetime references after workspace resolution
-- `arcana check` now also validates conservative body-level value resolution for locals, namespace-qualified member chains, enum variant constructors, module impl-method paths, chain steps, memory constructors, page-rollup handlers, and expression generic-argument type references within the active type scope
+- `arcana check` now also validates conservative body-level value resolution for locals, namespace-qualified member chains, enum variant constructors, module impl-method paths, structured chain stages and bound args, memory constructors, page-rollup handlers, and expression generic-argument type references within the active type scope
 - Impl header generic/lifetime params now survive syntax/HIR lowering, so inherited `T`/`'a` scope is available to later frontend work
 - Remaining opaque/frontend debt is now mostly the genuinely ambiguous/harder expression leftovers plus deeper expression typing and ownership/borrow flow
 - Seed-imported docs, grimoires, `std`, examples, and conformance fixtures from MeadowLang

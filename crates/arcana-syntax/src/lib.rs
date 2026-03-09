@@ -211,6 +211,20 @@ pub enum PhraseArg {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChainConnector {
+    Forward,
+    Reverse,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChainStep {
+    pub incoming: Option<ChainConnector>,
+    pub stage: Expr,
+    pub bind_args: Vec<Expr>,
+    pub text: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnaryOp {
     Neg,
     Not,
@@ -276,7 +290,7 @@ pub enum Expr {
     Chain {
         mode: String,
         reverse: bool,
-        steps: Vec<String>,
+        steps: Vec<ChainStep>,
     },
     MemoryPhrase {
         family: String,
@@ -2060,34 +2074,199 @@ fn parse_path_expression(text: &str) -> Option<Expr> {
 }
 
 fn parse_chain_expression(text: &str) -> Result<Option<Expr>, String> {
-    let (mode_text, reverse, step_token, step_text) =
-        if let Some(index) = find_top_level_token(text, ":=>") {
-            (&text[..index], false, "=>", &text[index + 3..])
-        } else if let Some(index) = find_top_level_token(text, ":=<") {
-            (&text[..index], true, "<=", &text[index + 3..])
-        } else {
-            return Ok(None);
-        };
+    let (mode_text, reverse, step_text) = if let Some(index) = find_top_level_token(text, ":=>") {
+        (&text[..index], false, &text[index + 3..])
+    } else if let Some(index) = find_top_level_token(text, ":=<") {
+        (&text[..index], true, &text[index + 3..])
+    } else {
+        return Ok(None);
+    };
     let mode = mode_text.trim();
     if !is_identifier(mode) {
         return Ok(None);
     }
-    let mut steps = Vec::new();
-    for part in split_top_level_token(step_text, step_token) {
-        let part = part.trim();
-        if part.is_empty() {
-            return Ok(None);
-        }
-        steps.push(part.to_string());
-    }
-    if steps.is_empty() {
+    let Some(steps) = parse_chain_steps(step_text, reverse)? else {
         return Ok(None);
-    }
+    };
     Ok(Some(Expr::Chain {
         mode: mode.to_string(),
         reverse,
         steps,
     }))
+}
+
+fn parse_chain_steps(text: &str, reverse_intro: bool) -> Result<Option<Vec<ChainStep>>, String> {
+    let parts = tokenize_chain_steps(text)?;
+    if parts.is_empty() {
+        return Ok(None);
+    }
+
+    let connectors = parts
+        .iter()
+        .skip(1)
+        .filter_map(|(incoming, _)| *incoming)
+        .collect::<Vec<_>>();
+    if reverse_intro {
+        if connectors
+            .iter()
+            .any(|connector| *connector != ChainConnector::Reverse)
+        {
+            return Err(
+                "reverse-introduced chains only support reverse (`<=`) connectors in v1"
+                    .to_string(),
+            );
+        }
+    } else if let Some(first) = connectors.first() {
+        if *first != ChainConnector::Forward {
+            return Err("forward-introduced chains must begin with a forward (`=>`) segment".to_string());
+        }
+        let mut changed = false;
+        for connector in connectors.iter().copied() {
+            match connector {
+                ChainConnector::Forward if changed => {
+                    return Err(
+                        "chain expressions allow at most one direction change in v1".to_string(),
+                    )
+                }
+                ChainConnector::Forward => {}
+                ChainConnector::Reverse => changed = true,
+            }
+        }
+    }
+
+    let mut steps = Vec::with_capacity(parts.len());
+    for (incoming, raw_text) in parts {
+        let trimmed = raw_text.trim();
+        if trimmed.is_empty() {
+            return Ok(None);
+        }
+        let (stage_text, bind_args) = match split_chain_with_args(trimmed)? {
+            Some((stage_text, args_text)) => {
+                let args = parse_chain_bind_args(args_text)?;
+                (stage_text, args)
+            }
+            None => (trimmed, Vec::new()),
+        };
+        let stage = parse_expression_core(stage_text)?;
+        if !is_chain_stage_expr(&stage) {
+            return Err(format!("unsupported chain stage `{stage_text}`"));
+        }
+        steps.push(ChainStep {
+            incoming,
+            stage,
+            bind_args,
+            text: trimmed.to_string(),
+        });
+    }
+    Ok(Some(steps))
+}
+
+fn tokenize_chain_steps(text: &str) -> Result<Vec<(Option<ChainConnector>, &str)>, String> {
+    let mut parts = Vec::new();
+    let mut pending = None;
+    let mut start = 0usize;
+    let mut depth_paren = 0usize;
+    let mut depth_bracket = 0usize;
+    let mut depth_brace = 0usize;
+    let mut in_string = false;
+    let mut escape = false;
+
+    for (idx, ch) in text.char_indices() {
+        if in_string {
+            if escape {
+                escape = false;
+                continue;
+            }
+            if ch == '\\' {
+                escape = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => {
+                in_string = true;
+                continue;
+            }
+            '(' => depth_paren += 1,
+            ')' => depth_paren = depth_paren.saturating_sub(1),
+            '[' => depth_bracket += 1,
+            ']' => depth_bracket = depth_bracket.saturating_sub(1),
+            '{' => depth_brace += 1,
+            '}' => depth_brace = depth_brace.saturating_sub(1),
+            _ => {}
+        }
+
+        if depth_paren != 0 || depth_bracket != 0 || depth_brace != 0 {
+            continue;
+        }
+
+        let incoming = if text[idx..].starts_with("=>") {
+            Some(ChainConnector::Forward)
+        } else if text[idx..].starts_with("<=") {
+            Some(ChainConnector::Reverse)
+        } else {
+            None
+        };
+        let Some(incoming) = incoming else {
+            continue;
+        };
+        parts.push((pending, &text[start..idx]));
+        pending = Some(incoming);
+        start = idx + 2;
+    }
+
+    parts.push((pending, &text[start..]));
+    if parts.iter().any(|(_, part)| part.trim().is_empty()) {
+        return Err("malformed chain expression".to_string());
+    }
+    Ok(parts)
+}
+
+fn split_chain_with_args(text: &str) -> Result<Option<(&str, &str)>, String> {
+    let Some(index) = find_top_level_keyword(text, "with") else {
+        return Ok(None);
+    };
+    let stage = text[..index].trim();
+    let args = text[index + "with".len()..].trim();
+    if stage.is_empty() || !args.starts_with('(') {
+        return Err("malformed bound chain stage".to_string());
+    }
+    let Some(close_idx) = find_matching_delim(args, 0, '(', ')') else {
+        return Err("malformed bound chain stage".to_string());
+    };
+    if close_idx != args.len() - 1 {
+        return Err("malformed bound chain stage".to_string());
+    }
+    Ok(Some((stage, &args[1..close_idx])))
+}
+
+fn parse_chain_bind_args(text: &str) -> Result<Vec<Expr>, String> {
+    if text.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    split_top_level(text, ',')
+        .into_iter()
+        .map(str::trim)
+        .map(|part| {
+            if part.is_empty() {
+                Err("malformed bound chain stage".to_string())
+            } else {
+                parse_expression_core(part)
+            }
+        })
+        .collect()
+}
+
+fn is_chain_stage_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::Path { .. } => true,
+        Expr::MemberAccess { expr, member } => is_identifier(member) && is_chain_stage_expr(expr),
+        Expr::GenericApply { expr, .. } => is_chain_stage_expr(expr),
+        _ => false,
+    }
 }
 
 fn parse_memory_phrase(text: &str) -> Result<Option<Expr>, String> {
@@ -2722,21 +2901,6 @@ fn split_top_level_single_colon(text: &str) -> Option<(&str, &str)> {
     None
 }
 
-fn split_top_level_token<'a>(text: &'a str, token: &str) -> Vec<&'a str> {
-    let positions = find_top_level_token_positions(text, token);
-    if positions.is_empty() {
-        return vec![text];
-    }
-    let mut parts = Vec::with_capacity(positions.len() + 1);
-    let mut start = 0usize;
-    for index in positions {
-        parts.push(&text[start..index]);
-        start = index + token.len();
-    }
-    parts.push(&text[start..]);
-    parts
-}
-
 fn has_word_boundary_before(text: &str, index: usize) -> bool {
     !matches!(text[..index].chars().next_back(), Some(ch) if is_identifier_continue(ch))
 }
@@ -3065,6 +3229,56 @@ fn find_top_level_token(text: &str, token: &str) -> Option<usize> {
             && depth_bracket == 0
             && depth_brace == 0
             && text[idx..].starts_with(token)
+        {
+            return Some(idx);
+        }
+    }
+
+    None
+}
+
+fn find_top_level_keyword(text: &str, keyword: &str) -> Option<usize> {
+    let mut depth_paren = 0usize;
+    let mut depth_bracket = 0usize;
+    let mut depth_brace = 0usize;
+    let mut in_string = false;
+    let mut escape = false;
+
+    for (idx, ch) in text.char_indices() {
+        if in_string {
+            if escape {
+                escape = false;
+                continue;
+            }
+            if ch == '\\' {
+                escape = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => {
+                in_string = true;
+                continue;
+            }
+            '(' => depth_paren += 1,
+            ')' => depth_paren = depth_paren.saturating_sub(1),
+            '[' => depth_bracket += 1,
+            ']' => depth_bracket = depth_bracket.saturating_sub(1),
+            '{' => depth_brace += 1,
+            '}' => depth_brace = depth_brace.saturating_sub(1),
+            _ => {}
+        }
+
+        if depth_paren != 0 || depth_bracket != 0 || depth_brace != 0 {
+            continue;
+        }
+
+        if text[idx..].starts_with(keyword)
+            && has_word_boundary_before(text, idx)
+            && has_word_boundary_after(text, idx + keyword.len())
         {
             return Some(idx);
         }
@@ -3737,7 +3951,15 @@ fn validate_expr_tuple_contract(expr: &Expr, span: Span) -> Result<(), String> {
             }
             Ok(())
         }
-        Expr::Chain { .. } => Ok(()),
+        Expr::Chain { steps, .. } => {
+            for step in steps {
+                validate_expr_tuple_contract(&step.stage, span)?;
+                for arg in &step.bind_args {
+                    validate_expr_tuple_contract(arg, span)?;
+                }
+            }
+            Ok(())
+        }
         Expr::MemoryPhrase {
             arena,
             init_args,
@@ -4294,9 +4516,9 @@ fn is_identifier_continue(ch: char) -> bool {
 mod tests {
     use super::freeze::{FROZEN_AST_NODE_KINDS, FROZEN_TOKEN_KINDS};
     use super::{
-        AssignTarget, BinaryOp, DirectiveKind, Expr, ForewordApp, ForewordArg, HeaderAttachment,
-        MatchPattern, ParamMode, PhraseArg, Statement, StatementKind, SymbolBody, SymbolKind,
-        UnaryOp, parse_module,
+        AssignTarget, BinaryOp, ChainConnector, ChainStep, DirectiveKind, Expr, ForewordApp,
+        ForewordArg, HeaderAttachment, MatchPattern, ParamMode, PhraseArg, Statement,
+        StatementKind, SymbolBody, SymbolKind, UnaryOp, parse_module,
     };
 
     fn expr_is_path(expr: &Expr, name: &str) -> bool {
@@ -4309,6 +4531,10 @@ mod tests {
 
     fn expr_is_str_literal(expr: &Expr, text: &str) -> bool {
         matches!(expr, Expr::StrLiteral { text: value } if value == text)
+    }
+
+    fn chain_step_texts(steps: &[ChainStep]) -> Vec<String> {
+        steps.iter().map(|step| step.text.clone()).collect()
     }
 
     #[test]
@@ -4742,9 +4968,57 @@ mod tests {
                 expr: Expr::Chain { mode, steps, .. },
             } => {
                 assert_eq!(mode, "forward");
-                assert_eq!(steps, &vec!["seed".to_string(), "step".to_string()]);
+                assert_eq!(chain_step_texts(steps), vec!["seed", "step"]);
+                assert!(steps[0].incoming.is_none());
+                assert_eq!(steps[1].incoming, Some(ChainConnector::Forward));
             }
             other => panic!("expected chain expression, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_module_collects_mixed_and_bound_chain_steps() {
+        let parsed = parse_module(
+            "fn main(seed: Int) -> Int:\n    let score = forward :=> stage.seed with (seed) => stage.inc <= stage.dec <= stage.emit\n    return score\n",
+        )
+        .expect("parse should pass");
+
+        match &parsed.symbols[0].statements[0].kind {
+            StatementKind::Let {
+                value:
+                    Expr::Chain {
+                        mode,
+                        reverse,
+                        steps,
+                    },
+                ..
+            } => {
+                assert_eq!(mode, "forward");
+                assert!(!reverse);
+                assert_eq!(
+                    steps.iter().map(|step| step.incoming).collect::<Vec<_>>(),
+                    vec![
+                        None,
+                        Some(ChainConnector::Forward),
+                        Some(ChainConnector::Reverse),
+                        Some(ChainConnector::Reverse)
+                    ]
+                );
+                assert_eq!(
+                    chain_step_texts(steps),
+                    vec![
+                        "stage.seed with (seed)",
+                        "stage.inc",
+                        "stage.dec",
+                        "stage.emit"
+                    ]
+                );
+                assert!(matches!(&steps[0].stage, Expr::MemberAccess { .. }));
+                assert_eq!(steps[0].bind_args.len(), 1);
+                assert!(expr_is_path(&steps[0].bind_args[0], "seed"));
+                assert!(steps[1].bind_args.is_empty());
+            }
+            other => panic!("expected bound mixed chain expression, got {other:?}"),
         }
     }
 
@@ -5226,12 +5500,8 @@ mod tests {
                         ..
                     } if mode == "forward"
                         && !reverse
-                        && steps
-                            == &vec![
-                                "show_node".to_string(),
-                                "bump_node".to_string(),
-                                "show_node".to_string()
-                            ]
+                        && chain_step_texts(steps)
+                            == vec!["show_node", "bump_node", "show_node"]
                         && matches!(
                             forewords.as_slice(),
                             [ForewordApp { name, args, .. }]
@@ -5273,7 +5543,7 @@ mod tests {
                         ..
                     } if mode == "plan"
                         && !reverse
-                        && steps == &vec!["touch_id".to_string()]
+                        && chain_step_texts(steps) == vec!["touch_id"]
                         && matches!(
                             forewords.as_slice(),
                             [ForewordApp { name, args, .. }]
@@ -5298,7 +5568,7 @@ mod tests {
                         ..
                     } if mode == "forward"
                         && !reverse
-                        && steps == &vec!["touch_id".to_string()]
+                        && chain_step_texts(steps) == vec!["touch_id"]
                         && forewords.is_empty()
                 ));
             }

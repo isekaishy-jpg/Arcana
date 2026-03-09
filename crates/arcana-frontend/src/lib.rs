@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use arcana_hir::{
-    HirAssignTarget, HirExpr, HirHeaderAttachment, HirImplDecl, HirMatchPattern, HirModule,
+    HirAssignTarget, HirChainStep, HirExpr, HirHeaderAttachment, HirImplDecl, HirMatchPattern, HirModule,
     HirModuleSummary, HirResolvedModule, HirResolvedTarget, HirResolvedWorkspace, HirStatement,
     HirStatementKind, HirSymbol, HirSymbolBody, HirSymbolKind, HirWorkspacePackage,
     HirWorkspaceSummary, lower_module_text, resolve_workspace,
@@ -1017,18 +1017,16 @@ fn validate_expr_semantics(
         }
         HirExpr::Chain { steps, .. } => {
             for step in steps {
-                if let Some(path) = split_simple_path(step) {
-                    validate_value_path_segments(
-                        workspace,
-                        resolved_module,
-                        module_path,
-                        scope,
-                        &path,
-                        span,
-                        &format!("chain step `{step}`"),
-                        diagnostics,
-                    );
-                }
+                validate_chain_step_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    scope,
+                    step,
+                    span,
+                    diagnostics,
+                );
             }
         }
         HirExpr::MemoryPhrase {
@@ -1321,6 +1319,127 @@ fn validate_phrase_arg_semantics(
             type_scope,
             scope,
             expr,
+            span,
+            diagnostics,
+        ),
+    }
+}
+
+fn validate_chain_step_semantics(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    module_path: &Path,
+    type_scope: &TypeScope,
+    scope: &ValueScope,
+    step: &HirChainStep,
+    span: Span,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    validate_chain_stage_semantics(
+        workspace,
+        resolved_module,
+        module_path,
+        type_scope,
+        scope,
+        &step.stage,
+        span,
+        &step.text,
+        diagnostics,
+    );
+    for arg in &step.bind_args {
+        validate_expr_semantics(
+            workspace,
+            resolved_module,
+            module_path,
+            type_scope,
+            scope,
+            arg,
+            span,
+            diagnostics,
+        );
+    }
+}
+
+fn validate_chain_stage_semantics(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    module_path: &Path,
+    type_scope: &TypeScope,
+    scope: &ValueScope,
+    stage: &HirExpr,
+    span: Span,
+    text: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    match stage {
+        HirExpr::Path { segments } => validate_value_path_segments(
+            workspace,
+            resolved_module,
+            module_path,
+            scope,
+            segments,
+            span,
+            &format!("chain step `{text}`"),
+            diagnostics,
+        ),
+        stage @ HirExpr::MemberAccess { .. } => {
+            if let Some(path) = flatten_member_expr_path(stage) {
+                validate_value_path_segments(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    scope,
+                    &path,
+                    span,
+                    &format!("chain step `{text}`"),
+                    diagnostics,
+                );
+            } else {
+                validate_expr_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    scope,
+                    stage,
+                    span,
+                    diagnostics,
+                );
+            }
+        }
+        HirExpr::GenericApply { expr, type_args } => {
+            validate_chain_stage_semantics(
+                workspace,
+                resolved_module,
+                module_path,
+                type_scope,
+                scope,
+                expr,
+                span,
+                text,
+                diagnostics,
+            );
+            for type_arg in type_args {
+                validate_type_surface_text(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    type_arg,
+                    span,
+                    &format!("chain step generic argument `{type_arg}` in `{text}`"),
+                    SurfaceSymbolUse::TypeLike,
+                    diagnostics,
+                );
+            }
+        }
+        _ => validate_expr_semantics(
+            workspace,
+            resolved_module,
+            module_path,
+            type_scope,
+            scope,
+            stage,
             span,
             diagnostics,
         ),
@@ -2340,6 +2459,22 @@ mod tests {
             .expect("enum variant constructors should resolve");
         assert_eq!(summary.package_count, 2);
         assert!(summary.module_count >= 3);
+    }
+
+    #[test]
+    fn check_path_handles_mixed_chain_example() {
+        let summary = check_path(&repo_root().join("examples").join("chain_styles_matrix"))
+            .expect("mixed chain example should resolve");
+        assert_eq!(summary.package_count, 2);
+        assert!(summary.module_count >= 3);
+    }
+
+    #[test]
+    fn check_path_handles_bound_chain_showcase() {
+        let summary = check_path(&repo_root().join("examples").join("topdown_arena_showcase"))
+            .expect("bound chain showcase should resolve");
+        assert!(summary.package_count >= 3);
+        assert!(summary.module_count >= 10);
     }
 
     #[test]

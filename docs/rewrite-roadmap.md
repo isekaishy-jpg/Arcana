@@ -17,7 +17,7 @@ Completed foundation work:
 - structured interior-member parsing for records, enums, traits, and impl bodies
 - structured statement-block parsing for function-like bodies, including `defer`
 - structured block-form `match` expression and pattern parsing for the imported enum/result corpus
-- structured qualified phrase, path and scalar literal leaves, collection literal, direct chain phrase, memory phrase, unary/binary operator, `>> await`, and `weave`/`split` expression parsing over the imported operator/async/selfhost corpus
+- structured qualified phrase, path and scalar literal leaves, collection literal, chain phrases with mixed connectors and bound `with (...)` adapters, memory phrase, unary/binary operator, `>> await`, and `weave`/`split` expression parsing over the imported operator/async/selfhost corpus
 - structured member access, pair tuple literals, generic-argument bracket applications, standalone ranges, and the unambiguous index/slice subset over the imported list/array/selfhost corpus, with opaque fallback still covering the remaining hard cases
 - structured header attachments for qualified and memory phrases, with named entries and chain lines lowering through syntax/HIR instead of raw attached entries
 - structured assignment targets for name, member, and index mutation paths over the imported behavior/list/selfhost corpus
@@ -26,7 +26,7 @@ Completed foundation work:
 - frontend semantic validation now includes unresolved `lang` item targets after workspace resolution
 - impl header generic/lifetime params now survive syntax/HIR lowering instead of being discarded
 - frontend semantic validation now includes declaration-surface type and lifetime resolution for params, returns, fields, enum payloads, trait defaults, impl headers, and inherited trait/impl method scopes
-- frontend semantic validation now includes conservative body-level value resolution for locals, namespace-qualified member chains, enum variant constructors, module impl-method paths, chain steps, memory constructors, rollup handlers, package/module-qualified value roots, and expression generic-argument type references over the imported selfhost corpus
+- frontend semantic validation now includes conservative body-level value resolution for locals, namespace-qualified member chains, enum variant constructors, module impl-method paths, structured chain stages and bound args, memory constructors, rollup handlers, package/module-qualified value roots, and expression generic-argument type references over the imported selfhost corpus
 
 ## Next Milestones
 

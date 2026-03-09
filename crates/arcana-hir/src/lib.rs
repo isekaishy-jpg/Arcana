@@ -202,6 +202,20 @@ pub enum HirPhraseArg {
     Named { name: String, value: HirExpr },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HirChainConnector {
+    Forward,
+    Reverse,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HirChainStep {
+    pub incoming: Option<HirChainConnector>,
+    pub stage: HirExpr,
+    pub bind_args: Vec<HirExpr>,
+    pub text: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HirHeaderAttachment {
     Named {
@@ -283,7 +297,7 @@ pub enum HirExpr {
     Chain {
         mode: String,
         reverse: bool,
-        steps: Vec<String>,
+        steps: Vec<HirChainStep>,
     },
     MemoryPhrase {
         family: String,
@@ -1659,7 +1673,7 @@ fn lower_expr(expr: &ParsedExpr) -> HirExpr {
         } => HirExpr::Chain {
             mode: mode.clone(),
             reverse: *reverse,
-            steps: steps.clone(),
+            steps: steps.iter().map(lower_chain_step).collect(),
         },
         ParsedExpr::MemoryPhrase {
             family,
@@ -1756,6 +1770,22 @@ fn lower_phrase_arg(arg: &arcana_syntax::PhraseArg) -> HirPhraseArg {
             name: name.clone(),
             value: lower_expr(value),
         },
+    }
+}
+
+fn lower_chain_step(step: &arcana_syntax::ChainStep) -> HirChainStep {
+    HirChainStep {
+        incoming: step.incoming.map(lower_chain_connector),
+        stage: lower_expr(&step.stage),
+        bind_args: step.bind_args.iter().map(lower_expr).collect(),
+        text: step.text.clone(),
+    }
+}
+
+fn lower_chain_connector(connector: arcana_syntax::ChainConnector) -> HirChainConnector {
+    match connector {
+        arcana_syntax::ChainConnector::Forward => HirChainConnector::Forward,
+        arcana_syntax::ChainConnector::Reverse => HirChainConnector::Reverse,
     }
 }
 
@@ -1863,11 +1893,12 @@ mod tests {
 
     use super::freeze::FROZEN_HIR_NODE_KINDS;
     use super::{
-        HirAssignOp, HirAssignTarget, HirBinaryOp, HirDirectiveKind, HirExpr, HirForewordApp,
-        HirForewordArg, HirHeaderAttachment, HirMatchPattern, HirPhraseArg, HirStatement,
-        HirStatementKind, HirSymbolBody, HirSymbolKind, HirUnaryOp, build_package_layout,
-        build_package_summary, build_workspace_package, build_workspace_summary,
-        derive_source_module_path, lower_module_text, resolve_workspace,
+        HirAssignOp, HirAssignTarget, HirBinaryOp, HirChainConnector, HirChainStep,
+        HirDirectiveKind, HirExpr, HirForewordApp, HirForewordArg, HirHeaderAttachment,
+        HirMatchPattern, HirPhraseArg, HirStatement, HirStatementKind, HirSymbolBody,
+        HirSymbolKind, HirUnaryOp, build_package_layout, build_package_summary,
+        build_workspace_package, build_workspace_summary, derive_source_module_path,
+        lower_module_text, resolve_workspace,
     };
 
     fn expr_is_path(expr: &HirExpr, name: &str) -> bool {
@@ -1880,6 +1911,10 @@ mod tests {
 
     fn expr_is_str_literal(expr: &HirExpr, text: &str) -> bool {
         matches!(expr, HirExpr::StrLiteral { text: value } if value == text)
+    }
+
+    fn chain_step_texts(steps: &[HirChainStep]) -> Vec<String> {
+        steps.iter().map(|step| step.text.clone()).collect()
     }
 
     #[test]
@@ -2167,9 +2202,57 @@ mod tests {
             } => {
                 assert_eq!(mode, "forward");
                 assert!(!reverse);
-                assert_eq!(steps, &vec!["seed".to_string(), "step".to_string()]);
+                assert_eq!(chain_step_texts(steps), vec!["seed", "step"]);
+                assert!(steps[0].incoming.is_none());
+                assert_eq!(steps[1].incoming, Some(HirChainConnector::Forward));
             }
             other => panic!("expected chain expression, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lower_module_text_captures_mixed_and_bound_chain_steps() {
+        let module = lower_module_text(
+            "chain_demo",
+            "fn main(seed: Int) -> Int:\n    let score = forward :=> stage.seed with (seed) => stage.inc <= stage.dec <= stage.emit\n    return score\n",
+        )
+        .expect("lowering should pass");
+
+        match &module.symbols[0].statements[0].kind {
+            HirStatementKind::Let {
+                value:
+                    HirExpr::Chain {
+                        mode,
+                        reverse,
+                        steps,
+                    },
+                ..
+            } => {
+                assert_eq!(mode, "forward");
+                assert!(!reverse);
+                assert_eq!(
+                    steps.iter().map(|step| step.incoming).collect::<Vec<_>>(),
+                    vec![
+                        None,
+                        Some(HirChainConnector::Forward),
+                        Some(HirChainConnector::Reverse),
+                        Some(HirChainConnector::Reverse)
+                    ]
+                );
+                assert_eq!(
+                    chain_step_texts(steps),
+                    vec![
+                        "stage.seed with (seed)",
+                        "stage.inc",
+                        "stage.dec",
+                        "stage.emit"
+                    ]
+                );
+                assert!(matches!(&steps[0].stage, HirExpr::MemberAccess { .. }));
+                assert_eq!(steps[0].bind_args.len(), 1);
+                assert!(expr_is_path(&steps[0].bind_args[0], "seed"));
+            }
+            other => panic!("expected bound mixed chain expression, got {other:?}"),
         }
     }
 
@@ -2713,12 +2796,8 @@ mod tests {
                         ..
                     } if mode == "forward"
                         && !reverse
-                        && steps
-                            == &vec![
-                                "show_node".to_string(),
-                                "bump_node".to_string(),
-                                "show_node".to_string()
-                            ]
+                        && chain_step_texts(steps)
+                            == vec!["show_node", "bump_node", "show_node"]
                         && matches!(
                             forewords.as_slice(),
                             [HirForewordApp { name, args, .. }]
@@ -2760,7 +2839,7 @@ mod tests {
                         ..
                     } if mode == "plan"
                         && !reverse
-                        && steps == &vec!["touch_id".to_string()]
+                        && chain_step_texts(steps) == vec!["touch_id"]
                         && matches!(
                             forewords.as_slice(),
                             [HirForewordApp { name, args, .. }]
@@ -2785,7 +2864,7 @@ mod tests {
                         ..
                     } if mode == "forward"
                         && !reverse
-                        && steps == &vec!["touch_id".to_string()]
+                        && chain_step_texts(steps) == vec!["touch_id"]
                         && forewords.is_empty()
                 ));
             }
