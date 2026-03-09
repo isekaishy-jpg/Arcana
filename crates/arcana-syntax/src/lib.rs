@@ -172,6 +172,19 @@ pub struct MatchArm {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HeaderAttachment {
+    Named {
+        name: String,
+        value: Expr,
+        span: Span,
+    },
+    Chain {
+        expr: Expr,
+        span: Span,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MatchPattern {
     Wildcard,
     Literal {
@@ -249,12 +262,13 @@ pub enum Expr {
         arena: Box<Expr>,
         init_args: Vec<PhraseArg>,
         constructor: String,
+        attached: Vec<HeaderAttachment>,
     },
     QualifiedPhrase {
         subject: Box<Expr>,
         args: Vec<PhraseArg>,
         qualifier: String,
-        attached: Vec<RawBlockEntry>,
+        attached: Vec<HeaderAttachment>,
     },
     Await {
         expr: Box<Expr>,
@@ -1706,7 +1720,20 @@ fn parse_expression(text: &str, attached: &[RawBlockEntry], span: Span) -> Resul
             subject,
             args,
             qualifier,
-            attached: attached.to_vec(),
+            attached: parse_header_attachments(attached)?,
+        }),
+        Expr::MemoryPhrase {
+            family,
+            arena,
+            init_args,
+            constructor,
+            ..
+        } => Ok(Expr::MemoryPhrase {
+            family,
+            arena,
+            init_args,
+            constructor,
+            attached: parse_header_attachments(attached)?,
         }),
         _ => Ok(Expr::Opaque {
             text: trimmed.to_string(),
@@ -2011,6 +2038,7 @@ fn parse_memory_phrase(text: &str) -> Result<Option<Expr>, String> {
         arena: Box::new(parse_expression_core(arena_text)?),
         init_args,
         constructor: constructor.to_string(),
+        attached: Vec::new(),
     }))
 }
 
@@ -2063,6 +2091,44 @@ fn parse_qualified_phrase(text: &str) -> Result<Option<Expr>, String> {
         qualifier: qualifier.to_string(),
         attached: Vec::new(),
     }))
+}
+
+fn parse_header_attachments(entries: &[RawBlockEntry]) -> Result<Vec<HeaderAttachment>, String> {
+    let mut attachments = Vec::new();
+    for entry in entries {
+        if let Some((name, value_text)) = split_header_attachment_named_entry(&entry.text) {
+            attachments.push(HeaderAttachment::Named {
+                name: name.to_string(),
+                value: parse_expression(value_text, &entry.children, entry.span)?,
+                span: entry.span,
+            });
+            continue;
+        }
+
+        let expr = parse_expression(&entry.text, &entry.children, entry.span)?;
+        if !matches!(expr, Expr::Chain { .. }) {
+            return Err(format!(
+                "{}:{}: header attached blocks only accept `name = expr` entries or chain lines",
+                entry.span.line, entry.span.column
+            ));
+        }
+        attachments.push(HeaderAttachment::Chain {
+            expr,
+            span: entry.span,
+        });
+    }
+    Ok(attachments)
+}
+
+fn split_header_attachment_named_entry(text: &str) -> Option<(&str, &str)> {
+    let index = find_top_level_named_eq(text)?;
+    let name = text[..index].trim();
+    let value = text[index + 1..].trim();
+    if is_identifier(name) && !value.is_empty() {
+        Some((name, value))
+    } else {
+        None
+    }
 }
 
 fn parse_phrase_args(text: &str) -> Result<Option<Vec<PhraseArg>>, String> {
@@ -2972,7 +3038,8 @@ fn statement_can_own_rollups(statement: &Statement) -> bool {
 
 fn expr_has_attached_block(expr: &Expr) -> bool {
     match expr {
-        Expr::Opaque { attached, .. } | Expr::QualifiedPhrase { attached, .. } => {
+        Expr::Opaque { attached, .. } => !attached.is_empty(),
+        Expr::QualifiedPhrase { attached, .. } | Expr::MemoryPhrase { attached, .. } => {
             !attached.is_empty()
         }
         _ => false,
@@ -3252,17 +3319,10 @@ fn immediate_statement_bindings(statements: &[Statement]) -> BTreeSet<String> {
 }
 
 fn immediate_attached_block_bindings(expr: &Expr) -> BTreeSet<String> {
-    expr_attached_entries(expr)
-        .map(immediate_raw_block_bindings)
-        .unwrap_or_default()
-}
-
-fn expr_attached_entries(expr: &Expr) -> Option<&[RawBlockEntry]> {
     match expr {
-        Expr::Opaque { attached, .. } | Expr::QualifiedPhrase { attached, .. } => {
-            Some(attached.as_slice())
-        }
-        _ => None,
+        Expr::Opaque { attached, .. } => immediate_raw_block_bindings(attached),
+        Expr::QualifiedPhrase { .. } | Expr::MemoryPhrase { .. } => BTreeSet::new(),
+        _ => BTreeSet::new(),
     }
 }
 
@@ -3486,7 +3546,10 @@ fn validate_expr_tuple_contract(expr: &Expr, span: Span) -> Result<(), String> {
         }
         Expr::Chain { .. } => Ok(()),
         Expr::MemoryPhrase {
-            arena, init_args, ..
+            arena,
+            init_args,
+            attached,
+            ..
         } => {
             validate_expr_tuple_contract(arena, span)?;
             for arg in init_args {
@@ -3495,15 +3558,26 @@ fn validate_expr_tuple_contract(expr: &Expr, span: Span) -> Result<(), String> {
                     PhraseArg::Named { value, .. } => validate_expr_tuple_contract(value, span)?,
                 }
             }
+            for attachment in attached {
+                validate_header_attachment_tuple_contract(attachment, span)?;
+            }
             Ok(())
         }
-        Expr::QualifiedPhrase { subject, args, .. } => {
+        Expr::QualifiedPhrase {
+            subject,
+            args,
+            attached,
+            ..
+        } => {
             validate_expr_tuple_contract(subject, span)?;
             for arg in args {
                 match arg {
                     PhraseArg::Positional(expr) => validate_expr_tuple_contract(expr, span)?,
                     PhraseArg::Named { value, .. } => validate_expr_tuple_contract(value, span)?,
                 }
+            }
+            for attachment in attached {
+                validate_header_attachment_tuple_contract(attachment, span)?;
             }
             Ok(())
         }
@@ -3540,6 +3614,17 @@ fn validate_expr_tuple_contract(expr: &Expr, span: Span) -> Result<(), String> {
                 validate_expr_tuple_contract(end, span)?;
             }
             Ok(())
+        }
+    }
+}
+
+fn validate_header_attachment_tuple_contract(
+    attachment: &HeaderAttachment,
+    span: Span,
+) -> Result<(), String> {
+    match attachment {
+        HeaderAttachment::Named { value, .. } | HeaderAttachment::Chain { expr: value, .. } => {
+            validate_expr_tuple_contract(value, span)
         }
     }
 }
@@ -3985,8 +4070,8 @@ fn is_identifier_continue(ch: char) -> bool {
 mod tests {
     use super::freeze::{FROZEN_AST_NODE_KINDS, FROZEN_TOKEN_KINDS};
     use super::{
-        AssignTarget, BinaryOp, DirectiveKind, Expr, MatchPattern, ParamMode, PhraseArg, Statement,
-        StatementKind, SymbolBody, SymbolKind, UnaryOp, parse_module,
+        AssignTarget, BinaryOp, DirectiveKind, Expr, HeaderAttachment, MatchPattern, ParamMode,
+        PhraseArg, Statement, StatementKind, SymbolBody, SymbolKind, UnaryOp, parse_module,
     };
 
     #[test]
@@ -4821,6 +4906,101 @@ mod tests {
                 ));
             }
             other => panic!("expected r2 let, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_module_collects_structured_header_attachments() {
+        let parsed = parse_module(
+            "fn main() -> Int:\n    Node :: :: call\n        value = 10\n        forward :=> show_node => bump_node => show_node\n    arena: arena_nodes :> 21 <: make_node\n        plan :=> touch_id\n        forward :=> touch_id\n    return 0\n",
+        )
+        .expect("parse should pass");
+
+        match &parsed.symbols[0].statements[0].kind {
+            StatementKind::Expr {
+                expr:
+                    Expr::QualifiedPhrase {
+                        qualifier,
+                        attached,
+                        ..
+                    },
+            } => {
+                assert_eq!(qualifier, "call");
+                assert_eq!(attached.len(), 2);
+                assert!(matches!(
+                    &attached[0],
+                    HeaderAttachment::Named {
+                        name,
+                        value: Expr::Opaque { text, attached },
+                        ..
+                    } if name == "value" && text == "10" && attached.is_empty()
+                ));
+                assert!(matches!(
+                    &attached[1],
+                    HeaderAttachment::Chain {
+                        expr:
+                            Expr::Chain {
+                                mode,
+                                reverse,
+                                steps,
+                            },
+                        ..
+                    } if mode == "forward"
+                        && !reverse
+                        && steps
+                            == &vec![
+                                "show_node".to_string(),
+                                "bump_node".to_string(),
+                                "show_node".to_string()
+                            ]
+                ));
+            }
+            other => panic!("expected qualified phrase statement, got {other:?}"),
+        }
+
+        match &parsed.symbols[0].statements[1].kind {
+            StatementKind::Expr {
+                expr:
+                    Expr::MemoryPhrase {
+                        family,
+                        constructor,
+                        attached,
+                        ..
+                    },
+            } => {
+                assert_eq!(family, "arena");
+                assert_eq!(constructor, "make_node");
+                assert_eq!(attached.len(), 2);
+                assert!(matches!(
+                    &attached[0],
+                    HeaderAttachment::Chain {
+                        expr:
+                            Expr::Chain {
+                                mode,
+                                reverse,
+                                steps,
+                            },
+                        ..
+                    } if mode == "plan"
+                        && !reverse
+                        && steps == &vec!["touch_id".to_string()]
+                ));
+                assert!(matches!(
+                    &attached[1],
+                    HeaderAttachment::Chain {
+                        expr:
+                            Expr::Chain {
+                                mode,
+                                reverse,
+                                steps,
+                            },
+                        ..
+                    } if mode == "forward"
+                        && !reverse
+                        && steps == &vec!["touch_id".to_string()]
+                ));
+            }
+            other => panic!("expected memory phrase statement, got {other:?}"),
         }
     }
 

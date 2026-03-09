@@ -202,6 +202,19 @@ pub enum HirPhraseArg {
     Named { name: String, value: HirExpr },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HirHeaderAttachment {
+    Named {
+        name: String,
+        value: HirExpr,
+        span: Span,
+    },
+    Chain {
+        expr: HirExpr,
+        span: Span,
+    },
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HirUnaryOp {
     Neg,
@@ -256,12 +269,13 @@ pub enum HirExpr {
         arena: Box<HirExpr>,
         init_args: Vec<HirPhraseArg>,
         constructor: String,
+        attached: Vec<HirHeaderAttachment>,
     },
     QualifiedPhrase {
         subject: Box<HirExpr>,
         args: Vec<HirPhraseArg>,
         qualifier: String,
-        attached: Vec<HirRawBlockEntry>,
+        attached: Vec<HirHeaderAttachment>,
     },
     Await {
         expr: Box<HirExpr>,
@@ -1551,6 +1565,27 @@ fn lower_raw_block_entries(entries: &[arcana_syntax::RawBlockEntry]) -> Vec<HirR
         .collect()
 }
 
+fn lower_header_attachments(
+    attachments: &[arcana_syntax::HeaderAttachment],
+) -> Vec<HirHeaderAttachment> {
+    attachments
+        .iter()
+        .map(|attachment| match attachment {
+            arcana_syntax::HeaderAttachment::Named { name, value, span } => {
+                HirHeaderAttachment::Named {
+                    name: name.clone(),
+                    value: lower_expr(value),
+                    span: *span,
+                }
+            }
+            arcana_syntax::HeaderAttachment::Chain { expr, span } => HirHeaderAttachment::Chain {
+                expr: lower_expr(expr),
+                span: *span,
+            },
+        })
+        .collect()
+}
+
 fn lower_expr(expr: &ParsedExpr) -> HirExpr {
     match expr {
         ParsedExpr::Opaque { text, attached } => HirExpr::Opaque {
@@ -1585,11 +1620,13 @@ fn lower_expr(expr: &ParsedExpr) -> HirExpr {
             arena,
             init_args,
             constructor,
+            attached,
         } => HirExpr::MemoryPhrase {
             family: family.clone(),
             arena: Box::new(lower_expr(arena)),
             init_args: init_args.iter().map(lower_phrase_arg).collect(),
             constructor: constructor.clone(),
+            attached: lower_header_attachments(attached),
         },
         ParsedExpr::QualifiedPhrase {
             subject,
@@ -1600,7 +1637,7 @@ fn lower_expr(expr: &ParsedExpr) -> HirExpr {
             subject: Box::new(lower_expr(subject)),
             args: args.iter().map(lower_phrase_arg).collect(),
             qualifier: qualifier.clone(),
-            attached: lower_raw_block_entries(attached),
+            attached: lower_header_attachments(attached),
         },
         ParsedExpr::Await { expr } => HirExpr::Await {
             expr: Box::new(lower_expr(expr)),
@@ -1773,10 +1810,11 @@ mod tests {
 
     use super::freeze::FROZEN_HIR_NODE_KINDS;
     use super::{
-        HirAssignOp, HirAssignTarget, HirBinaryOp, HirDirectiveKind, HirExpr, HirMatchPattern,
-        HirPhraseArg, HirStatement, HirStatementKind, HirSymbolBody, HirSymbolKind, HirUnaryOp,
-        build_package_layout, build_package_summary, build_workspace_package,
-        build_workspace_summary, derive_source_module_path, lower_module_text, resolve_workspace,
+        HirAssignOp, HirAssignTarget, HirBinaryOp, HirDirectiveKind, HirExpr, HirHeaderAttachment,
+        HirMatchPattern, HirPhraseArg, HirStatement, HirStatementKind, HirSymbolBody,
+        HirSymbolKind, HirUnaryOp, build_package_layout, build_package_summary,
+        build_workspace_package, build_workspace_summary, derive_source_module_path,
+        lower_module_text, resolve_workspace,
     };
 
     #[test]
@@ -2526,6 +2564,102 @@ mod tests {
                 ));
             }
             other => panic!("expected r2 let, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lower_module_text_captures_structured_header_attachments() {
+        let module = lower_module_text(
+            "header_attach",
+            "fn main() -> Int:\n    Node :: :: call\n        value = 10\n        forward :=> show_node => bump_node => show_node\n    arena: arena_nodes :> 21 <: make_node\n        plan :=> touch_id\n        forward :=> touch_id\n    return 0\n",
+        )
+        .expect("lowering should pass");
+
+        match &module.symbols[0].statements[0].kind {
+            HirStatementKind::Expr {
+                expr:
+                    HirExpr::QualifiedPhrase {
+                        qualifier,
+                        attached,
+                        ..
+                    },
+            } => {
+                assert_eq!(qualifier, "call");
+                assert_eq!(attached.len(), 2);
+                assert!(matches!(
+                    &attached[0],
+                    HirHeaderAttachment::Named {
+                        name,
+                        value: HirExpr::Opaque { text, attached },
+                        ..
+                    } if name == "value" && text == "10" && attached.is_empty()
+                ));
+                assert!(matches!(
+                    &attached[1],
+                    HirHeaderAttachment::Chain {
+                        expr:
+                            HirExpr::Chain {
+                                mode,
+                                reverse,
+                                steps,
+                            },
+                        ..
+                    } if mode == "forward"
+                        && !reverse
+                        && steps
+                            == &vec![
+                                "show_node".to_string(),
+                                "bump_node".to_string(),
+                                "show_node".to_string()
+                            ]
+                ));
+            }
+            other => panic!("expected qualified phrase statement, got {other:?}"),
+        }
+
+        match &module.symbols[0].statements[1].kind {
+            HirStatementKind::Expr {
+                expr:
+                    HirExpr::MemoryPhrase {
+                        family,
+                        constructor,
+                        attached,
+                        ..
+                    },
+            } => {
+                assert_eq!(family, "arena");
+                assert_eq!(constructor, "make_node");
+                assert_eq!(attached.len(), 2);
+                assert!(matches!(
+                    &attached[0],
+                    HirHeaderAttachment::Chain {
+                        expr:
+                            HirExpr::Chain {
+                                mode,
+                                reverse,
+                                steps,
+                            },
+                        ..
+                    } if mode == "plan"
+                        && !reverse
+                        && steps == &vec!["touch_id".to_string()]
+                ));
+                assert!(matches!(
+                    &attached[1],
+                    HirHeaderAttachment::Chain {
+                        expr:
+                            HirExpr::Chain {
+                                mode,
+                                reverse,
+                                steps,
+                            },
+                        ..
+                    } if mode == "forward"
+                        && !reverse
+                        && steps == &vec!["touch_id".to_string()]
+                ));
+            }
+            other => panic!("expected memory phrase statement, got {other:?}"),
         }
     }
 

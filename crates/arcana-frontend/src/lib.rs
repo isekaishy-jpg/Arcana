@@ -3,8 +3,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use arcana_hir::{
-    HirImplDecl, HirModule, HirModuleSummary, HirResolvedModule, HirResolvedTarget,
-    HirResolvedWorkspace, HirSymbol, HirSymbolBody, HirSymbolKind, HirWorkspacePackage,
+    HirAssignTarget, HirExpr, HirHeaderAttachment, HirImplDecl, HirMatchPattern, HirModule,
+    HirModuleSummary, HirResolvedModule, HirResolvedTarget, HirResolvedWorkspace, HirStatement,
+    HirStatementKind, HirSymbol, HirSymbolBody, HirSymbolKind, HirWorkspacePackage,
     HirWorkspaceSummary, lower_module_text, resolve_workspace,
 };
 use arcana_package::load_workspace_hir as load_package_workspace_hir;
@@ -89,6 +90,38 @@ impl TypeScope {
 
     fn lifetime_declared(&self, lifetime: &str) -> bool {
         lifetime == "'static" || self.lifetimes.contains(lifetime)
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct ValueScope {
+    locals: BTreeSet<String>,
+}
+
+impl ValueScope {
+    fn with_params<'a, I>(&self, params: I) -> Self
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        let mut next = self.clone();
+        for param in params {
+            next.locals.insert(param.to_string());
+        }
+        next
+    }
+
+    fn with_local(&self, name: &str) -> Self {
+        let mut next = self.clone();
+        next.locals.insert(name.to_string());
+        next
+    }
+
+    fn insert(&mut self, name: &str) {
+        self.locals.insert(name.to_string());
+    }
+
+    fn contains(&self, name: &str) -> bool {
+        self.locals.contains(name)
     }
 }
 
@@ -309,9 +342,24 @@ fn validate_module_semantics(
             &TypeScope::default(),
             diagnostics,
         );
+        validate_symbol_value_semantics(
+            workspace,
+            resolved_module,
+            &module_path,
+            symbol,
+            &ValueScope::default(),
+            diagnostics,
+        );
     }
     for impl_decl in &module.impls {
         validate_impl_surface_types(
+            workspace,
+            resolved_module,
+            &module_path,
+            impl_decl,
+            diagnostics,
+        );
+        validate_impl_value_semantics(
             workspace,
             resolved_module,
             &module_path,
@@ -506,6 +554,823 @@ fn validate_impl_surface_types(
             diagnostics,
         );
     }
+}
+
+fn validate_symbol_value_semantics(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    module_path: &Path,
+    symbol: &HirSymbol,
+    inherited_scope: &ValueScope,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let mut scope =
+        inherited_scope.with_params(symbol.params.iter().map(|param| param.name.as_str()));
+    validate_rollup_handlers(
+        workspace,
+        resolved_module,
+        module_path,
+        &symbol.rollups,
+        diagnostics,
+    );
+    validate_statement_block_semantics(
+        workspace,
+        resolved_module,
+        module_path,
+        &symbol.statements,
+        &mut scope,
+        diagnostics,
+    );
+
+    if let HirSymbolBody::Trait { methods, .. } = &symbol.body {
+        for method in methods {
+            validate_symbol_value_semantics(
+                workspace,
+                resolved_module,
+                module_path,
+                method,
+                &ValueScope::default(),
+                diagnostics,
+            );
+        }
+    }
+}
+
+fn validate_impl_value_semantics(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    module_path: &Path,
+    impl_decl: &HirImplDecl,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    for method in &impl_decl.methods {
+        validate_symbol_value_semantics(
+            workspace,
+            resolved_module,
+            module_path,
+            method,
+            &ValueScope::default(),
+            diagnostics,
+        );
+    }
+}
+
+fn validate_rollup_handlers(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    module_path: &Path,
+    rollups: &[arcana_hir::HirPageRollup],
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    for rollup in rollups {
+        if lookup_symbol_path(workspace, resolved_module, &rollup.handler_path).is_none() {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: rollup.span.line,
+                column: rollup.span.column,
+                message: format!(
+                    "unresolved page rollup handler `{}`",
+                    rollup.handler_path.join(".")
+                ),
+            });
+        }
+    }
+}
+
+fn validate_statement_block_semantics(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    module_path: &Path,
+    statements: &[HirStatement],
+    scope: &mut ValueScope,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    for statement in statements {
+        validate_rollup_handlers(
+            workspace,
+            resolved_module,
+            module_path,
+            &statement.rollups,
+            diagnostics,
+        );
+        match &statement.kind {
+            HirStatementKind::Let { name, value, .. } => {
+                validate_expr_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    scope,
+                    value,
+                    statement.span,
+                    diagnostics,
+                );
+                scope.insert(name);
+            }
+            HirStatementKind::Return { value } => {
+                if let Some(value) = value {
+                    validate_expr_semantics(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        scope,
+                        value,
+                        statement.span,
+                        diagnostics,
+                    );
+                }
+            }
+            HirStatementKind::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                validate_expr_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    scope,
+                    condition,
+                    statement.span,
+                    diagnostics,
+                );
+                let mut then_scope = scope.clone();
+                validate_statement_block_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    then_branch,
+                    &mut then_scope,
+                    diagnostics,
+                );
+                if let Some(else_branch) = else_branch {
+                    let mut else_scope = scope.clone();
+                    validate_statement_block_semantics(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        else_branch,
+                        &mut else_scope,
+                        diagnostics,
+                    );
+                }
+            }
+            HirStatementKind::While { condition, body } => {
+                validate_expr_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    scope,
+                    condition,
+                    statement.span,
+                    diagnostics,
+                );
+                let mut body_scope = scope.clone();
+                validate_statement_block_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    body,
+                    &mut body_scope,
+                    diagnostics,
+                );
+            }
+            HirStatementKind::For {
+                binding,
+                iterable,
+                body,
+            } => {
+                validate_expr_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    scope,
+                    iterable,
+                    statement.span,
+                    diagnostics,
+                );
+                let mut body_scope = scope.with_local(binding);
+                validate_statement_block_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    body,
+                    &mut body_scope,
+                    diagnostics,
+                );
+            }
+            HirStatementKind::Defer { expr } | HirStatementKind::Expr { expr } => {
+                validate_expr_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    scope,
+                    expr,
+                    statement.span,
+                    diagnostics,
+                );
+            }
+            HirStatementKind::Assign { target, value, .. } => {
+                validate_assign_target_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    scope,
+                    target,
+                    statement.span,
+                    diagnostics,
+                );
+                validate_expr_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    scope,
+                    value,
+                    statement.span,
+                    diagnostics,
+                );
+            }
+            HirStatementKind::Break | HirStatementKind::Continue => {}
+        }
+    }
+}
+
+fn validate_assign_target_semantics(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    module_path: &Path,
+    scope: &ValueScope,
+    target: &HirAssignTarget,
+    span: Span,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    match target {
+        HirAssignTarget::Opaque { text } => validate_opaque_value_text(
+            workspace,
+            resolved_module,
+            module_path,
+            scope,
+            text,
+            span,
+            "assignment target",
+            diagnostics,
+        ),
+        HirAssignTarget::Name { text } => validate_value_path_segments(
+            workspace,
+            resolved_module,
+            module_path,
+            scope,
+            &[text.clone()],
+            span,
+            "assignment target",
+            diagnostics,
+        ),
+        HirAssignTarget::MemberAccess { target, .. } => validate_assign_target_semantics(
+            workspace,
+            resolved_module,
+            module_path,
+            scope,
+            target,
+            span,
+            diagnostics,
+        ),
+        HirAssignTarget::Index { target, index } => {
+            validate_assign_target_semantics(
+                workspace,
+                resolved_module,
+                module_path,
+                scope,
+                target,
+                span,
+                diagnostics,
+            );
+            validate_expr_semantics(
+                workspace,
+                resolved_module,
+                module_path,
+                scope,
+                index,
+                span,
+                diagnostics,
+            );
+        }
+    }
+}
+
+fn validate_expr_semantics(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    module_path: &Path,
+    scope: &ValueScope,
+    expr: &HirExpr,
+    span: Span,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    match expr {
+        HirExpr::Opaque { text, .. } => validate_opaque_value_text(
+            workspace,
+            resolved_module,
+            module_path,
+            scope,
+            text,
+            span,
+            "value expression",
+            diagnostics,
+        ),
+        HirExpr::CollectionLiteral { items } => {
+            for item in items {
+                validate_expr_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    scope,
+                    item,
+                    span,
+                    diagnostics,
+                );
+            }
+        }
+        HirExpr::Match { subject, arms } => {
+            validate_expr_semantics(
+                workspace,
+                resolved_module,
+                module_path,
+                scope,
+                subject,
+                span,
+                diagnostics,
+            );
+            for arm in arms {
+                let mut arm_scope = scope.clone();
+                for pattern in &arm.patterns {
+                    validate_match_pattern_semantics(pattern, &mut arm_scope);
+                }
+                validate_expr_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    &arm_scope,
+                    &arm.value,
+                    arm.span,
+                    diagnostics,
+                );
+            }
+        }
+        HirExpr::Chain { steps, .. } => {
+            for step in steps {
+                if let Some(path) = split_simple_path(step) {
+                    validate_value_path_segments(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        scope,
+                        &path,
+                        span,
+                        &format!("chain step `{step}`"),
+                        diagnostics,
+                    );
+                }
+            }
+        }
+        HirExpr::MemoryPhrase {
+            arena,
+            init_args,
+            constructor,
+            attached,
+            ..
+        } => {
+            validate_expr_semantics(
+                workspace,
+                resolved_module,
+                module_path,
+                scope,
+                arena,
+                span,
+                diagnostics,
+            );
+            for arg in init_args {
+                validate_phrase_arg_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    scope,
+                    arg,
+                    span,
+                    diagnostics,
+                );
+            }
+            if let Some(path) = split_simple_path(constructor) {
+                validate_value_path_segments(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    scope,
+                    &path,
+                    span,
+                    &format!("memory constructor `{constructor}`"),
+                    diagnostics,
+                );
+            }
+            for attachment in attached {
+                validate_header_attachment_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    scope,
+                    attachment,
+                    diagnostics,
+                );
+            }
+        }
+        HirExpr::QualifiedPhrase {
+            subject,
+            args,
+            attached,
+            ..
+        } => {
+            validate_expr_semantics(
+                workspace,
+                resolved_module,
+                module_path,
+                scope,
+                subject,
+                span,
+                diagnostics,
+            );
+            for arg in args {
+                validate_phrase_arg_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    scope,
+                    arg,
+                    span,
+                    diagnostics,
+                );
+            }
+            for attachment in attached {
+                validate_header_attachment_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    scope,
+                    attachment,
+                    diagnostics,
+                );
+            }
+        }
+        HirExpr::Await { expr } | HirExpr::Unary { expr, .. } => validate_expr_semantics(
+            workspace,
+            resolved_module,
+            module_path,
+            scope,
+            expr,
+            span,
+            diagnostics,
+        ),
+        HirExpr::Binary { left, right, .. } => {
+            validate_expr_semantics(
+                workspace,
+                resolved_module,
+                module_path,
+                scope,
+                left,
+                span,
+                diagnostics,
+            );
+            validate_expr_semantics(
+                workspace,
+                resolved_module,
+                module_path,
+                scope,
+                right,
+                span,
+                diagnostics,
+            );
+        }
+        HirExpr::MemberAccess { expr, .. } => validate_expr_semantics(
+            workspace,
+            resolved_module,
+            module_path,
+            scope,
+            expr,
+            span,
+            diagnostics,
+        ),
+        HirExpr::Index { expr, index } => {
+            validate_expr_semantics(
+                workspace,
+                resolved_module,
+                module_path,
+                scope,
+                expr,
+                span,
+                diagnostics,
+            );
+            validate_expr_semantics(
+                workspace,
+                resolved_module,
+                module_path,
+                scope,
+                index,
+                span,
+                diagnostics,
+            );
+        }
+        HirExpr::Slice {
+            expr, start, end, ..
+        } => {
+            validate_expr_semantics(
+                workspace,
+                resolved_module,
+                module_path,
+                scope,
+                expr,
+                span,
+                diagnostics,
+            );
+            if let Some(start) = start {
+                validate_expr_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    scope,
+                    start,
+                    span,
+                    diagnostics,
+                );
+            }
+            if let Some(end) = end {
+                validate_expr_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    scope,
+                    end,
+                    span,
+                    diagnostics,
+                );
+            }
+        }
+        HirExpr::Range { start, end, .. } => {
+            if let Some(start) = start {
+                validate_expr_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    scope,
+                    start,
+                    span,
+                    diagnostics,
+                );
+            }
+            if let Some(end) = end {
+                validate_expr_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    scope,
+                    end,
+                    span,
+                    diagnostics,
+                );
+            }
+        }
+    }
+}
+
+fn validate_phrase_arg_semantics(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    module_path: &Path,
+    scope: &ValueScope,
+    arg: &arcana_hir::HirPhraseArg,
+    span: Span,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    match arg {
+        arcana_hir::HirPhraseArg::Positional(expr)
+        | arcana_hir::HirPhraseArg::Named { value: expr, .. } => validate_expr_semantics(
+            workspace,
+            resolved_module,
+            module_path,
+            scope,
+            expr,
+            span,
+            diagnostics,
+        ),
+    }
+}
+
+fn validate_header_attachment_semantics(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    module_path: &Path,
+    scope: &ValueScope,
+    attachment: &HirHeaderAttachment,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    match attachment {
+        HirHeaderAttachment::Named { value, span, .. }
+        | HirHeaderAttachment::Chain { expr: value, span } => validate_expr_semantics(
+            workspace,
+            resolved_module,
+            module_path,
+            scope,
+            value,
+            *span,
+            diagnostics,
+        ),
+    }
+}
+
+fn validate_match_pattern_semantics(pattern: &HirMatchPattern, scope: &mut ValueScope) {
+    match pattern {
+        HirMatchPattern::Wildcard
+        | HirMatchPattern::Literal { .. }
+        | HirMatchPattern::Opaque { .. } => {}
+        HirMatchPattern::Name { text } => {
+            let is_binding = match split_simple_path(text) {
+                Some(path) => path.len() == 1,
+                None => true,
+            };
+            if is_binding {
+                scope.insert(text.trim());
+            }
+        }
+        HirMatchPattern::Variant { args, .. } => {
+            for arg in args {
+                validate_match_pattern_semantics(arg, scope);
+            }
+        }
+    }
+}
+
+fn validate_opaque_value_text(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    module_path: &Path,
+    scope: &ValueScope,
+    text: &str,
+    span: Span,
+    context: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if matches!(text.trim(), "true" | "false") {
+        return;
+    }
+    let Some(path) = split_simple_path(text) else {
+        return;
+    };
+    validate_value_path_segments(
+        workspace,
+        resolved_module,
+        module_path,
+        scope,
+        &path,
+        span,
+        context,
+        diagnostics,
+    );
+}
+
+fn validate_value_path_segments(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    module_path: &Path,
+    scope: &ValueScope,
+    path: &[String],
+    span: Span,
+    context: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if path.len() == 1 && scope.contains(&path[0]) {
+        return;
+    }
+    if value_path_exists(workspace, resolved_module, path) {
+        return;
+    }
+    diagnostics.push(Diagnostic {
+        path: module_path.to_path_buf(),
+        line: span.line,
+        column: span.column,
+        message: format!(
+            "unresolved value reference `{}` in {context}",
+            path.join(".")
+        ),
+    });
+}
+
+fn value_path_exists(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    path: &[String],
+) -> bool {
+    if path.is_empty() {
+        return false;
+    }
+    if let Some(binding) = resolved_module.bindings.get(&path[0]) {
+        return target_path_exists(workspace, &binding.target, &path[1..]);
+    }
+    let Some(package) = workspace.package(&path[0]) else {
+        let Some(package_name) = resolved_module.module_id.split('.').next() else {
+            return false;
+        };
+        let Some(package) = workspace.package(package_name) else {
+            return false;
+        };
+        return package_path_exists(package, path);
+    };
+    package_path_exists(package, &path[1..])
+}
+
+fn target_path_exists(
+    workspace: &HirWorkspaceSummary,
+    target: &HirResolvedTarget,
+    tail: &[String],
+) -> bool {
+    match target {
+        HirResolvedTarget::Symbol { .. } => tail.is_empty(),
+        HirResolvedTarget::Module {
+            package_name,
+            module_id,
+        } => {
+            let Some(package) = workspace.package(package_name) else {
+                return false;
+            };
+            let Some(module) = package.module(module_id) else {
+                return false;
+            };
+            module_path_exists(package, module, tail)
+        }
+    }
+}
+
+fn package_path_exists(package: &HirWorkspacePackage, path: &[String]) -> bool {
+    if path.is_empty() {
+        return true;
+    }
+    if package.resolve_relative_module(path).is_some() {
+        return true;
+    }
+    let Some((symbol_name, module_path)) = path.split_last() else {
+        return false;
+    };
+    let module = if module_path.is_empty() {
+        package.module(&package.summary.package_name)
+    } else {
+        package.resolve_relative_module(module_path)
+    };
+    module
+        .map(|module| {
+            module
+                .symbols
+                .iter()
+                .any(|symbol| symbol.name == *symbol_name)
+        })
+        .unwrap_or(false)
+}
+
+fn module_path_exists(
+    package: &HirWorkspacePackage,
+    module: &HirModuleSummary,
+    path: &[String],
+) -> bool {
+    if path.is_empty() {
+        return true;
+    }
+    if path.len() == 1 && module.symbols.iter().any(|symbol| symbol.name == path[0]) {
+        return true;
+    }
+    let base_relative = module
+        .module_id
+        .split('.')
+        .skip(1)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let mut module_candidate = base_relative.clone();
+    module_candidate.extend_from_slice(path);
+    if package.resolve_relative_module(&module_candidate).is_some() {
+        return true;
+    }
+
+    let Some((symbol_name, module_tail)) = path.split_last() else {
+        return false;
+    };
+    let mut symbol_module_path = base_relative;
+    symbol_module_path.extend_from_slice(module_tail);
+    let target_module = if module_tail.is_empty() {
+        Some(module)
+    } else {
+        package.resolve_relative_module(&symbol_module_path)
+    };
+    target_module
+        .map(|module| {
+            module
+                .symbols
+                .iter()
+                .any(|symbol| symbol.name == *symbol_name)
+        })
+        .unwrap_or(false)
 }
 
 fn validate_type_surface_text(
@@ -728,6 +1593,33 @@ fn is_builtin_type_name(name: &str) -> bool {
             | "Window"
             | "Image"
     )
+}
+
+fn split_simple_path(text: &str) -> Option<Vec<String>> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let mut segments = Vec::new();
+    for segment in trimmed.split('.') {
+        let segment = segment.trim();
+        if segment.is_empty() {
+            return None;
+        }
+        let mut chars = segment.chars();
+        let first = chars.next()?;
+        if !is_ident_start(first) || !chars.all(is_ident_continue) {
+            return None;
+        }
+        segments.push(segment.to_string());
+    }
+
+    if segments.is_empty() {
+        None
+    } else {
+        Some(segments)
+    }
 }
 
 fn collect_surface_refs(text: &str) -> SurfaceRefs {
@@ -1084,6 +1976,31 @@ mod tests {
             err.contains("undeclared lifetime `'a` in parameter type `value`"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn check_path_rejects_unresolved_body_value_packages() {
+        let repo_root = repo_root()
+            .join("conformance")
+            .join("check_parity_packages");
+        for (package, expected) in [
+            (
+                "unresolved_value_ref",
+                "unresolved value reference `missing` in value expression",
+            ),
+            (
+                "unresolved_chain_step",
+                "unresolved value reference `missing` in chain step `missing`",
+            ),
+            (
+                "unresolved_rollup_handler",
+                "unresolved page rollup handler `missing.cleanup`",
+            ),
+        ] {
+            let err = check_path(&repo_root.join(package))
+                .expect_err("unresolved body semantic package should fail");
+            assert!(err.contains(expected), "{package}: {err}");
+        }
     }
 
     #[test]
