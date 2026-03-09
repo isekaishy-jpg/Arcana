@@ -7,11 +7,11 @@ Arcana is a Rust-first rewrite of the frozen Arcana language and tooling stack. 
 - Rust workspace scaffold for syntax, HIR, frontend, package manager, IR, AOT, and CLI layers
 - Language-freeze policy and CI guardrails
 - Path-only package graph, deterministic workspace planning, `Arcana.lock` v1, placeholder build artifacts, and exported-surface API fingerprints for rebuild propagation
-- Shared HIR module summaries and package-level HIR graphs now sit between syntax parsing and both frontend checks and package API hashing
+- Shared HIR module, package, and workspace summaries now sit between syntax parsing, frontend checks, and package graph consumers
 - Seed-imported docs, grimoires, `std`, examples, and conformance fixtures from MeadowLang
 - `arcana check` with line-based module loading, import/reexport/use resolution, direct-dependency enforcement, implicit `std`, and stable file/line/column diagnostics
-- `arcana build` now runs that frontend validation before writing placeholder artifacts
-- Placeholder artifacts now include package module counts, dependency-edge counts, and exported-surface rows for debugging/cache inspection
+- `arcana build` now runs frontend validation, lowers packages through placeholder IR, and emits placeholder AOT artifacts
+- Placeholder artifacts now include package/module counts, dependency-edge counts, exported-surface rows, and per-module summary rows for debugging/cache inspection
 
 ## Commands
 

@@ -2,3 +2,7 @@ target/
 .arcana/
 **/.arcana/
 *.tmp
+examples/**/Arcana.lock
+grimoires/**/Arcana.lock
+std/**/Arcana.lock
+conformance/**/Arcana.lock

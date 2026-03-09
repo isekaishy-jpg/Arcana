@@ -2,7 +2,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use arcana_aot::{AOT_PLACEHOLDER_FORMAT, compile_package};
 use arcana_hir::{build_package_summary, derive_source_module_path, lower_module_text};
+use arcana_ir::lower_package;
 use pathdiff::diff_paths;
 use sha2::{Digest, Sha256};
 
@@ -522,7 +524,7 @@ pub fn plan_build(
             api_fingerprint,
             artifact_rel_path,
             kind: member.kind.clone(),
-            format: "foundation-placeholder-v1".to_string(),
+            format: AOT_PLACEHOLDER_FORMAT.to_string(),
         });
     }
 
@@ -546,7 +548,14 @@ pub fn execute_build(graph: &WorkspaceGraph, statuses: &[BuildStatus]) -> Packag
             .member(&status.member)
             .ok_or_else(|| format!("missing workspace member `{}`", status.member))?;
         let package_summary = load_member_package_summary(member)?;
-        let surface_rows = package_summary.exported_surface_rows();
+        let ir_package = lower_package(&package_summary);
+        let artifact = compile_package(&ir_package);
+        if artifact.format != status.format {
+            return Err(format!(
+                "artifact format mismatch for `{}`: planner={}, compiler={}",
+                status.member, status.format, artifact.format
+            ));
+        }
         let artifact_path = graph.root_dir.join(&status.artifact_rel_path);
         if let Some(parent) = artifact_path.parent() {
             fs::create_dir_all(parent).map_err(|e| {
@@ -556,16 +565,28 @@ pub fn execute_build(graph: &WorkspaceGraph, statuses: &[BuildStatus]) -> Packag
                 )
             })?;
         }
+        let module_rows = artifact
+            .modules
+            .iter()
+            .map(|module| {
+                format!(
+                    "{}:symbols={}:items={}",
+                    module.module_id, module.symbol_count, module.item_count
+                )
+            })
+            .collect::<Vec<_>>();
         let rendered = format!(
-            "format = \"{}\"\nmember = \"{}\"\nkind = \"{}\"\nfingerprint = \"{}\"\napi_fingerprint = \"{}\"\nmodule_count = {}\ndependency_edge_count = {}\nsurface_rows = {}\n",
-            status.format,
+            "format = \"{}\"\nmember = \"{}\"\npackage = \"{}\"\nkind = \"{}\"\nfingerprint = \"{}\"\napi_fingerprint = \"{}\"\nmodule_count = {}\ndependency_edge_count = {}\nsurface_rows = {}\nmodule_rows = {}\n",
+            artifact.format,
             status.member,
+            artifact.package_name,
             status.kind.as_str(),
             status.fingerprint,
             status.api_fingerprint,
-            package_summary.module_count(),
-            package_summary.dependency_edges.len(),
-            format_string_array(&surface_rows)
+            artifact.module_count,
+            artifact.dependency_edge_count,
+            format_string_array(&artifact.exported_surface_rows),
+            format_string_array(&module_rows)
         );
         fs::write(&artifact_path, rendered).map_err(|e| {
             format!(
@@ -1168,11 +1189,15 @@ mod tests {
             .expect("core status");
         let artifact = fs::read_to_string(graph.root_dir.join(&core.artifact_rel_path))
             .expect("artifact should exist");
+        assert!(artifact.contains("format = \"aot-placeholder-v1\""));
+        assert!(artifact.contains("package = \"core\""));
         assert!(artifact.contains("module_count = 2"));
         assert!(artifact.contains("dependency_edge_count = 1"));
         assert!(artifact.contains("module=core:export:fn:shared_value"));
         assert!(artifact.contains("module=core:reexport:types"));
         assert!(artifact.contains("module=core.types:export:record:Counter"));
+        assert!(artifact.contains("module_rows = ["));
+        assert!(artifact.contains("core:symbols=1:items=4"));
         let _ = fs::remove_dir_all(&dir);
     }
 
