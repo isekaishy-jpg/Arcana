@@ -263,6 +263,24 @@ impl AssignOp {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AssignTarget {
+    Opaque {
+        text: String,
+    },
+    Name {
+        text: String,
+    },
+    MemberAccess {
+        target: Box<AssignTarget>,
+        member: String,
+    },
+    Index {
+        target: Box<AssignTarget>,
+        index: Expr,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StatementKind {
     Let {
         mutable: bool,
@@ -292,7 +310,7 @@ pub enum StatementKind {
     Break,
     Continue,
     Assign {
-        target: String,
+        target: AssignTarget,
         op: AssignOp,
         value: Expr,
     },
@@ -1596,6 +1614,38 @@ fn split_member_access(text: &str) -> Option<(&str, &str)> {
     Some((base, member))
 }
 
+fn parse_assign_target(text: &str) -> AssignTarget {
+    let trimmed = text.trim();
+    if let Some((base, inside)) = split_trailing_bracket_suffix(trimmed) {
+        let base = base.trim();
+        if !base.is_empty() && should_parse_index_brackets(inside) {
+            if let Ok(index) = parse_expression_core(inside.trim()) {
+                return AssignTarget::Index {
+                    target: Box::new(parse_assign_target(base)),
+                    index,
+                };
+            }
+        }
+    }
+
+    if let Some((base, member)) = split_member_access(trimmed) {
+        return AssignTarget::MemberAccess {
+            target: Box::new(parse_assign_target(base)),
+            member: member.to_string(),
+        };
+    }
+
+    if is_identifier(trimmed) {
+        return AssignTarget::Name {
+            text: trimmed.to_string(),
+        };
+    }
+
+    AssignTarget::Opaque {
+        text: trimmed.to_string(),
+    }
+}
+
 fn find_top_level_binary_op(text: &str, ops: &[BinaryOpSpec]) -> Option<(usize, BinaryOp, usize)> {
     let mut candidate = None;
     let mut depth_paren = 0usize;
@@ -1961,14 +2011,14 @@ fn parse_block_header(rest: &str, keyword: &str, span: Span) -> Result<String, S
     Ok(header.to_string())
 }
 
-fn parse_assignment_statement(text: &str) -> Option<(String, AssignOp, String)> {
+fn parse_assignment_statement(text: &str) -> Option<(AssignTarget, AssignOp, String)> {
     let (index, op, op_len) = find_top_level_assignment_op(text)?;
     let target = text[..index].trim();
     let value = text[index + op_len..].trim();
     if target.is_empty() || value.is_empty() {
         return None;
     }
-    Some((target.to_string(), op, value.to_string()))
+    Some((parse_assign_target(target), op, value.to_string()))
 }
 
 fn find_top_level_assignment_op(text: &str) -> Option<(usize, AssignOp, usize)> {
@@ -2242,8 +2292,8 @@ fn is_identifier_continue(ch: char) -> bool {
 mod tests {
     use super::freeze::{FROZEN_AST_NODE_KINDS, FROZEN_TOKEN_KINDS};
     use super::{
-        BinaryOp, DirectiveKind, Expr, MatchPattern, ParamMode, PhraseArg, StatementKind,
-        SymbolBody, SymbolKind, UnaryOp, parse_module,
+        AssignTarget, BinaryOp, DirectiveKind, Expr, MatchPattern, ParamMode, PhraseArg,
+        StatementKind, SymbolBody, SymbolKind, UnaryOp, parse_module,
     };
 
     #[test]
@@ -2448,7 +2498,13 @@ mod tests {
                             other => panic!("expected equality if condition, got {other:?}"),
                         }
                         assert_eq!(then_branch.len(), 1);
-                        assert!(matches!(then_branch[0].kind, StatementKind::Assign { .. }));
+                        assert!(matches!(
+                            then_branch[0].kind,
+                            StatementKind::Assign {
+                                target: AssignTarget::Name { ref text },
+                                ..
+                            } if text == "frames"
+                        ));
                         let else_branch = else_branch.as_ref().expect("else branch should exist");
                         assert_eq!(else_branch.len(), 1);
                         assert!(matches!(else_branch[0].kind, StatementKind::Continue));
@@ -2893,6 +2949,61 @@ mod tests {
                 ));
             }
             other => panic!("expected r2 let, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_module_collects_assignment_targets() {
+        let parsed = parse_module(
+            "fn main() -> Int:\n    self.tick.value = self.tick.value + 1\n    xs[1] = 9\n    xs[i] += 3\n    return 0\n",
+        )
+        .expect("parse should pass");
+
+        let statements = &parsed.symbols[0].statements;
+        match &statements[0].kind {
+            StatementKind::Assign { target, .. } => match target {
+                AssignTarget::MemberAccess { target, member } => {
+                    assert_eq!(member, "value");
+                    assert!(matches!(
+                        target.as_ref(),
+                        AssignTarget::MemberAccess { member, .. } if member == "tick"
+                    ));
+                }
+                other => panic!("expected member assignment target, got {other:?}"),
+            },
+            other => panic!("expected first assignment statement, got {other:?}"),
+        }
+        match &statements[1].kind {
+            StatementKind::Assign { target, .. } => match target {
+                AssignTarget::Index { target, index } => {
+                    assert!(matches!(
+                        target.as_ref(),
+                        AssignTarget::Name { text } if text == "xs"
+                    ));
+                    assert!(matches!(
+                        index,
+                        Expr::Opaque { text, attached } if text == "1" && attached.is_empty()
+                    ));
+                }
+                other => panic!("expected indexed assignment target, got {other:?}"),
+            },
+            other => panic!("expected second assignment statement, got {other:?}"),
+        }
+        match &statements[2].kind {
+            StatementKind::Assign { target, .. } => match target {
+                AssignTarget::Index { target, index } => {
+                    assert!(matches!(
+                        target.as_ref(),
+                        AssignTarget::Name { text } if text == "xs"
+                    ));
+                    assert!(matches!(
+                        index,
+                        Expr::Opaque { text, attached } if text == "i" && attached.is_empty()
+                    ));
+                }
+                other => panic!("expected indexed compound-assignment target, got {other:?}"),
+            },
+            other => panic!("expected third assignment statement, got {other:?}"),
         }
     }
 

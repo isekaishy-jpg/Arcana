@@ -269,6 +269,24 @@ impl HirAssignOp {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HirAssignTarget {
+    Opaque {
+        text: String,
+    },
+    Name {
+        text: String,
+    },
+    MemberAccess {
+        target: Box<HirAssignTarget>,
+        member: String,
+    },
+    Index {
+        target: Box<HirAssignTarget>,
+        index: HirExpr,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HirStatementKind {
     Let {
         mutable: bool,
@@ -298,7 +316,7 @@ pub enum HirStatementKind {
     Break,
     Continue,
     Assign {
-        target: String,
+        target: HirAssignTarget,
         op: HirAssignOp,
         value: HirExpr,
     },
@@ -1388,6 +1406,25 @@ fn lower_assign_op(op: &ParsedAssignOp) -> HirAssignOp {
     }
 }
 
+fn lower_assign_target(target: &arcana_syntax::AssignTarget) -> HirAssignTarget {
+    match target {
+        arcana_syntax::AssignTarget::Opaque { text } => {
+            HirAssignTarget::Opaque { text: text.clone() }
+        }
+        arcana_syntax::AssignTarget::Name { text } => HirAssignTarget::Name { text: text.clone() },
+        arcana_syntax::AssignTarget::MemberAccess { target, member } => {
+            HirAssignTarget::MemberAccess {
+                target: Box::new(lower_assign_target(target)),
+                member: member.clone(),
+            }
+        }
+        arcana_syntax::AssignTarget::Index { target, index } => HirAssignTarget::Index {
+            target: Box::new(lower_assign_target(target)),
+            index: lower_expr(index),
+        },
+    }
+}
+
 fn lower_raw_block_entries(entries: &[arcana_syntax::RawBlockEntry]) -> Vec<HirRawBlockEntry> {
     entries
         .iter()
@@ -1577,7 +1614,7 @@ fn lower_statement(statement: &arcana_syntax::Statement) -> HirStatement {
             ParsedStatementKind::Break => HirStatementKind::Break,
             ParsedStatementKind::Continue => HirStatementKind::Continue,
             ParsedStatementKind::Assign { target, op, value } => HirStatementKind::Assign {
-                target: target.clone(),
+                target: lower_assign_target(target),
                 op: lower_assign_op(op),
                 value: lower_expr(value),
             },
@@ -1596,10 +1633,10 @@ mod tests {
 
     use super::freeze::FROZEN_HIR_NODE_KINDS;
     use super::{
-        HirAssignOp, HirBinaryOp, HirDirectiveKind, HirExpr, HirMatchPattern, HirPhraseArg,
-        HirStatementKind, HirSymbolBody, HirUnaryOp, build_package_layout, build_package_summary,
-        build_workspace_package, build_workspace_summary, derive_source_module_path,
-        lower_module_text, resolve_workspace,
+        HirAssignOp, HirAssignTarget, HirBinaryOp, HirDirectiveKind, HirExpr, HirMatchPattern,
+        HirPhraseArg, HirStatementKind, HirSymbolBody, HirUnaryOp, build_package_layout,
+        build_package_summary, build_workspace_package, build_workspace_summary,
+        derive_source_module_path, lower_module_text, resolve_workspace,
     };
 
     #[test]
@@ -1751,7 +1788,10 @@ mod tests {
                         assert_eq!(then_branch.len(), 1);
                         match &then_branch[0].kind {
                             HirStatementKind::Assign { target, op, value } => {
-                                assert_eq!(target, "frames");
+                                assert!(matches!(
+                                    target,
+                                    HirAssignTarget::Name { text } if text == "frames"
+                                ));
                                 assert_eq!(*op, HirAssignOp::AddAssign);
                                 assert!(matches!(
                                     value,
@@ -2242,6 +2282,62 @@ mod tests {
                 ));
             }
             other => panic!("expected r2 let, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lower_module_text_captures_assignment_targets() {
+        let module = lower_module_text(
+            "assign_demo",
+            "fn main() -> Int:\n    self.tick.value = self.tick.value + 1\n    xs[1] = 9\n    xs[i] += 3\n    return 0\n",
+        )
+        .expect("lowering should pass");
+
+        let statements = &module.symbols[0].statements;
+        match &statements[0].kind {
+            HirStatementKind::Assign { target, .. } => match target {
+                HirAssignTarget::MemberAccess { target, member } => {
+                    assert_eq!(member, "value");
+                    assert!(matches!(
+                        target.as_ref(),
+                        HirAssignTarget::MemberAccess { member, .. } if member == "tick"
+                    ));
+                }
+                other => panic!("expected member assignment target, got {other:?}"),
+            },
+            other => panic!("expected first assignment statement, got {other:?}"),
+        }
+        match &statements[1].kind {
+            HirStatementKind::Assign { target, .. } => match target {
+                HirAssignTarget::Index { target, index } => {
+                    assert!(matches!(
+                        target.as_ref(),
+                        HirAssignTarget::Name { text } if text == "xs"
+                    ));
+                    assert!(matches!(
+                        index,
+                        HirExpr::Opaque { text, attached } if text == "1" && attached.is_empty()
+                    ));
+                }
+                other => panic!("expected indexed assignment target, got {other:?}"),
+            },
+            other => panic!("expected second assignment statement, got {other:?}"),
+        }
+        match &statements[2].kind {
+            HirStatementKind::Assign { target, .. } => match target {
+                HirAssignTarget::Index { target, index } => {
+                    assert!(matches!(
+                        target.as_ref(),
+                        HirAssignTarget::Name { text } if text == "xs"
+                    ));
+                    assert!(matches!(
+                        index,
+                        HirExpr::Opaque { text, attached } if text == "i" && attached.is_empty()
+                    ));
+                }
+                other => panic!("expected indexed compound-assignment target, got {other:?}"),
+            },
+            other => panic!("expected third assignment statement, got {other:?}"),
         }
     }
 
