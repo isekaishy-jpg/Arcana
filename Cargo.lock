@@ -30,6 +30,9 @@ dependencies = [
 [[package]]
 name = "arcana-hir"
 version = "0.1.0"
+dependencies = [
+ "arcana-syntax",
+]
 
 [[package]]
 name = "arcana-ir"
@@ -42,7 +45,7 @@ dependencies = [
 name = "arcana-package"
 version = "0.1.0"
 dependencies = [
- "arcana-syntax",
+ "arcana-hir",
  "pathdiff",
  "sha2",
  "toml",

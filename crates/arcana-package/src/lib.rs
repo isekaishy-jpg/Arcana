@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use arcana_syntax::{DirectiveKind, parse_module};
+use arcana_hir::lower_module_text;
 use pathdiff::diff_paths;
 use sha2::{Digest, Sha256};
 
@@ -880,31 +880,13 @@ fn compute_api_fingerprint(
         let module_id = module_id_from_path(member, file)?;
         let source =
             fs::read_to_string(file).map_err(|e| format!("failed to read `{}`: {e}", file.display()))?;
-        let parsed = parse_module(&source)
+        let module = lower_module_text(module_id.clone(), &source)
             .map_err(|err| format!("{}: {err}", file.display()))?;
-
         hasher.update(format!("module={module_id}\n").as_bytes());
 
-        let mut reexports = parsed
-            .directives
-            .iter()
-            .filter(|directive| directive.kind == DirectiveKind::Reexport)
-            .map(|directive| directive.path.join("."))
-            .collect::<Vec<_>>();
-        reexports.sort();
-        for reexport in reexports {
-            hasher.update(format!("reexport={reexport}\n").as_bytes());
-        }
-
-        let mut exported_symbols = parsed
-            .symbols
-            .iter()
-            .filter(|symbol| symbol.exported)
-            .map(|symbol| (symbol.kind.as_str().to_string(), symbol.name.clone()))
-            .collect::<Vec<_>>();
-        exported_symbols.sort();
-        for (kind, name) in exported_symbols {
-            hasher.update(format!("export={kind}:{name}\n").as_bytes());
+        for row in module.exported_surface_rows() {
+            hasher.update(row.as_bytes());
+            hasher.update(b"\n");
         }
     }
     Ok(format!("sha256:{:x}", hasher.finalize()))

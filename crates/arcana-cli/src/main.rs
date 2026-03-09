@@ -69,6 +69,10 @@ fn run_check(path: PathBuf) -> Result<i32, String> {
 }
 
 fn run_build(workspace_dir: PathBuf, plan_only: bool) -> Result<i32, String> {
+    if !plan_only {
+        check_path(&workspace_dir)?;
+    }
+
     let graph = load_workspace_graph(&workspace_dir)?;
     let order = plan_workspace(&graph)?;
     if plan_only {

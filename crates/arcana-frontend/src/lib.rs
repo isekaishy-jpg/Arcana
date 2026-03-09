@@ -2,9 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use arcana_hir::HirModule;
+use arcana_hir::{HirDirectiveKind, HirModule, HirModuleSummary, lower_module_text};
 use arcana_package::{GrimoireKind, WorkspaceGraph, load_workspace_graph, parse_manifest};
-use arcana_syntax::{DirectiveKind, ParsedModule, parse_module};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CheckSummary {
@@ -39,9 +38,7 @@ impl Diagnostic {
 struct ModuleRecord {
     path: PathBuf,
     relative_key: Option<String>,
-    absolute_display: String,
-    parsed: ParsedModule,
-    all_symbols: BTreeSet<String>,
+    hir: HirModuleSummary,
 }
 
 #[derive(Clone, Debug)]
@@ -59,12 +56,12 @@ where
     I: IntoIterator<Item = &'a str>,
 {
     let mut summary = CheckSummary::default();
-    for source in sources {
-        let parsed = parse_module(source)?;
+    for (index, source) in sources.into_iter().enumerate() {
+        let hir = lower_module_text(format!("memory.module.{index}"), source)?;
         summary.module_count += 1;
-        summary.non_empty_lines += parsed.non_empty_line_count;
-        summary.directive_count += parsed.directives.len();
-        summary.symbol_count += parsed.symbols.len();
+        summary.non_empty_lines += hir.non_empty_line_count;
+        summary.directive_count += hir.directives.len();
+        summary.symbol_count += hir.symbols.len();
     }
     Ok(summary)
 }
@@ -104,13 +101,14 @@ pub fn lower_to_hir(summary: &CheckSummary) -> HirModule {
 fn check_file(path: &Path) -> Result<CheckSummary, String> {
     let source =
         fs::read_to_string(path).map_err(|err| format!("failed to read `{}`: {err}", path.display()))?;
-    let parsed = parse_module(&source).map_err(|err| format!("{}: {err}", path.display()))?;
+    let hir = lower_module_text(path.display().to_string(), &source)
+        .map_err(|err| format!("{}: {err}", path.display()))?;
     Ok(CheckSummary {
         package_count: 0,
         module_count: 1,
-        non_empty_lines: parsed.non_empty_line_count,
-        directive_count: parsed.directives.len(),
-        symbol_count: parsed.symbols.len(),
+        non_empty_lines: hir.non_empty_line_count,
+        directive_count: hir.directives.len(),
+        symbol_count: hir.symbols.len(),
     })
 }
 
@@ -163,16 +161,16 @@ fn validate_packages(packages: &BTreeMap<String, PackageRecord>) -> Result<Check
     for package in packages.values() {
         for module in &package.modules {
             summary.module_count += 1;
-            summary.non_empty_lines += module.parsed.non_empty_line_count;
-            summary.directive_count += module.parsed.directives.len();
-            summary.symbol_count += module.parsed.symbols.len();
+            summary.non_empty_lines += module.hir.non_empty_line_count;
+            summary.directive_count += module.hir.directives.len();
+            summary.symbol_count += module.hir.symbols.len();
 
-            for directive in &module.parsed.directives {
+            for directive in &module.hir.directives {
                 let outcome = match directive.kind {
-                    DirectiveKind::Import | DirectiveKind::Reexport => {
+                    HirDirectiveKind::Import | HirDirectiveKind::Reexport => {
                         resolve_exact_module(package, packages, &directive.path).map(|_| ())
                     }
-                    DirectiveKind::Use => resolve_use_target(package, packages, &directive.path),
+                    HirDirectiveKind::Use => resolve_use_target(package, packages, &directive.path),
                 };
 
                 if let Err(message) = outcome {
@@ -243,13 +241,8 @@ fn load_package(
         let absolute_key = join_segments(&absolute_segments);
         let source = fs::read_to_string(&module_path)
             .map_err(|err| format!("failed to read `{}`: {err}", module_path.display()))?;
-        let parsed = parse_module(&source)
+        let hir = lower_module_text(absolute_key.clone(), &source)
             .map_err(|err| format!("{}: {err}", module_path.display()))?;
-        let all_symbols = parsed
-            .symbols
-            .iter()
-            .map(|symbol| symbol.name.clone())
-            .collect::<BTreeSet<_>>();
         let module = ModuleRecord {
             path: module_path,
             relative_key: if relative_key.is_empty() {
@@ -257,9 +250,7 @@ fn load_package(
             } else {
                 Some(relative_key.clone())
             },
-            absolute_display: absolute_key.clone(),
-            parsed,
-            all_symbols,
+            hir,
         };
 
         let index = package.modules.len();
@@ -434,12 +425,12 @@ fn resolve_use_target(
         }
 
         let symbol_name = &suffix[0];
-        if module.all_symbols.contains(symbol_name) {
+        if module.hir.has_symbol(symbol_name) {
             return Ok(());
         }
         return Err(format!(
             "unresolved symbol `{symbol_name}` in module `{}`",
-            module.absolute_display
+            module.hir.module_id
         ));
     }
 
