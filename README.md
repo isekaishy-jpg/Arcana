@@ -20,8 +20,9 @@ Arcana is a Rust-first rewrite of the frozen Arcana language and tooling stack. 
 - Assignment statements now carry structured name/member/index targets instead of raw target strings
 - Pair-tuple rules are now enforced in syntax/frontend diagnostics: `.0`/`.1` only, no tuple destructuring in `let`/`for`/params, no tuple field assignment, and no three-element tuple types or literals
 - Page rollups now parse and lower through syntax/HIR for function-like owners and block-owning statements, with subject-scope validation, cleanup-subject reassignment diagnostics, fixture coverage, and a real example package
-- `arcana check` now validates unresolved `lang` item targets after workspace resolution
-- Remaining opaque expression debt is now mostly deeper attached-block bodies, ownership/type semantics, and the still-ambiguous generic-bracket versus index-bracket edge cases
+- `arcana check` now validates unresolved `lang` item targets plus declaration-surface type and lifetime references after workspace resolution
+- Impl header generic/lifetime params now survive syntax/HIR lowering, so inherited `T`/`'a` scope is available to later frontend work
+- Remaining opaque expression debt is now mostly deeper attached-block bodies, expression typing, ownership flow, and the still-ambiguous generic-bracket versus index-bracket edge cases
 - Seed-imported docs, grimoires, `std`, examples, and conformance fixtures from MeadowLang
 - `arcana check` with shared package/HIR loading, symbol-based module and `use` resolution, direct-dependency enforcement, implicit `std`, and stable file/line/column diagnostics
 - `arcana build` now runs frontend validation, lowers packages through placeholder IR, and emits placeholder AOT artifacts

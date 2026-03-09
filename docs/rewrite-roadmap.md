@@ -23,11 +23,13 @@ Completed foundation work:
 - enforced pair-tuple contract over current syntax/frontend coverage, including `.0`/`.1`-only access, no tuple destructuring in bindings/params, no tuple field assignment, and new negative conformance fixtures wired into the frozen matrix
 - page rollups now parse and lower through syntax/HIR for function-like owners and block-owning statements, with subject-scope validation, cleanup-subject reassignment diagnostics, and example/negative conformance coverage wired into the frozen matrix
 - frontend semantic validation now includes unresolved `lang` item targets after workspace resolution
+- impl header generic/lifetime params now survive syntax/HIR lowering instead of being discarded
+- frontend semantic validation now includes declaration-surface type and lifetime resolution for params, returns, fields, enum payloads, trait defaults, impl headers, and inherited trait/impl method scopes
 
 ## Next Milestones
 
 1. Replace the remaining opaque attached-block and ambiguous bracket edge cases with fully structured parsing.
-2. Add typed frontend checking against the copied selfhost language matrix.
+2. Extend the typed frontend from declaration-surface checks into expression typing, ownership, and borrow/lifetime flow.
 3. Move package fingerprints from declaration-surface/source hashes to typed-HIR/API fingerprints.
 4. Compile first-party host/io/window/input grimoires against the new frontend.
 5. Replace the AOT placeholder with the first runnable backend.

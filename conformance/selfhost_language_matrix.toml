@@ -12,7 +12,10 @@ negative = ["conformance/check_parity_fixtures/parse_error.arc"]
 id = "records"
 status = "required"
 positive = ["examples/records", "examples/arena_ast_builder"]
-negative = ["conformance/check_parity_fixtures/parse_error.arc"]
+negative = [
+    "conformance/check_parity_fixtures/parse_error.arc",
+    "conformance/check_parity_packages/unresolved_type_ref",
+]
 
 [[feature]]
 id = "enums_match"
@@ -86,7 +89,10 @@ negative = ["conformance/check_parity_fixtures/malformed_intrinsic.arc"]
 id = "ownership_lifetimes"
 status = "required"
 positive = ["examples/arena_id_safety", "examples/frame_scratch_cycle"]
-negative = ["conformance/check_parity_fixtures/parse_error.arc"]
+negative = [
+    "conformance/check_parity_fixtures/parse_error.arc",
+    "conformance/check_parity_packages/undeclared_lifetime",
+]
 
 [[feature]]
 id = "defer_and_qmark"

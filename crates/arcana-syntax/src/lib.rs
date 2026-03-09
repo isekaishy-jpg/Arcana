@@ -431,6 +431,7 @@ pub struct ImplAssocTypeBinding {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ImplDecl {
+    pub type_params: Vec<String>,
     pub trait_path: Option<String>,
     pub target_type: String,
     pub assoc_types: Vec<ImplAssocTypeBinding>,
@@ -1198,6 +1199,7 @@ fn parse_impl_decl(entry: &RawBlockEntry) -> Result<Option<ImplDecl>, String> {
         return Ok(None);
     };
     rest = rest.trim_start();
+    let mut type_params = Vec::new();
     if rest.starts_with('[') {
         let close_idx = find_matching_delim(rest, 0, '[', ']').ok_or_else(|| {
             format!(
@@ -1205,6 +1207,13 @@ fn parse_impl_decl(entry: &RawBlockEntry) -> Result<Option<ImplDecl>, String> {
                 entry.span.line, entry.span.column
             )
         })?;
+        type_params.extend(
+            split_top_level(&rest[1..close_idx], ',')
+                .into_iter()
+                .map(str::trim)
+                .filter(|part| !part.is_empty())
+                .map(str::to_string),
+        );
         rest = rest[close_idx + 1..].trim_start();
     }
     if rest.is_empty() {
@@ -1293,6 +1302,7 @@ fn parse_impl_decl(entry: &RawBlockEntry) -> Result<Option<ImplDecl>, String> {
     let mut surface_lines = vec![entry.text.clone()];
     surface_lines.extend(body_entries.iter().cloned());
     Ok(Some(ImplDecl {
+        type_params,
         trait_path,
         target_type,
         assoc_types,
@@ -4061,7 +4071,7 @@ mod tests {
     #[test]
     fn parse_module_collects_async_functions_and_impls() {
         let parsed = parse_module(
-            "async fn worker[T, where std.iter.Iterator[T]](read it: T, count: Int) -> Int:\n    return count\nbehavior[phase=update, affinity=worker] fn tick():\n    return 0\nimpl std.iter.Iterator[T] for RangeIter:\n    type Item = Int\n    fn next(edit self: RangeIter) -> (Bool, Int):\n        return (false, 0)\n",
+            "async fn worker[T, where std.iter.Iterator[T]](read it: T, count: Int) -> Int:\n    return count\nbehavior[phase=update, affinity=worker] fn tick():\n    return 0\nimpl[T] std.iter.Iterator[T] for RangeIter:\n    type Item = Int\n    fn next(edit self: RangeIter) -> (Bool, Int):\n        return (false, 0)\n",
         )
         .expect("parse should pass");
 
@@ -4093,6 +4103,7 @@ mod tests {
             impl_decl.trait_path,
             Some("std.iter.Iterator[T]".to_string())
         );
+        assert_eq!(impl_decl.type_params, vec!["T".to_string()]);
         assert_eq!(impl_decl.target_type, "RangeIter");
         assert_eq!(impl_decl.body_entries.len(), 2);
         assert!(impl_decl.body_entries[0].starts_with("type Item"));

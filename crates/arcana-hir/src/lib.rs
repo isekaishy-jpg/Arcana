@@ -425,6 +425,7 @@ pub enum HirSymbolBody {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HirImplDecl {
+    pub type_params: Vec<String>,
     pub trait_path: Option<String>,
     pub target_type: String,
     pub assoc_types: Vec<HirImplAssocTypeBinding>,
@@ -782,6 +783,7 @@ pub fn lower_parsed_module(
             .impls
             .iter()
             .map(|impl_decl| HirImplDecl {
+                type_params: impl_decl.type_params.clone(),
                 trait_path: impl_decl.trait_path.clone(),
                 target_type: impl_decl.target_type.clone(),
                 assoc_types: impl_decl
@@ -1816,7 +1818,7 @@ mod tests {
     fn lower_module_text_captures_async_functions_and_impls() {
         let module = lower_module_text(
             "async_demo",
-            "export async fn worker[T, where std.iter.Iterator[T]](read it: T, count: Int) -> Int:\n    return count\nbehavior[phase=update, affinity=worker] fn tick():\n    return 0\nimpl RangeIter:\n    fn next(edit self: RangeIter) -> (Bool, Int):\n        return (false, 0)\n",
+            "export async fn worker[T, where std.iter.Iterator[T]](read it: T, count: Int) -> Int:\n    return count\nbehavior[phase=update, affinity=worker] fn tick():\n    return 0\nimpl[T] std.iter.Iterator[T] for RangeIter:\n    fn next(edit self: RangeIter) -> (Bool, Int):\n        return (false, 0)\n",
         )
         .expect("lowering should pass");
 
@@ -1840,6 +1842,11 @@ mod tests {
             vec!["export:fn:async fn worker[T, where std.iter.Iterator[T]](read it: T, count: Int) -> Int:".to_string()]
         );
         assert_eq!(module.impls.len(), 1);
+        assert_eq!(module.impls[0].type_params, vec!["T".to_string()]);
+        assert_eq!(
+            module.impls[0].trait_path,
+            Some("std.iter.Iterator[T]".to_string())
+        );
         assert_eq!(module.impls[0].target_type, "RangeIter");
         assert_eq!(module.impls[0].methods.len(), 1);
         assert_eq!(module.impls[0].methods[0].name, "next");
