@@ -26,7 +26,7 @@ Completed foundation work:
 - frontend semantic validation now includes unresolved `lang` item targets after workspace resolution
 - impl header generic/lifetime params now survive syntax/HIR lowering instead of being discarded
 - frontend semantic validation now includes declaration-surface type and lifetime resolution for params, returns, fields, enum payloads, trait defaults, impl headers, and inherited trait/impl method scopes
-- frontend semantic validation now includes conservative body-level value resolution for locals, chain steps, memory constructors, rollup handlers, package/module-qualified value roots, and expression generic-argument type references over the imported selfhost corpus
+- frontend semantic validation now includes conservative body-level value resolution for locals, namespace-qualified member chains, enum variant constructors, module impl-method paths, chain steps, memory constructors, rollup handlers, package/module-qualified value roots, and expression generic-argument type references over the imported selfhost corpus
 
 ## Next Milestones
 

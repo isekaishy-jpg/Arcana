@@ -860,16 +860,40 @@ fn validate_assign_target_semantics(
             "assignment target",
             diagnostics,
         ),
-        HirAssignTarget::MemberAccess { target, .. } => validate_assign_target_semantics(
-            workspace,
-            resolved_module,
-            module_path,
-            type_scope,
-            scope,
-            target,
-            span,
-            diagnostics,
-        ),
+        target @ HirAssignTarget::MemberAccess {
+            target: inner_target, ..
+        } => {
+            if let Some(path) = flatten_assign_target_path(target) {
+                if should_resolve_member_path_as_namespace(
+                    workspace,
+                    resolved_module,
+                    scope,
+                    &path,
+                ) {
+                    validate_value_path_segments(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        scope,
+                        &path,
+                        span,
+                        "assignment target",
+                        diagnostics,
+                    );
+                    return;
+                }
+            }
+            validate_assign_target_semantics(
+                workspace,
+                resolved_module,
+                module_path,
+                type_scope,
+                scope,
+                inner_target,
+                span,
+                diagnostics,
+            );
+        }
         HirAssignTarget::Index { target, index } => {
                 validate_assign_target_semantics(
                     workspace,
@@ -1157,16 +1181,38 @@ fn validate_expr_semantics(
                 diagnostics,
             );
         }
-        HirExpr::MemberAccess { expr, .. } => validate_expr_semantics(
-            workspace,
-            resolved_module,
-            module_path,
-            type_scope,
-            scope,
-            expr,
-            span,
-            diagnostics,
-        ),
+        member_expr @ HirExpr::MemberAccess { expr, .. } => {
+            if let Some(path) = flatten_member_expr_path(member_expr) {
+                if should_resolve_member_path_as_namespace(
+                    workspace,
+                    resolved_module,
+                    scope,
+                    &path,
+                ) {
+                    validate_value_path_segments(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        scope,
+                        &path,
+                        span,
+                        "value expression",
+                        diagnostics,
+                    );
+                    return;
+                }
+            }
+            validate_expr_semantics(
+                workspace,
+                resolved_module,
+                module_path,
+                type_scope,
+                scope,
+                expr,
+                span,
+                diagnostics,
+            );
+        }
         HirExpr::Index { expr, index } => {
             validate_expr_semantics(
                 workspace,
@@ -1393,7 +1439,9 @@ fn value_path_exists(
         return false;
     }
     if let Some(binding) = resolved_module.bindings.get(&path[0]) {
-        return target_path_exists(workspace, &binding.target, &path[1..]);
+        if target_path_exists(workspace, &binding.target, &path[1..]) {
+            return true;
+        }
     }
     let Some(package) = workspace.package(&path[0]) else {
         let Some(package_name) = resolved_module.module_id.split('.').next() else {
@@ -1413,7 +1461,26 @@ fn target_path_exists(
     tail: &[String],
 ) -> bool {
     match target {
-        HirResolvedTarget::Symbol { .. } => tail.is_empty(),
+        HirResolvedTarget::Symbol {
+            package_name,
+            module_id,
+            symbol_name,
+        } => {
+            let Some(package) = workspace.package(package_name) else {
+                return false;
+            };
+            let Some(module) = package.module(module_id) else {
+                return false;
+            };
+            let Some(symbol) = module
+                .symbols
+                .iter()
+                .find(|symbol| symbol.name == *symbol_name)
+            else {
+                return false;
+            };
+            symbol_tail_exists(symbol, tail)
+        }
         HirResolvedTarget::Module {
             package_name,
             module_id,
@@ -1433,25 +1500,10 @@ fn package_path_exists(package: &HirWorkspacePackage, path: &[String]) -> bool {
     if path.is_empty() {
         return true;
     }
-    if package.resolve_relative_module(path).is_some() {
-        return true;
-    }
-    let Some((symbol_name, module_path)) = path.split_last() else {
+    let Some(module) = package.module(&package.summary.package_name) else {
         return false;
     };
-    let module = if module_path.is_empty() {
-        package.module(&package.summary.package_name)
-    } else {
-        package.resolve_relative_module(module_path)
-    };
-    module
-        .map(|module| {
-            module
-                .symbols
-                .iter()
-                .any(|symbol| symbol.name == *symbol_name)
-        })
-        .unwrap_or(false)
+    module_path_exists(package, module, path)
 }
 
 fn module_path_exists(
@@ -1462,7 +1514,7 @@ fn module_path_exists(
     if path.is_empty() {
         return true;
     }
-    if path.len() == 1 && module.symbols.iter().any(|symbol| symbol.name == path[0]) {
+    if module_value_member_exists(module, &path[0], &path[1..]) {
         return true;
     }
     let base_relative = module
@@ -1476,25 +1528,130 @@ fn module_path_exists(
     if package.resolve_relative_module(&module_candidate).is_some() {
         return true;
     }
+    for split_index in 1..path.len() {
+        let mut symbol_module_path = base_relative.clone();
+        symbol_module_path.extend_from_slice(&path[..split_index]);
+        let Some(target_module) = package.resolve_relative_module(&symbol_module_path) else {
+            continue;
+        };
+        if module_value_member_exists(
+            target_module,
+            &path[split_index],
+            &path[split_index + 1..],
+        ) {
+            return true;
+        }
+    }
+    false
+}
 
-    let Some((symbol_name, module_tail)) = path.split_last() else {
+fn module_value_member_exists(module: &HirModuleSummary, member: &str, tail: &[String]) -> bool {
+    if let Some(symbol) = module.symbols.iter().find(|symbol| symbol.name == member) {
+        if symbol_tail_exists(symbol, tail) {
+            return true;
+        }
+    }
+    tail.is_empty()
+        && module
+            .impls
+            .iter()
+            .flat_map(|impl_decl| impl_decl.methods.iter())
+            .any(|method| method.name == member)
+}
+
+fn symbol_tail_exists(symbol: &HirSymbol, tail: &[String]) -> bool {
+    if tail.is_empty() {
+        return true;
+    }
+    match &symbol.body {
+        HirSymbolBody::Enum { variants } => {
+            tail.len() == 1 && variants.iter().any(|variant| variant.name == tail[0])
+        }
+        _ => false,
+    }
+}
+
+fn should_resolve_member_path_as_namespace(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    scope: &ValueScope,
+    path: &[String],
+) -> bool {
+    if path.len() < 2 || scope.contains(&path[0]) {
+        return false;
+    }
+    if let Some(binding) = resolved_module.bindings.get(&path[0]) {
+        return match &binding.target {
+            HirResolvedTarget::Module { .. } => true,
+            HirResolvedTarget::Symbol { .. } => target_supports_member_namespace(
+                workspace,
+                &binding.target,
+            ),
+        };
+    }
+    if workspace.package(&path[0]).is_some() {
+        return true;
+    }
+    let Some(package_name) = resolved_module.module_id.split('.').next() else {
         return false;
     };
-    let mut symbol_module_path = base_relative;
-    symbol_module_path.extend_from_slice(module_tail);
-    let target_module = if module_tail.is_empty() {
-        Some(module)
-    } else {
-        package.resolve_relative_module(&symbol_module_path)
+    let Some(package) = workspace.package(package_name) else {
+        return false;
     };
-    target_module
-        .map(|module| {
-            module
-                .symbols
-                .iter()
-                .any(|symbol| symbol.name == *symbol_name)
-        })
-        .unwrap_or(false)
+    package
+        .resolve_relative_module(&[path[0].clone()])
+        .is_some()
+}
+
+fn target_supports_member_namespace(
+    workspace: &HirWorkspaceSummary,
+    target: &HirResolvedTarget,
+) -> bool {
+    match target {
+        HirResolvedTarget::Module { .. } => true,
+        HirResolvedTarget::Symbol {
+            package_name,
+            module_id,
+            symbol_name,
+        } => workspace
+            .package(package_name)
+            .and_then(|package| package.module(module_id))
+            .and_then(|module| module.symbols.iter().find(|symbol| symbol.name == *symbol_name))
+            .map(|symbol| matches!(symbol.body, HirSymbolBody::Enum { .. }))
+            .unwrap_or(false),
+    }
+}
+
+fn flatten_member_expr_path(expr: &HirExpr) -> Option<Vec<String>> {
+    match expr {
+        HirExpr::Path { segments } => Some(segments.clone()),
+        HirExpr::MemberAccess { expr, member } if is_identifier_text(member) => {
+            let mut path = flatten_member_expr_path(expr)?;
+            path.push(member.clone());
+            Some(path)
+        }
+        _ => None,
+    }
+}
+
+fn flatten_assign_target_path(target: &HirAssignTarget) -> Option<Vec<String>> {
+    match target {
+        HirAssignTarget::Name { text } => Some(vec![text.clone()]),
+        HirAssignTarget::MemberAccess { target, member } if is_identifier_text(member) => {
+            let mut path = flatten_assign_target_path(target)?;
+            path.push(member.clone());
+            Some(path)
+        }
+        _ => None,
+    }
+}
+
+fn is_identifier_text(text: &str) -> bool {
+    let mut chars = text.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    is_ident_start(first) && chars.all(is_ident_continue)
 }
 
 fn validate_type_surface_text(
@@ -2133,6 +2290,10 @@ mod tests {
                 "unresolved value reference `missing` in value expression",
             ),
             (
+                "unresolved_namespace_member_ref",
+                "unresolved value reference `std.kernel.text.missing` in value expression",
+            ),
+            (
                 "unresolved_expr_type_arg",
                 "unresolved type reference `Missing` in expression generic argument `Missing`",
             ),
@@ -2149,6 +2310,36 @@ mod tests {
                 .expect_err("unresolved body semantic package should fail");
             assert!(err.contains(expected), "{package}: {err}");
         }
+    }
+
+    #[test]
+    fn check_path_handles_local_member_field_access() {
+        let root = make_temp_package(
+            "local_member_access",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    "record Box:\n    value: Int\nfn main() -> Int:\n    let item = Box :: value = 1 :: call\n    return item.value\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let summary = check_path(&root).expect("local member access should check");
+        assert_eq!(summary.package_count, 1);
+        assert_eq!(summary.module_count, 2);
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_handles_enum_variant_constructor_example() {
+        let summary = check_path(&repo_root().join("examples").join("result_qmark"))
+            .expect("enum variant constructors should resolve");
+        assert_eq!(summary.package_count, 2);
+        assert!(summary.module_count >= 3);
     }
 
     #[test]
