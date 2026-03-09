@@ -150,14 +150,69 @@ pub enum HirMatchPattern {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HirPhraseArg {
+    Positional(HirExpr),
+    Named { name: String, value: HirExpr },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HirUnaryOp {
+    Neg,
+    Not,
+    BitNot,
+    Weave,
+    Split,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HirBinaryOp {
+    Or,
+    And,
+    EqEq,
+    NotEq,
+    Lt,
+    LtEq,
+    Gt,
+    GtEq,
+    BitOr,
+    BitXor,
+    BitAnd,
+    Shl,
+    Shr,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HirExpr {
     Opaque {
         text: String,
         attached: Vec<HirRawBlockEntry>,
     },
     Match {
-        subject: String,
+        subject: Box<HirExpr>,
         arms: Vec<HirMatchArm>,
+    },
+    QualifiedPhrase {
+        subject: Box<HirExpr>,
+        args: Vec<HirPhraseArg>,
+        qualifier: String,
+        attached: Vec<HirRawBlockEntry>,
+    },
+    Await {
+        expr: Box<HirExpr>,
+    },
+    Unary {
+        op: HirUnaryOp,
+        expr: Box<HirExpr>,
+    },
+    Binary {
+        left: Box<HirExpr>,
+        op: HirBinaryOp,
+        right: Box<HirExpr>,
     },
 }
 
@@ -217,6 +272,9 @@ pub enum HirStatementKind {
         binding: String,
         iterable: HirExpr,
         body: Vec<HirStatement>,
+    },
+    Defer {
+        expr: HirExpr,
     },
     Break,
     Continue,
@@ -1329,7 +1387,7 @@ fn lower_expr(expr: &ParsedExpr) -> HirExpr {
             attached: lower_raw_block_entries(attached),
         },
         ParsedExpr::Match { subject, arms } => HirExpr::Match {
-            subject: subject.clone(),
+            subject: Box::new(lower_expr(subject)),
             arms: arms
                 .iter()
                 .map(|arm| HirMatchArm {
@@ -1338,6 +1396,29 @@ fn lower_expr(expr: &ParsedExpr) -> HirExpr {
                     span: arm.span,
                 })
                 .collect(),
+        },
+        ParsedExpr::QualifiedPhrase {
+            subject,
+            args,
+            qualifier,
+            attached,
+        } => HirExpr::QualifiedPhrase {
+            subject: Box::new(lower_expr(subject)),
+            args: args.iter().map(lower_phrase_arg).collect(),
+            qualifier: qualifier.clone(),
+            attached: lower_raw_block_entries(attached),
+        },
+        ParsedExpr::Await { expr } => HirExpr::Await {
+            expr: Box::new(lower_expr(expr)),
+        },
+        ParsedExpr::Unary { op, expr } => HirExpr::Unary {
+            op: lower_unary_op(op),
+            expr: Box::new(lower_expr(expr)),
+        },
+        ParsedExpr::Binary { left, op, right } => HirExpr::Binary {
+            left: Box::new(lower_expr(left)),
+            op: lower_binary_op(op),
+            right: Box::new(lower_expr(right)),
         },
     }
 }
@@ -1356,6 +1437,49 @@ fn lower_match_pattern(pattern: &arcana_syntax::MatchPattern) -> HirMatchPattern
         arcana_syntax::MatchPattern::Opaque { text } => {
             HirMatchPattern::Opaque { text: text.clone() }
         }
+    }
+}
+
+fn lower_phrase_arg(arg: &arcana_syntax::PhraseArg) -> HirPhraseArg {
+    match arg {
+        arcana_syntax::PhraseArg::Positional(expr) => HirPhraseArg::Positional(lower_expr(expr)),
+        arcana_syntax::PhraseArg::Named { name, value } => HirPhraseArg::Named {
+            name: name.clone(),
+            value: lower_expr(value),
+        },
+    }
+}
+
+fn lower_unary_op(op: &arcana_syntax::UnaryOp) -> HirUnaryOp {
+    match op {
+        arcana_syntax::UnaryOp::Neg => HirUnaryOp::Neg,
+        arcana_syntax::UnaryOp::Not => HirUnaryOp::Not,
+        arcana_syntax::UnaryOp::BitNot => HirUnaryOp::BitNot,
+        arcana_syntax::UnaryOp::Weave => HirUnaryOp::Weave,
+        arcana_syntax::UnaryOp::Split => HirUnaryOp::Split,
+    }
+}
+
+fn lower_binary_op(op: &arcana_syntax::BinaryOp) -> HirBinaryOp {
+    match op {
+        arcana_syntax::BinaryOp::Or => HirBinaryOp::Or,
+        arcana_syntax::BinaryOp::And => HirBinaryOp::And,
+        arcana_syntax::BinaryOp::EqEq => HirBinaryOp::EqEq,
+        arcana_syntax::BinaryOp::NotEq => HirBinaryOp::NotEq,
+        arcana_syntax::BinaryOp::Lt => HirBinaryOp::Lt,
+        arcana_syntax::BinaryOp::LtEq => HirBinaryOp::LtEq,
+        arcana_syntax::BinaryOp::Gt => HirBinaryOp::Gt,
+        arcana_syntax::BinaryOp::GtEq => HirBinaryOp::GtEq,
+        arcana_syntax::BinaryOp::BitOr => HirBinaryOp::BitOr,
+        arcana_syntax::BinaryOp::BitXor => HirBinaryOp::BitXor,
+        arcana_syntax::BinaryOp::BitAnd => HirBinaryOp::BitAnd,
+        arcana_syntax::BinaryOp::Shl => HirBinaryOp::Shl,
+        arcana_syntax::BinaryOp::Shr => HirBinaryOp::Shr,
+        arcana_syntax::BinaryOp::Add => HirBinaryOp::Add,
+        arcana_syntax::BinaryOp::Sub => HirBinaryOp::Sub,
+        arcana_syntax::BinaryOp::Mul => HirBinaryOp::Mul,
+        arcana_syntax::BinaryOp::Div => HirBinaryOp::Div,
+        arcana_syntax::BinaryOp::Mod => HirBinaryOp::Mod,
     }
 }
 
@@ -1400,6 +1524,9 @@ fn lower_statement(statement: &arcana_syntax::Statement) -> HirStatement {
                 iterable: lower_expr(iterable),
                 body: lower_statements(body),
             },
+            ParsedStatementKind::Defer { expr } => HirStatementKind::Defer {
+                expr: lower_expr(expr),
+            },
             ParsedStatementKind::Break => HirStatementKind::Break,
             ParsedStatementKind::Continue => HirStatementKind::Continue,
             ParsedStatementKind::Assign { target, op, value } => HirStatementKind::Assign {
@@ -1422,9 +1549,10 @@ mod tests {
 
     use super::freeze::FROZEN_HIR_NODE_KINDS;
     use super::{
-        HirAssignOp, HirDirectiveKind, HirExpr, HirMatchPattern, HirStatementKind, HirSymbolBody,
-        build_package_layout, build_package_summary, build_workspace_package,
-        build_workspace_summary, derive_source_module_path, lower_module_text, resolve_workspace,
+        HirAssignOp, HirBinaryOp, HirDirectiveKind, HirExpr, HirMatchPattern, HirPhraseArg,
+        HirStatementKind, HirSymbolBody, HirUnaryOp, build_package_layout, build_package_summary,
+        build_workspace_package, build_workspace_summary, derive_source_module_path,
+        lower_module_text, resolve_workspace,
     };
 
     #[test]
@@ -1522,11 +1650,21 @@ mod tests {
         }
         match &statements[1].kind {
             HirStatementKind::While { condition, body } => {
-                assert!(matches!(
-                    condition,
-                    HirExpr::Opaque { text, attached }
-                        if text == "frames < 10" && attached.is_empty()
-                ));
+                match condition {
+                    HirExpr::Binary { left, op, right } => {
+                        assert_eq!(*op, HirBinaryOp::Lt);
+                        assert!(matches!(
+                            left.as_ref(),
+                            HirExpr::Opaque { text, attached }
+                                if text == "frames" && attached.is_empty()
+                        ));
+                        assert!(matches!(
+                            right.as_ref(),
+                            HirExpr::Opaque { text, attached } if text == "10" && attached.is_empty()
+                        ));
+                    }
+                    other => panic!("expected binary while condition, got {other:?}"),
+                }
                 assert_eq!(body.len(), 1);
                 match &body[0].kind {
                     HirStatementKind::If {
@@ -1534,11 +1672,35 @@ mod tests {
                         then_branch,
                         else_branch,
                     } => {
-                        assert!(matches!(
-                            condition,
-                            HirExpr::Opaque { text, attached }
-                                if text == "frames % 2 == 0" && attached.is_empty()
-                        ));
+                        match condition {
+                            HirExpr::Binary { left, op, right } => {
+                                assert_eq!(*op, HirBinaryOp::EqEq);
+                                match left.as_ref() {
+                                    HirExpr::Binary { left, op, right } => {
+                                        assert_eq!(*op, HirBinaryOp::Mod);
+                                        assert!(matches!(
+                                            left.as_ref(),
+                                            HirExpr::Opaque { text, attached }
+                                                if text == "frames" && attached.is_empty()
+                                        ));
+                                        assert!(matches!(
+                                            right.as_ref(),
+                                            HirExpr::Opaque { text, attached }
+                                                if text == "2" && attached.is_empty()
+                                        ));
+                                    }
+                                    other => panic!(
+                                        "expected modulo expression in if condition, got {other:?}"
+                                    ),
+                                }
+                                assert!(matches!(
+                                    right.as_ref(),
+                                    HirExpr::Opaque { text, attached }
+                                        if text == "0" && attached.is_empty()
+                                ));
+                            }
+                            other => panic!("expected equality if condition, got {other:?}"),
+                        }
                         assert_eq!(then_branch.len(), 1);
                         match &then_branch[0].kind {
                             HirStatementKind::Assign { target, op, value } => {
@@ -1564,7 +1726,11 @@ mod tests {
             HirStatementKind::Return { value } => {
                 match value.as_ref().expect("return should carry a value") {
                     HirExpr::Match { subject, arms } => {
-                        assert_eq!(subject, "frames");
+                        assert!(matches!(
+                            subject.as_ref(),
+                            HirExpr::Opaque { text, attached }
+                                if text == "frames" && attached.is_empty()
+                        ));
                         assert_eq!(arms.len(), 2);
                         assert_eq!(
                             arms[0].patterns,
@@ -1598,7 +1764,10 @@ mod tests {
             HirStatementKind::Return { value } => {
                 match value.as_ref().expect("match return expected") {
                     HirExpr::Match { subject, arms } => {
-                        assert_eq!(subject, "t");
+                        assert!(matches!(
+                            subject.as_ref(),
+                            HirExpr::Opaque { text, attached } if text == "t" && attached.is_empty()
+                        ));
                         assert_eq!(
                             arms[0].patterns,
                             vec![
@@ -1631,7 +1800,10 @@ mod tests {
                 assert_eq!(name, "v");
                 match value {
                     HirExpr::Match { subject, arms } => {
-                        assert_eq!(subject, "out");
+                        assert!(matches!(
+                            subject.as_ref(),
+                            HirExpr::Opaque { text, attached } if text == "out" && attached.is_empty()
+                        ));
                         assert_eq!(arms.len(), 2);
                         assert_eq!(
                             arms[0].patterns,
@@ -1692,6 +1864,198 @@ mod tests {
                     .to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn lower_module_text_captures_structured_phrases_and_operators() {
+        let module = lower_module_text(
+            "expr_demo",
+            "fn main() -> Int:\n    defer io.print[Str] :: \"bye\" :: call\n    let task = weave worker :: 41 :: call\n    let ready = task >> await\n    let ok = not false and ((1 + 2) << 3) >= 8\n    let cfg = winspell.loop.FrameConfig :: clear = 0 :: call\n    let printed = io.print[Int] :: ready, ok :: call\n    return printed\n",
+        )
+        .expect("lowering should pass");
+
+        let statements = &module.symbols[0].statements;
+        assert_eq!(statements.len(), 7);
+
+        match &statements[0].kind {
+            HirStatementKind::Defer { expr } => match expr {
+                HirExpr::QualifiedPhrase {
+                    subject,
+                    args,
+                    qualifier,
+                    attached,
+                } => {
+                    assert_eq!(qualifier, "call");
+                    assert!(attached.is_empty());
+                    assert!(matches!(
+                        subject.as_ref(),
+                        HirExpr::Opaque { text, attached }
+                            if text == "io.print[Str]" && attached.is_empty()
+                    ));
+                    assert_eq!(args.len(), 1);
+                    assert!(matches!(
+                        &args[0],
+                        HirPhraseArg::Positional(HirExpr::Opaque { text, attached })
+                            if text == "\"bye\"" && attached.is_empty()
+                    ));
+                }
+                other => panic!("expected defer phrase expression, got {other:?}"),
+            },
+            other => panic!("expected defer statement, got {other:?}"),
+        }
+
+        match &statements[1].kind {
+            HirStatementKind::Let { name, value, .. } => {
+                assert_eq!(name, "task");
+                match value {
+                    HirExpr::Unary { op, expr } => {
+                        assert_eq!(*op, HirUnaryOp::Weave);
+                        assert!(matches!(
+                            expr.as_ref(),
+                            HirExpr::QualifiedPhrase { qualifier, .. } if qualifier == "call"
+                        ));
+                    }
+                    other => panic!("expected weave unary expression, got {other:?}"),
+                }
+            }
+            other => panic!("expected let task statement, got {other:?}"),
+        }
+
+        match &statements[2].kind {
+            HirStatementKind::Let { name, value, .. } => {
+                assert_eq!(name, "ready");
+                match value {
+                    HirExpr::Await { expr } => {
+                        assert!(matches!(
+                            expr.as_ref(),
+                            HirExpr::Opaque { text, attached } if text == "task" && attached.is_empty()
+                        ));
+                    }
+                    other => panic!("expected await expression, got {other:?}"),
+                }
+            }
+            other => panic!("expected let ready statement, got {other:?}"),
+        }
+
+        match &statements[3].kind {
+            HirStatementKind::Let { name, value, .. } => {
+                assert_eq!(name, "ok");
+                match value {
+                    HirExpr::Binary { left, op, right } => {
+                        assert_eq!(*op, HirBinaryOp::And);
+                        assert!(matches!(
+                            left.as_ref(),
+                            HirExpr::Unary {
+                                op: HirUnaryOp::Not,
+                                ..
+                            }
+                        ));
+                        match right.as_ref() {
+                            HirExpr::Binary { left, op, right } => {
+                                assert_eq!(*op, HirBinaryOp::GtEq);
+                                match left.as_ref() {
+                                    HirExpr::Binary { left, op, right } => {
+                                        assert_eq!(*op, HirBinaryOp::Shl);
+                                        match left.as_ref() {
+                                            HirExpr::Binary { op, .. } => {
+                                                assert_eq!(*op, HirBinaryOp::Add);
+                                            }
+                                            other => panic!(
+                                                "expected additive lhs in shift expression, got {other:?}"
+                                            ),
+                                        }
+                                        assert!(matches!(
+                                            right.as_ref(),
+                                            HirExpr::Opaque { text, attached }
+                                                if text == "3" && attached.is_empty()
+                                        ));
+                                    }
+                                    other => panic!(
+                                        "expected shift expression in comparison lhs, got {other:?}"
+                                    ),
+                                }
+                                assert!(matches!(
+                                    right.as_ref(),
+                                    HirExpr::Opaque { text, attached }
+                                        if text == "8" && attached.is_empty()
+                                ));
+                            }
+                            other => panic!(
+                                "expected comparison expression on rhs of logical and, got {other:?}"
+                            ),
+                        }
+                    }
+                    other => panic!("expected structured boolean expression, got {other:?}"),
+                }
+            }
+            other => panic!("expected let ok statement, got {other:?}"),
+        }
+
+        match &statements[4].kind {
+            HirStatementKind::Let { name, value, .. } => {
+                assert_eq!(name, "cfg");
+                match value {
+                    HirExpr::QualifiedPhrase {
+                        subject,
+                        args,
+                        qualifier,
+                        attached,
+                    } => {
+                        assert_eq!(qualifier, "call");
+                        assert!(attached.is_empty());
+                        assert!(matches!(
+                            subject.as_ref(),
+                            HirExpr::Opaque { text, attached }
+                                if text == "winspell.loop.FrameConfig" && attached.is_empty()
+                        ));
+                        assert_eq!(args.len(), 1);
+                        assert!(matches!(
+                            &args[0],
+                            HirPhraseArg::Named { name, value: HirExpr::Opaque { text, attached } }
+                                if name == "clear" && text == "0" && attached.is_empty()
+                        ));
+                    }
+                    other => panic!("expected named-arg phrase, got {other:?}"),
+                }
+            }
+            other => panic!("expected let cfg statement, got {other:?}"),
+        }
+
+        match &statements[5].kind {
+            HirStatementKind::Let { name, value, .. } => {
+                assert_eq!(name, "printed");
+                match value {
+                    HirExpr::QualifiedPhrase {
+                        subject,
+                        args,
+                        qualifier,
+                        attached,
+                    } => {
+                        assert_eq!(qualifier, "call");
+                        assert!(attached.is_empty());
+                        assert!(matches!(
+                            subject.as_ref(),
+                            HirExpr::Opaque { text, attached }
+                                if text == "io.print[Int]" && attached.is_empty()
+                        ));
+                        assert_eq!(args.len(), 2);
+                    }
+                    other => panic!("expected print phrase, got {other:?}"),
+                }
+            }
+            other => panic!("expected let printed statement, got {other:?}"),
+        }
+
+        match &statements[6].kind {
+            HirStatementKind::Return { value } => {
+                assert!(matches!(
+                    value.as_ref().expect("return should have value"),
+                    HirExpr::Opaque { text, attached }
+                        if text == "printed" && attached.is_empty()
+                ));
+            }
+            other => panic!("expected return statement, got {other:?}"),
+        }
     }
 
     #[test]

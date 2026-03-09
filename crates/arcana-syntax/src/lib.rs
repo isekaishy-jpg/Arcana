@@ -144,14 +144,69 @@ pub enum MatchPattern {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PhraseArg {
+    Positional(Expr),
+    Named { name: String, value: Expr },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnaryOp {
+    Neg,
+    Not,
+    BitNot,
+    Weave,
+    Split,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BinaryOp {
+    Or,
+    And,
+    EqEq,
+    NotEq,
+    Lt,
+    LtEq,
+    Gt,
+    GtEq,
+    BitOr,
+    BitXor,
+    BitAnd,
+    Shl,
+    Shr,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Expr {
     Opaque {
         text: String,
         attached: Vec<RawBlockEntry>,
     },
     Match {
-        subject: String,
+        subject: Box<Expr>,
         arms: Vec<MatchArm>,
+    },
+    QualifiedPhrase {
+        subject: Box<Expr>,
+        args: Vec<PhraseArg>,
+        qualifier: String,
+        attached: Vec<RawBlockEntry>,
+    },
+    Await {
+        expr: Box<Expr>,
+    },
+    Unary {
+        op: UnaryOp,
+        expr: Box<Expr>,
+    },
+    Binary {
+        left: Box<Expr>,
+        op: BinaryOp,
+        right: Box<Expr>,
     },
 }
 
@@ -211,6 +266,9 @@ pub enum StatementKind {
         binding: String,
         iterable: Expr,
         body: Vec<Statement>,
+    },
+    Defer {
+        expr: Expr,
     },
     Break,
     Continue,
@@ -1013,6 +1071,15 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
         });
     }
 
+    if let Some(rest) = entry.text.strip_prefix("defer ") {
+        return Ok(Statement {
+            kind: StatementKind::Defer {
+                expr: parse_expression(rest, &entry.children, entry.span)?,
+            },
+            span: entry.span,
+        });
+    }
+
     if entry.text == "break" {
         if loop_depth == 0 {
             return Err(format!(
@@ -1069,10 +1136,517 @@ fn parse_expression(text: &str, attached: &[RawBlockEntry], span: Span) -> Resul
     if let Some(rest) = trimmed.strip_prefix("match ") {
         return parse_match_expression(rest, attached, span);
     }
+
+    let expr = parse_expression_core(trimmed)?;
+    if attached.is_empty() {
+        return Ok(expr);
+    }
+
+    match expr {
+        Expr::QualifiedPhrase {
+            subject,
+            args,
+            qualifier,
+            ..
+        } => Ok(Expr::QualifiedPhrase {
+            subject,
+            args,
+            qualifier,
+            attached: attached.to_vec(),
+        }),
+        _ => Ok(Expr::Opaque {
+            text: trimmed.to_string(),
+            attached: attached.to_vec(),
+        }),
+    }
+}
+
+fn parse_expression_core(text: &str) -> Result<Expr, String> {
+    let trimmed = text.trim();
+    if let Some(inner) = strip_group_parens(trimmed) {
+        return parse_expression_core(inner);
+    }
+    parse_logical_or_expression(trimmed)
+}
+
+#[derive(Clone, Copy)]
+struct BinaryOpSpec {
+    token: &'static str,
+    op: BinaryOp,
+    keyword: bool,
+}
+
+impl BinaryOpSpec {
+    const fn keyword(token: &'static str, op: BinaryOp) -> Self {
+        Self {
+            token,
+            op,
+            keyword: true,
+        }
+    }
+
+    const fn symbol(token: &'static str, op: BinaryOp) -> Self {
+        Self {
+            token,
+            op,
+            keyword: false,
+        }
+    }
+}
+
+fn parse_logical_or_expression(text: &str) -> Result<Expr, String> {
+    parse_binary_layer(
+        text,
+        parse_logical_and_expression,
+        &[BinaryOpSpec::keyword("or", BinaryOp::Or)],
+    )
+}
+
+fn parse_logical_and_expression(text: &str) -> Result<Expr, String> {
+    parse_binary_layer(
+        text,
+        parse_equality_expression,
+        &[BinaryOpSpec::keyword("and", BinaryOp::And)],
+    )
+}
+
+fn parse_equality_expression(text: &str) -> Result<Expr, String> {
+    parse_binary_layer(
+        text,
+        parse_comparison_expression,
+        &[
+            BinaryOpSpec::symbol("==", BinaryOp::EqEq),
+            BinaryOpSpec::symbol("!=", BinaryOp::NotEq),
+        ],
+    )
+}
+
+fn parse_comparison_expression(text: &str) -> Result<Expr, String> {
+    parse_binary_layer(
+        text,
+        parse_bit_or_expression,
+        &[
+            BinaryOpSpec::symbol("<=", BinaryOp::LtEq),
+            BinaryOpSpec::symbol(">=", BinaryOp::GtEq),
+            BinaryOpSpec::symbol("<", BinaryOp::Lt),
+            BinaryOpSpec::symbol(">", BinaryOp::Gt),
+        ],
+    )
+}
+
+fn parse_bit_or_expression(text: &str) -> Result<Expr, String> {
+    parse_binary_layer(
+        text,
+        parse_bit_xor_expression,
+        &[BinaryOpSpec::symbol("|", BinaryOp::BitOr)],
+    )
+}
+
+fn parse_bit_xor_expression(text: &str) -> Result<Expr, String> {
+    parse_binary_layer(
+        text,
+        parse_bit_and_expression,
+        &[BinaryOpSpec::symbol("^", BinaryOp::BitXor)],
+    )
+}
+
+fn parse_bit_and_expression(text: &str) -> Result<Expr, String> {
+    parse_binary_layer(
+        text,
+        parse_shift_expression,
+        &[BinaryOpSpec::symbol("&", BinaryOp::BitAnd)],
+    )
+}
+
+fn parse_shift_expression(text: &str) -> Result<Expr, String> {
+    parse_binary_layer(
+        text,
+        parse_additive_expression,
+        &[
+            BinaryOpSpec::symbol("<<", BinaryOp::Shl),
+            BinaryOpSpec::keyword("shr", BinaryOp::Shr),
+        ],
+    )
+}
+
+fn parse_additive_expression(text: &str) -> Result<Expr, String> {
+    parse_binary_layer(
+        text,
+        parse_multiplicative_expression,
+        &[
+            BinaryOpSpec::symbol("+", BinaryOp::Add),
+            BinaryOpSpec::symbol("-", BinaryOp::Sub),
+        ],
+    )
+}
+
+fn parse_multiplicative_expression(text: &str) -> Result<Expr, String> {
+    parse_binary_layer(
+        text,
+        parse_unary_expression,
+        &[
+            BinaryOpSpec::symbol("*", BinaryOp::Mul),
+            BinaryOpSpec::symbol("/", BinaryOp::Div),
+            BinaryOpSpec::symbol("%", BinaryOp::Mod),
+        ],
+    )
+}
+
+fn parse_binary_layer(
+    text: &str,
+    lower: fn(&str) -> Result<Expr, String>,
+    ops: &[BinaryOpSpec],
+) -> Result<Expr, String> {
+    if let Some((index, op, token_len)) = find_top_level_binary_op(text, ops) {
+        let left = text[..index].trim();
+        let right = text[index + token_len..].trim();
+        if !left.is_empty() && !right.is_empty() {
+            return Ok(Expr::Binary {
+                left: Box::new(parse_binary_layer(left, lower, ops)?),
+                op,
+                right: Box::new(lower(right)?),
+            });
+        }
+    }
+    lower(text)
+}
+
+fn parse_unary_expression(text: &str) -> Result<Expr, String> {
+    if let Some(inner) = strip_group_parens(text) {
+        return parse_expression_core(inner);
+    }
+    if let Some(rest) = strip_keyword_prefix(text, "weave") {
+        return Ok(Expr::Unary {
+            op: UnaryOp::Weave,
+            expr: Box::new(parse_unary_expression(rest)?),
+        });
+    }
+    if let Some(rest) = strip_keyword_prefix(text, "split") {
+        return Ok(Expr::Unary {
+            op: UnaryOp::Split,
+            expr: Box::new(parse_unary_expression(rest)?),
+        });
+    }
+    if let Some(rest) = strip_keyword_prefix(text, "not") {
+        return Ok(Expr::Unary {
+            op: UnaryOp::Not,
+            expr: Box::new(parse_unary_expression(rest)?),
+        });
+    }
+    if let Some(rest) = text.strip_prefix('-') {
+        let rest = rest.trim();
+        if !rest.is_empty() {
+            return Ok(Expr::Unary {
+                op: UnaryOp::Neg,
+                expr: Box::new(parse_unary_expression(rest)?),
+            });
+        }
+    }
+    if let Some(rest) = text.strip_prefix('~') {
+        let rest = rest.trim();
+        if !rest.is_empty() {
+            return Ok(Expr::Unary {
+                op: UnaryOp::BitNot,
+                expr: Box::new(parse_unary_expression(rest)?),
+            });
+        }
+    }
+    parse_postfix_expression(text)
+}
+
+fn parse_postfix_expression(text: &str) -> Result<Expr, String> {
+    if let Some(expr) = parse_qualified_phrase(text)? {
+        return Ok(expr);
+    }
+    if let Some(expr) = parse_await_expression(text)? {
+        return Ok(expr);
+    }
     Ok(Expr::Opaque {
-        text: trimmed.to_string(),
-        attached: attached.to_vec(),
+        text: text.trim().to_string(),
+        attached: Vec::new(),
     })
+}
+
+fn parse_qualified_phrase(text: &str) -> Result<Option<Expr>, String> {
+    let positions = find_top_level_token_positions(text, "::");
+    if positions.len() != 2 {
+        return Ok(None);
+    }
+
+    let subject_text = text[..positions[0]].trim();
+    let args_text = text[positions[0] + 2..positions[1]].trim();
+    let qualifier = text[positions[1] + 2..].trim();
+    if subject_text.is_empty() || qualifier.is_empty() {
+        return Ok(None);
+    }
+
+    let args = match parse_phrase_args(args_text)? {
+        Some(args) => args,
+        None => return Ok(None),
+    };
+
+    Ok(Some(Expr::QualifiedPhrase {
+        subject: Box::new(parse_expression_core(subject_text)?),
+        args,
+        qualifier: qualifier.to_string(),
+        attached: Vec::new(),
+    }))
+}
+
+fn parse_phrase_args(text: &str) -> Result<Option<Vec<PhraseArg>>, String> {
+    if text.is_empty() {
+        return Ok(Some(Vec::new()));
+    }
+
+    let mut args = Vec::new();
+    for part in split_top_level(text, ',') {
+        let trimmed = part.trim();
+        if trimmed.is_empty() {
+            return Ok(None);
+        }
+        args.push(parse_phrase_arg(trimmed)?);
+    }
+    Ok(Some(args))
+}
+
+fn parse_phrase_arg(text: &str) -> Result<PhraseArg, String> {
+    if let Some(index) = find_top_level_named_eq(text) {
+        let name = text[..index].trim();
+        let value = text[index + 1..].trim();
+        if is_identifier(name) && !value.is_empty() {
+            return Ok(PhraseArg::Named {
+                name: name.to_string(),
+                value: parse_expression_core(value)?,
+            });
+        }
+    }
+
+    Ok(PhraseArg::Positional(parse_expression_core(text)?))
+}
+
+fn parse_await_expression(text: &str) -> Result<Option<Expr>, String> {
+    let Some(index) = find_top_level_token(text, ">>") else {
+        return Ok(None);
+    };
+    let left = text[..index].trim();
+    let right = text[index + 2..].trim();
+    if left.is_empty() || right != "await" {
+        return Ok(None);
+    }
+    Ok(Some(Expr::Await {
+        expr: Box::new(parse_expression_core(left)?),
+    }))
+}
+
+fn find_top_level_binary_op(text: &str, ops: &[BinaryOpSpec]) -> Option<(usize, BinaryOp, usize)> {
+    let mut candidate = None;
+    let mut depth_paren = 0usize;
+    let mut depth_bracket = 0usize;
+    let mut depth_brace = 0usize;
+    let mut in_string = false;
+    let mut escape = false;
+
+    for (idx, ch) in text.char_indices() {
+        if in_string {
+            if escape {
+                escape = false;
+                continue;
+            }
+            if ch == '\\' {
+                escape = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => {
+                in_string = true;
+                continue;
+            }
+            '(' => depth_paren += 1,
+            ')' => depth_paren = depth_paren.saturating_sub(1),
+            '[' => depth_bracket += 1,
+            ']' => depth_bracket = depth_bracket.saturating_sub(1),
+            '{' => depth_brace += 1,
+            '}' => depth_brace = depth_brace.saturating_sub(1),
+            _ => {}
+        }
+
+        if depth_paren != 0 || depth_bracket != 0 || depth_brace != 0 {
+            continue;
+        }
+
+        for spec in ops {
+            if operator_matches_at(text, idx, *spec) {
+                candidate = Some((idx, spec.op, spec.token.len()));
+                break;
+            }
+        }
+    }
+
+    candidate
+}
+
+fn operator_matches_at(text: &str, index: usize, spec: BinaryOpSpec) -> bool {
+    if !text[index..].starts_with(spec.token) {
+        return false;
+    }
+    if spec.keyword {
+        return has_word_boundary_before(text, index)
+            && has_word_boundary_after(text, index + spec.token.len());
+    }
+
+    match spec.token {
+        "<" => {
+            !matches!(text[index + 1..].chars().next(), Some('=' | '<'))
+                && !matches!(text[..index].chars().next_back(), Some('<'))
+        }
+        ">" => {
+            !matches!(text[index + 1..].chars().next(), Some('=' | '>'))
+                && !matches!(text[..index].chars().next_back(), Some('>'))
+        }
+        "|" => !matches!(text[index + 1..].chars().next(), Some('=')),
+        "&" => !matches!(text[index + 1..].chars().next(), Some('=')),
+        "+" => !matches!(text[index + 1..].chars().next(), Some('=')),
+        "-" => !matches!(text[index + 1..].chars().next(), Some('=' | '>')),
+        "*" => !matches!(text[index + 1..].chars().next(), Some('=')),
+        "/" => !matches!(text[index + 1..].chars().next(), Some('=')),
+        "%" => !matches!(text[index + 1..].chars().next(), Some('=')),
+        "^" => !matches!(text[index + 1..].chars().next(), Some('=')),
+        _ => true,
+    }
+}
+
+fn strip_keyword_prefix<'a>(text: &'a str, keyword: &str) -> Option<&'a str> {
+    let rest = text.strip_prefix(keyword)?;
+    if rest.is_empty() || !has_word_boundary_after(text, keyword.len()) {
+        return None;
+    }
+    Some(rest.trim_start())
+}
+
+fn strip_group_parens(text: &str) -> Option<&str> {
+    if !text.starts_with('(') || !text.ends_with(')') {
+        return None;
+    }
+    let close = find_matching_delim(text, 0, '(', ')')?;
+    if close != text.len() - 1 {
+        return None;
+    }
+    let inner = text[1..close].trim();
+    if inner.is_empty() || contains_top_level_char(inner, ',') {
+        return None;
+    }
+    Some(inner)
+}
+
+fn contains_top_level_char(text: &str, needle: char) -> bool {
+    let mut depth_paren = 0usize;
+    let mut depth_bracket = 0usize;
+    let mut depth_brace = 0usize;
+    let mut in_string = false;
+    let mut escape = false;
+
+    for ch in text.chars() {
+        if in_string {
+            if escape {
+                escape = false;
+                continue;
+            }
+            if ch == '\\' {
+                escape = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => {
+                in_string = true;
+                continue;
+            }
+            '(' => depth_paren += 1,
+            ')' => depth_paren = depth_paren.saturating_sub(1),
+            '[' => depth_bracket += 1,
+            ']' => depth_bracket = depth_bracket.saturating_sub(1),
+            '{' => depth_brace += 1,
+            '}' => depth_brace = depth_brace.saturating_sub(1),
+            _ => {}
+        }
+
+        if depth_paren == 0 && depth_bracket == 0 && depth_brace == 0 && ch == needle {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn find_top_level_named_eq(text: &str) -> Option<usize> {
+    let (index, op, len) = find_top_level_assignment_op(text)?;
+    if op == AssignOp::Assign && len == 1 {
+        return Some(index);
+    }
+    None
+}
+
+fn has_word_boundary_before(text: &str, index: usize) -> bool {
+    !matches!(text[..index].chars().next_back(), Some(ch) if is_identifier_continue(ch))
+}
+
+fn has_word_boundary_after(text: &str, index: usize) -> bool {
+    !matches!(text[index..].chars().next(), Some(ch) if is_identifier_continue(ch))
+}
+
+fn find_top_level_token_positions(text: &str, token: &str) -> Vec<usize> {
+    let mut positions = Vec::new();
+    let mut depth_paren = 0usize;
+    let mut depth_bracket = 0usize;
+    let mut depth_brace = 0usize;
+    let mut in_string = false;
+    let mut escape = false;
+
+    for (idx, ch) in text.char_indices() {
+        if in_string {
+            if escape {
+                escape = false;
+                continue;
+            }
+            if ch == '\\' {
+                escape = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => {
+                in_string = true;
+                continue;
+            }
+            '(' => depth_paren += 1,
+            ')' => depth_paren = depth_paren.saturating_sub(1),
+            '[' => depth_bracket += 1,
+            ']' => depth_bracket = depth_bracket.saturating_sub(1),
+            '{' => depth_brace += 1,
+            '}' => depth_brace = depth_brace.saturating_sub(1),
+            _ => {}
+        }
+
+        if depth_paren != 0 || depth_bracket != 0 || depth_brace != 0 {
+            continue;
+        }
+
+        if text[idx..].starts_with(token) {
+            positions.push(idx);
+        }
+    }
+
+    positions
 }
 
 fn parse_match_expression(
@@ -1100,7 +1674,7 @@ fn parse_match_expression(
     }
 
     Ok(Expr::Match {
-        subject: subject.to_string(),
+        subject: Box::new(parse_expression_core(subject)?),
         arms,
     })
 }
@@ -1500,8 +2074,8 @@ fn is_identifier_continue(ch: char) -> bool {
 mod tests {
     use super::freeze::{FROZEN_AST_NODE_KINDS, FROZEN_TOKEN_KINDS};
     use super::{
-        DirectiveKind, Expr, MatchPattern, ParamMode, StatementKind, SymbolBody, SymbolKind,
-        parse_module,
+        BinaryOp, DirectiveKind, Expr, MatchPattern, ParamMode, PhraseArg, StatementKind,
+        SymbolBody, SymbolKind, UnaryOp, parse_module,
     };
 
     #[test]
@@ -1654,10 +2228,21 @@ mod tests {
         }
         match &statements[1].kind {
             StatementKind::While { condition, body } => {
-                assert!(matches!(
-                    condition,
-                    Expr::Opaque { text, attached } if text == "frames < 10" && attached.is_empty()
-                ));
+                match condition {
+                    Expr::Binary { left, op, right } => {
+                        assert_eq!(*op, BinaryOp::Lt);
+                        assert!(matches!(
+                            left.as_ref(),
+                            Expr::Opaque { text, attached }
+                                if text == "frames" && attached.is_empty()
+                        ));
+                        assert!(matches!(
+                            right.as_ref(),
+                            Expr::Opaque { text, attached } if text == "10" && attached.is_empty()
+                        ));
+                    }
+                    other => panic!("expected binary while condition, got {other:?}"),
+                }
                 assert_eq!(body.len(), 1);
                 match &body[0].kind {
                     StatementKind::If {
@@ -1665,11 +2250,35 @@ mod tests {
                         then_branch,
                         else_branch,
                     } => {
-                        assert!(matches!(
-                            condition,
-                            Expr::Opaque { text, attached }
-                                if text == "frames % 2 == 0" && attached.is_empty()
-                        ));
+                        match condition {
+                            Expr::Binary { left, op, right } => {
+                                assert_eq!(*op, BinaryOp::EqEq);
+                                match left.as_ref() {
+                                    Expr::Binary { left, op, right } => {
+                                        assert_eq!(*op, BinaryOp::Mod);
+                                        assert!(matches!(
+                                            left.as_ref(),
+                                            Expr::Opaque { text, attached }
+                                                if text == "frames" && attached.is_empty()
+                                        ));
+                                        assert!(matches!(
+                                            right.as_ref(),
+                                            Expr::Opaque { text, attached }
+                                                if text == "2" && attached.is_empty()
+                                        ));
+                                    }
+                                    other => panic!(
+                                        "expected modulo expression in if condition, got {other:?}"
+                                    ),
+                                }
+                                assert!(matches!(
+                                    right.as_ref(),
+                                    Expr::Opaque { text, attached }
+                                        if text == "0" && attached.is_empty()
+                                ));
+                            }
+                            other => panic!("expected equality if condition, got {other:?}"),
+                        }
                         assert_eq!(then_branch.len(), 1);
                         assert!(matches!(then_branch[0].kind, StatementKind::Assign { .. }));
                         let else_branch = else_branch.as_ref().expect("else branch should exist");
@@ -1685,7 +2294,11 @@ mod tests {
             StatementKind::Return { value } => {
                 match value.as_ref().expect("return should carry a value") {
                     Expr::Match { subject, arms } => {
-                        assert_eq!(subject, "frames");
+                        assert!(matches!(
+                            subject.as_ref(),
+                            Expr::Opaque { text, attached }
+                                if text == "frames" && attached.is_empty()
+                        ));
                         assert_eq!(arms.len(), 2);
                         assert_eq!(
                             arms[0].patterns,
@@ -1718,7 +2331,10 @@ mod tests {
             StatementKind::Return { value } => match value.as_ref().expect("match return expected")
             {
                 Expr::Match { subject, arms } => {
-                    assert_eq!(subject, "t");
+                    assert!(matches!(
+                        subject.as_ref(),
+                        Expr::Opaque { text, attached } if text == "t" && attached.is_empty()
+                    ));
                     assert_eq!(
                         arms[0].patterns,
                         vec![
@@ -1750,7 +2366,10 @@ mod tests {
                 assert_eq!(name, "v");
                 match value {
                     Expr::Match { subject, arms } => {
-                        assert_eq!(subject, "out");
+                        assert!(matches!(
+                            subject.as_ref(),
+                            Expr::Opaque { text, attached } if text == "out" && attached.is_empty()
+                        ));
                         assert_eq!(arms.len(), 2);
                         assert_eq!(
                             arms[0].patterns,
@@ -1778,6 +2397,196 @@ mod tests {
         let err = parse_module("fn main() -> Int:\n    else:\n        return 0\n")
             .expect_err("else should fail");
         assert!(err.contains("`else` without a preceding `if`"), "{err}");
+    }
+
+    #[test]
+    fn parse_module_collects_structured_phrases_and_operators() {
+        let parsed = parse_module(
+            "fn main() -> Int:\n    defer io.print[Str] :: \"bye\" :: call\n    let task = weave worker :: 41 :: call\n    let ready = task >> await\n    let ok = not false and ((1 + 2) << 3) >= 8\n    let cfg = winspell.loop.FrameConfig :: clear = 0 :: call\n    let printed = io.print[Int] :: ready, ok :: call\n    return printed\n",
+        )
+        .expect("parse should pass");
+
+        let statements = &parsed.symbols[0].statements;
+        assert_eq!(statements.len(), 7);
+
+        match &statements[0].kind {
+            StatementKind::Defer { expr } => match expr {
+                Expr::QualifiedPhrase {
+                    subject,
+                    args,
+                    qualifier,
+                    attached,
+                } => {
+                    assert_eq!(qualifier, "call");
+                    assert!(attached.is_empty());
+                    assert!(matches!(
+                        subject.as_ref(),
+                        Expr::Opaque { text, attached }
+                            if text == "io.print[Str]" && attached.is_empty()
+                    ));
+                    assert_eq!(args.len(), 1);
+                    assert!(matches!(
+                        &args[0],
+                        PhraseArg::Positional(Expr::Opaque { text, attached })
+                            if text == "\"bye\"" && attached.is_empty()
+                    ));
+                }
+                other => panic!("expected defer phrase expression, got {other:?}"),
+            },
+            other => panic!("expected defer statement, got {other:?}"),
+        }
+
+        match &statements[1].kind {
+            StatementKind::Let { name, value, .. } => {
+                assert_eq!(name, "task");
+                match value {
+                    Expr::Unary { op, expr } => {
+                        assert_eq!(*op, UnaryOp::Weave);
+                        assert!(matches!(
+                            expr.as_ref(),
+                            Expr::QualifiedPhrase { qualifier, .. } if qualifier == "call"
+                        ));
+                    }
+                    other => panic!("expected weave unary expression, got {other:?}"),
+                }
+            }
+            other => panic!("expected let task statement, got {other:?}"),
+        }
+
+        match &statements[2].kind {
+            StatementKind::Let { name, value, .. } => {
+                assert_eq!(name, "ready");
+                match value {
+                    Expr::Await { expr } => {
+                        assert!(matches!(
+                            expr.as_ref(),
+                            Expr::Opaque { text, attached } if text == "task" && attached.is_empty()
+                        ));
+                    }
+                    other => panic!("expected await expression, got {other:?}"),
+                }
+            }
+            other => panic!("expected let ready statement, got {other:?}"),
+        }
+
+        match &statements[3].kind {
+            StatementKind::Let { name, value, .. } => {
+                assert_eq!(name, "ok");
+                match value {
+                    Expr::Binary { left, op, right } => {
+                        assert_eq!(*op, BinaryOp::And);
+                        assert!(matches!(
+                            left.as_ref(),
+                            Expr::Unary {
+                                op: UnaryOp::Not,
+                                ..
+                            }
+                        ));
+                        match right.as_ref() {
+                            Expr::Binary { left, op, right } => {
+                                assert_eq!(*op, BinaryOp::GtEq);
+                                match left.as_ref() {
+                                    Expr::Binary { left, op, right } => {
+                                        assert_eq!(*op, BinaryOp::Shl);
+                                        match left.as_ref() {
+                                            Expr::Binary { op, .. } => {
+                                                assert_eq!(*op, BinaryOp::Add);
+                                            }
+                                            other => panic!(
+                                                "expected additive lhs in shift expression, got {other:?}"
+                                            ),
+                                        }
+                                        assert!(matches!(
+                                            right.as_ref(),
+                                            Expr::Opaque { text, attached }
+                                                if text == "3" && attached.is_empty()
+                                        ));
+                                    }
+                                    other => panic!(
+                                        "expected shift expression in comparison lhs, got {other:?}"
+                                    ),
+                                }
+                                assert!(matches!(
+                                    right.as_ref(),
+                                    Expr::Opaque { text, attached }
+                                        if text == "8" && attached.is_empty()
+                                ));
+                            }
+                            other => panic!(
+                                "expected comparison expression on rhs of logical and, got {other:?}"
+                            ),
+                        }
+                    }
+                    other => panic!("expected structured boolean expression, got {other:?}"),
+                }
+            }
+            other => panic!("expected let ok statement, got {other:?}"),
+        }
+
+        match &statements[4].kind {
+            StatementKind::Let { name, value, .. } => {
+                assert_eq!(name, "cfg");
+                match value {
+                    Expr::QualifiedPhrase {
+                        subject,
+                        args,
+                        qualifier,
+                        attached,
+                    } => {
+                        assert_eq!(qualifier, "call");
+                        assert!(attached.is_empty());
+                        assert!(matches!(
+                            subject.as_ref(),
+                            Expr::Opaque { text, attached }
+                                if text == "winspell.loop.FrameConfig" && attached.is_empty()
+                        ));
+                        assert_eq!(args.len(), 1);
+                        assert!(matches!(
+                            &args[0],
+                            PhraseArg::Named { name, value: Expr::Opaque { text, attached } }
+                                if name == "clear" && text == "0" && attached.is_empty()
+                        ));
+                    }
+                    other => panic!("expected named-arg phrase, got {other:?}"),
+                }
+            }
+            other => panic!("expected let cfg statement, got {other:?}"),
+        }
+
+        match &statements[5].kind {
+            StatementKind::Let { name, value, .. } => {
+                assert_eq!(name, "printed");
+                match value {
+                    Expr::QualifiedPhrase {
+                        subject,
+                        args,
+                        qualifier,
+                        attached,
+                    } => {
+                        assert_eq!(qualifier, "call");
+                        assert!(attached.is_empty());
+                        assert!(matches!(
+                            subject.as_ref(),
+                            Expr::Opaque { text, attached }
+                                if text == "io.print[Int]" && attached.is_empty()
+                        ));
+                        assert_eq!(args.len(), 2);
+                    }
+                    other => panic!("expected print phrase, got {other:?}"),
+                }
+            }
+            other => panic!("expected let printed statement, got {other:?}"),
+        }
+
+        match &statements[6].kind {
+            StatementKind::Return { value } => {
+                assert!(matches!(
+                    value.as_ref().expect("return should have value"),
+                    Expr::Opaque { text, attached } if text == "printed" && attached.is_empty()
+                ));
+            }
+            other => panic!("expected return statement, got {other:?}"),
+        }
     }
 
     #[test]
