@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 pub mod freeze;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -109,6 +111,27 @@ pub struct TraitAssocTypeDecl {
 pub struct BehaviorAttr {
     pub name: String,
     pub value: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PageRollupKind {
+    Cleanup,
+}
+
+impl PageRollupKind {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Cleanup => "cleanup",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PageRollup {
+    pub kind: PageRollupKind,
+    pub subject: String,
+    pub handler_path: Vec<String>,
+    pub span: Span,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -322,6 +345,7 @@ pub enum StatementKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Statement {
     pub kind: StatementKind,
+    pub rollups: Vec<PageRollup>,
     pub span: Span,
 }
 
@@ -353,6 +377,7 @@ pub struct SymbolDecl {
     pub behavior_attrs: Vec<BehaviorAttr>,
     pub body: SymbolBody,
     pub statements: Vec<Statement>,
+    pub rollups: Vec<PageRollup>,
     pub surface_text: String,
     pub span: Span,
 }
@@ -409,20 +434,45 @@ pub fn parse_module(source: &str) -> Result<ParsedModule, String> {
     let mut directives = Vec::new();
     let mut symbols = Vec::new();
     let mut impls = Vec::new();
-    for entry in &entries {
+    let mut index = 0usize;
+    while index < entries.len() {
+        let entry = &entries[index];
+        if parse_page_rollup_entry(entry)?.is_some() {
+            return Err(format!(
+                "{}:{}: page rollup without a valid owning header",
+                entry.span.line, entry.span.column
+            ));
+        }
         if let Some(directive) = parse_directive(&entry.text, entry.span)? {
             directives.push(directive);
+            index += 1;
             continue;
         }
 
         if let Some(impl_decl) = parse_impl_decl(entry)? {
             impls.push(impl_decl);
+            index += 1;
             continue;
         }
 
-        if let Some(symbol) = parse_symbol_entry(entry)? {
+        if let Some(mut symbol) = parse_symbol_entry(entry)? {
+            let (rollups, consumed) = collect_following_rollups(&entries, index + 1)?;
+            if !rollups.is_empty() {
+                if symbol_can_own_rollups(&symbol) {
+                    symbol.rollups = rollups;
+                } else {
+                    let span = rollups[0].span;
+                    return Err(format!(
+                        "{}:{}: page rollups can only attach to function-like owning headers",
+                        span.line, span.column
+                    ));
+                }
+            }
             symbols.push(symbol);
+            index += 1 + consumed;
+            continue;
         }
+        index += 1;
     }
 
     let parsed = ParsedModule {
@@ -432,6 +482,7 @@ pub fn parse_module(source: &str) -> Result<ParsedModule, String> {
         symbols,
         impls,
     };
+    validate_module_rollup_contract(&parsed)?;
     validate_module_tuple_contract(&parsed)?;
     Ok(parsed)
 }
@@ -651,6 +702,7 @@ fn parse_symbol_header(trimmed: &str, span: Span) -> Option<SymbolDecl> {
             behavior_attrs: Vec::new(),
             body: SymbolBody::None,
             statements: Vec::new(),
+            rollups: Vec::new(),
             surface_text: trimmed.to_string(),
             span,
         });
@@ -680,6 +732,7 @@ fn parse_behavior_symbol(rest: &str, exported: bool, span: Span) -> Option<Symbo
         behavior_attrs: attrs,
         body: SymbolBody::None,
         statements: Vec::new(),
+        rollups: Vec::new(),
         surface_text: format!(
             "behavior[{}] fn {}",
             &rest[open_idx + 1..close_idx],
@@ -894,14 +947,38 @@ fn parse_impl_decl(entry: &RawBlockEntry) -> Result<Option<ImplDecl>, String> {
         .collect::<Vec<_>>();
     let mut assoc_types = Vec::new();
     let mut methods = Vec::new();
-    for child in &entry.children {
+    let mut index = 0usize;
+    while index < entry.children.len() {
+        let child = &entry.children[index];
+        if parse_page_rollup_entry(child)?.is_some() {
+            return Err(format!(
+                "{}:{}: page rollup without a valid owning header",
+                child.span.line, child.span.column
+            ));
+        }
         if let Some(assoc_type) = parse_impl_assoc_type_binding(&child.text, child.span) {
             assoc_types.push(assoc_type);
+            index += 1;
             continue;
         }
-        if let Some(method) = parse_symbol_entry(child)? {
+        if let Some(mut method) = parse_symbol_entry(child)? {
+            let (rollups, consumed) = collect_following_rollups(&entry.children, index + 1)?;
+            if !rollups.is_empty() {
+                if symbol_can_own_rollups(&method) {
+                    method.rollups = rollups;
+                } else {
+                    let span = method.span;
+                    return Err(format!(
+                        "{}:{}: page rollups can only attach to function-like owning headers",
+                        span.line, span.column
+                    ));
+                }
+            }
             methods.push(method);
+            index += 1 + consumed;
+            continue;
         }
+        index += 1;
     }
     let mut surface_lines = vec![entry.text.clone()];
     surface_lines.extend(body_entries.iter().cloned());
@@ -934,14 +1011,38 @@ fn parse_symbol_body(kind: &SymbolKind, entries: &[RawBlockEntry]) -> Result<Sym
         SymbolKind::Trait => {
             let mut assoc_types = Vec::new();
             let mut methods = Vec::new();
-            for entry in entries {
+            let mut index = 0usize;
+            while index < entries.len() {
+                let entry = &entries[index];
+                if parse_page_rollup_entry(entry)?.is_some() {
+                    return Err(format!(
+                        "{}:{}: page rollup without a valid owning header",
+                        entry.span.line, entry.span.column
+                    ));
+                }
                 if let Some(assoc_type) = parse_trait_assoc_type_decl(&entry.text, entry.span) {
                     assoc_types.push(assoc_type);
+                    index += 1;
                     continue;
                 }
-                if let Some(method) = parse_symbol_entry(entry)? {
+                if let Some(mut method) = parse_symbol_entry(entry)? {
+                    let (rollups, consumed) = collect_following_rollups(entries, index + 1)?;
+                    if !rollups.is_empty() {
+                        if symbol_can_own_rollups(&method) {
+                            method.rollups = rollups;
+                        } else {
+                            let span = method.span;
+                            return Err(format!(
+                                "{}:{}: page rollups can only attach to function-like owning headers",
+                                span.line, span.column
+                            ));
+                        }
+                    }
                     methods.push(method);
+                    index += 1 + consumed;
+                    continue;
                 }
+                index += 1;
             }
             Ok(SymbolBody::Trait {
                 assoc_types,
@@ -983,13 +1084,20 @@ fn parse_statement_block(
                 entry.span.line, entry.span.column
             ));
         }
+        if parse_page_rollup_entry(entry)?.is_some() {
+            return Err(format!(
+                "{}:{}: page rollup without a valid owning header",
+                entry.span.line, entry.span.column
+            ));
+        }
 
         let mut statement = parse_statement(entry, loop_depth)?;
+        let mut next_index = index + 1;
         if let StatementKind::If { else_branch, .. } = &mut statement.kind {
-            if let Some(next) = entries.get(index + 1) {
+            if let Some(next) = entries.get(next_index) {
                 if next.text == "else:" {
                     *else_branch = Some(parse_statement_block(&next.children, loop_depth)?);
-                    index += 1;
+                    next_index += 1;
                 } else if next.text.starts_with("else ") {
                     return Err(format!(
                         "{}:{}: malformed `else` clause",
@@ -999,8 +1107,21 @@ fn parse_statement_block(
             }
         }
 
+        let (rollups, consumed) = collect_following_rollups(entries, next_index)?;
+        if !rollups.is_empty() {
+            if statement_can_own_rollups(&statement) {
+                statement.rollups = rollups;
+            } else {
+                let span = entries[next_index].span;
+                return Err(format!(
+                    "{}:{}: page rollups can only attach to block-owning headers",
+                    span.line, span.column
+                ));
+            }
+        }
+
         statements.push(statement);
-        index += 1;
+        index = next_index + consumed;
     }
 
     Ok(statements)
@@ -1019,6 +1140,7 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
                 then_branch: parse_statement_block(&entry.children, loop_depth)?,
                 else_branch: None,
             },
+            rollups: Vec::new(),
             span: entry.span,
         });
     }
@@ -1034,6 +1156,7 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
                 condition,
                 body: parse_statement_block(&entry.children, loop_depth + 1)?,
             },
+            rollups: Vec::new(),
             span: entry.span,
         });
     }
@@ -1066,6 +1189,7 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
                 iterable: parse_expression(iterable, &[], entry.span)?,
                 body: parse_statement_block(&entry.children, loop_depth + 1)?,
             },
+            rollups: Vec::new(),
             span: entry.span,
         });
     }
@@ -1102,6 +1226,7 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
                 name: name.to_string(),
                 value: parse_expression(value, &entry.children, entry.span)?,
             },
+            rollups: Vec::new(),
             span: entry.span,
         });
     }
@@ -1119,6 +1244,7 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
         };
         return Ok(Statement {
             kind: StatementKind::Return { value },
+            rollups: Vec::new(),
             span: entry.span,
         });
     }
@@ -1128,6 +1254,7 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
             kind: StatementKind::Defer {
                 expr: parse_expression(rest, &entry.children, entry.span)?,
             },
+            rollups: Vec::new(),
             span: entry.span,
         });
     }
@@ -1141,6 +1268,7 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
         }
         return Ok(Statement {
             kind: StatementKind::Break,
+            rollups: Vec::new(),
             span: entry.span,
         });
     }
@@ -1154,6 +1282,7 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
         }
         return Ok(Statement {
             kind: StatementKind::Continue,
+            rollups: Vec::new(),
             span: entry.span,
         });
     }
@@ -1165,6 +1294,7 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
                 op,
                 value: parse_expression(&value, &entry.children, entry.span)?,
             },
+            rollups: Vec::new(),
             span: entry.span,
         });
     }
@@ -1173,6 +1303,7 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
         kind: StatementKind::Expr {
             expr: parse_expression(&entry.text, &entry.children, entry.span)?,
         },
+        rollups: Vec::new(),
         span: entry.span,
     })
 }
@@ -2215,6 +2346,208 @@ fn parse_impl_assoc_type_binding(trimmed: &str, span: Span) -> Option<ImplAssocT
     })
 }
 
+fn parse_page_rollup_entry(entry: &RawBlockEntry) -> Result<Option<PageRollup>, String> {
+    let text = entry.text.trim();
+    if !text.starts_with('[') {
+        return Ok(None);
+    }
+    let Some(close_idx) = find_matching_delim(text, 0, '[', ']') else {
+        return Ok(None);
+    };
+    let suffix = text[close_idx + 1..].trim();
+    let Some(kind_text) = suffix.strip_prefix('#') else {
+        return Ok(None);
+    };
+    if !entry.children.is_empty() {
+        return Err(format!(
+            "{}:{}: page rollup lines cannot own nested blocks",
+            entry.span.line, entry.span.column
+        ));
+    }
+    if kind_text.trim() != "cleanup" {
+        return Err(format!(
+            "{}:{}: only `#cleanup` page rollups are supported in v1",
+            entry.span.line, entry.span.column
+        ));
+    }
+
+    let args = split_top_level(text[1..close_idx].trim(), ',')
+        .into_iter()
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    if args.len() != 2 {
+        return Err(format!(
+            "{}:{}: `#cleanup` rollups require exactly `[subject, handler]`",
+            entry.span.line, entry.span.column
+        ));
+    }
+    let subject = args[0];
+    if !is_identifier(subject) {
+        return Err(format!(
+            "{}:{}: cleanup subject must be a binding name",
+            entry.span.line, entry.span.column
+        ));
+    }
+    let handler_path = parse_path(args[1]).map_err(|detail| {
+        format!(
+            "{}:{}: cleanup handler must be a named callable path: {}",
+            entry.span.line, entry.span.column, detail
+        )
+    })?;
+    Ok(Some(PageRollup {
+        kind: PageRollupKind::Cleanup,
+        subject: subject.to_string(),
+        handler_path,
+        span: entry.span,
+    }))
+}
+
+fn collect_following_rollups(
+    entries: &[RawBlockEntry],
+    start_index: usize,
+) -> Result<(Vec<PageRollup>, usize), String> {
+    let mut index = start_index;
+    let mut rollups = Vec::new();
+    while index < entries.len() {
+        let Some(rollup) = parse_page_rollup_entry(&entries[index])? else {
+            break;
+        };
+        rollups.push(rollup);
+        index += 1;
+    }
+    Ok((rollups, index - start_index))
+}
+
+fn symbol_can_own_rollups(symbol: &SymbolDecl) -> bool {
+    matches!(symbol.kind, SymbolKind::Fn | SymbolKind::Behavior)
+}
+
+fn statement_can_own_rollups(statement: &Statement) -> bool {
+    match &statement.kind {
+        StatementKind::If { .. } | StatementKind::While { .. } | StatementKind::For { .. } => {
+            true
+        }
+        StatementKind::Expr { expr } => expr_has_attached_block(expr),
+        _ => false,
+    }
+}
+
+fn expr_has_attached_block(expr: &Expr) -> bool {
+    match expr {
+        Expr::Opaque { attached, .. } | Expr::QualifiedPhrase { attached, .. } => !attached.is_empty(),
+        _ => false,
+    }
+}
+
+fn validate_module_rollup_contract(parsed: &ParsedModule) -> Result<(), String> {
+    for symbol in &parsed.symbols {
+        validate_symbol_rollup_contract(symbol)?;
+    }
+    for impl_decl in &parsed.impls {
+        for method in &impl_decl.methods {
+            validate_symbol_rollup_contract(method)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_symbol_rollup_contract(symbol: &SymbolDecl) -> Result<(), String> {
+    let mut available = symbol
+        .params
+        .iter()
+        .map(|param| param.name.clone())
+        .collect::<BTreeSet<_>>();
+    available.extend(immediate_statement_bindings(&symbol.statements));
+    for rollup in &symbol.rollups {
+        if !available.contains(&rollup.subject) {
+            return Err(format!(
+                "{}:{}: cleanup subject `{}` is not available in the owning header scope",
+                rollup.span.line, rollup.span.column, rollup.subject
+            ));
+        }
+    }
+    validate_statement_rollup_contract(&symbol.statements)?;
+    if let SymbolBody::Trait { methods, .. } = &symbol.body {
+        for method in methods {
+            validate_symbol_rollup_contract(method)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_statement_rollup_contract(statements: &[Statement]) -> Result<(), String> {
+    for statement in statements {
+        if let Some(available) = statement_rollup_subjects(statement) {
+            for rollup in &statement.rollups {
+                if !available.contains(&rollup.subject) {
+                    return Err(format!(
+                        "{}:{}: cleanup subject `{}` is not available in the owning header scope",
+                        rollup.span.line, rollup.span.column, rollup.subject
+                    ));
+                }
+            }
+        }
+        match &statement.kind {
+            StatementKind::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                validate_statement_rollup_contract(then_branch)?;
+                if let Some(else_branch) = else_branch {
+                    validate_statement_rollup_contract(else_branch)?;
+                }
+            }
+            StatementKind::While { body, .. } | StatementKind::For { body, .. } => {
+                validate_statement_rollup_contract(body)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn statement_rollup_subjects(statement: &Statement) -> Option<BTreeSet<String>> {
+    match &statement.kind {
+        StatementKind::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            let mut names = immediate_statement_bindings(then_branch);
+            if let Some(else_branch) = else_branch {
+                names.extend(immediate_statement_bindings(else_branch));
+            }
+            Some(names)
+        }
+        StatementKind::While { body, .. } => Some(immediate_statement_bindings(body)),
+        StatementKind::For { binding, body, .. } => {
+            let mut names = immediate_statement_bindings(body);
+            names.insert(binding.clone());
+            Some(names)
+        }
+        StatementKind::Expr { expr } if expr_has_attached_block(expr) => None,
+        _ => Some(BTreeSet::new()),
+    }
+}
+
+fn immediate_statement_bindings(statements: &[Statement]) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    for statement in statements {
+        match &statement.kind {
+            StatementKind::Let { name, .. } => {
+                names.insert(name.clone());
+            }
+            StatementKind::For { binding, .. } => {
+                names.insert(binding.clone());
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
 fn validate_module_tuple_contract(parsed: &ParsedModule) -> Result<(), String> {
     for symbol in &parsed.symbols {
         validate_symbol_tuple_contract(symbol)?;
@@ -2826,7 +3159,7 @@ mod tests {
     use super::freeze::{FROZEN_AST_NODE_KINDS, FROZEN_TOKEN_KINDS};
     use super::{
         AssignTarget, BinaryOp, DirectiveKind, Expr, MatchPattern, ParamMode, PhraseArg,
-        StatementKind, SymbolBody, SymbolKind, UnaryOp, parse_module,
+        Statement, StatementKind, SymbolBody, SymbolKind, UnaryOp, parse_module,
     };
 
     #[test]
@@ -3154,6 +3487,54 @@ mod tests {
         let err = parse_module("fn main() -> Int:\n    else:\n        return 0\n")
             .expect_err("else should fail");
         assert!(err.contains("`else` without a preceding `if`"), "{err}");
+    }
+
+    #[test]
+    fn parse_module_collects_page_rollups() {
+        let parsed = parse_module(
+            "fn cleanup(value: Int):\n    return\nfn run(seed: Int) -> Int:\n    let local = seed\n    while local > 0:\n        let scratch = local\n        local -= 1\n    [scratch, cleanup]#cleanup\n    return local\n[seed, cleanup]#cleanup\n",
+        )
+        .expect("rollups should parse");
+
+        let run = parsed
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "run")
+            .expect("run symbol should exist");
+        assert_eq!(run.rollups.len(), 1);
+        assert_eq!(run.rollups[0].subject, "seed");
+        assert_eq!(run.rollups[0].handler_path, vec!["cleanup".to_string()]);
+        match &run.statements[1] {
+            Statement {
+                kind: StatementKind::While { .. },
+                rollups,
+                ..
+            } => {
+                assert_eq!(rollups.len(), 1);
+                assert_eq!(rollups[0].subject, "scratch");
+                assert_eq!(rollups[0].kind.as_str(), "cleanup");
+            }
+            other => panic!("expected while statement with rollup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_module_rejects_ownerless_page_rollups() {
+        let err = parse_module("[value, cleanup]#cleanup\nfn cleanup(value: Int):\n    return\n")
+            .expect_err("ownerless rollup should fail");
+        assert!(err.contains("page rollup without a valid owning header"), "{err}");
+    }
+
+    #[test]
+    fn parse_module_rejects_unknown_cleanup_subjects() {
+        let err = parse_module(
+            "fn cleanup(value: Int):\n    return\nfn main() -> Int:\n    let value = 1\n    return value\n[missing, cleanup]#cleanup\n",
+        )
+        .expect_err("unknown subject should fail");
+        assert!(
+            err.contains("cleanup subject `missing` is not available in the owning header scope"),
+            "{err}"
+        );
     }
 
     #[test]

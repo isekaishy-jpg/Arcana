@@ -253,6 +253,35 @@ mod tests {
     }
 
     #[test]
+    fn check_sources_rejects_page_rollup_contract_fixtures() {
+        let repo_root = repo_root();
+        for (fixture, expected) in [
+            (
+                "page_rollup_stray.arc",
+                "page rollup without a valid owning header",
+            ),
+            (
+                "page_rollup_bad_subject.arc",
+                "cleanup subject must be a binding name",
+            ),
+            (
+                "page_rollup_unknown_subject.arc",
+                "cleanup subject `missing` is not available in the owning header scope",
+            ),
+        ] {
+            let source = fs::read_to_string(
+                repo_root
+                    .join("conformance")
+                    .join("check_parity_fixtures")
+                    .join(fixture),
+            )
+            .expect("fixture should be readable");
+            let err = check_sources([source.as_str()]).expect_err("fixture should fail");
+            assert!(err.contains(expected), "{fixture}: {err}");
+        }
+    }
+
+    #[test]
     fn check_path_resolves_local_use_symbols() {
         let root = make_temp_package(
             "counter_app",
@@ -285,6 +314,14 @@ mod tests {
             .expect("first-party grimoire should check");
         assert!(summary.package_count >= 2);
         assert!(summary.module_count >= 5);
+    }
+
+    #[test]
+    fn check_path_handles_page_rollup_example() {
+        let summary = check_path(&repo_root().join("examples").join("page_rollup_cleanup"))
+            .expect("page rollup example should check");
+        assert_eq!(summary.package_count, 2);
+        assert!(summary.module_count >= 3);
     }
 
     #[test]

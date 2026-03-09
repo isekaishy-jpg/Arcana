@@ -80,6 +80,16 @@ positive = ["examples/defer_scope", "examples/result_qmark"]
 negative = ["conformance/check_parity_fixtures/unresolved_symbol.arc"]
 
 [[feature]]
+id = "page_rollups_v1"
+status = "required"
+positive = ["examples/page_rollup_cleanup"]
+negative = [
+    "conformance/check_parity_fixtures/page_rollup_stray.arc",
+    "conformance/check_parity_fixtures/page_rollup_bad_subject.arc",
+    "conformance/check_parity_fixtures/page_rollup_unknown_subject.arc",
+]
+
+[[feature]]
 id = "async_weave_split"
 status = "required"
 positive = ["examples/async_main", "examples/split_join", "examples/channel_async"]

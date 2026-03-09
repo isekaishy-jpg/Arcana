@@ -11,6 +11,7 @@ pub const FROZEN_HIR_NODE_KINDS: &[&str] = &[
     "Behavior",
     "System",
     "Type",
+    "PageRollup",
     "Expr",
     "Stmt",
     "Pattern",

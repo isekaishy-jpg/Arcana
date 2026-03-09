@@ -7,6 +7,7 @@ Arcana is being rewritten under a hard language freeze until selfhost.
 Completed foundation work:
 - Rust workspace scaffold with isolated crates for syntax, HIR, frontend, package/build, IR, AOT, and CLI
 - language freeze policy and CI freeze guard
+- AnyBox policy guard over code-bearing paths
 - explicit spec-status taxonomy plus pre-selfhost contract docs for page rollups, tuples, callable/context direction, and AnyBox ban
 - seed import of frozen contract docs, conformance matrix, first-party grimoires, std, and source examples
 - deterministic path-only package graph, lockfile v1, and foundation build cache
@@ -19,6 +20,7 @@ Completed foundation work:
 - structured member access, standalone ranges, and the unambiguous index/slice subset over the imported list/array/selfhost corpus, with opaque fallback still covering the remaining hard cases
 - structured assignment targets for name, member, and index mutation paths over the imported behavior/list/selfhost corpus
 - enforced pair-tuple contract over current syntax/frontend coverage, including `.0`/`.1`-only access, no tuple destructuring in bindings/params, no tuple field assignment, and new negative conformance fixtures wired into the frozen matrix
+- page rollups now parse and lower through syntax/HIR for function-like owners and block-owning statements, with example/negative conformance coverage wired into the frozen matrix
 
 ## Next Milestones
 

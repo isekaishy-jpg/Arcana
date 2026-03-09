@@ -6,6 +6,7 @@ Arcana is a Rust-first rewrite of the frozen Arcana language and tooling stack. 
 
 - Rust workspace scaffold for syntax, HIR, frontend, package manager, IR, AOT, and CLI layers
 - Language-freeze policy and CI guardrails
+- `AnyBox` policy guard for code-bearing paths
 - Cross-cutting spec-status and contract docs now explicitly lock page rollups, pair tuples, callable/context direction, and the AnyBox ban before typed frontend hardening
 - Path-only package graph, deterministic workspace planning, `Arcana.lock` v1, placeholder build artifacts, and declaration-surface API fingerprints for rebuild propagation
 - Shared HIR module, package, and workspace summaries now sit between syntax parsing, frontend checks, and package graph consumers
@@ -17,6 +18,7 @@ Arcana is a Rust-first rewrite of the frozen Arcana language and tooling stack. 
 - Non-`match` expressions now lower structured qualified phrases, named phrase args, unary/binary operators, `>> await`, `weave`/`split`, member access, standalone ranges, and the unambiguous index/slice subset
 - Assignment statements now carry structured name/member/index targets instead of raw target strings
 - Pair-tuple rules are now enforced in syntax/frontend diagnostics: `.0`/`.1` only, no tuple destructuring in `let`/`for`/params, no tuple field assignment, and no three-element tuple types or literals
+- Page rollups now parse and lower through syntax/HIR for function-like owners and block-owning statements, with fixture coverage and a real example package
 - Remaining opaque expression debt is now mostly collection literals, chain phrases, memory phrases, and the still-ambiguous generic-bracket versus index-bracket cases
 - Seed-imported docs, grimoires, `std`, examples, and conformance fixtures from MeadowLang
 - `arcana check` with shared package/HIR loading, symbol-based module and `use` resolution, direct-dependency enforcement, implicit `std`, and stable file/line/column diagnostics

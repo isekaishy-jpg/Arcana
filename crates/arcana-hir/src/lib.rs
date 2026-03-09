@@ -76,6 +76,7 @@ pub struct HirSymbol {
     pub behavior_attrs: Vec<HirBehaviorAttr>,
     pub body: HirSymbolBody,
     pub statements: Vec<HirStatement>,
+    pub rollups: Vec<HirPageRollup>,
     pub surface_text: String,
     pub span: Span,
 }
@@ -115,6 +116,27 @@ pub struct HirField {
 pub struct HirBehaviorAttr {
     pub name: String,
     pub value: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HirPageRollupKind {
+    Cleanup,
+}
+
+impl HirPageRollupKind {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Cleanup => "cleanup",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HirPageRollup {
+    pub kind: HirPageRollupKind,
+    pub subject: String,
+    pub handler_path: Vec<String>,
+    pub span: Span,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -328,6 +350,7 @@ pub enum HirStatementKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HirStatement {
     pub kind: HirStatementKind,
+    pub rollups: Vec<HirPageRollup>,
     pub span: Span,
 }
 
@@ -697,6 +720,7 @@ pub fn lower_parsed_module(
                     .collect(),
                 body: lower_symbol_body(&symbol.body),
                 statements: lower_statements(&symbol.statements),
+                rollups: lower_rollups(&symbol.rollups),
                 surface_text: symbol.surface_text.clone(),
                 span: symbol.span,
             })
@@ -1385,9 +1409,24 @@ fn lower_trait_or_impl_method(method: &arcana_syntax::SymbolDecl) -> HirSymbol {
             .collect(),
         body: lower_symbol_body(&method.body),
         statements: lower_statements(&method.statements),
+        rollups: lower_rollups(&method.rollups),
         surface_text: method.surface_text.clone(),
         span: method.span,
     }
+}
+
+fn lower_rollups(rollups: &[arcana_syntax::PageRollup]) -> Vec<HirPageRollup> {
+    rollups
+        .iter()
+        .map(|rollup| HirPageRollup {
+            kind: match rollup.kind {
+                arcana_syntax::PageRollupKind::Cleanup => HirPageRollupKind::Cleanup,
+            },
+            subject: rollup.subject.clone(),
+            handler_path: rollup.handler_path.clone(),
+            span: rollup.span,
+        })
+        .collect()
 }
 
 fn lower_assign_op(op: &ParsedAssignOp) -> HirAssignOp {
@@ -1622,6 +1661,7 @@ fn lower_statement(statement: &arcana_syntax::Statement) -> HirStatement {
                 expr: lower_expr(expr),
             },
         },
+        rollups: lower_rollups(&statement.rollups),
         span: statement.span,
     }
 }
@@ -1634,7 +1674,7 @@ mod tests {
     use super::freeze::FROZEN_HIR_NODE_KINDS;
     use super::{
         HirAssignOp, HirAssignTarget, HirBinaryOp, HirDirectiveKind, HirExpr, HirMatchPattern,
-        HirPhraseArg, HirStatementKind, HirSymbolBody, HirUnaryOp, build_package_layout,
+        HirPhraseArg, HirStatement, HirStatementKind, HirSymbolBody, HirUnaryOp, build_package_layout,
         build_package_summary, build_workspace_package, build_workspace_summary,
         derive_source_module_path, lower_module_text, resolve_workspace,
     };
@@ -1836,6 +1876,36 @@ mod tests {
                 }
             }
             other => panic!("expected return statement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lower_module_text_captures_page_rollups() {
+        let module = lower_module_text(
+            "rollups",
+            "fn cleanup(value: Int):\n    return\nfn run(seed: Int) -> Int:\n    let local = seed\n    while local > 0:\n        let scratch = local\n        local -= 1\n    [scratch, cleanup]#cleanup\n    return local\n[seed, cleanup]#cleanup\n",
+        )
+        .expect("rollups should lower");
+
+        let run = module
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "run")
+            .expect("run symbol should exist");
+        assert_eq!(run.rollups.len(), 1);
+        assert_eq!(run.rollups[0].subject, "seed");
+        assert_eq!(run.rollups[0].handler_path, vec!["cleanup".to_string()]);
+        match &run.statements[1] {
+            HirStatement {
+                kind: HirStatementKind::While { .. },
+                rollups,
+                ..
+            } => {
+                assert_eq!(rollups.len(), 1);
+                assert_eq!(rollups[0].subject, "scratch");
+                assert_eq!(rollups[0].kind.as_str(), "cleanup");
+            }
+            other => panic!("expected while statement with rollup, got {other:?}"),
         }
     }
 
