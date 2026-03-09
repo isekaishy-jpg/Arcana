@@ -2,8 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use arcana_hir::{
-    HirDirectiveKind, HirModule, HirModuleSummary, HirWorkspacePackage, HirWorkspaceSummary,
-    lower_module_text,
+    HirModule, HirWorkspaceSummary, lower_module_text, resolve_workspace,
 };
 use arcana_package::load_workspace_hir as load_package_workspace_hir;
 
@@ -124,7 +123,6 @@ fn validate_packages(workspace: &HirWorkspaceSummary) -> Result<CheckSummary, St
         package_count: workspace.package_count(),
         ..CheckSummary::default()
     };
-    let mut diagnostics = Vec::new();
 
     for package in workspace.packages.values() {
         for module in &package.summary.modules {
@@ -133,28 +131,30 @@ fn validate_packages(workspace: &HirWorkspaceSummary) -> Result<CheckSummary, St
             summary.directive_count += module.directives.len();
             summary.symbol_count += module.symbols.len();
         }
-
-        for edge in &package.summary.dependency_edges {
-            let outcome = match edge.kind {
-                HirDirectiveKind::Import | HirDirectiveKind::Reexport => {
-                    resolve_exact_module(package, workspace, &edge.target_path).map(|_| ())
-                }
-                HirDirectiveKind::Use => resolve_use_target(package, workspace, &edge.target_path),
-            };
-
-            if let Err(message) = outcome {
-                diagnostics.push(Diagnostic {
-                    path: package
-                        .module_path(&edge.source_module_id)
-                        .cloned()
-                        .unwrap_or_else(|| package.root_dir.join("src").join("unknown.arc")),
-                    line: edge.span.line,
-                    column: edge.span.column,
-                    message,
-                });
-            }
-        }
     }
+
+    let mut diagnostics = match resolve_workspace(workspace) {
+        Ok(_) => Vec::new(),
+        Err(errors) => errors
+            .into_iter()
+            .map(|error| {
+                let package = workspace.package(&error.package_name);
+                Diagnostic {
+                    path: package
+                        .and_then(|package| package.module_path(&error.source_module_id))
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            package
+                                .map(|package| package.root_dir.join("src").join("unknown.arc"))
+                                .unwrap_or_else(|| PathBuf::from("unknown.arc"))
+                        }),
+                    line: error.span.line,
+                    column: error.span.column,
+                    message: error.message,
+                }
+            })
+            .collect::<Vec<_>>(),
+    };
 
     if diagnostics.is_empty() {
         return Ok(summary);
@@ -172,112 +172,6 @@ fn validate_packages(workspace: &HirWorkspaceSummary) -> Result<CheckSummary, St
         .map(|diagnostic| diagnostic.render())
         .collect::<Vec<_>>()
         .join("\n"))
-}
-
-fn resolve_exact_module<'a>(
-    package: &'a HirWorkspacePackage,
-    workspace: &'a HirWorkspaceSummary,
-    path: &[String],
-) -> Result<&'a HirModuleSummary, String> {
-    if path.is_empty() {
-        return Err("missing module path".to_string());
-    }
-
-    let key = join_segments(path);
-    let first = &path[0];
-    if first == &package.summary.package_name {
-        return package.module(&key).ok_or_else(|| format!("unresolved module `{key}`"));
-    }
-
-    if first == "std" {
-        return workspace
-            .package("std")
-            .ok_or_else(|| "implicit package `std` is not available".to_string())
-            .and_then(|std_package| {
-                std_package.module(&key).ok_or_else(|| format!("unresolved module `{key}`"))
-            });
-    }
-
-    if package.direct_deps.contains(first) {
-        return workspace
-            .package(first)
-            .ok_or_else(|| {
-                format!(
-                    "dependency `{first}` is not loaded for `{}`",
-                    package.summary.package_name
-                )
-            })
-            .and_then(|dependency| {
-                dependency.module(&key).ok_or_else(|| format!("unresolved module `{key}`"))
-            });
-    }
-
-    if workspace.package(first).is_some() {
-        return Err(format!(
-            "package `{first}` is not a direct dependency of `{}`",
-            package.summary.package_name
-        ));
-    }
-
-    package
-        .resolve_relative_module(path)
-        .ok_or_else(|| format!("unresolved module `{key}`"))
-}
-
-fn resolve_use_target(
-    package: &HirWorkspacePackage,
-    workspace: &HirWorkspaceSummary,
-    path: &[String],
-) -> Result<(), String> {
-    if path.is_empty() {
-        return Err("missing use target".to_string());
-    }
-
-    for prefix_len in (1..=path.len()).rev() {
-        let prefix = &path[..prefix_len];
-        let Ok(module) = resolve_exact_module(package, workspace, prefix) else {
-            continue;
-        };
-        if prefix_len == path.len() {
-            return Ok(());
-        }
-
-        let suffix = &path[prefix_len..];
-        if suffix.len() != 1 {
-            return Err(format!(
-                "nested symbol path `{}` is not supported yet",
-                join_segments(path)
-            ));
-        }
-
-        let symbol_name = &suffix[0];
-        if module.has_symbol(symbol_name) {
-            return Ok(());
-        }
-        return Err(format!(
-            "unresolved symbol `{symbol_name}` in module `{}`",
-            module.module_id
-        ));
-    }
-
-    if let Some(first) = path.first() {
-        if workspace.package(first).is_some()
-            && first != &package.summary.package_name
-            && first != "std"
-            && !package.direct_deps.contains(first)
-        {
-            return Err(format!(
-                "package `{first}` is not a direct dependency of `{}`",
-                package.summary.package_name
-            ));
-        }
-    }
-
-    Err(format!("unresolved module path `{}`", join_segments(path)))
-}
-
-fn join_segments(segments: &[String]) -> String {
-    segments.join(".")
 }
 
 #[cfg(test)]

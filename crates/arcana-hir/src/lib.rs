@@ -225,6 +225,94 @@ impl HirWorkspaceSummary {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HirResolvedTarget {
+    Module {
+        package_name: String,
+        module_id: String,
+    },
+    Symbol {
+        package_name: String,
+        module_id: String,
+        symbol_name: String,
+    },
+}
+
+impl HirResolvedTarget {
+    pub fn binding_name(&self) -> String {
+        match self {
+            Self::Module { module_id, .. } => module_id
+                .rsplit('.')
+                .next()
+                .unwrap_or(module_id)
+                .to_string(),
+            Self::Symbol { symbol_name, .. } => symbol_name.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HirBindingOrigin {
+    LocalSymbol,
+    Directive(HirDirectiveKind),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HirResolvedBinding {
+    pub local_name: String,
+    pub origin: HirBindingOrigin,
+    pub target: HirResolvedTarget,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HirResolvedDirective {
+    pub source_module_id: String,
+    pub local_name: String,
+    pub kind: HirDirectiveKind,
+    pub target: HirResolvedTarget,
+    pub alias: Option<String>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HirResolvedModule {
+    pub module_id: String,
+    pub bindings: BTreeMap<String, HirResolvedBinding>,
+    pub directives: Vec<HirResolvedDirective>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HirResolvedPackage {
+    pub package_name: String,
+    pub modules: BTreeMap<String, HirResolvedModule>,
+}
+
+impl HirResolvedPackage {
+    pub fn module(&self, module_id: &str) -> Option<&HirResolvedModule> {
+        self.modules.get(module_id)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HirResolvedWorkspace {
+    pub packages: BTreeMap<String, HirResolvedPackage>,
+}
+
+impl HirResolvedWorkspace {
+    pub fn package(&self, package_name: &str) -> Option<&HirResolvedPackage> {
+        self.packages.get(package_name)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HirResolutionError {
+    pub package_name: String,
+    pub source_module_id: String,
+    pub span: Span,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SourceModulePath {
     pub relative_segments: Vec<String>,
     pub module_id: String,
@@ -266,6 +354,142 @@ pub fn lower_parsed_module(module_id: impl Into<String>, parsed: &ParsedModule) 
 
 fn encode_surface_text(text: &str) -> String {
     text.replace('\\', "\\\\").replace('\n', "\\n")
+}
+
+fn resolve_module_target(
+    package: &HirWorkspacePackage,
+    workspace: &HirWorkspaceSummary,
+    path: &[String],
+) -> Result<(String, String), String> {
+    if path.is_empty() {
+        return Err("missing module path".to_string());
+    }
+
+    let key = path.join(".");
+    let first = &path[0];
+    if first == &package.summary.package_name {
+        return package
+            .module(&key)
+            .map(|module| (package.summary.package_name.clone(), module.module_id.clone()))
+            .ok_or_else(|| format!("unresolved module `{key}`"));
+    }
+
+    if first == "std" {
+        return workspace
+            .package("std")
+            .ok_or_else(|| "implicit package `std` is not available".to_string())
+            .and_then(|std_package| {
+                std_package
+                    .module(&key)
+                    .map(|module| (std_package.summary.package_name.clone(), module.module_id.clone()))
+                    .ok_or_else(|| format!("unresolved module `{key}`"))
+            });
+    }
+
+    if package.direct_deps.contains(first) {
+        return workspace
+            .package(first)
+            .ok_or_else(|| {
+                format!(
+                    "dependency `{first}` is not loaded for `{}`",
+                    package.summary.package_name
+                )
+            })
+            .and_then(|dependency| {
+                dependency
+                    .module(&key)
+                    .map(|module| (dependency.summary.package_name.clone(), module.module_id.clone()))
+                    .ok_or_else(|| format!("unresolved module `{key}`"))
+            });
+    }
+
+    if workspace.package(first).is_some() {
+        return Err(format!(
+            "package `{first}` is not a direct dependency of `{}`",
+            package.summary.package_name
+        ));
+    }
+
+    package
+        .resolve_relative_module(path)
+        .map(|module| (package.summary.package_name.clone(), module.module_id.clone()))
+        .ok_or_else(|| format!("unresolved module `{key}`"))
+}
+
+enum ResolvedUseTarget {
+    Module {
+        package_name: String,
+        module_id: String,
+    },
+    Symbol {
+        package_name: String,
+        module_id: String,
+        symbol_name: String,
+    },
+}
+
+fn resolve_use_target(
+    package: &HirWorkspacePackage,
+    workspace: &HirWorkspaceSummary,
+    path: &[String],
+) -> Result<ResolvedUseTarget, String> {
+    if path.is_empty() {
+        return Err("missing use target".to_string());
+    }
+
+    for prefix_len in (1..=path.len()).rev() {
+        let prefix = &path[..prefix_len];
+        let Ok((package_name, module_id)) = resolve_module_target(package, workspace, prefix) else {
+            continue;
+        };
+        if prefix_len == path.len() {
+            return Ok(ResolvedUseTarget::Module {
+                package_name,
+                module_id,
+            });
+        }
+
+        let suffix = &path[prefix_len..];
+        if suffix.len() != 1 {
+            return Err(format!(
+                "nested symbol path `{}` is not supported yet",
+                path.join(".")
+            ));
+        }
+
+        let symbol_name = &suffix[0];
+        let resolved_package = workspace
+            .package(&package_name)
+            .ok_or_else(|| format!("resolved package `{package_name}` is not loaded"))?;
+        let resolved_module = resolved_package
+            .module(&module_id)
+            .ok_or_else(|| format!("resolved module `{module_id}` is not loaded"))?;
+        if resolved_module.has_symbol(symbol_name) {
+            return Ok(ResolvedUseTarget::Symbol {
+                package_name,
+                module_id,
+                symbol_name: symbol_name.clone(),
+            });
+        }
+        return Err(format!(
+            "unresolved symbol `{symbol_name}` in module `{module_id}`"
+        ));
+    }
+
+    if let Some(first) = path.first() {
+        if workspace.package(first).is_some()
+            && first != &package.summary.package_name
+            && first != "std"
+            && !package.direct_deps.contains(first)
+        {
+            return Err(format!(
+                "package `{first}` is not a direct dependency of `{}`",
+                package.summary.package_name
+            ));
+        }
+    }
+
+    Err(format!("unresolved module path `{}`", path.join(".")))
 }
 
 pub fn build_package_summary(
@@ -391,6 +615,120 @@ pub fn build_workspace_summary(
     })
 }
 
+pub fn resolve_workspace(
+    workspace: &HirWorkspaceSummary,
+) -> Result<HirResolvedWorkspace, Vec<HirResolutionError>> {
+    let mut packages = BTreeMap::new();
+    let mut errors = Vec::new();
+
+    for package in workspace.packages.values() {
+        let mut modules = BTreeMap::new();
+        for module in &package.summary.modules {
+            let mut bindings = BTreeMap::new();
+            for symbol in &module.symbols {
+                bindings.entry(symbol.name.clone()).or_insert(HirResolvedBinding {
+                    local_name: symbol.name.clone(),
+                    origin: HirBindingOrigin::LocalSymbol,
+                    target: HirResolvedTarget::Symbol {
+                        package_name: package.summary.package_name.clone(),
+                        module_id: module.module_id.clone(),
+                        symbol_name: symbol.name.clone(),
+                    },
+                    span: symbol.span,
+                });
+            }
+
+            let mut directives = Vec::new();
+            for directive in &module.directives {
+                let target = match directive.kind {
+                    HirDirectiveKind::Import | HirDirectiveKind::Reexport => {
+                        resolve_module_target(package, workspace, &directive.path).map(
+                            |(package_name, module_id)| HirResolvedTarget::Module {
+                                package_name,
+                                module_id,
+                            },
+                        )
+                    }
+                    HirDirectiveKind::Use => {
+                        resolve_use_target(package, workspace, &directive.path).map(
+                            |resolved_target| match resolved_target {
+                                ResolvedUseTarget::Module {
+                                    package_name,
+                                    module_id,
+                                } => HirResolvedTarget::Module {
+                                    package_name,
+                                    module_id,
+                                },
+                                ResolvedUseTarget::Symbol {
+                                    package_name,
+                                    module_id,
+                                    symbol_name,
+                                } => HirResolvedTarget::Symbol {
+                                    package_name,
+                                    module_id,
+                                    symbol_name,
+                                },
+                            },
+                        )
+                    }
+                };
+
+                match target {
+                    Ok(target) => {
+                        let local_name = directive
+                            .alias
+                            .clone()
+                            .unwrap_or_else(|| target.binding_name());
+                        bindings.entry(local_name.clone()).or_insert(HirResolvedBinding {
+                            local_name: local_name.clone(),
+                            origin: HirBindingOrigin::Directive(directive.kind),
+                            target: target.clone(),
+                            span: directive.span,
+                        });
+                        directives.push(HirResolvedDirective {
+                            source_module_id: module.module_id.clone(),
+                            local_name,
+                            kind: directive.kind,
+                            target,
+                            alias: directive.alias.clone(),
+                            span: directive.span,
+                        });
+                    }
+                    Err(message) => errors.push(HirResolutionError {
+                        package_name: package.summary.package_name.clone(),
+                        source_module_id: module.module_id.clone(),
+                        span: directive.span,
+                        message,
+                    }),
+                }
+            }
+
+            modules.insert(
+                module.module_id.clone(),
+                HirResolvedModule {
+                    module_id: module.module_id.clone(),
+                    bindings,
+                    directives,
+                },
+            );
+        }
+
+        packages.insert(
+            package.summary.package_name.clone(),
+            HirResolvedPackage {
+                package_name: package.summary.package_name.clone(),
+                modules,
+            },
+        );
+    }
+
+    if errors.is_empty() {
+        Ok(HirResolvedWorkspace { packages })
+    } else {
+        Err(errors)
+    }
+}
+
 pub fn derive_source_module_path(
     package_name: &str,
     root_file_name: &str,
@@ -456,7 +794,7 @@ mod tests {
 
     use super::{
         HirDirectiveKind, build_package_layout, build_package_summary, build_workspace_package,
-        build_workspace_summary, derive_source_module_path, lower_module_text,
+        build_workspace_summary, derive_source_module_path, lower_module_text, resolve_workspace,
     };
     use super::freeze::FROZEN_HIR_NODE_KINDS;
 
@@ -570,6 +908,148 @@ mod tests {
                 .resolve_relative_module(&["window".to_string()])
                 .is_some()
         );
+    }
+
+    #[test]
+    fn resolve_workspace_builds_module_and_symbol_bindings() {
+        let std_summary = build_package_summary(
+            "std",
+            vec![
+                lower_module_text(
+                    "std.io",
+                    "export fn print() -> Int:\n    return 0\n",
+                )
+                .expect("std.io should lower"),
+            ],
+        );
+        let std_layout = build_package_layout(
+            &std_summary,
+            BTreeMap::from([(
+                "std.io".to_string(),
+                Path::new("C:/repo/std/src/io.arc").to_path_buf(),
+            )]),
+            BTreeMap::new(),
+        )
+        .expect("std layout should build");
+        let std_package = build_workspace_package(
+            Path::new("C:/repo/std").to_path_buf(),
+            BTreeSet::new(),
+            std_summary,
+            std_layout,
+        )
+        .expect("std package should build");
+
+        let app_summary = build_package_summary(
+            "app",
+            vec![
+                lower_module_text(
+                    "app",
+                    "import std.io\nuse std.io as io\nuse std.io.print\nexport fn main() -> Int:\n    return 0\n",
+                )
+                .expect("app should lower"),
+            ],
+        );
+        let app_layout = build_package_layout(
+            &app_summary,
+            BTreeMap::from([(
+                "app".to_string(),
+                Path::new("C:/repo/app/src/shelf.arc").to_path_buf(),
+            )]),
+            BTreeMap::new(),
+        )
+        .expect("app layout should build");
+        let app_package = build_workspace_package(
+            Path::new("C:/repo/app").to_path_buf(),
+            BTreeSet::new(),
+            app_summary,
+            app_layout,
+        )
+        .expect("app package should build");
+
+        let workspace =
+            build_workspace_summary(vec![app_package, std_package]).expect("workspace builds");
+        let resolved = resolve_workspace(&workspace).expect("resolution should succeed");
+        let app = resolved.package("app").expect("app should resolve");
+        let root = app.module("app").expect("root module should resolve");
+        assert_eq!(root.directives.len(), 3);
+        assert_eq!(
+            root.bindings.get("io").expect("alias should resolve").target,
+            super::HirResolvedTarget::Module {
+                package_name: "std".to_string(),
+                module_id: "std.io".to_string(),
+            }
+        );
+        assert_eq!(
+            root.bindings
+                .get("print")
+                .expect("symbol should resolve")
+                .target,
+            super::HirResolvedTarget::Symbol {
+                package_name: "std".to_string(),
+                module_id: "std.io".to_string(),
+                symbol_name: "print".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_workspace_reports_invalid_dependencies() {
+        let core_summary = build_package_summary(
+            "core",
+            vec![lower_module_text(
+                "core",
+                "export fn value() -> Int:\n    return 0\n",
+            )
+            .expect("core should lower")],
+        );
+        let core_layout = build_package_layout(
+            &core_summary,
+            BTreeMap::from([(
+                "core".to_string(),
+                Path::new("C:/repo/core/src/book.arc").to_path_buf(),
+            )]),
+            BTreeMap::new(),
+        )
+        .expect("core layout should build");
+        let core_package = build_workspace_package(
+            Path::new("C:/repo/core").to_path_buf(),
+            BTreeSet::new(),
+            core_summary,
+            core_layout,
+        )
+        .expect("core package should build");
+
+        let app_summary = build_package_summary(
+            "app",
+            vec![lower_module_text(
+                "app",
+                "import core\nfn main() -> Int:\n    return 0\n",
+            )
+            .expect("app should lower")],
+        );
+        let app_layout = build_package_layout(
+            &app_summary,
+            BTreeMap::from([(
+                "app".to_string(),
+                Path::new("C:/repo/app/src/shelf.arc").to_path_buf(),
+            )]),
+            BTreeMap::new(),
+        )
+        .expect("app layout should build");
+        let app_package = build_workspace_package(
+            Path::new("C:/repo/app").to_path_buf(),
+            BTreeSet::new(),
+            app_summary,
+            app_layout,
+        )
+        .expect("app package should build");
+
+        let workspace =
+            build_workspace_summary(vec![app_package, core_package]).expect("workspace builds");
+        let errors = resolve_workspace(&workspace).expect_err("resolution should fail");
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].message.contains("not a direct dependency"));
+        assert_eq!(errors[0].source_module_id, "app");
     }
 
     #[test]
