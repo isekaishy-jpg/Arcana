@@ -1,0 +1,8 @@
+[package]
+name = "arcana-ir"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+arcana-hir.workspace = true
+

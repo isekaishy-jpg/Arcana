@@ -1,0 +1,8 @@
+[package]
+name = "arcana-aot"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+arcana-ir.workspace = true
+

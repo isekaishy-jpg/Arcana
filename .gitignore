@@ -1,0 +1,6 @@
+target/
+.arcana/
+**/.arcana/
+**/Arcana.lock
+*.tmp
+

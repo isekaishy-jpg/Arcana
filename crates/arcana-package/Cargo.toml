@@ -1,0 +1,10 @@
+[package]
+name = "arcana-package"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+pathdiff.workspace = true
+sha2.workspace = true
+toml.workspace = true
+

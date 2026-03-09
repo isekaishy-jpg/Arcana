@@ -1,0 +1,9 @@
+[package]
+name = "arcana-frontend"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+arcana-hir.workspace = true
+arcana-syntax.workspace = true
+

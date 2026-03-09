@@ -1,0 +1,29 @@
+[workspace]
+members = [
+    "crates/arcana-aot",
+    "crates/arcana-cli",
+    "crates/arcana-frontend",
+    "crates/arcana-hir",
+    "crates/arcana-ir",
+    "crates/arcana-package",
+    "crates/arcana-syntax",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["Weaver"]
+license = "MIT"
+
+[workspace.dependencies]
+arcana-aot = { path = "crates/arcana-aot" }
+arcana-frontend = { path = "crates/arcana-frontend" }
+arcana-hir = { path = "crates/arcana-hir" }
+arcana-ir = { path = "crates/arcana-ir" }
+arcana-package = { path = "crates/arcana-package" }
+arcana-syntax = { path = "crates/arcana-syntax" }
+pathdiff = "0.2"
+sha2 = "0.10"
+toml = "0.8"
+
