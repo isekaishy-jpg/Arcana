@@ -1,9 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use arcana_hir::{
-    HirModule, HirWorkspaceSummary, lower_module_text, resolve_workspace,
-};
+use arcana_hir::{HirModule, HirWorkspaceSummary, lower_module_text, resolve_workspace};
 use arcana_package::load_workspace_hir as load_package_workspace_hir;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -60,8 +58,8 @@ pub fn check_path(path: &Path) -> Result<CheckSummary, String> {
         return Err(format!("`{}` is not a file or directory", path.display()));
     }
 
-    let root_dir =
-        fs::canonicalize(path).map_err(|err| format!("failed to open `{}`: {err}", path.display()))?;
+    let root_dir = fs::canonicalize(path)
+        .map_err(|err| format!("failed to open `{}`: {err}", path.display()))?;
     let manifest_path = root_dir.join("book.toml");
     if !manifest_path.is_file() {
         return Err(format!(
@@ -84,8 +82,8 @@ pub fn load_workspace_hir(path: &Path) -> Result<HirWorkspaceSummary, String> {
         ));
     }
 
-    let root_dir =
-        fs::canonicalize(path).map_err(|err| format!("failed to open `{}`: {err}", path.display()))?;
+    let root_dir = fs::canonicalize(path)
+        .map_err(|err| format!("failed to open `{}`: {err}", path.display()))?;
     let manifest_path = root_dir.join("book.toml");
     if !manifest_path.is_file() {
         return Err(format!(
@@ -105,8 +103,8 @@ pub fn lower_to_hir(summary: &CheckSummary) -> HirModule {
 }
 
 fn check_file(path: &Path) -> Result<CheckSummary, String> {
-    let source =
-        fs::read_to_string(path).map_err(|err| format!("failed to read `{}`: {err}", path.display()))?;
+    let source = fs::read_to_string(path)
+        .map_err(|err| format!("failed to read `{}`: {err}", path.display()))?;
     let hir = lower_module_text(path.display().to_string(), &source)
         .map_err(|err| format!("{}: {err}", path.display()))?;
     Ok(CheckSummary {
@@ -186,8 +184,12 @@ mod tests {
 
     #[test]
     fn check_sources_counts_modules() {
-        let summary = check_sources(["import std.io\nfn main() -> Int:\n    return 0\n"].iter().copied())
-            .expect("check should pass");
+        let summary = check_sources(
+            ["import std.io\nfn main() -> Int:\n    return 0\n"]
+                .iter()
+                .copied(),
+        )
+        .expect("check should pass");
         assert_eq!(summary.module_count, 1);
         assert_eq!(summary.directive_count, 1);
         assert!(summary.symbol_count >= 1);
@@ -203,7 +205,10 @@ mod tests {
             "app",
             &[],
             &[
-                ("src/shelf.arc", "import missing.module\nfn main() -> Int:\n    return 0\n"),
+                (
+                    "src/shelf.arc",
+                    "import missing.module\nfn main() -> Int:\n    return 0\n",
+                ),
                 ("src/types.arc", ""),
             ],
         );
@@ -221,7 +226,10 @@ mod tests {
             "app",
             &[],
             &[
-                ("src/shelf.arc", "import types\nuse types.Counter\nfn main() -> Int:\n    return 0\n"),
+                (
+                    "src/shelf.arc",
+                    "import types\nuse types.Counter\nfn main() -> Int:\n    return 0\n",
+                ),
                 ("src/types.arc", "export record Counter:\n    value: Int\n"),
             ],
         );
@@ -253,8 +261,9 @@ mod tests {
             .join("..")
             .canonicalize()
             .expect("repo root should resolve");
-        let workspace = load_workspace_hir(&repo_root.join("examples").join("workspace_vertical_slice"))
-            .expect("workspace hir should load");
+        let workspace =
+            load_workspace_hir(&repo_root.join("examples").join("workspace_vertical_slice"))
+                .expect("workspace hir should load");
         assert!(workspace.package("desktop_app").is_some());
         assert!(workspace.package("winspell").is_some());
         assert!(

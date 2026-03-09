@@ -307,7 +307,10 @@ pub fn load_workspace_hir_from_graph(
     let mut packages = Vec::new();
 
     let root_manifest = parse_manifest(&root_dir.join("book.toml"))?;
-    let root_already_in_graph = graph.members.iter().any(|member| member.abs_dir == root_dir);
+    let root_already_in_graph = graph
+        .members
+        .iter()
+        .any(|member| member.abs_dir == root_dir);
     if !root_already_in_graph && has_root_module(&root_dir, &root_manifest.kind) {
         packages.push(load_package_hir(
             &root_dir,
@@ -951,10 +954,7 @@ fn compute_source_fingerprint(
     Ok(format!("sha256:{:x}", hasher.finalize()))
 }
 
-fn compute_api_fingerprint(
-    member: &WorkspaceMember,
-    files: &[PathBuf],
-) -> PackageResult<String> {
+fn compute_api_fingerprint(member: &WorkspaceMember, files: &[PathBuf]) -> PackageResult<String> {
     let mut hasher = Sha256::new();
     hasher.update(b"arcana_api_v2\n");
     hasher.update(format!("name={}\n", member.name).as_bytes());
@@ -971,7 +971,9 @@ fn compute_api_fingerprint(
     Ok(format!("sha256:{:x}", hasher.finalize()))
 }
 
-fn load_member_package_summary(member: &WorkspaceMember) -> PackageResult<arcana_hir::HirPackageSummary> {
+fn load_member_package_summary(
+    member: &WorkspaceMember,
+) -> PackageResult<arcana_hir::HirPackageSummary> {
     Ok(load_member_hir_package(member)?.summary)
 }
 
@@ -1023,8 +1025,8 @@ fn build_package_hir(
         let source_path = derive_source_module_path(name, kind.root_file_name(), &src_dir, file)?;
         let relative_key = source_path.relative_segments.join(".");
         let module_id = source_path.module_id;
-        let source =
-            fs::read_to_string(file).map_err(|e| format!("failed to read `{}`: {e}", file.display()))?;
+        let source = fs::read_to_string(file)
+            .map_err(|e| format!("failed to read `{}`: {e}", file.display()))?;
         let module = lower_module_text(module_id, &source)
             .map_err(|err| format!("{}: {err}", file.display()))?;
         if module_paths
@@ -1092,11 +1094,17 @@ fn find_implicit_std(start: &Path) -> PackageResult<Option<PathBuf>> {
     while let Some(dir) = cursor {
         let candidate = dir.join("std").join("book.toml");
         if candidate.is_file() {
-            let std_dir = candidate
-                .parent()
-                .ok_or_else(|| format!("failed to resolve implicit std from `{}`", candidate.display()))?;
+            let std_dir = candidate.parent().ok_or_else(|| {
+                format!(
+                    "failed to resolve implicit std from `{}`",
+                    candidate.display()
+                )
+            })?;
             let canonical = fs::canonicalize(std_dir).map_err(|err| {
-                format!("failed to open implicit std package `{}`: {err}", std_dir.display())
+                format!(
+                    "failed to open implicit std package `{}`: {err}",
+                    std_dir.display()
+                )
             })?;
             return Ok(Some(canonical));
         }
@@ -1252,7 +1260,8 @@ mod tests {
                 .summary
                 .dependency_edges
                 .iter()
-                .any(|edge| edge.target_path == vec!["std".to_string(), "io".to_string(), "print".to_string()])
+                .any(|edge| edge.target_path
+                    == vec!["std".to_string(), "io".to_string(), "print".to_string()])
         );
 
         let _ = fs::remove_dir_all(&dir);
@@ -1356,7 +1365,10 @@ mod tests {
             &dir.join("core/src/book.arc"),
             "reexport types\nexport fn shared_value() -> Int:\n    return 0\n",
         );
-        write_file(&dir.join("core/src/types.arc"), "export record Counter:\n    value: Int\n");
+        write_file(
+            &dir.join("core/src/types.arc"),
+            "export record Counter:\n    value: Int\n",
+        );
         let graph = load_workspace_graph(&dir).expect("load graph");
         let order = plan_workspace(&graph).expect("plan");
         let fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
@@ -1375,7 +1387,9 @@ mod tests {
         assert!(artifact.contains("dependency_edge_count = 1"));
         assert!(artifact.contains("module=core:export:fn:fn shared_value() -> Int:"));
         assert!(artifact.contains("module=core:reexport:types"));
-        assert!(artifact.contains("module=core.types:export:record:record Counter:\\\\nvalue: Int"));
+        assert!(
+            artifact.contains("module=core.types:export:record:record Counter:\\\\nvalue: Int")
+        );
         assert!(artifact.contains("module_rows = ["));
         assert!(artifact.contains("core:symbols=1:items=4"));
         let _ = fs::remove_dir_all(&dir);

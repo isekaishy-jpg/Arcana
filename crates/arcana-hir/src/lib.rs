@@ -4,8 +4,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use arcana_syntax::{
-    DirectiveKind as ParsedDirectiveKind, ParamMode as ParsedParamMode, ParsedModule, Span,
-    SymbolKind as ParsedSymbolKind, parse_module,
+    AssignOp as ParsedAssignOp, DirectiveKind as ParsedDirectiveKind, ParamMode as ParsedParamMode,
+    ParsedModule, Span, StatementKind as ParsedStatementKind, SymbolKind as ParsedSymbolKind,
+    parse_module,
 };
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -72,6 +73,9 @@ pub struct HirSymbol {
     pub where_clause: Option<String>,
     pub params: Vec<HirParam>,
     pub return_type: Option<String>,
+    pub behavior_attrs: Vec<HirBehaviorAttr>,
+    pub body: HirSymbolBody,
+    pub statements: Vec<HirStatement>,
     pub surface_text: String,
     pub span: Span,
 }
@@ -101,11 +105,148 @@ pub struct HirParam {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HirField {
+    pub name: String,
+    pub ty: String,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HirBehaviorAttr {
+    pub name: String,
+    pub value: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HirRawBlockEntry {
+    pub text: String,
+    pub span: Span,
+    pub children: Vec<HirRawBlockEntry>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HirAssignOp {
+    Assign,
+    AddAssign,
+    SubAssign,
+    MulAssign,
+    DivAssign,
+    ModAssign,
+    BitAndAssign,
+    BitOrAssign,
+    BitXorAssign,
+    ShlAssign,
+    ShrAssign,
+}
+
+impl HirAssignOp {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Assign => "=",
+            Self::AddAssign => "+=",
+            Self::SubAssign => "-=",
+            Self::MulAssign => "*=",
+            Self::DivAssign => "/=",
+            Self::ModAssign => "%=",
+            Self::BitAndAssign => "&=",
+            Self::BitOrAssign => "|=",
+            Self::BitXorAssign => "^=",
+            Self::ShlAssign => "<<=",
+            Self::ShrAssign => "shr=",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HirStatementKind {
+    Let {
+        mutable: bool,
+        name: String,
+        value: String,
+        attached: Vec<HirRawBlockEntry>,
+    },
+    Return {
+        value: Option<String>,
+        attached: Vec<HirRawBlockEntry>,
+    },
+    If {
+        condition: String,
+        then_branch: Vec<HirStatement>,
+        else_branch: Option<Vec<HirStatement>>,
+    },
+    While {
+        condition: String,
+        body: Vec<HirStatement>,
+    },
+    For {
+        binding: String,
+        iterable: String,
+        body: Vec<HirStatement>,
+    },
+    Break,
+    Continue,
+    Assign {
+        target: String,
+        op: HirAssignOp,
+        value: String,
+        attached: Vec<HirRawBlockEntry>,
+    },
+    Expr {
+        text: String,
+        attached: Vec<HirRawBlockEntry>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HirStatement {
+    pub kind: HirStatementKind,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HirEnumVariant {
+    pub name: String,
+    pub payload: Option<String>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HirTraitAssocType {
+    pub name: String,
+    pub default_ty: Option<String>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HirSymbolBody {
+    None,
+    Record {
+        fields: Vec<HirField>,
+    },
+    Enum {
+        variants: Vec<HirEnumVariant>,
+    },
+    Trait {
+        assoc_types: Vec<HirTraitAssocType>,
+        methods: Vec<HirSymbol>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HirImplDecl {
     pub trait_path: Option<String>,
     pub target_type: String,
+    pub assoc_types: Vec<HirImplAssocTypeBinding>,
+    pub methods: Vec<HirSymbol>,
     pub body_entries: Vec<String>,
     pub surface_text: String,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HirImplAssocTypeBinding {
+    pub name: String,
+    pub value_ty: Option<String>,
     pub span: Span,
 }
 
@@ -152,6 +293,10 @@ impl HirSymbol {
     fn api_signature_text(&self) -> String {
         match self.kind {
             HirSymbolKind::Fn => render_function_signature(self),
+            HirSymbolKind::Record => render_record_signature(self),
+            HirSymbolKind::Enum => render_enum_signature(self),
+            HirSymbolKind::Trait => render_trait_signature(self),
+            HirSymbolKind::Behavior => render_behavior_signature(self),
             _ => self.surface_text.clone(),
         }
     }
@@ -175,7 +320,9 @@ pub struct HirPackageSummary {
 
 impl HirPackageSummary {
     pub fn module(&self, module_id: &str) -> Option<&HirModuleSummary> {
-        self.modules.iter().find(|module| module.module_id == module_id)
+        self.modules
+            .iter()
+            .find(|module| module.module_id == module_id)
     }
 
     pub fn module_count(&self) -> usize {
@@ -366,12 +513,18 @@ pub struct SourceModulePath {
     pub module_id: String,
 }
 
-pub fn lower_module_text(module_id: impl Into<String>, source: &str) -> Result<HirModuleSummary, String> {
+pub fn lower_module_text(
+    module_id: impl Into<String>,
+    source: &str,
+) -> Result<HirModuleSummary, String> {
     let parsed = parse_module(source)?;
     Ok(lower_parsed_module(module_id, &parsed))
 }
 
-pub fn lower_parsed_module(module_id: impl Into<String>, parsed: &ParsedModule) -> HirModuleSummary {
+pub fn lower_parsed_module(
+    module_id: impl Into<String>,
+    parsed: &ParsedModule,
+) -> HirModuleSummary {
     HirModuleSummary {
         module_id: module_id.into(),
         line_count: parsed.line_count,
@@ -406,6 +559,16 @@ pub fn lower_parsed_module(module_id: impl Into<String>, parsed: &ParsedModule) 
                     })
                     .collect(),
                 return_type: symbol.return_type.clone(),
+                behavior_attrs: symbol
+                    .behavior_attrs
+                    .iter()
+                    .map(|attr| HirBehaviorAttr {
+                        name: attr.name.clone(),
+                        value: attr.value.clone(),
+                    })
+                    .collect(),
+                body: lower_symbol_body(&symbol.body),
+                statements: lower_statements(&symbol.statements),
                 surface_text: symbol.surface_text.clone(),
                 span: symbol.span,
             })
@@ -416,6 +579,20 @@ pub fn lower_parsed_module(module_id: impl Into<String>, parsed: &ParsedModule) 
             .map(|impl_decl| HirImplDecl {
                 trait_path: impl_decl.trait_path.clone(),
                 target_type: impl_decl.target_type.clone(),
+                assoc_types: impl_decl
+                    .assoc_types
+                    .iter()
+                    .map(|assoc_type| HirImplAssocTypeBinding {
+                        name: assoc_type.name.clone(),
+                        value_ty: assoc_type.value_ty.clone(),
+                        span: assoc_type.span,
+                    })
+                    .collect(),
+                methods: impl_decl
+                    .methods
+                    .iter()
+                    .map(lower_trait_or_impl_method)
+                    .collect(),
                 body_entries: impl_decl.body_entries.clone(),
                 surface_text: impl_decl.surface_text.clone(),
                 span: impl_decl.span,
@@ -469,6 +646,82 @@ fn render_param(param: &HirParam) -> String {
     }
 }
 
+fn render_record_signature(symbol: &HirSymbol) -> String {
+    let mut lines = vec![render_named_type_header("record", symbol)];
+    if let HirSymbolBody::Record { fields } = &symbol.body {
+        lines.extend(
+            fields
+                .iter()
+                .map(|field| format!("{}: {}", field.name, field.ty)),
+        );
+    }
+    lines.join("\n")
+}
+
+fn render_enum_signature(symbol: &HirSymbol) -> String {
+    let mut lines = vec![render_named_type_header("enum", symbol)];
+    if let HirSymbolBody::Enum { variants } = &symbol.body {
+        lines.extend(variants.iter().map(|variant| match &variant.payload {
+            Some(payload) => format!("{}({payload})", variant.name),
+            None => variant.name.clone(),
+        }));
+    }
+    lines.join("\n")
+}
+
+fn render_trait_signature(symbol: &HirSymbol) -> String {
+    let mut lines = vec![render_named_type_header("trait", symbol)];
+    if let HirSymbolBody::Trait {
+        assoc_types,
+        methods,
+    } = &symbol.body
+    {
+        lines.extend(
+            assoc_types
+                .iter()
+                .map(|assoc_type| match &assoc_type.default_ty {
+                    Some(default_ty) => format!("type {} = {default_ty}", assoc_type.name),
+                    None => format!("type {}", assoc_type.name),
+                }),
+        );
+        lines.extend(methods.iter().map(render_function_signature));
+    }
+    lines.join("\n")
+}
+
+fn render_behavior_signature(symbol: &HirSymbol) -> String {
+    let attrs = symbol
+        .behavior_attrs
+        .iter()
+        .map(|attr| format!("{}={}", attr.name, attr.value))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut rendered = String::new();
+    rendered.push_str("behavior[");
+    rendered.push_str(&attrs);
+    rendered.push_str("] ");
+    rendered.push_str(&render_function_signature(symbol));
+    rendered
+}
+
+fn render_named_type_header(keyword: &str, symbol: &HirSymbol) -> String {
+    let mut rendered = String::new();
+    rendered.push_str(keyword);
+    rendered.push(' ');
+    rendered.push_str(&symbol.name);
+    if !symbol.type_params.is_empty() || symbol.where_clause.is_some() {
+        rendered.push('[');
+        let mut parts = symbol.type_params.clone();
+        if let Some(where_clause) = &symbol.where_clause {
+            parts.push(format!("where {where_clause}"));
+        }
+        rendered.push_str(&parts.join(", "));
+        rendered.push(']');
+    }
+    rendered.push(':');
+    rendered
+}
+
 fn resolve_module_target(
     package: &HirWorkspacePackage,
     workspace: &HirWorkspaceSummary,
@@ -483,7 +736,12 @@ fn resolve_module_target(
     if first == &package.summary.package_name {
         return package
             .module(&key)
-            .map(|module| (package.summary.package_name.clone(), module.module_id.clone()))
+            .map(|module| {
+                (
+                    package.summary.package_name.clone(),
+                    module.module_id.clone(),
+                )
+            })
             .ok_or_else(|| format!("unresolved module `{key}`"));
     }
 
@@ -494,7 +752,12 @@ fn resolve_module_target(
             .and_then(|std_package| {
                 std_package
                     .module(&key)
-                    .map(|module| (std_package.summary.package_name.clone(), module.module_id.clone()))
+                    .map(|module| {
+                        (
+                            std_package.summary.package_name.clone(),
+                            module.module_id.clone(),
+                        )
+                    })
                     .ok_or_else(|| format!("unresolved module `{key}`"))
             });
     }
@@ -511,7 +774,12 @@ fn resolve_module_target(
             .and_then(|dependency| {
                 dependency
                     .module(&key)
-                    .map(|module| (dependency.summary.package_name.clone(), module.module_id.clone()))
+                    .map(|module| {
+                        (
+                            dependency.summary.package_name.clone(),
+                            module.module_id.clone(),
+                        )
+                    })
                     .ok_or_else(|| format!("unresolved module `{key}`"))
             });
     }
@@ -525,7 +793,12 @@ fn resolve_module_target(
 
     package
         .resolve_relative_module(path)
-        .map(|module| (package.summary.package_name.clone(), module.module_id.clone()))
+        .map(|module| {
+            (
+                package.summary.package_name.clone(),
+                module.module_id.clone(),
+            )
+        })
         .ok_or_else(|| format!("unresolved module `{key}`"))
 }
 
@@ -552,7 +825,8 @@ fn resolve_use_target(
 
     for prefix_len in (1..=path.len()).rev() {
         let prefix = &path[..prefix_len];
-        let Ok((package_name, module_id)) = resolve_module_target(package, workspace, prefix) else {
+        let Ok((package_name, module_id)) = resolve_module_target(package, workspace, prefix)
+        else {
             continue;
         };
         if prefix_len == path.len() {
@@ -614,13 +888,16 @@ pub fn build_package_summary(
     let mut dependency_edges = modules
         .iter()
         .flat_map(|module| {
-            module.directives.iter().map(move |directive| HirModuleDependency {
-                source_module_id: module.module_id.clone(),
-                kind: directive.kind,
-                target_path: directive.path.clone(),
-                alias: directive.alias.clone(),
-                span: directive.span,
-            })
+            module
+                .directives
+                .iter()
+                .map(move |directive| HirModuleDependency {
+                    source_module_id: module.module_id.clone(),
+                    kind: directive.kind,
+                    target_path: directive.path.clone(),
+                    alias: directive.alias.clone(),
+                    span: directive.span,
+                })
         })
         .collect::<Vec<_>>();
     dependency_edges.sort_by(|left, right| {
@@ -739,16 +1016,18 @@ pub fn resolve_workspace(
         for module in &package.summary.modules {
             let mut bindings = BTreeMap::new();
             for symbol in &module.symbols {
-                bindings.entry(symbol.name.clone()).or_insert(HirResolvedBinding {
-                    local_name: symbol.name.clone(),
-                    origin: HirBindingOrigin::LocalSymbol,
-                    target: HirResolvedTarget::Symbol {
-                        package_name: package.summary.package_name.clone(),
-                        module_id: module.module_id.clone(),
-                        symbol_name: symbol.name.clone(),
-                    },
-                    span: symbol.span,
-                });
+                bindings
+                    .entry(symbol.name.clone())
+                    .or_insert(HirResolvedBinding {
+                        local_name: symbol.name.clone(),
+                        origin: HirBindingOrigin::LocalSymbol,
+                        target: HirResolvedTarget::Symbol {
+                            package_name: package.summary.package_name.clone(),
+                            module_id: module.module_id.clone(),
+                            symbol_name: symbol.name.clone(),
+                        },
+                        span: symbol.span,
+                    });
             }
 
             let mut directives = Vec::new();
@@ -792,12 +1071,14 @@ pub fn resolve_workspace(
                             .alias
                             .clone()
                             .unwrap_or_else(|| target.binding_name());
-                        bindings.entry(local_name.clone()).or_insert(HirResolvedBinding {
-                            local_name: local_name.clone(),
-                            origin: HirBindingOrigin::Directive(directive.kind),
-                            target: target.clone(),
-                            span: directive.span,
-                        });
+                        bindings
+                            .entry(local_name.clone())
+                            .or_insert(HirResolvedBinding {
+                                local_name: local_name.clone(),
+                                origin: HirBindingOrigin::Directive(directive.kind),
+                                target: target.clone(),
+                                span: directive.span,
+                            });
                         directives.push(HirResolvedDirective {
                             source_module_id: module.module_id.clone(),
                             local_name,
@@ -908,16 +1189,183 @@ fn lower_param_mode(mode: &ParsedParamMode) -> HirParamMode {
     }
 }
 
+fn lower_symbol_body(body: &arcana_syntax::SymbolBody) -> HirSymbolBody {
+    match body {
+        arcana_syntax::SymbolBody::None => HirSymbolBody::None,
+        arcana_syntax::SymbolBody::Record { fields } => HirSymbolBody::Record {
+            fields: fields
+                .iter()
+                .map(|field| HirField {
+                    name: field.name.clone(),
+                    ty: field.ty.clone(),
+                    span: field.span,
+                })
+                .collect(),
+        },
+        arcana_syntax::SymbolBody::Enum { variants } => HirSymbolBody::Enum {
+            variants: variants
+                .iter()
+                .map(|variant| HirEnumVariant {
+                    name: variant.name.clone(),
+                    payload: variant.payload.clone(),
+                    span: variant.span,
+                })
+                .collect(),
+        },
+        arcana_syntax::SymbolBody::Trait {
+            assoc_types,
+            methods,
+        } => HirSymbolBody::Trait {
+            assoc_types: assoc_types
+                .iter()
+                .map(|assoc_type| HirTraitAssocType {
+                    name: assoc_type.name.clone(),
+                    default_ty: assoc_type.default_ty.clone(),
+                    span: assoc_type.span,
+                })
+                .collect(),
+            methods: methods.iter().map(lower_trait_or_impl_method).collect(),
+        },
+    }
+}
+
+fn lower_trait_or_impl_method(method: &arcana_syntax::SymbolDecl) -> HirSymbol {
+    HirSymbol {
+        kind: lower_symbol_kind(&method.kind),
+        name: method.name.clone(),
+        exported: method.exported,
+        is_async: method.is_async,
+        type_params: method.type_params.clone(),
+        where_clause: method.where_clause.clone(),
+        params: method
+            .params
+            .iter()
+            .map(|param| HirParam {
+                mode: param.mode.as_ref().map(lower_param_mode),
+                name: param.name.clone(),
+                ty: param.ty.clone(),
+            })
+            .collect(),
+        return_type: method.return_type.clone(),
+        behavior_attrs: method
+            .behavior_attrs
+            .iter()
+            .map(|attr| HirBehaviorAttr {
+                name: attr.name.clone(),
+                value: attr.value.clone(),
+            })
+            .collect(),
+        body: lower_symbol_body(&method.body),
+        statements: lower_statements(&method.statements),
+        surface_text: method.surface_text.clone(),
+        span: method.span,
+    }
+}
+
+fn lower_assign_op(op: &ParsedAssignOp) -> HirAssignOp {
+    match op {
+        ParsedAssignOp::Assign => HirAssignOp::Assign,
+        ParsedAssignOp::AddAssign => HirAssignOp::AddAssign,
+        ParsedAssignOp::SubAssign => HirAssignOp::SubAssign,
+        ParsedAssignOp::MulAssign => HirAssignOp::MulAssign,
+        ParsedAssignOp::DivAssign => HirAssignOp::DivAssign,
+        ParsedAssignOp::ModAssign => HirAssignOp::ModAssign,
+        ParsedAssignOp::BitAndAssign => HirAssignOp::BitAndAssign,
+        ParsedAssignOp::BitOrAssign => HirAssignOp::BitOrAssign,
+        ParsedAssignOp::BitXorAssign => HirAssignOp::BitXorAssign,
+        ParsedAssignOp::ShlAssign => HirAssignOp::ShlAssign,
+        ParsedAssignOp::ShrAssign => HirAssignOp::ShrAssign,
+    }
+}
+
+fn lower_raw_block_entries(entries: &[arcana_syntax::RawBlockEntry]) -> Vec<HirRawBlockEntry> {
+    entries
+        .iter()
+        .map(|entry| HirRawBlockEntry {
+            text: entry.text.clone(),
+            span: entry.span,
+            children: lower_raw_block_entries(&entry.children),
+        })
+        .collect()
+}
+
+fn lower_statements(statements: &[arcana_syntax::Statement]) -> Vec<HirStatement> {
+    statements.iter().map(lower_statement).collect()
+}
+
+fn lower_statement(statement: &arcana_syntax::Statement) -> HirStatement {
+    HirStatement {
+        kind: match &statement.kind {
+            ParsedStatementKind::Let {
+                mutable,
+                name,
+                value,
+                attached,
+            } => HirStatementKind::Let {
+                mutable: *mutable,
+                name: name.clone(),
+                value: value.clone(),
+                attached: lower_raw_block_entries(attached),
+            },
+            ParsedStatementKind::Return { value, attached } => HirStatementKind::Return {
+                value: value.clone(),
+                attached: lower_raw_block_entries(attached),
+            },
+            ParsedStatementKind::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => HirStatementKind::If {
+                condition: condition.clone(),
+                then_branch: lower_statements(then_branch),
+                else_branch: else_branch.as_ref().map(|branch| lower_statements(branch)),
+            },
+            ParsedStatementKind::While { condition, body } => HirStatementKind::While {
+                condition: condition.clone(),
+                body: lower_statements(body),
+            },
+            ParsedStatementKind::For {
+                binding,
+                iterable,
+                body,
+            } => HirStatementKind::For {
+                binding: binding.clone(),
+                iterable: iterable.clone(),
+                body: lower_statements(body),
+            },
+            ParsedStatementKind::Break => HirStatementKind::Break,
+            ParsedStatementKind::Continue => HirStatementKind::Continue,
+            ParsedStatementKind::Assign {
+                target,
+                op,
+                value,
+                attached,
+            } => HirStatementKind::Assign {
+                target: target.clone(),
+                op: lower_assign_op(op),
+                value: value.clone(),
+                attached: lower_raw_block_entries(attached),
+            },
+            ParsedStatementKind::Expr { text, attached } => HirStatementKind::Expr {
+                text: text.clone(),
+                attached: lower_raw_block_entries(attached),
+            },
+        },
+        span: statement.span,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::path::Path;
 
-    use super::{
-        HirDirectiveKind, build_package_layout, build_package_summary, build_workspace_package,
-        build_workspace_summary, derive_source_module_path, lower_module_text, resolve_workspace,
-    };
     use super::freeze::FROZEN_HIR_NODE_KINDS;
+    use super::{
+        HirAssignOp, HirDirectiveKind, HirStatementKind, HirSymbolBody, build_package_layout,
+        build_package_summary, build_workspace_package, build_workspace_summary,
+        derive_source_module_path, lower_module_text, resolve_workspace,
+    };
 
     #[test]
     fn frozen_hir_list_is_unique() {
@@ -941,6 +1389,10 @@ mod tests {
         assert!(module.has_symbol("print"));
         assert!(module.has_symbol("helper"));
         assert_eq!(module.impls.len(), 0);
+        assert!(matches!(
+            module.symbols[0].statements[0].kind,
+            HirStatementKind::Return { .. }
+        ));
         assert_eq!(
             module.exported_surface_rows(),
             vec![
@@ -954,23 +1406,148 @@ mod tests {
     fn lower_module_text_captures_async_functions_and_impls() {
         let module = lower_module_text(
             "async_demo",
-            "export async fn worker[T, where std.iter.Iterator[T]](read it: T, count: Int) -> Int:\n    return count\nimpl RangeIter:\n    fn next(edit self: RangeIter) -> (Bool, Int):\n        return (false, 0)\n",
+            "export async fn worker[T, where std.iter.Iterator[T]](read it: T, count: Int) -> Int:\n    return count\nbehavior[phase=update, affinity=worker] fn tick():\n    return 0\nimpl RangeIter:\n    fn next(edit self: RangeIter) -> (Bool, Int):\n        return (false, 0)\n",
         )
         .expect("lowering should pass");
 
-        assert_eq!(module.symbols.len(), 1);
+        assert_eq!(module.symbols.len(), 2);
         let worker = &module.symbols[0];
         assert!(worker.is_async);
         assert_eq!(worker.type_params, vec!["T".to_string()]);
-        assert_eq!(worker.where_clause, Some("std.iter.Iterator[T]".to_string()));
+        assert_eq!(
+            worker.where_clause,
+            Some("std.iter.Iterator[T]".to_string())
+        );
         assert_eq!(worker.params.len(), 2);
         assert_eq!(worker.return_type, Some("Int".to_string()));
+        let tick = &module.symbols[1];
+        assert_eq!(tick.kind, super::HirSymbolKind::Behavior);
+        assert_eq!(tick.behavior_attrs.len(), 2);
+        assert_eq!(tick.behavior_attrs[0].name, "phase");
+        assert_eq!(tick.behavior_attrs[0].value, "update");
         assert_eq!(
             module.exported_surface_rows(),
             vec!["export:fn:async fn worker[T, where std.iter.Iterator[T]](read it: T, count: Int) -> Int:".to_string()]
         );
         assert_eq!(module.impls.len(), 1);
         assert_eq!(module.impls[0].target_type, "RangeIter");
+        assert_eq!(module.impls[0].methods.len(), 1);
+        assert_eq!(module.impls[0].methods[0].name, "next");
+    }
+
+    #[test]
+    fn lower_module_text_captures_structured_statements() {
+        let module = lower_module_text(
+            "flow_demo",
+            "fn main() -> Int:\n    let mut frames = 0\n    while frames < 10:\n        if frames % 2 == 0:\n            frames += 1\n        else:\n            continue\n    return match frames:\n        10 => 1\n        _ => 0\n",
+        )
+        .expect("lowering should pass");
+
+        let statements = &module.symbols[0].statements;
+        assert_eq!(statements.len(), 3);
+        match &statements[0].kind {
+            HirStatementKind::Let {
+                mutable,
+                name,
+                value,
+                attached,
+            } => {
+                assert!(*mutable);
+                assert_eq!(name, "frames");
+                assert_eq!(value, "0");
+                assert!(attached.is_empty());
+            }
+            other => panic!("expected let statement, got {other:?}"),
+        }
+        match &statements[1].kind {
+            HirStatementKind::While { condition, body } => {
+                assert_eq!(condition, "frames < 10");
+                assert_eq!(body.len(), 1);
+                match &body[0].kind {
+                    HirStatementKind::If {
+                        condition,
+                        then_branch,
+                        else_branch,
+                    } => {
+                        assert_eq!(condition, "frames % 2 == 0");
+                        assert_eq!(then_branch.len(), 1);
+                        match &then_branch[0].kind {
+                            HirStatementKind::Assign {
+                                target,
+                                op,
+                                value,
+                                attached,
+                            } => {
+                                assert_eq!(target, "frames");
+                                assert_eq!(*op, HirAssignOp::AddAssign);
+                                assert_eq!(value, "1");
+                                assert!(attached.is_empty());
+                            }
+                            other => panic!("expected assignment, got {other:?}"),
+                        }
+                        let else_branch = else_branch.as_ref().expect("else branch should exist");
+                        assert!(matches!(else_branch[0].kind, HirStatementKind::Continue));
+                    }
+                    other => panic!("expected nested if statement, got {other:?}"),
+                }
+            }
+            other => panic!("expected while statement, got {other:?}"),
+        }
+        match &statements[2].kind {
+            HirStatementKind::Return { value, attached } => {
+                assert_eq!(value.as_deref(), Some("match frames:"));
+                assert_eq!(attached.len(), 2);
+                assert_eq!(attached[0].text, "10 => 1");
+                assert_eq!(attached[1].text, "_ => 0");
+            }
+            other => panic!("expected return statement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lower_module_text_captures_record_enum_and_trait_members() {
+        let module = lower_module_text(
+            "types",
+            "export record Counter:\n    value: Int\nexport enum Result[T]:\n    Ok(Int)\n    Err(Str)\nexport trait CounterOps[T]:\n    type Output\n    fn tick(edit self: T) -> Int:\n        return 0\n",
+        )
+        .expect("lowering should pass");
+
+        assert_eq!(module.symbols.len(), 3);
+        match &module.symbols[0].body {
+            HirSymbolBody::Record { fields } => {
+                assert_eq!(fields.len(), 1);
+                assert_eq!(fields[0].name, "value");
+            }
+            other => panic!("expected record body, got {other:?}"),
+        }
+        match &module.symbols[1].body {
+            HirSymbolBody::Enum { variants } => {
+                assert_eq!(variants.len(), 2);
+                assert_eq!(variants[0].name, "Ok");
+            }
+            other => panic!("expected enum body, got {other:?}"),
+        }
+        match &module.symbols[2].body {
+            HirSymbolBody::Trait {
+                assoc_types,
+                methods,
+            } => {
+                assert_eq!(assoc_types.len(), 1);
+                assert_eq!(assoc_types[0].name, "Output");
+                assert_eq!(methods.len(), 1);
+                assert_eq!(methods[0].name, "tick");
+            }
+            other => panic!("expected trait body, got {other:?}"),
+        }
+        assert_eq!(
+            module.exported_surface_rows(),
+            vec![
+                "export:enum:enum Result[T]:\\nOk(Int)\\nErr(Str)".to_string(),
+                "export:record:record Counter:\\nvalue: Int".to_string(),
+                "export:trait:trait CounterOps[T]:\\ntype Output\\nfn tick(edit self: T) -> Int:"
+                    .to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -993,11 +1570,17 @@ mod tests {
         assert_eq!(package.dependency_edges.len(), 3);
         assert_eq!(package.dependency_edges[0].source_module_id, "winspell");
         assert_eq!(package.dependency_edges[0].kind, HirDirectiveKind::Reexport);
-        assert_eq!(package.dependency_edges[1].source_module_id, "winspell.window");
-        assert_eq!(package.exported_surface_rows(), vec![
-            "module=winspell:export:fn:fn open() -> Int:".to_string(),
-            "module=winspell:reexport:winspell.window".to_string(),
-        ]);
+        assert_eq!(
+            package.dependency_edges[1].source_module_id,
+            "winspell.window"
+        );
+        assert_eq!(
+            package.exported_surface_rows(),
+            vec![
+                "module=winspell:export:fn:fn open() -> Int:".to_string(),
+                "module=winspell:reexport:winspell.window".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -1060,11 +1643,8 @@ mod tests {
         let std_summary = build_package_summary(
             "std",
             vec![
-                lower_module_text(
-                    "std.io",
-                    "export fn print() -> Int:\n    return 0\n",
-                )
-                .expect("std.io should lower"),
+                lower_module_text("std.io", "export fn print() -> Int:\n    return 0\n")
+                    .expect("std.io should lower"),
             ],
         );
         let std_layout = build_package_layout(
@@ -1118,7 +1698,10 @@ mod tests {
         let root = app.module("app").expect("root module should resolve");
         assert_eq!(root.directives.len(), 3);
         assert_eq!(
-            root.bindings.get("io").expect("alias should resolve").target,
+            root.bindings
+                .get("io")
+                .expect("alias should resolve")
+                .target,
             super::HirResolvedTarget::Module {
                 package_name: "std".to_string(),
                 module_id: "std.io".to_string(),
@@ -1141,11 +1724,10 @@ mod tests {
     fn resolve_workspace_reports_invalid_dependencies() {
         let core_summary = build_package_summary(
             "core",
-            vec![lower_module_text(
-                "core",
-                "export fn value() -> Int:\n    return 0\n",
-            )
-            .expect("core should lower")],
+            vec![
+                lower_module_text("core", "export fn value() -> Int:\n    return 0\n")
+                    .expect("core should lower"),
+            ],
         );
         let core_layout = build_package_layout(
             &core_summary,
@@ -1166,11 +1748,10 @@ mod tests {
 
         let app_summary = build_package_summary(
             "app",
-            vec![lower_module_text(
-                "app",
-                "import core\nfn main() -> Int:\n    return 0\n",
-            )
-            .expect("app should lower")],
+            vec![
+                lower_module_text("app", "import core\nfn main() -> Int:\n    return 0\n")
+                    .expect("app should lower"),
+            ],
         );
         let app_layout = build_package_layout(
             &app_summary,

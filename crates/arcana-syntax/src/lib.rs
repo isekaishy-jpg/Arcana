@@ -85,6 +85,134 @@ pub struct ParamDecl {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FieldDecl {
+    pub name: String,
+    pub ty: String,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EnumVariantDecl {
+    pub name: String,
+    pub payload: Option<String>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TraitAssocTypeDecl {
+    pub name: String,
+    pub default_ty: Option<String>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BehaviorAttr {
+    pub name: String,
+    pub value: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RawBlockEntry {
+    pub text: String,
+    pub span: Span,
+    pub children: Vec<RawBlockEntry>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AssignOp {
+    Assign,
+    AddAssign,
+    SubAssign,
+    MulAssign,
+    DivAssign,
+    ModAssign,
+    BitAndAssign,
+    BitOrAssign,
+    BitXorAssign,
+    ShlAssign,
+    ShrAssign,
+}
+
+impl AssignOp {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Assign => "=",
+            Self::AddAssign => "+=",
+            Self::SubAssign => "-=",
+            Self::MulAssign => "*=",
+            Self::DivAssign => "/=",
+            Self::ModAssign => "%=",
+            Self::BitAndAssign => "&=",
+            Self::BitOrAssign => "|=",
+            Self::BitXorAssign => "^=",
+            Self::ShlAssign => "<<=",
+            Self::ShrAssign => "shr=",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StatementKind {
+    Let {
+        mutable: bool,
+        name: String,
+        value: String,
+        attached: Vec<RawBlockEntry>,
+    },
+    Return {
+        value: Option<String>,
+        attached: Vec<RawBlockEntry>,
+    },
+    If {
+        condition: String,
+        then_branch: Vec<Statement>,
+        else_branch: Option<Vec<Statement>>,
+    },
+    While {
+        condition: String,
+        body: Vec<Statement>,
+    },
+    For {
+        binding: String,
+        iterable: String,
+        body: Vec<Statement>,
+    },
+    Break,
+    Continue,
+    Assign {
+        target: String,
+        op: AssignOp,
+        value: String,
+        attached: Vec<RawBlockEntry>,
+    },
+    Expr {
+        text: String,
+        attached: Vec<RawBlockEntry>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Statement {
+    pub kind: StatementKind,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SymbolBody {
+    None,
+    Record {
+        fields: Vec<FieldDecl>,
+    },
+    Enum {
+        variants: Vec<EnumVariantDecl>,
+    },
+    Trait {
+        assoc_types: Vec<TraitAssocTypeDecl>,
+        methods: Vec<SymbolDecl>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SymbolDecl {
     pub name: String,
     pub kind: SymbolKind,
@@ -94,7 +222,17 @@ pub struct SymbolDecl {
     pub where_clause: Option<String>,
     pub params: Vec<ParamDecl>,
     pub return_type: Option<String>,
+    pub behavior_attrs: Vec<BehaviorAttr>,
+    pub body: SymbolBody,
+    pub statements: Vec<Statement>,
     pub surface_text: String,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImplAssocTypeBinding {
+    pub name: String,
+    pub value_ty: Option<String>,
     pub span: Span,
 }
 
@@ -102,6 +240,8 @@ pub struct SymbolDecl {
 pub struct ImplDecl {
     pub trait_path: Option<String>,
     pub target_type: String,
+    pub assoc_types: Vec<ImplAssocTypeBinding>,
+    pub methods: Vec<SymbolDecl>,
     pub body_entries: Vec<String>,
     pub surface_text: String,
     pub span: Span,
@@ -120,38 +260,43 @@ pub fn parse_module(source: &str) -> Result<ParsedModule, String> {
     let lines = source.lines().collect::<Vec<_>>();
     let mut line_count = 0usize;
     let mut non_empty = 0usize;
-    let mut directives = Vec::new();
-    let mut symbols = Vec::new();
-    let mut impls = Vec::new();
+    let mut source_lines = Vec::with_capacity(lines.len());
 
     for (idx, line) in lines.iter().enumerate() {
         line_count = idx + 1;
         let analysis = analyze_line(line, idx)?;
-        if !analysis.counts_as_non_empty() {
-            continue;
+        let counts_as_non_empty = analysis.counts_as_non_empty();
+        if counts_as_non_empty {
+            non_empty += 1;
         }
+        source_lines.push(SourceLine {
+            text: analysis.trimmed.to_string(),
+            leading_spaces: analysis.leading_spaces,
+            line: idx + 1,
+            counts_as_non_empty,
+        });
+    }
 
-        non_empty += 1;
-        if analysis.leading_spaces != 0 {
-            continue;
-        }
-
-        let span = Span::new(idx + 1, 1);
-        if let Some(directive) = parse_directive(analysis.trimmed, span)? {
+    let (entries, _) = collect_block_entries(&source_lines, 0, 0)?;
+    let mut directives = Vec::new();
+    let mut symbols = Vec::new();
+    let mut impls = Vec::new();
+    for entry in &entries {
+        if let Some(directive) = parse_directive(&entry.text, entry.span)? {
             directives.push(directive);
             continue;
         }
 
-        if let Some(impl_decl) = parse_impl_decl(&lines, idx, analysis.trimmed, span)? {
+        if let Some(impl_decl) = parse_impl_decl(entry)? {
             impls.push(impl_decl);
             continue;
         }
 
-        if let Some(mut symbol) = parse_symbol(analysis.trimmed, span) {
-            symbol.surface_text = collect_symbol_surface(&lines, idx, &symbol.kind)?;
+        if let Some(symbol) = parse_symbol_entry(entry)? {
             symbols.push(symbol);
         }
     }
+
     Ok(ParsedModule {
         line_count: line_count.max(1),
         non_empty_line_count: non_empty,
@@ -170,6 +315,14 @@ impl AnalyzedLine<'_> {
     fn counts_as_non_empty(&self) -> bool {
         !self.trimmed.is_empty() && !self.trimmed.starts_with('#')
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SourceLine {
+    text: String,
+    leading_spaces: usize,
+    line: usize,
+    counts_as_non_empty: bool,
 }
 
 fn analyze_line<'a>(line: &'a str, line_index: usize) -> Result<AnalyzedLine<'a>, String> {
@@ -195,6 +348,56 @@ fn analyze_line<'a>(line: &'a str, line_index: usize) -> Result<AnalyzedLine<'a>
         trimmed: line.trim(),
         leading_spaces,
     })
+}
+
+fn collect_block_entries(
+    lines: &[SourceLine],
+    start_index: usize,
+    indent: usize,
+) -> Result<(Vec<RawBlockEntry>, usize), String> {
+    let mut index = start_index;
+    let mut entries = Vec::new();
+
+    while let Some(next_index) = next_non_empty_index(lines, index) {
+        let line = &lines[next_index];
+        if line.leading_spaces < indent {
+            return Ok((entries, next_index));
+        }
+        if line.leading_spaces > indent {
+            return Err(format!("{}:{}: unexpected indentation", line.line, 1));
+        }
+
+        let mut entry = RawBlockEntry {
+            text: line.text.clone(),
+            span: Span::new(line.line, 1),
+            children: Vec::new(),
+        };
+
+        index = next_index + 1;
+        if let Some(child_index) = next_non_empty_index(lines, index) {
+            let child = &lines[child_index];
+            if child.leading_spaces > indent {
+                let (children, next_child_index) =
+                    collect_block_entries(lines, child_index, child.leading_spaces)?;
+                entry.children = children;
+                index = next_child_index;
+            }
+        }
+
+        entries.push(entry);
+    }
+
+    Ok((entries, lines.len()))
+}
+
+fn next_non_empty_index(lines: &[SourceLine], mut index: usize) -> Option<usize> {
+    while index < lines.len() {
+        if lines[index].counts_as_non_empty {
+            return Some(index);
+        }
+        index += 1;
+    }
+    None
 }
 
 fn parse_directive(trimmed: &str, span: Span) -> Result<Option<ModuleDirective>, String> {
@@ -269,9 +472,22 @@ fn parse_path(path: &str) -> Result<Vec<String>, String> {
     Ok(segments)
 }
 
-fn parse_symbol(trimmed: &str, span: Span) -> Option<SymbolDecl> {
+fn parse_symbol_entry(entry: &RawBlockEntry) -> Result<Option<SymbolDecl>, String> {
+    let Some(mut symbol) = parse_symbol_header(&entry.text, entry.span) else {
+        return Ok(None);
+    };
+    symbol.surface_text = collect_symbol_surface(&entry.text, &symbol.kind, &entry.children);
+    symbol.body = parse_symbol_body(&symbol.kind, &entry.children)?;
+    symbol.statements = parse_symbol_statements(&symbol.kind, &entry.children)?;
+    Ok(Some(symbol))
+}
+
+fn parse_symbol_header(trimmed: &str, span: Span) -> Option<SymbolDecl> {
     let exported = trimmed.starts_with("export ");
     let rest = trimmed.strip_prefix("export ").unwrap_or(trimmed);
+    if let Some(symbol) = parse_behavior_symbol(rest, exported, span) {
+        return Some(symbol);
+    }
     let (is_async, rest) = if let Some(rest) = rest.strip_prefix("async ") {
         (true, rest)
     } else {
@@ -301,6 +517,9 @@ fn parse_symbol(trimmed: &str, span: Span) -> Option<SymbolDecl> {
             where_clause: signature.where_clause,
             params: signature.params,
             return_type: signature.return_type,
+            behavior_attrs: Vec::new(),
+            body: SymbolBody::None,
+            statements: Vec::new(),
             surface_text: trimmed.to_string(),
             span,
         });
@@ -308,26 +527,54 @@ fn parse_symbol(trimmed: &str, span: Span) -> Option<SymbolDecl> {
     None
 }
 
-fn collect_symbol_surface(
-    lines: &[&str],
-    start_index: usize,
-    kind: &SymbolKind,
-) -> Result<String, String> {
-    let line = analyze_line(lines[start_index], start_index)?;
+fn parse_behavior_symbol(rest: &str, exported: bool, span: Span) -> Option<SymbolDecl> {
+    let open_idx = rest.find('[')?;
+    if !rest[..open_idx].trim().eq("behavior") {
+        return None;
+    }
+    let close_idx = find_matching_delim(rest, open_idx, '[', ']')?;
+    let attrs = parse_behavior_attrs(&rest[open_idx + 1..close_idx]).ok()?;
+    let after_attrs = rest[close_idx + 1..].trim();
+    let fn_rest = after_attrs.strip_prefix("fn ")?;
+    let signature = parse_symbol_signature(SymbolKind::Fn, fn_rest)?;
+    Some(SymbolDecl {
+        name: signature.name,
+        kind: SymbolKind::Behavior,
+        exported,
+        is_async: false,
+        type_params: signature.type_params,
+        where_clause: signature.where_clause,
+        params: signature.params,
+        return_type: signature.return_type,
+        behavior_attrs: attrs,
+        body: SymbolBody::None,
+        statements: Vec::new(),
+        surface_text: format!(
+            "behavior[{}] fn {}",
+            &rest[open_idx + 1..close_idx],
+            fn_rest
+        ),
+        span,
+    })
+}
+
+fn collect_symbol_surface(trimmed: &str, kind: &SymbolKind, entries: &[RawBlockEntry]) -> String {
     let mut surface_lines = vec![
-        line.trimmed
+        trimmed
             .strip_prefix("export ")
-            .unwrap_or(line.trimmed)
+            .unwrap_or(trimmed)
             .to_string(),
     ];
 
-    if matches!(kind, SymbolKind::Fn | SymbolKind::Const) {
-        return Ok(surface_lines.join("\n"));
+    if matches!(
+        kind,
+        SymbolKind::Fn | SymbolKind::Behavior | SymbolKind::Const
+    ) {
+        return surface_lines.join("\n");
     }
 
-    surface_lines.extend(collect_indented_entries(lines, start_index)?);
-
-    Ok(surface_lines.join("\n"))
+    surface_lines.extend(entries.iter().map(|entry| entry.text.clone()));
+    surface_lines.join("\n")
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -378,7 +625,9 @@ fn parse_function_signature_tail(
     Some((type_params, where_clause, params, return_type))
 }
 
-fn parse_named_type_tail(tail: &str) -> Option<(Vec<String>, Option<String>, Vec<ParamDecl>, Option<String>)> {
+fn parse_named_type_tail(
+    tail: &str,
+) -> Option<(Vec<String>, Option<String>, Vec<ParamDecl>, Option<String>)> {
     let (type_params, where_clause, remainder) = parse_type_params_and_where(tail.trim())?;
     if !remainder.trim().is_empty() {
         return None;
@@ -461,13 +710,36 @@ fn parse_param_list(source: &str) -> Result<Vec<ParamDecl>, String> {
     Ok(params)
 }
 
-fn parse_impl_decl(
-    lines: &[&str],
-    start_index: usize,
-    trimmed: &str,
-    span: Span,
-) -> Result<Option<ImplDecl>, String> {
-    let Some(rest) = trimmed.strip_prefix("impl ") else {
+fn parse_behavior_attrs(source: &str) -> Result<Vec<BehaviorAttr>, String> {
+    let source = source.trim();
+    if source.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut attrs = Vec::new();
+    for part in split_top_level(source, ',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let (name, value) = part
+            .split_once('=')
+            .ok_or_else(|| format!("malformed behavior attribute `{part}`"))?;
+        let name = name.trim();
+        let value = value.trim();
+        if !is_identifier(name) || value.is_empty() {
+            return Err(format!("malformed behavior attribute `{part}`"));
+        }
+        attrs.push(BehaviorAttr {
+            name: name.to_string(),
+            value: value.to_string(),
+        });
+    }
+    Ok(attrs)
+}
+
+fn parse_impl_decl(entry: &RawBlockEntry) -> Result<Option<ImplDecl>, String> {
+    let Some(rest) = entry.text.strip_prefix("impl ") else {
         return Ok(None);
     };
     let header = rest.strip_suffix(':').unwrap_or(rest).trim();
@@ -479,43 +751,429 @@ fn parse_impl_decl(
         None => (None, header.to_string()),
     };
     if target_type.is_empty() {
-        return Err(format!("{}:{}: malformed impl declaration", span.line, span.column));
+        return Err(format!(
+            "{}:{}: malformed impl declaration",
+            entry.span.line, entry.span.column
+        ));
     }
-    let body_entries = collect_indented_entries(lines, start_index)?;
-    let mut surface_lines = vec![trimmed.to_string()];
+    let body_entries = entry
+        .children
+        .iter()
+        .map(|entry| entry.text.clone())
+        .collect::<Vec<_>>();
+    let mut assoc_types = Vec::new();
+    let mut methods = Vec::new();
+    for child in &entry.children {
+        if let Some(assoc_type) = parse_impl_assoc_type_binding(&child.text, child.span) {
+            assoc_types.push(assoc_type);
+            continue;
+        }
+        if let Some(method) = parse_symbol_entry(child)? {
+            methods.push(method);
+        }
+    }
+    let mut surface_lines = vec![entry.text.clone()];
     surface_lines.extend(body_entries.iter().cloned());
     Ok(Some(ImplDecl {
         trait_path,
         target_type,
+        assoc_types,
+        methods,
         body_entries,
         surface_text: surface_lines.join("\n"),
-        span,
+        span: entry.span,
     }))
 }
 
-fn collect_indented_entries(lines: &[&str], start_index: usize) -> Result<Vec<String>, String> {
-    let mut entries = Vec::new();
-    let mut body_indent = None;
-    let mut index = start_index + 1;
-    while index < lines.len() {
-        let analysis = analyze_line(lines[index], index)?;
-        if !analysis.counts_as_non_empty() {
-            index += 1;
-            continue;
+fn parse_symbol_body(kind: &SymbolKind, entries: &[RawBlockEntry]) -> Result<SymbolBody, String> {
+    match kind {
+        SymbolKind::Fn | SymbolKind::Const | SymbolKind::Behavior => Ok(SymbolBody::None),
+        SymbolKind::Record => Ok(SymbolBody::Record {
+            fields: entries
+                .iter()
+                .filter_map(|entry| parse_field_decl(&entry.text, entry.span))
+                .collect(),
+        }),
+        SymbolKind::Enum => Ok(SymbolBody::Enum {
+            variants: entries
+                .iter()
+                .filter_map(|entry| parse_enum_variant_decl(&entry.text, entry.span))
+                .collect(),
+        }),
+        SymbolKind::Trait => {
+            let mut assoc_types = Vec::new();
+            let mut methods = Vec::new();
+            for entry in entries {
+                if let Some(assoc_type) = parse_trait_assoc_type_decl(&entry.text, entry.span) {
+                    assoc_types.push(assoc_type);
+                    continue;
+                }
+                if let Some(method) = parse_symbol_entry(entry)? {
+                    methods.push(method);
+                }
+            }
+            Ok(SymbolBody::Trait {
+                assoc_types,
+                methods,
+            })
         }
-        if analysis.leading_spaces == 0 {
-            break;
+    }
+}
+
+fn parse_symbol_statements(
+    kind: &SymbolKind,
+    entries: &[RawBlockEntry],
+) -> Result<Vec<Statement>, String> {
+    match kind {
+        SymbolKind::Fn | SymbolKind::Behavior => parse_statement_block(entries, 0),
+        SymbolKind::Trait | SymbolKind::Record | SymbolKind::Enum | SymbolKind::Const => {
+            Ok(Vec::new())
         }
-        let indent = *body_indent.get_or_insert(analysis.leading_spaces);
-        if analysis.leading_spaces < indent {
-            break;
+    }
+}
+
+fn parse_statement_block(
+    entries: &[RawBlockEntry],
+    loop_depth: usize,
+) -> Result<Vec<Statement>, String> {
+    let mut statements = Vec::new();
+    let mut index = 0usize;
+    while index < entries.len() {
+        let entry = &entries[index];
+        if entry.text == "else:" {
+            return Err(format!(
+                "{}:{}: `else` without a preceding `if`",
+                entry.span.line, entry.span.column
+            ));
         }
-        if analysis.leading_spaces == indent {
-            entries.push(analysis.trimmed.to_string());
+        if entry.text.starts_with("else ") {
+            return Err(format!(
+                "{}:{}: malformed `else` clause",
+                entry.span.line, entry.span.column
+            ));
         }
+
+        let mut statement = parse_statement(entry, loop_depth)?;
+        if let StatementKind::If { else_branch, .. } = &mut statement.kind {
+            if let Some(next) = entries.get(index + 1) {
+                if next.text == "else:" {
+                    *else_branch = Some(parse_statement_block(&next.children, loop_depth)?);
+                    index += 1;
+                } else if next.text.starts_with("else ") {
+                    return Err(format!(
+                        "{}:{}: malformed `else` clause",
+                        next.span.line, next.span.column
+                    ));
+                }
+            }
+        }
+
+        statements.push(statement);
         index += 1;
     }
-    Ok(entries)
+
+    Ok(statements)
+}
+
+fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement, String> {
+    if let Some(rest) = entry.text.strip_prefix("if ") {
+        let condition = parse_block_header(rest, "if", entry.span)?;
+        return Ok(Statement {
+            kind: StatementKind::If {
+                condition,
+                then_branch: parse_statement_block(&entry.children, loop_depth)?,
+                else_branch: None,
+            },
+            span: entry.span,
+        });
+    }
+
+    if let Some(rest) = entry.text.strip_prefix("while ") {
+        let condition = parse_block_header(rest, "while", entry.span)?;
+        return Ok(Statement {
+            kind: StatementKind::While {
+                condition,
+                body: parse_statement_block(&entry.children, loop_depth + 1)?,
+            },
+            span: entry.span,
+        });
+    }
+
+    if let Some(rest) = entry.text.strip_prefix("for ") {
+        let header = parse_block_header(rest, "for", entry.span)?;
+        let (binding, iterable) = header.split_once(" in ").ok_or_else(|| {
+            format!(
+                "{}:{}: malformed `for` statement",
+                entry.span.line, entry.span.column
+            )
+        })?;
+        let binding = binding.trim();
+        let iterable = iterable.trim();
+        if !is_identifier(binding) || iterable.is_empty() {
+            return Err(format!(
+                "{}:{}: malformed `for` statement",
+                entry.span.line, entry.span.column
+            ));
+        }
+        return Ok(Statement {
+            kind: StatementKind::For {
+                binding: binding.to_string(),
+                iterable: iterable.to_string(),
+                body: parse_statement_block(&entry.children, loop_depth + 1)?,
+            },
+            span: entry.span,
+        });
+    }
+
+    if let Some(rest) = entry.text.strip_prefix("let ") {
+        let (mutable, rest) = if let Some(rest) = rest.strip_prefix("mut ") {
+            (true, rest)
+        } else {
+            (false, rest)
+        };
+        let (name, value) = rest.split_once('=').ok_or_else(|| {
+            format!(
+                "{}:{}: malformed `let` statement",
+                entry.span.line, entry.span.column
+            )
+        })?;
+        let name = name.trim();
+        let value = value.trim();
+        if !is_identifier(name) || value.is_empty() {
+            return Err(format!(
+                "{}:{}: malformed `let` statement",
+                entry.span.line, entry.span.column
+            ));
+        }
+        return Ok(Statement {
+            kind: StatementKind::Let {
+                mutable,
+                name: name.to_string(),
+                value: value.to_string(),
+                attached: entry.children.clone(),
+            },
+            span: entry.span,
+        });
+    }
+
+    if let Some(rest) = entry.text.strip_prefix("return") {
+        let value = match rest.trim() {
+            "" => None,
+            value => Some(value.to_string()),
+        };
+        return Ok(Statement {
+            kind: StatementKind::Return {
+                value,
+                attached: entry.children.clone(),
+            },
+            span: entry.span,
+        });
+    }
+
+    if entry.text == "break" {
+        if loop_depth == 0 {
+            return Err(format!(
+                "{}:{}: `break` is only valid inside loops",
+                entry.span.line, entry.span.column
+            ));
+        }
+        return Ok(Statement {
+            kind: StatementKind::Break,
+            span: entry.span,
+        });
+    }
+
+    if entry.text == "continue" {
+        if loop_depth == 0 {
+            return Err(format!(
+                "{}:{}: `continue` is only valid inside loops",
+                entry.span.line, entry.span.column
+            ));
+        }
+        return Ok(Statement {
+            kind: StatementKind::Continue,
+            span: entry.span,
+        });
+    }
+
+    if let Some((target, op, value)) = parse_assignment_statement(&entry.text) {
+        return Ok(Statement {
+            kind: StatementKind::Assign {
+                target,
+                op,
+                value,
+                attached: entry.children.clone(),
+            },
+            span: entry.span,
+        });
+    }
+
+    Ok(Statement {
+        kind: StatementKind::Expr {
+            text: entry.text.clone(),
+            attached: entry.children.clone(),
+        },
+        span: entry.span,
+    })
+}
+
+fn parse_block_header(rest: &str, keyword: &str, span: Span) -> Result<String, String> {
+    let Some(header) = rest.strip_suffix(':') else {
+        return Err(format!(
+            "{}:{}: malformed `{keyword}` statement",
+            span.line, span.column
+        ));
+    };
+    let header = header.trim();
+    if header.is_empty() {
+        return Err(format!(
+            "{}:{}: malformed `{keyword}` statement",
+            span.line, span.column
+        ));
+    }
+    Ok(header.to_string())
+}
+
+fn parse_assignment_statement(text: &str) -> Option<(String, AssignOp, String)> {
+    let (index, op, op_len) = find_top_level_assignment_op(text)?;
+    let target = text[..index].trim();
+    let value = text[index + op_len..].trim();
+    if target.is_empty() || value.is_empty() {
+        return None;
+    }
+    Some((target.to_string(), op, value.to_string()))
+}
+
+fn find_top_level_assignment_op(text: &str) -> Option<(usize, AssignOp, usize)> {
+    let mut depth_paren = 0usize;
+    let mut depth_bracket = 0usize;
+    let mut depth_brace = 0usize;
+    let mut in_string = false;
+    let mut escape = false;
+
+    for (idx, ch) in text.char_indices() {
+        if in_string {
+            if escape {
+                escape = false;
+                continue;
+            }
+            if ch == '\\' {
+                escape = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => {
+                in_string = true;
+                continue;
+            }
+            '(' => depth_paren += 1,
+            ')' => depth_paren = depth_paren.saturating_sub(1),
+            '[' => depth_bracket += 1,
+            ']' => depth_bracket = depth_bracket.saturating_sub(1),
+            '{' => depth_brace += 1,
+            '}' => depth_brace = depth_brace.saturating_sub(1),
+            _ => {}
+        }
+
+        if depth_paren != 0 || depth_bracket != 0 || depth_brace != 0 {
+            continue;
+        }
+
+        for (token, op) in [
+            ("<<=", AssignOp::ShlAssign),
+            ("shr=", AssignOp::ShrAssign),
+            ("+=", AssignOp::AddAssign),
+            ("-=", AssignOp::SubAssign),
+            ("*=", AssignOp::MulAssign),
+            ("/=", AssignOp::DivAssign),
+            ("%=", AssignOp::ModAssign),
+            ("&=", AssignOp::BitAndAssign),
+            ("|=", AssignOp::BitOrAssign),
+            ("^=", AssignOp::BitXorAssign),
+            ("=", AssignOp::Assign),
+        ] {
+            if !text[idx..].starts_with(token) {
+                continue;
+            }
+            if token == "=" {
+                let prev = text[..idx].chars().next_back();
+                let next = text[idx + 1..].chars().next();
+                if matches!(prev, Some('<' | '>' | '!' | '=')) || matches!(next, Some('=' | '>')) {
+                    continue;
+                }
+            }
+            return Some((idx, op, token.len()));
+        }
+    }
+
+    None
+}
+
+fn parse_field_decl(trimmed: &str, span: Span) -> Option<FieldDecl> {
+    let (name, ty) = trimmed.split_once(':')?;
+    let name = name.trim();
+    let ty = ty.trim();
+    if !is_identifier(name) || ty.is_empty() {
+        return None;
+    }
+    Some(FieldDecl {
+        name: name.to_string(),
+        ty: ty.to_string(),
+        span,
+    })
+}
+
+fn parse_enum_variant_decl(trimmed: &str, span: Span) -> Option<EnumVariantDecl> {
+    let name = parse_symbol_name(trimmed)?;
+    let tail = trimmed[name.len()..].trim();
+    let payload = if tail.is_empty() {
+        None
+    } else if tail.starts_with('(') && tail.ends_with(')') {
+        Some(tail[1..tail.len() - 1].trim().to_string())
+    } else {
+        None
+    };
+    Some(EnumVariantDecl {
+        name,
+        payload,
+        span,
+    })
+}
+
+fn parse_trait_assoc_type_decl(trimmed: &str, span: Span) -> Option<TraitAssocTypeDecl> {
+    let rest = trimmed.strip_prefix("type ")?;
+    let (name, default_ty) = match rest.split_once('=') {
+        Some((name, value)) => (name.trim(), Some(value.trim().to_string())),
+        None => (rest.trim(), None),
+    };
+    if !is_identifier(name) {
+        return None;
+    }
+    Some(TraitAssocTypeDecl {
+        name: name.to_string(),
+        default_ty: default_ty.filter(|value| !value.is_empty()),
+        span,
+    })
+}
+
+fn parse_impl_assoc_type_binding(trimmed: &str, span: Span) -> Option<ImplAssocTypeBinding> {
+    let rest = trimmed.strip_prefix("type ")?;
+    let (name, value_ty) = match rest.split_once('=') {
+        Some((name, value)) => (name.trim(), Some(value.trim().to_string())),
+        None => (rest.trim(), None),
+    };
+    if !is_identifier(name) {
+        return None;
+    }
+    Some(ImplAssocTypeBinding {
+        name: name.to_string(),
+        value_ty: value_ty.filter(|value| !value.is_empty()),
+        span,
+    })
 }
 
 fn split_top_level(source: &str, separator: char) -> Vec<&str> {
@@ -601,7 +1259,7 @@ fn is_identifier_continue(ch: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::freeze::{FROZEN_AST_NODE_KINDS, FROZEN_TOKEN_KINDS};
-    use super::{DirectiveKind, ParamMode, parse_module};
+    use super::{DirectiveKind, ParamMode, StatementKind, SymbolBody, SymbolKind, parse_module};
 
     #[test]
     fn frozen_lists_are_unique() {
@@ -625,7 +1283,7 @@ mod tests {
     #[test]
     fn parse_module_collects_directives_and_symbols() {
         let parsed = parse_module(
-            "import std.io\nuse std.result.Result\nreexport types\nexport record Counter:\n    value: Int\nfn main() -> Int:\n",
+            "import std.io\nuse std.result.Result\nreexport types\nexport record Counter:\n    value: Int\nexport enum Result[T]:\n    Ok(Int)\n    Err(Str)\nexport trait CounterOps[T]:\n    type Output\n    fn tick(edit self: T) -> Int:\n        return 0\nfn main() -> Int:\n",
         )
         .expect("parse should pass");
 
@@ -634,43 +1292,165 @@ mod tests {
         assert_eq!(parsed.directives[0].path, ["std", "io"]);
         assert_eq!(parsed.directives[1].kind, DirectiveKind::Use);
         assert_eq!(parsed.directives[1].path, ["std", "result", "Result"]);
-        assert_eq!(parsed.symbols.len(), 2);
+        assert_eq!(parsed.symbols.len(), 4);
         assert_eq!(parsed.symbols[0].name, "Counter");
         assert_eq!(parsed.symbols[0].kind.as_str(), "record");
         assert!(parsed.symbols[0].exported);
-        assert_eq!(parsed.symbols[0].surface_text, "record Counter:\nvalue: Int");
+        assert_eq!(
+            parsed.symbols[0].surface_text,
+            "record Counter:\nvalue: Int"
+        );
         assert_eq!(parsed.symbols[0].type_params, Vec::<String>::new());
-        assert_eq!(parsed.symbols[1].name, "main");
-        assert_eq!(parsed.symbols[1].kind.as_str(), "fn");
-        assert!(!parsed.symbols[1].exported);
-        assert_eq!(parsed.symbols[1].surface_text, "fn main() -> Int:");
-        assert_eq!(parsed.symbols[1].return_type, Some("Int".to_string()));
+        match &parsed.symbols[0].body {
+            SymbolBody::Record { fields } => {
+                assert_eq!(fields.len(), 1);
+                assert_eq!(fields[0].name, "value");
+                assert_eq!(fields[0].ty, "Int");
+            }
+            other => panic!("expected record body, got {other:?}"),
+        }
+        assert_eq!(parsed.symbols[1].name, "Result");
+        match &parsed.symbols[1].body {
+            SymbolBody::Enum { variants } => {
+                assert_eq!(variants.len(), 2);
+                assert_eq!(variants[0].name, "Ok");
+                assert_eq!(variants[0].payload, Some("Int".to_string()));
+                assert_eq!(variants[1].payload, Some("Str".to_string()));
+            }
+            other => panic!("expected enum body, got {other:?}"),
+        }
+        assert_eq!(parsed.symbols[2].name, "CounterOps");
+        match &parsed.symbols[2].body {
+            SymbolBody::Trait {
+                assoc_types,
+                methods,
+            } => {
+                assert_eq!(assoc_types.len(), 1);
+                assert_eq!(assoc_types[0].name, "Output");
+                assert_eq!(methods.len(), 1);
+                assert_eq!(methods[0].name, "tick");
+            }
+            other => panic!("expected trait body, got {other:?}"),
+        }
+        assert_eq!(parsed.symbols[3].name, "main");
+        assert_eq!(parsed.symbols[3].kind.as_str(), "fn");
+        assert!(!parsed.symbols[3].exported);
+        assert_eq!(parsed.symbols[3].surface_text, "fn main() -> Int:");
+        assert_eq!(parsed.symbols[3].return_type, Some("Int".to_string()));
+        assert!(parsed.symbols[3].statements.is_empty());
     }
 
     #[test]
     fn parse_module_collects_async_functions_and_impls() {
         let parsed = parse_module(
-            "async fn worker[T, where std.iter.Iterator[T]](read it: T, count: Int) -> Int:\n    return count\nimpl std.iter.Iterator[T] for RangeIter:\n    type Item = Int\n    fn next(edit self: RangeIter) -> (Bool, Int):\n        return (false, 0)\n",
+            "async fn worker[T, where std.iter.Iterator[T]](read it: T, count: Int) -> Int:\n    return count\nbehavior[phase=update, affinity=worker] fn tick():\n    return 0\nimpl std.iter.Iterator[T] for RangeIter:\n    type Item = Int\n    fn next(edit self: RangeIter) -> (Bool, Int):\n        return (false, 0)\n",
         )
         .expect("parse should pass");
 
-        assert_eq!(parsed.symbols.len(), 1);
+        assert_eq!(parsed.symbols.len(), 2);
         let worker = &parsed.symbols[0];
         assert!(worker.is_async);
         assert_eq!(worker.type_params, vec!["T".to_string()]);
-        assert_eq!(worker.where_clause, Some("std.iter.Iterator[T]".to_string()));
+        assert_eq!(
+            worker.where_clause,
+            Some("std.iter.Iterator[T]".to_string())
+        );
         assert_eq!(worker.params.len(), 2);
         assert_eq!(worker.params[0].mode, Some(ParamMode::Read));
         assert_eq!(worker.params[0].name, "it");
         assert_eq!(worker.params[0].ty, "T");
         assert_eq!(worker.params[1].mode, None);
         assert_eq!(worker.return_type, Some("Int".to_string()));
+        let tick = &parsed.symbols[1];
+        assert_eq!(tick.kind, SymbolKind::Behavior);
+        assert_eq!(tick.name, "tick");
+        assert_eq!(tick.behavior_attrs.len(), 2);
+        assert_eq!(tick.behavior_attrs[0].name, "phase");
+        assert_eq!(tick.behavior_attrs[0].value, "update");
+        assert_eq!(tick.behavior_attrs[1].value, "worker");
 
         assert_eq!(parsed.impls.len(), 1);
         let impl_decl = &parsed.impls[0];
-        assert_eq!(impl_decl.trait_path, Some("std.iter.Iterator[T]".to_string()));
+        assert_eq!(
+            impl_decl.trait_path,
+            Some("std.iter.Iterator[T]".to_string())
+        );
         assert_eq!(impl_decl.target_type, "RangeIter");
         assert_eq!(impl_decl.body_entries.len(), 2);
         assert!(impl_decl.body_entries[0].starts_with("type Item"));
+        assert_eq!(impl_decl.assoc_types.len(), 1);
+        assert_eq!(impl_decl.assoc_types[0].name, "Item");
+        assert_eq!(impl_decl.assoc_types[0].value_ty, Some("Int".to_string()));
+        assert_eq!(impl_decl.methods.len(), 1);
+        assert_eq!(impl_decl.methods[0].name, "next");
+    }
+
+    #[test]
+    fn parse_module_collects_structured_statements() {
+        let parsed = parse_module(
+            "fn main() -> Int:\n    let mut frames = 0\n    while frames < 10:\n        if frames % 2 == 0:\n            frames += 1\n        else:\n            continue\n    return match frames:\n        10 => 1\n        _ => 0\n",
+        )
+        .expect("parse should pass");
+
+        let statements = &parsed.symbols[0].statements;
+        assert_eq!(statements.len(), 3);
+        match &statements[0].kind {
+            StatementKind::Let {
+                mutable,
+                name,
+                value,
+                attached,
+            } => {
+                assert!(*mutable);
+                assert_eq!(name, "frames");
+                assert_eq!(value, "0");
+                assert!(attached.is_empty());
+            }
+            other => panic!("expected let statement, got {other:?}"),
+        }
+        match &statements[1].kind {
+            StatementKind::While { condition, body } => {
+                assert_eq!(condition, "frames < 10");
+                assert_eq!(body.len(), 1);
+                match &body[0].kind {
+                    StatementKind::If {
+                        condition,
+                        then_branch,
+                        else_branch,
+                    } => {
+                        assert_eq!(condition, "frames % 2 == 0");
+                        assert_eq!(then_branch.len(), 1);
+                        assert!(matches!(then_branch[0].kind, StatementKind::Assign { .. }));
+                        let else_branch = else_branch.as_ref().expect("else branch should exist");
+                        assert_eq!(else_branch.len(), 1);
+                        assert!(matches!(else_branch[0].kind, StatementKind::Continue));
+                    }
+                    other => panic!("expected nested if statement, got {other:?}"),
+                }
+            }
+            other => panic!("expected while statement, got {other:?}"),
+        }
+        match &statements[2].kind {
+            StatementKind::Return { value, attached } => {
+                assert_eq!(value.as_deref(), Some("match frames:"));
+                assert_eq!(attached.len(), 2);
+                assert_eq!(attached[0].text, "10 => 1");
+                assert_eq!(attached[1].text, "_ => 0");
+            }
+            other => panic!("expected return statement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_module_rejects_break_outside_loop() {
+        let err = parse_module("fn main() -> Int:\n    break\n").expect_err("break should fail");
+        assert!(err.contains("`break` is only valid inside loops"), "{err}");
+    }
+
+    #[test]
+    fn parse_module_rejects_stray_else() {
+        let err = parse_module("fn main() -> Int:\n    else:\n        return 0\n")
+            .expect_err("else should fail");
+        assert!(err.contains("`else` without a preceding `if`"), "{err}");
     }
 }
