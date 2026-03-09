@@ -54,7 +54,10 @@ negative = ["conformance/check_parity_fixtures/missing_chain_contract.arc"]
 id = "collections_list_array_map"
 status = "required"
 positive = ["examples/list_core", "examples/array_core", "examples/map_core"]
-negative = ["conformance/check_parity_fixtures/phrase_arg_shape.arc"]
+negative = [
+    "conformance/check_parity_fixtures/phrase_arg_shape.arc",
+    "conformance/check_parity_packages/unresolved_expr_type_arg",
+]
 
 [[feature]]
 id = "pair_tuples_v1"

@@ -347,6 +347,7 @@ fn validate_module_semantics(
             resolved_module,
             &module_path,
             symbol,
+            &TypeScope::default(),
             &ValueScope::default(),
             diagnostics,
         );
@@ -561,9 +562,11 @@ fn validate_symbol_value_semantics(
     resolved_module: &HirResolvedModule,
     module_path: &Path,
     symbol: &HirSymbol,
+    inherited_type_scope: &TypeScope,
     inherited_scope: &ValueScope,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
+    let type_scope = inherited_type_scope.with_params(&symbol.type_params);
     let mut scope =
         inherited_scope.with_params(symbol.params.iter().map(|param| param.name.as_str()));
     validate_rollup_handlers(
@@ -578,17 +581,26 @@ fn validate_symbol_value_semantics(
         resolved_module,
         module_path,
         &symbol.statements,
+        &type_scope,
         &mut scope,
         diagnostics,
     );
 
-    if let HirSymbolBody::Trait { methods, .. } = &symbol.body {
+    if let HirSymbolBody::Trait {
+        assoc_types,
+        methods,
+    } = &symbol.body
+    {
+        let trait_scope = type_scope
+            .with_assoc_types(assoc_types.iter().map(|assoc_type| assoc_type.name.clone()))
+            .with_self();
         for method in methods {
             validate_symbol_value_semantics(
                 workspace,
                 resolved_module,
                 module_path,
                 method,
+                &trait_scope,
                 &ValueScope::default(),
                 diagnostics,
             );
@@ -603,12 +615,22 @@ fn validate_impl_value_semantics(
     impl_decl: &HirImplDecl,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
+    let scope = TypeScope::default()
+        .with_params(&impl_decl.type_params)
+        .with_assoc_types(
+            impl_decl
+                .assoc_types
+                .iter()
+                .map(|assoc_type| assoc_type.name.clone()),
+        )
+        .with_self();
     for method in &impl_decl.methods {
         validate_symbol_value_semantics(
             workspace,
             resolved_module,
             module_path,
             method,
+            &scope,
             &ValueScope::default(),
             diagnostics,
         );
@@ -642,6 +664,7 @@ fn validate_statement_block_semantics(
     resolved_module: &HirResolvedModule,
     module_path: &Path,
     statements: &[HirStatement],
+    type_scope: &TypeScope,
     scope: &mut ValueScope,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
@@ -659,6 +682,7 @@ fn validate_statement_block_semantics(
                     workspace,
                     resolved_module,
                     module_path,
+                    type_scope,
                     scope,
                     value,
                     statement.span,
@@ -672,6 +696,7 @@ fn validate_statement_block_semantics(
                         workspace,
                         resolved_module,
                         module_path,
+                        type_scope,
                         scope,
                         value,
                         statement.span,
@@ -688,6 +713,7 @@ fn validate_statement_block_semantics(
                     workspace,
                     resolved_module,
                     module_path,
+                    type_scope,
                     scope,
                     condition,
                     statement.span,
@@ -699,6 +725,7 @@ fn validate_statement_block_semantics(
                     resolved_module,
                     module_path,
                     then_branch,
+                    type_scope,
                     &mut then_scope,
                     diagnostics,
                 );
@@ -709,6 +736,7 @@ fn validate_statement_block_semantics(
                         resolved_module,
                         module_path,
                         else_branch,
+                        type_scope,
                         &mut else_scope,
                         diagnostics,
                     );
@@ -719,6 +747,7 @@ fn validate_statement_block_semantics(
                     workspace,
                     resolved_module,
                     module_path,
+                    type_scope,
                     scope,
                     condition,
                     statement.span,
@@ -730,6 +759,7 @@ fn validate_statement_block_semantics(
                     resolved_module,
                     module_path,
                     body,
+                    type_scope,
                     &mut body_scope,
                     diagnostics,
                 );
@@ -743,6 +773,7 @@ fn validate_statement_block_semantics(
                     workspace,
                     resolved_module,
                     module_path,
+                    type_scope,
                     scope,
                     iterable,
                     statement.span,
@@ -754,6 +785,7 @@ fn validate_statement_block_semantics(
                     resolved_module,
                     module_path,
                     body,
+                    type_scope,
                     &mut body_scope,
                     diagnostics,
                 );
@@ -763,6 +795,7 @@ fn validate_statement_block_semantics(
                     workspace,
                     resolved_module,
                     module_path,
+                    type_scope,
                     scope,
                     expr,
                     statement.span,
@@ -774,6 +807,7 @@ fn validate_statement_block_semantics(
                     workspace,
                     resolved_module,
                     module_path,
+                    type_scope,
                     scope,
                     target,
                     statement.span,
@@ -783,6 +817,7 @@ fn validate_statement_block_semantics(
                     workspace,
                     resolved_module,
                     module_path,
+                    type_scope,
                     scope,
                     value,
                     statement.span,
@@ -798,6 +833,7 @@ fn validate_assign_target_semantics(
     workspace: &HirWorkspaceSummary,
     resolved_module: &HirResolvedModule,
     module_path: &Path,
+    type_scope: &TypeScope,
     scope: &ValueScope,
     target: &HirAssignTarget,
     span: Span,
@@ -828,25 +864,28 @@ fn validate_assign_target_semantics(
             workspace,
             resolved_module,
             module_path,
+            type_scope,
             scope,
             target,
             span,
             diagnostics,
         ),
         HirAssignTarget::Index { target, index } => {
-            validate_assign_target_semantics(
-                workspace,
-                resolved_module,
-                module_path,
-                scope,
-                target,
-                span,
-                diagnostics,
-            );
+                validate_assign_target_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    scope,
+                    target,
+                    span,
+                    diagnostics,
+                );
             validate_expr_semantics(
                 workspace,
                 resolved_module,
                 module_path,
+                type_scope,
                 scope,
                 index,
                 span,
@@ -860,6 +899,7 @@ fn validate_expr_semantics(
     workspace: &HirWorkspaceSummary,
     resolved_module: &HirResolvedModule,
     module_path: &Path,
+    type_scope: &TypeScope,
     scope: &ValueScope,
     expr: &HirExpr,
     span: Span,
@@ -877,24 +917,26 @@ fn validate_expr_semantics(
             diagnostics,
         ),
         HirExpr::Pair { left, right } => {
-            validate_expr_semantics(
-                workspace,
-                resolved_module,
-                module_path,
-                scope,
-                left,
-                span,
-                diagnostics,
-            );
-            validate_expr_semantics(
-                workspace,
-                resolved_module,
-                module_path,
-                scope,
-                right,
-                span,
-                diagnostics,
-            );
+                validate_expr_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    scope,
+                    left,
+                    span,
+                    diagnostics,
+                );
+                validate_expr_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    scope,
+                    right,
+                    span,
+                    diagnostics,
+                );
         }
         HirExpr::CollectionLiteral { items } => {
             for item in items {
@@ -902,6 +944,7 @@ fn validate_expr_semantics(
                     workspace,
                     resolved_module,
                     module_path,
+                    type_scope,
                     scope,
                     item,
                     span,
@@ -914,6 +957,7 @@ fn validate_expr_semantics(
                 workspace,
                 resolved_module,
                 module_path,
+                type_scope,
                 scope,
                 subject,
                 span,
@@ -928,6 +972,7 @@ fn validate_expr_semantics(
                     workspace,
                     resolved_module,
                     module_path,
+                    type_scope,
                     &arm_scope,
                     &arm.value,
                     arm.span,
@@ -962,6 +1007,7 @@ fn validate_expr_semantics(
                 workspace,
                 resolved_module,
                 module_path,
+                type_scope,
                 scope,
                 arena,
                 span,
@@ -972,6 +1018,7 @@ fn validate_expr_semantics(
                     workspace,
                     resolved_module,
                     module_path,
+                    type_scope,
                     scope,
                     arg,
                     span,
@@ -995,21 +1042,38 @@ fn validate_expr_semantics(
                     workspace,
                     resolved_module,
                     module_path,
+                    type_scope,
                     scope,
                     attachment,
                     diagnostics,
                 );
             }
         }
-        HirExpr::GenericApply { expr, .. } => validate_expr_semantics(
-            workspace,
-            resolved_module,
-            module_path,
-            scope,
-            expr,
-            span,
-            diagnostics,
-        ),
+        HirExpr::GenericApply { expr, type_args } => {
+            validate_expr_semantics(
+                workspace,
+                resolved_module,
+                module_path,
+                type_scope,
+                scope,
+                expr,
+                span,
+                diagnostics,
+            );
+            for type_arg in type_args {
+                validate_type_surface_text(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    type_arg,
+                    span,
+                    &format!("expression generic argument `{type_arg}`"),
+                    SurfaceSymbolUse::TypeLike,
+                    diagnostics,
+                );
+            }
+        }
         HirExpr::QualifiedPhrase {
             subject,
             args,
@@ -1020,6 +1084,7 @@ fn validate_expr_semantics(
                 workspace,
                 resolved_module,
                 module_path,
+                type_scope,
                 scope,
                 subject,
                 span,
@@ -1030,6 +1095,7 @@ fn validate_expr_semantics(
                     workspace,
                     resolved_module,
                     module_path,
+                    type_scope,
                     scope,
                     arg,
                     span,
@@ -1041,6 +1107,7 @@ fn validate_expr_semantics(
                     workspace,
                     resolved_module,
                     module_path,
+                    type_scope,
                     scope,
                     attachment,
                     diagnostics,
@@ -1051,6 +1118,7 @@ fn validate_expr_semantics(
             workspace,
             resolved_module,
             module_path,
+            type_scope,
             scope,
             expr,
             span,
@@ -1061,6 +1129,7 @@ fn validate_expr_semantics(
                 workspace,
                 resolved_module,
                 module_path,
+                type_scope,
                 scope,
                 left,
                 span,
@@ -1070,6 +1139,7 @@ fn validate_expr_semantics(
                 workspace,
                 resolved_module,
                 module_path,
+                type_scope,
                 scope,
                 right,
                 span,
@@ -1080,6 +1150,7 @@ fn validate_expr_semantics(
             workspace,
             resolved_module,
             module_path,
+            type_scope,
             scope,
             expr,
             span,
@@ -1090,6 +1161,7 @@ fn validate_expr_semantics(
                 workspace,
                 resolved_module,
                 module_path,
+                type_scope,
                 scope,
                 expr,
                 span,
@@ -1099,6 +1171,7 @@ fn validate_expr_semantics(
                 workspace,
                 resolved_module,
                 module_path,
+                type_scope,
                 scope,
                 index,
                 span,
@@ -1112,6 +1185,7 @@ fn validate_expr_semantics(
                 workspace,
                 resolved_module,
                 module_path,
+                type_scope,
                 scope,
                 expr,
                 span,
@@ -1122,6 +1196,7 @@ fn validate_expr_semantics(
                     workspace,
                     resolved_module,
                     module_path,
+                    type_scope,
                     scope,
                     start,
                     span,
@@ -1133,6 +1208,7 @@ fn validate_expr_semantics(
                     workspace,
                     resolved_module,
                     module_path,
+                    type_scope,
                     scope,
                     end,
                     span,
@@ -1146,6 +1222,7 @@ fn validate_expr_semantics(
                     workspace,
                     resolved_module,
                     module_path,
+                    type_scope,
                     scope,
                     start,
                     span,
@@ -1157,6 +1234,7 @@ fn validate_expr_semantics(
                     workspace,
                     resolved_module,
                     module_path,
+                    type_scope,
                     scope,
                     end,
                     span,
@@ -1171,6 +1249,7 @@ fn validate_phrase_arg_semantics(
     workspace: &HirWorkspaceSummary,
     resolved_module: &HirResolvedModule,
     module_path: &Path,
+    type_scope: &TypeScope,
     scope: &ValueScope,
     arg: &arcana_hir::HirPhraseArg,
     span: Span,
@@ -1182,6 +1261,7 @@ fn validate_phrase_arg_semantics(
             workspace,
             resolved_module,
             module_path,
+            type_scope,
             scope,
             expr,
             span,
@@ -1194,6 +1274,7 @@ fn validate_header_attachment_semantics(
     workspace: &HirWorkspaceSummary,
     resolved_module: &HirResolvedModule,
     module_path: &Path,
+    type_scope: &TypeScope,
     scope: &ValueScope,
     attachment: &HirHeaderAttachment,
     diagnostics: &mut Vec<Diagnostic>,
@@ -1206,6 +1287,7 @@ fn validate_header_attachment_semantics(
             workspace,
             resolved_module,
             module_path,
+            type_scope,
             scope,
             value,
             *span,
@@ -1488,8 +1570,13 @@ fn lookup_symbol_path<'a>(
         return lookup_target_symbol_tail(workspace, &binding.target, &path[1..]);
     }
 
-    let package = workspace.package(first)?;
-    lookup_package_symbol_path(package, &path[1..])
+    if let Some(package) = workspace.package(first) {
+        return lookup_package_symbol_path(package, &path[1..]);
+    }
+
+    let package_name = module.module_id.split('.').next()?;
+    let package = workspace.package(package_name)?;
+    lookup_package_symbol_path(package, path)
 }
 
 fn lookup_target_symbol_tail<'a>(
@@ -2033,6 +2120,10 @@ mod tests {
             (
                 "unresolved_value_ref",
                 "unresolved value reference `missing` in value expression",
+            ),
+            (
+                "unresolved_expr_type_arg",
+                "unresolved type reference `Missing` in expression generic argument `Missing`",
             ),
             (
                 "unresolved_chain_step",
