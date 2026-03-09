@@ -5,6 +5,15 @@
 - Date: 2026-03-03
 - Applies to chain contracts on stage declarations (`#stage[...]`) and chain statements (`#chain[...]`).
 
+## Surface Model
+- Chain surface is decomposed into:
+  - style qualifier (`forward`, `lazy`, `parallel`, `async`, `plan`, `broadcast`, `collect`)
+  - introducer family (`:=>` for forward/mixed, `:=<` for composition)
+  - connector-directed stage edges (`=>`, `<=`)
+- Style selects execution semantics and capability rules.
+- Introducer selects the chain family.
+- Connectors express per-edge flow inside that family.
+
 ## Required System-Boundary Resolution
 For chain phrases inside `behavior[...]`/`system[...]` bodies, resolution must provide:
 - `phase`

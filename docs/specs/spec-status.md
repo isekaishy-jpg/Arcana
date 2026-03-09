@@ -42,12 +42,16 @@ This document defines how Arcana spec files are interpreted during the rewrite.
 - `docs/specs/selfhost-host/selfhost-host/v1-scope.md`
 - `docs/specs/memory/memory/generic-memory-spec.md`
 - `docs/specs/forewords/forewords/v1-scope.md`
+- `docs/specs/chain/contract_matrix_v1.md`
 - `docs/specs/page-rollups/page-rollups/v1-scope.md`
 - `docs/specs/tuples/tuples/v1-scope.md`
 - `docs/specs/backend/anybox-policy.md`
 
 `reserved-post-selfhost`
 - `docs/specs/callables/callables/v1-status.md`
+
+`reference-only`
+- `docs/specs/chain/chain_adoption_audit_v1.md`
 
 `authoritative-deferred-ledger`
 - `docs/specs/selfhost-host/selfhost-host/deferred-roadmap.md`
@@ -59,6 +63,7 @@ This document defines how Arcana spec files are interpreted during the rewrite.
 ## Immediate Rewrite Guidance
 
 - Page rollups are a pre-selfhost contract, not a post-selfhost cleanup idea.
+- Chain surface should stay explicit as style qualifier plus introducer family plus connector-directed edges.
 - Pair-tuple rules must be explicit before selfhost because the imported corpus already depends on them heavily.
 - Pair-only tuples are the current baseline, not a statement that generalized tuples are off the table forever.
 - `plan` and `lazy` chain semantics must stay explicit in the frozen docs so pipeline validation and demand-sensitive execution are not inferred from old implementation shortcuts.

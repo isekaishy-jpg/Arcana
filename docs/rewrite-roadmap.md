@@ -18,7 +18,7 @@ Completed foundation work:
 - structured interior-member parsing for records, enums, traits, and impl bodies
 - structured statement-block parsing for function-like bodies, including `defer`
 - structured block-form `match` expression and pattern parsing for the imported enum/result corpus
-- structured qualified phrase, path and scalar literal leaves, collection literal, chain phrases with mixed connectors and bound `with (...)` adapters, memory phrase, unary/binary operator, `>> await`, and `weave`/`split` expression parsing over the imported operator/async/selfhost corpus
+- structured qualified phrase, path and scalar literal leaves, collection literal, chain phrases with explicit style plus introducer plus connector structure and bound `with (...)` adapters, memory phrase, unary/binary operator, `>> await`, and `weave`/`split` expression parsing over the imported operator/async/selfhost corpus
 - structured member access, pair tuple literals, generic-argument bracket applications, standalone ranges, and the unambiguous index/slice subset over the imported list/array/selfhost corpus, with opaque fallback still covering the remaining hard cases
 - structured header attachments for qualified and memory phrases, with named entries and chain lines lowering through syntax/HIR instead of raw attached entries
 - structured assignment targets for name, member, and index mutation paths over the imported behavior/list/selfhost corpus

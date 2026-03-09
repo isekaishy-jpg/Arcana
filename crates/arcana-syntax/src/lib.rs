@@ -216,6 +216,12 @@ pub enum ChainConnector {
     Reverse,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChainIntroducer {
+    Forward,
+    Reverse,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChainStep {
     pub incoming: Option<ChainConnector>,
@@ -288,8 +294,8 @@ pub enum Expr {
         arms: Vec<MatchArm>,
     },
     Chain {
-        mode: String,
-        reverse: bool,
+        style: String,
+        introducer: ChainIntroducer,
         steps: Vec<ChainStep>,
     },
     MemoryPhrase {
@@ -2074,28 +2080,32 @@ fn parse_path_expression(text: &str) -> Option<Expr> {
 }
 
 fn parse_chain_expression(text: &str) -> Result<Option<Expr>, String> {
-    let (mode_text, reverse, step_text) = if let Some(index) = find_top_level_token(text, ":=>") {
-        (&text[..index], false, &text[index + 3..])
+    let (style_text, introducer, step_text) =
+        if let Some(index) = find_top_level_token(text, ":=>") {
+            (&text[..index], ChainIntroducer::Forward, &text[index + 3..])
     } else if let Some(index) = find_top_level_token(text, ":=<") {
-        (&text[..index], true, &text[index + 3..])
+        (&text[..index], ChainIntroducer::Reverse, &text[index + 3..])
     } else {
         return Ok(None);
     };
-    let mode = mode_text.trim();
-    if !is_identifier(mode) {
+    let style = style_text.trim();
+    if !is_identifier(style) {
         return Ok(None);
     }
-    let Some(steps) = parse_chain_steps(step_text, reverse)? else {
+    let Some(steps) = parse_chain_steps(step_text, introducer)? else {
         return Ok(None);
     };
     Ok(Some(Expr::Chain {
-        mode: mode.to_string(),
-        reverse,
+        style: style.to_string(),
+        introducer,
         steps,
     }))
 }
 
-fn parse_chain_steps(text: &str, reverse_intro: bool) -> Result<Option<Vec<ChainStep>>, String> {
+fn parse_chain_steps(
+    text: &str,
+    introducer: ChainIntroducer,
+) -> Result<Option<Vec<ChainStep>>, String> {
     let parts = tokenize_chain_steps(text)?;
     if parts.is_empty() {
         return Ok(None);
@@ -2106,7 +2116,7 @@ fn parse_chain_steps(text: &str, reverse_intro: bool) -> Result<Option<Vec<Chain
         .skip(1)
         .filter_map(|(incoming, _)| *incoming)
         .collect::<Vec<_>>();
-    if reverse_intro {
+    if matches!(introducer, ChainIntroducer::Reverse) {
         if connectors
             .iter()
             .any(|connector| *connector != ChainConnector::Reverse)
@@ -4516,9 +4526,9 @@ fn is_identifier_continue(ch: char) -> bool {
 mod tests {
     use super::freeze::{FROZEN_AST_NODE_KINDS, FROZEN_TOKEN_KINDS};
     use super::{
-        AssignTarget, BinaryOp, ChainConnector, ChainStep, DirectiveKind, Expr, ForewordApp,
-        ForewordArg, HeaderAttachment, MatchPattern, ParamMode, PhraseArg, Statement,
-        StatementKind, SymbolBody, SymbolKind, UnaryOp, parse_module,
+        AssignTarget, BinaryOp, ChainConnector, ChainIntroducer, ChainStep, DirectiveKind, Expr,
+        ForewordApp, ForewordArg, HeaderAttachment, MatchPattern, ParamMode, PhraseArg,
+        Statement, StatementKind, SymbolBody, SymbolKind, UnaryOp, parse_module,
     };
 
     fn expr_is_path(expr: &Expr, name: &str) -> bool {
@@ -4965,9 +4975,15 @@ mod tests {
         }
         match &parsed.symbols[0].statements[2].kind {
             StatementKind::Expr {
-                expr: Expr::Chain { mode, steps, .. },
+                expr:
+                    Expr::Chain {
+                        style,
+                        introducer,
+                        steps,
+                    },
             } => {
-                assert_eq!(mode, "forward");
+                assert_eq!(style, "forward");
+                assert_eq!(*introducer, ChainIntroducer::Forward);
                 assert_eq!(chain_step_texts(steps), vec!["seed", "step"]);
                 assert!(steps[0].incoming.is_none());
                 assert_eq!(steps[1].incoming, Some(ChainConnector::Forward));
@@ -4987,14 +5003,14 @@ mod tests {
             StatementKind::Let {
                 value:
                     Expr::Chain {
-                        mode,
-                        reverse,
+                        style,
+                        introducer,
                         steps,
                     },
                 ..
             } => {
-                assert_eq!(mode, "forward");
-                assert!(!reverse);
+                assert_eq!(style, "forward");
+                assert_eq!(*introducer, ChainIntroducer::Forward);
                 assert_eq!(
                     steps.iter().map(|step| step.incoming).collect::<Vec<_>>(),
                     vec![
@@ -5492,14 +5508,14 @@ mod tests {
                     HeaderAttachment::Chain {
                         expr:
                             Expr::Chain {
-                                mode,
-                                reverse,
+                                style,
+                                introducer,
                                 steps,
                             },
                         forewords,
                         ..
-                    } if mode == "forward"
-                        && !reverse
+                    } if style == "forward"
+                        && *introducer == ChainIntroducer::Forward
                         && chain_step_texts(steps)
                             == vec!["show_node", "bump_node", "show_node"]
                         && matches!(
@@ -5535,14 +5551,14 @@ mod tests {
                     HeaderAttachment::Chain {
                         expr:
                             Expr::Chain {
-                                mode,
-                                reverse,
+                                style,
+                                introducer,
                                 steps,
                             },
                         forewords,
                         ..
-                    } if mode == "plan"
-                        && !reverse
+                    } if style == "plan"
+                        && *introducer == ChainIntroducer::Forward
                         && chain_step_texts(steps) == vec!["touch_id"]
                         && matches!(
                             forewords.as_slice(),
@@ -5560,14 +5576,14 @@ mod tests {
                     HeaderAttachment::Chain {
                         expr:
                             Expr::Chain {
-                                mode,
-                                reverse,
+                                style,
+                                introducer,
                                 steps,
                             },
                         forewords,
                         ..
-                    } if mode == "forward"
-                        && !reverse
+                    } if style == "forward"
+                        && *introducer == ChainIntroducer::Forward
                         && chain_step_texts(steps) == vec!["touch_id"]
                         && forewords.is_empty()
                 ));

@@ -250,7 +250,7 @@ Arcana’s phrase family has three forms:
 |---|---|---|
 | Qualified phrase | `subject :: args? :: qualifier` | expression + statement |
 | Memory phrase | `memory_type: instance :> args? <: qualifier` | expression + statement |
-| Chain phrase | `style :=(>|<) stage...` with `=>`/`<=` connectors | statement-only (v1) |
+| Chain phrase | `style :=(>|<) stage...` with `=>`/`<=` connectors | expression + statement |
 
 Header phrases are qualified/memory phrases. A header phrase may own an attached block. In attached blocks:
 
@@ -587,14 +587,22 @@ Interop boundary contracts (compile-time only):
 
 Arcana chain phrases support directional staged flow:
 
-- forward introducer: `style :=>`
-- reverse introducer: `style :=<`
-- connectors: `=>` (forward), `<=` (reverse)
+- style qualifier: selects chain execution semantics such as `forward`, `lazy`, `parallel`, `async`, `plan`, `broadcast`, `collect`
+- forward introducer: `style :=>` for forward and mixed chains
+- composition introducer: `style :=<` for composition/reverse chains
+- connectors: `=>` (forward edge), `<=` (reverse/composition edge)
 - supported styles:
   - directional-enabled: `forward`, `lazy`, `async`, `plan`, `collect`
   - forward-only fan-out: `parallel`, `broadcast`
 - stages are callable paths (optionally with type args)
 - chains are valid in both statement and expression position
+
+Surface model:
+
+- a chain is three things: `style`, introducer, and connector-directed stage edges
+- the style is not just decoration; it selects execution semantics and capability rules
+- the introducer selects the family of chain being written: forward/mixed or composition
+- the connectors still matter inside the chain because they describe per-edge flow
 
 Standalone chains:
 
@@ -635,7 +643,7 @@ Style notes:
 | `forward` | unary pipeline in source order | final stage value |
 | `lazy` | demand-sensitive left-to-right pipeline style; runtime lowering may skip unnecessary downstream work when needed, but only when that does not change required observable behavior | final stage value |
 | `async` | unary pipeline with auto-await for `Task[T]` stages | unwrapped final value |
-| `parallel` | fan-out with deterministic ordered collection (spawn/join when eligible, fallback otherwise) | `List[T]` |
+| `parallel` | fan-out with deterministic ordered collection; lowering may use threads or async-task fanout when qualifier/caller/stage capabilities permit, with deterministic fallback otherwise | `List[T]` |
 | `broadcast` | sequential fan-out over same input | `List[T]` |
 | `collect` | directional pipeline collecting intermediates in normalized order | `List[T]` |
 | `plan` | validate/typecheck the pipeline/chain contract only; no stage execution, and expression-position use yields the original input unchanged | pass-through input |
@@ -652,7 +660,7 @@ Directional topology rules:
 Reading/composition model:
 
 - chain source is always written and read left-to-right
-- connectors determine the normalized execution order after directional parsing
+- connectors determine the normalized execution order within the chosen introducer family
 - conventional function-composition reasoning is still right-to-left over the normalized stage list; the source pipe itself is not
 
 Standalone seed rule:

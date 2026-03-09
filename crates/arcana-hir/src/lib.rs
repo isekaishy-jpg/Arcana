@@ -208,6 +208,12 @@ pub enum HirChainConnector {
     Reverse,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HirChainIntroducer {
+    Forward,
+    Reverse,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HirChainStep {
     pub incoming: Option<HirChainConnector>,
@@ -295,8 +301,8 @@ pub enum HirExpr {
         arms: Vec<HirMatchArm>,
     },
     Chain {
-        mode: String,
-        reverse: bool,
+        style: String,
+        introducer: HirChainIntroducer,
         steps: Vec<HirChainStep>,
     },
     MemoryPhrase {
@@ -1667,12 +1673,12 @@ fn lower_expr(expr: &ParsedExpr) -> HirExpr {
                 .collect(),
         },
         ParsedExpr::Chain {
-            mode,
-            reverse,
+            style,
+            introducer,
             steps,
         } => HirExpr::Chain {
-            mode: mode.clone(),
-            reverse: *reverse,
+            style: style.clone(),
+            introducer: lower_chain_introducer(*introducer),
             steps: steps.iter().map(lower_chain_step).collect(),
         },
         ParsedExpr::MemoryPhrase {
@@ -1789,6 +1795,15 @@ fn lower_chain_connector(connector: arcana_syntax::ChainConnector) -> HirChainCo
     }
 }
 
+fn lower_chain_introducer(
+    introducer: arcana_syntax::ChainIntroducer,
+) -> HirChainIntroducer {
+    match introducer {
+        arcana_syntax::ChainIntroducer::Forward => HirChainIntroducer::Forward,
+        arcana_syntax::ChainIntroducer::Reverse => HirChainIntroducer::Reverse,
+    }
+}
+
 fn lower_unary_op(op: &arcana_syntax::UnaryOp) -> HirUnaryOp {
     match op {
         arcana_syntax::UnaryOp::Neg => HirUnaryOp::Neg,
@@ -1893,10 +1908,10 @@ mod tests {
 
     use super::freeze::FROZEN_HIR_NODE_KINDS;
     use super::{
-        HirAssignOp, HirAssignTarget, HirBinaryOp, HirChainConnector, HirChainStep,
-        HirDirectiveKind, HirExpr, HirForewordApp, HirForewordArg, HirHeaderAttachment,
-        HirMatchPattern, HirPhraseArg, HirStatement, HirStatementKind, HirSymbolBody,
-        HirSymbolKind, HirUnaryOp, build_package_layout, build_package_summary,
+        HirAssignOp, HirAssignTarget, HirBinaryOp, HirChainConnector, HirChainIntroducer,
+        HirChainStep, HirDirectiveKind, HirExpr, HirForewordApp, HirForewordArg,
+        HirHeaderAttachment, HirMatchPattern, HirPhraseArg, HirStatement, HirStatementKind,
+        HirSymbolBody, HirSymbolKind, HirUnaryOp, build_package_layout, build_package_summary,
         build_workspace_package, build_workspace_summary, derive_source_module_path,
         lower_module_text, resolve_workspace,
     };
@@ -2195,13 +2210,13 @@ mod tests {
             HirStatementKind::Expr {
                 expr:
                     HirExpr::Chain {
-                        mode,
-                        reverse,
+                        style,
+                        introducer,
                         steps,
                     },
             } => {
-                assert_eq!(mode, "forward");
-                assert!(!reverse);
+                assert_eq!(style, "forward");
+                assert_eq!(*introducer, HirChainIntroducer::Forward);
                 assert_eq!(chain_step_texts(steps), vec!["seed", "step"]);
                 assert!(steps[0].incoming.is_none());
                 assert_eq!(steps[1].incoming, Some(HirChainConnector::Forward));
@@ -2222,14 +2237,14 @@ mod tests {
             HirStatementKind::Let {
                 value:
                     HirExpr::Chain {
-                        mode,
-                        reverse,
+                        style,
+                        introducer,
                         steps,
                     },
                 ..
             } => {
-                assert_eq!(mode, "forward");
-                assert!(!reverse);
+                assert_eq!(style, "forward");
+                assert_eq!(*introducer, HirChainIntroducer::Forward);
                 assert_eq!(
                     steps.iter().map(|step| step.incoming).collect::<Vec<_>>(),
                     vec![
@@ -2788,14 +2803,14 @@ mod tests {
                     HirHeaderAttachment::Chain {
                         expr:
                             HirExpr::Chain {
-                                mode,
-                                reverse,
+                                style,
+                                introducer,
                                 steps,
                             },
                         forewords,
                         ..
-                    } if mode == "forward"
-                        && !reverse
+                    } if style == "forward"
+                        && *introducer == HirChainIntroducer::Forward
                         && chain_step_texts(steps)
                             == vec!["show_node", "bump_node", "show_node"]
                         && matches!(
@@ -2831,14 +2846,14 @@ mod tests {
                     HirHeaderAttachment::Chain {
                         expr:
                             HirExpr::Chain {
-                                mode,
-                                reverse,
+                                style,
+                                introducer,
                                 steps,
                             },
                         forewords,
                         ..
-                    } if mode == "plan"
-                        && !reverse
+                    } if style == "plan"
+                        && *introducer == HirChainIntroducer::Forward
                         && chain_step_texts(steps) == vec!["touch_id"]
                         && matches!(
                             forewords.as_slice(),
@@ -2856,14 +2871,14 @@ mod tests {
                     HirHeaderAttachment::Chain {
                         expr:
                             HirExpr::Chain {
-                                mode,
-                                reverse,
+                                style,
+                                introducer,
                                 steps,
                             },
                         forewords,
                         ..
-                    } if mode == "forward"
-                        && !reverse
+                    } if style == "forward"
+                        && *introducer == HirChainIntroducer::Forward
                         && chain_step_texts(steps) == vec!["touch_id"]
                         && forewords.is_empty()
                 ));
