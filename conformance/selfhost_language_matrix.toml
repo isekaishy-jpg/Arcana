@@ -33,6 +33,15 @@ positive = ["examples/grimoire_std_methods_app", "examples/pair_try_pop"]
 negative = ["conformance/check_parity_fixtures/phrase_arg_shape.arc"]
 
 [[feature]]
+id = "forewords_and_lang_items"
+status = "required"
+positive = ["examples/forewords_builtin_app", "examples/result_qmark"]
+negative = [
+    "conformance/check_parity_fixtures/invalid_statement_foreword.arc",
+    "conformance/check_parity_packages/unresolved_lang_item",
+]
+
+[[feature]]
 id = "chain_phrases"
 status = "required"
 positive = ["examples/chain_forward_pipeline", "examples/chain_styles_matrix"]
@@ -68,6 +77,12 @@ positive = ["examples/memory_phrase_frame_pool", "examples/pool_reuse_cycle"]
 negative = ["conformance/check_parity_fixtures/unresolved_symbol.arc"]
 
 [[feature]]
+id = "intrinsic_kernel_abi"
+status = "required"
+positive = ["std", "examples/selfhost_host_tool_mvp"]
+negative = ["conformance/check_parity_fixtures/malformed_intrinsic.arc"]
+
+[[feature]]
 id = "ownership_lifetimes"
 status = "required"
 positive = ["examples/arena_id_safety", "examples/frame_scratch_cycle"]
@@ -87,6 +102,7 @@ negative = [
     "conformance/check_parity_fixtures/page_rollup_stray.arc",
     "conformance/check_parity_fixtures/page_rollup_bad_subject.arc",
     "conformance/check_parity_fixtures/page_rollup_unknown_subject.arc",
+    "conformance/check_parity_fixtures/page_rollup_reassign.arc",
 ]
 
 [[feature]]

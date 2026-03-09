@@ -36,12 +36,14 @@ pub struct ModuleDirective {
     pub kind: DirectiveKind,
     pub path: Vec<String>,
     pub alias: Option<String>,
+    pub forewords: Vec<ForewordApp>,
     pub span: Span,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SymbolKind {
     Fn,
+    System,
     Record,
     Enum,
     Trait,
@@ -53,6 +55,7 @@ impl SymbolKind {
     pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Fn => "fn",
+            Self::System => "system",
             Self::Record => "record",
             Self::Enum => "enum",
             Self::Trait => "trait",
@@ -111,6 +114,26 @@ pub struct TraitAssocTypeDecl {
 pub struct BehaviorAttr {
     pub name: String,
     pub value: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ForewordArg {
+    pub name: Option<String>,
+    pub value: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ForewordApp {
+    pub name: String,
+    pub args: Vec<ForewordArg>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LangItemDecl {
+    pub name: String,
+    pub target: Vec<String>,
+    pub span: Span,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -209,9 +232,23 @@ pub enum Expr {
         text: String,
         attached: Vec<RawBlockEntry>,
     },
+    CollectionLiteral {
+        items: Vec<Expr>,
+    },
     Match {
         subject: Box<Expr>,
         arms: Vec<MatchArm>,
+    },
+    Chain {
+        mode: String,
+        reverse: bool,
+        steps: Vec<String>,
+    },
+    MemoryPhrase {
+        family: String,
+        arena: Box<Expr>,
+        init_args: Vec<PhraseArg>,
+        constructor: String,
     },
     QualifiedPhrase {
         subject: Box<Expr>,
@@ -345,6 +382,7 @@ pub enum StatementKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Statement {
     pub kind: StatementKind,
+    pub forewords: Vec<ForewordApp>,
     pub rollups: Vec<PageRollup>,
     pub span: Span,
 }
@@ -375,6 +413,8 @@ pub struct SymbolDecl {
     pub params: Vec<ParamDecl>,
     pub return_type: Option<String>,
     pub behavior_attrs: Vec<BehaviorAttr>,
+    pub forewords: Vec<ForewordApp>,
+    pub intrinsic_impl: Option<String>,
     pub body: SymbolBody,
     pub statements: Vec<Statement>,
     pub rollups: Vec<PageRollup>,
@@ -405,6 +445,7 @@ pub struct ParsedModule {
     pub line_count: usize,
     pub non_empty_line_count: usize,
     pub directives: Vec<ModuleDirective>,
+    pub lang_items: Vec<LangItemDecl>,
     pub symbols: Vec<SymbolDecl>,
     pub impls: Vec<ImplDecl>,
 }
@@ -432,30 +473,58 @@ pub fn parse_module(source: &str) -> Result<ParsedModule, String> {
 
     let (entries, _) = collect_block_entries(&source_lines, 0, 0)?;
     let mut directives = Vec::new();
+    let mut lang_items = Vec::new();
     let mut symbols = Vec::new();
     let mut impls = Vec::new();
+    let mut pending_forewords = Vec::new();
     let mut index = 0usize;
     while index < entries.len() {
         let entry = &entries[index];
+        if let Some(foreword) = parse_foreword_app(&entry.text, entry.span)? {
+            pending_forewords.push(foreword);
+            index += 1;
+            continue;
+        }
         if parse_page_rollup_entry(entry)?.is_some() {
             return Err(format!(
                 "{}:{}: page rollup without a valid owning header",
                 entry.span.line, entry.span.column
             ));
         }
-        if let Some(directive) = parse_directive(&entry.text, entry.span)? {
+        if let Some(mut directive) = parse_directive(&entry.text, entry.span)? {
+            directive.forewords = std::mem::take(&mut pending_forewords);
             directives.push(directive);
+            index += 1;
+            continue;
+        }
+        if let Some(lang_item) = parse_lang_item(&entry.text, entry.span)? {
+            if !pending_forewords.is_empty() {
+                let foreword = &pending_forewords[0];
+                return Err(format!(
+                    "{}:{}: forewords cannot target `lang` items in v1",
+                    foreword.span.line, foreword.span.column
+                ));
+            }
+            lang_items.push(lang_item);
             index += 1;
             continue;
         }
 
         if let Some(impl_decl) = parse_impl_decl(entry)? {
+            if !pending_forewords.is_empty() {
+                let foreword = &pending_forewords[0];
+                return Err(format!(
+                    "{}:{}: forewords cannot target `impl` blocks directly in v1",
+                    foreword.span.line, foreword.span.column
+                ));
+            }
             impls.push(impl_decl);
             index += 1;
             continue;
         }
 
         if let Some(mut symbol) = parse_symbol_entry(entry)? {
+            symbol.forewords = std::mem::take(&mut pending_forewords);
             let (rollups, consumed) = collect_following_rollups(&entries, index + 1)?;
             if !rollups.is_empty() {
                 if symbol_can_own_rollups(&symbol) {
@@ -472,16 +541,29 @@ pub fn parse_module(source: &str) -> Result<ParsedModule, String> {
             index += 1 + consumed;
             continue;
         }
-        index += 1;
+
+        return Err(format!(
+            "{}:{}: unsupported top-level syntax: `{}`",
+            entry.span.line, entry.span.column, entry.text
+        ));
+    }
+
+    if let Some(foreword) = pending_forewords.first() {
+        return Err(format!(
+            "{}:{}: foreword without a valid target",
+            foreword.span.line, foreword.span.column
+        ));
     }
 
     let parsed = ParsedModule {
         line_count: line_count.max(1),
         non_empty_line_count: non_empty,
         directives,
+        lang_items,
         symbols,
         impls,
     };
+    validate_module_foreword_contract(&parsed)?;
     validate_module_rollup_contract(&parsed)?;
     validate_module_tuple_contract(&parsed)?;
     Ok(parsed)
@@ -494,7 +576,7 @@ struct AnalyzedLine<'a> {
 
 impl AnalyzedLine<'_> {
     fn counts_as_non_empty(&self) -> bool {
-        !self.trimmed.is_empty() && !self.trimmed.starts_with('#')
+        !self.trimmed.is_empty() && !self.trimmed.starts_with("//")
     }
 }
 
@@ -627,8 +709,111 @@ fn parse_directive(trimmed: &str, span: Span) -> Result<Option<ModuleDirective>,
         kind,
         path,
         alias,
+        forewords: Vec::new(),
         span,
     }))
+}
+
+fn parse_lang_item(trimmed: &str, span: Span) -> Result<Option<LangItemDecl>, String> {
+    let Some(rest) = trimmed.strip_prefix("lang ") else {
+        return Ok(None);
+    };
+    let (name, target) = rest.split_once('=').ok_or_else(|| {
+        format!(
+            "{}:{}: malformed `lang` item declaration",
+            span.line, span.column
+        )
+    })?;
+    let name = name.trim();
+    if !is_identifier(name) {
+        return Err(format!(
+            "{}:{}: malformed `lang` item declaration",
+            span.line, span.column
+        ));
+    }
+    let target = parse_path(target).map_err(|_| {
+        format!(
+            "{}:{}: malformed `lang` item declaration",
+            span.line, span.column
+        )
+    })?;
+    Ok(Some(LangItemDecl {
+        name: name.to_string(),
+        target,
+        span,
+    }))
+}
+
+fn parse_foreword_app(trimmed: &str, span: Span) -> Result<Option<ForewordApp>, String> {
+    let Some(rest) = trimmed.strip_prefix('#') else {
+        return Ok(None);
+    };
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return Err(format!("{}:{}: malformed foreword", span.line, span.column));
+    }
+    if let Some(open_idx) = rest.find('[') {
+        let close_idx = find_matching_delim(rest, open_idx, '[', ']')
+            .ok_or_else(|| format!("{}:{}: malformed foreword", span.line, span.column))?;
+        if close_idx != rest.len() - 1 {
+            return Err(format!("{}:{}: malformed foreword", span.line, span.column));
+        }
+        let name = rest[..open_idx].trim();
+        if !is_identifier(name) {
+            return Err(format!("{}:{}: malformed foreword", span.line, span.column));
+        }
+        let args = parse_foreword_args(&rest[open_idx + 1..close_idx], span)?;
+        return Ok(Some(ForewordApp {
+            name: name.to_string(),
+            args,
+            span,
+        }));
+    }
+    if !is_identifier(rest) {
+        return Err(format!("{}:{}: malformed foreword", span.line, span.column));
+    }
+    Ok(Some(ForewordApp {
+        name: rest.to_string(),
+        args: Vec::new(),
+        span,
+    }))
+}
+
+fn parse_foreword_args(source: &str, span: Span) -> Result<Vec<ForewordArg>, String> {
+    let source = source.trim();
+    if source.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut args = Vec::new();
+    for part in split_top_level(source, ',') {
+        let part = part.trim();
+        if part.is_empty() {
+            return Err(format!(
+                "{}:{}: malformed foreword argument list",
+                span.line, span.column
+            ));
+        }
+        if let Some(index) = find_top_level_named_eq(part) {
+            let name = part[..index].trim();
+            let value = part[index + 1..].trim();
+            if !is_identifier(name) || value.is_empty() {
+                return Err(format!(
+                    "{}:{}: malformed foreword argument `{part}`",
+                    span.line, span.column
+                ));
+            }
+            args.push(ForewordArg {
+                name: Some(name.to_string()),
+                value: value.to_string(),
+            });
+        } else {
+            args.push(ForewordArg {
+                name: None,
+                value: part.to_string(),
+            });
+        }
+    }
+    Ok(args)
 }
 
 fn parse_path(path: &str) -> Result<Vec<String>, String> {
@@ -656,8 +841,25 @@ fn parse_path(path: &str) -> Result<Vec<String>, String> {
 fn parse_symbol_entry(entry: &RawBlockEntry) -> Result<Option<SymbolDecl>, String> {
     validate_raw_function_header_tuple_contract(&entry.text, entry.span)?;
     let Some(mut symbol) = parse_symbol_header(&entry.text, entry.span) else {
+        let rest = entry
+            .text
+            .strip_prefix("export ")
+            .unwrap_or(&entry.text)
+            .trim();
+        if rest.starts_with("intrinsic ") {
+            return Err(format!(
+                "{}:{}: malformed intrinsic function declaration",
+                entry.span.line, entry.span.column
+            ));
+        }
         return Ok(None);
     };
+    if symbol.intrinsic_impl.is_some() && !entry.children.is_empty() {
+        return Err(format!(
+            "{}:{}: intrinsic functions cannot own nested blocks",
+            entry.span.line, entry.span.column
+        ));
+    }
     symbol.surface_text = collect_symbol_surface(&entry.text, &symbol.kind, &entry.children);
     symbol.body = parse_symbol_body(&symbol.kind, &entry.children)?;
     symbol.statements = parse_symbol_statements(&symbol.kind, &entry.children)?;
@@ -667,7 +869,13 @@ fn parse_symbol_entry(entry: &RawBlockEntry) -> Result<Option<SymbolDecl>, Strin
 fn parse_symbol_header(trimmed: &str, span: Span) -> Option<SymbolDecl> {
     let exported = trimmed.starts_with("export ");
     let rest = trimmed.strip_prefix("export ").unwrap_or(trimmed);
+    if let Some(symbol) = parse_intrinsic_symbol(rest, exported, span) {
+        return Some(symbol);
+    }
     if let Some(symbol) = parse_behavior_symbol(rest, exported, span) {
+        return Some(symbol);
+    }
+    if let Some(symbol) = parse_system_symbol(rest, exported, span) {
         return Some(symbol);
     }
     let (is_async, rest) = if let Some(rest) = rest.strip_prefix("async ") {
@@ -677,6 +885,7 @@ fn parse_symbol_header(trimmed: &str, span: Span) -> Option<SymbolDecl> {
     };
     for (keyword, kind) in [
         ("fn", SymbolKind::Fn),
+        ("system", SymbolKind::System),
         ("record", SymbolKind::Record),
         ("enum", SymbolKind::Enum),
         ("trait", SymbolKind::Trait),
@@ -700,6 +909,8 @@ fn parse_symbol_header(trimmed: &str, span: Span) -> Option<SymbolDecl> {
             params: signature.params,
             return_type: signature.return_type,
             behavior_attrs: Vec::new(),
+            forewords: Vec::new(),
+            intrinsic_impl: None,
             body: SymbolBody::None,
             statements: Vec::new(),
             rollups: Vec::new(),
@@ -730,6 +941,8 @@ fn parse_behavior_symbol(rest: &str, exported: bool, span: Span) -> Option<Symbo
         params: signature.params,
         return_type: signature.return_type,
         behavior_attrs: attrs,
+        forewords: Vec::new(),
+        intrinsic_impl: None,
         body: SymbolBody::None,
         statements: Vec::new(),
         rollups: Vec::new(),
@@ -738,6 +951,64 @@ fn parse_behavior_symbol(rest: &str, exported: bool, span: Span) -> Option<Symbo
             &rest[open_idx + 1..close_idx],
             fn_rest
         ),
+        span,
+    })
+}
+
+fn parse_system_symbol(rest: &str, exported: bool, span: Span) -> Option<SymbolDecl> {
+    let open_idx = rest.find('[')?;
+    if !rest[..open_idx].trim().eq("system") {
+        return None;
+    }
+    let close_idx = find_matching_delim(rest, open_idx, '[', ']')?;
+    let attrs = parse_behavior_attrs(&rest[open_idx + 1..close_idx]).ok()?;
+    let after_attrs = rest[close_idx + 1..].trim();
+    let fn_rest = after_attrs.strip_prefix("fn ")?;
+    let signature = parse_symbol_signature(SymbolKind::Fn, fn_rest)?;
+    Some(SymbolDecl {
+        name: signature.name,
+        kind: SymbolKind::System,
+        exported,
+        is_async: false,
+        type_params: signature.type_params,
+        where_clause: signature.where_clause,
+        params: signature.params,
+        return_type: signature.return_type,
+        behavior_attrs: attrs,
+        forewords: Vec::new(),
+        intrinsic_impl: None,
+        body: SymbolBody::None,
+        statements: Vec::new(),
+        rollups: Vec::new(),
+        surface_text: format!("system[{}] fn {}", &rest[open_idx + 1..close_idx], fn_rest),
+        span,
+    })
+}
+
+fn parse_intrinsic_symbol(rest: &str, exported: bool, span: Span) -> Option<SymbolDecl> {
+    let rest = rest.strip_prefix("intrinsic fn ")?;
+    let (signature_text, binding_text) = rest.split_once('=')?;
+    let binding = binding_text.trim();
+    if binding.is_empty() || !is_path_like(binding) {
+        return None;
+    }
+    let signature = parse_symbol_signature(SymbolKind::Fn, signature_text.trim())?;
+    Some(SymbolDecl {
+        name: signature.name,
+        kind: SymbolKind::Fn,
+        exported,
+        is_async: false,
+        type_params: signature.type_params,
+        where_clause: signature.where_clause,
+        params: signature.params,
+        return_type: signature.return_type,
+        behavior_attrs: Vec::new(),
+        forewords: Vec::new(),
+        intrinsic_impl: Some(binding.to_string()),
+        body: SymbolBody::None,
+        statements: Vec::new(),
+        rollups: Vec::new(),
+        surface_text: format!("intrinsic fn {} = {}", signature_text.trim(), binding),
         span,
     })
 }
@@ -752,7 +1023,7 @@ fn collect_symbol_surface(trimmed: &str, kind: &SymbolKind, entries: &[RawBlockE
 
     if matches!(
         kind,
-        SymbolKind::Fn | SymbolKind::Behavior | SymbolKind::Const
+        SymbolKind::Fn | SymbolKind::Behavior | SymbolKind::System | SymbolKind::Const
     ) {
         return surface_lines.join("\n");
     }
@@ -776,7 +1047,7 @@ fn parse_symbol_signature(kind: SymbolKind, rest: &str) -> Option<ParsedSymbolSi
     let name = parse_symbol_name(header)?;
     let after_name = &header[name.len()..];
     let (type_params, where_clause, params, return_type) = match kind {
-        SymbolKind::Fn => parse_function_signature_tail(after_name)?,
+        SymbolKind::Fn | SymbolKind::System => parse_function_signature_tail(after_name)?,
         SymbolKind::Record | SymbolKind::Enum | SymbolKind::Trait | SymbolKind::Behavior => {
             parse_named_type_tail(after_name)?
         }
@@ -923,9 +1194,25 @@ fn parse_behavior_attrs(source: &str) -> Result<Vec<BehaviorAttr>, String> {
 }
 
 fn parse_impl_decl(entry: &RawBlockEntry) -> Result<Option<ImplDecl>, String> {
-    let Some(rest) = entry.text.strip_prefix("impl ") else {
+    let Some(mut rest) = entry.text.strip_prefix("impl") else {
         return Ok(None);
     };
+    rest = rest.trim_start();
+    if rest.starts_with('[') {
+        let close_idx = find_matching_delim(rest, 0, '[', ']').ok_or_else(|| {
+            format!(
+                "{}:{}: malformed impl declaration",
+                entry.span.line, entry.span.column
+            )
+        })?;
+        rest = rest[close_idx + 1..].trim_start();
+    }
+    if rest.is_empty() {
+        return Err(format!(
+            "{}:{}: malformed impl declaration",
+            entry.span.line, entry.span.column
+        ));
+    }
     let header = rest.strip_suffix(':').unwrap_or(rest).trim();
     let (trait_path, target_type) = match header.rsplit_once(" for ") {
         Some((trait_path, target_type)) => (
@@ -947,9 +1234,15 @@ fn parse_impl_decl(entry: &RawBlockEntry) -> Result<Option<ImplDecl>, String> {
         .collect::<Vec<_>>();
     let mut assoc_types = Vec::new();
     let mut methods = Vec::new();
+    let mut pending_forewords = Vec::new();
     let mut index = 0usize;
     while index < entry.children.len() {
         let child = &entry.children[index];
+        if let Some(foreword) = parse_foreword_app(&child.text, child.span)? {
+            pending_forewords.push(foreword);
+            index += 1;
+            continue;
+        }
         if parse_page_rollup_entry(child)?.is_some() {
             return Err(format!(
                 "{}:{}: page rollup without a valid owning header",
@@ -957,11 +1250,19 @@ fn parse_impl_decl(entry: &RawBlockEntry) -> Result<Option<ImplDecl>, String> {
             ));
         }
         if let Some(assoc_type) = parse_impl_assoc_type_binding(&child.text, child.span) {
+            if !pending_forewords.is_empty() {
+                let foreword = &pending_forewords[0];
+                return Err(format!(
+                    "{}:{}: forewords cannot target impl assoc type bindings in v1",
+                    foreword.span.line, foreword.span.column
+                ));
+            }
             assoc_types.push(assoc_type);
             index += 1;
             continue;
         }
         if let Some(mut method) = parse_symbol_entry(child)? {
+            method.forewords = std::mem::take(&mut pending_forewords);
             let (rollups, consumed) = collect_following_rollups(&entry.children, index + 1)?;
             if !rollups.is_empty() {
                 if symbol_can_own_rollups(&method) {
@@ -978,7 +1279,16 @@ fn parse_impl_decl(entry: &RawBlockEntry) -> Result<Option<ImplDecl>, String> {
             index += 1 + consumed;
             continue;
         }
-        index += 1;
+        return Err(format!(
+            "{}:{}: unsupported `impl` item syntax: `{}`",
+            child.span.line, child.span.column, child.text
+        ));
+    }
+    if let Some(foreword) = pending_forewords.first() {
+        return Err(format!(
+            "{}:{}: foreword without a valid target",
+            foreword.span.line, foreword.span.column
+        ));
     }
     let mut surface_lines = vec![entry.text.clone()];
     surface_lines.extend(body_entries.iter().cloned());
@@ -995,7 +1305,9 @@ fn parse_impl_decl(entry: &RawBlockEntry) -> Result<Option<ImplDecl>, String> {
 
 fn parse_symbol_body(kind: &SymbolKind, entries: &[RawBlockEntry]) -> Result<SymbolBody, String> {
     match kind {
-        SymbolKind::Fn | SymbolKind::Const | SymbolKind::Behavior => Ok(SymbolBody::None),
+        SymbolKind::Fn | SymbolKind::Const | SymbolKind::Behavior | SymbolKind::System => {
+            Ok(SymbolBody::None)
+        }
         SymbolKind::Record => Ok(SymbolBody::Record {
             fields: entries
                 .iter()
@@ -1011,9 +1323,15 @@ fn parse_symbol_body(kind: &SymbolKind, entries: &[RawBlockEntry]) -> Result<Sym
         SymbolKind::Trait => {
             let mut assoc_types = Vec::new();
             let mut methods = Vec::new();
+            let mut pending_forewords = Vec::new();
             let mut index = 0usize;
             while index < entries.len() {
                 let entry = &entries[index];
+                if let Some(foreword) = parse_foreword_app(&entry.text, entry.span)? {
+                    pending_forewords.push(foreword);
+                    index += 1;
+                    continue;
+                }
                 if parse_page_rollup_entry(entry)?.is_some() {
                     return Err(format!(
                         "{}:{}: page rollup without a valid owning header",
@@ -1021,11 +1339,19 @@ fn parse_symbol_body(kind: &SymbolKind, entries: &[RawBlockEntry]) -> Result<Sym
                     ));
                 }
                 if let Some(assoc_type) = parse_trait_assoc_type_decl(&entry.text, entry.span) {
+                    if !pending_forewords.is_empty() {
+                        let foreword = &pending_forewords[0];
+                        return Err(format!(
+                            "{}:{}: forewords cannot target trait assoc type declarations in v1",
+                            foreword.span.line, foreword.span.column
+                        ));
+                    }
                     assoc_types.push(assoc_type);
                     index += 1;
                     continue;
                 }
                 if let Some(mut method) = parse_symbol_entry(entry)? {
+                    method.forewords = std::mem::take(&mut pending_forewords);
                     let (rollups, consumed) = collect_following_rollups(entries, index + 1)?;
                     if !rollups.is_empty() {
                         if symbol_can_own_rollups(&method) {
@@ -1042,7 +1368,16 @@ fn parse_symbol_body(kind: &SymbolKind, entries: &[RawBlockEntry]) -> Result<Sym
                     index += 1 + consumed;
                     continue;
                 }
-                index += 1;
+                return Err(format!(
+                    "{}:{}: unsupported `trait` item syntax: `{}`",
+                    entry.span.line, entry.span.column, entry.text
+                ));
+            }
+            if let Some(foreword) = pending_forewords.first() {
+                return Err(format!(
+                    "{}:{}: foreword without a valid target",
+                    foreword.span.line, foreword.span.column
+                ));
             }
             Ok(SymbolBody::Trait {
                 assoc_types,
@@ -1057,7 +1392,9 @@ fn parse_symbol_statements(
     entries: &[RawBlockEntry],
 ) -> Result<Vec<Statement>, String> {
     match kind {
-        SymbolKind::Fn | SymbolKind::Behavior => parse_statement_block(entries, 0),
+        SymbolKind::Fn | SymbolKind::Behavior | SymbolKind::System => {
+            parse_statement_block(entries, 0)
+        }
         SymbolKind::Trait | SymbolKind::Record | SymbolKind::Enum | SymbolKind::Const => {
             Ok(Vec::new())
         }
@@ -1069,9 +1406,15 @@ fn parse_statement_block(
     loop_depth: usize,
 ) -> Result<Vec<Statement>, String> {
     let mut statements = Vec::new();
+    let mut pending_forewords = Vec::new();
     let mut index = 0usize;
     while index < entries.len() {
         let entry = &entries[index];
+        if let Some(foreword) = parse_foreword_app(&entry.text, entry.span)? {
+            pending_forewords.push(foreword);
+            index += 1;
+            continue;
+        }
         if entry.text == "else:" {
             return Err(format!(
                 "{}:{}: `else` without a preceding `if`",
@@ -1092,6 +1435,7 @@ fn parse_statement_block(
         }
 
         let mut statement = parse_statement(entry, loop_depth)?;
+        statement.forewords = std::mem::take(&mut pending_forewords);
         let mut next_index = index + 1;
         if let StatementKind::If { else_branch, .. } = &mut statement.kind {
             if let Some(next) = entries.get(next_index) {
@@ -1124,6 +1468,13 @@ fn parse_statement_block(
         index = next_index + consumed;
     }
 
+    if let Some(foreword) = pending_forewords.first() {
+        return Err(format!(
+            "{}:{}: foreword without a valid target",
+            foreword.span.line, foreword.span.column
+        ));
+    }
+
     Ok(statements)
 }
 
@@ -1140,6 +1491,7 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
                 then_branch: parse_statement_block(&entry.children, loop_depth)?,
                 else_branch: None,
             },
+            forewords: Vec::new(),
             rollups: Vec::new(),
             span: entry.span,
         });
@@ -1156,6 +1508,7 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
                 condition,
                 body: parse_statement_block(&entry.children, loop_depth + 1)?,
             },
+            forewords: Vec::new(),
             rollups: Vec::new(),
             span: entry.span,
         });
@@ -1189,6 +1542,7 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
                 iterable: parse_expression(iterable, &[], entry.span)?,
                 body: parse_statement_block(&entry.children, loop_depth + 1)?,
             },
+            forewords: Vec::new(),
             rollups: Vec::new(),
             span: entry.span,
         });
@@ -1226,6 +1580,7 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
                 name: name.to_string(),
                 value: parse_expression(value, &entry.children, entry.span)?,
             },
+            forewords: Vec::new(),
             rollups: Vec::new(),
             span: entry.span,
         });
@@ -1244,6 +1599,7 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
         };
         return Ok(Statement {
             kind: StatementKind::Return { value },
+            forewords: Vec::new(),
             rollups: Vec::new(),
             span: entry.span,
         });
@@ -1254,6 +1610,7 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
             kind: StatementKind::Defer {
                 expr: parse_expression(rest, &entry.children, entry.span)?,
             },
+            forewords: Vec::new(),
             rollups: Vec::new(),
             span: entry.span,
         });
@@ -1268,6 +1625,7 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
         }
         return Ok(Statement {
             kind: StatementKind::Break,
+            forewords: Vec::new(),
             rollups: Vec::new(),
             span: entry.span,
         });
@@ -1282,6 +1640,7 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
         }
         return Ok(Statement {
             kind: StatementKind::Continue,
+            forewords: Vec::new(),
             rollups: Vec::new(),
             span: entry.span,
         });
@@ -1294,6 +1653,7 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
                 op,
                 value: parse_expression(&value, &entry.children, entry.span)?,
             },
+            forewords: Vec::new(),
             rollups: Vec::new(),
             span: entry.span,
         });
@@ -1303,6 +1663,7 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
         kind: StatementKind::Expr {
             expr: parse_expression(&entry.text, &entry.children, entry.span)?,
         },
+        forewords: Vec::new(),
         rollups: Vec::new(),
         span: entry.span,
     })
@@ -1348,6 +1709,15 @@ fn parse_expression_core(text: &str) -> Result<Expr, String> {
     let trimmed = text.trim();
     if let Some(inner) = strip_group_parens(trimmed) {
         return parse_expression_core(inner);
+    }
+    if let Some(expr) = parse_chain_expression(trimmed)? {
+        return Ok(expr);
+    }
+    if let Some(expr) = parse_memory_phrase(trimmed)? {
+        return Ok(expr);
+    }
+    if let Some(expr) = parse_collection_literal(trimmed)? {
+        return Ok(expr);
     }
     parse_range_expression(trimmed)
 }
@@ -1545,6 +1915,12 @@ fn parse_unary_expression(text: &str) -> Result<Expr, String> {
 }
 
 fn parse_postfix_expression(text: &str) -> Result<Expr, String> {
+    if let Some(expr) = parse_chain_expression(text)? {
+        return Ok(expr);
+    }
+    if let Some(expr) = parse_memory_phrase(text)? {
+        return Ok(expr);
+    }
     if let Some(expr) = parse_qualified_phrase(text)? {
         return Ok(expr);
     }
@@ -1554,10 +1930,103 @@ fn parse_postfix_expression(text: &str) -> Result<Expr, String> {
     if let Some(expr) = parse_access_expression(text)? {
         return Ok(expr);
     }
+    if let Some(expr) = parse_collection_literal(text)? {
+        return Ok(expr);
+    }
     Ok(Expr::Opaque {
         text: text.trim().to_string(),
         attached: Vec::new(),
     })
+}
+
+fn parse_chain_expression(text: &str) -> Result<Option<Expr>, String> {
+    let (mode_text, reverse, step_token, step_text) =
+        if let Some(index) = find_top_level_token(text, ":=>") {
+            (&text[..index], false, "=>", &text[index + 3..])
+        } else if let Some(index) = find_top_level_token(text, ":=<") {
+            (&text[..index], true, "<=", &text[index + 3..])
+        } else {
+            return Ok(None);
+        };
+    let mode = mode_text.trim();
+    if !is_identifier(mode) {
+        return Ok(None);
+    }
+    let mut steps = Vec::new();
+    for part in split_top_level_token(step_text, step_token) {
+        let part = part.trim();
+        if part.is_empty() {
+            return Ok(None);
+        }
+        steps.push(part.to_string());
+    }
+    if steps.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(Expr::Chain {
+        mode: mode.to_string(),
+        reverse,
+        steps,
+    }))
+}
+
+fn parse_memory_phrase(text: &str) -> Result<Option<Expr>, String> {
+    let Some(alloc_index) = find_top_level_token(text, ":>") else {
+        return Ok(None);
+    };
+    let Some(close_index) = find_top_level_token(text, "<:") else {
+        return Ok(None);
+    };
+    if close_index <= alloc_index {
+        return Ok(None);
+    }
+
+    let family_and_arena = text[..alloc_index].trim();
+    let init_text = text[alloc_index + 2..close_index].trim();
+    let constructor = text[close_index + 2..].trim();
+    let Some((family, arena_text)) = split_top_level_single_colon(family_and_arena) else {
+        return Ok(None);
+    };
+    let family = family.trim();
+    let arena_text = arena_text.trim();
+    if !is_identifier(family) || arena_text.is_empty() || constructor.is_empty() {
+        return Ok(None);
+    }
+    let init_args = match parse_phrase_args(init_text)? {
+        Some(args) => args,
+        None => return Ok(None),
+    };
+    Ok(Some(Expr::MemoryPhrase {
+        family: family.to_string(),
+        arena: Box::new(parse_expression_core(arena_text)?),
+        init_args,
+        constructor: constructor.to_string(),
+    }))
+}
+
+fn parse_collection_literal(text: &str) -> Result<Option<Expr>, String> {
+    let trimmed = text.trim();
+    if !trimmed.starts_with('[') || !trimmed.ends_with(']') {
+        return Ok(None);
+    }
+    let Some(close_idx) = find_matching_delim(trimmed, 0, '[', ']') else {
+        return Ok(None);
+    };
+    if close_idx != trimmed.len() - 1 {
+        return Ok(None);
+    }
+    let inside = &trimmed[1..close_idx];
+    let mut items = Vec::new();
+    if !inside.trim().is_empty() {
+        for part in split_top_level(inside, ',') {
+            let part = part.trim();
+            if part.is_empty() {
+                return Ok(None);
+            }
+            items.push(parse_expression_core(part)?);
+        }
+    }
+    Ok(Some(Expr::CollectionLiteral { items }))
 }
 
 fn parse_qualified_phrase(text: &str) -> Result<Option<Expr>, String> {
@@ -1945,6 +2414,66 @@ fn find_top_level_named_eq(text: &str) -> Option<usize> {
         return Some(index);
     }
     None
+}
+
+fn split_top_level_single_colon(text: &str) -> Option<(&str, &str)> {
+    let mut depth_paren = 0usize;
+    let mut depth_bracket = 0usize;
+    let mut depth_brace = 0usize;
+    let mut in_string = false;
+    let mut escape = false;
+
+    for (idx, ch) in text.char_indices() {
+        if in_string {
+            if escape {
+                escape = false;
+                continue;
+            }
+            if ch == '\\' {
+                escape = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => {
+                in_string = true;
+                continue;
+            }
+            '(' => depth_paren += 1,
+            ')' => depth_paren = depth_paren.saturating_sub(1),
+            '[' => depth_bracket += 1,
+            ']' => depth_bracket = depth_bracket.saturating_sub(1),
+            '{' => depth_brace += 1,
+            '}' => depth_brace = depth_brace.saturating_sub(1),
+            ':' if depth_paren == 0 && depth_bracket == 0 && depth_brace == 0 => {
+                let prev = text[..idx].chars().next_back();
+                let next = text[idx + 1..].chars().next();
+                if !matches!(prev, Some(':')) && !matches!(next, Some(':' | '>' | '<' | '=')) {
+                    return Some((&text[..idx], &text[idx + 1..]));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn split_top_level_token<'a>(text: &'a str, token: &str) -> Vec<&'a str> {
+    let positions = find_top_level_token_positions(text, token);
+    if positions.is_empty() {
+        return vec![text];
+    }
+    let mut parts = Vec::with_capacity(positions.len() + 1);
+    let mut start = 0usize;
+    for index in positions {
+        parts.push(&text[start..index]);
+        start = index + token.len();
+    }
+    parts.push(&text[start..]);
+    parts
 }
 
 fn has_word_boundary_before(text: &str, index: usize) -> bool {
@@ -2425,9 +2954,7 @@ fn symbol_can_own_rollups(symbol: &SymbolDecl) -> bool {
 
 fn statement_can_own_rollups(statement: &Statement) -> bool {
     match &statement.kind {
-        StatementKind::If { .. } | StatementKind::While { .. } | StatementKind::For { .. } => {
-            true
-        }
+        StatementKind::If { .. } | StatementKind::While { .. } | StatementKind::For { .. } => true,
         StatementKind::Expr { expr } => expr_has_attached_block(expr),
         _ => false,
     }
@@ -2435,9 +2962,132 @@ fn statement_can_own_rollups(statement: &Statement) -> bool {
 
 fn expr_has_attached_block(expr: &Expr) -> bool {
     match expr {
-        Expr::Opaque { attached, .. } | Expr::QualifiedPhrase { attached, .. } => !attached.is_empty(),
+        Expr::Opaque { attached, .. } | Expr::QualifiedPhrase { attached, .. } => {
+            !attached.is_empty()
+        }
         _ => false,
     }
+}
+
+fn validate_module_foreword_contract(parsed: &ParsedModule) -> Result<(), String> {
+    for directive in &parsed.directives {
+        validate_top_level_forewords(&directive.forewords, true)?;
+    }
+    for symbol in &parsed.symbols {
+        validate_symbol_foreword_contract(symbol)?;
+    }
+    for impl_decl in &parsed.impls {
+        for method in &impl_decl.methods {
+            validate_symbol_foreword_contract(method)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_top_level_forewords(
+    forewords: &[ForewordApp],
+    allow_builtin_only: bool,
+) -> Result<(), String> {
+    for foreword in forewords {
+        let name = foreword.name.as_str();
+        let is_builtin = matches!(
+            name,
+            "deprecated" | "only" | "test" | "allow" | "deny" | "inline" | "cold"
+        );
+        if allow_builtin_only && !is_builtin {
+            return Err(format!(
+                "{}:{}: `#{}` is not a valid foreword for this target",
+                foreword.span.line, foreword.span.column, name
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_symbol_foreword_contract(symbol: &SymbolDecl) -> Result<(), String> {
+    for foreword in &symbol.forewords {
+        let name = foreword.name.as_str();
+        let is_builtin = matches!(
+            name,
+            "deprecated" | "only" | "test" | "allow" | "deny" | "inline" | "cold"
+        );
+        let is_stage = name == "stage";
+        if !(is_builtin
+            || (is_stage
+                && matches!(
+                    symbol.kind,
+                    SymbolKind::Fn | SymbolKind::Behavior | SymbolKind::System
+                )))
+        {
+            return Err(format!(
+                "{}:{}: `#{}` is not a valid foreword for this target",
+                foreword.span.line, foreword.span.column, name
+            ));
+        }
+    }
+    validate_statement_foreword_contract(
+        &symbol.statements,
+        matches!(symbol.kind, SymbolKind::Behavior | SymbolKind::System),
+    )?;
+    if let SymbolBody::Trait { methods, .. } = &symbol.body {
+        for method in methods {
+            validate_symbol_foreword_contract(method)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_statement_foreword_contract(
+    statements: &[Statement],
+    require_chain_contracts: bool,
+) -> Result<(), String> {
+    for statement in statements {
+        for foreword in &statement.forewords {
+            if foreword.name != "chain" {
+                return Err(format!(
+                    "{}:{}: `#{}` is not a valid statement-level contract",
+                    foreword.span.line, foreword.span.column, foreword.name
+                ));
+            }
+        }
+        if !statement.forewords.is_empty() && !statement_is_chain_target(statement) {
+            let foreword = &statement.forewords[0];
+            return Err(format!(
+                "{}:{}: `#chain` can only target chain statements",
+                foreword.span.line, foreword.span.column
+            ));
+        }
+        if require_chain_contracts
+            && statement_is_chain_target(statement)
+            && statement.forewords.is_empty()
+        {
+            return Err(format!(
+                "{}:{}: system boundary chain must declare explicit #chain[...] contract",
+                statement.span.line, statement.span.column
+            ));
+        }
+        match &statement.kind {
+            StatementKind::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                validate_statement_foreword_contract(then_branch, require_chain_contracts)?;
+                if let Some(else_branch) = else_branch {
+                    validate_statement_foreword_contract(else_branch, require_chain_contracts)?;
+                }
+            }
+            StatementKind::While { body, .. } | StatementKind::For { body, .. } => {
+                validate_statement_foreword_contract(body, require_chain_contracts)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn statement_is_chain_target(statement: &Statement) -> bool {
+    matches!(&statement.kind, StatementKind::Expr { expr } if matches!(expr, Expr::Chain { .. }))
 }
 
 fn validate_module_rollup_contract(parsed: &ParsedModule) -> Result<(), String> {
@@ -2459,6 +3109,7 @@ fn validate_symbol_rollup_contract(symbol: &SymbolDecl) -> Result<(), String> {
         .map(|param| param.name.clone())
         .collect::<BTreeSet<_>>();
     available.extend(immediate_statement_bindings(&symbol.statements));
+    let cleanup_subjects = collect_rollup_subjects(&symbol.rollups);
     for rollup in &symbol.rollups {
         if !available.contains(&rollup.subject) {
             return Err(format!(
@@ -2467,6 +3118,17 @@ fn validate_symbol_rollup_contract(symbol: &SymbolDecl) -> Result<(), String> {
             ));
         }
     }
+    let initially_active = symbol
+        .params
+        .iter()
+        .map(|param| param.name.clone())
+        .filter(|name| cleanup_subjects.contains(name))
+        .collect::<BTreeSet<_>>();
+    validate_rollup_reassignment_contract(
+        &symbol.statements,
+        &cleanup_subjects,
+        &initially_active,
+    )?;
     validate_statement_rollup_contract(&symbol.statements)?;
     if let SymbolBody::Trait { methods, .. } = &symbol.body {
         for method in methods {
@@ -2479,6 +3141,7 @@ fn validate_symbol_rollup_contract(symbol: &SymbolDecl) -> Result<(), String> {
 fn validate_statement_rollup_contract(statements: &[Statement]) -> Result<(), String> {
     for statement in statements {
         if let Some(available) = statement_rollup_subjects(statement) {
+            let cleanup_subjects = collect_rollup_subjects(&statement.rollups);
             for rollup in &statement.rollups {
                 if !available.contains(&rollup.subject) {
                     return Err(format!(
@@ -2486,6 +3149,40 @@ fn validate_statement_rollup_contract(statements: &[Statement]) -> Result<(), St
                         rollup.span.line, rollup.span.column, rollup.subject
                     ));
                 }
+            }
+            let mut initially_active = BTreeSet::new();
+            if let StatementKind::For { binding, .. } = &statement.kind {
+                if cleanup_subjects.contains(binding) {
+                    initially_active.insert(binding.clone());
+                }
+            }
+            match &statement.kind {
+                StatementKind::If {
+                    then_branch,
+                    else_branch,
+                    ..
+                } => {
+                    validate_rollup_reassignment_contract(
+                        then_branch,
+                        &cleanup_subjects,
+                        &initially_active,
+                    )?;
+                    if let Some(else_branch) = else_branch {
+                        validate_rollup_reassignment_contract(
+                            else_branch,
+                            &cleanup_subjects,
+                            &initially_active,
+                        )?;
+                    }
+                }
+                StatementKind::While { body, .. } | StatementKind::For { body, .. } => {
+                    validate_rollup_reassignment_contract(
+                        body,
+                        &cleanup_subjects,
+                        &initially_active,
+                    )?;
+                }
+                _ => {}
             }
         }
         match &statement.kind {
@@ -2527,7 +3224,9 @@ fn statement_rollup_subjects(statement: &Statement) -> Option<BTreeSet<String>> 
             names.insert(binding.clone());
             Some(names)
         }
-        StatementKind::Expr { expr } if expr_has_attached_block(expr) => None,
+        StatementKind::Expr { expr } if expr_has_attached_block(expr) => {
+            Some(immediate_attached_block_bindings(expr))
+        }
         _ => Some(BTreeSet::new()),
     }
 }
@@ -2535,17 +3234,112 @@ fn statement_rollup_subjects(statement: &Statement) -> Option<BTreeSet<String>> 
 fn immediate_statement_bindings(statements: &[Statement]) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
     for statement in statements {
+        if let StatementKind::Let { name, .. } = &statement.kind {
+            names.insert(name.clone());
+        }
+    }
+    names
+}
+
+fn immediate_attached_block_bindings(expr: &Expr) -> BTreeSet<String> {
+    expr_attached_entries(expr)
+        .map(immediate_raw_block_bindings)
+        .unwrap_or_default()
+}
+
+fn expr_attached_entries(expr: &Expr) -> Option<&[RawBlockEntry]> {
+    match expr {
+        Expr::Opaque { attached, .. } | Expr::QualifiedPhrase { attached, .. } => {
+            Some(attached.as_slice())
+        }
+        _ => None,
+    }
+}
+
+fn immediate_raw_block_bindings(entries: &[RawBlockEntry]) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    for entry in entries {
+        if let Some(name) = immediate_raw_block_binding_name(&entry.text) {
+            names.insert(name);
+        }
+    }
+    names
+}
+
+fn immediate_raw_block_binding_name(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    let rest = trimmed.strip_prefix("let ")?;
+    let rest = rest.strip_prefix("mut ").unwrap_or(rest).trim_start();
+    let name = rest
+        .chars()
+        .take_while(|ch| is_identifier_continue(*ch))
+        .collect::<String>();
+    if name.is_empty() { None } else { Some(name) }
+}
+
+fn collect_rollup_subjects(rollups: &[PageRollup]) -> BTreeSet<String> {
+    rollups
+        .iter()
+        .map(|rollup| rollup.subject.clone())
+        .collect::<BTreeSet<_>>()
+}
+
+fn validate_rollup_reassignment_contract(
+    statements: &[Statement],
+    cleanup_subjects: &BTreeSet<String>,
+    active_subjects: &BTreeSet<String>,
+) -> Result<(), String> {
+    let mut active = active_subjects.clone();
+    for statement in statements {
+        if let Some(name) = assignment_target_name(statement) {
+            if active.contains(name) {
+                return Err(format!(
+                    "{}:{}: cleanup subject `{}` cannot be reassigned after activation",
+                    statement.span.line, statement.span.column, name
+                ));
+            }
+        }
+
         match &statement.kind {
             StatementKind::Let { name, .. } => {
-                names.insert(name.clone());
+                if cleanup_subjects.contains(name) {
+                    active.insert(name.clone());
+                }
             }
-            StatementKind::For { binding, .. } => {
-                names.insert(binding.clone());
+            StatementKind::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                validate_rollup_reassignment_contract(then_branch, cleanup_subjects, &active)?;
+                if let Some(else_branch) = else_branch {
+                    validate_rollup_reassignment_contract(else_branch, cleanup_subjects, &active)?;
+                }
+            }
+            StatementKind::While { body, .. } => {
+                validate_rollup_reassignment_contract(body, cleanup_subjects, &active)?;
+            }
+            StatementKind::For { binding, body, .. } => {
+                let mut loop_active = active.clone();
+                if cleanup_subjects.contains(binding) {
+                    loop_active.insert(binding.clone());
+                }
+                validate_rollup_reassignment_contract(body, cleanup_subjects, &loop_active)?;
             }
             _ => {}
         }
     }
-    names
+    Ok(())
+}
+
+fn assignment_target_name(statement: &Statement) -> Option<&str> {
+    match &statement.kind {
+        StatementKind::Assign {
+            target: AssignTarget::Name { text },
+            ..
+        } => Some(text.as_str()),
+        _ => None,
+    }
 }
 
 fn validate_module_tuple_contract(parsed: &ParsedModule) -> Result<(), String> {
@@ -2667,10 +3461,29 @@ fn validate_statement_block_tuple_contract(statements: &[Statement]) -> Result<(
 fn validate_expr_tuple_contract(expr: &Expr, span: Span) -> Result<(), String> {
     match expr {
         Expr::Opaque { text, .. } => validate_tuple_expression_text(text, span),
+        Expr::CollectionLiteral { items } => {
+            for item in items {
+                validate_expr_tuple_contract(item, span)?;
+            }
+            Ok(())
+        }
         Expr::Match { subject, arms } => {
             validate_expr_tuple_contract(subject, span)?;
             for arm in arms {
                 validate_expr_tuple_contract(&arm.value, arm.span)?;
+            }
+            Ok(())
+        }
+        Expr::Chain { .. } => Ok(()),
+        Expr::MemoryPhrase {
+            arena, init_args, ..
+        } => {
+            validate_expr_tuple_contract(arena, span)?;
+            for arg in init_args {
+                match arg {
+                    PhraseArg::Positional(expr) => validate_expr_tuple_contract(expr, span)?,
+                    PhraseArg::Named { value, .. } => validate_expr_tuple_contract(value, span)?,
+                }
             }
             Ok(())
         }
@@ -2924,11 +3737,15 @@ fn validate_tuple_expression_groups(text: &str, span: Span) -> Result<(), String
             let inner = text[index + 1..close_idx].trim();
             if contains_top_level_char(inner, ',') {
                 match parse_expression_core(inner) {
-                    Ok(parsed) if !matches!(
-                        &parsed,
-                        Expr::Opaque { text, attached }
-                            if text.trim() == inner && attached.is_empty()
-                    ) => validate_expr_tuple_contract(&parsed, span)?,
+                    Ok(parsed)
+                        if !matches!(
+                            &parsed,
+                            Expr::Opaque { text, attached }
+                                if text.trim() == inner && attached.is_empty()
+                        ) =>
+                    {
+                        validate_expr_tuple_contract(&parsed, span)?
+                    }
                     _ => {
                         let parts = split_top_level(inner, ',')
                             .into_iter()
@@ -3158,8 +3975,8 @@ fn is_identifier_continue(ch: char) -> bool {
 mod tests {
     use super::freeze::{FROZEN_AST_NODE_KINDS, FROZEN_TOKEN_KINDS};
     use super::{
-        AssignTarget, BinaryOp, DirectiveKind, Expr, MatchPattern, ParamMode, PhraseArg,
-        Statement, StatementKind, SymbolBody, SymbolKind, UnaryOp, parse_module,
+        AssignTarget, BinaryOp, DirectiveKind, Expr, MatchPattern, ParamMode, PhraseArg, Statement,
+        StatementKind, SymbolBody, SymbolKind, UnaryOp, parse_module,
     };
 
     #[test]
@@ -3522,7 +4339,10 @@ mod tests {
     fn parse_module_rejects_ownerless_page_rollups() {
         let err = parse_module("[value, cleanup]#cleanup\nfn cleanup(value: Int):\n    return\n")
             .expect_err("ownerless rollup should fail");
-        assert!(err.contains("page rollup without a valid owning header"), "{err}");
+        assert!(
+            err.contains("page rollup without a valid owning header"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -3533,6 +4353,93 @@ mod tests {
         .expect_err("unknown subject should fail");
         assert!(
             err.contains("cleanup subject `missing` is not available in the owning header scope"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn parse_module_rejects_reassigned_cleanup_subjects() {
+        let err = parse_module(
+            "fn cleanup(value: Int):\n    return\nfn main(seed: Int) -> Int:\n    let local = seed\n    local += 1\n    return local\n[local, cleanup]#cleanup\n",
+        )
+        .expect_err("cleanup subject reassignment should fail");
+        assert!(
+            err.contains("cleanup subject `local` cannot be reassigned after activation"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn parse_module_collects_forewords_lang_items_intrinsics_and_systems() {
+        let parsed = parse_module(
+            "use std.result as result\n#test\n#inline\nfn smoke() -> Int:\n    return 0\n#stage[phase=update, deterministic=true]\nsystem[phase=startup, affinity=main] fn boot():\n    #chain[phase=startup, deterministic=true]\n    forward :=> seed => step\nlang result = smoke\nintrinsic fn host_len(read text: Str) -> Int = HostTextLenBytes\nfn seed() -> Int:\n    return 1\nfn step(v: Int) -> Int:\n    return v\n",
+        )
+        .expect("module should parse");
+
+        assert_eq!(parsed.directives[0].forewords.len(), 0);
+        assert_eq!(parsed.lang_items[0].name, "result");
+        assert_eq!(parsed.symbols[0].forewords.len(), 2);
+        assert_eq!(parsed.symbols[1].kind, SymbolKind::System);
+        assert_eq!(parsed.symbols[1].forewords[0].name, "stage");
+        assert_eq!(parsed.symbols[1].statements[0].forewords[0].name, "chain");
+        assert!(parsed.symbols[2].intrinsic_impl.is_some());
+    }
+
+    #[test]
+    fn parse_module_collects_chain_collection_and_memory_expressions() {
+        let parsed = parse_module(
+            "fn main() -> Int:\n    let xs = [1, 2, 3]\n    let id = arena: store :> value = 1 <: Item\n    forward :=> seed => step\n    return xs[0]\n",
+        )
+        .expect("module should parse");
+
+        match &parsed.symbols[0].statements[0].kind {
+            StatementKind::Let {
+                value: Expr::CollectionLiteral { items },
+                ..
+            } => {
+                assert_eq!(items.len(), 3);
+            }
+            other => panic!("expected collection literal, got {other:?}"),
+        }
+        match &parsed.symbols[0].statements[1].kind {
+            StatementKind::Let {
+                value:
+                    Expr::MemoryPhrase {
+                        family,
+                        constructor,
+                        ..
+                    },
+                ..
+            } => {
+                assert_eq!(family, "arena");
+                assert_eq!(constructor, "Item");
+            }
+            other => panic!("expected memory phrase, got {other:?}"),
+        }
+        match &parsed.symbols[0].statements[2].kind {
+            StatementKind::Expr {
+                expr: Expr::Chain { mode, steps, .. },
+            } => {
+                assert_eq!(mode, "forward");
+                assert_eq!(steps, &vec!["seed".to_string(), "step".to_string()]);
+            }
+            other => panic!("expected chain expression, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_module_rejects_unsupported_top_level_syntax() {
+        let err = parse_module("widget Gizmo:\n    value: Int\n")
+            .expect_err("unsupported top-level syntax should fail");
+        assert!(err.contains("unsupported top-level syntax"), "{err}");
+    }
+
+    #[test]
+    fn parse_module_rejects_malformed_intrinsic_declaration() {
+        let err = parse_module("intrinsic fn host_len(read text: Str) -> Int\n")
+            .expect_err("malformed intrinsic should fail");
+        assert!(
+            err.contains("malformed intrinsic function declaration"),
             "{err}"
         );
     }
@@ -3571,7 +4478,10 @@ mod tests {
     fn parse_module_rejects_three_element_tuple_contracts() {
         let err = parse_module("fn main() -> (Int, Int, Int):\n    return (1, 2, 3)\n")
             .expect_err("triple tuples should fail");
-        assert!(err.contains("tuple types must have exactly 2 elements in v1"), "{err}");
+        assert!(
+            err.contains("tuple types must have exactly 2 elements in v1"),
+            "{err}"
+        );
     }
 
     #[test]

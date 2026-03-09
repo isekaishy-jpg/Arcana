@@ -1,7 +1,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use arcana_hir::{HirModule, HirWorkspaceSummary, lower_module_text, resolve_workspace};
+use arcana_hir::{
+    HirModule, HirResolvedModule, HirResolvedTarget, HirResolvedWorkspace, HirWorkspaceSummary,
+    lower_module_text, resolve_workspace,
+};
 use arcana_package::load_workspace_hir as load_package_workspace_hir;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -131,28 +134,35 @@ fn validate_packages(workspace: &HirWorkspaceSummary) -> Result<CheckSummary, St
         }
     }
 
-    let mut diagnostics = match resolve_workspace(workspace) {
-        Ok(_) => Vec::new(),
-        Err(errors) => errors
-            .into_iter()
-            .map(|error| {
-                let package = workspace.package(&error.package_name);
-                Diagnostic {
-                    path: package
-                        .and_then(|package| package.module_path(&error.source_module_id))
-                        .cloned()
-                        .unwrap_or_else(|| {
-                            package
-                                .map(|package| package.root_dir.join("src").join("unknown.arc"))
-                                .unwrap_or_else(|| PathBuf::from("unknown.arc"))
-                        }),
-                    line: error.span.line,
-                    column: error.span.column,
-                    message: error.message,
-                }
-            })
-            .collect::<Vec<_>>(),
+    let (resolved_workspace, mut diagnostics) = match resolve_workspace(workspace) {
+        Ok(resolved) => (Some(resolved), Vec::new()),
+        Err(errors) => {
+            let diagnostics = errors
+                .into_iter()
+                .map(|error| {
+                    let package = workspace.package(&error.package_name);
+                    Diagnostic {
+                        path: package
+                            .and_then(|package| package.module_path(&error.source_module_id))
+                            .cloned()
+                            .unwrap_or_else(|| {
+                                package
+                                    .map(|package| package.root_dir.join("src").join("unknown.arc"))
+                                    .unwrap_or_else(|| PathBuf::from("unknown.arc"))
+                            }),
+                        line: error.span.line,
+                        column: error.span.column,
+                        message: error.message,
+                    }
+                })
+                .collect::<Vec<_>>();
+            (None, diagnostics)
+        }
     };
+
+    if let Some(resolved_workspace) = resolved_workspace.as_ref() {
+        diagnostics.extend(validate_hir_semantics(workspace, resolved_workspace));
+    }
 
     if diagnostics.is_empty() {
         return Ok(summary);
@@ -170,6 +180,133 @@ fn validate_packages(workspace: &HirWorkspaceSummary) -> Result<CheckSummary, St
         .map(|diagnostic| diagnostic.render())
         .collect::<Vec<_>>()
         .join("\n"))
+}
+
+fn validate_hir_semantics(
+    workspace: &HirWorkspaceSummary,
+    resolved: &HirResolvedWorkspace,
+) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
+    for (package_name, package) in &workspace.packages {
+        let Some(resolved_package) = resolved.package(package_name) else {
+            continue;
+        };
+        for module in &package.summary.modules {
+            let Some(resolved_module) = resolved_package.module(&module.module_id) else {
+                continue;
+            };
+            for lang_item in &module.lang_items {
+                if !lang_item_resolves(workspace, resolved_module, lang_item.target.as_slice()) {
+                    diagnostics.push(Diagnostic {
+                        path: package
+                            .module_path(&module.module_id)
+                            .cloned()
+                            .unwrap_or_else(|| package.root_dir.join("src").join("unknown.arc")),
+                        line: lang_item.span.line,
+                        column: lang_item.span.column,
+                        message: format!(
+                            "unresolved `lang` item target `{}` for `{}`",
+                            lang_item.target.join("."),
+                            lang_item.name
+                        ),
+                    });
+                }
+            }
+        }
+    }
+    diagnostics
+}
+
+fn lang_item_resolves(
+    workspace: &HirWorkspaceSummary,
+    module: &HirResolvedModule,
+    path: &[String],
+) -> bool {
+    if path.is_empty() {
+        return false;
+    }
+    if path.len() == 1 {
+        return matches!(
+            module.bindings.get(&path[0]).map(|binding| &binding.target),
+            Some(HirResolvedTarget::Symbol { .. })
+        );
+    }
+
+    let first = &path[0];
+    if let Some(binding) = module.bindings.get(first) {
+        return resolve_target_tail(workspace, &binding.target, &path[1..]);
+    }
+
+    let Some(package) = workspace.package(first) else {
+        return false;
+    };
+    resolve_package_symbol_path(package, &path[1..])
+}
+
+fn resolve_target_tail(
+    workspace: &HirWorkspaceSummary,
+    target: &HirResolvedTarget,
+    tail: &[String],
+) -> bool {
+    match target {
+        HirResolvedTarget::Symbol { .. } => tail.is_empty(),
+        HirResolvedTarget::Module {
+            package_name,
+            module_id,
+        } => {
+            let Some(package) = workspace.package(package_name) else {
+                return false;
+            };
+            let Some(module) = package.module(module_id) else {
+                return false;
+            };
+            resolve_module_symbol_path(package, module, tail)
+        }
+    }
+}
+
+fn resolve_package_symbol_path(package: &arcana_hir::HirWorkspacePackage, path: &[String]) -> bool {
+    if path.is_empty() {
+        return false;
+    }
+    let Some((symbol_name, module_path)) = path.split_last() else {
+        return false;
+    };
+    let module = if symbol_name.is_empty() {
+        return false;
+    } else if module_path.is_empty() {
+        package.module(&package.summary.package_name)
+    } else {
+        package.resolve_relative_module(module_path)
+    };
+    module
+        .map(|module| module.has_symbol(symbol_name))
+        .unwrap_or(false)
+}
+
+fn resolve_module_symbol_path(
+    package: &arcana_hir::HirWorkspacePackage,
+    module: &arcana_hir::HirModuleSummary,
+    path: &[String],
+) -> bool {
+    if path.len() == 1 {
+        return module.has_symbol(&path[0]);
+    }
+    let Some((symbol_name, module_tail)) = path.split_last() else {
+        return false;
+    };
+    let base_relative = module
+        .module_id
+        .split('.')
+        .skip(1)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let mut target_relative = base_relative;
+    target_relative.extend_from_slice(module_tail);
+    package
+        .resolve_relative_module(&target_relative)
+        .map(|target_module| target_module.has_symbol(symbol_name))
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -268,6 +405,35 @@ mod tests {
                 "page_rollup_unknown_subject.arc",
                 "cleanup subject `missing` is not available in the owning header scope",
             ),
+            (
+                "page_rollup_reassign.arc",
+                "cleanup subject `local` cannot be reassigned after activation",
+            ),
+        ] {
+            let source = fs::read_to_string(
+                repo_root
+                    .join("conformance")
+                    .join("check_parity_fixtures")
+                    .join(fixture),
+            )
+            .expect("fixture should be readable");
+            let err = check_sources([source.as_str()]).expect_err("fixture should fail");
+            assert!(err.contains(expected), "{fixture}: {err}");
+        }
+    }
+
+    #[test]
+    fn check_sources_rejects_foreword_and_intrinsic_contract_fixtures() {
+        let repo_root = repo_root();
+        for (fixture, expected) in [
+            (
+                "invalid_statement_foreword.arc",
+                "`#inline` is not a valid statement-level contract",
+            ),
+            (
+                "malformed_intrinsic.arc",
+                "malformed intrinsic function declaration",
+            ),
         ] {
             let source = fs::read_to_string(
                 repo_root
@@ -317,11 +483,41 @@ mod tests {
     }
 
     #[test]
+    fn check_path_handles_builtin_foreword_example() {
+        let summary = check_path(&repo_root().join("examples").join("forewords_builtin_app"))
+            .expect("foreword example should check");
+        assert_eq!(summary.package_count, 2);
+        assert!(summary.module_count >= 3);
+    }
+
+    #[test]
+    fn check_path_handles_std_intrinsics() {
+        let summary = check_path(&repo_root().join("std")).expect("std should check");
+        assert!(summary.package_count >= 1);
+        assert!(summary.module_count >= 10);
+    }
+
+    #[test]
     fn check_path_handles_page_rollup_example() {
         let summary = check_path(&repo_root().join("examples").join("page_rollup_cleanup"))
             .expect("page rollup example should check");
         assert_eq!(summary.package_count, 2);
         assert!(summary.module_count >= 3);
+    }
+
+    #[test]
+    fn check_path_rejects_unresolved_lang_item_package() {
+        let err = check_path(
+            &repo_root()
+                .join("conformance")
+                .join("check_parity_packages")
+                .join("unresolved_lang_item"),
+        )
+        .expect_err("unresolved lang item package should fail");
+        assert!(
+            err.contains("unresolved `lang` item target `Missing` for `result`"),
+            "{err}"
+        );
     }
 
     #[test]

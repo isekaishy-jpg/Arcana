@@ -37,12 +37,14 @@ pub struct HirDirective {
     pub kind: HirDirectiveKind,
     pub path: Vec<String>,
     pub alias: Option<String>,
+    pub forewords: Vec<HirForewordApp>,
     pub span: Span,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum HirSymbolKind {
     Fn,
+    System,
     Record,
     Enum,
     Trait,
@@ -54,6 +56,7 @@ impl HirSymbolKind {
     pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Fn => "fn",
+            Self::System => "system",
             Self::Record => "record",
             Self::Enum => "enum",
             Self::Trait => "trait",
@@ -74,6 +77,8 @@ pub struct HirSymbol {
     pub params: Vec<HirParam>,
     pub return_type: Option<String>,
     pub behavior_attrs: Vec<HirBehaviorAttr>,
+    pub forewords: Vec<HirForewordApp>,
+    pub intrinsic_impl: Option<String>,
     pub body: HirSymbolBody,
     pub statements: Vec<HirStatement>,
     pub rollups: Vec<HirPageRollup>,
@@ -116,6 +121,26 @@ pub struct HirField {
 pub struct HirBehaviorAttr {
     pub name: String,
     pub value: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HirForewordArg {
+    pub name: Option<String>,
+    pub value: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HirForewordApp {
+    pub name: String,
+    pub args: Vec<HirForewordArg>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HirLangItem {
+    pub name: String,
+    pub target: Vec<String>,
+    pub span: Span,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -214,9 +239,23 @@ pub enum HirExpr {
         text: String,
         attached: Vec<HirRawBlockEntry>,
     },
+    CollectionLiteral {
+        items: Vec<HirExpr>,
+    },
     Match {
         subject: Box<HirExpr>,
         arms: Vec<HirMatchArm>,
+    },
+    Chain {
+        mode: String,
+        reverse: bool,
+        steps: Vec<String>,
+    },
+    MemoryPhrase {
+        family: String,
+        arena: Box<HirExpr>,
+        init_args: Vec<HirPhraseArg>,
+        constructor: String,
     },
     QualifiedPhrase {
         subject: Box<HirExpr>,
@@ -350,6 +389,7 @@ pub enum HirStatementKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HirStatement {
     pub kind: HirStatementKind,
+    pub forewords: Vec<HirForewordApp>,
     pub rollups: Vec<HirPageRollup>,
     pub span: Span,
 }
@@ -407,6 +447,7 @@ pub struct HirModuleSummary {
     pub line_count: usize,
     pub non_empty_line_count: usize,
     pub directives: Vec<HirDirective>,
+    pub lang_items: Vec<HirLangItem>,
     pub symbols: Vec<HirSymbol>,
     pub impls: Vec<HirImplDecl>,
 }
@@ -443,7 +484,7 @@ impl HirModuleSummary {
 impl HirSymbol {
     fn api_signature_text(&self) -> String {
         match self.kind {
-            HirSymbolKind::Fn => render_function_signature(self),
+            HirSymbolKind::Fn | HirSymbolKind::System => render_function_signature(self),
             HirSymbolKind::Record => render_record_signature(self),
             HirSymbolKind::Enum => render_enum_signature(self),
             HirSymbolKind::Trait => render_trait_signature(self),
@@ -687,7 +728,17 @@ pub fn lower_parsed_module(
                 kind: lower_directive_kind(&directive.kind),
                 path: directive.path.clone(),
                 alias: directive.alias.clone(),
+                forewords: lower_forewords(&directive.forewords),
                 span: directive.span,
+            })
+            .collect(),
+        lang_items: parsed
+            .lang_items
+            .iter()
+            .map(|item| HirLangItem {
+                name: item.name.clone(),
+                target: item.target.clone(),
+                span: item.span,
             })
             .collect(),
         symbols: parsed
@@ -718,6 +769,8 @@ pub fn lower_parsed_module(
                         value: attr.value.clone(),
                     })
                     .collect(),
+                forewords: lower_forewords(&symbol.forewords),
+                intrinsic_impl: symbol.intrinsic_impl.clone(),
                 body: lower_symbol_body(&symbol.body),
                 statements: lower_statements(&symbol.statements),
                 rollups: lower_rollups(&symbol.rollups),
@@ -1325,6 +1378,7 @@ fn lower_directive_kind(kind: &ParsedDirectiveKind) -> HirDirectiveKind {
 fn lower_symbol_kind(kind: &ParsedSymbolKind) -> HirSymbolKind {
     match kind {
         ParsedSymbolKind::Fn => HirSymbolKind::Fn,
+        ParsedSymbolKind::System => HirSymbolKind::System,
         ParsedSymbolKind::Record => HirSymbolKind::Record,
         ParsedSymbolKind::Enum => HirSymbolKind::Enum,
         ParsedSymbolKind::Trait => HirSymbolKind::Trait,
@@ -1407,12 +1461,32 @@ fn lower_trait_or_impl_method(method: &arcana_syntax::SymbolDecl) -> HirSymbol {
                 value: attr.value.clone(),
             })
             .collect(),
+        forewords: lower_forewords(&method.forewords),
+        intrinsic_impl: method.intrinsic_impl.clone(),
         body: lower_symbol_body(&method.body),
         statements: lower_statements(&method.statements),
         rollups: lower_rollups(&method.rollups),
         surface_text: method.surface_text.clone(),
         span: method.span,
     }
+}
+
+fn lower_forewords(forewords: &[arcana_syntax::ForewordApp]) -> Vec<HirForewordApp> {
+    forewords
+        .iter()
+        .map(|foreword| HirForewordApp {
+            name: foreword.name.clone(),
+            args: foreword
+                .args
+                .iter()
+                .map(|arg| HirForewordArg {
+                    name: arg.name.clone(),
+                    value: arg.value.clone(),
+                })
+                .collect(),
+            span: foreword.span,
+        })
+        .collect()
 }
 
 fn lower_rollups(rollups: &[arcana_syntax::PageRollup]) -> Vec<HirPageRollup> {
@@ -1481,6 +1555,9 @@ fn lower_expr(expr: &ParsedExpr) -> HirExpr {
             text: text.clone(),
             attached: lower_raw_block_entries(attached),
         },
+        ParsedExpr::CollectionLiteral { items } => HirExpr::CollectionLiteral {
+            items: items.iter().map(lower_expr).collect(),
+        },
         ParsedExpr::Match { subject, arms } => HirExpr::Match {
             subject: Box::new(lower_expr(subject)),
             arms: arms
@@ -1491,6 +1568,26 @@ fn lower_expr(expr: &ParsedExpr) -> HirExpr {
                     span: arm.span,
                 })
                 .collect(),
+        },
+        ParsedExpr::Chain {
+            mode,
+            reverse,
+            steps,
+        } => HirExpr::Chain {
+            mode: mode.clone(),
+            reverse: *reverse,
+            steps: steps.clone(),
+        },
+        ParsedExpr::MemoryPhrase {
+            family,
+            arena,
+            init_args,
+            constructor,
+        } => HirExpr::MemoryPhrase {
+            family: family.clone(),
+            arena: Box::new(lower_expr(arena)),
+            init_args: init_args.iter().map(lower_phrase_arg).collect(),
+            constructor: constructor.clone(),
         },
         ParsedExpr::QualifiedPhrase {
             subject,
@@ -1661,6 +1758,7 @@ fn lower_statement(statement: &arcana_syntax::Statement) -> HirStatement {
                 expr: lower_expr(expr),
             },
         },
+        forewords: lower_forewords(&statement.forewords),
         rollups: lower_rollups(&statement.rollups),
         span: statement.span,
     }
@@ -1674,9 +1772,9 @@ mod tests {
     use super::freeze::FROZEN_HIR_NODE_KINDS;
     use super::{
         HirAssignOp, HirAssignTarget, HirBinaryOp, HirDirectiveKind, HirExpr, HirMatchPattern,
-        HirPhraseArg, HirStatement, HirStatementKind, HirSymbolBody, HirUnaryOp, build_package_layout,
-        build_package_summary, build_workspace_package, build_workspace_summary,
-        derive_source_module_path, lower_module_text, resolve_workspace,
+        HirPhraseArg, HirStatement, HirStatementKind, HirSymbolBody, HirSymbolKind, HirUnaryOp,
+        build_package_layout, build_package_summary, build_workspace_package,
+        build_workspace_summary, derive_source_module_path, lower_module_text, resolve_workspace,
     };
 
     #[test]
@@ -1906,6 +2004,75 @@ mod tests {
                 assert_eq!(rollups[0].kind.as_str(), "cleanup");
             }
             other => panic!("expected while statement with rollup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lower_module_text_captures_forewords_lang_items_intrinsics_and_systems() {
+        let module = lower_module_text(
+            "surface",
+            "use std.result as result\n#test\n#inline\nfn smoke() -> Int:\n    return 0\n#stage[phase=update, deterministic=true]\nsystem[phase=startup, affinity=main] fn boot():\n    #chain[phase=startup, deterministic=true]\n    forward :=> seed => step\nlang result = smoke\nintrinsic fn host_len(read text: Str) -> Int = HostTextLenBytes\nfn seed() -> Int:\n    return 1\nfn step(v: Int) -> Int:\n    return v\n",
+        )
+        .expect("lowering should pass");
+
+        assert_eq!(module.lang_items.len(), 1);
+        assert_eq!(module.lang_items[0].name, "result");
+        assert_eq!(module.symbols[0].forewords.len(), 2);
+        assert_eq!(module.symbols[1].kind, HirSymbolKind::System);
+        assert_eq!(module.symbols[1].forewords[0].name, "stage");
+        assert_eq!(module.symbols[1].statements[0].forewords[0].name, "chain");
+        assert_eq!(
+            module.symbols[2].intrinsic_impl.as_deref(),
+            Some("HostTextLenBytes")
+        );
+    }
+
+    #[test]
+    fn lower_module_text_captures_collection_chain_and_memory_expressions() {
+        let module = lower_module_text(
+            "expr_demo",
+            "fn main() -> Int:\n    let xs = [1, 2, 3]\n    let id = arena: store :> value = 1 <: Item\n    forward :=> seed => step\n    return xs[0]\n",
+        )
+        .expect("lowering should pass");
+
+        match &module.symbols[0].statements[0].kind {
+            HirStatementKind::Let {
+                value: HirExpr::CollectionLiteral { items },
+                ..
+            } => {
+                assert_eq!(items.len(), 3);
+            }
+            other => panic!("expected collection literal, got {other:?}"),
+        }
+        match &module.symbols[0].statements[1].kind {
+            HirStatementKind::Let {
+                value:
+                    HirExpr::MemoryPhrase {
+                        family,
+                        constructor,
+                        ..
+                    },
+                ..
+            } => {
+                assert_eq!(family, "arena");
+                assert_eq!(constructor, "Item");
+            }
+            other => panic!("expected memory phrase, got {other:?}"),
+        }
+        match &module.symbols[0].statements[2].kind {
+            HirStatementKind::Expr {
+                expr:
+                    HirExpr::Chain {
+                        mode,
+                        reverse,
+                        steps,
+                    },
+            } => {
+                assert_eq!(mode, "forward");
+                assert!(!reverse);
+                assert_eq!(steps, &vec!["seed".to_string(), "step".to_string()]);
+            }
+            other => panic!("expected chain expression, got {other:?}"),
         }
     }
 
