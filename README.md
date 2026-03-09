@@ -17,6 +17,7 @@ Arcana is a Rust-first rewrite of the frozen Arcana language and tooling stack. 
 - Function-like bodies now parse structured statement blocks for `let`, `return`, `defer`, `if`/`else`, `while`, `for`, assignments, `break`, and `continue`
 - Block-form `match` expressions now lower into structured expression and pattern nodes, including wildcard, literal, variant, and `A | B` arm shapes
 - Non-`match` expressions now lower structured qualified phrases, named phrase args, collection literals, direct chain phrases, memory phrases, unary/binary operators, `>> await`, `weave`/`split`, member access, standalone ranges, and the unambiguous index/slice subset
+- Pair tuple literals now lower as structured expressions, and generic-argument brackets like `path[(K, V)]` are distinguished from runtime indexing so tuple type args no longer leak into value resolution
 - Header-phrase attached blocks now lower as structured named attachments and chain attachments for qualified and memory phrases instead of raw block entries
 - Assignment statements now carry structured name/member/index targets instead of raw target strings
 - Pair-tuple rules are now enforced in syntax/frontend diagnostics: `.0`/`.1` only, no tuple destructuring in `let`/`for`/params, no tuple field assignment, and no three-element tuple types or literals
@@ -24,7 +25,7 @@ Arcana is a Rust-first rewrite of the frozen Arcana language and tooling stack. 
 - `arcana check` now validates unresolved `lang` item targets plus declaration-surface type and lifetime references after workspace resolution
 - `arcana check` now also validates conservative body-level value resolution for locals, package/module-qualified value roots, chain steps, memory constructors, and page-rollup handlers
 - Impl header generic/lifetime params now survive syntax/HIR lowering, so inherited `T`/`'a` scope is available to later frontend work
-- Remaining opaque/frontend debt is now mostly ambiguous generic-bracket versus index-bracket edge cases, deeper expression typing, and ownership/borrow flow
+- Remaining opaque/frontend debt is now mostly deeper expression typing, semantic type-arg validation inside expression generic applications, and ownership/borrow flow
 - Seed-imported docs, grimoires, `std`, examples, and conformance fixtures from MeadowLang
 - `arcana check` with shared package/HIR loading, symbol-based module and `use` resolution, direct-dependency enforcement, implicit `std`, and stable file/line/column diagnostics
 - `arcana build` now runs frontend validation, lowers packages through placeholder IR, and emits placeholder AOT artifacts

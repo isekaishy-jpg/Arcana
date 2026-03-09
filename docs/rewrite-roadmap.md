@@ -18,7 +18,7 @@ Completed foundation work:
 - structured statement-block parsing for function-like bodies, including `defer`
 - structured block-form `match` expression and pattern parsing for the imported enum/result corpus
 - structured qualified phrase, collection literal, direct chain phrase, memory phrase, unary/binary operator, `>> await`, and `weave`/`split` expression parsing over the imported operator/async/selfhost corpus
-- structured member access, standalone ranges, and the unambiguous index/slice subset over the imported list/array/selfhost corpus, with opaque fallback still covering the remaining hard cases
+- structured member access, pair tuple literals, generic-argument bracket applications, standalone ranges, and the unambiguous index/slice subset over the imported list/array/selfhost corpus, with opaque fallback still covering the remaining hard cases
 - structured header attachments for qualified and memory phrases, with named entries and chain lines lowering through syntax/HIR instead of raw attached entries
 - structured assignment targets for name, member, and index mutation paths over the imported behavior/list/selfhost corpus
 - enforced pair-tuple contract over current syntax/frontend coverage, including `.0`/`.1`-only access, no tuple destructuring in bindings/params, no tuple field assignment, and new negative conformance fixtures wired into the frozen matrix
@@ -30,7 +30,7 @@ Completed foundation work:
 
 ## Next Milestones
 
-1. Replace the remaining ambiguous bracket edge cases and raw opaque-expression fallbacks with fully structured parsing.
+1. Replace the remaining raw opaque-expression fallbacks and any leftover bracket ambiguities with fully structured parsing.
 2. Extend the typed frontend from declaration-surface plus body-resolution checks into expression typing, ownership, and borrow/lifetime flow.
 3. Move package fingerprints from declaration-surface/source hashes to typed-HIR/API fingerprints.
 4. Compile first-party host/io/window/input grimoires against the new frontend.

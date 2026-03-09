@@ -876,6 +876,26 @@ fn validate_expr_semantics(
             "value expression",
             diagnostics,
         ),
+        HirExpr::Pair { left, right } => {
+            validate_expr_semantics(
+                workspace,
+                resolved_module,
+                module_path,
+                scope,
+                left,
+                span,
+                diagnostics,
+            );
+            validate_expr_semantics(
+                workspace,
+                resolved_module,
+                module_path,
+                scope,
+                right,
+                span,
+                diagnostics,
+            );
+        }
         HirExpr::CollectionLiteral { items } => {
             for item in items {
                 validate_expr_semantics(
@@ -981,6 +1001,15 @@ fn validate_expr_semantics(
                 );
             }
         }
+        HirExpr::GenericApply { expr, .. } => validate_expr_semantics(
+            workspace,
+            resolved_module,
+            module_path,
+            scope,
+            expr,
+            span,
+            diagnostics,
+        ),
         HirExpr::QualifiedPhrase {
             subject,
             args,
@@ -1171,7 +1200,9 @@ fn validate_header_attachment_semantics(
 ) {
     match attachment {
         HirHeaderAttachment::Named { value, span, .. }
-        | HirHeaderAttachment::Chain { expr: value, span } => validate_expr_semantics(
+        | HirHeaderAttachment::Chain {
+            expr: value, span, ..
+        } => validate_expr_semantics(
             workspace,
             resolved_module,
             module_path,
@@ -1873,6 +1904,21 @@ mod tests {
             let err = check_sources([source.as_str()]).expect_err("fixture should fail");
             assert!(err.contains(expected), "{fixture}: {err}");
         }
+    }
+
+    #[test]
+    fn check_path_rejects_unresolved_tuple_value_package() {
+        let err = check_path(
+            &repo_root()
+                .join("conformance")
+                .join("check_parity_packages")
+                .join("unresolved_tuple_value_ref"),
+        )
+        .expect_err("fixture should fail");
+        assert!(
+            err.contains("unresolved value reference `missing` in value expression"),
+            "{err}"
+        );
     }
 
     #[test]

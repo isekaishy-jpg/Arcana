@@ -207,10 +207,12 @@ pub enum HirHeaderAttachment {
     Named {
         name: String,
         value: HirExpr,
+        forewords: Vec<HirForewordApp>,
         span: Span,
     },
     Chain {
         expr: HirExpr,
+        forewords: Vec<HirForewordApp>,
         span: Span,
     },
 }
@@ -220,6 +222,9 @@ pub enum HirUnaryOp {
     Neg,
     Not,
     BitNot,
+    BorrowRead,
+    BorrowMut,
+    Deref,
     Weave,
     Split,
 }
@@ -252,6 +257,10 @@ pub enum HirExpr {
         text: String,
         attached: Vec<HirRawBlockEntry>,
     },
+    Pair {
+        left: Box<HirExpr>,
+        right: Box<HirExpr>,
+    },
     CollectionLiteral {
         items: Vec<HirExpr>,
     },
@@ -270,6 +279,10 @@ pub enum HirExpr {
         init_args: Vec<HirPhraseArg>,
         constructor: String,
         attached: Vec<HirHeaderAttachment>,
+    },
+    GenericApply {
+        expr: Box<HirExpr>,
+        type_args: Vec<String>,
     },
     QualifiedPhrase {
         subject: Box<HirExpr>,
@@ -1571,15 +1584,26 @@ fn lower_header_attachments(
     attachments
         .iter()
         .map(|attachment| match attachment {
-            arcana_syntax::HeaderAttachment::Named { name, value, span } => {
+            arcana_syntax::HeaderAttachment::Named {
+                name,
+                value,
+                forewords,
+                span,
+            } => {
                 HirHeaderAttachment::Named {
                     name: name.clone(),
                     value: lower_expr(value),
+                    forewords: lower_forewords(forewords),
                     span: *span,
                 }
             }
-            arcana_syntax::HeaderAttachment::Chain { expr, span } => HirHeaderAttachment::Chain {
+            arcana_syntax::HeaderAttachment::Chain {
+                expr,
+                forewords,
+                span,
+            } => HirHeaderAttachment::Chain {
                 expr: lower_expr(expr),
+                forewords: lower_forewords(forewords),
                 span: *span,
             },
         })
@@ -1591,6 +1615,10 @@ fn lower_expr(expr: &ParsedExpr) -> HirExpr {
         ParsedExpr::Opaque { text, attached } => HirExpr::Opaque {
             text: text.clone(),
             attached: lower_raw_block_entries(attached),
+        },
+        ParsedExpr::Pair { left, right } => HirExpr::Pair {
+            left: Box::new(lower_expr(left)),
+            right: Box::new(lower_expr(right)),
         },
         ParsedExpr::CollectionLiteral { items } => HirExpr::CollectionLiteral {
             items: items.iter().map(lower_expr).collect(),
@@ -1627,6 +1655,10 @@ fn lower_expr(expr: &ParsedExpr) -> HirExpr {
             init_args: init_args.iter().map(lower_phrase_arg).collect(),
             constructor: constructor.clone(),
             attached: lower_header_attachments(attached),
+        },
+        ParsedExpr::GenericApply { expr, type_args } => HirExpr::GenericApply {
+            expr: Box::new(lower_expr(expr)),
+            type_args: type_args.clone(),
         },
         ParsedExpr::QualifiedPhrase {
             subject,
@@ -1714,6 +1746,9 @@ fn lower_unary_op(op: &arcana_syntax::UnaryOp) -> HirUnaryOp {
         arcana_syntax::UnaryOp::Neg => HirUnaryOp::Neg,
         arcana_syntax::UnaryOp::Not => HirUnaryOp::Not,
         arcana_syntax::UnaryOp::BitNot => HirUnaryOp::BitNot,
+        arcana_syntax::UnaryOp::BorrowRead => HirUnaryOp::BorrowRead,
+        arcana_syntax::UnaryOp::BorrowMut => HirUnaryOp::BorrowMut,
+        arcana_syntax::UnaryOp::Deref => HirUnaryOp::Deref,
         arcana_syntax::UnaryOp::Weave => HirUnaryOp::Weave,
         arcana_syntax::UnaryOp::Split => HirUnaryOp::Split,
     }
@@ -1810,11 +1845,11 @@ mod tests {
 
     use super::freeze::FROZEN_HIR_NODE_KINDS;
     use super::{
-        HirAssignOp, HirAssignTarget, HirBinaryOp, HirDirectiveKind, HirExpr, HirHeaderAttachment,
-        HirMatchPattern, HirPhraseArg, HirStatement, HirStatementKind, HirSymbolBody,
-        HirSymbolKind, HirUnaryOp, build_package_layout, build_package_summary,
-        build_workspace_package, build_workspace_summary, derive_source_module_path,
-        lower_module_text, resolve_workspace,
+        HirAssignOp, HirAssignTarget, HirBinaryOp, HirDirectiveKind, HirExpr, HirForewordApp,
+        HirForewordArg, HirHeaderAttachment, HirMatchPattern, HirPhraseArg, HirStatement,
+        HirStatementKind, HirSymbolBody, HirSymbolKind, HirUnaryOp, build_package_layout,
+        build_package_summary, build_workspace_package, build_workspace_summary,
+        derive_source_module_path, lower_module_text, resolve_workspace,
     };
 
     #[test]
@@ -2258,7 +2293,12 @@ mod tests {
                     assert!(attached.is_empty());
                     assert!(matches!(
                         subject.as_ref(),
-                        HirExpr::MemberAccess { member, .. } if member == "print[Str]"
+                        HirExpr::GenericApply { expr, type_args }
+                            if type_args == &vec!["Str".to_string()]
+                                && matches!(
+                                    expr.as_ref(),
+                                    HirExpr::MemberAccess { member, .. } if member == "print"
+                                )
                     ));
                     assert_eq!(args.len(), 1);
                     assert!(matches!(
@@ -2398,12 +2438,17 @@ mod tests {
                         qualifier,
                         attached,
                     } => {
-                        assert_eq!(qualifier, "call");
-                        assert!(attached.is_empty());
-                        assert!(matches!(
-                            subject.as_ref(),
-                            HirExpr::MemberAccess { member, .. } if member == "print[Int]"
-                        ));
+                    assert_eq!(qualifier, "call");
+                    assert!(attached.is_empty());
+                    assert!(matches!(
+                        subject.as_ref(),
+                        HirExpr::GenericApply { expr, type_args }
+                            if type_args == &vec!["Int".to_string()]
+                                && matches!(
+                                    expr.as_ref(),
+                                    HirExpr::MemberAccess { member, .. } if member == "print"
+                                )
+                    ));
                         assert_eq!(args.len(), 2);
                     }
                     other => panic!("expected print phrase, got {other:?}"),
@@ -2568,10 +2613,68 @@ mod tests {
     }
 
     #[test]
+    fn lower_module_text_captures_pair_tuple_expressions() {
+        let module = lower_module_text(
+            "pair_expr",
+            "fn main() -> Int:\n    let pair = (left, right)\n    return pair.0\n",
+        )
+        .expect("lowering should pass");
+
+        match &module.symbols[0].statements[0].kind {
+            HirStatementKind::Let { name, value, .. } => {
+                assert_eq!(name, "pair");
+                assert!(matches!(
+                    value,
+                    HirExpr::Pair {
+                        left,
+                        right,
+                    } if matches!(
+                        left.as_ref(),
+                        HirExpr::Opaque { text, attached } if text == "left" && attached.is_empty()
+                    ) && matches!(
+                        right.as_ref(),
+                        HirExpr::Opaque { text, attached } if text == "right" && attached.is_empty()
+                    )
+                ));
+            }
+            other => panic!("expected pair let, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lower_module_text_distinguishes_generic_apply_from_indexing() {
+        let module = lower_module_text(
+            "generic_apply",
+            "fn main() -> Int:\n    let out = std.collections.list.new[(K, V)] :: :: call\n    return 0\n",
+        )
+        .expect("lowering should pass");
+
+        match &module.symbols[0].statements[0].kind {
+            HirStatementKind::Let {
+                value:
+                    HirExpr::QualifiedPhrase {
+                        subject,
+                        qualifier,
+                        ..
+                    },
+                ..
+            } => {
+                assert_eq!(qualifier, "call");
+                assert!(matches!(
+                    subject.as_ref(),
+                    HirExpr::GenericApply { type_args, .. }
+                        if type_args == &vec!["(K, V)".to_string()]
+                ));
+            }
+            other => panic!("expected generic qualified phrase, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn lower_module_text_captures_structured_header_attachments() {
         let module = lower_module_text(
             "header_attach",
-            "fn main() -> Int:\n    Node :: :: call\n        value = 10\n        forward :=> show_node => bump_node => show_node\n    arena: arena_nodes :> 21 <: make_node\n        plan :=> touch_id\n        forward :=> touch_id\n    return 0\n",
+            "fn main() -> Int:\n    Node :: :: call\n        value = 10\n        #chain[phase=update]\n        forward :=> show_node => bump_node => show_node\n    arena: arena_nodes :> 21 <: make_node\n        #chain[phase=plan]\n        plan :=> touch_id\n        forward :=> touch_id\n    return 0\n",
         )
         .expect("lowering should pass");
 
@@ -2591,8 +2694,10 @@ mod tests {
                     HirHeaderAttachment::Named {
                         name,
                         value: HirExpr::Opaque { text, attached },
+                        forewords,
                         ..
                     } if name == "value" && text == "10" && attached.is_empty()
+                        && forewords.is_empty()
                 ));
                 assert!(matches!(
                     &attached[1],
@@ -2603,6 +2708,7 @@ mod tests {
                                 reverse,
                                 steps,
                             },
+                        forewords,
                         ..
                     } if mode == "forward"
                         && !reverse
@@ -2612,6 +2718,16 @@ mod tests {
                                 "bump_node".to_string(),
                                 "show_node".to_string()
                             ]
+                        && matches!(
+                            forewords.as_slice(),
+                            [HirForewordApp { name, args, .. }]
+                                if name == "chain"
+                                    && matches!(
+                                        args.as_slice(),
+                                        [HirForewordArg { name: Some(arg_name), value }]
+                                            if arg_name == "phase" && value == "update"
+                                    )
+                        )
                 ));
             }
             other => panic!("expected qualified phrase statement, got {other:?}"),
@@ -2639,10 +2755,21 @@ mod tests {
                                 reverse,
                                 steps,
                             },
+                        forewords,
                         ..
                     } if mode == "plan"
                         && !reverse
                         && steps == &vec!["touch_id".to_string()]
+                        && matches!(
+                            forewords.as_slice(),
+                            [HirForewordApp { name, args, .. }]
+                                if name == "chain"
+                                    && matches!(
+                                        args.as_slice(),
+                                        [HirForewordArg { name: Some(arg_name), value }]
+                                            if arg_name == "phase" && value == "plan"
+                                    )
+                        )
                 ));
                 assert!(matches!(
                     &attached[1],
@@ -2653,10 +2780,12 @@ mod tests {
                                 reverse,
                                 steps,
                             },
+                        forewords,
                         ..
                     } if mode == "forward"
                         && !reverse
                         && steps == &vec!["touch_id".to_string()]
+                        && forewords.is_empty()
                 ));
             }
             other => panic!("expected memory phrase statement, got {other:?}"),
@@ -2716,6 +2845,83 @@ mod tests {
                 other => panic!("expected indexed compound-assignment target, got {other:?}"),
             },
             other => panic!("expected third assignment statement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lower_module_text_captures_borrow_and_deref_expressions() {
+        let module = lower_module_text(
+            "borrow_demo",
+            "fn main() -> Int:\n    let local_x = 1\n    let mut local_y = 2\n    let x_ref = &local_x\n    let y_mut = &mut local_y\n    let sum = *x_ref + *y_mut\n    return sum\n",
+        )
+        .expect("lowering should pass");
+
+        let statements = &module.symbols[0].statements;
+        match &statements[2].kind {
+            HirStatementKind::Let { name, value, .. } => {
+                assert_eq!(name, "x_ref");
+                assert!(matches!(
+                    value,
+                    HirExpr::Unary {
+                        op: HirUnaryOp::BorrowRead,
+                        expr
+                    } if matches!(
+                        expr.as_ref(),
+                        HirExpr::Opaque { text, attached } if text == "local_x" && attached.is_empty()
+                    )
+                ));
+            }
+            other => panic!("expected x_ref let, got {other:?}"),
+        }
+
+        match &statements[3].kind {
+            HirStatementKind::Let { name, value, .. } => {
+                assert_eq!(name, "y_mut");
+                assert!(matches!(
+                    value,
+                    HirExpr::Unary {
+                        op: HirUnaryOp::BorrowMut,
+                        expr
+                    } if matches!(
+                        expr.as_ref(),
+                        HirExpr::Opaque { text, attached } if text == "local_y" && attached.is_empty()
+                    )
+                ));
+            }
+            other => panic!("expected y_mut let, got {other:?}"),
+        }
+
+        match &statements[4].kind {
+            HirStatementKind::Let { name, value, .. } => {
+                assert_eq!(name, "sum");
+                assert!(matches!(
+                    value,
+                    HirExpr::Binary {
+                        left,
+                        op: HirBinaryOp::Add,
+                        right
+                    } if matches!(
+                        left.as_ref(),
+                        HirExpr::Unary {
+                            op: HirUnaryOp::Deref,
+                            expr
+                        } if matches!(
+                            expr.as_ref(),
+                            HirExpr::Opaque { text, attached } if text == "x_ref" && attached.is_empty()
+                        )
+                    ) && matches!(
+                        right.as_ref(),
+                        HirExpr::Unary {
+                            op: HirUnaryOp::Deref,
+                            expr
+                        } if matches!(
+                            expr.as_ref(),
+                            HirExpr::Opaque { text, attached } if text == "y_mut" && attached.is_empty()
+                        )
+                    )
+                ));
+            }
+            other => panic!("expected sum let, got {other:?}"),
         }
     }
 

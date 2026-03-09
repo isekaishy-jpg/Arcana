@@ -65,6 +65,7 @@ negative = [
     "conformance/check_parity_fixtures/tuple_destructure_let.arc",
     "conformance/check_parity_fixtures/tuple_triple_type.arc",
     "conformance/check_parity_fixtures/tuple_field_assignment.arc",
+    "conformance/check_parity_packages/unresolved_tuple_value_ref",
 ]
 
 [[feature]]

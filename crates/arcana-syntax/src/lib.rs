@@ -176,10 +176,12 @@ pub enum HeaderAttachment {
     Named {
         name: String,
         value: Expr,
+        forewords: Vec<ForewordApp>,
         span: Span,
     },
     Chain {
         expr: Expr,
+        forewords: Vec<ForewordApp>,
         span: Span,
     },
 }
@@ -213,6 +215,9 @@ pub enum UnaryOp {
     Neg,
     Not,
     BitNot,
+    BorrowRead,
+    BorrowMut,
+    Deref,
     Weave,
     Split,
 }
@@ -245,6 +250,10 @@ pub enum Expr {
         text: String,
         attached: Vec<RawBlockEntry>,
     },
+    Pair {
+        left: Box<Expr>,
+        right: Box<Expr>,
+    },
     CollectionLiteral {
         items: Vec<Expr>,
     },
@@ -263,6 +272,10 @@ pub enum Expr {
         init_args: Vec<PhraseArg>,
         constructor: String,
         attached: Vec<HeaderAttachment>,
+    },
+    GenericApply {
+        expr: Box<Expr>,
+        type_args: Vec<String>,
     },
     QualifiedPhrase {
         subject: Box<Expr>,
@@ -1753,6 +1766,9 @@ fn parse_expression_core(text: &str) -> Result<Expr, String> {
     if let Some(expr) = parse_memory_phrase(trimmed)? {
         return Ok(expr);
     }
+    if let Some(expr) = parse_pair_expression(trimmed)? {
+        return Ok(expr);
+    }
     if let Some(expr) = parse_collection_literal(trimmed)? {
         return Ok(expr);
     }
@@ -1912,6 +1928,21 @@ fn parse_unary_expression(text: &str) -> Result<Expr, String> {
     if let Some(inner) = strip_group_parens(text) {
         return parse_expression_core(inner);
     }
+    if let Some(rest) = text.strip_prefix('&') {
+        let rest = rest.trim_start();
+        if let Some(rest) = strip_keyword_prefix(rest, "mut") {
+            return Ok(Expr::Unary {
+                op: UnaryOp::BorrowMut,
+                expr: Box::new(parse_unary_expression(rest)?),
+            });
+        }
+        if !rest.is_empty() {
+            return Ok(Expr::Unary {
+                op: UnaryOp::BorrowRead,
+                expr: Box::new(parse_unary_expression(rest)?),
+            });
+        }
+    }
     if let Some(rest) = strip_keyword_prefix(text, "weave") {
         return Ok(Expr::Unary {
             op: UnaryOp::Weave,
@@ -1944,6 +1975,15 @@ fn parse_unary_expression(text: &str) -> Result<Expr, String> {
         if !rest.is_empty() {
             return Ok(Expr::Unary {
                 op: UnaryOp::BitNot,
+                expr: Box::new(parse_unary_expression(rest)?),
+            });
+        }
+    }
+    if let Some(rest) = text.strip_prefix('*') {
+        let rest = rest.trim();
+        if !rest.is_empty() {
+            return Ok(Expr::Unary {
+                op: UnaryOp::Deref,
                 expr: Box::new(parse_unary_expression(rest)?),
             });
         }
@@ -2042,6 +2082,19 @@ fn parse_memory_phrase(text: &str) -> Result<Option<Expr>, String> {
     }))
 }
 
+fn parse_pair_expression(text: &str) -> Result<Option<Expr>, String> {
+    let Some(parts) = tuple_parts_if_whole(text) else {
+        return Ok(None);
+    };
+    if parts.len() != 2 || parts.iter().any(|part| part.is_empty()) {
+        return Ok(None);
+    }
+    Ok(Some(Expr::Pair {
+        left: Box::new(parse_expression_core(parts[0])?),
+        right: Box::new(parse_expression_core(parts[1])?),
+    }))
+}
+
 fn parse_collection_literal(text: &str) -> Result<Option<Expr>, String> {
     let trimmed = text.trim();
     if !trimmed.starts_with('[') || !trimmed.ends_with(']') {
@@ -2095,11 +2148,18 @@ fn parse_qualified_phrase(text: &str) -> Result<Option<Expr>, String> {
 
 fn parse_header_attachments(entries: &[RawBlockEntry]) -> Result<Vec<HeaderAttachment>, String> {
     let mut attachments = Vec::new();
+    let mut pending_forewords = Vec::new();
     for entry in entries {
+        if let Some(foreword) = parse_foreword_app(&entry.text, entry.span)? {
+            pending_forewords.push(foreword);
+            continue;
+        }
+
         if let Some((name, value_text)) = split_header_attachment_named_entry(&entry.text) {
             attachments.push(HeaderAttachment::Named {
                 name: name.to_string(),
                 value: parse_expression(value_text, &entry.children, entry.span)?,
+                forewords: std::mem::take(&mut pending_forewords),
                 span: entry.span,
             });
             continue;
@@ -2114,9 +2174,18 @@ fn parse_header_attachments(entries: &[RawBlockEntry]) -> Result<Vec<HeaderAttac
         }
         attachments.push(HeaderAttachment::Chain {
             expr,
+            forewords: std::mem::take(&mut pending_forewords),
             span: entry.span,
         });
     }
+
+    if let Some(foreword) = pending_forewords.first() {
+        return Err(format!(
+            "{}:{}: foreword without a valid target",
+            foreword.span.line, foreword.span.column
+        ));
+    }
+
     Ok(attachments)
 }
 
@@ -2181,6 +2250,14 @@ fn parse_access_expression(text: &str) -> Result<Option<Expr>, String> {
         let base = base.trim();
         if base.is_empty() {
             return Ok(None);
+        }
+        if is_path_like(base) {
+            if let Some(type_args) = parse_generic_arg_texts(inside) {
+                return Ok(Some(Expr::GenericApply {
+                    expr: Box::new(parse_expression_core(base)?),
+                    type_args,
+                }));
+            }
         }
         if let Some((start, end, inclusive_end)) = parse_range_parts(inside) {
             return Ok(Some(Expr::Slice {
@@ -2292,6 +2369,71 @@ fn should_parse_index_brackets(text: &str) -> bool {
         return first.is_ascii_lowercase() || first == '_';
     }
     false
+}
+
+fn parse_generic_arg_texts(text: &str) -> Option<Vec<String>> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let args = split_top_level(trimmed, ',')
+        .into_iter()
+        .map(str::trim)
+        .collect::<Vec<_>>();
+    if args.iter().any(|arg| arg.is_empty()) {
+        return None;
+    }
+    if args.iter().all(|arg| looks_like_type_surface_text(arg)) {
+        return Some(args.into_iter().map(str::to_string).collect());
+    }
+    None
+}
+
+fn looks_like_type_surface_text(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if let Some(parts) = tuple_parts_if_whole(trimmed) {
+        return parts.len() == 2
+            && parts
+                .iter()
+                .all(|part| !part.is_empty() && looks_like_type_surface_text(part));
+    }
+    if let Some((base, inside)) = split_trailing_bracket_suffix(trimmed) {
+        let base = base.trim();
+        return looks_like_type_ref_path(base) && parse_generic_arg_texts(inside).is_some();
+    }
+    if let Some(rest) = trimmed.strip_prefix('&') {
+        let mut rest = rest.trim_start();
+        if let Some(stripped) = rest.strip_prefix('\'') {
+            let lifetime_len = stripped
+                .chars()
+                .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+                .map(char::len_utf8)
+                .sum::<usize>();
+            if lifetime_len == 0 {
+                return false;
+            }
+            rest = stripped[lifetime_len..].trim_start();
+        }
+        if let Some(stripped) = strip_keyword_prefix(rest, "mut") {
+            rest = stripped;
+        }
+        return looks_like_type_surface_text(rest);
+    }
+    looks_like_type_ref_path(trimmed)
+}
+
+fn looks_like_type_ref_path(text: &str) -> bool {
+    if !is_path_like(text) {
+        return false;
+    }
+    text.rsplit('.')
+        .next()
+        .and_then(|segment| segment.chars().next())
+        .map(|ch| ch.is_ascii_uppercase())
+        .unwrap_or(false)
 }
 
 fn split_member_access(text: &str) -> Option<(&str, &str)> {
@@ -3531,6 +3673,10 @@ fn validate_statement_block_tuple_contract(statements: &[Statement]) -> Result<(
 fn validate_expr_tuple_contract(expr: &Expr, span: Span) -> Result<(), String> {
     match expr {
         Expr::Opaque { text, .. } => validate_tuple_expression_text(text, span),
+        Expr::Pair { left, right } => {
+            validate_expr_tuple_contract(left, span)?;
+            validate_expr_tuple_contract(right, span)
+        }
         Expr::CollectionLiteral { items } => {
             for item in items {
                 validate_expr_tuple_contract(item, span)?;
@@ -3560,6 +3706,13 @@ fn validate_expr_tuple_contract(expr: &Expr, span: Span) -> Result<(), String> {
             }
             for attachment in attached {
                 validate_header_attachment_tuple_contract(attachment, span)?;
+            }
+            Ok(())
+        }
+        Expr::GenericApply { expr, type_args } => {
+            validate_expr_tuple_contract(expr, span)?;
+            for type_arg in type_args {
+                validate_tuple_type_contract(type_arg, span, "generic argument")?;
             }
             Ok(())
         }
@@ -4070,8 +4223,9 @@ fn is_identifier_continue(ch: char) -> bool {
 mod tests {
     use super::freeze::{FROZEN_AST_NODE_KINDS, FROZEN_TOKEN_KINDS};
     use super::{
-        AssignTarget, BinaryOp, DirectiveKind, Expr, HeaderAttachment, MatchPattern, ParamMode,
-        PhraseArg, Statement, StatementKind, SymbolBody, SymbolKind, UnaryOp, parse_module,
+        AssignTarget, BinaryOp, DirectiveKind, Expr, ForewordApp, ForewordArg, HeaderAttachment,
+        MatchPattern, ParamMode, PhraseArg, Statement, StatementKind, SymbolBody, SymbolKind,
+        UnaryOp, parse_module,
     };
 
     #[test]
@@ -4602,7 +4756,12 @@ mod tests {
                     assert!(attached.is_empty());
                     assert!(matches!(
                         subject.as_ref(),
-                        Expr::MemberAccess { member, .. } if member == "print[Str]"
+                        Expr::GenericApply { expr, type_args }
+                            if type_args == &vec!["Str".to_string()]
+                                && matches!(
+                                    expr.as_ref(),
+                                    Expr::MemberAccess { member, .. } if member == "print"
+                                )
                     ));
                     assert_eq!(args.len(), 1);
                     assert!(matches!(
@@ -4742,12 +4901,17 @@ mod tests {
                         qualifier,
                         attached,
                     } => {
-                        assert_eq!(qualifier, "call");
-                        assert!(attached.is_empty());
-                        assert!(matches!(
-                            subject.as_ref(),
-                            Expr::MemberAccess { member, .. } if member == "print[Int]"
-                        ));
+                    assert_eq!(qualifier, "call");
+                    assert!(attached.is_empty());
+                    assert!(matches!(
+                        subject.as_ref(),
+                        Expr::GenericApply { expr, type_args }
+                            if type_args == &vec!["Int".to_string()]
+                                && matches!(
+                                    expr.as_ref(),
+                                    Expr::MemberAccess { member, .. } if member == "print"
+                                )
+                    ));
                         assert_eq!(args.len(), 2);
                     }
                     other => panic!("expected print phrase, got {other:?}"),
@@ -4910,9 +5074,65 @@ mod tests {
     }
 
     #[test]
+    fn parse_module_collects_pair_tuple_expressions() {
+        let parsed = parse_module(
+            "fn main() -> Int:\n    let pair = (left, right)\n    return pair.0\n",
+        )
+        .expect("parse should pass");
+
+        match &parsed.symbols[0].statements[0].kind {
+            StatementKind::Let { name, value, .. } => {
+                assert_eq!(name, "pair");
+                assert!(matches!(
+                    value,
+                    Expr::Pair {
+                        left,
+                        right,
+                    } if matches!(
+                        left.as_ref(),
+                        Expr::Opaque { text, attached } if text == "left" && attached.is_empty()
+                    ) && matches!(
+                        right.as_ref(),
+                        Expr::Opaque { text, attached } if text == "right" && attached.is_empty()
+                    )
+                ));
+            }
+            other => panic!("expected pair let, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_module_distinguishes_generic_apply_from_indexing() {
+        let parsed = parse_module(
+            "fn main() -> Int:\n    let out = std.collections.list.new[(K, V)] :: :: call\n    return 0\n",
+        )
+        .expect("parse should pass");
+
+        match &parsed.symbols[0].statements[0].kind {
+            StatementKind::Let {
+                value:
+                    Expr::QualifiedPhrase {
+                        subject,
+                        qualifier,
+                        ..
+                    },
+                ..
+            } => {
+                assert_eq!(qualifier, "call");
+                assert!(matches!(
+                    subject.as_ref(),
+                    Expr::GenericApply { type_args, .. }
+                        if type_args == &vec!["(K, V)".to_string()]
+                ));
+            }
+            other => panic!("expected generic qualified phrase, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_module_collects_structured_header_attachments() {
         let parsed = parse_module(
-            "fn main() -> Int:\n    Node :: :: call\n        value = 10\n        forward :=> show_node => bump_node => show_node\n    arena: arena_nodes :> 21 <: make_node\n        plan :=> touch_id\n        forward :=> touch_id\n    return 0\n",
+            "fn main() -> Int:\n    Node :: :: call\n        value = 10\n        #chain[phase=update]\n        forward :=> show_node => bump_node => show_node\n    arena: arena_nodes :> 21 <: make_node\n        #chain[phase=plan]\n        plan :=> touch_id\n        forward :=> touch_id\n    return 0\n",
         )
         .expect("parse should pass");
 
@@ -4932,8 +5152,10 @@ mod tests {
                     HeaderAttachment::Named {
                         name,
                         value: Expr::Opaque { text, attached },
+                        forewords,
                         ..
                     } if name == "value" && text == "10" && attached.is_empty()
+                        && forewords.is_empty()
                 ));
                 assert!(matches!(
                     &attached[1],
@@ -4944,6 +5166,7 @@ mod tests {
                                 reverse,
                                 steps,
                             },
+                        forewords,
                         ..
                     } if mode == "forward"
                         && !reverse
@@ -4953,6 +5176,16 @@ mod tests {
                                 "bump_node".to_string(),
                                 "show_node".to_string()
                             ]
+                        && matches!(
+                            forewords.as_slice(),
+                            [ForewordApp { name, args, .. }]
+                                if name == "chain"
+                                    && matches!(
+                                        args.as_slice(),
+                                        [ForewordArg { name: Some(arg_name), value }]
+                                            if arg_name == "phase" && value == "update"
+                                    )
+                        )
                 ));
             }
             other => panic!("expected qualified phrase statement, got {other:?}"),
@@ -4980,10 +5213,21 @@ mod tests {
                                 reverse,
                                 steps,
                             },
+                        forewords,
                         ..
                     } if mode == "plan"
                         && !reverse
                         && steps == &vec!["touch_id".to_string()]
+                        && matches!(
+                            forewords.as_slice(),
+                            [ForewordApp { name, args, .. }]
+                                if name == "chain"
+                                    && matches!(
+                                        args.as_slice(),
+                                        [ForewordArg { name: Some(arg_name), value }]
+                                            if arg_name == "phase" && value == "plan"
+                                    )
+                        )
                 ));
                 assert!(matches!(
                     &attached[1],
@@ -4994,10 +5238,12 @@ mod tests {
                                 reverse,
                                 steps,
                             },
+                        forewords,
                         ..
                     } if mode == "forward"
                         && !reverse
                         && steps == &vec!["touch_id".to_string()]
+                        && forewords.is_empty()
                 ));
             }
             other => panic!("expected memory phrase statement, got {other:?}"),
@@ -5056,6 +5302,82 @@ mod tests {
                 other => panic!("expected indexed compound-assignment target, got {other:?}"),
             },
             other => panic!("expected third assignment statement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_module_collects_borrow_and_deref_expressions() {
+        let parsed = parse_module(
+            "fn main() -> Int:\n    let local_x = 1\n    let mut local_y = 2\n    let x_ref = &local_x\n    let y_mut = &mut local_y\n    let sum = *x_ref + *y_mut\n    return sum\n",
+        )
+        .expect("parse should pass");
+
+        let statements = &parsed.symbols[0].statements;
+        match &statements[2].kind {
+            StatementKind::Let { name, value, .. } => {
+                assert_eq!(name, "x_ref");
+                assert!(matches!(
+                    value,
+                    Expr::Unary {
+                        op: UnaryOp::BorrowRead,
+                        expr
+                    } if matches!(
+                        expr.as_ref(),
+                        Expr::Opaque { text, attached } if text == "local_x" && attached.is_empty()
+                    )
+                ));
+            }
+            other => panic!("expected x_ref let, got {other:?}"),
+        }
+
+        match &statements[3].kind {
+            StatementKind::Let { name, value, .. } => {
+                assert_eq!(name, "y_mut");
+                assert!(matches!(
+                    value,
+                    Expr::Unary {
+                        op: UnaryOp::BorrowMut,
+                        expr
+                    } if matches!(
+                        expr.as_ref(),
+                        Expr::Opaque { text, attached } if text == "local_y" && attached.is_empty()
+                    )
+                ));
+            }
+            other => panic!("expected y_mut let, got {other:?}"),
+        }
+
+        match &statements[4].kind {
+            StatementKind::Let { name, value, .. } => {
+                assert_eq!(name, "sum");
+                assert!(matches!(
+                    value,
+                    Expr::Binary {
+                        left,
+                        op: BinaryOp::Add,
+                        right
+                    } if matches!(
+                        left.as_ref(),
+                        Expr::Unary {
+                            op: UnaryOp::Deref,
+                            expr
+                        } if matches!(
+                            expr.as_ref(),
+                            Expr::Opaque { text, attached } if text == "x_ref" && attached.is_empty()
+                        )
+                    ) && matches!(
+                        right.as_ref(),
+                        Expr::Unary {
+                            op: UnaryOp::Deref,
+                            expr
+                        } if matches!(
+                            expr.as_ref(),
+                            Expr::Opaque { text, attached } if text == "y_mut" && attached.is_empty()
+                        )
+                    )
+                ));
+            }
+            other => panic!("expected sum let, got {other:?}"),
         }
     }
 
