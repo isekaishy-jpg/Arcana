@@ -13,6 +13,7 @@ dependencies = [
 name = "arcana-cli"
 version = "0.1.0"
 dependencies = [
+ "arcana-frontend",
  "arcana-package",
 ]
 

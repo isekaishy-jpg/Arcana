@@ -1,9 +1,10 @@
 use std::env;
 use std::path::PathBuf;
 
+use arcana_frontend::check_path;
 use arcana_package::{
     BuildDisposition, compute_member_fingerprints, execute_build, load_workspace_graph, plan_build,
-    plan_workspace, read_lockfile, render_build_summary, validate_path, write_lockfile,
+    plan_workspace, read_lockfile, render_build_summary, write_lockfile,
 };
 
 fn main() {
@@ -55,8 +56,15 @@ fn real_main() -> Result<i32, String> {
 }
 
 fn run_check(path: PathBuf) -> Result<i32, String> {
-    validate_path(&path)?;
-    println!("ok: {}", path.display());
+    let summary = check_path(&path)?;
+    println!(
+        "ok: {} (packages: {}, modules: {}, directives: {}, symbols: {})",
+        path.display(),
+        summary.package_count,
+        summary.module_count,
+        summary.directive_count,
+        summary.symbol_count
+    );
     Ok(0)
 }
 
