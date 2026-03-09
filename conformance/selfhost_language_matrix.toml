@@ -1,5 +1,5 @@
 version = 1
-as_of = "2026-03-05"
+as_of = "2026-03-09"
 owner = "Arcana selfhost/compiler team"
 
 [[feature]]
@@ -43,6 +43,17 @@ id = "collections_list_array_map"
 status = "required"
 positive = ["examples/list_core", "examples/array_core", "examples/map_core"]
 negative = ["conformance/check_parity_fixtures/phrase_arg_shape.arc"]
+
+[[feature]]
+id = "pair_tuples_v1"
+status = "required"
+positive = ["examples/pair_try_pop", "examples/events_poll_demo"]
+negative = [
+    "conformance/check_parity_fixtures/tuple_field_out_of_range.arc",
+    "conformance/check_parity_fixtures/tuple_destructure_let.arc",
+    "conformance/check_parity_fixtures/tuple_triple_type.arc",
+    "conformance/check_parity_fixtures/tuple_field_assignment.arc",
+]
 
 [[feature]]
 id = "for_loop_iteration"

@@ -18,6 +18,7 @@ Completed foundation work:
 - structured qualified phrase, unary/binary operator, `>> await`, and `weave`/`split` expression parsing over the imported operator/async corpus
 - structured member access, standalone ranges, and the unambiguous index/slice subset over the imported list/array/selfhost corpus, with opaque fallback still covering the remaining hard cases
 - structured assignment targets for name, member, and index mutation paths over the imported behavior/list/selfhost corpus
+- enforced pair-tuple contract over current syntax/frontend coverage, including `.0`/`.1`-only access, no tuple destructuring in bindings/params, no tuple field assignment, and new negative conformance fixtures wired into the frozen matrix
 
 ## Next Milestones
 

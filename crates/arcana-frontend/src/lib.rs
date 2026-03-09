@@ -220,6 +220,39 @@ mod tests {
     }
 
     #[test]
+    fn check_sources_rejects_tuple_contract_fixtures() {
+        let repo_root = repo_root();
+        for (fixture, expected) in [
+            (
+                "tuple_field_out_of_range.arc",
+                "tuple field access only supports `.0` and `.1` in v1",
+            ),
+            (
+                "tuple_destructure_let.arc",
+                "tuple destructuring is not allowed in `let` statements",
+            ),
+            (
+                "tuple_triple_type.arc",
+                "tuple types must have exactly 2 elements in v1",
+            ),
+            (
+                "tuple_field_assignment.arc",
+                "tuple field assignment is not allowed in v1",
+            ),
+        ] {
+            let source = fs::read_to_string(
+                repo_root
+                    .join("conformance")
+                    .join("check_parity_fixtures")
+                    .join(fixture),
+            )
+            .expect("fixture should be readable");
+            let err = check_sources([source.as_str()]).expect_err("fixture should fail");
+            assert!(err.contains(expected), "{fixture}: {err}");
+        }
+    }
+
+    #[test]
     fn check_path_resolves_local_use_symbols() {
         let root = make_temp_package(
             "counter_app",
@@ -256,11 +289,7 @@ mod tests {
 
     #[test]
     fn load_workspace_hir_exposes_package_summaries() {
-        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("..")
-            .canonicalize()
-            .expect("repo root should resolve");
+        let repo_root = repo_root();
         let workspace =
             load_workspace_hir(&repo_root.join("examples").join("workspace_vertical_slice"))
                 .expect("workspace hir should load");
@@ -311,6 +340,14 @@ mod tests {
         }
 
         root
+    }
+
+    fn repo_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .canonicalize()
+            .expect("repo root should resolve")
     }
 
     fn unique_test_id() -> u64 {

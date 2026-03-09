@@ -425,13 +425,15 @@ pub fn parse_module(source: &str) -> Result<ParsedModule, String> {
         }
     }
 
-    Ok(ParsedModule {
+    let parsed = ParsedModule {
         line_count: line_count.max(1),
         non_empty_line_count: non_empty,
         directives,
         symbols,
         impls,
-    })
+    };
+    validate_module_tuple_contract(&parsed)?;
+    Ok(parsed)
 }
 
 struct AnalyzedLine<'a> {
@@ -601,6 +603,7 @@ fn parse_path(path: &str) -> Result<Vec<String>, String> {
 }
 
 fn parse_symbol_entry(entry: &RawBlockEntry) -> Result<Option<SymbolDecl>, String> {
+    validate_raw_function_header_tuple_contract(&entry.text, entry.span)?;
     let Some(mut symbol) = parse_symbol_header(&entry.text, entry.span) else {
         return Ok(None);
     };
@@ -1045,6 +1048,12 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
         })?;
         let binding = binding.trim();
         let iterable = iterable.trim();
+        if looks_like_tuple_binding(binding) {
+            return Err(format!(
+                "{}:{}: tuple destructuring is not allowed in `for` bindings",
+                entry.span.line, entry.span.column
+            ));
+        }
         if !is_identifier(binding) || iterable.is_empty() {
             return Err(format!(
                 "{}:{}: malformed `for` statement",
@@ -1075,6 +1084,12 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
         })?;
         let name = name.trim();
         let value = value.trim();
+        if looks_like_tuple_binding(name) {
+            return Err(format!(
+                "{}:{}: tuple destructuring is not allowed in `let` statements",
+                entry.span.line, entry.span.column
+            ));
+        }
         if !is_identifier(name) || value.is_empty() {
             return Err(format!(
                 "{}:{}: malformed `let` statement",
@@ -2200,6 +2215,524 @@ fn parse_impl_assoc_type_binding(trimmed: &str, span: Span) -> Option<ImplAssocT
     })
 }
 
+fn validate_module_tuple_contract(parsed: &ParsedModule) -> Result<(), String> {
+    for symbol in &parsed.symbols {
+        validate_symbol_tuple_contract(symbol)?;
+    }
+    for impl_decl in &parsed.impls {
+        validate_impl_tuple_contract(impl_decl)?;
+    }
+    Ok(())
+}
+
+fn validate_symbol_tuple_contract(symbol: &SymbolDecl) -> Result<(), String> {
+    for param in &symbol.params {
+        validate_tuple_type_contract(&param.ty, symbol.span, "parameter type")?;
+    }
+    if let Some(return_type) = &symbol.return_type {
+        validate_tuple_type_contract(return_type, symbol.span, "return type")?;
+    }
+
+    match &symbol.body {
+        SymbolBody::None => {}
+        SymbolBody::Record { fields } => {
+            for field in fields {
+                validate_tuple_type_contract(&field.ty, field.span, "field type")?;
+            }
+        }
+        SymbolBody::Enum { variants } => {
+            for variant in variants {
+                if let Some(payload) = &variant.payload {
+                    validate_tuple_type_contract(payload, variant.span, "enum variant payload")?;
+                }
+            }
+        }
+        SymbolBody::Trait {
+            assoc_types,
+            methods,
+        } => {
+            for assoc_type in assoc_types {
+                if let Some(default_ty) = &assoc_type.default_ty {
+                    validate_tuple_type_contract(
+                        default_ty,
+                        assoc_type.span,
+                        "associated type default",
+                    )?;
+                }
+            }
+            for method in methods {
+                validate_symbol_tuple_contract(method)?;
+            }
+        }
+    }
+
+    validate_statement_block_tuple_contract(&symbol.statements)
+}
+
+fn validate_impl_tuple_contract(impl_decl: &ImplDecl) -> Result<(), String> {
+    if tuple_parts_if_whole(&impl_decl.target_type).is_some() {
+        return Err(format!(
+            "{}:{}: tuple impl targets are not part of v1",
+            impl_decl.span.line, impl_decl.span.column
+        ));
+    }
+    validate_tuple_type_contract(&impl_decl.target_type, impl_decl.span, "impl target type")?;
+    for assoc_type in &impl_decl.assoc_types {
+        if let Some(value_ty) = &assoc_type.value_ty {
+            validate_tuple_type_contract(value_ty, assoc_type.span, "associated type binding")?;
+        }
+    }
+    for method in &impl_decl.methods {
+        validate_symbol_tuple_contract(method)?;
+    }
+    Ok(())
+}
+
+fn validate_statement_block_tuple_contract(statements: &[Statement]) -> Result<(), String> {
+    for statement in statements {
+        match &statement.kind {
+            StatementKind::Let { value, .. } => {
+                validate_expr_tuple_contract(value, statement.span)?;
+            }
+            StatementKind::Return { value } => {
+                if let Some(value) = value {
+                    validate_expr_tuple_contract(value, statement.span)?;
+                }
+            }
+            StatementKind::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                validate_expr_tuple_contract(condition, statement.span)?;
+                validate_statement_block_tuple_contract(then_branch)?;
+                if let Some(else_branch) = else_branch {
+                    validate_statement_block_tuple_contract(else_branch)?;
+                }
+            }
+            StatementKind::While { condition, body } => {
+                validate_expr_tuple_contract(condition, statement.span)?;
+                validate_statement_block_tuple_contract(body)?;
+            }
+            StatementKind::For { iterable, body, .. } => {
+                validate_expr_tuple_contract(iterable, statement.span)?;
+                validate_statement_block_tuple_contract(body)?;
+            }
+            StatementKind::Defer { expr } | StatementKind::Expr { expr } => {
+                validate_expr_tuple_contract(expr, statement.span)?;
+            }
+            StatementKind::Assign { target, value, .. } => {
+                validate_assign_target_tuple_contract(target, statement.span)?;
+                validate_expr_tuple_contract(value, statement.span)?;
+            }
+            StatementKind::Break | StatementKind::Continue => {}
+        }
+    }
+    Ok(())
+}
+
+fn validate_expr_tuple_contract(expr: &Expr, span: Span) -> Result<(), String> {
+    match expr {
+        Expr::Opaque { text, .. } => validate_tuple_expression_text(text, span),
+        Expr::Match { subject, arms } => {
+            validate_expr_tuple_contract(subject, span)?;
+            for arm in arms {
+                validate_expr_tuple_contract(&arm.value, arm.span)?;
+            }
+            Ok(())
+        }
+        Expr::QualifiedPhrase { subject, args, .. } => {
+            validate_expr_tuple_contract(subject, span)?;
+            for arg in args {
+                match arg {
+                    PhraseArg::Positional(expr) => validate_expr_tuple_contract(expr, span)?,
+                    PhraseArg::Named { value, .. } => validate_expr_tuple_contract(value, span)?,
+                }
+            }
+            Ok(())
+        }
+        Expr::Await { expr } | Expr::Unary { expr, .. } => validate_expr_tuple_contract(expr, span),
+        Expr::Binary { left, right, .. } => {
+            validate_expr_tuple_contract(left, span)?;
+            validate_expr_tuple_contract(right, span)
+        }
+        Expr::MemberAccess { expr, member } => {
+            validate_expr_tuple_contract(expr, span)?;
+            validate_tuple_member_access(member, span)
+        }
+        Expr::Index { expr, index } => {
+            validate_expr_tuple_contract(expr, span)?;
+            validate_expr_tuple_contract(index, span)
+        }
+        Expr::Slice {
+            expr, start, end, ..
+        } => {
+            validate_expr_tuple_contract(expr, span)?;
+            if let Some(start) = start {
+                validate_expr_tuple_contract(start, span)?;
+            }
+            if let Some(end) = end {
+                validate_expr_tuple_contract(end, span)?;
+            }
+            Ok(())
+        }
+        Expr::Range { start, end, .. } => {
+            if let Some(start) = start {
+                validate_expr_tuple_contract(start, span)?;
+            }
+            if let Some(end) = end {
+                validate_expr_tuple_contract(end, span)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn validate_assign_target_tuple_contract(target: &AssignTarget, span: Span) -> Result<(), String> {
+    match target {
+        AssignTarget::Opaque { text } => validate_tuple_expression_text(text, span),
+        AssignTarget::Name { .. } => Ok(()),
+        AssignTarget::MemberAccess { target, member } => {
+            validate_assign_target_tuple_contract(target, span)?;
+            if is_numeric_member_selector(member) {
+                return Err(format!(
+                    "{}:{}: tuple field assignment is not allowed in v1",
+                    span.line, span.column
+                ));
+            }
+            Ok(())
+        }
+        AssignTarget::Index { target, index } => {
+            validate_assign_target_tuple_contract(target, span)?;
+            validate_expr_tuple_contract(index, span)
+        }
+    }
+}
+
+fn validate_raw_function_header_tuple_contract(text: &str, span: Span) -> Result<(), String> {
+    let Some((params, return_type)) = extract_raw_function_signature_parts(text) else {
+        return Ok(());
+    };
+    validate_raw_param_list_tuple_contract(params, span)?;
+    if let Some(return_type) = return_type {
+        validate_tuple_type_contract(return_type, span, "return type")?;
+    }
+    Ok(())
+}
+
+fn extract_raw_function_signature_parts<'a>(text: &'a str) -> Option<(&'a str, Option<&'a str>)> {
+    let rest = text.strip_prefix("export ").unwrap_or(text).trim_start();
+    let rest = rest.strip_prefix("async ").unwrap_or(rest).trim_start();
+    let rest = if rest.starts_with("behavior") {
+        let open_idx = rest.find('[')?;
+        if !rest[..open_idx].trim().eq("behavior") {
+            return None;
+        }
+        let close_idx = find_matching_delim(rest, open_idx, '[', ']')?;
+        rest[close_idx + 1..].trim_start().strip_prefix("fn ")?
+    } else {
+        rest.strip_prefix("fn ")?
+    };
+
+    let header = rest.strip_suffix(':').unwrap_or(rest).trim();
+    let name = parse_symbol_name(header)?;
+    let after_name = &header[name.len()..];
+    let (_, _, remainder) = parse_type_params_and_where(after_name)?;
+    let remainder = remainder.trim();
+    let open_idx = remainder.find('(')?;
+    let close_idx = find_matching_delim(remainder, open_idx, '(', ')')?;
+    let params = &remainder[open_idx + 1..close_idx];
+    let return_type = remainder[close_idx + 1..]
+        .trim()
+        .strip_prefix("->")
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    Some((params, return_type))
+}
+
+fn validate_raw_param_list_tuple_contract(source: &str, span: Span) -> Result<(), String> {
+    for part in split_top_level(source, ',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        if looks_like_tuple_binding(part) {
+            return Err(format!(
+                "{}:{}: tuple destructuring is not allowed in parameter lists",
+                span.line, span.column
+            ));
+        }
+        if let Some((binding, ty)) = part.split_once(':') {
+            if looks_like_tuple_binding(binding.trim()) {
+                return Err(format!(
+                    "{}:{}: tuple destructuring is not allowed in parameter lists",
+                    span.line, span.column
+                ));
+            }
+            let ty = ty.trim();
+            if !ty.is_empty() {
+                validate_tuple_type_contract(ty, span, "parameter type")?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_tuple_type_contract(text: &str, span: Span, context: &str) -> Result<(), String> {
+    validate_tuple_groups_in_text(text, span, context, "tuple types")
+}
+
+fn validate_tuple_expression_text(text: &str, span: Span) -> Result<(), String> {
+    validate_numeric_tuple_member_selectors(text, span)?;
+    validate_tuple_expression_groups(text, span)
+}
+
+fn validate_tuple_groups_in_text(
+    text: &str,
+    span: Span,
+    context: &str,
+    tuple_label: &str,
+) -> Result<(), String> {
+    let text = text.trim();
+    let mut index = 0usize;
+    let mut in_string = false;
+    let mut escape = false;
+
+    while index < text.len() {
+        let mut chars = text[index..].chars();
+        let Some(ch) = chars.next() else {
+            break;
+        };
+
+        if in_string {
+            if escape {
+                escape = false;
+            } else if ch == '\\' {
+                escape = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            index += ch.len_utf8();
+            continue;
+        }
+
+        if ch == '"' {
+            in_string = true;
+            index += ch.len_utf8();
+            continue;
+        }
+
+        if ch == '(' {
+            let Some(close_idx) = find_matching_delim(text, index, '(', ')') else {
+                break;
+            };
+            let inner = text[index + 1..close_idx].trim();
+            if contains_top_level_char(inner, ',') {
+                let parts = split_top_level(inner, ',')
+                    .into_iter()
+                    .map(str::trim)
+                    .collect::<Vec<_>>();
+                if parts.len() != 2 || parts.iter().any(|part| part.is_empty()) {
+                    return Err(format!(
+                        "{}:{}: {tuple_label} must have exactly 2 elements in v1 ({context})",
+                        span.line, span.column
+                    ));
+                }
+                for part in parts {
+                    validate_tuple_groups_in_text(part, span, context, tuple_label)?;
+                }
+            } else if !inner.is_empty() {
+                validate_tuple_groups_in_text(inner, span, context, tuple_label)?;
+            }
+            index = close_idx + 1;
+            continue;
+        }
+
+        index += ch.len_utf8();
+    }
+
+    Ok(())
+}
+
+fn validate_tuple_expression_groups(text: &str, span: Span) -> Result<(), String> {
+    let text = text.trim();
+    let mut index = 0usize;
+    let mut in_string = false;
+    let mut escape = false;
+
+    while index < text.len() {
+        let mut chars = text[index..].chars();
+        let Some(ch) = chars.next() else {
+            break;
+        };
+
+        if in_string {
+            if escape {
+                escape = false;
+            } else if ch == '\\' {
+                escape = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            index += ch.len_utf8();
+            continue;
+        }
+
+        if ch == '"' {
+            in_string = true;
+            index += ch.len_utf8();
+            continue;
+        }
+
+        if ch == '(' {
+            let Some(close_idx) = find_matching_delim(text, index, '(', ')') else {
+                break;
+            };
+            let inner = text[index + 1..close_idx].trim();
+            if contains_top_level_char(inner, ',') {
+                match parse_expression_core(inner) {
+                    Ok(parsed) if !matches!(
+                        &parsed,
+                        Expr::Opaque { text, attached }
+                            if text.trim() == inner && attached.is_empty()
+                    ) => validate_expr_tuple_contract(&parsed, span)?,
+                    _ => {
+                        let parts = split_top_level(inner, ',')
+                            .into_iter()
+                            .map(str::trim)
+                            .collect::<Vec<_>>();
+                        if parts.len() != 2 || parts.iter().any(|part| part.is_empty()) {
+                            return Err(format!(
+                                "{}:{}: tuple literals must have exactly 2 elements in v1",
+                                span.line, span.column
+                            ));
+                        }
+                        for part in parts {
+                            validate_tuple_expression_text(part, span)?;
+                        }
+                    }
+                }
+            } else if !inner.is_empty() {
+                validate_tuple_expression_text(inner, span)?;
+            }
+            index = close_idx + 1;
+            continue;
+        }
+
+        index += ch.len_utf8();
+    }
+
+    Ok(())
+}
+
+fn validate_numeric_tuple_member_selectors(text: &str, span: Span) -> Result<(), String> {
+    let text = text.trim();
+    let mut index = 0usize;
+    let mut in_string = false;
+    let mut escape = false;
+
+    while index < text.len() {
+        let mut chars = text[index..].chars();
+        let Some(ch) = chars.next() else {
+            break;
+        };
+
+        if in_string {
+            if escape {
+                escape = false;
+            } else if ch == '\\' {
+                escape = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            index += ch.len_utf8();
+            continue;
+        }
+
+        if ch == '"' {
+            in_string = true;
+            index += ch.len_utf8();
+            continue;
+        }
+
+        if ch == '.' {
+            if matches!(text[..index].chars().next_back(), Some('.'))
+                || matches!(text[index + 1..].chars().next(), Some('.'))
+            {
+                index += 1;
+                continue;
+            }
+
+            let mut end = index + 1;
+            while end < text.len() {
+                let mut digits = text[end..].chars();
+                let Some(next) = digits.next() else {
+                    break;
+                };
+                if !next.is_ascii_digit() {
+                    break;
+                }
+                end += next.len_utf8();
+            }
+
+            if end > index + 1 {
+                let member = &text[index + 1..end];
+                if member != "0" && member != "1" {
+                    return Err(format!(
+                        "{}:{}: tuple field access only supports `.0` and `.1` in v1",
+                        span.line, span.column
+                    ));
+                }
+                index = end;
+                continue;
+            }
+        }
+
+        index += ch.len_utf8();
+    }
+
+    Ok(())
+}
+
+fn validate_tuple_member_access(member: &str, span: Span) -> Result<(), String> {
+    if is_numeric_member_selector(member) && member != "0" && member != "1" {
+        return Err(format!(
+            "{}:{}: tuple field access only supports `.0` and `.1` in v1",
+            span.line, span.column
+        ));
+    }
+    Ok(())
+}
+
+fn looks_like_tuple_binding(text: &str) -> bool {
+    tuple_parts_if_whole(text).is_some()
+}
+
+fn tuple_parts_if_whole<'a>(text: &'a str) -> Option<Vec<&'a str>> {
+    let trimmed = text.trim();
+    if !trimmed.starts_with('(') || !trimmed.ends_with(')') {
+        return None;
+    }
+    let close_idx = find_matching_delim(trimmed, 0, '(', ')')?;
+    if close_idx != trimmed.len() - 1 {
+        return None;
+    }
+    let inner = trimmed[1..close_idx].trim();
+    if !contains_top_level_char(inner, ',') {
+        return None;
+    }
+    Some(
+        split_top_level(inner, ',')
+            .into_iter()
+            .map(str::trim)
+            .collect(),
+    )
+}
+
+fn is_numeric_member_selector(member: &str) -> bool {
+    !member.is_empty() && member.chars().all(|ch| ch.is_ascii_digit())
+}
+
 fn split_top_level(source: &str, separator: char) -> Vec<&str> {
     let mut parts = Vec::new();
     let mut depth_paren = 0usize;
@@ -2621,6 +3154,43 @@ mod tests {
         let err = parse_module("fn main() -> Int:\n    else:\n        return 0\n")
             .expect_err("else should fail");
         assert!(err.contains("`else` without a preceding `if`"), "{err}");
+    }
+
+    #[test]
+    fn parse_module_rejects_tuple_field_access_outside_pair_contract() {
+        let err = parse_module("fn main() -> Int:\n    return pair.2\n")
+            .expect_err("tuple field access should fail");
+        assert!(
+            err.contains("tuple field access only supports `.0` and `.1` in v1"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn parse_module_rejects_tuple_destructuring_in_let_statements() {
+        let err = parse_module("fn main() -> Int:\n    let (left, right) = pair\n    return 0\n")
+            .expect_err("tuple destructuring should fail");
+        assert!(
+            err.contains("tuple destructuring is not allowed in `let` statements"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn parse_module_rejects_tuple_field_assignment() {
+        let err = parse_module("fn main() -> Int:\n    pair.0 = 1\n    return 0\n")
+            .expect_err("tuple field assignment should fail");
+        assert!(
+            err.contains("tuple field assignment is not allowed in v1"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn parse_module_rejects_three_element_tuple_contracts() {
+        let err = parse_module("fn main() -> (Int, Int, Int):\n    return (1, 2, 3)\n")
+            .expect_err("triple tuples should fail");
+        assert!(err.contains("tuple types must have exactly 2 elements in v1"), "{err}");
     }
 
     #[test]
