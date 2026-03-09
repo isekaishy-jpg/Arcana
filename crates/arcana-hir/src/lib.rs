@@ -1,5 +1,7 @@
 pub mod freeze;
 
+use std::path::Path;
+
 use arcana_syntax::{
     DirectiveKind as ParsedDirectiveKind, ParsedModule, Span, SymbolKind as ParsedSymbolKind,
     parse_module,
@@ -136,6 +138,12 @@ impl HirPackageSummary {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceModulePath {
+    pub relative_segments: Vec<String>,
+    pub module_id: String,
+}
+
 pub fn lower_module_text(module_id: impl Into<String>, source: &str) -> Result<HirModuleSummary, String> {
     let parsed = parse_module(source)?;
     Ok(lower_parsed_module(module_id, &parsed))
@@ -204,6 +212,45 @@ pub fn build_package_summary(
     }
 }
 
+pub fn derive_source_module_path(
+    package_name: &str,
+    root_file_name: &str,
+    src_dir: &Path,
+    module_path: &Path,
+) -> Result<SourceModulePath, String> {
+    let relative = module_path
+        .strip_prefix(src_dir)
+        .map_err(|err| format!("failed to relativize `{}`: {err}", module_path.display()))?;
+    let mut components = relative
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    if components.is_empty() {
+        return Err(format!("empty module path for `{}`", module_path.display()));
+    }
+
+    let file_name = components
+        .pop()
+        .ok_or_else(|| format!("empty module path for `{}`", module_path.display()))?;
+    let stem = file_name
+        .strip_suffix(".arc")
+        .ok_or_else(|| format!("non-Arcana file `{}`", module_path.display()))?;
+    if stem == "book" || stem == "shelf" {
+        if file_name != root_file_name && !components.is_empty() {
+            components.push(stem.to_string());
+        }
+    } else {
+        components.push(stem.to_string());
+    }
+
+    let mut module_segments = vec![package_name.to_string()];
+    module_segments.extend(components.iter().cloned());
+    Ok(SourceModulePath {
+        relative_segments: components,
+        module_id: module_segments.join("."),
+    })
+}
+
 fn lower_directive_kind(kind: &ParsedDirectiveKind) -> HirDirectiveKind {
     match kind {
         ParsedDirectiveKind::Import => HirDirectiveKind::Import,
@@ -225,7 +272,11 @@ fn lower_symbol_kind(kind: &ParsedSymbolKind) -> HirSymbolKind {
 
 #[cfg(test)]
 mod tests {
-    use super::{HirDirectiveKind, build_package_summary, lower_module_text};
+    use std::path::Path;
+
+    use super::{
+        HirDirectiveKind, build_package_summary, derive_source_module_path, lower_module_text,
+    };
     use super::freeze::FROZEN_HIR_NODE_KINDS;
 
     #[test]
@@ -280,5 +331,32 @@ mod tests {
             "module=winspell:export:fn:open".to_string(),
             "module=winspell:reexport:winspell.window".to_string(),
         ]);
+    }
+
+    #[test]
+    fn derive_source_module_path_handles_root_and_nested_modules() {
+        let src_dir = Path::new("C:/repo/winspell/src");
+        let root = derive_source_module_path(
+            "winspell",
+            "book.arc",
+            src_dir,
+            Path::new("C:/repo/winspell/src/book.arc"),
+        )
+        .expect("root module should resolve");
+        assert_eq!(root.relative_segments, Vec::<String>::new());
+        assert_eq!(root.module_id, "winspell");
+
+        let nested = derive_source_module_path(
+            "winspell",
+            "book.arc",
+            src_dir,
+            Path::new("C:/repo/winspell/src/render/window.arc"),
+        )
+        .expect("nested module should resolve");
+        assert_eq!(
+            nested.relative_segments,
+            vec!["render".to_string(), "window".to_string()]
+        );
+        assert_eq!(nested.module_id, "winspell.render.window");
     }
 }

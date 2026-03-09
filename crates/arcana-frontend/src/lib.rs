@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use arcana_hir::{
     HirDirectiveKind, HirModule, HirModuleSummary, HirPackageSummary, build_package_summary,
+    derive_source_module_path,
     lower_module_text,
 };
 use arcana_package::{GrimoireKind, WorkspaceGraph, load_workspace_graph, parse_manifest};
@@ -285,16 +286,10 @@ fn load_package(
     let mut relative_to_absolute = BTreeMap::new();
 
     for module_path in collect_arc_files(&src_dir)? {
-        let relative_segments = module_segments(kind, &src_dir, &module_path)?;
-        let relative_key = join_segments(&relative_segments);
-        let absolute_segments = if relative_segments.is_empty() {
-            vec![name.to_string()]
-        } else {
-            let mut segments = vec![name.to_string()];
-            segments.extend(relative_segments.iter().cloned());
-            segments
-        };
-        let absolute_key = join_segments(&absolute_segments);
+        let source_path =
+            derive_source_module_path(name, kind.root_file_name(), &src_dir, &module_path)?;
+        let relative_key = join_segments(&source_path.relative_segments);
+        let absolute_key = source_path.module_id;
         let source = fs::read_to_string(&module_path)
             .map_err(|err| format!("failed to read `{}`: {err}", module_path.display()))?;
         let hir = lower_module_text(absolute_key.clone(), &source)
@@ -373,32 +368,6 @@ fn collect_arc_files_recursive(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(
     }
 
     Ok(())
-}
-
-fn module_segments(kind: &GrimoireKind, src_dir: &Path, module_path: &Path) -> Result<Vec<String>, String> {
-    let relative = module_path
-        .strip_prefix(src_dir)
-        .map_err(|err| format!("failed to relativize `{}`: {err}", module_path.display()))?;
-    let mut components = relative
-        .components()
-        .map(|component| component.as_os_str().to_string_lossy().into_owned())
-        .collect::<Vec<_>>();
-    if components.is_empty() {
-        return Err(format!("empty module path for `{}`", module_path.display()));
-    }
-
-    let file_name = components
-        .pop()
-        .ok_or_else(|| format!("empty module path for `{}`", module_path.display()))?;
-    let stem = file_name
-        .strip_suffix(".arc")
-        .ok_or_else(|| format!("non-Arcana file `{}`", module_path.display()))?;
-    if stem != "book" && stem != "shelf" {
-        components.push(stem.to_string());
-    } else if file_name != kind.root_file_name() && !components.is_empty() {
-        components.push(stem.to_string());
-    }
-    Ok(components)
 }
 
 fn resolve_exact_module<'a>(

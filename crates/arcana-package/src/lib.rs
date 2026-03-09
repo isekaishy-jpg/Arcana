@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use arcana_hir::{build_package_summary, lower_module_text};
+use arcana_hir::{build_package_summary, derive_source_module_path, lower_module_text};
 use pathdiff::diff_paths;
 use sha2::{Digest, Sha256};
 
@@ -903,7 +903,13 @@ fn build_member_package_summary(
 ) -> PackageResult<arcana_hir::HirPackageSummary> {
     let mut modules = Vec::new();
     for file in files {
-        let module_id = module_id_from_path(member, file)?;
+        let module_id = derive_source_module_path(
+            &member.name,
+            member.kind.root_file_name(),
+            &member.abs_dir.join("src"),
+            file,
+        )?
+        .module_id;
         let source =
             fs::read_to_string(file).map_err(|e| format!("failed to read `{}`: {e}", file.display()))?;
         let module = lower_module_text(module_id, &source)
@@ -933,37 +939,6 @@ fn collect_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> PackageResult<
         }
     }
     Ok(())
-}
-
-fn module_id_from_path(member: &WorkspaceMember, path: &Path) -> PackageResult<String> {
-    let src_dir = member.abs_dir.join("src");
-    let relative = path
-        .strip_prefix(&src_dir)
-        .map_err(|e| format!("failed to resolve module path `{}`: {e}", path.display()))?;
-    let mut segments = relative
-        .components()
-        .map(|component| component.as_os_str().to_string_lossy().into_owned())
-        .collect::<Vec<_>>();
-    if segments.is_empty() {
-        return Err(format!("empty module path for `{}`", path.display()));
-    }
-    let file_name = segments
-        .pop()
-        .ok_or_else(|| format!("empty module path for `{}`", path.display()))?;
-    let stem = file_name
-        .strip_suffix(".arc")
-        .ok_or_else(|| format!("non-Arcana file `{}`", path.display()))?;
-    if stem == "book" || stem == "shelf" {
-        if file_name != member.kind.root_file_name() && !segments.is_empty() {
-            segments.push(stem.to_string());
-        }
-    } else {
-        segments.push(stem.to_string());
-    }
-
-    let mut full = vec![member.name.clone()];
-    full.extend(segments);
-    Ok(full.join("."))
 }
 
 fn canonicalize_dir(path: &Path) -> PackageResult<PathBuf> {
