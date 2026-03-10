@@ -1,5 +1,2 @@
 name = "spell_events"
 kind = "lib"
-
-[deps]
-winspell = { path = "../winspell" }

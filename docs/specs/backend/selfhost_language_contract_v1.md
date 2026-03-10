@@ -2,6 +2,11 @@
 
 This document freezes the canonical selfhost language target for Arcana as of **March 5, 2026**.
 
+Scope note:
+- This file freezes the required language corpus for selfhost.
+- It does not define backend implementation strategy, runtime artifact format, or selfhost milestone order.
+- Backend architecture and sequencing come from `PLAN.md` and `docs/rewrite-roadmap.md`.
+
 Source of truth:
 - `docs/arcana-v0.md`
 

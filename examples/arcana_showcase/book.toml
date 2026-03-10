@@ -1,2 +1,5 @@
 name = "arcana_showcase"
 kind = "app"
+
+[deps]
+winspell = { path = "../../grimoires/winspell" }

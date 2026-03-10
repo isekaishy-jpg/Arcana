@@ -1,5 +1,9 @@
 # Arcana Generic Host Platform Spec (Reference)
 
+Status: `reference-only`
+
+This is a broad saved direction note. Current host-platform contract lives in `docs/specs/selfhost-host/selfhost-host/v1-scope.md` and `docs/specs/selfhost-host/selfhost-host/deferred-roadmap.md`.
+
 This document captures the broad host-platform direction for Arcana tooling grimoires.
 
 ## Purpose

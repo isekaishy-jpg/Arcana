@@ -28,18 +28,29 @@ This document defines how Arcana spec files are interpreted during the rewrite.
 
 - `docs/arcana-v0.md` remains the top-level frozen language summary until its contents are fully split into finer-grained domain specs.
 - Domain `v1-scope.md` or equivalent scope files define the current approved contract for that domain.
+- Domain `v1-status.md` files are living readiness/classification companions for an approved scope; they may classify current bootstrap state but they may not expand domain surface by themselves.
 - Domain `deferred-roadmap.md` files are authoritative only for items explicitly deferred from their parent domain scope.
 - Descriptive "current implementation limits" notes do not become language law unless they are promoted into a domain scope or the frozen matrix.
 - If a contract question materially affects parser shape, typed HIR, IR, or selfhost grimoires, it should not remain implicit.
+- Imported MeadowLang planning docs do not define current rewrite architecture unless they are explicitly listed here as frozen, approved, reserved, or deferred authority.
+- Reference-only material should live under `docs/reference/` whenever practical so historical context is not mixed into the active spec tree.
+- Imported `std`, first-party grimoires, and examples are behavioral seed corpus only; they do not define rewrite layering, backend architecture, or public package surface except where current scope docs explicitly ratify them.
+- Architecture/selfhost-progress reviews must privilege approved docs plus `crates/*` over carried corpus; issues found only in `std/`, `grimoires/`, `examples/`, or generated snapshots must be labeled as transitional/corpus drift unless a current scope explicitly makes them authoritative.
 
 ## Current Registry Seed
 
 `frozen-selfhost-baseline`
 - `docs/arcana-v0.md`
+- `docs/specs/backend/selfhost_language_contract_v1.md`
 - `conformance/selfhost_language_matrix.toml`
 
 `approved-pre-selfhost`
+- `docs/specs/std/std/v1-scope.md`
+- `docs/specs/std/std/v1-status.md`
+- `docs/specs/grimoires/grimoires/v1-scope.md`
+- `docs/specs/grimoires/grimoires/v1-status.md`
 - `docs/specs/selfhost-host/selfhost-host/v1-scope.md`
+- `docs/specs/selfhost-host/selfhost-host/app-substrate-v1-scope.md`
 - `docs/specs/memory/memory/generic-memory-spec.md`
 - `docs/specs/forewords/forewords/v1-scope.md`
 - `docs/specs/chain/contract_matrix_v1.md`
@@ -51,9 +62,16 @@ This document defines how Arcana spec files are interpreted during the rewrite.
 - `docs/specs/callables/callables/v1-status.md`
 
 `reference-only`
-- `docs/specs/chain/chain_adoption_audit_v1.md`
+- `docs/reference/backend/ir-backend-roadmap.md`
+- `docs/reference/chain/chain_adoption_audit_v1.md`
+- `docs/reference/forewords/generic-foreword-spec.md`
+- `docs/reference/memory/v2-scope.md`
+- `docs/reference/selfhost-host/generic-host-spec.md`
+- `docs/reference/audits/meadow_language_behavior_audit_v1.md`
 
 `authoritative-deferred-ledger`
+- `docs/specs/backend/deferred-roadmap.md`
+- `docs/specs/std/std/deferred-roadmap.md`
 - `docs/specs/selfhost-host/selfhost-host/deferred-roadmap.md`
 - `docs/specs/memory/memory/deferred-roadmap.md`
 - `docs/specs/forewords/forewords/deferred-roadmap.md`
@@ -69,3 +87,15 @@ This document defines how Arcana spec files are interpreted during the rewrite.
 - `plan` and `lazy` chain semantics must stay explicit in the frozen docs so pipeline validation and demand-sensitive execution are not inferred from old implementation shortcuts.
 - `AnyBox` or equivalent erased Arcana value carriers are banned from the rewrite contract.
 - Closures are not the intended direction; if first-class callable capability is added later, it should be through explicit function/context objects.
+- The 3-top-level-arg phrase cap is intentional and does not, by itself, justify early callable/context-object work; use explicit data shaping until a dedicated callable-object contract exists.
+- Legacy Meadow backend planning must not override the rewrite path; extract only explicitly approved deferred items and keep the original documents reference-only.
+- Rebuild imported `std` for the rewrite architecture instead of preserving Meadow-era layering; showcase/game convenience logic does not become std contract just because it was carried over.
+- `std` is rewrite-owned first-party library surface, not an imported MeadowLang artifact to preserve wholesale.
+- Imported-std review and any app/runtime handle redesign must preserve Arcana's explicit/unambiguous doctrine: typed, named, auditable contracts over ambiguous convenience or erased fallback carriers.
+- First-party runtime/package ownership means more than wrapping upstream Rust crates: third-party crates may exist as private implementation details, but they must not define the public Arcana substrate or the reason first-party `std` exists.
+- First-party grimoire responsibilities must be explicit before bootstrap so carried package names do not silently define the ecosystem.
+- First-party window/input/canvas and primitive graphics/text remain pre-selfhost requirements for real apps/showcases, but carried `winspell`/`spell-events` code does not freeze the old implementation stack.
+- ECS scheduling/components remain first-party language/runtime surface during the rewrite; do not classify them as showcase-only helpers.
+- `std.app` fixed-step helpers and `std.tooling` planner helpers are carried convenience layers, not rewrite-approved first-party architecture unless a scope doc explicitly ratifies them.
+- Every std or first-party grimoire surface change must update the corresponding scope or status ledger in the same patch.
+- Generated direct-emit snapshot files and similar carried artifacts are migration corpus, not primary rewrite authority; do not let them outweigh approved docs or `crates/*` during review.

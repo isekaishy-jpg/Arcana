@@ -2,19 +2,18 @@ import std.canvas
 import std.window
 import std.input
 import std.events
-import std.app
 import std.memory
 import std.collections.list
 import std.collections.array
 import std.collections.map
 import std.concurrent
 import std.io
+import winspell.loop
 
 use std.canvas as canvas
 use std.window as window
 use std.input as input
 use std.events as events
-use std.app as app
 use std.memory as memory
 use std.collections.list as list
 use std.collections.array as array
@@ -183,7 +182,7 @@ fn main() -> Int:
     stats :: "lives", 3 :: set
     stats :: "resizes", 0 :: set
 
-    let mut runner = app.fixed_runner :: 60 :: call
+    let mut runner = winspell.loop.fixed_runner :: 60 :: call
     run_chain_demo :: :: call
     let t = weave run_chain_demo_async :: :: call
     t :: :: join
@@ -214,7 +213,7 @@ fn main() -> Int:
         let ww = dims.0
         let wh = dims.1
 
-        let sim = app.fixed_runner_step :: runner, 16 :: call
+        let sim = winspell.loop.fixed_runner_step :: runner, 16 :: call
         let mut steps = sim.0
         while steps > 0:
             steps -= 1

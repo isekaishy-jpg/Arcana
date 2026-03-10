@@ -14,7 +14,11 @@ This is the canonical generic reference for Arcana memory-system evolution after
 
 - `memory_type: instance :> args? <: qualifier`
 - Inline args are comma-separated and limited to 3 top-level items.
-- Attached blocks are statement-context only and currently use `name = expr` entries.
+- Constructor/qualifier must be `path` or `path[type_args]`.
+- Attached blocks are statement-context only.
+- Attached blocks support `name = expr` entries and chain lines.
+- Attached entries may carry forewords as header-local metadata.
+- If more than 3 independent inputs are needed, group them into ordinary pair/record data rather than treating phrase arity as a reason to add callable/context objects.
 
 ## Core Model
 

@@ -1,9 +1,12 @@
 # Generic Foreword Metadata Specification
 
+Status: `reference-only`
+
 ## Purpose
 Foreword metadata is a prefix metadata system for Arcana declarations. It carries structured metadata that can be validated and interpreted by a specific owner (compiler, tooling, runtime, or framework subsystem).
 
 This document is the saved generic reference spec for future expansions beyond v1.
+Current foreword contract lives in `docs/specs/forewords/forewords/v1-scope.md` and `docs/specs/forewords/forewords/deferred-roadmap.md`.
 
 ## Core idea
 Forewords are attached before a declaration:
@@ -122,4 +125,3 @@ This spec does not require:
 - duplicate/conflict resolution defaults
 - statement/expression target semantics
 - introspection APIs and bytecode metadata carriage
-

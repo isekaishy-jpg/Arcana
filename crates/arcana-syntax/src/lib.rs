@@ -627,6 +627,7 @@ pub fn parse_module(source: &str) -> Result<ParsedModule, String> {
     apply_only_foreword_filters(&mut parsed)?;
     validate_module_rollup_contract(&parsed)?;
     validate_module_tuple_contract(&parsed)?;
+    validate_module_phrase_contract(&parsed)?;
     Ok(parsed)
 }
 
@@ -1790,11 +1791,11 @@ fn parse_expression(text: &str, attached: &[RawBlockEntry], span: Span) -> Resul
 
 fn parse_expression_core(text: &str) -> Result<Expr, String> {
     let trimmed = text.trim();
-    if let Some(inner) = strip_group_parens(trimmed) {
-        return parse_expression_core(inner);
-    }
     if let Some(expr) = parse_grouped_non_tuple_expression(trimmed)? {
         return Ok(expr);
+    }
+    if let Some(inner) = strip_group_parens(trimmed) {
+        return parse_expression_core(inner);
     }
     if let Some(expr) = parse_chain_expression(trimmed)? {
         return Ok(expr);
@@ -1825,14 +1826,35 @@ fn parse_grouped_non_tuple_expression(text: &str) -> Result<Option<Expr>, String
     if inner.is_empty() || !contains_top_level_char(inner, ',') {
         return Ok(None);
     }
-    let parsed = parse_expression_core(inner)?;
-    if matches!(
-        &parsed,
-        Expr::Opaque { text, attached } if text.trim() == inner && attached.is_empty()
-    ) {
+    parse_non_tuple_comma_expression(inner)
+}
+
+fn parse_non_tuple_comma_expression(text: &str) -> Result<Option<Expr>, String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || !contains_top_level_char(trimmed, ',') {
         return Ok(None);
     }
-    Ok(Some(parsed))
+    if let Some(expr) = parse_chain_expression(trimmed)? {
+        return Ok(Some(expr));
+    }
+    if let Some(expr) = parse_memory_phrase(trimmed)? {
+        if matches!(
+            &expr,
+            Expr::MemoryPhrase { constructor, .. } if is_memory_constructor_like(constructor)
+        ) {
+            return Ok(Some(expr));
+        }
+    }
+    if let Some(expr) = parse_qualified_phrase(trimmed)? {
+        if matches!(
+            &expr,
+            Expr::QualifiedPhrase { qualifier, .. }
+                if classify_qualified_phrase_qualifier(qualifier).is_some()
+        ) {
+            return Ok(Some(expr));
+        }
+    }
+    Ok(None)
 }
 
 #[derive(Clone, Copy)]
@@ -2109,12 +2131,9 @@ fn parse_path_expression(text: &str) -> Option<Expr> {
 
 fn validate_chain_style(style: &str) -> Result<(), String> {
     match style {
-        "forward" | "lazy" | "parallel" | "async" | "plan" | "broadcast" | "collect" => {
-            Ok(())
-        }
+        "forward" | "lazy" | "parallel" | "async" | "plan" | "broadcast" | "collect" => Ok(()),
         "reverse" => Err(
-            "chain style `reverse` was removed; use `<style> :=<` with `<=` connectors"
-                .to_string(),
+            "chain style `reverse` was removed; use `<style> :=<` with `<=` connectors".to_string(),
         ),
         _ => Err(format!(
             "unknown chain style `{style}`; supported: forward, lazy, parallel, async, plan, broadcast, collect"
@@ -2131,9 +2150,9 @@ fn chain_style_supports_reverse_connectors(style: &str) -> bool {
 }
 
 fn parse_chain_expression(text: &str) -> Result<Option<Expr>, String> {
-    let (style_text, introducer, step_text) =
-        if let Some(index) = find_top_level_token(text, ":=>") {
-            (&text[..index], ChainIntroducer::Forward, &text[index + 3..])
+    let (style_text, introducer, step_text) = if let Some(index) = find_top_level_token(text, ":=>")
+    {
+        (&text[..index], ChainIntroducer::Forward, &text[index + 3..])
     } else if let Some(index) = find_top_level_token(text, ":=<") {
         (&text[..index], ChainIntroducer::Reverse, &text[index + 3..])
     } else {
@@ -2186,15 +2205,17 @@ fn parse_chain_steps(
         }
     } else if let Some(first) = connectors.first() {
         if *first != ChainConnector::Forward {
-            return Err("forward-introduced chains must begin with a forward (`=>`) segment".to_string());
+            return Err(
+                "forward-introduced chains must begin with a forward (`=>`) segment".to_string(),
+            );
         }
         let mut changed = false;
         for connector in connectors.iter().copied() {
             match connector {
                 ChainConnector::Forward if changed => {
                     return Err(
-                        "chain expressions allow at most one direction change in v1".to_string(),
-                    )
+                        "chain expressions allow at most one direction change in v1".to_string()
+                    );
                 }
                 ChainConnector::Forward => {}
                 ChainConnector::Reverse => {
@@ -2509,6 +2530,13 @@ enum PhraseArgContext {
 }
 
 impl PhraseArgContext {
+    fn arity_error(self) -> &'static str {
+        match self {
+            Self::Qualified => "qualified phrase allows at most 3 top-level arguments",
+            Self::Memory => "memory phrase allows at most 3 top-level arguments",
+        }
+    }
+
     fn trailing_comma_error(self) -> &'static str {
         match self {
             Self::Qualified => "trailing comma is not allowed before phrase qualifier",
@@ -2517,7 +2545,10 @@ impl PhraseArgContext {
     }
 }
 
-fn parse_phrase_args(text: &str, context: PhraseArgContext) -> Result<Option<Vec<PhraseArg>>, String> {
+fn parse_phrase_args(
+    text: &str,
+    context: PhraseArgContext,
+) -> Result<Option<Vec<PhraseArg>>, String> {
     if text.is_empty() {
         return Ok(Some(Vec::new()));
     }
@@ -2531,6 +2562,9 @@ fn parse_phrase_args(text: &str, context: PhraseArgContext) -> Result<Option<Vec
         let trimmed = part.trim();
         if trimmed.is_empty() {
             return Ok(None);
+        }
+        if args.len() >= 3 {
+            return Err(context.arity_error().to_string());
         }
         args.push(parse_phrase_arg(trimmed)?);
     }
@@ -3630,7 +3664,10 @@ fn foreword_target_allows(target: ForewordTarget, foreword_name: &str) -> bool {
             target,
             ForewordTarget::Function | ForewordTarget::TraitMethod | ForewordTarget::ImplMethod
         ),
-        "boundary" => matches!(target, ForewordTarget::Function | ForewordTarget::ImplMethod),
+        "boundary" => matches!(
+            target,
+            ForewordTarget::Function | ForewordTarget::ImplMethod
+        ),
         "stage" => matches!(
             target,
             ForewordTarget::Function
@@ -3659,7 +3696,11 @@ fn validate_symbol_foreword_contract(
     }
     if let SymbolBody::Trait { methods, .. } = &symbol.body {
         for method in methods {
-            validate_symbol_foreword_contract(method, ForewordTarget::TraitMethod, active_boundary_target)?;
+            validate_symbol_foreword_contract(
+                method,
+                ForewordTarget::TraitMethod,
+                active_boundary_target,
+            )?;
         }
     }
     Ok(())
@@ -4131,6 +4172,9 @@ fn type_text_is_boundary_safe(text: &str) -> bool {
                 | "RangeInt"
                 | "Window"
                 | "Image"
+                | "AudioDevice"
+                | "AudioBuffer"
+                | "AudioPlayback"
                 | "AtomicInt"
                 | "AtomicBool"
         ) {
@@ -4214,6 +4258,287 @@ fn validate_statement_foreword_contract(
                 validate_statement_foreword_contract(body, require_chain_contracts)?;
             }
             _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn validate_module_phrase_contract(parsed: &ParsedModule) -> Result<(), String> {
+    for symbol in &parsed.symbols {
+        validate_statement_phrase_contract(&symbol.statements)?;
+    }
+    for impl_decl in &parsed.impls {
+        for method in &impl_decl.methods {
+            validate_statement_phrase_contract(&method.statements)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_statement_phrase_contract(statements: &[Statement]) -> Result<(), String> {
+    for statement in statements {
+        match &statement.kind {
+            StatementKind::Let { value, .. } => {
+                validate_expr_phrase_contract(value, statement.span, false)?;
+            }
+            StatementKind::Return { value } => {
+                if let Some(value) = value {
+                    validate_expr_phrase_contract(value, statement.span, false)?;
+                }
+            }
+            StatementKind::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                validate_expr_phrase_contract(condition, statement.span, false)?;
+                validate_statement_phrase_contract(then_branch)?;
+                if let Some(else_branch) = else_branch {
+                    validate_statement_phrase_contract(else_branch)?;
+                }
+            }
+            StatementKind::While { condition, body } => {
+                validate_expr_phrase_contract(condition, statement.span, false)?;
+                validate_statement_phrase_contract(body)?;
+            }
+            StatementKind::For { iterable, body, .. } => {
+                validate_expr_phrase_contract(iterable, statement.span, false)?;
+                validate_statement_phrase_contract(body)?;
+            }
+            StatementKind::Defer { expr } => {
+                validate_expr_phrase_contract(expr, statement.span, false)?;
+            }
+            StatementKind::Assign { value, .. } => {
+                validate_expr_phrase_contract(value, statement.span, false)?;
+            }
+            StatementKind::Expr { expr } => {
+                validate_expr_phrase_contract(expr, statement.span, true)?;
+            }
+            StatementKind::Break | StatementKind::Continue => {}
+        }
+    }
+    Ok(())
+}
+
+fn validate_expr_phrase_contract(
+    expr: &Expr,
+    span: Span,
+    allow_header_attachments: bool,
+) -> Result<(), String> {
+    match expr {
+        Expr::Opaque { attached, .. } => {
+            if !attached.is_empty() {
+                return Err(format!(
+                    "{}:{}: attached blocks are only valid on standalone qualified/memory phrase statements",
+                    span.line, span.column
+                ));
+            }
+        }
+        Expr::Path { .. }
+        | Expr::BoolLiteral { .. }
+        | Expr::IntLiteral { .. }
+        | Expr::StrLiteral { .. } => {}
+        Expr::Pair { left, right } => {
+            validate_expr_phrase_contract(left, span, false)?;
+            validate_expr_phrase_contract(right, span, false)?;
+        }
+        Expr::CollectionLiteral { items } => {
+            for item in items {
+                validate_expr_phrase_contract(item, span, false)?;
+            }
+        }
+        Expr::Match { subject, arms } => {
+            validate_expr_phrase_contract(subject, span, false)?;
+            for arm in arms {
+                validate_expr_phrase_contract(&arm.value, arm.span, false)?;
+            }
+        }
+        Expr::Chain { steps, .. } => {
+            for step in steps {
+                validate_expr_phrase_contract(&step.stage, span, false)?;
+                for arg in &step.bind_args {
+                    validate_expr_phrase_contract(arg, span, false)?;
+                }
+            }
+        }
+        Expr::MemoryPhrase {
+            arena,
+            init_args,
+            constructor,
+            attached,
+            ..
+        } => {
+            validate_expr_phrase_contract(arena, span, false)?;
+            for arg in init_args {
+                validate_phrase_arg_contract(arg, span)?;
+            }
+            if !is_memory_constructor_like(constructor) {
+                return Err(format!(
+                    "{}:{}: invalid memory phrase constructor `{}`; expected path or path[type_args]",
+                    span.line, span.column, constructor
+                ));
+            }
+            if !attached.is_empty() {
+                if !allow_header_attachments {
+                    return Err(format!(
+                        "{}:{}: attached blocks are only valid on standalone qualified/memory phrase statements",
+                        span.line, span.column
+                    ));
+                }
+                validate_header_attachment_phrase_contract(attached)?;
+            }
+        }
+        Expr::GenericApply { expr, .. } => {
+            validate_expr_phrase_contract(expr, span, false)?;
+        }
+        Expr::QualifiedPhrase {
+            subject,
+            args,
+            qualifier,
+            attached,
+        } => {
+            validate_expr_phrase_contract(subject, span, false)?;
+            for arg in args {
+                validate_phrase_arg_contract(arg, span)?;
+            }
+            let qualifier_kind = classify_qualified_phrase_qualifier(qualifier).ok_or_else(|| {
+                format!(
+                    "{}:{}: invalid phrase qualifier `{}`; expected path or one of `?`, `>`, `>>`",
+                    span.line, span.column, qualifier
+                )
+            })?;
+            if !attached.is_empty() {
+                if !allow_header_attachments {
+                    return Err(format!(
+                        "{}:{}: attached blocks are only valid on standalone qualified/memory phrase statements",
+                        span.line, span.column
+                    ));
+                }
+                validate_qualified_phrase_attachment_contract(&qualifier_kind, attached)?;
+            }
+        }
+        Expr::Await { expr } | Expr::Unary { expr, .. } => {
+            validate_expr_phrase_contract(expr, span, false)?;
+        }
+        Expr::Binary { left, right, .. } => {
+            validate_expr_phrase_contract(left, span, false)?;
+            validate_expr_phrase_contract(right, span, false)?;
+        }
+        Expr::MemberAccess { expr, .. } => {
+            validate_expr_phrase_contract(expr, span, false)?;
+        }
+        Expr::Index { expr, index } => {
+            validate_expr_phrase_contract(expr, span, false)?;
+            validate_expr_phrase_contract(index, span, false)?;
+        }
+        Expr::Slice {
+            expr, start, end, ..
+        } => {
+            validate_expr_phrase_contract(expr, span, false)?;
+            if let Some(start) = start {
+                validate_expr_phrase_contract(start, span, false)?;
+            }
+            if let Some(end) = end {
+                validate_expr_phrase_contract(end, span, false)?;
+            }
+        }
+        Expr::Range { start, end, .. } => {
+            if let Some(start) = start {
+                validate_expr_phrase_contract(start, span, false)?;
+            }
+            if let Some(end) = end {
+                validate_expr_phrase_contract(end, span, false)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_phrase_arg_contract(arg: &PhraseArg, span: Span) -> Result<(), String> {
+    match arg {
+        PhraseArg::Positional(expr) | PhraseArg::Named { value: expr, .. } => {
+            validate_expr_phrase_contract(expr, span, false)
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QualifiedPhraseQualifierKind {
+    Try,
+    Apply,
+    AwaitApply,
+    BareMethod,
+    NamedPath,
+}
+
+fn classify_qualified_phrase_qualifier(qualifier: &str) -> Option<QualifiedPhraseQualifierKind> {
+    match qualifier.trim() {
+        "?" => Some(QualifiedPhraseQualifierKind::Try),
+        ">" => Some(QualifiedPhraseQualifierKind::Apply),
+        ">>" => Some(QualifiedPhraseQualifierKind::AwaitApply),
+        value if is_path_like(value) => {
+            if value.contains('.') {
+                Some(QualifiedPhraseQualifierKind::NamedPath)
+            } else {
+                Some(QualifiedPhraseQualifierKind::BareMethod)
+            }
+        }
+        _ => None,
+    }
+}
+
+fn is_memory_constructor_like(text: &str) -> bool {
+    let trimmed = text.trim();
+    if is_path_like(trimmed) {
+        return true;
+    }
+    let Some((base, inside)) = split_trailing_bracket_suffix(trimmed) else {
+        return false;
+    };
+    is_path_like(base.trim()) && parse_generic_arg_texts(inside).is_some()
+}
+
+fn validate_header_attachment_phrase_contract(
+    attachments: &[HeaderAttachment],
+) -> Result<(), String> {
+    for attachment in attachments {
+        match attachment {
+            HeaderAttachment::Named { value, span, .. } => {
+                validate_expr_phrase_contract(value, *span, false)?;
+            }
+            HeaderAttachment::Chain { expr, span, .. } => {
+                validate_expr_phrase_contract(expr, *span, false)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_qualified_phrase_attachment_contract(
+    qualifier_kind: &QualifiedPhraseQualifierKind,
+    attachments: &[HeaderAttachment],
+) -> Result<(), String> {
+    validate_header_attachment_phrase_contract(attachments)?;
+    let allow_named = matches!(
+        qualifier_kind,
+        QualifiedPhraseQualifierKind::Apply | QualifiedPhraseQualifierKind::BareMethod
+    );
+    for attachment in attachments {
+        let HeaderAttachment::Named { span, .. } = attachment else {
+            continue;
+        };
+        if !allow_named {
+            let qualifier = match qualifier_kind {
+                QualifiedPhraseQualifierKind::Try => "?",
+                QualifiedPhraseQualifierKind::Apply => ">",
+                QualifiedPhraseQualifierKind::AwaitApply => ">>",
+                QualifiedPhraseQualifierKind::BareMethod => "method",
+                QualifiedPhraseQualifierKind::NamedPath => "path qualifier",
+            };
+            return Err(format!(
+                "{}:{}: qualifier `{}` does not support named header entries",
+                span.line, span.column, qualifier
+            ));
         }
     }
     Ok(())
@@ -4910,30 +5235,21 @@ fn validate_tuple_expression_groups(text: &str, span: Span) -> Result<(), String
             };
             let inner = text[index + 1..close_idx].trim();
             if contains_top_level_char(inner, ',') {
-                match parse_expression_core(inner) {
-                    Ok(parsed)
-                        if !matches!(
-                            &parsed,
-                            Expr::Opaque { text, attached }
-                                if text.trim() == inner && attached.is_empty()
-                        ) =>
-                    {
-                        validate_expr_tuple_contract(&parsed, span)?
+                if let Some(parsed) = parse_non_tuple_comma_expression(inner)? {
+                    validate_expr_tuple_contract(&parsed, span)?
+                } else {
+                    let parts = split_top_level(inner, ',')
+                        .into_iter()
+                        .map(str::trim)
+                        .collect::<Vec<_>>();
+                    if parts.len() != 2 || parts.iter().any(|part| part.is_empty()) {
+                        return Err(format!(
+                            "{}:{}: tuple literals must have exactly 2 elements in v1",
+                            span.line, span.column
+                        ));
                     }
-                    _ => {
-                        let parts = split_top_level(inner, ',')
-                            .into_iter()
-                            .map(str::trim)
-                            .collect::<Vec<_>>();
-                        if parts.len() != 2 || parts.iter().any(|part| part.is_empty()) {
-                            return Err(format!(
-                                "{}:{}: tuple literals must have exactly 2 elements in v1",
-                                span.line, span.column
-                            ));
-                        }
-                        for part in parts {
-                            validate_tuple_expression_text(part, span)?;
-                        }
+                    for part in parts {
+                        validate_tuple_expression_text(part, span)?;
                     }
                 }
             } else if !inner.is_empty() {
@@ -5192,8 +5508,8 @@ mod tests {
     use super::freeze::{FROZEN_AST_NODE_KINDS, FROZEN_TOKEN_KINDS};
     use super::{
         AssignTarget, BinaryOp, ChainConnector, ChainIntroducer, ChainStep, DirectiveKind, Expr,
-        ForewordApp, ForewordArg, HeaderAttachment, MatchPattern, ParamMode, PhraseArg,
-        Statement, StatementKind, SymbolBody, SymbolKind, UnaryOp, parse_module,
+        ForewordApp, ForewordArg, HeaderAttachment, MatchPattern, ParamMode, PhraseArg, Statement,
+        StatementKind, SymbolBody, SymbolKind, UnaryOp, parse_module,
     };
 
     fn expr_is_path(expr: &Expr, name: &str) -> bool {
@@ -5711,19 +6027,47 @@ mod tests {
     }
 
     #[test]
-    fn parse_module_rejects_bad_memory_family_and_trailing_phrase_commas() {
+    fn parse_module_rejects_bad_memory_family_trailing_commas_and_phrase_over_arity() {
         for (source, expected) in [
             (
                 "fn main() -> Int:\n    return io.print :: 1, :: call\n",
                 "trailing comma is not allowed before phrase qualifier",
             ),
             (
+                "fn main() -> Int:\n    return io.print :: 1, 2, 3, 4 :: call\n",
+                "qualified phrase allows at most 3 top-level arguments",
+            ),
+            (
                 "fn main() -> Int:\n    let node = arena: store :> a = 1, <: Node\n    return 0\n",
                 "trailing comma is not allowed before memory phrase qualifier",
             ),
             (
+                "fn main() -> Int:\n    let node = arena: store :> a = 1, b = 2, c = 3, d = 4 <: Node\n    return 0\n",
+                "memory phrase allows at most 3 top-level arguments",
+            ),
+            (
                 "fn main() -> Int:\n    let item = weird: store :> value = 1 <: Item\n    return 0\n",
                 "unknown memory type `weird`; supported now: arena, frame, pool (reserved for future expansion)",
+            ),
+            (
+                "fn main() -> Int:\n    let item = arena: store :> value = 1 <: Node()\n    return 0\n",
+                "invalid memory phrase constructor `Node()`; expected path or path[type_args]",
+            ),
+            (
+                "fn main() -> Int:\n    let item = io.print :: 1 :: call\n        value = 2\n    return 0\n",
+                "attached blocks are only valid on standalone qualified/memory phrase statements",
+            ),
+            (
+                "fn main() -> Int:\n    io.print :: 1 :: std.io.print\n        value = 2\n    return 0\n",
+                "qualifier `path qualifier` does not support named header entries",
+            ),
+            (
+                "fn main() -> Int:\n    value :: :: ?\n        fallback = 1\n    return 0\n",
+                "qualifier `?` does not support named header entries",
+            ),
+            (
+                "fn main() -> Int:\n    io.print :: 1 :: call[T]\n    return 0\n",
+                "invalid phrase qualifier `call[T]`; expected path or one of `?`, `>`, `>>`",
             ),
         ] {
             let err = parse_module(source).expect_err("source should fail");
@@ -5786,7 +6130,11 @@ mod tests {
         )
         .expect("non-matching #only target should filter declaration");
         assert_eq!(
-            parsed.symbols.iter().map(|symbol| symbol.name.as_str()).collect::<Vec<_>>(),
+            parsed
+                .symbols
+                .iter()
+                .map(|symbol| symbol.name.as_str())
+                .collect::<Vec<_>>(),
             vec!["main"]
         );
     }
@@ -6002,17 +6350,17 @@ mod tests {
                         qualifier,
                         attached,
                     } => {
-                    assert_eq!(qualifier, "call");
+                        assert_eq!(qualifier, "call");
                         assert!(attached.is_empty());
                         assert!(matches!(
-                            subject.as_ref(),
-                            Expr::GenericApply { expr, type_args }
-                            if type_args == &vec!["Int".to_string()]
-                                && matches!(
-                                    expr.as_ref(),
-                                    Expr::MemberAccess { member, .. } if member == "print"
-                                )
-                    ));
+                                subject.as_ref(),
+                                Expr::GenericApply { expr, type_args }
+                                if type_args == &vec!["Int".to_string()]
+                                    && matches!(
+                                        expr.as_ref(),
+                                        Expr::MemberAccess { member, .. } if member == "print"
+                                    )
+                        ));
                         assert_eq!(args.len(), 2);
                     }
                     other => panic!("expected print phrase, got {other:?}"),
@@ -6033,11 +6381,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_module_preserves_parenthesized_phrase_calls_with_many_args() {
+    fn parse_module_preserves_parenthesized_phrase_args_with_nested_commas() {
         let parsed = parse_module(
-            "fn has_magic(read bytes: Array[Int], a: Int, b: Int, c: Int, d: Int) -> Bool:\n    return true\nfn main(read bytes: Array[Int]) -> Int:\n    if not (has_magic :: bytes, 65, 82, 67, 66 :: call):\n        return 1\n    return 0\n",
+            "fn has_magic(read bytes: Array[Int], left: (Int, Int), right: (Int, Int)) -> Bool:\n    return true\nfn main(read bytes: Array[Int]) -> Int:\n    if not (has_magic :: bytes, (65, 82), (67, 66) :: call):\n        return 1\n    return 0\n",
         )
-        .expect("parenthesized phrase call should parse");
+        .expect("parenthesized phrase args should parse");
 
         match &parsed.symbols[1].statements[0].kind {
             StatementKind::If { condition, .. } => {
@@ -6186,10 +6534,9 @@ mod tests {
 
     #[test]
     fn parse_module_collects_pair_tuple_expressions() {
-        let parsed = parse_module(
-            "fn main() -> Int:\n    let pair = (left, right)\n    return pair.0\n",
-        )
-        .expect("parse should pass");
+        let parsed =
+            parse_module("fn main() -> Int:\n    let pair = (left, right)\n    return pair.0\n")
+                .expect("parse should pass");
 
         match &parsed.symbols[0].statements[0].kind {
             StatementKind::Let { name, value, .. } => {
@@ -6213,6 +6560,27 @@ mod tests {
     }
 
     #[test]
+    fn parse_module_collects_pair_tuple_expressions_with_binary_left_side() {
+        let parsed = parse_module(
+            "fn main() -> Int:\n    let pair = (left + right, tail)\n    return pair.1\n",
+        )
+        .expect("parse should pass");
+
+        match &parsed.symbols[0].statements[0].kind {
+            StatementKind::Let { name, value, .. } => {
+                assert_eq!(name, "pair");
+                assert!(matches!(
+                    value,
+                    Expr::Pair { left, right }
+                        if matches!(left.as_ref(), Expr::Binary { .. })
+                            && matches!(right.as_ref(), expr if expr_is_path(expr, "tail"))
+                ));
+            }
+            other => panic!("expected pair let, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_module_distinguishes_generic_apply_from_indexing() {
         let parsed = parse_module(
             "fn main() -> Int:\n    let out = std.collections.list.new[(K, V)] :: :: call\n    return 0\n",
@@ -6223,9 +6591,7 @@ mod tests {
             StatementKind::Let {
                 value:
                     Expr::QualifiedPhrase {
-                        subject,
-                        qualifier,
-                        ..
+                        subject, qualifier, ..
                     },
                 ..
             } => {
@@ -6237,6 +6603,31 @@ mod tests {
                 ));
             }
             other => panic!("expected generic qualified phrase, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_module_preserves_phrase_calls_inside_pair_expressions() {
+        let parsed = parse_module(
+            "fn main() -> Bool:\n    return (std.collections.list.new[Str] :: :: call, \"\")\n",
+        )
+        .expect("pair expression should parse");
+
+        match &parsed.symbols[0].statements[0].kind {
+            StatementKind::Return { value } => match value
+                .as_ref()
+                .expect("return should carry a value")
+            {
+                Expr::Pair { left, right } => {
+                    assert!(matches!(
+                        left.as_ref(),
+                        Expr::QualifiedPhrase { qualifier, .. } if qualifier == "call"
+                    ));
+                    assert!(matches!(right.as_ref(), expr if expr_is_str_literal(expr, "\"\"")));
+                }
+                other => panic!("expected pair expression, got {other:?}"),
+            },
+            other => panic!("expected return statement, got {other:?}"),
         }
     }
 

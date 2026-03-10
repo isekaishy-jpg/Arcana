@@ -1,6 +1,9 @@
-# Memory v2 Scope (Plan 31)
+# Memory v2 Scope
 
-This file is the exact implemented scope for Plan 31.
+Status: `reference-only`
+
+This file captures a legacy implementation slice and is retained only as memory-system history.
+Current memory authority lives in `docs/specs/memory/memory/generic-memory-spec.md` and `docs/specs/memory/memory/deferred-roadmap.md`.
 
 ## Implemented Now
 

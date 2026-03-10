@@ -1,6 +1,7 @@
 # Rewrite Roadmap
 
 Arcana is being rewritten under a hard language freeze until selfhost.
+This roadmap tracks the current rewrite slice, not the full post-selfhost program.
 
 ## Current State
 
@@ -11,6 +12,9 @@ Completed foundation work:
 - explicit spec-status taxonomy plus pre-selfhost contract docs for page rollups, tuples, callable/context direction, and AnyBox ban
 - clarified frozen-doc interpretation so domain scopes beat descriptive implementation limits, tuple docs stay forward-looking, and chain-style semantics are explicit rather than inherited from Meadow-era behavior
 - seed import of frozen contract docs, conformance matrix, first-party grimoires, std, and source examples
+- explicit recognition that imported `std` and carried grimoires are behavioral seed corpus, not rewrite architecture authority
+- explicit std/grimoire governance docs so bootstrap-required surface and transitional carried roles are tracked in-repo instead of inferred from imports
+- explicit review boundary: approved docs plus `crates/*` define rewrite status, while carried `std`/grimoires/examples/generated snapshots are migration corpus unless a current scope ratifies them
 - deterministic path-only package graph, lockfile v1, and foundation build cache
 - shared workspace/package HIR loading and symbol-based module and imported-name resolution over the current parser foundation
 - explicit rejection of unsupported top-level syntax instead of silent skipping
@@ -32,14 +36,28 @@ Completed foundation work:
 - frontend semantic validation now includes conservative body-level value resolution for locals, namespace-qualified member chains, enum variant constructors, module impl-method paths, structured chain stages and bound args, memory constructors, rollup handlers, package/module-qualified value roots, and expression generic-argument type references over the imported selfhost corpus
 - boundary-varietal example/negative conformance now covers Lua/SQL compile-time interop contracts, and ECS docs now preserve first-class scheduler/component direction without freezing general query authoring into the selfhost baseline
 
+Imported-source guardrails:
+- carried `std`, `winspell`, `spell-events`, and compiler grimoires are known hotspot imports and must be rebuilt against the rewrite's typed HIR, IR, package, and AOT architecture rather than preserved as implementation templates
+- `std` itself is rewrite-owned first-party library surface; imports only provide carried behavior samples and transition corpus
+- first-party grimoire responsibilities are frozen by role, not by carried Meadow-era package names
+- imported standard-library contents do not automatically define correct standard-library layering; showcase/game/demo logic that leaked into `std` should move back into showcase or app grimoires unless it is explicitly ratified as general-purpose std surface
+- first-party host/io/window/input/canvas/time/audio plus primitive graphics/text remain required before selfhost so the rewrite can show real apps/showcases and bootstrap required grimoires, but the old MeadowLang `winspell`/VM/bytecode/winit stack is not the mandated implementation path
+- those host/app/runtime packages are real Rust rewrite commitments, not a promise that imported `std` or carried grimoires will keep satisfying them unchanged
+- third-party Rust crates may still appear underneath the runtime/backend, but only as replaceable private implementation details rather than the defining first-party substrate
+- parser opaque-expression fallback and typed resource handles are different concerns: the former should be eliminated from the frontend path before selfhost, while current typed `Window` / `Image` / `Audio*` std handles are only bootstrap seams and must be revisited once the rewrite-owned runtime/backend resource model is settled
+- ECS scheduling/components remain first-party language/runtime surface during the rewrite; they are not merely showcase helpers carried from MeadowLang
+- carried `std.app` fixed-step helpers and `std.tooling` planner helpers are convenience corpus, not rewrite-owned architecture until a scope explicitly ratifies them
+- carried generated snapshot artifacts such as direct-emit spec shards are not rewrite architecture evidence by themselves; use them to track migration work, not to override approved contracts or crate-side implementation status
+
 ## Next Milestones
 
 1. Replace the remaining raw opaque-expression fallbacks and any leftover bracket ambiguities with fully structured parsing.
-2. Extend the typed frontend from declaration-surface plus body-resolution checks into expression typing, ownership, and borrow/lifetime flow.
-3. Move package fingerprints from declaration-surface/source hashes to typed-HIR/API fingerprints.
-4. Compile first-party host/io/window/input grimoires against the new frontend.
-5. Replace the AOT placeholder with the first runnable backend.
-6. Port `arcana-frontend`, `arcana-compiler-core`, and `arcana-selfhost-compiler` onto the new toolchain.
+2. Freeze the rewrite-owned first-party package split and bootstrap ledgers: host-core in `selfhost-host/v1-scope`, app/runtime substrate in `app-substrate-v1-scope`, std scope/status, grimoire scope/status, ECS/behaviors kept first-party, and carried convenience layers explicitly left unratified.
+3. Extend the typed frontend from declaration-surface plus body-resolution checks into expression typing, ownership, and borrow/lifetime flow.
+4. Move package fingerprints from declaration-surface/source hashes to typed-HIR/API fingerprints.
+5. Compile rewrite-owned first-party host/io plus app/runtime packages and their consumer grimoires against the new frontend, trimming imported `std` back to approved responsibilities and moving showcase-specific helpers out where needed.
+6. Replace the AOT placeholder with the first runnable backend sufficient for carried `hello`, host-tool, window/input/canvas showcase proof, and basic audio smoke proof, with rewrite-owned host/window/input/canvas/events/time/audio/graphics/text seams implemented in Rust as real runtime commitments rather than compatibility wrappers.
+7. Port `arcana-frontend`, `arcana-compiler-core`, and `arcana-selfhost-compiler` onto the new toolchain.
 
 ## Non-Goals Before Selfhost
 

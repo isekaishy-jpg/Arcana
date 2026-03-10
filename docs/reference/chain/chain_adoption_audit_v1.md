@@ -1,5 +1,9 @@
 # Chain Adoption Audit v1
 
+Status: `reference-only`
+
+This audit is retained as adoption history only. It does not define the current chain contract or rewrite priorities.
+
 ## Scope
 - Plan: PLAN45 (chain-aware IR regions + conservative first-party adoption)
 - Date: 2026-03-03

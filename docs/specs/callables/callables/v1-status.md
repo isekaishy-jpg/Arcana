@@ -23,11 +23,19 @@ This document records the chosen direction for first-class callable capability w
 - Typed frontend and IR work should not invent placeholder closure semantics.
 - Future callable support should solve the lack of closures through explicit objects, not by reopening closure semantics through the back door.
 
+## Phrase Arity Interaction
+
+- The 3-top-level-arg cap on qualified and memory phrases is intentional.
+- That cap does not, by itself, create a need for function/context objects.
+- Higher-arity data should stay explicit through ordinary records, pair nesting, or statement-form attached metadata where that surface fits.
+- Function/context objects remain reserved for future first-class callable transport/callback needs, not as an escape hatch for phrase arity.
+
 ## Pre-Selfhost Guidance
 
 - Parser, HIR, IR, std, and runtime work must not assume callable/context objects exist yet.
 - New language work must not introduce hidden closure-like capture behavior.
 - Cleanup handlers, callbacks, and similar surfaces remain named callable paths only until a dedicated callable-object contract exists.
+- Parser/HIR/IR work must not treat the 3-arg phrase cap as justification for early callable/context-object design.
 
 ## Required Future Contract Before Implementation
 

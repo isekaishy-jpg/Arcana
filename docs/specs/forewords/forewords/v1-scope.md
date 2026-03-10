@@ -26,6 +26,11 @@
 - `import`, `reexport`, `use`
 - trait methods and impl methods
 - chain statements for `#chain[...]` only
+- attached header entries inside statement-form qualified/memory phrase blocks
+
+Attached-header-entry note:
+- These are header-local metadata carriers, not general statement/expression targets.
+- Built-in compiler-owned validation remains target-specific; attached-entry forewords do not automatically inherit declaration or chain-contract semantics.
 
 Boundary contract notes:
 - `#boundary[...]` is compile-time only in v1
@@ -36,7 +41,7 @@ Boundary contract notes:
 Not supported in v1:
 - field-level/param-level targets
 - expression-level targets
-- general statement-level targets outside chain-contract `#chain[...]`
+- general statement-level targets outside chain-contract `#chain[...]` and attached header-entry metadata
 
 ### Comment cutover
 - `#` comments are removed
@@ -53,7 +58,7 @@ Not supported in v1:
 - `#derive`
 - user-defined forewords (`foreword ...`)
 - runtime-retained metadata and introspection
-- general statement/expression targets beyond chain contracts
+- general statement/expression targets beyond chain contracts and attached header-entry metadata carriers
 
 ## Policy
 Any deferred foreword item must be tracked in:

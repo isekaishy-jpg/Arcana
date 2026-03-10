@@ -1,11 +1,16 @@
 # Arcana v0
 
-Arcana v0 is a small, typed, indentation-based language with access-mode parameters (`read`, `edit`, `take`) and a native JIT runtime (default, strict CLIF execution).
+Arcana v0 is a small, typed, indentation-based language with access-mode parameters (`read`, `edit`, `take`).
+
+Scope note:
+- This document summarizes the frozen source-language, grimoire/module shape, and first-party standard surface carried toward selfhost.
+- It is not the authority for backend implementation strategy, bootstrap/oracle history, artifact internals, or historical runtime modes.
+- Rewrite authority lives in `POLICY.md`, `docs/specs/spec-status.md`, `PLAN.md`, and `docs/rewrite-roadmap.md`.
 
 Repository policy note:
 - `POLICY.md` defines the current direction: no new public builtins, migrate toward Arcana-authored stdlib/shelves, and reject pseudo-builtin wrappers.
 
-This repository currently implements a working toy subset with:
+Arcana v0 currently includes:
 
 - `fn`, `let`, `mut`, `if`, `while`, `return`
 - `Int`, `Bool`, `Str`, `Unit`
@@ -18,138 +23,25 @@ This repository currently implements a working toy subset with:
 - Memory phrases v0.35: `arena|frame|pool: instance :> ... <: qualifier` with typed allocator storage (`Arena[T]`, `FrameArena[T]`, `PoolArena[T]` + corresponding ID handles)
 - Ownership/lifetimes v0.32 surface: explicit refs (`&'a T`, `&'a mut T`), borrow/deref expressions (`&x`, `&mut x`, `*x`), a carried lexical borrow contract, and `#boundary[target="lua|sql"]` signature contracts
 - Trait v2: associated types, default trait methods, supertrait bounds, projection equality in `where`
-- `arcana run/check/compile`
 
 ## Commands
 
-- `arcana run <file.arc | grimoire-dir> [--native-strict] [--host-root <dir>] [--allow-process] [--emit-scheduler-trace <file>] [-- [app args...]]`
-- `arcana check <file.arc | grimoire-dir> [--emit-summary <file>]`
-- `arcana selfhost-check <grimoire-dir> [--native-strict] [--host-root <dir>] [--allow-process] [--emit-summary <file>]`
-- `arcana compile <file.arc | grimoire-dir> -o <file.arcbc> [--emit-summary <file>]`
-- `arcana build <workspace-dir> [--member <name>] [--clean] [--plan] [--emit-ir-dump] [--emit-summary <file>]`
-- `arcana chant <file.arcbc> [--native-strict] [--host-root <dir>] [--allow-process] [--emit-scheduler-trace <file>] [-- [app args...]]`
+- `arcana check`
+- `arcana build --plan`
+- `arcana build`
 
-Single-file mode is intentionally minimal: it does not resolve `import`/`use`/`reexport`.
-Use grimoire mode (`arcana run/check <grimoire-dir>`) for std/module-based programs.
-Default runtime backend is `native`.
-`--backend vm` is no longer supported on public commands and returns:
-`vm backend is historical-only; use native runtime commands`.
-Historical VM execution is available only through the hidden `vm-legacy` command with explicit opt-in:
-`ARCANA_ENABLE_VM_LEGACY=1 arcana vm-legacy <file.arcbc>`.
-Native paths are strict by default; `--native-strict` is accepted for compatibility and is redundant.
-`arcana chant --backend native` requires signature-bearing scheduler metadata bytecode modules (`ARCB` v29+).
+Current rewrite public interfaces stop there until the first runnable AOT backend lands.
+Carried `run`/`compile`/artifact-execution expectations remain future-facing backend work, not current rewrite CLI contract.
+
+Single-file checking is intentionally minimal: it does not resolve `import`/`use`/`reexport`.
+Use grimoire/workspace mode (`arcana check <grimoire-dir>`, `arcana build <workspace-dir>`) for std/module-based programs.
 Source files are hard-standardized to `.arc` in file-mode commands and module loading.
 Migration helper: `powershell -ExecutionPolicy Bypass -File scripts/migrate_source_extensions_to_arc.ps1` (add `-Apply` to execute).
 
 `arcana build --member <name>` is strict: if non-target members have source fingerprint drift,
 build fails and requires a full `arcana build <workspace-dir>` refresh.
 
-### Check Cutover (Plan 50 Sunset)
-
-- `arcana check` is selfhost-canonical and runs the Arcana frontend checker path.
-- Legacy Rust check-oracle wiring has been retired.
-- Oracle phase state is tracked in `docs/specs/backend/check_oracle_state.toml`.
-- CI phase enforcement remains in `scripts/ci/check_oracle_phase_guard.ps1`.
-
-Canonical selfhost check protocol records:
-- `CHECK_DIAG_V1`:
-  - `code`
-  - `severity`
-  - `path`
-  - `line`
-  - `column`
-  - `end_line`
-  - `end_column`
-  - `message`
-- `CHECK_FINAL_V1`:
-  - `error_count`
-  - `warning_count`
-  - `checksum`
-
-Parity contract compares `{code,severity,path,line,column,end_line,end_column}` only.
-`message` text is informational and not parity-critical.
-
-### Compile/Build Cutover (Plan 53 Sunset)
-
-- `arcana compile` and `arcana build` are selfhost-canonical.
-- Legacy compile/build oracle commands were sunset-removed.
-- The compile/build oracle environment gate is no longer used.
-- Compile/build oracle phase state is tracked in:
-  - `docs/specs/backend/compile_oracle_state.toml` (`phase = "sunset"`).
-- Compile/build conformance is now canonical-only:
-  - committed native golden snapshots
-  - repeated-run determinism checks
-  - hard selfhost bootstrap proof
-- Selfhost core closure policy is tracked separately in:
-  - `docs/specs/backend/selfhost_core_state.toml`
-  - current phase: `cutover`
-- CI enforcement:
-  - `scripts/ci/selfhost_compile_parity_guard.ps1`
-  - `scripts/ci/selfhost_build_parity_guard.ps1`
-  - `scripts/ci/selfhost_bootstrap_hard_guard.ps1`
-  - `scripts/ci/selfhost_runnable_artifact_guard.ps1`
-  - `scripts/ci/selfhost_no_proxy_guard.ps1`
-  - `scripts/ci/selfhost_no_seed_guard.ps1`
-  - `scripts/ci/selfhost_core_phase_guard.ps1`
-  - `scripts/ci/compile_oracle_phase_guard.ps1`
-- canonical selfhost compile/build/bootstrap guard lanes also run with
-  `ARCANA_FORBID_HOST_COMPILER=1` so host compiler intrinsics are blocked in canonical mode
-- canonical selfhost compile/build/bootstrap guard lanes also run with
-  `ARCANA_FORBID_SEED_FALLBACK=1` so seed/template fallback paths are blocked in canonical mode
-- canonical selfhost compile/build/bootstrap guard lanes also run with
-  `ARCANA_FORBID_SELFHOST_BRIDGE=1` so hidden bridge/proxy subprocess paths fail deterministically
-- canonical `compile` and `build` execute an installed runnable selfhost compiler artifact
-  through the normal bytecode path with `allow_process=false`
-- canonical selfhost artifact emit no longer uses host compiler intrinsics
-- current first-party `book.toml` targets emit through generated compiler-core registry data synced
-  from checked-in direct-emit specs, enforced by
-  `scripts/ci/selfhost_direct_emit_spec_coverage_guard.ps1`
-- current first-party `book.toml` targets also compile canonically under
-  `ARCANA_FORBID_HOST_COMPILER=1`, `ARCANA_FORBID_SEED_FALLBACK=1`, and
-  `ARCANA_FORBID_SELFHOST_BRIDGE=1` via `scripts/ci/selfhost_firstparty_compile_guard.ps1`
-- shared compile-grade source/workspace logic is being extracted into
-  `grimoires/arcana-compiler-core`
-- install or refresh the canonical compiler artifact with:
-  - `arcana selfhost-install`
-- CI bootstraps a temporary installed toolchain via `selfhost-install` before running
-  canonical selfhost compile/build/bootstrap guard lanes
-- selfhost compiler artifacts are real runnable `ARCB` modules; `arcana chant <compiler.arcbc> -- compile ...`
-  uses the normal bytecode runtime path rather than token routing or source-side Rust recompilation
-
-Compile/build recovery policy:
-- Permanent Rust recovery path is intentionally non-default.
-- Hidden recovery commands exist only in feature-enabled builds:
-  - `arcana recover-compile ...`
-  - `arcana recover-build ...`
-- Build requirement:
-  - compile `arcana-cli` with `--features recovery-rust-oracle`
-- Runtime gate:
-  - `ARCANA_ENABLE_RECOVERY_ORACLE=1`
-
-Canonical selfhost compile/build protocol records:
-- `COMPILE_DIAG_V1`:
-  - `code`
-  - `severity`
-  - `path`
-  - `line`
-  - `column`
-  - `end_line`
-  - `end_column`
-  - `message`
-- `COMPILE_ARTIFACT_V1`:
-  - `kind`
-  - `path`
-  - `fingerprint`
-  - `ir_fingerprint`
-  - `bytecode_version`
-- `BUILD_EVENT_V1`:
-  - `member`
-  - `status`
-  - `artifact_path`
-- `COMPILE_FINAL_V1`:
-  - `error_count`
-  - `warning_count`
-  - `checksum`
+Detailed backend, selfhost, and bootstrap workflow policy is tracked outside this document.
 
 ## Grimoires (v0.3)
 
@@ -252,10 +144,11 @@ Arcana’s phrase family has three forms:
 | Memory phrase | `memory_type: instance :> args? <: qualifier` | expression + statement |
 | Chain phrase | `style :=(>|<) stage...` with `=>`/`<=` connectors | expression + statement |
 
-Header phrases are qualified/memory phrases. A header phrase may own an attached block. In attached blocks:
+Header phrases are statement-form qualified/memory phrases. A header phrase may own an attached block. In attached blocks:
 
 - `name = expr` remains valid header metadata/named-arg overflow
 - chain phrase lines are valid and execute in source order
+- forewords may annotate attached entries as header-local metadata, similar in spirit to Rust attributes
 - each attached chain receives the prior result implicitly
 
 Evaluation order for attached header blocks:
@@ -270,11 +163,12 @@ Evaluation order for attached header blocks:
 Arcana now supports qualified phrase invocation syntax:
 
 - `subject :: args :: qualifier`
-- args are comma-separated top-level inline items
+- args are comma-separated top-level inline items, with at most 3 top-level args
 - trailing comma before the qualifier is rejected
 - qualifier forms:
   - named/path (for example `call`, `join`, `std.io.print`)
   - symbols: `?`, `>`, `>>`
+- attached blocks are valid only on standalone statement-form qualified phrases
 
 Core behavior:
 
@@ -293,6 +187,12 @@ Counter :: :: call
 
 For `call`, `>`, and bare method qualifiers, attached `name = expr` entries are treated as
 additional named arguments.
+
+For dotted path qualifiers, `?`, and `>>`, attached `name = expr` entries are rejected.
+
+If a call needs more than 3 independent top-level inline inputs, group them explicitly into
+pair/record data or move named overflow into a statement-form attached block. The 3-arg cap is
+intentional.
 
 Classic user call syntax (`f(...)`, `obj.method(...)`) is removed. Use qualified phrases.
 
@@ -335,7 +235,7 @@ Arcana now includes a first collection surface centered on `List[T]`.
   - `xs[i] = v`
   - `xs[i] += 1`
   - `xs[i] shr= 1`
-- Shelf-first list API (Plan 15):
+- Shelf-first list API:
   - `std.collections.list.new[T]()`
   - `xs :: :: len`
   - `xs :: v :: push`
@@ -448,7 +348,7 @@ Std now includes a trait-based iterator foundation:
 - `impl std.iter.Iterator[SingletonCursor[T]] for SingletonCursor[T]`
 
 This demonstrates associated-type-based abstractions across std modules without adding new builtins.
-It does not freeze general ECS query syntax; Meadow carried first-class ECS direction, but broad query authoring remained incomplete.
+It does not freeze general ECS query syntax; broad query authoring remains outside the frozen selfhost baseline.
 
 ## Std-Style Shelf Foundation
 
@@ -463,12 +363,12 @@ See `examples/grimoire_std_methods_app` for:
 
 This provides the intended direction where app code uses shelf methods instead of direct builtin calls.
 
-## De-Builtinization Phase 1 (v0.15)
+## Collection De-Builtinization (v0.15)
 
 Collections are now de-builtinized through an internal intrinsic bridge.
 
 - Public usage is shelf-first via `std.collections.*`.
-- Compiler/VM collection semantics no longer rely on collection callee-string dispatch branches.
+- Collection semantics no longer rely on collection callee-string dispatch branches.
 - Direct calls to legacy collection builtins are hard errors by default.
 - Legacy collection call names are removed; use shelf-first APIs.
 - `intrinsic fn` is internal: restricted to trusted `std.kernel.*` modules.
@@ -482,9 +382,11 @@ Memory phrase syntax:
 
 - `memory_type: instance :> args? <: qualifier`
 - v2 supports `memory_type = arena | frame | pool`
-- inline args are comma-separated top-level items
+- inline args are comma-separated top-level items, with at most 3 top-level args
 - arg items support positional and named (`name = expr`)
 - trailing comma before the qualifier is rejected
+- constructor/qualifier must be a path or `path[type_args]`
+- attached blocks are valid only on standalone statement-form memory phrases
 
 Allocator phrase lowering:
 
@@ -545,8 +447,9 @@ Runtime semantics:
 
 Notes:
 
-- Attached blocks on memory phrase statements follow header-phrase rules: `name = expr` entries and chain lines are both valid.
+- Attached blocks on memory phrase statements follow header-phrase rules: `name = expr` entries and chain lines are both valid, and attached entries may carry forewords as header-local metadata.
 - Unknown memory types are rejected with a future-reserved diagnostic.
+- If a memory phrase needs more than 3 independent top-level inline inputs, group them explicitly into pair/record data. The 3-arg cap is intentional.
 - `std.memory` exposes allocator borrow APIs:
   - `borrow_read` / `borrow_edit` for `Arena`, `FrameArena`, and `PoolArena`.
 - `reset`/`remove` are compile-time rejected when live allocator borrows would be invalidated.
@@ -696,7 +599,7 @@ Supported `#chain` keys:
 
 - `phase`, `deterministic`, `thread`, `authority`, `rollback_safe`
 
-Migration note:
+Compatibility note:
 
 - legacy `reverse :=> ...` style is removed
 - use an existing directional style with reverse introducer and reverse connectors (`<style> :=< ... <= ...`)
@@ -743,11 +646,13 @@ Desktop APIs are now shelf-first through toolchain std modules:
 
 Recommended app-facing layer:
 
-- `winspell` (first-party lib grimoire) depends on `std.*` and provides a maintainable windowing facade for demos/apps.
-- `spell_events` (first-party companion lib grimoire) provides event/keybind/frame-input helpers on top of `winspell` + `std.events`.
-- Demo/window-focused apps should prefer `winspell.*`; `std.*` remains the low-level stable substrate.
+- carried `winspell` and `spell_events` grimoires are first-party consumer/reference imports, not rewrite implementation authority
+- the rewrite still requires first-party window/input/canvas and primitive graphics/text support sufficient for real apps/showcases and eventual selfhost proof
+- low-level `std.time` and `std.audio` substrate are tracked as bootstrap-owned std surface in `docs/specs/selfhost-host/selfhost-host/app-substrate-v1-scope.md` and `docs/specs/std/std/v1-status.md`
+- demo/showcase/game-specific helper logic belongs in showcase or app grimoires unless it is explicitly ratified as general-purpose std surface
+- `std.*` remains the low-level substrate; higher-level facades are expected to be rebuilt for the rewrite architecture rather than copied mechanically from Meadow-era implementation layers
 
-Plan 17 migration status:
+Surface policy:
 
 - Direct legacy calls to `sigil_*`, `window_*`, `key_*`, `mouse_*` are hard errors.
 - The compiler now lowers desktop API calls through intrinsic bindings rather than owning semantics by callee-name dispatch.
@@ -768,11 +673,7 @@ Notes:
 - `std.canvas.image_load` supports PNG-only in v0.12+.
 - Image blits use nearest-neighbor scaling and source-over alpha blending.
 
-Backend note:
-
-- The Windows runtime backend is `winit + softbuffer` with immediate present semantics.
-- `std.window.set_topmost` is supported on the Windows backend.
-- Non-Windows builds keep deterministic unsupported diagnostics for window runtime paths.
+- Platform/backend implementation details are intentionally outside this document.
 
 ## Events + App Helpers (v0.17)
 
@@ -807,6 +708,13 @@ New modules:
 - `fixed_runner_step(edit runner, frame_ms) -> (Int, Int)` (steps, alpha_milli)
 - `fixed_runner_reset(edit runner)`
 
+Rewrite note:
+
+- `std.events` is part of the first-party app/runtime substrate required before selfhost.
+- `std.ecs` and `std.behaviors.step` remain first-party language/runtime surface.
+- `std.time` and `std.audio` are bootstrap-owned low-level substrate categories; higher-level loop and playback policy belongs in first-party grimoires.
+- carried `std.app` fixed-step helpers are convenience corpus, not the rewrite's canonical app architecture unless later ratified by an explicit scope.
+
 `std.ecs` currently provides scheduler-phase helpers for behavior/system stepping:
 
 - `step_startup()`
@@ -830,7 +738,7 @@ New modules:
 Runtime note:
 
 - First-class ECS scheduling/components are part of the carried v0 surface through `behavior[...] fn`, `system[...] fn`, and `std.ecs`.
-- General ECS query authoring is not yet part of the frozen selfhost baseline; Meadow had direction here, but broad query support was not fully landed.
+- General ECS query authoring is not yet part of the frozen selfhost baseline.
 - `affinity=worker` component systems run via worker execution when component arguments are transferable; non-transferable component values fall back to deterministic main-thread execution.
 - Worker-applied component writes are fail-fast checked; if a targeted component changed before apply, runtime reports an ECS worker apply conflict.
 - Worker-affinity systems require sendable component parameter types.
@@ -841,18 +749,16 @@ Runtime note:
 - `plan_local_workspace(members, deps) -> Result[List[Str], Str]`
 - `std.tooling.graph.topo_sort(members, deps)`
 
-Toolchain integration:
+Rewrite note:
 
-- `arcana build <workspace-dir> --plan` compiles and executes `std.tooling` to print deterministic build order.
-- `arcana build <workspace-dir>` compiles workspace members in topo order, reuses deterministic artifact cache entries, and writes `Arcana.lock`.
-- `arcana build <workspace-dir> --emit-ir-dump` writes deterministic SSA CFG IR dump files (`arcana-ir-v2-ssa`) to `.arcana/logs/*.ir.txt` during build compilation.
-- In `build` mode, members compile against artifact-derived dependency interfaces and app outputs are linked with compiled `.arclib` dependency modules (no dependency source flattening in the build path).
+- carried `std.tooling` helpers are not, by themselves, rewrite-approved standard-library architecture; they may move to toolchain/support grimoires unless later ratified by scope.
+
+Workspace/build notes:
+
+- `arcana build <workspace-dir> --plan` prints deterministic build order.
+- `arcana build <workspace-dir>` builds workspace members in topo order and writes `Arcana.lock`.
 - Grimoire `[deps]` path dependencies are import-resolvable in compile/check/run flows (`import <dep>.*`).
-- Build artifacts are written under `.arcana/artifacts/<member>/<fingerprint_hex>.<ext>`:
-  - app members: `.arcbc`
-  - lib members: `.arclib`
-- Build summaries are written to `.arcana/logs/build-last.txt`.
-- `Arcana.lock` (v3) includes members, order, paths, deps, fingerprints, artifact paths, and per-member artifact metadata (`kind`, `format`, `content_hash`).
+- Build/cache artifact layout is a toolchain detail and is not frozen here.
 
 See:
 
@@ -872,7 +778,7 @@ See:
 - `grimoires/winspell`
 - `grimoires/spell-events`
 
-## Concurrency / IO Migration (v0.17)
+## Concurrency / IO Surface (v0.17)
 
 New shelf-first modules:
 
@@ -891,12 +797,12 @@ Canonical surface:
 - `phase :: :: std.behaviors.step`
 - `value :: :: std.io.print`
 
-Plan 17 policy:
+Surface policy:
 
 - Legacy concurrency/behavior call names are removed from compiler special handling; use `std.concurrent` + methods and `std.behaviors.step`.
 - Legacy call-name interception for `print` is removed; use `value :: :: std.io.print`.
 
-## Plan 4 Concurrency + Behaviors (v0.4)
+## Concurrency + Behaviors (v0.4)
 
 Implemented surface:
 
@@ -920,24 +826,20 @@ Examples:
 - `examples/atomic_counter`
 - `examples/grimoire_behavior_app`
 
-Implementation notes (current behavior):
+Current behavior:
 
-- `weave`/`split`/`await` and `std.behaviors.step` are implemented end-to-end in compiler + bytecode + native
+- `weave`/`split`/`await` and `std.behaviors.step` are supported by the current toolchain/runtime
 - `async fn main() -> Int|Unit` is supported
 - `split` now runs targets on real OS threads for sendable runtime values (`Int`/`Bool`/`Str`/sendable records), with thread/task completion via `h :: :: join` / `t :: :: join`
 - `Channel[T]`, `Mutex[T]` (move-lock), `AtomicInt`, and `AtomicBool` are available via `std.concurrent` constructors and methods
 - Channel ops now produce runtime errors for obvious closed/disconnected cases (`recv` on closed+empty, bounded `send` to a closed channel), with best-effort detection in the current single-handle channel model
 - `weave` is executor-first in v0.4: it creates hot local tasks on the main-thread async runtime path; `split` remains the explicit OS-thread primitive
-- Local task execution now preserves/resumes VM call frames across suspension points for `std.concurrent.sleep`, `Channel.recv`, bounded-full `Channel.send`, and `Mutex.pull`
-- Local channel/mutex waits in suspended tasks now use host condvars for wake blocking, and nested local-task `await` blocks directly on the child task instead of short polling
 - `task :: :: done` now advances progress across the reachable local await-graph (not just the top task), and reports completion status without blocking
-- native `std.behaviors.step` executes metadata-driven scheduler groups with deterministic phase/group ordering
-- VM is historical-only and no longer part of active runtime command flows.
+- `std.behaviors.step` executes metadata-driven scheduler groups with deterministic phase/group ordering
 - `std.canvas.*`, `std.window.*`, `std.input.*`, and `std.behaviors.step` are runtime-enforced as main-thread-only
-- Local tasks now use a thread-local ready queue + wake notifications and queue-driven progression across await-graphs; `split` threads still use blocking host-thread semantics by design (intentional for v0.4)
 
 
-## Forewords (v1) and Comment Cutover
+## Forewords (v1) and Comments
 
 Arcana v1 forewords use prefix metadata syntax:
 
@@ -982,6 +884,13 @@ v1 attachment targets:
 - top-level declarations (`fn`, `record`, `enum`, `trait`, `impl`, `behavior`, `system`)
 - `import`, `reexport`, `use`
 - trait methods and impl methods
+- chain statements for `#chain[...]` only
+- attached header entries inside statement-form qualified/memory phrase blocks as header-local metadata carriers
+
+Attached-header-entry note:
+
+- these are header-local metadata carriers, not general statement/expression targets
+- built-in declaration and chain-contract semantics do not automatically retarget there
 
 Boundary note:
 
@@ -991,7 +900,8 @@ Boundary note:
 
 Not in v1:
 
-- field/param/statement/expression forewords
+- field/param forewords
+- general statement/expression forewords outside chain-contract statements and attached header entries
 - `#derive`
 - user-defined forewords (`foreword ...`)
 
@@ -1003,14 +913,14 @@ Compiler migration diagnostic:
 
 `'#' comments were removed; use '//' comments and '#[...]' forewords`
 
-Migration helper:
+Comment conversion helper:
 
 - `powershell -ExecutionPolicy Bypass -File scripts/migrate_comments_to_slashslash.ps1` (dry-run)
 - `powershell -ExecutionPolicy Bypass -File scripts/migrate_comments_to_slashslash.ps1 -Apply`
 
 ## Selfhost Host Platform v2
 
-Native-first host/tooling substrate is available under `std.*`:
+Host/tooling substrate is available under `std.*`:
 
 - `std.args`
 - `std.env`
@@ -1022,17 +932,17 @@ Native-first host/tooling substrate is available under `std.*`:
 
 Policy:
 
-- Native backend is canonical for host APIs.
-- Historical VM behavior is available only via hidden `vm-legacy` command and is not part of active host/tooling workflows.
+- Exact approved host-core surface lives in `docs/specs/selfhost-host/selfhost-host/v1-scope.md`.
+- Imported `std` helper expansions beyond that approved host-core scope are not frozen here just because they were carried from MeadowLang.
+- Runnable execution host-root and process-capability policy applies when execution commands return with the first runnable backend; it is not evidence of current CLI surface.
+
 - Host filesystem APIs are sandboxed to a runtime host-root:
-  - `run <grimoire-dir>` -> grimoire directory
-  - `run <file.arc>` -> parent directory of file
-  - `chant <file.arcbc>` -> current working directory
-- `run` and `chant` support app-argument pass-through via `--` and explicit host-root override via `--host-root <dir>`.
-- native scheduler trace output can be emitted with:
-  - `--emit-scheduler-trace <file>` on `run` and `chant` (native-only)
+  - grimoire execution -> grimoire directory
+  - file execution -> parent directory of file
+  - artifact execution -> current working directory
+- execution flows support app-argument pass-through via `--` and explicit host-root override via `--host-root <dir>`.
 - `std.process.exec_status(program, args)` requires explicit capability opt-in:
-  - `--allow-process` on `run`, `chant`, or `selfhost-check`
+  - `--allow-process` on runnable execution flows
   - without the flag: `process execution is disabled; rerun with --allow-process`
 - `std.fs` includes binary file APIs: `read_bytes(path) -> Array[Int]` and `write_bytes(path, bytes)`.
 - `std.fs` includes streaming APIs:

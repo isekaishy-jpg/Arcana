@@ -1,18 +1,17 @@
 import winspell.window
 import winspell.draw
+import winspell.loop
 import spell_events.router
-import std.app
 import std.io
-use std.app as app
 use std.io as io
 use std.collections.list as list
 
 fn main() -> Int:
     let mut win = winspell.window.open :: "Arcana Events", 320, 180 :: call
-    let mut runner = app.fixed_runner :: 60 :: call
+    let mut runner = winspell.loop.fixed_runner :: 60 :: call
     let mut frames = 0
-    while winspell.window.alive :: win :: call:
-        let step = app.fixed_runner_step :: runner, 16 :: call
+    while winspell.loop.should_run :: win :: call:
+        let step = winspell.loop.fixed_runner_step :: runner, 16 :: call
         let queued = spell_events.router.drain :: win :: call
         let qn = queued :: :: list.len
         if qn > 0:

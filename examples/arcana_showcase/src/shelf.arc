@@ -2,18 +2,17 @@ import std.canvas
 import std.window
 import std.input
 import std.events
-import std.app
 import std.memory
 import std.collections.list
 import std.collections.map
 import std.collections.array
 import std.concurrent
 import std.io
+import winspell.loop
 use std.canvas as canvas
 use std.window as window
 use std.input as input
 use std.events as events
-use std.app as app
 use std.memory as memory
 use std.collections.list as list
 use std.collections.map as map
@@ -62,7 +61,7 @@ fn main() -> Int:
     let sw = sprite_size.0
     let sh = sprite_size.1
 
-    let mut runner = app.fixed_runner :: 60 :: call
+    let mut runner = winspell.loop.fixed_runner :: 60 :: call
     let mut palette = array.new[Int] :: 4, 0 :: call
     palette[0] = canvas.rgb :: 12, 16, 24 :: call
     palette[1] = canvas.rgb :: 64, 190, 255 :: call
@@ -93,7 +92,7 @@ fn main() -> Int:
     run_chain_matrix :: :: call
 
     while canvas.alive :: win :: call:
-        let step = app.fixed_runner_step :: runner, 16 :: call
+        let step = winspell.loop.fixed_runner_step :: runner, 16 :: call
         let _alpha = step.1
         let frame_events = events.drain :: win :: call
         let event_count = frame_events :: :: len

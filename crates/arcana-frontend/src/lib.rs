@@ -3,9 +3,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use arcana_hir::{
-    HirAssignTarget, HirChainStep, HirExpr, HirHeaderAttachment, HirImplDecl, HirMatchPattern, HirModule,
-    HirModuleSummary, HirResolvedModule, HirResolvedTarget, HirResolvedWorkspace, HirStatement,
-    HirStatementKind, HirSymbol, HirSymbolBody, HirSymbolKind, HirWorkspacePackage,
+    HirAssignTarget, HirChainStep, HirExpr, HirHeaderAttachment, HirImplDecl, HirMatchPattern,
+    HirModule, HirModuleSummary, HirResolvedModule, HirResolvedTarget, HirResolvedWorkspace,
+    HirStatement, HirStatementKind, HirSymbol, HirSymbolBody, HirSymbolKind, HirWorkspacePackage,
     HirWorkspaceSummary, lower_module_text, resolve_workspace,
 };
 use arcana_package::load_workspace_hir as load_package_workspace_hir;
@@ -800,7 +800,10 @@ fn boundary_symbol_is_safe(
 }
 
 fn is_boundary_safe_builtin_name(name: &str) -> bool {
-    matches!(name, "Int" | "Bool" | "Str" | "Unit" | "List" | "Array" | "Map")
+    matches!(
+        name,
+        "Int" | "Bool" | "Str" | "Unit" | "List" | "Array" | "Map"
+    )
 }
 
 fn is_boundary_unsafe_builtin_name(name: &str) -> bool {
@@ -819,6 +822,9 @@ fn is_boundary_unsafe_builtin_name(name: &str) -> bool {
             | "RangeInt"
             | "Window"
             | "Image"
+            | "AudioDevice"
+            | "AudioBuffer"
+            | "AudioPlayback"
             | "AtomicInt"
             | "AtomicBool"
     )
@@ -1141,15 +1147,12 @@ fn validate_assign_target_semantics(
             diagnostics,
         ),
         target @ HirAssignTarget::MemberAccess {
-            target: inner_target, ..
+            target: inner_target,
+            ..
         } => {
             if let Some(path) = flatten_assign_target_path(target) {
-                if should_resolve_member_path_as_namespace(
-                    workspace,
-                    resolved_module,
-                    scope,
-                    &path,
-                ) {
+                if should_resolve_member_path_as_namespace(workspace, resolved_module, scope, &path)
+                {
                     validate_value_path_segments(
                         workspace,
                         resolved_module,
@@ -1175,16 +1178,16 @@ fn validate_assign_target_semantics(
             );
         }
         HirAssignTarget::Index { target, index } => {
-                validate_assign_target_semantics(
-                    workspace,
-                    resolved_module,
-                    module_path,
-                    type_scope,
-                    scope,
-                    target,
-                    span,
-                    diagnostics,
-                );
+            validate_assign_target_semantics(
+                workspace,
+                resolved_module,
+                module_path,
+                type_scope,
+                scope,
+                target,
+                span,
+                diagnostics,
+            );
             validate_expr_semantics(
                 workspace,
                 resolved_module,
@@ -1235,23 +1238,23 @@ fn validate_expr_semantics(
             validate_expr_semantics(
                 workspace,
                 resolved_module,
-                    module_path,
-                    type_scope,
-                    scope,
-                    left,
-                    span,
-                    diagnostics,
-                );
-                validate_expr_semantics(
-                    workspace,
-                    resolved_module,
-                    module_path,
-                    type_scope,
-                    scope,
-                    right,
-                    span,
-                    diagnostics,
-                );
+                module_path,
+                type_scope,
+                scope,
+                left,
+                span,
+                diagnostics,
+            );
+            validate_expr_semantics(
+                workspace,
+                resolved_module,
+                module_path,
+                type_scope,
+                scope,
+                right,
+                span,
+                diagnostics,
+            );
         }
         HirExpr::CollectionLiteral { items } => {
             for item in items {
@@ -1461,12 +1464,8 @@ fn validate_expr_semantics(
         }
         member_expr @ HirExpr::MemberAccess { expr, .. } => {
             if let Some(path) = flatten_member_expr_path(member_expr) {
-                if should_resolve_member_path_as_namespace(
-                    workspace,
-                    resolved_module,
-                    scope,
-                    &path,
-                ) {
+                if should_resolve_member_path_as_namespace(workspace, resolved_module, scope, &path)
+                {
                     validate_value_path_segments(
                         workspace,
                         resolved_module,
@@ -1933,11 +1932,7 @@ fn module_path_exists(
         let Some(target_module) = package.resolve_relative_module(&symbol_module_path) else {
             continue;
         };
-        if module_value_member_exists(
-            target_module,
-            &path[split_index],
-            &path[split_index + 1..],
-        ) {
+        if module_value_member_exists(target_module, &path[split_index], &path[split_index + 1..]) {
             return true;
         }
     }
@@ -1982,10 +1977,9 @@ fn should_resolve_member_path_as_namespace(
     if let Some(binding) = resolved_module.bindings.get(&path[0]) {
         return match &binding.target {
             HirResolvedTarget::Module { .. } => true,
-            HirResolvedTarget::Symbol { .. } => target_supports_member_namespace(
-                workspace,
-                &binding.target,
-            ),
+            HirResolvedTarget::Symbol { .. } => {
+                target_supports_member_namespace(workspace, &binding.target)
+            }
         };
     }
     if workspace.package(&path[0]).is_some() {
@@ -2015,7 +2009,12 @@ fn target_supports_member_namespace(
         } => workspace
             .package(package_name)
             .and_then(|package| package.module(module_id))
-            .and_then(|module| module.symbols.iter().find(|symbol| symbol.name == *symbol_name))
+            .and_then(|module| {
+                module
+                    .symbols
+                    .iter()
+                    .find(|symbol| symbol.name == *symbol_name)
+            })
             .map(|symbol| matches!(symbol.body, HirSymbolBody::Enum { .. }))
             .unwrap_or(false),
     }
@@ -2293,6 +2292,9 @@ fn is_builtin_type_name(name: &str) -> bool {
             | "AtomicBool"
             | "Window"
             | "Image"
+            | "AudioDevice"
+            | "AudioBuffer"
+            | "AudioPlayback"
     )
 }
 
@@ -2560,8 +2562,16 @@ mod tests {
                 "`#inline` is not a valid statement-level contract",
             ),
             (
+                "phrase_arg_arity.arc",
+                "qualified phrase allows at most 3 top-level arguments",
+            ),
+            (
                 "phrase_arg_shape.arc",
                 "trailing comma is not allowed before phrase qualifier",
+            ),
+            (
+                "memory_phrase_arg_arity.arc",
+                "memory phrase allows at most 3 top-level arguments",
             ),
             (
                 "unknown_memory_type.arc",
@@ -2667,6 +2677,14 @@ mod tests {
     }
 
     #[test]
+    fn check_path_handles_rewrite_owned_audio_grimoire() {
+        let summary = check_path(&repo_root().join("grimoires").join("spell-audio"))
+            .expect("audio grimoire should check");
+        assert!(summary.package_count >= 2);
+        assert!(summary.module_count >= 4);
+    }
+
+    #[test]
     fn check_path_handles_builtin_foreword_example() {
         let summary = check_path(&repo_root().join("examples").join("forewords_builtin_app"))
             .expect("foreword example should check");
@@ -2676,8 +2694,12 @@ mod tests {
 
     #[test]
     fn check_path_handles_boundary_interop_example() {
-        let summary = check_path(&repo_root().join("examples").join("interop_boundary_contracts"))
-            .expect("boundary interop example should check");
+        let summary = check_path(
+            &repo_root()
+                .join("examples")
+                .join("interop_boundary_contracts"),
+        )
+        .expect("boundary interop example should check");
         assert_eq!(summary.package_count, 2);
         assert!(summary.module_count >= 3);
     }
@@ -2695,6 +2717,14 @@ mod tests {
             .expect("page rollup example should check");
         assert_eq!(summary.package_count, 2);
         assert!(summary.module_count >= 3);
+    }
+
+    #[test]
+    fn check_path_handles_audio_smoke_example() {
+        let summary = check_path(&repo_root().join("examples").join("audio_smoke_demo"))
+            .expect("audio smoke example should check");
+        assert!(summary.package_count >= 2);
+        assert!(summary.module_count >= 4);
     }
 
     #[test]

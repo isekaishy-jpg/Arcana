@@ -34,6 +34,7 @@ id = "qualified_phrases"
 status = "required"
 positive = ["examples/grimoire_std_methods_app", "examples/pair_try_pop"]
 negative = [
+    "conformance/check_parity_fixtures/phrase_arg_arity.arc",
     "conformance/check_parity_fixtures/phrase_arg_shape.arc",
 ]
 
@@ -100,6 +101,7 @@ id = "memory_phrase_allocators"
 status = "required"
 positive = ["examples/memory_phrase_frame_pool", "examples/pool_reuse_cycle"]
 negative = [
+    "conformance/check_parity_fixtures/memory_phrase_arg_arity.arc",
     "conformance/check_parity_fixtures/unresolved_symbol.arc",
     "conformance/check_parity_fixtures/unknown_memory_type.arc",
 ]

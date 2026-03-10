@@ -6,12 +6,13 @@
   - it treated the freeze as soft instead of absolute,
   - it underspecified incremental build scope,
   - it was too vague about which legacy materials to carry forward.
-- The rewrite stays Rust-first, but the architecture is explicitly shaped for four non-language goals before selfhost: deterministic package management, real incremental builds, early first-party IO/window/input packages, and an eventual AOT backend.
+- The rewrite stays Rust-first, but the architecture is explicitly shaped for four non-language goals before selfhost: deterministic package management, real incremental builds, early first-party host plus app/runtime packages, and an eventual AOT backend.
 
 ## Seed Import and Governance
 - Copy forward only the source-of-truth docs and corpus that define the frozen contract:
   - the language contract and freeze docs,
   - the selfhost language matrix,
+  - the std and first-party grimoire scope/status docs,
   - the chain, memory, host, backend, and policy docs that describe behavior rather than old implementation.
 - Copy forward source grimoires and examples that define required behavior:
   - `std`,
@@ -63,20 +64,23 @@
   - `arcana build`.
 - First-party package milestone includes both host-core and windowing layers:
   - host/core packages for text, fs, path, process, args/env,
-  - window/input/canvas packages,
-  - then `winspell` and `spell-events` as first consumers proving the package surface is usable.
+  - app/runtime packages for window/input/canvas/events/time/audio plus primitive graphics/text,
+  - ECS/behavior runtime substrate remains first-party and is not treated as showcase-only logic,
+  - then the required first-party grimoires for frontend, compiler-core, selfhost-compiler, desktop facade, event/input utility, and audio facade prove the package surface is usable,
+  - and those packages are real Rust-side runtime commitments of the rewrite, not temporary compatibility shims to be deferred until after selfhost.
 - Artifact strategy is explicit:
   - no public bytecode compatibility contract in the new repo,
   - internal IR may be serialized for tests/cache/bootstrap only,
   - AOT is the intended public delivery path,
-  - if a temporary interpreter or bootstrap artifact exists, it stays internal and unstable until after selfhost.
+  - if a temporary interpreter or bootstrap artifact exists, it stays internal and unstable until after selfhost,
+  - but the required host/app/runtime substrate still lands as rewrite-owned Rust implementation work before selfhost.
 - Selfhost sequence is fixed:
   1. repo scaffold + copied docs/corpus + freeze policy,
   2. package graph + lockfile + deterministic planning,
   3. parser/HIR/frontend for the frozen language matrix,
   4. incremental build and cache correctness,
-  5. first-party host/io/window/input packages compile on the new frontend,
-  6. internal IR and first AOT backend,
+  5. first-party host/io plus app/runtime packages compile on the new frontend,
+  6. internal IR and first AOT backend with rewrite-owned host/window/input/canvas/events/graphics/text substrate,
   7. runnable proof on carried-over examples such as `hello`, one host tool, and one window demo,
   8. port `arcana-frontend`, then `arcana-compiler-core`, then `arcana-selfhost-compiler`,
   9. declare selfhost only when the new compiler can build its own compiler corpus without using the old MeadowLang implementation.
@@ -96,8 +100,8 @@
   - diagnostics preserve path/line/column stability for the curated negative corpus.
 - First-party packages:
   - compile tests for core host packages,
-  - compile tests for window/input/canvas packages,
-  - package-level tests proving `winspell` and `spell-events` build against the new package/runtime boundary.
+  - compile tests for window/input/canvas/time/audio packages,
+  - package-level tests proving the required first-party grimoire roles build against the new package/runtime boundary.
 - Backend/selfhost:
   - first AOT milestone must run `hello`, one host-tool example, and one window example,
   - selfhost milestone must build the carried-over compiler grimoires with the new toolchain and no fallback to the legacy MeadowLang repo.
@@ -107,4 +111,4 @@
 - Pre-selfhost work may change manifests, lockfiles, caches, host APIs, backend internals, and package tooling, but may not change the source language.
 - Path dependencies are the only supported dependency source until after selfhost.
 - `Arcana.lock` is restarted at `version = 1` in the new repo rather than inheriting MeadowLang’s lockfile schema wholesale.
-- Early IO/window/input support means “supported before selfhost”, not “before the frontend exists”; runnable demos arrive with the first AOT backend milestone.
+- Early host/app substrate support means “supported before selfhost”, not “before the frontend exists”; runnable demos arrive with the first AOT backend milestone.

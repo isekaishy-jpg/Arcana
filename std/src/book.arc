@@ -11,9 +11,9 @@ reexport std.canvas
 reexport std.window
 reexport std.input
 reexport std.events
-reexport std.app
+reexport std.time
+reexport std.audio
 reexport std.ecs
-reexport std.tooling
 reexport std.concurrent
 reexport std.behaviors
 reexport std.io
