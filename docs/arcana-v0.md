@@ -270,7 +270,7 @@ Evaluation order for attached header blocks:
 Arcana now supports qualified phrase invocation syntax:
 
 - `subject :: args :: qualifier`
-- args are comma-separated and limited to at most 3 top-level inline items
+- args are comma-separated top-level inline items
 - trailing comma before the qualifier is rejected
 - qualifier forms:
   - named/path (for example `call`, `join`, `std.io.print`)
@@ -482,7 +482,7 @@ Memory phrase syntax:
 
 - `memory_type: instance :> args? <: qualifier`
 - v2 supports `memory_type = arena | frame | pool`
-- inline args are comma-separated, up to 3 top-level items
+- inline args are comma-separated top-level items
 - arg items support positional and named (`name = expr`)
 - trailing comma before the qualifier is rejected
 
@@ -684,7 +684,7 @@ Contracts:
 
 - `#stage[...]` on `fn`/trait methods/impl methods
 - `#chain[...]` on chain statements
-- system/behavior boundary checks enforce resolved chain contract fields
+- the chain contract matrix defines resolved chain-contract fields for behavior/system scheduling
 - any chain inside `behavior[...]` or `system[...]` must declare explicit `#chain[...]`
 
 Supported `#stage` keys:
@@ -708,7 +708,7 @@ See also:
 Metadata blocks:
 
 - standalone chain attachment blocks are currently validated as `name = expr` only
-- metadata is parsed/validated in v1 and ignored semantically
+- metadata payloads are parsed/validated in v1; full contract aggregation and scheduler enforcement beyond explicit chain-presence checks are later typed/runtime work
 
 See:
 
@@ -724,7 +724,7 @@ Where a domain scope exists under `docs/specs/**/v1-scope.md`, that domain scope
 - `edit` call arguments currently must be local bindings (not field expressions)
 - Access checking is currently root-binding based (conservative)
 - Moves inside `while` loops are currently rejected
-- boundary checks currently enforce payload/target rules plus direct signature-shape safety; full recursive boundary-safe typing will arrive with deeper typed frontend work
+- boundary checks now enforce payload/target rules, direct signature-shape safety, and recursive record/enum boundary-safe typing after HIR resolution; later work still needs full ownership/backend boundary flow
 - full ownership/borrow flow is still being re-established in the rewrite; current frontend covers declaration-surface lifetimes and conservative body resolution first
 
 ## Canvas/Window/Input (v0.16 shelf-first)

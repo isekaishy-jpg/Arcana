@@ -1,5 +1,5 @@
 version = 1
-as_of = "2026-03-09"
+as_of = "2026-03-10"
 owner = "Arcana selfhost/compiler team"
 
 [[feature]]
@@ -35,7 +35,6 @@ status = "required"
 positive = ["examples/grimoire_std_methods_app", "examples/pair_try_pop"]
 negative = [
     "conformance/check_parity_fixtures/phrase_arg_shape.arc",
-    "conformance/check_parity_fixtures/qualified_phrase_too_many_args.arc",
 ]
 
 [[feature]]
@@ -52,6 +51,7 @@ negative = [
     "conformance/check_parity_fixtures/test_payload.arc",
     "conformance/check_parity_packages/unresolved_lang_item",
     "conformance/check_parity_packages/invalid_boundary_signature",
+    "conformance/check_parity_packages/nested_boundary_unsafe",
     "conformance/check_parity_packages/invalid_test_signature",
 ]
 
@@ -63,6 +63,9 @@ negative = [
     "conformance/check_parity_fixtures/missing_chain_contract.arc",
     "conformance/check_parity_fixtures/unknown_chain_style.arc",
     "conformance/check_parity_fixtures/reverse_parallel_chain.arc",
+    "conformance/check_parity_fixtures/invalid_stage_contract_key.arc",
+    "conformance/check_parity_fixtures/invalid_chain_contract_key.arc",
+    "conformance/check_parity_fixtures/invalid_chain_contract_phase.arc",
 ]
 
 [[feature]]
@@ -98,7 +101,6 @@ status = "required"
 positive = ["examples/memory_phrase_frame_pool", "examples/pool_reuse_cycle"]
 negative = [
     "conformance/check_parity_fixtures/unresolved_symbol.arc",
-    "conformance/check_parity_fixtures/memory_phrase_too_many_args.arc",
     "conformance/check_parity_fixtures/unknown_memory_type.arc",
 ]
 

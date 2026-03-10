@@ -18,11 +18,14 @@
 - `#inline`
 - `#cold`
 - `#boundary[target = "lua" | "sql"]`
+- `#stage[...]`
+- `#chain[...]`
 
 ### v1 targets
 - top-level declarations
 - `import`, `reexport`, `use`
 - trait methods and impl methods
+- chain statements for `#chain[...]` only
 
 Boundary contract notes:
 - `#boundary[...]` is compile-time only in v1
@@ -32,7 +35,8 @@ Boundary contract notes:
 
 Not supported in v1:
 - field-level/param-level targets
-- statement-level/expression-level targets
+- expression-level targets
+- general statement-level targets outside chain-contract `#chain[...]`
 
 ### Comment cutover
 - `#` comments are removed
@@ -49,7 +53,7 @@ Not supported in v1:
 - `#derive`
 - user-defined forewords (`foreword ...`)
 - runtime-retained metadata and introspection
-- statement/expression targets
+- general statement/expression targets beyond chain contracts
 
 ## Policy
 Any deferred foreword item must be tracked in:

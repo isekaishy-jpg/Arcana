@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -132,6 +132,8 @@ struct SurfaceRefs {
 }
 
 struct ResolvedSymbolRef<'a> {
+    package_name: &'a str,
+    module_id: &'a str,
     symbol: &'a HirSymbol,
 }
 
@@ -296,6 +298,7 @@ fn validate_hir_semantics(
             };
             validate_module_semantics(
                 workspace,
+                resolved,
                 package,
                 module,
                 resolved_module,
@@ -308,6 +311,7 @@ fn validate_hir_semantics(
 
 fn validate_module_semantics(
     workspace: &HirWorkspaceSummary,
+    resolved_workspace: &HirResolvedWorkspace,
     package: &HirWorkspacePackage,
     module: &HirModuleSummary,
     resolved_module: &HirResolvedModule,
@@ -342,6 +346,18 @@ fn validate_module_semantics(
             &TypeScope::default(),
             diagnostics,
         );
+        let symbol_scope = TypeScope::default().with_params(&symbol.type_params);
+        validate_boundary_symbol_contract(
+            workspace,
+            resolved_workspace,
+            resolved_module,
+            &module_path,
+            symbol,
+            &symbol_scope,
+            None,
+            &BTreeMap::new(),
+            diagnostics,
+        );
         validate_symbol_value_semantics(
             workspace,
             resolved_module,
@@ -355,6 +371,7 @@ fn validate_module_semantics(
     for impl_decl in &module.impls {
         validate_impl_surface_types(
             workspace,
+            resolved_workspace,
             resolved_module,
             &module_path,
             impl_decl,
@@ -418,7 +435,6 @@ fn validate_symbol_surface_types(
             diagnostics,
         );
     }
-
     match &symbol.body {
         HirSymbolBody::None => {}
         HirSymbolBody::Record { fields } => {
@@ -491,6 +507,7 @@ fn validate_symbol_surface_types(
 
 fn validate_impl_surface_types(
     workspace: &HirWorkspaceSummary,
+    resolved_workspace: &HirResolvedWorkspace,
     resolved_module: &HirResolvedModule,
     module_path: &Path,
     impl_decl: &HirImplDecl,
@@ -505,6 +522,16 @@ fn validate_impl_surface_types(
                 .map(|assoc_type| assoc_type.name.clone()),
         )
         .with_self();
+    let assoc_bindings = impl_decl
+        .assoc_types
+        .iter()
+        .filter_map(|assoc_type| {
+            assoc_type
+                .value_ty
+                .as_ref()
+                .map(|value_ty| (assoc_type.name.clone(), value_ty.clone()))
+        })
+        .collect::<BTreeMap<_, _>>();
 
     if let Some(trait_path) = &impl_decl.trait_path {
         validate_type_surface_text(
@@ -554,7 +581,260 @@ fn validate_impl_surface_types(
             &scope,
             diagnostics,
         );
+        let method_scope = scope.with_params(&method.type_params);
+        validate_boundary_symbol_contract(
+            workspace,
+            resolved_workspace,
+            resolved_module,
+            module_path,
+            method,
+            &method_scope,
+            Some(&impl_decl.target_type),
+            &assoc_bindings,
+            diagnostics,
+        );
     }
+}
+
+fn validate_boundary_symbol_contract(
+    workspace: &HirWorkspaceSummary,
+    resolved_workspace: &HirResolvedWorkspace,
+    resolved_module: &HirResolvedModule,
+    module_path: &Path,
+    symbol: &HirSymbol,
+    scope: &TypeScope,
+    self_type: Option<&str>,
+    assoc_bindings: &BTreeMap<String, String>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let Some(target) = boundary_target_from_forewords(&symbol.forewords) else {
+        return;
+    };
+
+    for param in &symbol.params {
+        let mut visited = BTreeSet::new();
+        if !boundary_type_is_safe(
+            workspace,
+            resolved_workspace,
+            resolved_module,
+            scope,
+            &param.ty,
+            self_type,
+            assoc_bindings,
+            &mut visited,
+        ) {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: symbol.span.line,
+                column: symbol.span.column,
+                message: format!(
+                    "type `{}` is not boundary-safe for target `{target}`",
+                    param.ty
+                ),
+            });
+        }
+    }
+
+    if let Some(return_type) = &symbol.return_type {
+        let mut visited = BTreeSet::new();
+        if !boundary_type_is_safe(
+            workspace,
+            resolved_workspace,
+            resolved_module,
+            scope,
+            return_type,
+            self_type,
+            assoc_bindings,
+            &mut visited,
+        ) {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: symbol.span.line,
+                column: symbol.span.column,
+                message: format!(
+                    "type `{}` is not boundary-safe for target `{target}`",
+                    return_type
+                ),
+            });
+        }
+    }
+}
+
+fn boundary_target_from_forewords(forewords: &[arcana_hir::HirForewordApp]) -> Option<String> {
+    forewords
+        .iter()
+        .find(|foreword| foreword.name == "boundary")
+        .and_then(|foreword| {
+            foreword
+                .args
+                .iter()
+                .find(|arg| arg.name.as_deref() == Some("target"))
+        })
+        .and_then(|arg| parse_symbol_or_string_literal(&arg.value))
+}
+
+fn boundary_type_is_safe(
+    workspace: &HirWorkspaceSummary,
+    resolved_workspace: &HirResolvedWorkspace,
+    resolved_module: &HirResolvedModule,
+    scope: &TypeScope,
+    text: &str,
+    self_type: Option<&str>,
+    assoc_bindings: &BTreeMap<String, String>,
+    visited_symbols: &mut BTreeSet<String>,
+) -> bool {
+    for path in collect_surface_refs(text).paths {
+        if path.len() == 1 {
+            let name = &path[0];
+            if name == "Self" {
+                if let Some(self_type) = self_type {
+                    if !boundary_type_is_safe(
+                        workspace,
+                        resolved_workspace,
+                        resolved_module,
+                        scope,
+                        self_type,
+                        None,
+                        assoc_bindings,
+                        visited_symbols,
+                    ) {
+                        return false;
+                    }
+                }
+                continue;
+            }
+            if let Some(value_ty) = assoc_bindings.get(name) {
+                if !boundary_type_is_safe(
+                    workspace,
+                    resolved_workspace,
+                    resolved_module,
+                    scope,
+                    value_ty,
+                    self_type,
+                    assoc_bindings,
+                    visited_symbols,
+                ) {
+                    return false;
+                }
+                continue;
+            }
+            if scope.allows_type_name(name) || is_boundary_safe_builtin_name(name) {
+                continue;
+            }
+            if is_boundary_unsafe_builtin_name(name) {
+                return false;
+            }
+        }
+
+        let Some(symbol_ref) = lookup_symbol_path(workspace, resolved_module, &path) else {
+            continue;
+        };
+        if !boundary_symbol_is_safe(
+            workspace,
+            resolved_workspace,
+            resolved_module,
+            scope,
+            &symbol_ref,
+            self_type,
+            assoc_bindings,
+            visited_symbols,
+        ) {
+            return false;
+        }
+    }
+    true
+}
+
+fn boundary_symbol_is_safe(
+    workspace: &HirWorkspaceSummary,
+    resolved_workspace: &HirResolvedWorkspace,
+    resolved_module: &HirResolvedModule,
+    scope: &TypeScope,
+    symbol_ref: &ResolvedSymbolRef<'_>,
+    self_type: Option<&str>,
+    assoc_bindings: &BTreeMap<String, String>,
+    visited_symbols: &mut BTreeSet<String>,
+) -> bool {
+    let visit_key = format!(
+        "{}::{}::{}",
+        symbol_ref.package_name, symbol_ref.module_id, symbol_ref.symbol.name
+    );
+    if !visited_symbols.insert(visit_key) {
+        return true;
+    }
+
+    let nested_scope = TypeScope::default().with_params(&symbol_ref.symbol.type_params);
+    let owner_module = resolved_workspace
+        .package(symbol_ref.package_name)
+        .and_then(|package| package.module(symbol_ref.module_id))
+        .unwrap_or(resolved_module);
+    match &symbol_ref.symbol.body {
+        HirSymbolBody::Record { fields } => fields.iter().all(|field| {
+            boundary_type_is_safe(
+                workspace,
+                resolved_workspace,
+                owner_module,
+                &nested_scope,
+                &field.ty,
+                self_type,
+                assoc_bindings,
+                visited_symbols,
+            )
+        }),
+        HirSymbolBody::Enum { variants } => variants.iter().all(|variant| {
+            variant.payload.as_ref().is_none_or(|payload| {
+                boundary_type_is_safe(
+                    workspace,
+                    resolved_workspace,
+                    owner_module,
+                    &nested_scope,
+                    payload,
+                    self_type,
+                    assoc_bindings,
+                    visited_symbols,
+                )
+            })
+        }),
+        _ => scope.allows_type_name(&symbol_ref.symbol.name),
+    }
+}
+
+fn is_boundary_safe_builtin_name(name: &str) -> bool {
+    matches!(name, "Int" | "Bool" | "Str" | "Unit" | "List" | "Array" | "Map")
+}
+
+fn is_boundary_unsafe_builtin_name(name: &str) -> bool {
+    matches!(
+        name,
+        "Task"
+            | "Thread"
+            | "Channel"
+            | "Mutex"
+            | "Arena"
+            | "ArenaId"
+            | "FrameArena"
+            | "FrameId"
+            | "PoolArena"
+            | "PoolId"
+            | "RangeInt"
+            | "Window"
+            | "Image"
+            | "AtomicInt"
+            | "AtomicBool"
+    )
+}
+
+fn parse_symbol_or_string_literal(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if let Some(unquoted) = trimmed
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+    {
+        return Some(unquoted.to_string());
+    }
+    split_simple_path(trimmed)
+        .filter(|path| path.len() == 1)
+        .map(|path| path[0].clone())
 }
 
 fn validate_symbol_value_semantics(
@@ -1839,7 +2119,7 @@ fn validate_type_surface_text(
 
 fn lookup_symbol_path<'a>(
     workspace: &'a HirWorkspaceSummary,
-    module: &HirResolvedModule,
+    module: &'a HirResolvedModule,
     path: &[String],
 ) -> Option<ResolvedSymbolRef<'a>> {
     if path.is_empty() {
@@ -1868,7 +2148,7 @@ fn lookup_symbol_path<'a>(
 
 fn lookup_target_symbol_tail<'a>(
     workspace: &'a HirWorkspaceSummary,
-    target: &HirResolvedTarget,
+    target: &'a HirResolvedTarget,
     tail: &[String],
 ) -> Option<ResolvedSymbolRef<'a>> {
     match target {
@@ -1886,7 +2166,11 @@ fn lookup_target_symbol_tail<'a>(
                 .symbols
                 .iter()
                 .find(|symbol| symbol.name == *symbol_name)?;
-            Some(ResolvedSymbolRef { symbol })
+            Some(ResolvedSymbolRef {
+                package_name,
+                module_id,
+                symbol,
+            })
         }
         HirResolvedTarget::Module {
             package_name,
@@ -1919,7 +2203,11 @@ fn lookup_package_symbol_path<'a>(
         .symbols
         .iter()
         .find(|symbol| symbol.name == *symbol_name)?;
-    Some(ResolvedSymbolRef { symbol })
+    Some(ResolvedSymbolRef {
+        package_name: &package.summary.package_name,
+        module_id: &module.module_id,
+        symbol,
+    })
 }
 
 fn lookup_module_symbol_path<'a>(
@@ -1935,7 +2223,11 @@ fn lookup_module_symbol_path<'a>(
             .symbols
             .iter()
             .find(|symbol| symbol.name == path[0])?;
-        return Some(ResolvedSymbolRef { symbol });
+        return Some(ResolvedSymbolRef {
+            package_name: &package.summary.package_name,
+            module_id: &module.module_id,
+            symbol,
+        });
     }
     let (symbol_name, module_tail) = path.split_last()?;
     let base_relative = module
@@ -1951,7 +2243,11 @@ fn lookup_module_symbol_path<'a>(
         .symbols
         .iter()
         .find(|symbol| symbol.name == *symbol_name)?;
-    Some(ResolvedSymbolRef { symbol })
+    Some(ResolvedSymbolRef {
+        package_name: &package.summary.package_name,
+        module_id: &target_module.module_id,
+        symbol,
+    })
 }
 
 fn symbol_matches_surface_use(kind: HirSymbolKind, expected_use: SurfaceSymbolUse) -> bool {
@@ -2264,12 +2560,12 @@ mod tests {
                 "`#inline` is not a valid statement-level contract",
             ),
             (
-                "qualified_phrase_too_many_args.arc",
-                "qualified phrase allows at most 3 top-level arguments",
+                "phrase_arg_shape.arc",
+                "trailing comma is not allowed before phrase qualifier",
             ),
             (
-                "memory_phrase_too_many_args.arc",
-                "memory phrase allows at most 3 top-level arguments",
+                "unknown_memory_type.arc",
+                "unknown memory type `weird`; supported now: arena, frame, pool (reserved for future expansion)",
             ),
             (
                 "unknown_chain_style.arc",
@@ -2290,6 +2586,18 @@ mod tests {
             (
                 "test_payload.arc",
                 "invalid payload for foreword `#test`: expected no payload",
+            ),
+            (
+                "invalid_stage_contract_key.arc",
+                "invalid #stage contract key 'bad_key'",
+            ),
+            (
+                "invalid_chain_contract_key.arc",
+                "invalid #chain contract key 'bad_key'",
+            ),
+            (
+                "invalid_chain_contract_phase.arc",
+                "invalid payload for `phase`",
             ),
             (
                 "malformed_intrinsic.arc",
@@ -2413,6 +2721,10 @@ mod tests {
             (
                 "invalid_boundary_signature",
                 "`#boundary` target `lua` does not allow mutable borrows",
+            ),
+            (
+                "nested_boundary_unsafe",
+                "type `types.Payload` is not boundary-safe for target `lua`",
             ),
             (
                 "invalid_test_signature",

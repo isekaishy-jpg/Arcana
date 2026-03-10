@@ -2158,7 +2158,7 @@ mod tests {
     fn lower_module_text_captures_forewords_lang_items_intrinsics_and_systems() {
         let module = lower_module_text(
             "surface",
-            "use std.result as result\n#test\n#inline\nfn smoke() -> Int:\n    return 0\n#stage[phase=update, deterministic=true]\nsystem[phase=startup, affinity=main] fn boot():\n    #chain[phase=startup, deterministic=true]\n    forward :=> seed => step\nlang result = smoke\nintrinsic fn host_len(read text: Str) -> Int = HostTextLenBytes\nfn seed() -> Int:\n    return 1\nfn step(v: Int) -> Int:\n    return v\n",
+            "use std.result as result\n#test\n#inline\nfn smoke() -> Int:\n    return 0\n#stage[thread=worker, deterministic=true]\nsystem[phase=startup, affinity=main] fn boot():\n    #chain[phase=startup, deterministic=true]\n    forward :=> seed => step\nlang result = smoke\nintrinsic fn host_len(read text: Str) -> Int = HostTextLenBytes\nfn seed() -> Int:\n    return 1\nfn step(v: Int) -> Int:\n    return v\n",
         )
         .expect("lowering should pass");
 

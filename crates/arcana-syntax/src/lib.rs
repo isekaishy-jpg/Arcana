@@ -1793,6 +1793,9 @@ fn parse_expression_core(text: &str) -> Result<Expr, String> {
     if let Some(inner) = strip_group_parens(trimmed) {
         return parse_expression_core(inner);
     }
+    if let Some(expr) = parse_grouped_non_tuple_expression(trimmed)? {
+        return Ok(expr);
+    }
     if let Some(expr) = parse_chain_expression(trimmed)? {
         return Ok(expr);
     }
@@ -1806,6 +1809,30 @@ fn parse_expression_core(text: &str) -> Result<Expr, String> {
         return Ok(expr);
     }
     parse_range_expression(trimmed)
+}
+
+fn parse_grouped_non_tuple_expression(text: &str) -> Result<Option<Expr>, String> {
+    if !text.starts_with('(') || !text.ends_with(')') {
+        return Ok(None);
+    }
+    let Some(close_idx) = find_matching_delim(text, 0, '(', ')') else {
+        return Ok(None);
+    };
+    if close_idx != text.len() - 1 {
+        return Ok(None);
+    }
+    let inner = text[1..close_idx].trim();
+    if inner.is_empty() || !contains_top_level_char(inner, ',') {
+        return Ok(None);
+    }
+    let parsed = parse_expression_core(inner)?;
+    if matches!(
+        &parsed,
+        Expr::Opaque { text, attached } if text.trim() == inner && attached.is_empty()
+    ) {
+        return Ok(None);
+    }
+    Ok(Some(parsed))
 }
 
 #[derive(Clone, Copy)]
@@ -2482,13 +2509,6 @@ enum PhraseArgContext {
 }
 
 impl PhraseArgContext {
-    fn max_args_error(self) -> &'static str {
-        match self {
-            Self::Qualified => "qualified phrase allows at most 3 top-level arguments",
-            Self::Memory => "memory phrase allows at most 3 top-level arguments",
-        }
-    }
-
     fn trailing_comma_error(self) -> &'static str {
         match self {
             Self::Qualified => "trailing comma is not allowed before phrase qualifier",
@@ -2506,13 +2526,8 @@ fn parse_phrase_args(text: &str, context: PhraseArgContext) -> Result<Option<Vec
         return Err(context.trailing_comma_error().to_string());
     }
 
-    let parts = split_top_level(text, ',');
-    if parts.len() > 3 {
-        return Err(context.max_args_error().to_string());
-    }
-
     let mut args = Vec::new();
-    for part in parts {
+    for part in split_top_level(text, ',') {
         let trimmed = part.trim();
         if trimmed.is_empty() {
             return Ok(None);
@@ -3656,6 +3671,7 @@ fn validate_foreword_list(
     symbol: Option<&SymbolDecl>,
 ) -> Result<Option<String>, String> {
     let mut boundary_target = None;
+    let mut saw_stage = false;
     for foreword in forewords {
         if !foreword_target_allows(target, foreword.name.as_str()) {
             return Err(format!(
@@ -3685,7 +3701,16 @@ fn validate_foreword_list(
                     ));
                 }
             }
-            "stage" => {}
+            "stage" => {
+                validate_stage_payload(foreword)?;
+                if saw_stage {
+                    return Err(format!(
+                        "{}:{}: duplicate foreword `stage` on declaration",
+                        foreword.span.line, foreword.span.column
+                    ));
+                }
+                saw_stage = true;
+            }
             _ => {}
         }
     }
@@ -3761,6 +3786,13 @@ fn parse_foreword_symbol_or_string(value: &str) -> Option<String> {
         return Some(unquoted.to_string());
     }
     is_identifier(value).then(|| value.to_string())
+}
+
+fn parse_foreword_path_or_string(value: &str) -> Option<String> {
+    if let Some(unquoted) = unquote_double_quoted_literal(value) {
+        return Some(unquoted.to_string());
+    }
+    is_path_like(value).then(|| value.trim().to_string())
 }
 
 fn parse_boundary_payload(foreword: &ForewordApp) -> Result<String, String> {
@@ -3852,6 +3884,130 @@ fn include_for_only_forewords(forewords: &[ForewordApp]) -> Result<bool, String>
         }
     }
     Ok(include)
+}
+
+fn validate_stage_payload(foreword: &ForewordApp) -> Result<(), String> {
+    for arg in &foreword.args {
+        let Some(key) = arg.name.as_deref() else {
+            return Err(format!(
+                "{}:{}: invalid payload for foreword `#stage`: expected named key/value pairs",
+                foreword.span.line, foreword.span.column
+            ));
+        };
+        match key {
+            "pure" => parse_contract_bool(arg.value.as_str(), foreword, "stage.pure")?,
+            "deterministic" => {
+                parse_contract_bool(arg.value.as_str(), foreword, "stage.deterministic")?
+            }
+            "rollback_safe" => {
+                parse_contract_bool(arg.value.as_str(), foreword, "stage.rollback_safe")?
+            }
+            "effect" => parse_contract_effect(arg.value.as_str(), foreword)?,
+            "thread" => parse_contract_thread(arg.value.as_str(), foreword)?,
+            "authority" => parse_contract_authority(arg.value.as_str(), foreword)?,
+            "reads" | "writes" | "excludes" => {
+                parse_contract_resource(arg.value.as_str(), foreword)?
+            }
+            other => {
+                return Err(format!(
+                    "{}:{}: invalid #stage contract key '{other}'",
+                    foreword.span.line, foreword.span.column
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_chain_payload(foreword: &ForewordApp) -> Result<(), String> {
+    for arg in &foreword.args {
+        let Some(key) = arg.name.as_deref() else {
+            return Err(format!(
+                "{}:{}: invalid payload for foreword `#chain`: expected named key/value pairs",
+                foreword.span.line, foreword.span.column
+            ));
+        };
+        match key {
+            "phase" => parse_contract_phase(arg.value.as_str(), foreword)?,
+            "deterministic" => {
+                parse_contract_bool(arg.value.as_str(), foreword, "chain.deterministic")?
+            }
+            "thread" => parse_contract_thread(arg.value.as_str(), foreword)?,
+            "authority" => parse_contract_authority(arg.value.as_str(), foreword)?,
+            "rollback_safe" => {
+                parse_contract_bool(arg.value.as_str(), foreword, "chain.rollback_safe")?
+            }
+            other => {
+                return Err(format!(
+                    "{}:{}: invalid #chain contract key '{other}'",
+                    foreword.span.line, foreword.span.column
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn parse_contract_bool(value: &str, foreword: &ForewordApp, label: &str) -> Result<(), String> {
+    match value.trim() {
+        "true" | "false" => Ok(()),
+        _ => Err(format!(
+            "{}:{}: invalid payload for `{label}`: expected bool",
+            foreword.span.line, foreword.span.column
+        )),
+    }
+}
+
+fn parse_contract_effect(value: &str, foreword: &ForewordApp) -> Result<(), String> {
+    match parse_foreword_path_or_string(value).as_deref() {
+        Some("read" | "write" | "exclusive_write" | "emit" | "render") => Ok(()),
+        _ => Err(format!(
+            "{}:{}: invalid payload for `stage.effect`",
+            foreword.span.line, foreword.span.column
+        )),
+    }
+}
+
+fn parse_contract_thread(value: &str, foreword: &ForewordApp) -> Result<(), String> {
+    match parse_foreword_path_or_string(value).as_deref() {
+        Some("main" | "worker" | "any") => Ok(()),
+        _ => Err(format!(
+            "{}:{}: invalid payload for `thread`",
+            foreword.span.line, foreword.span.column
+        )),
+    }
+}
+
+fn parse_contract_authority(value: &str, foreword: &ForewordApp) -> Result<(), String> {
+    match parse_foreword_path_or_string(value).as_deref() {
+        Some("local" | "client" | "server" | "any") => Ok(()),
+        _ => Err(format!(
+            "{}:{}: invalid payload for `authority`",
+            foreword.span.line, foreword.span.column
+        )),
+    }
+}
+
+fn parse_contract_phase(value: &str, foreword: &ForewordApp) -> Result<(), String> {
+    match parse_foreword_path_or_string(value).as_deref() {
+        Some("startup" | "fixed" | "fixed_update" | "update" | "render" | "net" | "event") => {
+            Ok(())
+        }
+        _ => Err(format!(
+            "{}:{}: invalid payload for `phase`",
+            foreword.span.line, foreword.span.column
+        )),
+    }
+}
+
+fn parse_contract_resource(value: &str, foreword: &ForewordApp) -> Result<(), String> {
+    if parse_foreword_path_or_string(value).is_some() {
+        return Ok(());
+    }
+    Err(format!(
+        "{}:{}: invalid payload for stage resource set; expected type path",
+        foreword.span.line, foreword.span.column
+    ))
 }
 
 fn filter_only_vec<T, F>(items: Vec<T>, include: F) -> Result<Vec<T>, String>
@@ -4025,6 +4181,7 @@ fn validate_statement_foreword_contract(
                     foreword.span.line, foreword.span.column, foreword.name
                 ));
             }
+            validate_chain_payload(foreword)?;
         }
         if !statement.forewords.is_empty() && !statement_is_chain_target(statement) {
             let foreword = &statement.forewords[0];
@@ -5437,7 +5594,7 @@ mod tests {
     #[test]
     fn parse_module_collects_forewords_lang_items_intrinsics_and_systems() {
         let parsed = parse_module(
-            "use std.result as result\n#test\n#inline\nfn smoke() -> Int:\n    return 0\n#stage[phase=update, deterministic=true]\nsystem[phase=startup, affinity=main] fn boot():\n    #chain[phase=startup, deterministic=true]\n    forward :=> seed => step\nlang result = smoke\nintrinsic fn host_len(read text: Str) -> Int = HostTextLenBytes\nfn seed() -> Int:\n    return 1\nfn step(v: Int) -> Int:\n    return v\n",
+            "use std.result as result\n#test\n#inline\nfn smoke() -> Int:\n    return 0\n#stage[thread=worker, deterministic=true]\nsystem[phase=startup, affinity=main] fn boot():\n    #chain[phase=startup, deterministic=true]\n    forward :=> seed => step\nlang result = smoke\nintrinsic fn host_len(read text: Str) -> Int = HostTextLenBytes\nfn seed() -> Int:\n    return 1\nfn step(v: Int) -> Int:\n    return v\n",
         )
         .expect("module should parse");
 
@@ -5554,15 +5711,15 @@ mod tests {
     }
 
     #[test]
-    fn parse_module_rejects_phrase_arg_overflow_and_unknown_memory_family() {
+    fn parse_module_rejects_bad_memory_family_and_trailing_phrase_commas() {
         for (source, expected) in [
             (
-                "fn main() -> Int:\n    return io.print :: 1, 2, 3, 4 :: call\n",
-                "qualified phrase allows at most 3 top-level arguments",
+                "fn main() -> Int:\n    return io.print :: 1, :: call\n",
+                "trailing comma is not allowed before phrase qualifier",
             ),
             (
-                "fn main() -> Int:\n    let node = arena: store :> a = 1, b = 2, c = 3, d = 4 <: Node\n    return 0\n",
-                "memory phrase allows at most 3 top-level arguments",
+                "fn main() -> Int:\n    let node = arena: store :> a = 1, <: Node\n    return 0\n",
+                "trailing comma is not allowed before memory phrase qualifier",
             ),
             (
                 "fn main() -> Int:\n    let item = weird: store :> value = 1 <: Item\n    return 0\n",
@@ -5603,6 +5760,10 @@ mod tests {
             (
                 "#boundary[target = lua.sql]\nfn bad() -> Int:\n    return 0\n",
                 "invalid payload for foreword `#boundary`: `target` must be a string or symbol",
+            ),
+            (
+                "#stage[bad_key=true]\nfn seed() -> Int:\n    return 1\n",
+                "invalid #stage contract key 'bad_key'",
             ),
             (
                 "#test[smoke]\nfn bad() -> Int:\n    return 0\n",
@@ -5872,6 +6033,25 @@ mod tests {
     }
 
     #[test]
+    fn parse_module_preserves_parenthesized_phrase_calls_with_many_args() {
+        let parsed = parse_module(
+            "fn has_magic(read bytes: Array[Int], a: Int, b: Int, c: Int, d: Int) -> Bool:\n    return true\nfn main(read bytes: Array[Int]) -> Int:\n    if not (has_magic :: bytes, 65, 82, 67, 66 :: call):\n        return 1\n    return 0\n",
+        )
+        .expect("parenthesized phrase call should parse");
+
+        match &parsed.symbols[1].statements[0].kind {
+            StatementKind::If { condition, .. } => {
+                assert!(matches!(
+                    condition,
+                    Expr::Unary { op: UnaryOp::Not, expr }
+                        if !matches!(expr.as_ref(), Expr::Pair { .. })
+                ));
+            }
+            other => panic!("expected if statement, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_module_collects_access_and_range_expressions() {
         let parsed = parse_module(
             "fn main() -> Int:\n    let tuple_head = pair.0\n    let color = spec.color\n    let xs = [1, 2, 3, 4]\n    let first = xs[0]\n    let tail = xs[1..]\n    let mid = xs[1..=2]\n    let whole = xs[..]\n    let r1 = 0..3\n    let r2 = ..=3\n    return first\n",
@@ -6063,7 +6243,7 @@ mod tests {
     #[test]
     fn parse_module_collects_structured_header_attachments() {
         let parsed = parse_module(
-            "fn main() -> Int:\n    Node :: :: call\n        value = 10\n        #chain[phase=update]\n        forward :=> show_node => bump_node => show_node\n    arena: arena_nodes :> 21 <: make_node\n        #chain[phase=plan]\n        plan :=> touch_id\n        forward :=> touch_id\n    return 0\n",
+            "fn main() -> Int:\n    Node :: :: call\n        value = 10\n        #chain[phase=update]\n        forward :=> show_node => bump_node => show_node\n    arena: arena_nodes :> 21 <: make_node\n        #chain[phase=update]\n        plan :=> touch_id\n        forward :=> touch_id\n    return 0\n",
         )
         .expect("parse should pass");
 
@@ -6152,7 +6332,7 @@ mod tests {
                                     && matches!(
                                         args.as_slice(),
                                         [ForewordArg { name: Some(arg_name), value }]
-                                            if arg_name == "phase" && value == "plan"
+                                            if arg_name == "phase" && value == "update"
                                     )
                         )
                 ));
