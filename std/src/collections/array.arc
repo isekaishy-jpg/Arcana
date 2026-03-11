@@ -10,5 +10,8 @@ impl[T] Array[T]:
     fn len(read self: Array[T]) -> Int:
         return std.kernel.collections.array_len :: self :: call
 
+    fn is_empty(read self: Array[T]) -> Bool:
+        return (self :: :: len) == 0
+
     fn to_list(read self: Array[T]) -> List[T]:
         return std.kernel.collections.array_to_list :: self :: call

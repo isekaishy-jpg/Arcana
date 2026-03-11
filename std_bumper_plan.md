@@ -1,24 +1,29 @@
-# Bootstrap Std Plan With First-Party Grimoire Inventory
+# Bootstrap Std Plan With Arcana-Owned App/Media Grimoire Roles
 
 ## Summary
 
 Rebuild `std` now as a rewrite-owned, pre-selfhost substrate that is sufficient for:
-- bootstrapping the carried compiler/tooling grimoires on the Rust rewrite
-- supporting a later 5k-10k LOC desktop showcase game through first-party grimoires built on top of `std`
+- bootstrapping against the reference compiler/tooling corpus on the Rust rewrite
+- supporting a later 5k-10k LOC desktop showcase game through future Arcana-owned grimoire layers built on top of `std`
 
-This plan is explicitly pre-selfhost only. It does not attempt to define post-selfhost std or the full long-range ecosystem. The contract is: build the minimum stable first-party substrate and the minimum required first-party grimoire set, document it heavily, and leave update notes wherever the shape may evolve later.
+This plan is explicitly pre-selfhost only. It does not attempt to define post-selfhost std or the full long-range ecosystem. The contract is: build the minimum stable first-party substrate and the minimum required future Arcana-owned app/media grimoire roles, document it heavily, and leave update notes wherever the shape may evolve later.
+
+Reference boundary:
+- `grimoires/reference/*` is carried reference corpus only.
+- The reference packages may be checked or mined for behavior pressure during the rewrite, but they are not the active Arcana package layout.
+- Rewrite-owned app/media grimoires live under `grimoires/owned/*`.
 
 ## Required Docs And Ownership
 
 - Keep `docs/specs/std/std/v1-scope.md` as the authoritative std contract.
 - Add `docs/specs/std/std/v1-status.md` as the living bootstrap/readiness ledger.
 - Add `docs/specs/std/std/deferred-roadmap.md` for deferred std work.
-- Add `docs/specs/grimoires/grimoires/v1-scope.md` to freeze the required first-party grimoire roles before bootstrap.
-- Add `docs/specs/grimoires/grimoires/v1-status.md` to track which first-party grimoire roles are rewrite-owned, carried, transitional, or still missing.
+- Add `docs/specs/grimoires/grimoires/v1-scope.md` to freeze the required future Arcana-owned app/media grimoire roles before bootstrap.
+- Add `docs/specs/grimoires/grimoires/v1-status.md` to track which future Arcana-owned app/media grimoire roles are reference-backed, rewrite-owned, transitional, or still missing.
 - Register those docs in `docs/specs/spec-status.md`.
 - Update `PLAN.md`, `docs/rewrite-roadmap.md`, and `README.md` to point at the std scope/status docs and the grimoires scope/status docs.
-- Add a standing rule: every std or first-party grimoire surface change must update the relevant scope or status ledger in the same patch.
-- Add a standing rule: transitional carried modules must carry an explicit `update note` in docs stating what should be revisited and what would cause promotion, rewrite, relocation, or removal.
+- Add a standing rule: every std or Arcana-owned grimoire surface change must update the relevant scope or status ledger in the same patch.
+- Add a standing rule: transitional reference-backed modules must carry an explicit `update note` in docs stating what should be revisited and what would cause promotion, rewrite, relocation, or removal.
 
 ## Std Contract To Build Now
 
@@ -52,29 +57,28 @@ Not rewrite-defining std in this plan:
 - higher-level desktop framework APIs
 - broad gameplay/math/physics/network kits
 
-## Required First-Party Grimoires
+## Required Arcana-Owned App/Media Grimoire Roles
 
 Freeze responsibilities now, but do not freeze long-term package names yet.
 
-Required pre-selfhost first-party grimoire roles:
-- Frontend grimoire:
-  - current role of `arcana-frontend`
-  - must consume rewrite std without hidden compiler special cases
-- Compiler-core grimoire:
-  - current role of `arcana-compiler-core`
-  - must consume rewrite std and the rewrite backend/toolchain seams needed for bootstrap
-- Selfhost-compiler grimoire:
-  - current role of `arcana-selfhost-compiler`
-  - must compile on the rewrite-owned std/bootstrap path
+Required pre-selfhost Arcana-owned grimoire roles:
 - Desktop app facade grimoire:
-  - successor role to `winspell`
+  - rewrite-owned scaffold: `grimoires/owned/app/arcana-desktop`
+  - current reference corpus: `grimoires/reference/app/winspell`
   - owns ergonomic desktop/window/run-loop/frame convenience above low-level std
   - must not force std to absorb framework-level policies
-- Event/input utility grimoire:
-  - successor role to `spell-events`
-  - owns event routing, frame input snapshots, keybind/action helpers, and event convenience above `std.events` and `std.input`
+- Graphics facade grimoire:
+  - rewrite-owned scaffold: `grimoires/owned/app/arcana-graphics`
+  - current reference corpus: `grimoires/reference/app/winspell`
+  - owns 2D graphics/image convenience above `std.canvas`
+- Text facade grimoire:
+  - rewrite-owned scaffold: `grimoires/owned/app/arcana-text`
+  - current reference corpus: `grimoires/reference/app/winspell`
+  - owns text draw and text-asset convenience above `std.canvas`, `std.text`, and `std.fs`
+  - file IO remains in `std.fs`; this layer may add text-asset convenience only
 - Audio facade grimoire:
-  - new required role
+  - rewrite-owned scaffold: `grimoires/owned/app/arcana-audio`
+  - current reference corpus: `grimoires/reference/app/spell-audio`
   - owns miniaudio-style higher-level playback/convenience above `std.audio`
   - must be buildable without expanding std into a full audio framework
 
@@ -88,7 +92,7 @@ Not required in this bumper plan:
 
 ## Classification And Tracking Rules
 
-Every std module and required first-party grimoire role must be classified in its status ledger as:
+Every std module and required Arcana-owned app/media grimoire role must be classified in its status ledger as:
 - `bootstrap-required`
 - `transitional-carried`
 - `deferred`
@@ -96,7 +100,7 @@ Every std module and required first-party grimoire role must be classified in it
 Each entry must record:
 - why it exists
 - which concrete consumers require it
-- whether the current implementation is rewrite-owned, carried, missing, or mixed
+- whether the current implementation is rewrite-owned, reference-backed, missing, or mixed
 - what still needs to be rebuilt
 - what note should be revisited later
 - what condition would promote it out of transitional status
@@ -104,7 +108,7 @@ Each entry must record:
 Defaults for this plan:
 - bootstrap-required public std additions are allowed before selfhost if they are tied to a real compiler/tooling or showcase consumer
 - prefer public std for true substrate-level bootstrap needs
-- prefer grimoires for convenience layers
+- prefer Arcana-owned grimoires for convenience layers
 - keep names flexible, freeze responsibilities
 
 ## Implementation Sequence
@@ -113,14 +117,12 @@ Defaults for this plan:
 - std scope
 - std status ledger
 - std deferred roadmap
-- first-party grimoires scope
-- first-party grimoires status ledger
+- app/media grimoire-role scope
+- app/media grimoire-role status ledger
 
-2. Inventory the carried repo against real consumers.
+2. Inventory the reference corpus against real consumers.
 - `std/src`
-- `grimoires/arcana-frontend/src`
-- `grimoires/arcana-compiler-core/src`
-- `grimoires/arcana-selfhost-compiler/src`
+- `grimoires/reference/toolchain/*/src` as bootstrap/reference pressure only
 - current window/input/event/showcase examples
 
 3. Classify each current std module and each required grimoire role.
@@ -144,24 +146,22 @@ Defaults for this plan:
 - audio
 - low-level geometry/color/time/media handle types
 
-7. Rebuild or replace the required first-party grimoires on top of that substrate.
-- frontend
-- compiler-core
-- selfhost-compiler
+7. Rebuild or replace the required Arcana-owned app/media grimoire layers on top of that substrate.
 - desktop facade
-- event/input utility
+- graphics facade
+- text facade
 - audio facade
 
 8. Validate against the intended consumer path.
 - host/bootstrap tooling
-- selfhost compiler grimoires
+- reference compiler/selfhost corpus compatibility
 - window/input/event demo
 - primitive render/text/image demo
 - basic audio smoke demo
 - ECS-driven desktop showcase path
 
 9. Update docs after every classification or surface change.
-- if a carried surface is retained, record why
+- if a reference-backed surface is retained, record why
 - if a surface is provisional, record what triggers revisiting it
 - if a surface is deferred, record why it is not needed before selfhost
 
@@ -174,19 +174,19 @@ Public std categories to expose or ratify in this plan:
 - raw window/input/event/canvas/time/audio substrate
 - low-level geometry/color/time/frame wrappers and opaque media handles
 
-Everything above that belongs in first-party grimoires, not std.
+Everything above that belongs in Arcana-owned grimoire layers, not std.
 
 ## Test Plan
 
 - Doc checks:
   - std scope, std status, std deferred roadmap, grimoires scope, and grimoires status all exist and are cross-linked
   - every bootstrap-required std item and grimoire role has a concrete consumer
-- Rewrite/toolchain checks:
-  - `grimoires/arcana-frontend`
-  - `grimoires/arcana-compiler-core`
-  - `grimoires/arcana-selfhost-compiler`
-  - `examples/selfhost_host_tool_mvp`
-  - `examples/selfhost_frontend_mvp`
+- Reference-corpus compatibility checks:
+  - `grimoires/reference/toolchain/arcana-frontend` remains checkable as migration corpus pressure, not as active package layout
+  - `grimoires/reference/toolchain/arcana-compiler-core` remains checkable as migration corpus pressure, not as active package layout
+  - `grimoires/reference/toolchain/arcana-selfhost-compiler` remains checkable as migration corpus pressure, not as active package layout
+  - `grimoires/reference/examples/selfhost_host_tool_mvp`
+  - `grimoires/reference/examples/selfhost_frontend_mvp`
 - Runtime smoke checks:
   - file/path/process host tool flow
   - window open/close/input/events
@@ -194,8 +194,8 @@ Everything above that belongs in first-party grimoires, not std.
   - basic audio playback
   - ECS/behaviors on the same toolchain/runtime path
 - Showcase-readiness checks:
-  - a desktop showcase/game can be built through grimoires without adding a new std category
-  - any newly discovered need is first evaluated as grimoire-level, and only promoted into std if it is clearly substrate-level
+  - a desktop showcase/game can be built through Arcana-owned grimoire layers without adding a new std category
+  - any newly discovered need is first evaluated as grimoire-layer work, and only promoted into std if it is clearly substrate-level
 
 ## Assumptions
 
@@ -203,4 +203,4 @@ Everything above that belongs in first-party grimoires, not std.
 - `std` must support actual bootstrapping, not just generic app development.
 - Post-selfhost std expansion is expected but intentionally not designed here.
 - Heavy documentation and explicit update notes are part of the deliverable, not follow-up polish.
-- First-party grimoire responsibilities are frozen now, but long-term package names remain flexible.
+- Arcana-owned app/media grimoire responsibilities are frozen now, but long-term package names remain flexible.

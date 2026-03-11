@@ -1,7 +1,0 @@
-name = "desktop_app"
-kind = "app"
-
-[deps]
-shared_core = { path = "../shared_core" }
-winspell = { path = "../../../grimoires/winspell" }
-spell_events = { path = "../../../grimoires/spell-events" }

@@ -34,8 +34,9 @@ This document defines how Arcana spec files are interpreted during the rewrite.
 - If a contract question materially affects parser shape, typed HIR, IR, or selfhost grimoires, it should not remain implicit.
 - Imported MeadowLang planning docs do not define current rewrite architecture unless they are explicitly listed here as frozen, approved, reserved, or deferred authority.
 - Reference-only material should live under `docs/reference/` whenever practical so historical context is not mixed into the active spec tree.
-- Imported `std`, first-party grimoires, and examples are behavioral seed corpus only; they do not define rewrite layering, backend architecture, or public package surface except where current scope docs explicitly ratify them.
-- Architecture/selfhost-progress reviews must privilege approved docs plus `crates/*` over carried corpus; issues found only in `std/`, `grimoires/`, `examples/`, or generated snapshots must be labeled as transitional/corpus drift unless a current scope explicitly makes them authoritative.
+- Imported `std` and `grimoires/reference/*` are behavioral seed corpus only; they do not define rewrite layering, backend architecture, or public package surface except where current scope docs explicitly ratify them.
+- Architecture/selfhost-progress reviews must privilege approved docs plus `crates/*` over carried corpus; issues found only in `std/`, `grimoires/reference/*`, or generated snapshots must be labeled as transitional/corpus drift unless a current scope explicitly makes them authoritative.
+- `grimoires/reference/*` is intentionally temporary. Once the rewrite-owned runtime/app stack and owned showcase path are proven, the reference corpus should leave the default development loop and remain only as selective migration/conformance material.
 
 ## Current Registry Seed
 
@@ -94,9 +95,10 @@ This document defines how Arcana spec files are interpreted during the rewrite.
 - Imported-std review and any app/runtime handle redesign must preserve Arcana's explicit/unambiguous doctrine: typed, named, auditable contracts over ambiguous convenience or erased fallback carriers.
 - Ownership and borrowing work follows the same doctrine: copy Rust where its mutability/borrow/ownership rules are explicit and unambiguous, then tailor to Arcana's ratified surface while making any remaining behavior explicit in syntax, static rules, and diagnostics.
 - First-party runtime/package ownership means more than wrapping upstream Rust crates: third-party crates may exist as private implementation details, but they must not define the public Arcana substrate or the reason first-party `std` exists.
-- First-party grimoire responsibilities must be explicit before bootstrap so carried package names do not silently define the ecosystem.
+- Future Arcana-owned grimoire responsibilities must be explicit before bootstrap so carried package names do not silently define the ecosystem.
 - First-party window/input/canvas and primitive graphics/text remain pre-selfhost requirements for real apps/showcases, but carried `winspell`/`spell-events` code does not freeze the old implementation stack.
+- Arcana-owned grimoire roles are capability commitments, not a promise to preserve the current reference `grimoires/` folder split or Meadow-era package topology.
 - ECS scheduling/components remain first-party language/runtime surface during the rewrite; do not classify them as showcase-only helpers.
 - `std.app` fixed-step helpers and `std.tooling` planner helpers are carried convenience layers, not rewrite-approved first-party architecture unless a scope doc explicitly ratifies them.
-- Every std or first-party grimoire surface change must update the corresponding scope or status ledger in the same patch.
+- Every std or Arcana-owned grimoire surface change must update the corresponding scope or status ledger in the same patch.
 - Generated direct-emit snapshot files and similar carried artifacts are migration corpus, not primary rewrite authority; do not let them outweigh approved docs or `crates/*` during review.

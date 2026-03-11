@@ -1,0 +1,12 @@
+intrinsic fn path_cwd() -> Str = HostPathCwd
+intrinsic fn path_join(a: Str, b: Str) -> Str = HostPathJoin
+intrinsic fn path_normalize(path: Str) -> Str = HostPathNormalize
+intrinsic fn path_parent(path: Str) -> Str = HostPathParent
+intrinsic fn path_file_name(path: Str) -> Str = HostPathFileName
+intrinsic fn path_ext(path: Str) -> Str = HostPathExt
+intrinsic fn path_is_absolute(path: Str) -> Bool = HostPathIsAbsolute
+intrinsic fn path_stem_try(path: Str) -> (Bool, Str) = HostPathStemTry
+intrinsic fn path_with_ext(path: Str, ext: Str) -> Str = HostPathWithExt
+intrinsic fn path_relative_to_try(path: Str, base: Str) -> (Bool, Str) = HostPathRelativeToTry
+intrinsic fn path_canonicalize_try(path: Str) -> (Bool, Str) = HostPathCanonicalizeTry
+intrinsic fn path_strip_prefix_try(path: Str, prefix: Str) -> (Bool, Str) = HostPathStripPrefixTry

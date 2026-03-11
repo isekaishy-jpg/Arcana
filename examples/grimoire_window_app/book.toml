@@ -1,5 +1,0 @@
-name = "grimoire_window_app"
-kind = "app"
-
-[deps]
-winspell = { path = "../../grimoires/winspell" }

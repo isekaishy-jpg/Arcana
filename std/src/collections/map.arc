@@ -25,11 +25,18 @@ impl[K, V] Map[K, V]:
     fn len(read self: Map[K, V]) -> Int:
         return std.kernel.collections.map_len :: self :: call
 
+    fn is_empty(read self: Map[K, V]) -> Bool:
+        return (self :: :: len) == 0
+
     fn has(read self: Map[K, V], key: K) -> Bool:
         return std.kernel.collections.map_has :: self, key :: call
 
     fn get(read self: Map[K, V], key: K) -> V:
         return std.kernel.collections.map_get :: self, key :: call
+
+    fn get_or(read self: Map[K, V], key: K, take fallback: V) -> V:
+        let pair = std.kernel.collections.map_try_get_or :: self, key, fallback :: call
+        return pair.1
 
     fn set(edit self: Map[K, V], key: K, take value: V):
         std.kernel.collections.map_set :: self, key, value :: call

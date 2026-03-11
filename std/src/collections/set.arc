@@ -12,6 +12,9 @@ export fn new[K]() -> Set[K]:
 export fn len[K](read self: Set[K]) -> Int:
     return std.kernel.collections.map_len :: self.entries :: call
 
+export fn is_empty[K](read self: Set[K]) -> Bool:
+    return (std.collections.set.len :: self :: call) == 0
+
 export fn has[K](read self: Set[K], key: K) -> Bool:
     return std.kernel.collections.map_has :: self.entries, key :: call
 

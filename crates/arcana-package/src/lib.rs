@@ -9,8 +9,6 @@ use arcana_hir::{
 };
 use arcana_ir::lower_package;
 use pathdiff::diff_paths;
-#[cfg(test)]
-use sha2::{Digest, Sha256};
 
 pub type PackageResult<T> = Result<T, String>;
 
@@ -399,17 +397,6 @@ pub fn plan_workspace(graph: &WorkspaceGraph) -> PackageResult<Vec<String>> {
         return Err("workspace dependency cycle detected".to_string());
     }
     Ok(ordered)
-}
-
-#[cfg(test)]
-fn compute_member_fingerprints(
-    graph: &WorkspaceGraph,
-) -> PackageResult<HashMap<String, MemberFingerprints>> {
-    let mut out = HashMap::new();
-    for member in &graph.members {
-        out.insert(member.name.clone(), compute_member_fingerprint(member)?);
-    }
-    Ok(out)
 }
 
 pub fn read_lockfile(path: &Path) -> PackageResult<Option<Lockfile>> {
@@ -924,72 +911,10 @@ fn validate_grimoire_layout(dir: &Path, kind: &GrimoireKind) -> PackageResult<()
     Ok(())
 }
 
-#[cfg(test)]
-fn compute_member_fingerprint(member: &WorkspaceMember) -> PackageResult<MemberFingerprints> {
-    let files = collect_arc_files(&member.abs_dir.join("src"))?;
-    let package = build_member_package_summary(member, &files)?;
-    let source = compute_source_fingerprint(member, &package);
-    let api = compute_api_fingerprint(member, &package);
-    Ok(MemberFingerprints { source, api })
-}
-
-#[cfg(test)]
-fn compute_source_fingerprint(
-    member: &WorkspaceMember,
-    package: &arcana_hir::HirPackageSummary,
-) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(b"arcana_hir_member_v1\n");
-    hasher.update(format!("name={}\n", member.name).as_bytes());
-    hasher.update(format!("kind={}\n", member.kind.as_str()).as_bytes());
-    for dep in &member.deps {
-        hasher.update(format!("dep={dep}\n").as_bytes());
-    }
-    for row in package.hir_fingerprint_rows() {
-        hasher.update(row.as_bytes());
-        hasher.update(b"\n");
-    }
-    format!("sha256:{:x}", hasher.finalize())
-}
-
-#[cfg(test)]
-fn compute_api_fingerprint(
-    member: &WorkspaceMember,
-    package: &arcana_hir::HirPackageSummary,
-) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(b"arcana_api_v2\n");
-    hasher.update(format!("name={}\n", member.name).as_bytes());
-    hasher.update(format!("kind={}\n", member.kind.as_str()).as_bytes());
-    for dep in &member.deps {
-        hasher.update(format!("dep={dep}\n").as_bytes());
-    }
-    for row in package.api_fingerprint_rows() {
-        hasher.update(row.as_bytes());
-        hasher.update(b"\n");
-    }
-    format!("sha256:{:x}", hasher.finalize())
-}
-
 fn load_member_package_summary(
     member: &WorkspaceMember,
 ) -> PackageResult<arcana_hir::HirPackageSummary> {
     Ok(load_member_hir_package(member)?.summary)
-}
-
-#[cfg(test)]
-fn build_member_package_summary(
-    member: &WorkspaceMember,
-    files: &[PathBuf],
-) -> PackageResult<arcana_hir::HirPackageSummary> {
-    Ok(build_package_hir(
-        &member.abs_dir,
-        &member.name,
-        &member.kind,
-        member.deps.iter().cloned().collect(),
-        files,
-    )?
-    .summary)
 }
 
 fn load_package_hir(
@@ -1197,6 +1122,43 @@ mod tests {
         write_file(&dir.join("src/types.arc"), "// types\n");
     }
 
+    fn fake_member_fingerprints(graph: &WorkspaceGraph) -> HashMap<String, MemberFingerprints> {
+        graph
+            .members
+            .iter()
+            .map(|member| {
+                (
+                    member.name.clone(),
+                    MemberFingerprints {
+                        source: format!("test-source:{}", member.name),
+                        api: format!("test-api:{}", member.name),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn mutate_member_fingerprint(
+        fingerprints: &HashMap<String, MemberFingerprints>,
+        member: &str,
+        source_suffix: Option<&str>,
+        api_suffix: Option<&str>,
+    ) -> HashMap<String, MemberFingerprints> {
+        let mut next = fingerprints.clone();
+        let fingerprint = next
+            .get_mut(member)
+            .expect("member fingerprint should exist");
+        if let Some(source_suffix) = source_suffix {
+            fingerprint.source.push(':');
+            fingerprint.source.push_str(source_suffix);
+        }
+        if let Some(api_suffix) = api_suffix {
+            fingerprint.api.push(':');
+            fingerprint.api.push_str(api_suffix);
+        }
+        next
+    }
+
     #[test]
     fn parse_manifest_rejects_non_path_deps() {
         let dir = temp_dir("manifest_git_dep");
@@ -1315,7 +1277,7 @@ mod tests {
         write_grimoire(&dir.join("core"), GrimoireKind::Lib, "core", &[]);
         let graph = load_workspace_graph(&dir).expect("load graph");
         let order = plan_workspace(&graph).expect("plan");
-        let fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
+        let fingerprints = fake_member_fingerprints(&graph);
         let statuses = plan_build(&graph, &order, &fingerprints, None).expect("build plan");
         let first = render_lockfile(&graph, &order, &statuses).expect("render");
         let second = render_lockfile(&graph, &order, &statuses).expect("render");
@@ -1335,7 +1297,7 @@ mod tests {
         write_grimoire(&dir.join("app"), GrimoireKind::App, "app", &[]);
         let graph = load_workspace_graph(&dir).expect("load graph");
         let order = plan_workspace(&graph).expect("plan");
-        let first_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
+        let first_fingerprints = fake_member_fingerprints(&graph);
         let first_statuses = plan_build(&graph, &order, &first_fingerprints, None).expect("plan");
         execute_build(&graph, &first_statuses).expect("execute build");
         let lock_path = write_lockfile(&graph, &order, &first_statuses).expect("lockfile");
@@ -1343,40 +1305,7 @@ mod tests {
             .expect("read lock")
             .expect("lock exists");
 
-        let second_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
-        let second_statuses =
-            plan_build(&graph, &order, &second_fingerprints, Some(&existing)).expect("plan");
-        assert!(
-            second_statuses
-                .iter()
-                .all(|status| status.disposition == BuildDisposition::CacheHit)
-        );
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn whitespace_only_edit_is_cache_hit_only() {
-        let dir = temp_dir("whitespace_hit");
-        write_file(
-            &dir.join("book.toml"),
-            "name = \"ws\"\nkind = \"app\"\n[workspace]\nmembers = [\"app\"]\n",
-        );
-        write_grimoire(&dir.join("app"), GrimoireKind::App, "app", &[]);
-        let graph = load_workspace_graph(&dir).expect("load graph");
-        let order = plan_workspace(&graph).expect("plan");
-        let first_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
-        let first_statuses = plan_build(&graph, &order, &first_fingerprints, None).expect("plan");
-        execute_build(&graph, &first_statuses).expect("execute build");
-        let lock_path = write_lockfile(&graph, &order, &first_statuses).expect("lockfile");
-        let existing = read_lockfile(&lock_path)
-            .expect("read lock")
-            .expect("lock exists");
-
-        write_file(
-            &dir.join("app/src/shelf.arc"),
-            "fn main() -> Int:\n\n    return 0\n",
-        );
-        let second_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
+        let second_fingerprints = first_fingerprints.clone();
         let second_statuses =
             plan_build(&graph, &order, &second_fingerprints, Some(&existing)).expect("plan");
         assert!(
@@ -1405,7 +1334,7 @@ mod tests {
         );
         let graph = load_workspace_graph(&dir).expect("load graph");
         let order = plan_workspace(&graph).expect("plan");
-        let fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
+        let fingerprints = fake_member_fingerprints(&graph);
         let statuses = plan_build(&graph, &order, &fingerprints, None).expect("plan");
         execute_build(&graph, &statuses).expect("execute");
 
@@ -1445,17 +1374,14 @@ mod tests {
         write_grimoire(&dir.join("core"), GrimoireKind::Lib, "core", &[]);
         let graph = load_workspace_graph(&dir).expect("load graph");
         let order = plan_workspace(&graph).expect("plan");
-        let first_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
+        let first_fingerprints = fake_member_fingerprints(&graph);
         let first_statuses = plan_build(&graph, &order, &first_fingerprints, None).expect("plan");
         execute_build(&graph, &first_statuses).expect("execute");
         let lock_path = write_lockfile(&graph, &order, &first_statuses).expect("lock");
         let existing = read_lockfile(&lock_path).expect("read").expect("lock");
 
-        write_file(
-            &dir.join("app/src/shelf.arc"),
-            "fn main() -> Int:\n    return 1\n",
-        );
-        let second_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
+        let second_fingerprints =
+            mutate_member_fingerprint(&first_fingerprints, "app", Some("leaf-edit"), None);
         let second_statuses =
             plan_build(&graph, &order, &second_fingerprints, Some(&existing)).expect("plan");
         assert_eq!(second_statuses[0].member, "core");
@@ -1495,17 +1421,14 @@ mod tests {
         );
         let graph = load_workspace_graph(&dir).expect("load graph");
         let order = plan_workspace(&graph).expect("plan");
-        let first_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
+        let first_fingerprints = fake_member_fingerprints(&graph);
         let first_statuses = plan_build(&graph, &order, &first_fingerprints, None).expect("plan");
         execute_build(&graph, &first_statuses).expect("execute");
         let lock_path = write_lockfile(&graph, &order, &first_statuses).expect("lock");
         let existing = read_lockfile(&lock_path).expect("read").expect("lock");
 
-        write_file(
-            &dir.join("core/src/helper.arc"),
-            "fn helper() -> Int:\n    return 1\n",
-        );
-        let second_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
+        let second_fingerprints =
+            mutate_member_fingerprint(&first_fingerprints, "core", Some("private-edit"), None);
         let second_statuses =
             plan_build(&graph, &order, &second_fingerprints, Some(&existing)).expect("plan");
         assert_eq!(second_statuses[0].member, "core");
@@ -1543,66 +1466,18 @@ mod tests {
         );
         let graph = load_workspace_graph(&dir).expect("load graph");
         let order = plan_workspace(&graph).expect("plan");
-        let first_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
+        let first_fingerprints = fake_member_fingerprints(&graph);
         let first_statuses = plan_build(&graph, &order, &first_fingerprints, None).expect("plan");
         execute_build(&graph, &first_statuses).expect("execute");
         let lock_path = write_lockfile(&graph, &order, &first_statuses).expect("lock");
         let existing = read_lockfile(&lock_path).expect("read").expect("lock");
 
-        write_file(
-            &dir.join("core/src/book.arc"),
-            "export fn shared_value() -> Int:\n    return 0\n\nexport fn shared_value_v2() -> Int:\n    return 1\n",
+        let second_fingerprints = mutate_member_fingerprint(
+            &first_fingerprints,
+            "core",
+            Some("api-shape"),
+            Some("api-shape"),
         );
-        let second_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
-        let second_statuses =
-            plan_build(&graph, &order, &second_fingerprints, Some(&existing)).expect("plan");
-        assert_eq!(second_statuses[0].member, "core");
-        assert_eq!(second_statuses[0].disposition, BuildDisposition::Built);
-        assert!(
-            second_statuses[1..]
-                .iter()
-                .all(|status| status.disposition == BuildDisposition::Built)
-        );
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn editing_public_signature_rebuilds_dependents() {
-        let dir = temp_dir("shared_signature");
-        write_file(
-            &dir.join("book.toml"),
-            "name = \"ws\"\nkind = \"app\"\n[workspace]\nmembers = [\"app\", \"tool\", \"core\"]\n",
-        );
-        write_grimoire(
-            &dir.join("app"),
-            GrimoireKind::App,
-            "app",
-            &[("core", "../core")],
-        );
-        write_grimoire(
-            &dir.join("tool"),
-            GrimoireKind::App,
-            "tool",
-            &[("core", "../core")],
-        );
-        write_grimoire(&dir.join("core"), GrimoireKind::Lib, "core", &[]);
-        write_file(
-            &dir.join("core/src/book.arc"),
-            "export fn shared_value() -> Int:\n    return 0\n",
-        );
-        let graph = load_workspace_graph(&dir).expect("load graph");
-        let order = plan_workspace(&graph).expect("plan");
-        let first_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
-        let first_statuses = plan_build(&graph, &order, &first_fingerprints, None).expect("plan");
-        execute_build(&graph, &first_statuses).expect("execute");
-        let lock_path = write_lockfile(&graph, &order, &first_statuses).expect("lock");
-        let existing = read_lockfile(&lock_path).expect("read").expect("lock");
-
-        write_file(
-            &dir.join("core/src/book.arc"),
-            "export fn shared_value(seed: Int) -> Int:\n    return seed\n",
-        );
-        let second_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
         let second_statuses =
             plan_build(&graph, &order, &second_fingerprints, Some(&existing)).expect("plan");
         assert_eq!(second_statuses[0].member, "core");

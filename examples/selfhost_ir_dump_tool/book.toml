@@ -1,5 +1,0 @@
-name = "selfhost_ir_dump_tool"
-kind = "app"
-
-[deps]
-arcana_compiler_core = { path = "../../grimoires/arcana-compiler-core" }

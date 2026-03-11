@@ -13,7 +13,7 @@ Current std authority is:
 Guardrails:
 - This ledger may schedule or classify follow-on std work, but it may not expand pre-selfhost std by itself.
 - If a deferred item becomes a demonstrated bootstrap blocker, it must move through an explicit scope/status update instead of silently landing in code.
-- Higher-level framework or gameplay surface should prefer first-party grimoires unless a concrete substrate-level need is proven.
+- Higher-level framework or gameplay surface should prefer Arcana-owned grimoire layers unless a concrete substrate-level need is proven.
 
 id: STD-D1
 title: richer text and font stack beyond primitive label draw
@@ -46,7 +46,25 @@ id: STD-D4
 title: gameplay/math/domain helper expansion
 reason_deferred: gameplay helpers, broader math types, physics helpers, and domain-specific utility layers are not part of bootstrap std.
 target_window: post-selfhost ecosystem shaping
-trigger_condition: ready_when=multiple first-party grimoires or showcase consumers prove a repeated substrate-level gap; verify=the proposed helpers are not framework/domain convenience better owned by grimoires; blocked_by=no approved cross-domain contract.
+trigger_condition: ready_when=multiple Arcana-owned grimoire layers or showcase consumers prove a repeated substrate-level gap; verify=the proposed helpers are not framework/domain convenience better owned by grimoires; blocked_by=no approved cross-domain contract.
 owner: Arcana std/grimoire team
-acceptance_criteria: only demonstrably substrate-level helpers graduate into std; the rest stay in first-party grimoires.
+acceptance_criteria: only demonstrably substrate-level helpers graduate into std; the rest stay in Arcana-owned grimoire layers.
+status: deferred
+
+id: STD-D5
+title: digest substrate beyond explicit SHA-256 helpers
+reason_deferred: `std.bytes.sha256_hex` is now part of the approved baseline, so the remaining question is only whether Arcana-side tooling later needs binary digests, incremental hashing, or other explicitly named digest helpers.
+target_window: before any Arcana-owned package/build/fingerprint driver needs more than one-shot SHA-256 strings
+trigger_condition: ready_when=Arcana-side tooling proves that `sha256_hex` is not enough for stable content/API fingerprints; verify=any added surface stays concrete, typed, deterministic, and narrowly named rather than turning into a broad crypto toolkit; blocked_by=current build/fingerprint logic still lives in the Rust rewrite.
+owner: Arcana std/tooling team
+acceptance_criteria: std exposes only the additional digest substrate Arcana-side tooling actually needs beyond `sha256_hex`, without collapsing into a broad crypto utility layer.
+status: deferred
+
+id: STD-D6
+title: manifest and package substrate beyond explicit baseline helpers
+reason_deferred: `std.path` now includes canonical path resolution and explicit prefix handling, and `std.manifest` now includes explicit workspace-member, dependency-path, and lockfile lookup helpers. The remaining deferred work is only whatever structured manifest/rendering support Arcana-side tooling later proves it still needs.
+target_window: before any Arcana-owned package/workspace driver needs more than the current explicit path and manifest baseline
+trigger_condition: ready_when=Arcana-side tooling needs richer manifest tables, typed lockfile rendering, or other deterministic package helpers beyond the current explicit lookup set; verify=the promoted helpers stay substrate-level and deterministic rather than becoming a generic config framework; blocked_by=the current package/build driver still lives in the Rust rewrite.
+owner: Arcana std/tooling team
+acceptance_criteria: std grows only the additional, narrowly named package/manifest pieces the Arcana-side package layer actually needs beyond the current baseline, without turning std into a generic config framework.
 status: deferred

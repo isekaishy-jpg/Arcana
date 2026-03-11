@@ -1,3 +1,38 @@
-intrinsic fn events_poll_kind(read win: Window) -> Int = EventsPollKind
-intrinsic fn events_poll_a(read win: Window) -> Int = EventsPollA
-intrinsic fn events_poll_b(read win: Window) -> Int = EventsPollB
+enum Event:
+    None
+    WindowResized((Int, Int))
+    WindowCloseRequested
+    WindowFocused(Bool)
+    KeyDown(Int)
+    KeyUp(Int)
+    MouseDown(Int)
+    MouseUp(Int)
+    MouseMove((Int, Int))
+    MouseWheelY(Int)
+
+intrinsic fn poll_raw(read win: Window) -> (Int, (Int, Int)) = EventsPoll
+
+fn decode(kind: Int, a: Int, b: Int) -> std.kernel.events.Event:
+    if kind == 1:
+        return std.kernel.events.Event.WindowResized :: (a, b) :: call
+    if kind == 2:
+        return std.kernel.events.Event.WindowCloseRequested :: :: call
+    if kind == 3:
+        return std.kernel.events.Event.WindowFocused :: a != 0 :: call
+    if kind == 4:
+        return std.kernel.events.Event.KeyDown :: a :: call
+    if kind == 5:
+        return std.kernel.events.Event.KeyUp :: a :: call
+    if kind == 6:
+        return std.kernel.events.Event.MouseDown :: a :: call
+    if kind == 7:
+        return std.kernel.events.Event.MouseUp :: a :: call
+    if kind == 8:
+        return std.kernel.events.Event.MouseMove :: (a, b) :: call
+    if kind == 9:
+        return std.kernel.events.Event.MouseWheelY :: a :: call
+    return std.kernel.events.Event.None :: :: call
+
+fn poll(read win: Window) -> std.kernel.events.Event:
+    let raw = std.kernel.events.poll_raw :: win :: call
+    return std.kernel.events.decode :: raw.0, raw.1.0, raw.1.1 :: call

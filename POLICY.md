@@ -29,12 +29,12 @@ Allowed pre-selfhost language edits are limited to:
 - `AnyBox`-style erased Arcana values are banned from the rewrite contract.
 - Closures and general callable values are not part of the selfhost baseline; future callable capability is expected to use explicit function/context objects instead.
 
-## 4. First-Party Package Boundary
+## 4. Arcana-Owned Package Boundary
 
-- Host and platform capability must surface through first-party grimoires.
+- Host and platform capability must surface through Arcana-owned packages above `std`, not through compiler special cases.
 - Compiler special cases and name-based privilege are prohibited for library APIs.
 - Internal host capabilities may exist for bootstrap purposes, but they are not public language surface.
-- First-party `std` and required grimoires must define Arcana-owned contracts, not thin public wrappers around third-party Rust crate APIs.
+- First-party `std` and any future Arcana-owned grimoires must define Arcana-owned contracts, not thin public wrappers around third-party Rust crate APIs.
 - Third-party Rust crates may be used only as replaceable private implementation details under the rewrite-owned runtime/backend stack.
 - Upstream crate choices must not become de facto Arcana language/runtime policy through wrapper inertia.
 - If end users could get the same canonical behavior by wrapping the same Rust crates externally, the surface probably does not belong in first-party `std`.
@@ -42,7 +42,7 @@ Allowed pre-selfhost language edits are limited to:
 ## 4A. Rewrite Review Boundary
 
 - Architecture and selfhost-progress review must privilege approved specs plus `crates/*`, because that is the actual rewrite implementation.
-- Imported `std`, first-party grimoires, examples, conformance fixtures, and generated direct-emit snapshots are carried source corpus unless a current approved scope explicitly ratifies the exact surface being discussed.
+- Imported `std`, `grimoires/reference/*`, conformance fixtures, and generated direct-emit snapshots are carried source corpus unless a current approved scope explicitly ratifies the exact surface being discussed.
 - Findings discovered only in carried corpus must be labeled as transitional migration work or corpus drift, not as rewrite-crate dependence.
 - Carried corpus may still expose pressure or missing substrate needs, but it must not silently redefine rewrite architecture.
 

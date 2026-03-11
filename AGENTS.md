@@ -8,11 +8,11 @@ When judging rewrite architecture, selfhost readiness, or whether something is "
 2. `docs/specs/spec-status.md` and any spec files it marks frozen or approved
 3. `PLAN.md` and `docs/rewrite-roadmap.md` for sequencing and milestone intent
 4. `crates/*` for the actual Rust rewrite implementation
-5. `std/`, `grimoires/`, `examples/`, and conformance fixtures only as carried source corpus unless an approved scope explicitly ratifies the surface being discussed
+5. `std/`, `grimoires/reference/*`, and conformance fixtures only as carried source corpus unless an approved scope explicitly ratifies the surface being discussed
 
 ## Review Boundary
 
-- Do not treat imported `std`, first-party grimoires, examples, or generated direct-emit snapshots as rewrite architecture evidence by themselves.
+- Do not treat imported `std`, `grimoires/reference/*`, or generated direct-emit snapshots as rewrite architecture evidence by themselves.
 - For architecture reviews and selfhost-progress reviews, findings must distinguish:
   - crate-side rewrite implementation
   - approved first-party contract
@@ -22,8 +22,8 @@ When judging rewrite architecture, selfhost readiness, or whether something is "
 
 ## Imported Corpus Hotspots
 
-- `std/`, `grimoires/`, and `examples/` are still useful for behavioral checks and migration pressure.
-- `grimoires/arcana-compiler-core/src/direct_emit_specs_*` are carried/generated artifacts and should not be used as primary evidence for current rewrite architecture.
+- `std/` and `grimoires/reference/*` are still useful for behavioral checks and migration pressure.
+- `grimoires/reference/toolchain/arcana-compiler-core/src/direct_emit_specs_*` are carried/generated artifacts and should not be used as primary evidence for current rewrite architecture.
 - If a review needs to talk about these paths, state explicitly whether the issue is:
   - rewrite-crate behavior
   - approved contract mismatch

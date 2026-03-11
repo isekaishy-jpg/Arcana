@@ -114,18 +114,12 @@ Notes:
 Arcana now ships reusable standard type modules:
 
 - `std.types.core`
-- `std.types.game`
-- `std.types` (reexports `core` + `game`)
+- `std.types` (reexports `core`)
 
 Current `std.types.core` includes:
 
 - `Vec2i`, `Size2i`, `Recti`, `ColorRgb`, `Tick`, `FrameIndex`
 - helpers: `vec2`, `size2`, `rect`, `rgb`
-
-Current `std.types.game` includes:
-
-- `EntityId`, `Health`, `Damage`, `Score`, `TeamId`
-- helpers: `entity_id`, `health`, `damage`, `score`, `team_id`
 
 Arcana also ships soft behavior phase trait standards:
 
@@ -233,9 +227,9 @@ Notes:
 - Integer overflow in `+ - * / %` and unary `-` is reported deterministically at runtime:
   `integer overflow in add|sub|mul|division|modulo|neg`.
 
-See `examples/operators_core`.
-See `examples/operators_bitwise`.
-See `examples/operators_concat_assign`.
+See `grimoires/reference/examples/operators_core`.
+See `grimoires/reference/examples/operators_bitwise`.
+See `grimoires/reference/examples/operators_concat_assign`.
 
 ## Collections (v0.9)
 
@@ -268,10 +262,10 @@ Notes:
 - Generic calls use phrase style (`foo[T] :: ... :: call`), while `foo[T]` without a qualifier remains subscript syntax.
 - Pair tuples are the current selfhost baseline. Richer tuple expansion is intentionally deferred rather than rejected outright; see `docs/specs/tuples/tuples/v1-scope.md` and `docs/specs/tuples/tuples/deferred-roadmap.md`.
 
-See `examples/list_core`.
-See `examples/list_slice_range`.
-See `examples/list_index_compound`.
-See `examples/pair_try_pop`.
+See `grimoires/reference/examples/list_core`.
+See `grimoires/reference/examples/list_slice_range`.
+See `grimoires/reference/examples/list_index_compound`.
+See `grimoires/reference/examples/pair_try_pop`.
 
 ## Collections Expansion (v0.10)
 
@@ -309,10 +303,10 @@ Notes:
 - Empty map literals are not supported yet; use `std.collections.map.new[K, V]()`.
 - Array literals are not part of v0.10 (use constructors).
 
-See `examples/array_core`.
-See `examples/map_core`.
-See `examples/for_collections`.
-See `examples/map_index_compound`.
+See `grimoires/reference/examples/array_core`.
+See `grimoires/reference/examples/map_core`.
+See `grimoires/reference/examples/for_collections`.
+See `grimoires/reference/examples/map_index_compound`.
 
 ## Library-Ready Language Additions (v0.13, current subset)
 
@@ -344,10 +338,10 @@ Notes:
 - Or-pattern binding capture (`A(x) | B(x)`) is not supported yet.
 - Trait dispatch remains static/monomorphized (no trait objects/dynamic dispatch).
 
-See `examples/plan13_box_generic`.
-See `examples/plan13_generics_match`.
-See `examples/plan13_result_generic`.
-See `examples/trait_v2_iter_ecs`.
+See `grimoires/reference/examples/plan13_box_generic`.
+See `grimoires/reference/examples/plan13_generics_match`.
+See `grimoires/reference/examples/plan13_result_generic`.
+See `grimoires/reference/examples/trait_v2_iter_ecs`.
 
 ## Iterator + ECS Trait Proof Slice (v0.27)
 
@@ -369,7 +363,7 @@ It does not freeze general ECS query syntax; broad query authoring remains outsi
 
 A std-style shelf layout now works in Grimoires using `impl` extension methods over kernel collection intrinsics.
 
-See `examples/grimoire_std_methods_app` for:
+See `grimoires/reference/examples/grimoire_std_methods_app` for:
 
 - `std.result` / `std.option` user enums
 - `std.collections.list` extension methods (`len`, `push`, `pop`, `try_pop_or`)
@@ -471,12 +465,12 @@ Notes:
 
 See:
 
-- `examples/arena_ast_builder`
-- `examples/arena_reset_cycle`
-- `examples/arena_id_safety`
-- `examples/frame_scratch_cycle`
-- `examples/pool_reuse_cycle`
-- `examples/memory_phrase_frame_pool`
+- `grimoires/reference/examples/arena_ast_builder`
+- `grimoires/reference/examples/arena_reset_cycle`
+- `grimoires/reference/examples/arena_id_safety`
+- `grimoires/reference/examples/frame_scratch_cycle`
+- `grimoires/reference/examples/pool_reuse_cycle`
+- `grimoires/reference/examples/memory_phrase_frame_pool`
 
 ## Ownership And Lifetimes (v0.32)
 
@@ -637,9 +631,9 @@ Metadata blocks:
 
 See:
 
-- `examples/chain_forward_pipeline`
-- `examples/chain_header_attached`
-- `examples/chain_styles_matrix`
+- `grimoires/reference/examples/chain_forward_pipeline`
+- `grimoires/reference/examples/chain_header_attached`
+- `grimoires/reference/examples/chain_styles_matrix`
 
 ## Current Implementation Limits (Not Frozen Language Law)
 
@@ -657,9 +651,10 @@ Where a domain scope exists under `docs/specs/**/v1-scope.md`, that domain scope
 Desktop APIs are now shelf-first through toolchain std modules:
 
 - `std.canvas`:
-  - `open`, `alive`, `fill`, `rect`, `label`, `present`, `rgb`
-  - `image_load`, `image_size`, `blit`, `blit_scaled`, `blit_region`
+  - `open -> Result[Window, Str]`, `alive`, `fill`, `rect`, `label`, `present`, `rgb`
+  - `image_load -> Result[Image, Str]`, `image_size`, `blit`, `blit_scaled`, `blit_region`
 - `std.window`:
+  - `open -> Result[Window, Str]`, `alive`
   - `size`, `resized`, `fullscreen`, `minimized`, `maximized`, `focused`
   - `set_title`, `set_resizable`, `set_fullscreen`, `set_minimized`, `set_maximized`, `set_topmost`, `set_cursor_visible`, `close`
 - `std.input`:
@@ -682,7 +677,7 @@ Surface policy:
 
 Notes:
 
-- `Window` and `Image` are typed opaque values.
+- `Window` and `Image` are typed opaque values, and creation/load boundaries are explicit `Result[...]` APIs rather than infallible handle producers.
 - `std.canvas.fill`, `std.canvas.rect`, `std.canvas.label`, and `std.canvas.present` require `edit win`.
 - `std.canvas.rgb` clamps channels to `0..255`.
 - `std.canvas.rect` rejects negative width/height at runtime.
@@ -702,14 +697,14 @@ Notes:
 New modules:
 
 - `std.events`
-- `std.app`
 - `std.ecs`
-- `std.tooling`
 
 `std.events` provides typed queue access sourced from the same frame pump boundary:
 
 - `std.events.poll(read win) -> Option[std.events.AppEvent]`
 - `std.events.drain(read win) -> List[std.events.AppEvent]`
+
+`std.events.poll` is sourced from a single backend event-record poll per step and returns `Option[...]` explicitly rather than relying on separate kind/payload probes in public std.
 
 `std.events.AppEvent` variants:
 
@@ -721,21 +716,13 @@ New modules:
 - `MouseMove((Int, Int))`
 - `MouseWheelY(Int)`
 
-`std.app` provides deterministic fixed-step helpers:
-
-- `fixed_tick_ms(tick_hz)`
-- `fixed_consume_steps(edit accumulator_ms, frame_ms, tick_ms)`
-- `fixed_alpha_milli(accumulator_ms, tick_ms)`
-- `fixed_runner(tick_hz) -> std.app.FixedRunner`
-- `fixed_runner_step(edit runner, frame_ms) -> (Int, Int)` (steps, alpha_milli)
-- `fixed_runner_reset(edit runner)`
-
 Rewrite note:
 
 - `std.events` is part of the first-party app/runtime substrate required before selfhost.
 - `std.ecs` and `std.behaviors.step` remain first-party language/runtime surface.
-- `std.time` and `std.audio` are bootstrap-owned low-level substrate categories; higher-level loop and playback policy belongs in first-party grimoires.
-- carried `std.app` fixed-step helpers are convenience corpus, not the rewrite's canonical app architecture unless later ratified by an explicit scope.
+- `std.time` and `std.audio` are bootstrap-owned low-level substrate categories; higher-level loop and playback policy belongs in Arcana-owned grimoire layers.
+- `std.audio.default_output`, `std.audio.buffer_load_wav`, and `std.audio.play_buffer` are explicit `Result[...]` APIs.
+- carried historical `std.app` fixed-step helpers are convenience corpus only and are not part of the current std surface.
 
 `std.ecs` currently provides scheduler-phase helpers for behavior/system stepping:
 
@@ -766,14 +753,9 @@ Runtime note:
 - Worker-affinity systems require sendable component parameter types.
 - A single system cannot declare multiple `edit` parameters for the same component type.
 
-`std.tooling` currently provides Arcana-authored local planning helpers:
-
-- `plan_local_workspace(members, deps) -> Result[List[Str], Str]`
-- `std.tooling.graph.topo_sort(members, deps)`
-
 Rewrite note:
 
-- carried `std.tooling` helpers are not, by themselves, rewrite-approved standard-library architecture; they may move to toolchain/support grimoires unless later ratified by scope.
+- carried historical `std.tooling` helpers are not part of the current std surface and remain reference-only unless a future scope explicitly reintroduces them elsewhere.
 
 Workspace/build notes:
 
@@ -784,21 +766,21 @@ Workspace/build notes:
 
 See:
 
-- `examples/window_hello`
-- `examples/window_quads`
-- `examples/input_tester`
-- `examples/window_image_viewer`
-- `examples/window_controls`
-- `examples/events_poll_demo`
-- `examples/grimoire_ecs_mini_game`
-- `examples/arcana_showcase`
-- `examples/life_lab`
-- `examples/grimoire_counter_app`
-- `examples/grimoire_window_app`
-- `examples/grimoire_ui_lib`
-- `examples/grimoire_ecs_schedule`
-- `grimoires/winspell`
-- `grimoires/spell-events`
+- `grimoires/reference/examples/window_hello`
+- `grimoires/reference/examples/window_quads`
+- `grimoires/reference/examples/input_tester`
+- `grimoires/reference/examples/window_image_viewer`
+- `grimoires/reference/examples/window_controls`
+- `grimoires/reference/examples/events_poll_demo`
+- `grimoires/reference/examples/grimoire_ecs_mini_game`
+- `grimoires/reference/examples/arcana_showcase`
+- `grimoires/reference/examples/life_lab`
+- `grimoires/reference/examples/grimoire_counter_app`
+- `grimoires/reference/examples/grimoire_window_app`
+- `grimoires/reference/examples/grimoire_ui_lib`
+- `grimoires/reference/examples/grimoire_ecs_schedule`
+- `grimoires/reference/app/winspell`
+- `grimoires/reference/app/spell-events`
 
 ## Concurrency / IO Surface (v0.17)
 
@@ -837,16 +819,16 @@ Implemented surface:
 
 Examples:
 
-- `examples/async_weave`
-- `examples/async_main`
-- `examples/split_join`
-- `examples/behavior_phases`
-- `examples/channel_ping`
-- `examples/channel_async`
-- `examples/async_channel`
-- `examples/mutex_counter`
-- `examples/atomic_counter`
-- `examples/grimoire_behavior_app`
+- `grimoires/reference/examples/async_weave`
+- `grimoires/reference/examples/async_main`
+- `grimoires/reference/examples/split_join`
+- `grimoires/reference/examples/behavior_phases`
+- `grimoires/reference/examples/channel_ping`
+- `grimoires/reference/examples/channel_async`
+- `grimoires/reference/examples/async_channel`
+- `grimoires/reference/examples/mutex_counter`
+- `grimoires/reference/examples/atomic_counter`
+- `grimoires/reference/examples/grimoire_behavior_app`
 
 Current behavior:
 
@@ -967,15 +949,15 @@ Policy:
   - `--allow-process` on runnable execution flows
   - without the flag: `process execution is disabled; rerun with --allow-process`
 - `std.fs` includes binary file APIs: `read_bytes(path) -> Array[Int]` and `write_bytes(path, bytes)`.
-- `std.fs` includes streaming APIs:
-  - `stream_open_read(path) -> Int`
-  - `stream_open_write(path, append) -> Int`
-  - `stream_read(stream_id, max_bytes) -> Array[Int]`
-  - `stream_write(stream_id, bytes) -> Int`
-  - `stream_eof(stream_id) -> Bool`
-  - `stream_close(stream_id)`
+- `std.fs` includes streaming APIs with a typed `FileStream` handle:
+  - `stream_open_read(path) -> Result[FileStream, Str]`
+  - `stream_open_write(path, append) -> Result[FileStream, Str]`
+  - `stream_read(read stream, max_bytes) -> Result[Array[Int], Str]`
+  - `stream_write(read stream, bytes) -> Result[Int, Str]`
+  - `stream_eof(read stream) -> Result[Bool, Str]`
+  - `stream_close(read stream) -> Result[Bool, Str]`
 
 Host-tool bootstrap example:
 
-- `examples/selfhost_host_tool_mvp`
-- `examples/selfhost_frontend_mvp` (Arcana frontend/typecheck MVP verification path)
+- `grimoires/reference/examples/selfhost_host_tool_mvp`
+- `grimoires/reference/examples/selfhost_frontend_mvp` (Arcana frontend/typecheck MVP verification path)

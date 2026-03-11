@@ -1,0 +1,5 @@
+name = "workspace_vertical_slice"
+kind = "app"
+
+[workspace]
+members = ["../../app/winspell", "../../app/spell-events", "shared_core", "desktop_app", "ecs_game"]

@@ -2,6 +2,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+mod api_fingerprint;
+mod surface;
+
 use arcana_hir::{
     HirAssignTarget, HirBinaryOp, HirChainStep, HirExpr, HirHeaderAttachment, HirImplDecl,
     HirMatchPattern, HirModule, HirModuleSummary, HirResolvedModule, HirResolvedTarget,
@@ -9,12 +12,14 @@ use arcana_hir::{
     HirUnaryOp, HirWorkspacePackage, HirWorkspaceSummary, lower_module_text, resolve_workspace,
 };
 use arcana_package::{
-    MemberFingerprints, WorkspaceGraph,
-    load_workspace_hir as load_package_workspace_hir,
+    MemberFingerprints, WorkspaceGraph, load_workspace_hir as load_package_workspace_hir,
     load_workspace_hir_from_graph as load_package_workspace_hir_from_graph,
 };
 use arcana_syntax::Span;
-use sha2::{Digest, Sha256};
+use surface::{
+    ResolvedSymbolRef, SurfaceSymbolUse, collect_surface_refs, is_builtin_type_name,
+    lookup_symbol_path, split_simple_path, surface_use_name, symbol_matches_surface_use,
+};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CheckSummary {
@@ -23,6 +28,22 @@ pub struct CheckSummary {
     pub non_empty_lines: usize,
     pub directive_count: usize,
     pub symbol_count: usize,
+}
+
+pub struct CheckedWorkspace {
+    summary: CheckSummary,
+    pub(crate) workspace: HirWorkspaceSummary,
+    pub(crate) resolved_workspace: HirResolvedWorkspace,
+}
+
+impl CheckedWorkspace {
+    pub fn summary(&self) -> &CheckSummary {
+        &self.summary
+    }
+
+    fn into_summary(self) -> CheckSummary {
+        self.summary
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,12 +64,6 @@ impl Diagnostic {
             self.message
         )
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SurfaceSymbolUse {
-    TypeLike,
-    Trait,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -278,7 +293,11 @@ fn validate_expected_expr_type(
             module_path,
             span,
             diagnostics,
-            format!("{context} requires {}, found {}", expected.label(), actual.label()),
+            format!(
+                "{context} requires {}, found {}",
+                expected.label(),
+                actual.label()
+            ),
         );
     }
 }
@@ -420,7 +439,10 @@ fn expr_place_root_local<'a>(expr: &'a HirExpr, scope: &ValueScope) -> Option<&'
     }
 }
 
-fn assign_target_root_local<'a>(target: &'a HirAssignTarget, scope: &ValueScope) -> Option<&'a str> {
+fn assign_target_root_local<'a>(
+    target: &'a HirAssignTarget,
+    scope: &ValueScope,
+) -> Option<&'a str> {
     match target {
         HirAssignTarget::Name { text } if scope.contains(text) => Some(text.as_str()),
         HirAssignTarget::MemberAccess { target, .. } | HirAssignTarget::Index { target, .. } => {
@@ -434,8 +456,8 @@ fn ownership_of_builtin_type(name: &str) -> OwnershipClass {
     match name {
         "Int" | "Bool" | "RangeInt" | "ArenaId" | "FrameId" | "PoolId" | "AtomicInt"
         | "AtomicBool" => OwnershipClass::Copy,
-        "Str" | "List" | "Array" | "Map" | "Arena" | "FrameArena" | "PoolArena"
-        | "Task" | "Thread" | "Channel" | "Mutex" => OwnershipClass::Move,
+        "Str" | "List" | "Array" | "Map" | "Arena" | "FrameArena" | "PoolArena" | "Task"
+        | "Thread" | "Channel" | "Mutex" => OwnershipClass::Move,
         _ => OwnershipClass::Unknown,
     }
 }
@@ -497,9 +519,7 @@ fn infer_expr_type_text(
             infer_expr_type_text(workspace, resolved_module, type_scope, scope, expr)
         }
         HirExpr::QualifiedPhrase {
-            subject,
-            qualifier,
-            ..
+            subject, qualifier, ..
         } => resolve_qualified_phrase_target_symbol(
             workspace,
             resolved_module,
@@ -508,10 +528,12 @@ fn infer_expr_type_text(
             subject,
             qualifier,
         )
-        .and_then(|symbol| symbol.return_type.clone().or_else(|| match symbol.kind {
-            HirSymbolKind::Record | HirSymbolKind::Enum => Some(symbol.name.clone()),
-            _ => None,
-        })),
+        .and_then(|symbol| {
+            symbol.return_type.clone().or_else(|| match symbol.kind {
+                HirSymbolKind::Record | HirSymbolKind::Enum => Some(symbol.name.clone()),
+                _ => None,
+            })
+        }),
         HirExpr::MemberAccess { expr, .. } => {
             infer_expr_type_text(workspace, resolved_module, type_scope, scope, expr)
         }
@@ -530,7 +552,8 @@ fn infer_expr_ownership(
         HirExpr::BoolLiteral { .. } | HirExpr::IntLiteral { .. } => OwnershipClass::Copy,
         HirExpr::StrLiteral { .. } | HirExpr::CollectionLiteral { .. } => OwnershipClass::Move,
         HirExpr::Pair { left, right } => {
-            let left_kind = infer_expr_ownership(workspace, resolved_module, type_scope, scope, left);
+            let left_kind =
+                infer_expr_ownership(workspace, resolved_module, type_scope, scope, left);
             let right_kind =
                 infer_expr_ownership(workspace, resolved_module, type_scope, scope, right);
             if left_kind == OwnershipClass::Copy && right_kind == OwnershipClass::Copy {
@@ -544,7 +567,9 @@ fn infer_expr_ownership(
         HirExpr::Path { segments } if segments.len() == 1 && scope.contains(&segments[0]) => {
             scope.ownership_of(&segments[0])
         }
-        HirExpr::Unary { op, .. } if matches!(op, HirUnaryOp::BorrowRead | HirUnaryOp::BorrowMut) => {
+        HirExpr::Unary { op, .. }
+            if matches!(op, HirUnaryOp::BorrowRead | HirUnaryOp::BorrowMut) =>
+        {
             OwnershipClass::Copy
         }
         _ => infer_expr_type_text(workspace, resolved_module, type_scope, scope, expr)
@@ -587,7 +612,10 @@ fn lookup_method_symbol_for_type<'a>(
                 if target != wanted {
                     continue;
                 }
-                if let Some(method) = impl_decl.methods.iter().find(|method| method.name == method_name)
+                if let Some(method) = impl_decl
+                    .methods
+                    .iter()
+                    .find(|method| method.name == method_name)
                 {
                     return Some(method);
                 }
@@ -607,7 +635,8 @@ fn resolve_qualified_phrase_target_symbol<'a>(
 ) -> Option<&'a HirSymbol> {
     if qualifier == "call" {
         let path = flatten_callable_expr_path(subject)?;
-        return lookup_symbol_path(workspace, resolved_module, &path).map(|resolved| resolved.symbol);
+        return lookup_symbol_path(workspace, resolved_module, &path)
+            .map(|resolved| resolved.symbol);
     }
 
     if let Some(path) = split_simple_path(qualifier) {
@@ -617,7 +646,8 @@ fn resolve_qualified_phrase_target_symbol<'a>(
     }
 
     if is_identifier_text(qualifier) {
-        let subject_ty = infer_expr_type_text(workspace, resolved_module, type_scope, scope, subject)?;
+        let subject_ty =
+            infer_expr_type_text(workspace, resolved_module, type_scope, scope, subject)?;
         return lookup_method_symbol_for_type(workspace, &subject_ty, qualifier);
     }
 
@@ -920,7 +950,10 @@ fn validate_call_param_mode_flow(
                         module_path,
                         span,
                         diagnostics,
-                        format!("argument for edit parameter `{}` must be a local place expression", param.name),
+                        format!(
+                            "argument for edit parameter `{}` must be a local place expression",
+                            param.name
+                        ),
                     );
                     continue;
                 }
@@ -1062,7 +1095,14 @@ fn validate_expr_borrow_flow_inner(
     match expr {
         HirExpr::Path { segments } => {
             if !within_place && segments.len() == 1 && scope.contains(&segments[0]) {
-                validate_direct_local_place_access(module_path, scope, state, expr, span, diagnostics);
+                validate_direct_local_place_access(
+                    module_path,
+                    scope,
+                    state,
+                    expr,
+                    span,
+                    diagnostics,
+                );
             }
         }
         HirExpr::BoolLiteral { .. } | HirExpr::IntLiteral { .. } | HirExpr::StrLiteral { .. } => {}
@@ -1391,7 +1431,14 @@ fn validate_expr_borrow_flow_inner(
         }
         HirExpr::MemberAccess { expr: target, .. } => {
             if !within_place {
-                validate_direct_local_place_access(module_path, scope, state, expr, span, diagnostics);
+                validate_direct_local_place_access(
+                    module_path,
+                    scope,
+                    state,
+                    expr,
+                    span,
+                    diagnostics,
+                );
             }
             validate_expr_borrow_flow_inner(
                 workspace,
@@ -1406,9 +1453,19 @@ fn validate_expr_borrow_flow_inner(
                 diagnostics,
             );
         }
-        HirExpr::Index { expr: target, index } => {
+        HirExpr::Index {
+            expr: target,
+            index,
+        } => {
             if !within_place {
-                validate_direct_local_place_access(module_path, scope, state, expr, span, diagnostics);
+                validate_direct_local_place_access(
+                    module_path,
+                    scope,
+                    state,
+                    expr,
+                    span,
+                    diagnostics,
+                );
             }
             validate_expr_borrow_flow_inner(
                 workspace,
@@ -1435,9 +1492,21 @@ fn validate_expr_borrow_flow_inner(
                 diagnostics,
             );
         }
-        HirExpr::Slice { expr: target, start, end, .. } => {
+        HirExpr::Slice {
+            expr: target,
+            start,
+            end,
+            ..
+        } => {
             if !within_place {
-                validate_direct_local_place_access(module_path, scope, state, expr, span, diagnostics);
+                validate_direct_local_place_access(
+                    module_path,
+                    scope,
+                    state,
+                    expr,
+                    span,
+                    diagnostics,
+                );
             }
             validate_expr_borrow_flow_inner(
                 workspace,
@@ -1624,7 +1693,10 @@ fn collect_expr_local_borrows(
                 collect_expr_local_borrows(end, scope, borrows);
             }
         }
-        HirExpr::Path { .. } | HirExpr::BoolLiteral { .. } | HirExpr::IntLiteral { .. } | HirExpr::StrLiteral { .. } => {}
+        HirExpr::Path { .. }
+        | HirExpr::BoolLiteral { .. }
+        | HirExpr::IntLiteral { .. }
+        | HirExpr::StrLiteral { .. } => {}
     }
 }
 
@@ -1665,7 +1737,14 @@ fn note_expr_moves(
                 qualifier,
                 state,
             );
-            note_expr_moves(workspace, resolved_module, type_scope, scope, subject, state);
+            note_expr_moves(
+                workspace,
+                resolved_module,
+                type_scope,
+                scope,
+                subject,
+                state,
+            );
             for arg in args {
                 match arg {
                     arcana_hir::HirPhraseArg::Positional(expr)
@@ -1675,7 +1754,9 @@ fn note_expr_moves(
                 }
             }
         }
-        HirExpr::GenericApply { expr, .. } | HirExpr::Await { expr } | HirExpr::MemberAccess { expr, .. } => {
+        HirExpr::GenericApply { expr, .. }
+        | HirExpr::Await { expr }
+        | HirExpr::MemberAccess { expr, .. } => {
             note_expr_moves(workspace, resolved_module, type_scope, scope, expr, state);
         }
         HirExpr::Unary { expr, .. } => {
@@ -1691,14 +1772,35 @@ fn note_expr_moves(
             }
         }
         HirExpr::Match { subject, arms } => {
-            note_expr_moves(workspace, resolved_module, type_scope, scope, subject, state);
+            note_expr_moves(
+                workspace,
+                resolved_module,
+                type_scope,
+                scope,
+                subject,
+                state,
+            );
             for arm in arms {
-                note_expr_moves(workspace, resolved_module, type_scope, scope, &arm.value, state);
+                note_expr_moves(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    scope,
+                    &arm.value,
+                    state,
+                );
             }
         }
         HirExpr::Chain { steps, .. } => {
             for step in steps {
-                note_expr_moves(workspace, resolved_module, type_scope, scope, &step.stage, state);
+                note_expr_moves(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    scope,
+                    &step.stage,
+                    state,
+                );
                 for arg in &step.bind_args {
                     note_expr_moves(workspace, resolved_module, type_scope, scope, arg, state);
                 }
@@ -1723,7 +1825,14 @@ fn note_expr_moves(
                 match attachment {
                     HirHeaderAttachment::Named { value, .. }
                     | HirHeaderAttachment::Chain { expr: value, .. } => {
-                        note_expr_moves(workspace, resolved_module, type_scope, scope, value, state);
+                        note_expr_moves(
+                            workspace,
+                            resolved_module,
+                            type_scope,
+                            scope,
+                            value,
+                            state,
+                        );
                     }
                 }
             }
@@ -1751,11 +1860,18 @@ fn note_expr_moves(
                 note_expr_moves(workspace, resolved_module, type_scope, scope, end, state);
             }
         }
-        HirExpr::Path { .. } | HirExpr::BoolLiteral { .. } | HirExpr::IntLiteral { .. } | HirExpr::StrLiteral { .. } => {}
+        HirExpr::Path { .. }
+        | HirExpr::BoolLiteral { .. }
+        | HirExpr::IntLiteral { .. }
+        | HirExpr::StrLiteral { .. } => {}
     }
 }
 
-fn collect_returned_local_borrows(expr: &HirExpr, scope: &ValueScope, roots: &mut BTreeSet<String>) {
+fn collect_returned_local_borrows(
+    expr: &HirExpr,
+    scope: &ValueScope,
+    roots: &mut BTreeSet<String>,
+) {
     match expr {
         HirExpr::Unary { op, expr } => {
             if matches!(op, HirUnaryOp::BorrowRead | HirUnaryOp::BorrowMut) {
@@ -1862,7 +1978,10 @@ fn collect_returned_local_borrows(expr: &HirExpr, scope: &ValueScope, roots: &mu
                 collect_returned_local_borrows(end, scope, roots);
             }
         }
-        HirExpr::Path { .. } | HirExpr::BoolLiteral { .. } | HirExpr::IntLiteral { .. } | HirExpr::StrLiteral { .. } => {}
+        HirExpr::Path { .. }
+        | HirExpr::BoolLiteral { .. }
+        | HirExpr::IntLiteral { .. }
+        | HirExpr::StrLiteral { .. } => {}
     }
 }
 
@@ -1890,18 +2009,6 @@ fn validate_return_borrow_ties(
     }
 }
 
-#[derive(Clone, Debug, Default)]
-struct SurfaceRefs {
-    paths: Vec<Vec<String>>,
-    lifetimes: Vec<String>,
-}
-
-struct ResolvedSymbolRef<'a> {
-    package_name: &'a str,
-    module_id: &'a str,
-    symbol: &'a HirSymbol,
-}
-
 pub fn check_sources<'a, I>(sources: I) -> Result<CheckSummary, String>
 where
     I: IntoIterator<Item = &'a str>,
@@ -1927,58 +2034,43 @@ pub fn check_path(path: &Path) -> Result<CheckSummary, String> {
         return Err(format!("`{}` is not a file or directory", path.display()));
     }
 
-    let root_dir = fs::canonicalize(path)
-        .map_err(|err| format!("failed to open `{}`: {err}", path.display()))?;
-    let manifest_path = root_dir.join("book.toml");
-    if !manifest_path.is_file() {
-        return Err(format!(
-            "`{}` does not contain a `book.toml` manifest",
-            root_dir.display()
-        ));
-    }
-
-    let workspace = load_package_workspace_hir(&root_dir)?;
-    validate_packages(&workspace)
+    Ok(check_workspace_path(path)?.into_summary())
 }
 
 pub fn load_workspace_hir(path: &Path) -> Result<HirWorkspaceSummary, String> {
-    let metadata =
-        fs::metadata(path).map_err(|err| format!("failed to read `{}`: {err}", path.display()))?;
-    if !metadata.is_dir() {
-        return Err(format!(
-            "workspace HIR requires a grimoire or workspace directory, got `{}`",
-            path.display()
-        ));
-    }
-
-    let root_dir = fs::canonicalize(path)
-        .map_err(|err| format!("failed to open `{}`: {err}", path.display()))?;
-    let manifest_path = root_dir.join("book.toml");
-    if !manifest_path.is_file() {
-        return Err(format!(
-            "`{}` does not contain a `book.toml` manifest",
-            root_dir.display()
-        ));
-    }
-
+    let root_dir = canonicalize_workspace_dir(path)?;
     load_package_workspace_hir(&root_dir)
+}
+
+pub fn check_workspace_path(path: &Path) -> Result<CheckedWorkspace, String> {
+    let root_dir = canonicalize_workspace_dir(path)?;
+    let workspace = load_package_workspace_hir(&root_dir)?;
+    validate_packages(workspace)
+}
+
+pub fn check_workspace_graph(graph: &WorkspaceGraph) -> Result<CheckedWorkspace, String> {
+    let workspace = load_package_workspace_hir_from_graph(&graph.root_dir, graph)?;
+    validate_packages(workspace)
+}
+
+pub fn compute_member_fingerprints_for_checked_workspace(
+    graph: &WorkspaceGraph,
+    checked: &CheckedWorkspace,
+) -> Result<HashMap<String, MemberFingerprints>, String> {
+    api_fingerprint::compute_member_fingerprints_for_checked_workspace(graph, checked)
 }
 
 pub fn compute_member_fingerprints(
     graph: &WorkspaceGraph,
 ) -> Result<HashMap<String, MemberFingerprints>, String> {
     let workspace = load_package_workspace_hir_from_graph(&graph.root_dir, graph)?;
-    let resolved_workspace =
-        resolve_workspace(&workspace).map_err(|errors| render_resolution_errors(&workspace, errors))?;
-    let mut fingerprints = HashMap::new();
-
-    for member in &graph.members {
-        let source = compute_member_source_fingerprint(member, &workspace)?;
-        let api = compute_resolved_api_fingerprint(member, &workspace, &resolved_workspace)?;
-        fingerprints.insert(member.name.clone(), MemberFingerprints { source, api });
-    }
-
-    Ok(fingerprints)
+    let resolved_workspace = resolve_workspace(&workspace)
+        .map_err(|errors| render_resolution_errors(&workspace, errors))?;
+    api_fingerprint::compute_member_fingerprints_for_workspace(
+        graph,
+        &workspace,
+        &resolved_workspace,
+    )
 }
 
 pub fn lower_to_hir(summary: &CheckSummary) -> HirModule {
@@ -2000,6 +2092,29 @@ fn check_file(path: &Path) -> Result<CheckSummary, String> {
         directive_count: hir.directives.len(),
         symbol_count: hir.symbols.len(),
     })
+}
+
+fn canonicalize_workspace_dir(path: &Path) -> Result<PathBuf, String> {
+    let metadata =
+        fs::metadata(path).map_err(|err| format!("failed to read `{}`: {err}", path.display()))?;
+    if !metadata.is_dir() {
+        return Err(format!(
+            "workspace HIR requires a grimoire or workspace directory, got `{}`",
+            path.display()
+        ));
+    }
+
+    let root_dir = fs::canonicalize(path)
+        .map_err(|err| format!("failed to open `{}`: {err}", path.display()))?;
+    let manifest_path = root_dir.join("book.toml");
+    if !manifest_path.is_file() {
+        return Err(format!(
+            "`{}` does not contain a `book.toml` manifest",
+            root_dir.display()
+        ));
+    }
+
+    Ok(root_dir)
 }
 
 fn render_resolution_errors(
@@ -2030,524 +2145,24 @@ fn render_resolution_errors(
         .join("\n")
 }
 
-fn compute_resolved_api_fingerprint(
-    member: &arcana_package::WorkspaceMember,
-    workspace: &HirWorkspaceSummary,
-    resolved_workspace: &arcana_hir::HirResolvedWorkspace,
-) -> Result<String, String> {
-    let package = workspace
-        .package(&member.name)
-        .ok_or_else(|| format!("package `{}` is not loaded in workspace HIR", member.name))?;
-    let resolved_package = resolved_workspace
-        .package(&member.name)
-        .ok_or_else(|| format!("resolved package `{}` is not loaded", member.name))?;
+fn validate_packages(workspace: HirWorkspaceSummary) -> Result<CheckedWorkspace, String> {
+    let summary = summarize_workspace(&workspace);
+    let resolved_workspace = resolve_workspace(&workspace)
+        .map_err(|errors| render_resolution_errors(&workspace, errors))?;
+    let diagnostics = validate_hir_semantics(&workspace, &resolved_workspace);
 
-    let mut hasher = Sha256::new();
-    hasher.update(b"arcana_resolved_api_v1\n");
-    hasher.update(format!("name={}\n", member.name).as_bytes());
-    hasher.update(format!("kind={}\n", member.kind.as_str()).as_bytes());
-    for dep in &member.deps {
-        hasher.update(format!("dep={dep}\n").as_bytes());
-    }
-
-    for row in resolved_package_api_rows(package, resolved_package, workspace)? {
-        hasher.update(row.as_bytes());
-        hasher.update(b"\n");
-    }
-
-    Ok(format!("sha256:{:x}", hasher.finalize()))
-}
-
-fn compute_member_source_fingerprint(
-    member: &arcana_package::WorkspaceMember,
-    workspace: &HirWorkspaceSummary,
-) -> Result<String, String> {
-    let package = workspace
-        .package(&member.name)
-        .ok_or_else(|| format!("package `{}` is not loaded in workspace HIR", member.name))?;
-    let mut hasher = Sha256::new();
-    hasher.update(b"arcana_hir_member_v1\n");
-    hasher.update(format!("name={}\n", member.name).as_bytes());
-    hasher.update(format!("kind={}\n", member.kind.as_str()).as_bytes());
-    for dep in &member.deps {
-        hasher.update(format!("dep={dep}\n").as_bytes());
-    }
-    for row in package.summary.hir_fingerprint_rows() {
-        hasher.update(row.as_bytes());
-        hasher.update(b"\n");
-    }
-    Ok(format!("sha256:{:x}", hasher.finalize()))
-}
-
-fn resolved_package_api_rows(
-    package: &HirWorkspacePackage,
-    resolved_package: &arcana_hir::HirResolvedPackage,
-    workspace: &HirWorkspaceSummary,
-) -> Result<Vec<String>, String> {
-    let mut rows = Vec::new();
-    for module in &package.summary.modules {
-        let resolved_module = resolved_package
-            .module(&module.module_id)
-            .ok_or_else(|| format!("resolved module `{}` is not loaded", module.module_id))?;
-        for row in resolved_module_api_rows(
-            package,
-            module,
-            resolved_module,
+    if diagnostics.is_empty() {
+        return Ok(CheckedWorkspace {
+            summary,
             workspace,
-        ) {
-            rows.push(format!("module={}:{}", module.module_id, row));
-        }
+            resolved_workspace,
+        });
     }
-    rows.sort();
-    Ok(rows)
+
+    Err(render_diagnostics(diagnostics))
 }
 
-fn resolved_module_api_rows(
-    package: &HirWorkspacePackage,
-    module: &HirModuleSummary,
-    resolved_module: &arcana_hir::HirResolvedModule,
-    workspace: &HirWorkspaceSummary,
-) -> Vec<String> {
-    let mut rows = resolved_module
-        .directives
-        .iter()
-        .filter(|directive| directive.kind == arcana_hir::HirDirectiveKind::Reexport)
-        .map(|directive| {
-            format!(
-                "reexport:local={}|target={}",
-                directive.local_name,
-                render_resolved_target_fingerprint(&directive.target)
-            )
-        })
-        .collect::<Vec<_>>();
-
-    for symbol in &module.symbols {
-        if symbol.exported {
-            rows.push(format!(
-                "export:{}:{}",
-                symbol.kind.as_str(),
-                render_symbol_api_fingerprint(workspace, resolved_module, symbol)
-            ));
-        }
-    }
-
-    let module_scope = TypeScope::default();
-    for impl_decl in &module.impls {
-        if impl_decl_is_public(package, resolved_module, workspace, &module_scope, impl_decl) {
-            rows.push(format!(
-                "impl:{}",
-                render_impl_api_fingerprint(workspace, resolved_module, impl_decl)
-            ));
-        }
-    }
-
-    rows.sort();
-    rows
-}
-
-fn render_resolved_target_fingerprint(target: &arcana_hir::HirResolvedTarget) -> String {
-    match target {
-        arcana_hir::HirResolvedTarget::Module { module_id, .. } => {
-            format!("module:{module_id}")
-        }
-        arcana_hir::HirResolvedTarget::Symbol {
-            module_id,
-            symbol_name,
-            ..
-        } => format!("symbol:{module_id}.{symbol_name}"),
-    }
-}
-
-fn render_symbol_api_fingerprint(
-    workspace: &HirWorkspaceSummary,
-    resolved_module: &arcana_hir::HirResolvedModule,
-    symbol: &HirSymbol,
-) -> String {
-    let base = match symbol.kind {
-        HirSymbolKind::Fn | HirSymbolKind::System => {
-            render_callable_symbol_api_fingerprint(workspace, resolved_module, symbol, &TypeScope::default())
-        }
-        HirSymbolKind::Record => render_record_api_fingerprint(workspace, resolved_module, symbol),
-        HirSymbolKind::Enum => render_enum_api_fingerprint(workspace, resolved_module, symbol),
-        HirSymbolKind::Trait => render_trait_api_fingerprint(workspace, resolved_module, symbol),
-        HirSymbolKind::Behavior => {
-            render_behavior_api_fingerprint(workspace, resolved_module, symbol)
-        }
-        HirSymbolKind::Const => {
-            canonicalize_surface_text(workspace, resolved_module, &TypeScope::default(), &symbol.surface_text)
-        }
-    };
-    append_symbol_contract_metadata(base, workspace, resolved_module, symbol)
-}
-
-fn render_callable_symbol_api_fingerprint(
-    workspace: &HirWorkspaceSummary,
-    resolved_module: &arcana_hir::HirResolvedModule,
-    symbol: &HirSymbol,
-    scope: &TypeScope,
-) -> String {
-    let mut rendered = String::new();
-    if symbol.is_async {
-        rendered.push_str("async");
-    }
-    rendered.push_str("fn:");
-    rendered.push_str(&symbol.name);
-    rendered.push('[');
-    rendered.push_str(
-        &symbol
-            .type_params
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>()
-            .join(","),
-    );
-    rendered.push(']');
-    if let Some(where_clause) = &symbol.where_clause {
-        rendered.push_str("|where=");
-        rendered.push_str(&canonicalize_surface_text(
-            workspace,
-            resolved_module,
-            &scope.with_params(&symbol.type_params),
-            where_clause,
-        ));
-    }
-    rendered.push('(');
-    rendered.push_str(
-        &symbol
-            .params
-            .iter()
-            .map(|param| {
-                let mut part = String::new();
-                if let Some(mode) = param.mode {
-                    part.push_str(mode.as_str());
-                    part.push(':');
-                }
-                part.push_str(&param.name);
-                part.push(':');
-                part.push_str(&canonicalize_surface_text(
-                    workspace,
-                    resolved_module,
-                    &scope.with_params(&symbol.type_params),
-                    &param.ty,
-                ));
-                part
-            })
-            .collect::<Vec<_>>()
-            .join(","),
-    );
-    rendered.push(')');
-    if let Some(return_type) = &symbol.return_type {
-        rendered.push_str("->");
-        rendered.push_str(&canonicalize_surface_text(
-            workspace,
-            resolved_module,
-            &scope.with_params(&symbol.type_params),
-            return_type,
-        ));
-    }
-    rendered
-}
-
-fn append_symbol_contract_metadata(
-    mut base: String,
-    workspace: &HirWorkspaceSummary,
-    resolved_module: &arcana_hir::HirResolvedModule,
-    symbol: &HirSymbol,
-) -> String {
-    if !symbol.forewords.is_empty() {
-        base.push_str("|forewords=[");
-        base.push_str(
-            &symbol
-                .forewords
-                .iter()
-                .map(|foreword| render_foreword_api_fingerprint(workspace, resolved_module, foreword))
-                .collect::<Vec<_>>()
-                .join(","),
-        );
-        base.push(']');
-    }
-    if let Some(intrinsic_impl) = &symbol.intrinsic_impl {
-        base.push_str("|intrinsic=");
-        base.push_str(intrinsic_impl);
-    }
-    base
-}
-
-fn render_foreword_api_fingerprint(
-    workspace: &HirWorkspaceSummary,
-    resolved_module: &arcana_hir::HirResolvedModule,
-    foreword: &arcana_hir::HirForewordApp,
-) -> String {
-    format!(
-        "{}[{}]",
-        foreword.name,
-        foreword
-            .args
-            .iter()
-            .map(|arg| {
-                let value = canonicalize_foreword_arg_value(
-                    workspace,
-                    resolved_module,
-                    &arg.value,
-                );
-                match &arg.name {
-                    Some(name) => format!("{name}={value}"),
-                    None => value,
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(",")
-    )
-}
-
-fn canonicalize_foreword_arg_value(
-    workspace: &HirWorkspaceSummary,
-    resolved_module: &arcana_hir::HirResolvedModule,
-    value: &str,
-) -> String {
-    let trimmed = value.trim();
-    if let Some(unquoted) = trimmed
-        .strip_prefix('"')
-        .and_then(|rest| rest.strip_suffix('"'))
-    {
-        return format!("str:{unquoted}");
-    }
-    if let Some(path) = split_simple_path(trimmed) {
-        return format!(
-            "path:{}",
-            canonicalize_surface_path(workspace, resolved_module, &TypeScope::default(), &path)
-        );
-    }
-    trimmed.to_string()
-}
-
-fn render_record_api_fingerprint(
-    workspace: &HirWorkspaceSummary,
-    resolved_module: &arcana_hir::HirResolvedModule,
-    symbol: &HirSymbol,
-) -> String {
-    let scope = TypeScope::default().with_params(&symbol.type_params);
-    let fields = match &symbol.body {
-        HirSymbolBody::Record { fields } => fields
-            .iter()
-            .map(|field| {
-                format!(
-                    "{}:{}",
-                    field.name,
-                    canonicalize_surface_text(workspace, resolved_module, &scope, &field.ty)
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(","),
-        _ => String::new(),
-    };
-    let mut rendered = format!("record:{}[{}]", symbol.name, symbol.type_params.join(","));
-    if let Some(where_clause) = &symbol.where_clause {
-        rendered.push_str("|where=");
-        rendered.push_str(&canonicalize_surface_text(workspace, resolved_module, &scope, where_clause));
-    }
-    rendered.push_str("|fields=[");
-    rendered.push_str(&fields);
-    rendered.push(']');
-    rendered
-}
-
-fn render_enum_api_fingerprint(
-    workspace: &HirWorkspaceSummary,
-    resolved_module: &arcana_hir::HirResolvedModule,
-    symbol: &HirSymbol,
-) -> String {
-    let scope = TypeScope::default().with_params(&symbol.type_params);
-    let variants = match &symbol.body {
-        HirSymbolBody::Enum { variants } => variants
-            .iter()
-            .map(|variant| match &variant.payload {
-                Some(payload) => format!(
-                    "{}({})",
-                    variant.name,
-                    canonicalize_surface_text(workspace, resolved_module, &scope, payload)
-                ),
-                None => variant.name.clone(),
-            })
-            .collect::<Vec<_>>()
-            .join(","),
-        _ => String::new(),
-    };
-    let mut rendered = format!("enum:{}[{}]", symbol.name, symbol.type_params.join(","));
-    if let Some(where_clause) = &symbol.where_clause {
-        rendered.push_str("|where=");
-        rendered.push_str(&canonicalize_surface_text(workspace, resolved_module, &scope, where_clause));
-    }
-    rendered.push_str("|variants=[");
-    rendered.push_str(&variants);
-    rendered.push(']');
-    rendered
-}
-
-fn render_trait_api_fingerprint(
-    workspace: &HirWorkspaceSummary,
-    resolved_module: &arcana_hir::HirResolvedModule,
-    symbol: &HirSymbol,
-) -> String {
-    let scope = TypeScope::default().with_params(&symbol.type_params);
-    let mut rendered = format!("trait:{}[{}]", symbol.name, symbol.type_params.join(","));
-    if let Some(where_clause) = &symbol.where_clause {
-        rendered.push_str("|where=");
-        rendered.push_str(&canonicalize_surface_text(workspace, resolved_module, &scope, where_clause));
-    }
-    if let HirSymbolBody::Trait {
-        assoc_types,
-        methods,
-    } = &symbol.body
-    {
-        rendered.push_str("|assoc=[");
-        rendered.push_str(
-            &assoc_types
-                .iter()
-                .map(|assoc_type| match &assoc_type.default_ty {
-                    Some(default_ty) => format!(
-                        "{}={}",
-                        assoc_type.name,
-                        canonicalize_surface_text(workspace, resolved_module, &scope, default_ty)
-                    ),
-                    None => assoc_type.name.clone(),
-                })
-                .collect::<Vec<_>>()
-                .join(","),
-        );
-        rendered.push(']');
-        let method_scope = scope.with_assoc_types(assoc_types.iter().map(|assoc_type| assoc_type.name.clone()));
-        rendered.push_str("|methods=[");
-        rendered.push_str(
-            &methods
-                .iter()
-                .map(|method| render_callable_symbol_api_fingerprint(workspace, resolved_module, method, &method_scope))
-                .collect::<Vec<_>>()
-                .join(","),
-        );
-        rendered.push(']');
-    }
-    rendered
-}
-
-fn render_behavior_api_fingerprint(
-    workspace: &HirWorkspaceSummary,
-    resolved_module: &arcana_hir::HirResolvedModule,
-    symbol: &HirSymbol,
-) -> String {
-    let mut rendered = String::from("behavior[");
-    rendered.push_str(
-        &symbol
-            .behavior_attrs
-            .iter()
-            .map(|attr| format!("{}={}", attr.name, attr.value))
-            .collect::<Vec<_>>()
-            .join(","),
-    );
-    rendered.push(']');
-    rendered.push_str(&render_callable_symbol_api_fingerprint(
-        workspace,
-        resolved_module,
-        symbol,
-        &TypeScope::default(),
-    ));
-    rendered
-}
-
-fn render_impl_api_fingerprint(
-    workspace: &HirWorkspaceSummary,
-    resolved_module: &arcana_hir::HirResolvedModule,
-    impl_decl: &HirImplDecl,
-) -> String {
-    let scope = TypeScope::default()
-        .with_params(&impl_decl.type_params)
-        .with_assoc_types(impl_decl.assoc_types.iter().map(|assoc_type| assoc_type.name.clone()))
-        .with_self();
-    let mut rendered = format!(
-        "target={}",
-        canonicalize_surface_text(workspace, resolved_module, &scope, &impl_decl.target_type)
-    );
-    if let Some(trait_path) = &impl_decl.trait_path {
-        rendered.push_str("|trait=");
-        rendered.push_str(&canonicalize_surface_text(workspace, resolved_module, &scope, trait_path));
-    }
-    rendered.push_str("|assoc=[");
-    rendered.push_str(
-        &impl_decl
-            .assoc_types
-            .iter()
-            .map(|assoc_type| match &assoc_type.value_ty {
-                Some(value_ty) => format!(
-                    "{}={}",
-                    assoc_type.name,
-                    canonicalize_surface_text(workspace, resolved_module, &scope, value_ty)
-                ),
-                None => assoc_type.name.clone(),
-            })
-            .collect::<Vec<_>>()
-            .join(","),
-    );
-    rendered.push(']');
-    rendered.push_str("|methods=[");
-    rendered.push_str(
-        &impl_decl
-            .methods
-            .iter()
-            .map(|method| render_callable_symbol_api_fingerprint(workspace, resolved_module, method, &scope.with_params(&method.type_params)))
-            .collect::<Vec<_>>()
-            .join(","),
-    );
-    rendered.push(']');
-    rendered
-}
-
-fn impl_decl_is_public(
-    package: &HirWorkspacePackage,
-    resolved_module: &arcana_hir::HirResolvedModule,
-    workspace: &HirWorkspaceSummary,
-    scope: &TypeScope,
-    impl_decl: &HirImplDecl,
-) -> bool {
-    if !surface_text_is_public(
-        package,
-        resolved_module,
-        workspace,
-        scope,
-        &impl_decl.target_type,
-    ) {
-        return false;
-    }
-    impl_decl.trait_path.as_ref().is_none_or(|trait_path| {
-        surface_text_is_public(package, resolved_module, workspace, scope, trait_path)
-    })
-}
-
-fn surface_text_is_public(
-    package: &HirWorkspacePackage,
-    resolved_module: &arcana_hir::HirResolvedModule,
-    workspace: &HirWorkspaceSummary,
-    scope: &TypeScope,
-    text: &str,
-) -> bool {
-    let refs = collect_surface_refs(text);
-    if refs.paths.is_empty() {
-        return true;
-    }
-    for path in refs.paths {
-        if path.len() == 1 && (scope.allows_type_name(&path[0]) || is_builtin_type_name(&path[0])) {
-            continue;
-        }
-        let Some(symbol_ref) = lookup_symbol_path(workspace, resolved_module, &path) else {
-            return false;
-        };
-        if symbol_ref.package_name == package.summary.package_name && !symbol_ref.symbol.exported {
-            return false;
-        }
-    }
-    true
-}
-
-fn validate_packages(workspace: &HirWorkspaceSummary) -> Result<CheckSummary, String> {
+fn summarize_workspace(workspace: &HirWorkspaceSummary) -> CheckSummary {
     let mut summary = CheckSummary {
         package_count: workspace.package_count(),
         ..CheckSummary::default()
@@ -2562,40 +2177,10 @@ fn validate_packages(workspace: &HirWorkspaceSummary) -> Result<CheckSummary, St
         }
     }
 
-    let (resolved_workspace, mut diagnostics) = match resolve_workspace(workspace) {
-        Ok(resolved) => (Some(resolved), Vec::new()),
-        Err(errors) => {
-            let diagnostics = errors
-                .into_iter()
-                .map(|error| {
-                    let package = workspace.package(&error.package_name);
-                    Diagnostic {
-                        path: package
-                            .and_then(|package| package.module_path(&error.source_module_id))
-                            .cloned()
-                            .unwrap_or_else(|| {
-                                package
-                                    .map(|package| package.root_dir.join("src").join("unknown.arc"))
-                                    .unwrap_or_else(|| PathBuf::from("unknown.arc"))
-                            }),
-                        line: error.span.line,
-                        column: error.span.column,
-                        message: error.message,
-                    }
-                })
-                .collect::<Vec<_>>();
-            (None, diagnostics)
-        }
-    };
+    summary
+}
 
-    if let Some(resolved_workspace) = resolved_workspace.as_ref() {
-        diagnostics.extend(validate_hir_semantics(workspace, resolved_workspace));
-    }
-
-    if diagnostics.is_empty() {
-        return Ok(summary);
-    }
-
+fn render_diagnostics(mut diagnostics: Vec<Diagnostic>) -> String {
     diagnostics.sort_by(|left, right| {
         left.path
             .cmp(&right.path)
@@ -2603,11 +2188,11 @@ fn validate_packages(workspace: &HirWorkspaceSummary) -> Result<CheckSummary, St
             .then_with(|| left.column.cmp(&right.column))
             .then_with(|| left.message.cmp(&right.message))
     });
-    Err(diagnostics
+    diagnostics
         .into_iter()
         .map(|diagnostic| diagnostic.render())
         .collect::<Vec<_>>()
-        .join("\n"))
+        .join("\n")
 }
 
 fn validate_hir_semantics(
@@ -3161,6 +2746,7 @@ fn is_boundary_unsafe_builtin_name(name: &str) -> bool {
             | "RangeInt"
             | "Window"
             | "Image"
+            | "FileStream"
             | "AudioDevice"
             | "AudioBuffer"
             | "AudioPlayback"
@@ -3196,7 +2782,9 @@ fn validate_symbol_value_semantics(
     for param in &symbol.params {
         let ownership = infer_type_ownership(workspace, resolved_module, &type_scope, &param.ty);
         scope.ownership.insert(param.name.clone(), ownership);
-        scope.type_texts.insert(param.name.clone(), param.ty.clone());
+        scope
+            .type_texts
+            .insert(param.name.clone(), param.ty.clone());
     }
     let mut borrow_state = BorrowFlowState::default();
     validate_rollup_handlers(
@@ -4762,7 +4350,8 @@ fn is_identifier_text(text: &str) -> bool {
     let Some(first) = chars.next() else {
         return false;
     };
-    is_ident_start(first) && chars.all(is_ident_continue)
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 fn validate_type_surface_text(
@@ -4829,434 +4418,11 @@ fn validate_type_surface_text(
     }
 }
 
-fn lookup_symbol_path<'a>(
-    workspace: &'a HirWorkspaceSummary,
-    module: &'a HirResolvedModule,
-    path: &[String],
-) -> Option<ResolvedSymbolRef<'a>> {
-    if path.is_empty() {
-        return None;
-    }
-    if path.len() == 1 {
-        return module
-            .bindings
-            .get(&path[0])
-            .and_then(|binding| lookup_target_symbol_tail(workspace, &binding.target, &[]));
-    }
-
-    let first = &path[0];
-    if let Some(binding) = module.bindings.get(first) {
-        return lookup_target_symbol_tail(workspace, &binding.target, &path[1..]);
-    }
-
-    if let Some(package) = workspace.package(first) {
-        return lookup_package_symbol_path(package, &path[1..]);
-    }
-
-    let package_name = module.module_id.split('.').next()?;
-    let package = workspace.package(package_name)?;
-    lookup_package_symbol_path(package, path)
-}
-
-fn lookup_target_symbol_tail<'a>(
-    workspace: &'a HirWorkspaceSummary,
-    target: &'a HirResolvedTarget,
-    tail: &[String],
-) -> Option<ResolvedSymbolRef<'a>> {
-    match target {
-        HirResolvedTarget::Symbol {
-            package_name,
-            module_id,
-            symbol_name,
-        } => {
-            if !tail.is_empty() {
-                return None;
-            }
-            let package = workspace.package(package_name)?;
-            let module = package.module(module_id)?;
-            let symbol = module
-                .symbols
-                .iter()
-                .find(|symbol| symbol.name == *symbol_name)?;
-            Some(ResolvedSymbolRef {
-                package_name,
-                module_id,
-                symbol,
-            })
-        }
-        HirResolvedTarget::Module {
-            package_name,
-            module_id,
-        } => {
-            let package = workspace.package(package_name)?;
-            let module = package.module(module_id)?;
-            lookup_module_symbol_path(package, module, tail)
-        }
-    }
-}
-
-fn lookup_package_symbol_path<'a>(
-    package: &'a HirWorkspacePackage,
-    path: &[String],
-) -> Option<ResolvedSymbolRef<'a>> {
-    if path.is_empty() {
-        return None;
-    }
-    let (symbol_name, module_path) = path.split_last()?;
-    if symbol_name.is_empty() {
-        return None;
-    }
-    let module = if module_path.is_empty() {
-        package.module(&package.summary.package_name)
-    } else {
-        package.resolve_relative_module(module_path)
-    }?;
-    let symbol = module
-        .symbols
-        .iter()
-        .find(|symbol| symbol.name == *symbol_name)?;
-    Some(ResolvedSymbolRef {
-        package_name: &package.summary.package_name,
-        module_id: &module.module_id,
-        symbol,
-    })
-}
-
-fn lookup_module_symbol_path<'a>(
-    package: &'a HirWorkspacePackage,
-    module: &'a HirModuleSummary,
-    path: &[String],
-) -> Option<ResolvedSymbolRef<'a>> {
-    if path.is_empty() {
-        return None;
-    }
-    if path.len() == 1 {
-        let symbol = module
-            .symbols
-            .iter()
-            .find(|symbol| symbol.name == path[0])?;
-        return Some(ResolvedSymbolRef {
-            package_name: &package.summary.package_name,
-            module_id: &module.module_id,
-            symbol,
-        });
-    }
-    let (symbol_name, module_tail) = path.split_last()?;
-    let base_relative = module
-        .module_id
-        .split('.')
-        .skip(1)
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    let mut target_relative = base_relative;
-    target_relative.extend_from_slice(module_tail);
-    let target_module = package.resolve_relative_module(&target_relative)?;
-    let symbol = target_module
-        .symbols
-        .iter()
-        .find(|symbol| symbol.name == *symbol_name)?;
-    Some(ResolvedSymbolRef {
-        package_name: &package.summary.package_name,
-        module_id: &target_module.module_id,
-        symbol,
-    })
-}
-
-fn symbol_matches_surface_use(kind: HirSymbolKind, expected_use: SurfaceSymbolUse) -> bool {
-    match expected_use {
-        SurfaceSymbolUse::TypeLike => {
-            matches!(
-                kind,
-                HirSymbolKind::Record | HirSymbolKind::Enum | HirSymbolKind::Trait
-            )
-        }
-        SurfaceSymbolUse::Trait => kind == HirSymbolKind::Trait,
-    }
-}
-
-fn surface_use_name(expected_use: SurfaceSymbolUse) -> &'static str {
-    match expected_use {
-        SurfaceSymbolUse::TypeLike => "type",
-        SurfaceSymbolUse::Trait => "trait",
-    }
-}
-
-fn is_builtin_type_name(name: &str) -> bool {
-    matches!(
-        name,
-        "Int"
-            | "Str"
-            | "Bool"
-            | "RangeInt"
-            | "List"
-            | "Array"
-            | "Map"
-            | "Arena"
-            | "ArenaId"
-            | "FrameArena"
-            | "FrameId"
-            | "PoolArena"
-            | "PoolId"
-            | "Task"
-            | "Thread"
-            | "Channel"
-            | "Mutex"
-            | "AtomicInt"
-            | "AtomicBool"
-            | "Window"
-            | "Image"
-            | "AudioDevice"
-            | "AudioBuffer"
-            | "AudioPlayback"
-    )
-}
-
-fn split_simple_path(text: &str) -> Option<Vec<String>> {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    let mut segments = Vec::new();
-    for segment in trimmed.split('.') {
-        let segment = segment.trim();
-        if segment.is_empty() {
-            return None;
-        }
-        let mut chars = segment.chars();
-        let first = chars.next()?;
-        if !is_ident_start(first) || !chars.all(is_ident_continue) {
-            return None;
-        }
-        segments.push(segment.to_string());
-    }
-
-    if segments.is_empty() {
-        None
-    } else {
-        Some(segments)
-    }
-}
-
-fn canonicalize_surface_text(
-    workspace: &HirWorkspaceSummary,
-    resolved_module: &arcana_hir::HirResolvedModule,
-    scope: &TypeScope,
-    text: &str,
-) -> String {
-    let chars = text.chars().collect::<Vec<_>>();
-    let mut out = String::new();
-    let mut index = 0usize;
-
-    while index < chars.len() {
-        let ch = chars[index];
-        if ch.is_whitespace() {
-            index += 1;
-            continue;
-        }
-        if ch == '\'' {
-            let start = index;
-            index += 1;
-            while index < chars.len() && is_ident_continue(chars[index]) {
-                index += 1;
-            }
-            out.push_str(&chars[start..index].iter().collect::<String>());
-            continue;
-        }
-        if is_ident_start(ch) && !is_projection_tail(&chars, index) {
-            let start = index;
-            let mut end = index;
-            let mut segments = Vec::new();
-            let mut keyword = None::<String>;
-            loop {
-                let segment_start = end;
-                end += 1;
-                while end < chars.len() && is_ident_continue(chars[end]) {
-                    end += 1;
-                }
-                let segment = chars[segment_start..end].iter().collect::<String>();
-                if is_surface_keyword(&segment) {
-                    keyword = Some(segment);
-                    segments.clear();
-                    break;
-                }
-                segments.push(segment);
-
-                let Some(dot_idx) = next_non_ws_index(&chars, end) else {
-                    break;
-                };
-                if chars[dot_idx] != '.' {
-                    break;
-                }
-                let Some(next_idx) = next_non_ws_index(&chars, dot_idx + 1) else {
-                    break;
-                };
-                if !is_ident_start(chars[next_idx]) {
-                    break;
-                }
-                end = next_idx;
-            }
-
-            if let Some(keyword) = keyword {
-                out.push_str(&keyword);
-                index = end;
-                continue;
-            }
-            if !segments.is_empty() {
-                out.push_str(&canonicalize_surface_path(
-                    workspace,
-                    resolved_module,
-                    scope,
-                    &segments,
-                ));
-                index = end;
-                continue;
-            }
-            out.push_str(&chars[start..end].iter().collect::<String>());
-            index = end;
-            continue;
-        }
-        out.push(ch);
-        index += 1;
-    }
-
-    out
-}
-
-fn canonicalize_surface_path(
-    workspace: &HirWorkspaceSummary,
-    resolved_module: &arcana_hir::HirResolvedModule,
-    scope: &TypeScope,
-    path: &[String],
-) -> String {
-    if path.len() == 1 && (scope.allows_type_name(&path[0]) || is_builtin_type_name(&path[0])) {
-        return path[0].clone();
-    }
-    if let Some(symbol_ref) = lookup_symbol_path(workspace, resolved_module, path) {
-        return format!("{}.{}", symbol_ref.module_id, symbol_ref.symbol.name);
-    }
-    path.join(".")
-}
-
-fn collect_surface_refs(text: &str) -> SurfaceRefs {
-    let chars = text.chars().collect::<Vec<_>>();
-    let mut refs = SurfaceRefs::default();
-    let mut index = 0usize;
-
-    while index < chars.len() {
-        let ch = chars[index];
-        if ch == '\'' {
-            let start = index;
-            index += 1;
-            while index < chars.len() && is_ident_continue(chars[index]) {
-                index += 1;
-            }
-            if index > start + 1 {
-                refs.lifetimes
-                    .push(chars[start..index].iter().collect::<String>());
-            }
-            continue;
-        }
-        if is_ident_start(ch) {
-            if is_projection_tail(&chars, index) {
-                index += 1;
-                while index < chars.len() && is_ident_continue(chars[index]) {
-                    index += 1;
-                }
-                continue;
-            }
-
-            let mut segments = Vec::new();
-            loop {
-                let start = index;
-                index += 1;
-                while index < chars.len() && is_ident_continue(chars[index]) {
-                    index += 1;
-                }
-                let segment = chars[start..index].iter().collect::<String>();
-                if is_surface_keyword(&segment) {
-                    segments.clear();
-                    break;
-                }
-                segments.push(segment);
-
-                let Some(dot_idx) = next_non_ws_index(&chars, index) else {
-                    break;
-                };
-                if chars[dot_idx] != '.' {
-                    break;
-                }
-                let Some(next_idx) = next_non_ws_index(&chars, dot_idx + 1) else {
-                    break;
-                };
-                if !is_ident_start(chars[next_idx]) {
-                    break;
-                }
-                index = next_idx;
-            }
-
-            if !segments.is_empty() {
-                refs.paths.push(segments);
-            }
-            continue;
-        }
-        index += 1;
-    }
-
-    refs
-}
-
-fn is_projection_tail(chars: &[char], index: usize) -> bool {
-    let Some(dot_idx) = previous_non_ws_index(chars, index) else {
-        return false;
-    };
-    if chars[dot_idx] != '.' {
-        return false;
-    }
-    let Some(owner_idx) = previous_non_ws_index(chars, dot_idx) else {
-        return false;
-    };
-    matches!(chars[owner_idx], ']' | ')')
-}
-
-fn previous_non_ws_index(chars: &[char], before: usize) -> Option<usize> {
-    let mut index = before;
-    while index > 0 {
-        index -= 1;
-        if !chars[index].is_whitespace() {
-            return Some(index);
-        }
-    }
-    None
-}
-
-fn next_non_ws_index(chars: &[char], start: usize) -> Option<usize> {
-    let mut index = start;
-    while index < chars.len() {
-        if !chars[index].is_whitespace() {
-            return Some(index);
-        }
-        index += 1;
-    }
-    None
-}
-
-fn is_ident_start(ch: char) -> bool {
-    ch == '_' || ch.is_ascii_alphabetic()
-}
-
-fn is_ident_continue(ch: char) -> bool {
-    ch == '_' || ch.is_ascii_alphanumeric()
-}
-
-fn is_surface_keyword(token: &str) -> bool {
-    matches!(token, "mut" | "where")
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        check_path, check_sources, compute_member_fingerprints, load_workspace_hir, lower_to_hir,
+        check_path, check_sources, check_workspace_graph, compute_member_fingerprints,
+        compute_member_fingerprints_for_checked_workspace, load_workspace_hir, lower_to_hir,
     };
     use arcana_package::{
         BuildDisposition, execute_build, load_workspace_graph, plan_build, plan_workspace,
@@ -5502,7 +4668,10 @@ mod tests {
                     "core/src/book.arc",
                     "import types\nuse types.Counter\nexport fn make_counter() -> Counter:\n    return pool: entities :> value = 0 <: Counter\n",
                 ),
-                ("core/src/types.arc", "export record Counter:\n    value: Int\n"),
+                (
+                    "core/src/types.arc",
+                    "export record Counter:\n    value: Int\n",
+                ),
             ],
         );
 
@@ -5521,6 +4690,162 @@ mod tests {
         .expect("rewrite should succeed");
 
         let second_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
+        let second_statuses =
+            plan_build(&graph, &order, &second_fingerprints, Some(&existing)).expect("plan");
+        assert_eq!(second_statuses[0].member, "core");
+        assert_eq!(second_statuses[0].disposition, BuildDisposition::Built);
+        assert_eq!(second_statuses[1].member, "app");
+        assert_eq!(second_statuses[1].disposition, BuildDisposition::CacheHit);
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn compute_member_fingerprints_reuses_checked_workspace_state() {
+        let root = make_temp_workspace(
+            "typed_api_checked_workspace",
+            &["app", "core"],
+            &[
+                (
+                    "app/book.toml",
+                    "name = \"app\"\nkind = \"app\"\n\n[deps]\ncore = { path = \"../core\" }\n",
+                ),
+                (
+                    "app/src/shelf.arc",
+                    "import core\nfn main() -> Int:\n    return core.value :: :: call\n",
+                ),
+                ("app/src/types.arc", ""),
+                ("core/book.toml", "name = \"core\"\nkind = \"lib\"\n"),
+                (
+                    "core/src/book.arc",
+                    "export fn value() -> Int:\n    return 0\n",
+                ),
+                ("core/src/types.arc", ""),
+            ],
+        );
+
+        let graph = load_workspace_graph(&root).expect("load graph");
+        let checked = check_workspace_graph(&graph).expect("workspace should check");
+        let direct = compute_member_fingerprints(&graph).expect("direct fingerprints");
+        let reused = compute_member_fingerprints_for_checked_workspace(&graph, &checked)
+            .expect("reused fingerprints");
+        assert_eq!(direct, reused);
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn member_source_fingerprint_ignores_whitespace_only_edits() {
+        let root = make_temp_workspace(
+            "typed_api_whitespace_source",
+            &["app"],
+            &[
+                ("app/book.toml", "name = \"app\"\nkind = \"app\"\n"),
+                ("app/src/shelf.arc", "fn main() -> Int:\n    return 0\n"),
+                ("app/src/types.arc", ""),
+            ],
+        );
+
+        let graph = load_workspace_graph(&root).expect("load graph");
+        let order = plan_workspace(&graph).expect("plan");
+        let first_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
+        let first_statuses = plan_build(&graph, &order, &first_fingerprints, None).expect("plan");
+        execute_build(&graph, &first_statuses).expect("execute");
+        let lock_path = write_lockfile(&graph, &order, &first_statuses).expect("lock");
+        let existing = read_lockfile(&lock_path).expect("read").expect("lock");
+
+        fs::write(
+            root.join("app/src/shelf.arc"),
+            "fn main() -> Int:\n\n    return 0\n",
+        )
+        .expect("rewrite should succeed");
+
+        let second_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
+        assert_eq!(
+            first_fingerprints
+                .get("app")
+                .map(|fingerprint| &fingerprint.source),
+            second_fingerprints
+                .get("app")
+                .map(|fingerprint| &fingerprint.source)
+        );
+        assert_eq!(
+            first_fingerprints
+                .get("app")
+                .map(|fingerprint| &fingerprint.api),
+            second_fingerprints
+                .get("app")
+                .map(|fingerprint| &fingerprint.api)
+        );
+
+        let second_statuses =
+            plan_build(&graph, &order, &second_fingerprints, Some(&existing)).expect("plan");
+        assert!(
+            second_statuses
+                .iter()
+                .all(|status| status.disposition == BuildDisposition::CacheHit)
+        );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn typed_api_fingerprint_ignores_private_dependency_code_edits() {
+        let root = make_temp_workspace(
+            "typed_api_private_dependency_code",
+            &["app", "core"],
+            &[
+                (
+                    "app/book.toml",
+                    "name = \"app\"\nkind = \"app\"\n\n[deps]\ncore = { path = \"../core\" }\n",
+                ),
+                (
+                    "app/src/shelf.arc",
+                    "import core\nfn main() -> Int:\n    return core.shared_value :: :: call\n",
+                ),
+                ("app/src/types.arc", ""),
+                ("core/book.toml", "name = \"core\"\nkind = \"lib\"\n"),
+                (
+                    "core/src/book.arc",
+                    "export fn shared_value() -> Int:\n    return helper :: :: call\n",
+                ),
+                ("core/src/helper.arc", "fn helper() -> Int:\n    return 0\n"),
+                ("core/src/types.arc", ""),
+            ],
+        );
+
+        let graph = load_workspace_graph(&root).expect("load graph");
+        let order = plan_workspace(&graph).expect("plan");
+        let first_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
+        let first_statuses = plan_build(&graph, &order, &first_fingerprints, None).expect("plan");
+        execute_build(&graph, &first_statuses).expect("execute");
+        let lock_path = write_lockfile(&graph, &order, &first_statuses).expect("lock");
+        let existing = read_lockfile(&lock_path).expect("read").expect("lock");
+
+        fs::write(
+            root.join("core/src/helper.arc"),
+            "fn helper() -> Int:\n    return 1\n",
+        )
+        .expect("rewrite should succeed");
+
+        let second_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
+        assert_ne!(
+            first_fingerprints
+                .get("core")
+                .map(|fingerprint| &fingerprint.source),
+            second_fingerprints
+                .get("core")
+                .map(|fingerprint| &fingerprint.source)
+        );
+        assert_eq!(
+            first_fingerprints
+                .get("core")
+                .map(|fingerprint| &fingerprint.api),
+            second_fingerprints
+                .get("core")
+                .map(|fingerprint| &fingerprint.api)
+        );
+
         let second_statuses =
             plan_build(&graph, &order, &second_fingerprints, Some(&existing)).expect("plan");
         assert_eq!(second_statuses[0].member, "core");
@@ -5600,7 +4925,10 @@ mod tests {
                     "core/src/book.arc",
                     "import types\nuse types.Counter\nexport fn make_counter() -> Counter:\n    return pool: entities :> value = 0 <: Counter\n\nimpl Counter:\n    fn add(self: Counter, value: Int) -> Int:\n        return self.value + value\n",
                 ),
-                ("core/src/types.arc", "export record Counter:\n    value: Int\n"),
+                (
+                    "core/src/types.arc",
+                    "export record Counter:\n    value: Int\n",
+                ),
             ],
         );
 
@@ -5630,29 +4958,26 @@ mod tests {
     }
 
     #[test]
-    fn check_path_handles_real_first_party_grimoire() {
-        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("..")
-            .canonicalize()
-            .expect("repo root should resolve");
-        let summary = check_path(&repo_root.join("grimoires").join("winspell"))
-            .expect("first-party grimoire should check");
+    fn check_path_handles_reference_window_grimoire() {
+        let summary = check_path(&reference_app_root().join("winspell"))
+            .expect("reference window grimoire should check");
         assert!(summary.package_count >= 2);
         assert!(summary.module_count >= 5);
     }
 
     #[test]
-    fn check_path_handles_rewrite_owned_audio_grimoire() {
-        let summary = check_path(&repo_root().join("grimoires").join("spell-audio"))
-            .expect("audio grimoire should check");
+    fn check_path_handles_reference_audio_grimoire() {
+        let summary = check_path(&reference_app_root().join("spell-audio"))
+            .expect("reference audio grimoire should check");
         assert!(summary.package_count >= 2);
         assert!(summary.module_count >= 4);
     }
 
     #[test]
     fn check_path_handles_builtin_foreword_example() {
-        let summary = check_path(&repo_root().join("examples").join("forewords_builtin_app"))
+        let summary = check_path(
+            &reference_examples_root().join("forewords_builtin_app"),
+        )
             .expect("foreword example should check");
         assert_eq!(summary.package_count, 2);
         assert!(summary.module_count >= 3);
@@ -5661,9 +4986,7 @@ mod tests {
     #[test]
     fn check_path_handles_boundary_interop_example() {
         let summary = check_path(
-            &repo_root()
-                .join("examples")
-                .join("interop_boundary_contracts"),
+            &reference_examples_root().join("interop_boundary_contracts"),
         )
         .expect("boundary interop example should check");
         assert_eq!(summary.package_count, 2);
@@ -5679,7 +5002,9 @@ mod tests {
 
     #[test]
     fn check_path_handles_page_rollup_example() {
-        let summary = check_path(&repo_root().join("examples").join("page_rollup_cleanup"))
+        let summary = check_path(
+            &reference_examples_root().join("page_rollup_cleanup"),
+        )
             .expect("page rollup example should check");
         assert_eq!(summary.package_count, 2);
         assert!(summary.module_count >= 3);
@@ -5687,7 +5012,7 @@ mod tests {
 
     #[test]
     fn check_path_handles_audio_smoke_example() {
-        let summary = check_path(&repo_root().join("examples").join("audio_smoke_demo"))
+        let summary = check_path(&reference_examples_root().join("audio_smoke_demo"))
             .expect("audio smoke example should check");
         assert!(summary.package_count >= 2);
         assert!(summary.module_count >= 4);
@@ -5811,7 +5136,10 @@ mod tests {
         );
 
         let err = check_path(&root).expect_err("non-bool if condition should fail");
-        assert!(err.contains("if condition requires Bool, found Int"), "{err}");
+        assert!(
+            err.contains("if condition requires Bool, found Int"),
+            "{err}"
+        );
 
         fs::remove_dir_all(root).expect("cleanup should succeed");
     }
@@ -5829,7 +5157,10 @@ mod tests {
         );
 
         let err = check_path(&root).expect_err("non-bool `not` operand should fail");
-        assert!(err.contains("operand of `not` requires Bool, found Int"), "{err}");
+        assert!(
+            err.contains("operand of `not` requires Bool, found Int"),
+            "{err}"
+        );
 
         fs::remove_dir_all(root).expect("cleanup should succeed");
     }
@@ -5850,7 +5181,10 @@ mod tests {
         );
 
         let err = check_path(&root).expect_err("non-int shift operand should fail");
-        assert!(err.contains("right operand of `<<` requires Int, found Str"), "{err}");
+        assert!(
+            err.contains("right operand of `<<` requires Int, found Str"),
+            "{err}"
+        );
 
         fs::remove_dir_all(root).expect("cleanup should succeed");
     }
@@ -5916,7 +5250,10 @@ mod tests {
         );
 
         let err = check_path(&root).expect_err("mutable borrow of immutable local should fail");
-        assert!(err.contains("cannot mutably borrow immutable local `x`"), "{err}");
+        assert!(
+            err.contains("cannot mutably borrow immutable local `x`"),
+            "{err}"
+        );
 
         fs::remove_dir_all(root).expect("cleanup should succeed");
     }
@@ -5961,7 +5298,10 @@ mod tests {
         );
 
         let err = check_path(&root).expect_err("assignment while borrowed should fail");
-        assert!(err.contains("cannot assign to local `x` while it is borrowed"), "{err}");
+        assert!(
+            err.contains("cannot assign to local `x` while it is borrowed"),
+            "{err}"
+        );
 
         fs::remove_dir_all(root).expect("cleanup should succeed");
     }
@@ -6019,10 +5359,7 @@ mod tests {
             "app",
             &[],
             &[
-                (
-                    "src/shelf.arc",
-                    "fn bad['a]() -> &'a Int:\n    return 1\n",
-                ),
+                ("src/shelf.arc", "fn bad['a]() -> &'a Int:\n    return 1\n"),
                 ("src/types.arc", ""),
             ],
         );
@@ -6099,7 +5436,10 @@ mod tests {
         );
 
         let err = check_path(&root).expect_err("moving borrowed local should fail");
-        assert!(err.contains("cannot move local `s` while it is borrowed"), "{err}");
+        assert!(
+            err.contains("cannot move local `s` while it is borrowed"),
+            "{err}"
+        );
 
         fs::remove_dir_all(root).expect("cleanup should succeed");
     }
@@ -6217,7 +5557,7 @@ mod tests {
 
     #[test]
     fn check_path_handles_enum_variant_constructor_example() {
-        let summary = check_path(&repo_root().join("examples").join("result_qmark"))
+        let summary = check_path(&reference_examples_root().join("result_qmark"))
             .expect("enum variant constructors should resolve");
         assert_eq!(summary.package_count, 2);
         assert!(summary.module_count >= 3);
@@ -6225,7 +5565,7 @@ mod tests {
 
     #[test]
     fn check_path_handles_mixed_chain_example() {
-        let summary = check_path(&repo_root().join("examples").join("chain_styles_matrix"))
+        let summary = check_path(&reference_examples_root().join("chain_styles_matrix"))
             .expect("mixed chain example should resolve");
         assert_eq!(summary.package_count, 2);
         assert!(summary.module_count >= 3);
@@ -6233,7 +5573,9 @@ mod tests {
 
     #[test]
     fn check_path_handles_bound_chain_showcase() {
-        let summary = check_path(&repo_root().join("examples").join("topdown_arena_showcase"))
+        let summary = check_path(
+            &reference_examples_root().join("topdown_arena_showcase"),
+        )
             .expect("bound chain showcase should resolve");
         assert!(summary.package_count >= 3);
         assert!(summary.module_count >= 10);
@@ -6263,10 +5605,10 @@ mod tests {
 
     #[test]
     fn load_workspace_hir_exposes_package_summaries() {
-        let repo_root = repo_root();
-        let workspace =
-            load_workspace_hir(&repo_root.join("examples").join("workspace_vertical_slice"))
-                .expect("workspace hir should load");
+        let workspace = load_workspace_hir(
+            &reference_examples_root().join("workspace_vertical_slice"),
+        )
+        .expect("workspace hir should load");
         assert!(workspace.package("desktop_app").is_some());
         assert!(workspace.package("winspell").is_some());
         assert!(
@@ -6354,6 +5696,18 @@ mod tests {
             .join("..")
             .canonicalize()
             .expect("repo root should resolve")
+    }
+
+    fn reference_root() -> PathBuf {
+        repo_root().join("grimoires").join("reference")
+    }
+
+    fn reference_app_root() -> PathBuf {
+        reference_root().join("app")
+    }
+
+    fn reference_examples_root() -> PathBuf {
+        reference_root().join("examples")
     }
 
     fn unique_test_id() -> u64 {

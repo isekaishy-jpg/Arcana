@@ -1,0 +1,5 @@
+name = "selfhost_member_fingerprint_tool"
+kind = "app"
+
+[deps]
+arcana_compiler_core = { path = "../../toolchain/arcana-compiler-core" }

@@ -1,0 +1,6 @@
+name = "events_poll_demo"
+kind = "app"
+
+[deps]
+winspell = { path = "../../app/winspell" }
+spell_events = { path = "../../app/spell-events" }

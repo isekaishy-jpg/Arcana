@@ -12,21 +12,21 @@
 - Copy forward only the source-of-truth docs and corpus that define the frozen contract:
   - the language contract and freeze docs,
   - the selfhost language matrix,
-  - the std and first-party grimoire scope/status docs,
+  - the std and grimoire scope/status docs,
   - the chain, memory, host, backend, and policy docs that describe behavior rather than old implementation.
-- Copy forward source grimoires and examples that define required behavior:
+- Copy forward source reference corpus that defines required behavior:
   - `std`,
-  - `grimoires/arcana-frontend`,
-  - `grimoires/arcana-compiler-core`,
-  - `grimoires/arcana-selfhost-compiler`,
-  - `grimoires/winspell`,
-  - `grimoires/spell-events`,
-  - the example/conformance targets referenced by the selfhost language matrix.
+  - `grimoires/reference/toolchain/arcana-frontend`,
+  - `grimoires/reference/toolchain/arcana-compiler-core`,
+  - `grimoires/reference/toolchain/arcana-selfhost-compiler`,
+  - `grimoires/reference/app/winspell`,
+  - `grimoires/reference/app/spell-events`,
+  - `grimoires/reference/examples/*` and the conformance targets referenced by the selfhost language matrix.
 - Do not copy old Rust implementation crates, old bytecode/runtime binaries, `PLAN*.md`, `tmp/`, `target/`, `.arcana/` artifacts, or generated golden outputs.
 - Add a repo policy document on day 1 that states:
   - language frozen until selfhost,
   - package/build/backend work must not force source-language churn,
-  - host/platform features must surface through first-party grimoires, not compiler special cases,
+  - host/platform features must surface through Arcana-owned packages above `std`, not compiler special cases,
   - any requested pre-selfhost language change is rejected unless it is a contract-preserving bug fix.
 
 ## Architecture and Milestones
@@ -74,7 +74,8 @@
   - host/core packages for text, fs, path, process, args/env,
   - app/runtime packages for window/input/canvas/events/time/audio plus primitive graphics/text,
   - ECS/behavior runtime substrate remains first-party and is not treated as showcase-only logic,
-  - then the required first-party grimoires for frontend, compiler-core, selfhost-compiler, desktop facade, event/input utility, and audio facade prove the package surface is usable,
+  - then future Arcana-owned app/media grimoires for desktop facade, event/input utility, and audio facade prove the package surface is usable,
+  - reference compiler corpus under `grimoires/reference/toolchain/*` remains validation pressure and selfhost-closure corpus, not the target package architecture to preserve,
   - and those packages are real Rust-side runtime commitments of the rewrite, not temporary compatibility shims to be deferred until after selfhost.
 - Artifact strategy is explicit:
   - no public bytecode compatibility contract in the new repo,
@@ -91,8 +92,13 @@
   6. internal IR and first AOT backend with rewrite-owned host/window/input/canvas/events/graphics/text substrate,
   7. runnable proof on carried-over examples such as `hello`, one host tool, and one window demo,
   8. add first-party `arcana test` and `arcana format` on the rewrite-owned toolchain, and keep `arcana review` limited to compiler-owned/spec-backed advice until showcase-scale corpus exists,
-  9. port `arcana-frontend`, then `arcana-compiler-core`, then `arcana-selfhost-compiler`,
-  10. declare selfhost only when the new compiler can build its own compiler corpus without using the old MeadowLang implementation.
+  9. write any needed Arcana-owned layers on top of the new toolchain and validate against the reference compiler corpus without preserving Meadow-era package decomposition by default,
+  10. declare selfhost only when the new compiler can build the reference compiler corpus without using the old MeadowLang implementation.
+- Reference-corpus quarantine policy:
+  - architectural quarantine is immediate: `grimoires/reference/*` and other carried corpus remain behavioral reference only and must not define current rewrite architecture,
+  - operational quarantine begins once Milestone 6 is complete, the owned app/media grimoires are usable on the rewrite-owned runtime substrate, and at least one real owned showcase exists,
+  - from that point, reference corpus should stop being part of normal default validation and move to selective migration/conformance pressure only,
+  - post-selfhost, keep only distilled conformance fixtures and narrowly useful historical reference; do not keep broad carried reference trees in the default development loop by inertia.
 
 ## Tests and Acceptance Criteria
 - Freeze enforcement:
@@ -110,10 +116,10 @@
 - First-party packages:
   - compile tests for core host packages,
   - compile tests for window/input/canvas/time/audio packages,
-  - package-level tests proving the required first-party grimoire roles build against the new package/runtime boundary.
+  - package-level tests proving the required future Arcana-owned app/media grimoire roles build against the new package/runtime boundary.
 - Backend/selfhost:
   - first AOT milestone must run `hello`, one host-tool example, and one window example,
-  - selfhost milestone must build the carried-over compiler grimoires with the new toolchain and no fallback to the legacy MeadowLang repo.
+  - selfhost milestone must build the reference compiler corpus with the new toolchain and no fallback to the legacy MeadowLang repo.
 
 ## Assumptions and Defaults
 - The frozen baseline is the current Arcana v0 language contract plus the existing selfhost language matrix.

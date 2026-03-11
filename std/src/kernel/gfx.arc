@@ -1,11 +1,14 @@
-intrinsic fn canvas_open(title: Str, width: Int, height: Int) -> Window = CanvasOpen
+intrinsic fn window_open_try(title: Str, width: Int, height: Int) -> (Bool, Window) = WindowOpenTry
 intrinsic fn canvas_alive(read win: Window) -> Bool = CanvasAlive
 intrinsic fn canvas_fill(edit win: Window, color: Int) = CanvasFill
 intrinsic fn canvas_rect(edit win: Window, x: Int, y: Int, w: Int, h: Int, color: Int) = CanvasRect
+intrinsic fn canvas_line(edit win: Window, x1: Int, y1: Int, x2: Int, y2: Int, color: Int) = CanvasLine
+intrinsic fn canvas_circle_fill(edit win: Window, x: Int, y: Int, radius: Int, color: Int) = CanvasCircleFill
 intrinsic fn canvas_label(edit win: Window, x: Int, y: Int, text: Str, color: Int) = CanvasLabel
+intrinsic fn canvas_label_size(text: Str) -> (Int, Int) = CanvasLabelSize
 intrinsic fn canvas_present(edit win: Window) = CanvasPresent
 intrinsic fn canvas_rgb(r: Int, g: Int, b: Int) -> Int = CanvasRgb
-intrinsic fn canvas_image_load(path: Str) -> Image = CanvasImageLoad
+intrinsic fn image_load_try(path: Str) -> (Bool, Image) = ImageLoadTry
 intrinsic fn canvas_image_size(read img: Image) -> (Int, Int) = CanvasImageSize
 intrinsic fn canvas_blit(edit win: Window, read img: Image, x: Int, y: Int) = CanvasBlit
 intrinsic fn canvas_blit_scaled(edit win: Window, read img: Image, x: Int, y: Int, w: Int, h: Int) = CanvasBlitScaled

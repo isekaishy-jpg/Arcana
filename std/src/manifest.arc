@@ -1,3 +1,4 @@
+import std.collections.list
 import std.collections.map
 import std.result
 import std.text
@@ -13,7 +14,10 @@ record LockManifestV3:
     workspace: Str
     data: Map[Str, Str]
 
-fn trim_ws(text: Str) -> Str:
+fn empty_string_list() -> List[Str]:
+    return std.collections.list.new[Str] :: :: call
+
+fn trim_ws(read text: Str) -> Str:
     let n = std.text.len_bytes :: text :: call
     let mut start = 0
     while start < n and (std.text.is_space_byte :: (std.text.byte_at :: text, start :: call) :: call):
@@ -23,14 +27,65 @@ fn trim_ws(text: Str) -> Str:
         end -= 1
     return std.text.slice_bytes :: text, start, end :: call
 
-fn strip_quotes(text: Str) -> Str:
+fn find_quote_end(read text: Str, start: Int) -> Result[Int, Str]:
+    let n = std.text.len_bytes :: text :: call
+    let mut i = start
+    let mut escaped = false
+    while i < n:
+        let b = std.text.byte_at :: text, i :: call
+        if escaped:
+            escaped = false
+        else:
+            if b == 92:
+                escaped = true
+            else:
+                if b == 34:
+                    return Result.Ok[Int, Str] :: i :: call
+        i += 1
+    return Result.Err[Int, Str] :: "unterminated quoted string" :: call
+
+fn strip_comment(read text: Str) -> Result[Str, Str]:
+    let n = std.text.len_bytes :: text :: call
+    let mut i = 0
+    while i < n:
+        let b = std.text.byte_at :: text, i :: call
+        if b == 34:
+            let close = std.manifest.find_quote_end :: text, i + 1 :: call
+            if close :: :: is_err:
+                return Result.Err[Str, Str] :: "unterminated quoted string" :: call
+            let value = close :: 0 :: unwrap_or
+            return std.manifest.strip_comment_after_quote :: text, value + 1 :: call
+        else:
+            if b == 35:
+                return Result.Ok[Str, Str] :: (std.manifest.trim_ws :: (std.text.slice_bytes :: text, 0, i :: call) :: call) :: call
+        i += 1
+    return Result.Ok[Str, Str] :: (std.manifest.trim_ws :: text :: call) :: call
+
+fn strip_comment_after_quote(read text: Str, start: Int) -> Result[Str, Str]:
+    let n = std.text.len_bytes :: text :: call
+    let mut i = start
+    while i < n:
+        let b = std.text.byte_at :: text, i :: call
+        if b == 34:
+            let close = std.manifest.find_quote_end :: text, i + 1 :: call
+            if close :: :: is_err:
+                return Result.Err[Str, Str] :: "unterminated quoted string" :: call
+            let value = close :: 0 :: unwrap_or
+            return std.manifest.strip_comment_after_quote :: text, value + 1 :: call
+        else:
+            if b == 35:
+                return Result.Ok[Str, Str] :: (std.manifest.trim_ws :: (std.text.slice_bytes :: text, 0, i :: call) :: call) :: call
+        i += 1
+    return Result.Ok[Str, Str] :: (std.manifest.trim_ws :: text :: call) :: call
+
+fn strip_quotes(read text: Str) -> Str:
     let t = std.manifest.trim_ws :: text :: call
     let n = std.text.len_bytes :: t :: call
     if n >= 2 and (std.text.byte_at :: t, 0 :: call) == 34 and (std.text.byte_at :: t, n - 1 :: call) == 34:
         return std.text.slice_bytes :: t, 1, n - 1 :: call
     return t
 
-fn parse_kv(line: Str) -> (Bool, (Str, Str)):
+fn parse_kv(read line: Str) -> (Bool, (Str, Str)):
     let eq = std.text.find_byte :: line, 0, 61 :: call
     if eq < 0:
         return (false, ("", ""))
@@ -38,7 +93,7 @@ fn parse_kv(line: Str) -> (Bool, (Str, Str)):
     let value = std.manifest.trim_ws :: (std.text.slice_bytes :: line, eq + 1, (std.text.len_bytes :: line :: call) :: call) :: call
     return (true, (key, value))
 
-fn parse_int_or(text: Str, fallback: Int) -> Int:
+fn parse_int_or(read text: Str, fallback: Int) -> Int:
     let s = std.manifest.trim_ws :: text :: call
     let n = std.text.len_bytes :: s :: call
     if n == 0:
@@ -57,6 +112,149 @@ fn parse_int_or(text: Str, fallback: Int) -> Int:
         i += 1
     return value * sign
 
+fn lookup_required(read data: Map[Str, Str], read key: Str, read label: Str) -> Result[Str, Str]:
+    if data :: key :: has:
+        return Result.Ok[Str, Str] :: (data :: key :: get) :: call
+    return Result.Err[Str, Str] :: ("missing " + label + " `" + key + "`") :: call
+
+export fn parse_string_array_literal(read text: Str) -> Result[List[Str], Str]:
+    let value = std.manifest.trim_ws :: text :: call
+    let n = std.text.len_bytes :: value :: call
+    if n < 2 or (std.text.byte_at :: value, 0 :: call) != 91 or (std.text.byte_at :: value, n - 1 :: call) != 93:
+        return Result.Err[List[Str], Str] :: "expected string array literal" :: call
+    let mut out = std.collections.list.new[Str] :: :: call
+    let mut i = 1
+    while i < (n - 1):
+        while i < (n - 1) and (std.text.is_space_byte :: (std.text.byte_at :: value, i :: call) :: call):
+            i += 1
+        if i >= (n - 1):
+            return Result.Ok[List[Str], Str] :: out :: call
+        if (std.text.byte_at :: value, i :: call) != 34:
+            return Result.Err[List[Str], Str] :: "expected quoted string in array literal" :: call
+        let close = std.manifest.find_quote_end :: value, i + 1 :: call
+        if close :: :: is_err:
+            return Result.Err[List[Str], Str] :: "unterminated quoted string in array literal" :: call
+        let end = close :: 0 :: unwrap_or
+        if end >= n:
+            return Result.Err[List[Str], Str] :: "unterminated quoted string in array literal" :: call
+        out :: (std.text.slice_bytes :: value, i + 1, end :: call) :: push
+        i = end + 1
+        while i < (n - 1) and (std.text.is_space_byte :: (std.text.byte_at :: value, i :: call) :: call):
+            i += 1
+        if i >= (n - 1):
+            return Result.Ok[List[Str], Str] :: out :: call
+        if (std.text.byte_at :: value, i :: call) != 44:
+            return Result.Err[List[Str], Str] :: "expected comma in array literal" :: call
+        i += 1
+    return Result.Ok[List[Str], Str] :: out :: call
+
+export fn parse_inline_table_string_field(read text: Str, read wanted_key: Str) -> Result[Str, Str]:
+    let value = std.manifest.trim_ws :: text :: call
+    let n = std.text.len_bytes :: value :: call
+    if n >= 2 and (std.text.byte_at :: value, 0 :: call) == 34 and (std.text.byte_at :: value, n - 1 :: call) == 34:
+        return Result.Ok[Str, Str] :: (std.manifest.strip_quotes :: value :: call) :: call
+    if n < 2 or (std.text.byte_at :: value, 0 :: call) != 123 or (std.text.byte_at :: value, n - 1 :: call) != 125:
+        return Result.Err[Str, Str] :: "expected quoted string or inline table" :: call
+    let mut i = 1
+    while i < (n - 1):
+        while i < (n - 1):
+            let b = std.text.byte_at :: value, i :: call
+            if (std.text.is_space_byte :: b :: call) or b == 44:
+                i += 1
+            else:
+                break
+        if i >= (n - 1):
+            break
+        let key_start = i
+        while i < (n - 1):
+            let b = std.text.byte_at :: value, i :: call
+            if b == 61 or (std.text.is_space_byte :: b :: call):
+                break
+            i += 1
+        let key_end = i
+        let key = std.manifest.trim_ws :: (std.text.slice_bytes :: value, key_start, key_end :: call) :: call
+        while i < (n - 1) and (std.text.is_space_byte :: (std.text.byte_at :: value, i :: call) :: call):
+            i += 1
+        if i >= (n - 1) or (std.text.byte_at :: value, i :: call) != 61:
+            return Result.Err[Str, Str] :: "expected `=` in inline table" :: call
+        i += 1
+        while i < (n - 1) and (std.text.is_space_byte :: (std.text.byte_at :: value, i :: call) :: call):
+            i += 1
+        if i >= (n - 1):
+            return Result.Err[Str, Str] :: "missing inline table value" :: call
+        let mut field_value = ""
+        if (std.text.byte_at :: value, i :: call) == 34:
+            let close = std.manifest.find_quote_end :: value, i + 1 :: call
+            if close :: :: is_err:
+                return Result.Err[Str, Str] :: "unterminated quoted string in inline table" :: call
+            let end = close :: 0 :: unwrap_or
+            if end >= n:
+                return Result.Err[Str, Str] :: "unterminated quoted string in inline table" :: call
+            field_value = std.text.slice_bytes :: value, i + 1, end :: call
+            i = end + 1
+        else:
+            let value_start = i
+            while i < (n - 1) and (std.text.byte_at :: value, i :: call) != 44:
+                i += 1
+            field_value = std.manifest.trim_ws :: (std.text.slice_bytes :: value, value_start, i :: call) :: call
+        if key == wanted_key:
+            return Result.Ok[Str, Str] :: field_value :: call
+    return Result.Err[Str, Str] :: ("missing inline table field `" + wanted_key + "`") :: call
+
+impl BookManifest:
+    fn data_value_or(read self: BookManifest, read key: Str, fallback: Str) -> Str:
+        if self.data :: key :: has:
+            return self.data :: key :: get
+        return fallback
+
+    fn workspace_members(read self: BookManifest) -> Result[List[Str], Str]:
+        if not (self.data :: "[workspace].members" :: has):
+            return Result.Ok[List[Str], Str] :: (std.manifest.empty_string_list :: :: call) :: call
+        return std.manifest.parse_string_array_literal :: (self.data :: "[workspace].members" :: get) :: call
+
+    fn dep_path(read self: BookManifest, dep_name: Str) -> Result[Str, Str]:
+        let key = "[deps]." + dep_name
+        let raw = std.manifest.lookup_required :: self.data, key, "dependency entry" :: call
+        if raw :: :: is_err:
+            return Result.Err[Str, Str] :: ("missing dependency entry `" + key + "`") :: call
+        let value = raw :: "" :: unwrap_or
+        return std.manifest.parse_inline_table_string_field :: value, "path" :: call
+
+impl LockManifestV3:
+    fn data_value_or(read self: LockManifestV3, read key: Str, fallback: Str) -> Str:
+        if self.data :: key :: has:
+            return self.data :: key :: get
+        return fallback
+
+    fn order(read self: LockManifestV3) -> Result[List[Str], Str]:
+        if not (self.data :: "order" :: has):
+            return Result.Ok[List[Str], Str] :: (std.manifest.empty_string_list :: :: call) :: call
+        return std.manifest.parse_string_array_literal :: (self.data :: "order" :: get) :: call
+
+    fn deps_for(read self: LockManifestV3, member: Str) -> Result[List[Str], Str]:
+        let key = "[deps]." + member
+        if not (self.data :: key :: has):
+            return Result.Ok[List[Str], Str] :: (std.manifest.empty_string_list :: :: call) :: call
+        return std.manifest.parse_string_array_literal :: (self.data :: key :: get) :: call
+
+    fn path_for(read self: LockManifestV3, member: Str) -> Result[Str, Str]:
+        return std.manifest.lookup_required :: self.data, "[paths]." + member, "lock path entry" :: call
+
+    fn fingerprint_for(read self: LockManifestV3, member: Str) -> Result[Str, Str]:
+        return std.manifest.lookup_required :: self.data, "[fingerprints]." + member, "lock fingerprint entry" :: call
+
+    fn api_fingerprint_for(read self: LockManifestV3, member: Str) -> Result[Str, Str]:
+        return std.manifest.lookup_required :: self.data, "[api_fingerprints]." + member, "lock api fingerprint entry" :: call
+
+    fn artifact_for(read self: LockManifestV3, member: Str) -> Result[Str, Str]:
+        return std.manifest.lookup_required :: self.data, "[artifacts]." + member, "lock artifact entry" :: call
+
+    fn kind_for(read self: LockManifestV3, member: Str) -> Result[Str, Str]:
+        return std.manifest.lookup_required :: self.data, "[kinds]." + member, "lock kind entry" :: call
+
+    fn format_for(read self: LockManifestV3, member: Str) -> Result[Str, Str]:
+        return std.manifest.lookup_required :: self.data, "[formats]." + member, "lock format entry" :: call
+
 export fn parse_book(text: Str) -> Result[BookManifest, Str]:
     let mut name = ""
     let mut kind = ""
@@ -64,23 +262,28 @@ export fn parse_book(text: Str) -> Result[BookManifest, Str]:
     let mut data = std.collections.map.new[Str, Str] :: :: call
     let lines = std.text.split_lines :: text :: call
     for raw in lines:
-        let line = std.manifest.trim_ws :: raw :: call
+        let line_result = std.manifest.strip_comment :: raw :: call
+        if line_result :: :: is_err:
+            return Result.Err[BookManifest, Str] :: "unterminated quoted string" :: call
+        let line = line_result :: "" :: unwrap_or
         if (std.text.len_bytes :: line :: call) == 0:
             continue
         if std.text.starts_with :: line, "[" :: call:
+            if not (std.text.ends_with :: line, "]" :: call):
+                return Result.Err[BookManifest, Str] :: ("malformed section header `" + line + "`") :: call
             section = line
             continue
         let kv = std.manifest.parse_kv :: line :: call
         if not kv.0:
-            continue
+            return Result.Err[BookManifest, Str] :: ("malformed manifest line `" + line + "`") :: call
         let key = std.manifest.strip_quotes :: kv.1.0 :: call
-        let value = std.manifest.strip_quotes :: kv.1.1 :: call
+        let value = kv.1.1
         if section == "":
             if key == "name":
-                name = value
+                name = std.manifest.strip_quotes :: value :: call
             else:
                 if key == "kind":
-                    kind = value
+                    kind = std.manifest.strip_quotes :: value :: call
         let mut full_key = key
         if section != "":
             full_key = section + "." + key
@@ -95,23 +298,28 @@ export fn parse_lock_v3(text: Str) -> Result[LockManifestV3, Str]:
     let mut data = std.collections.map.new[Str, Str] :: :: call
     let lines = std.text.split_lines :: text :: call
     for raw in lines:
-        let line = std.manifest.trim_ws :: raw :: call
+        let line_result = std.manifest.strip_comment :: raw :: call
+        if line_result :: :: is_err:
+            return Result.Err[LockManifestV3, Str] :: "unterminated quoted string" :: call
+        let line = line_result :: "" :: unwrap_or
         if (std.text.len_bytes :: line :: call) == 0:
             continue
         if std.text.starts_with :: line, "[" :: call:
+            if not (std.text.ends_with :: line, "]" :: call):
+                return Result.Err[LockManifestV3, Str] :: ("malformed section header `" + line + "`") :: call
             section = line
             continue
         let kv = std.manifest.parse_kv :: line :: call
         if not kv.0:
-            continue
+            return Result.Err[LockManifestV3, Str] :: ("malformed lockfile line `" + line + "`") :: call
         let key = std.manifest.strip_quotes :: kv.1.0 :: call
-        let value = std.manifest.strip_quotes :: kv.1.1 :: call
+        let value = kv.1.1
         if section == "":
             if key == "version":
                 version = std.manifest.parse_int_or :: value, 0 :: call
             else:
                 if key == "workspace":
-                    workspace = value
+                    workspace = std.manifest.strip_quotes :: value :: call
         let mut full_key = key
         if section != "":
             full_key = section + "." + key

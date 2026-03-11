@@ -1,5 +1,0 @@
-name = "input_tester"
-kind = "app"
-
-[deps]
-winspell = { path = "../../grimoires/winspell" }

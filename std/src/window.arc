@@ -1,4 +1,16 @@
 import std.kernel.gfx
+import std.kernel.error
+import std.result
+use std.result.Result
+
+export fn open(title: Str, width: Int, height: Int) -> Result[Window, Str]:
+    let pair = std.kernel.gfx.window_open_try :: title, width, height :: call
+    if pair.0:
+        return Result.Ok[Window, Str] :: pair.1 :: call
+    return Result.Err[Window, Str] :: (std.kernel.error.last_error_take :: :: call) :: call
+
+export fn alive(read win: Window) -> Bool:
+    return std.kernel.gfx.canvas_alive :: win :: call
 
 export fn size(read win: Window) -> (Int, Int):
     return std.kernel.gfx.window_size :: win :: call

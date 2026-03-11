@@ -11,3 +11,4 @@ intrinsic fn bytes_to_str_utf8(read bytes: Array[Int]) -> Str = HostBytesToStrUt
 intrinsic fn bytes_len(read bytes: Array[Int]) -> Int = HostBytesLen
 intrinsic fn bytes_at(read bytes: Array[Int], index: Int) -> Int = HostBytesAt
 intrinsic fn bytes_slice(read bytes: Array[Int], start: Int, end: Int) -> Array[Int] = HostBytesSlice
+intrinsic fn bytes_sha256_hex(read bytes: Array[Int]) -> Str = HostBytesSha256Hex

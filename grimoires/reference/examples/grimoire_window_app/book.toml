@@ -1,0 +1,5 @@
+name = "grimoire_window_app"
+kind = "app"
+
+[deps]
+winspell = { path = "../../app/winspell" }

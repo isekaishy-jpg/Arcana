@@ -19,6 +19,58 @@ export fn at(read bytes: Array[Int], index: Int) -> Int:
 export fn slice(read bytes: Array[Int], start: Int, end: Int) -> Array[Int]:
     return std.kernel.text.bytes_slice :: bytes, start, end :: call
 
+export fn starts_with(read bytes: Array[Int], read prefix: Array[Int]) -> Bool:
+    let n = std.bytes.len :: bytes :: call
+    let m = std.bytes.len :: prefix :: call
+    if m > n:
+        return false
+    let mut i = 0
+    while i < m:
+        if (std.bytes.at :: bytes, i :: call) != (std.bytes.at :: prefix, i :: call):
+            return false
+        i += 1
+    return true
+
+export fn ends_with(read bytes: Array[Int], read suffix: Array[Int]) -> Bool:
+    let n = std.bytes.len :: bytes :: call
+    let m = std.bytes.len :: suffix :: call
+    if m > n:
+        return false
+    let start = n - m
+    let mut i = 0
+    while i < m:
+        if (std.bytes.at :: bytes, start + i :: call) != (std.bytes.at :: suffix, i :: call):
+            return false
+        i += 1
+    return true
+
+export fn find(read bytes: Array[Int], start: Int, read needle: Array[Int]) -> Int:
+    let n = std.bytes.len :: bytes :: call
+    let m = std.bytes.len :: needle :: call
+    let mut i = start
+    if i < 0:
+        i = 0
+    if m == 0:
+        if i > n:
+            return n
+        return i
+    while i + m <= n:
+        let mut matched = true
+        let mut j = 0
+        while j < m:
+            if (std.bytes.at :: bytes, i + j :: call) != (std.bytes.at :: needle, j :: call):
+                matched = false
+                j = m
+            else:
+                j += 1
+        if matched:
+            return i
+        i += 1
+    return -1
+
+export fn contains(read bytes: Array[Int], read needle: Array[Int]) -> Bool:
+    return (std.bytes.find :: bytes, 0, needle :: call) >= 0
+
 export fn validate_byte(value: Int) -> Bool:
     return value >= 0 and value <= 255
 
@@ -45,3 +97,14 @@ export fn buf_to_array(read buf: List[Int]) -> Array[Int]:
     for b in buf:
         out :: b :: push
     return std.collections.array.from_list[Int] :: out :: call
+
+export fn concat(read a: Array[Int], read b: Array[Int]) -> Array[Int]:
+    let mut out = std.collections.list.new[Int] :: :: call
+    for value in a:
+        out :: value :: push
+    for value in b:
+        out :: value :: push
+    return std.collections.array.from_list[Int] :: out :: call
+
+export fn sha256_hex(read bytes: Array[Int]) -> Str:
+    return std.kernel.text.bytes_sha256_hex :: bytes :: call

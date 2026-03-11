@@ -1,8 +1,22 @@
 import std.kernel.gfx
+import std.kernel.error
+import std.result
+import std.window
+use std.result.Result
 
 export record RectSpec:
     pos: (Int, Int)
     size: (Int, Int)
+    color: Int
+
+export record LineSpec:
+    start: (Int, Int)
+    end: (Int, Int)
+    color: Int
+
+export record CircleFillSpec:
+    center: (Int, Int)
+    radius: Int
     color: Int
 
 export record LabelSpec:
@@ -10,11 +24,11 @@ export record LabelSpec:
     text: Str
     color: Int
 
-export fn open(title: Str, width: Int, height: Int) -> Window:
-    return std.kernel.gfx.canvas_open :: title, width, height :: call
+export fn open(title: Str, width: Int, height: Int) -> Result[Window, Str]:
+    return std.window.open :: title, width, height :: call
 
 export fn alive(read win: Window) -> Bool:
-    return std.kernel.gfx.canvas_alive :: win :: call
+    return std.window.alive :: win :: call
 
 export fn fill(edit win: Window, color: Int):
     std.kernel.gfx.canvas_fill :: win, color :: call
@@ -35,6 +49,36 @@ export fn rect_draw(edit win: Window, read spec: RectSpec):
         h = spec.size.1
         color = spec.color
 
+export fn line(edit win: Window, x1: Int, y1: Int, x2: Int, y2: Int, color: Int):
+    std.kernel.gfx.canvas_line :: win :: call
+        x1 = x1
+        y1 = y1
+        x2 = x2
+        y2 = y2
+        color = color
+
+export fn line_draw(edit win: Window, read spec: LineSpec):
+    std.kernel.gfx.canvas_line :: win :: call
+        x1 = spec.start.0
+        y1 = spec.start.1
+        x2 = spec.end.0
+        y2 = spec.end.1
+        color = spec.color
+
+export fn circle_fill(edit win: Window, x: Int, y: Int, radius: Int, color: Int):
+    std.kernel.gfx.canvas_circle_fill :: win :: call
+        x = x
+        y = y
+        radius = radius
+        color = color
+
+export fn circle_fill_draw(edit win: Window, read spec: CircleFillSpec):
+    std.kernel.gfx.canvas_circle_fill :: win :: call
+        x = spec.center.0
+        y = spec.center.1
+        radius = spec.radius
+        color = spec.color
+
 export fn label(edit win: Window, x: Int, y: Int, text: Str, color: Int):
     std.kernel.gfx.canvas_label :: win :: call
         x = x
@@ -49,14 +93,20 @@ export fn label_draw(edit win: Window, read spec: LabelSpec):
         text = spec.text
         color = spec.color
 
+export fn label_size(text: Str) -> (Int, Int):
+    return std.kernel.gfx.canvas_label_size :: text :: call
+
 export fn present(edit win: Window):
     std.kernel.gfx.canvas_present :: win :: call
 
 export fn rgb(r: Int, g: Int, b: Int) -> Int:
     return std.kernel.gfx.canvas_rgb :: r, g, b :: call
 
-export fn image_load(path: Str) -> Image:
-    return std.kernel.gfx.canvas_image_load :: path :: call
+export fn image_load(path: Str) -> Result[Image, Str]:
+    let pair = std.kernel.gfx.image_load_try :: path :: call
+    if pair.0:
+        return Result.Ok[Image, Str] :: pair.1 :: call
+    return Result.Err[Image, Str] :: (std.kernel.error.last_error_take :: :: call) :: call
 
 export fn image_size(read img: Image) -> (Int, Int):
     return std.kernel.gfx.canvas_image_size :: img :: call

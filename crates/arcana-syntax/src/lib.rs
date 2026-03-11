@@ -4196,6 +4196,7 @@ fn type_text_is_boundary_safe(text: &str) -> bool {
                 | "RangeInt"
                 | "Window"
                 | "Image"
+                | "FileStream"
                 | "AudioDevice"
                 | "AudioBuffer"
                 | "AudioPlayback"
@@ -5382,6 +5383,18 @@ mod tests {
             .expect("repo root should resolve")
     }
 
+    fn reference_root() -> PathBuf {
+        repo_root().join("grimoires").join("reference")
+    }
+
+    fn reference_app_root() -> PathBuf {
+        reference_root().join("app")
+    }
+
+    fn reference_examples_root() -> PathBuf {
+        reference_root().join("examples")
+    }
+
     fn collect_arc_files(root: &Path) -> Vec<PathBuf> {
         let mut files = Vec::new();
         let mut stack = vec![root.to_path_buf()];
@@ -5422,15 +5435,14 @@ mod tests {
 
     #[test]
     fn carried_corpus_parses_as_supported_syntax() {
-        for rel in [
-            "std/src",
-            "grimoires/winspell/src",
-            "grimoires/spell-events/src",
-            "grimoires/spell-audio/src",
-            "examples/audio_smoke_demo/src",
-            "examples/topdown_arena_showcase",
+        for root in [
+            repo_root().join("std").join("src"),
+            reference_app_root().join("winspell").join("src"),
+            reference_app_root().join("spell-events").join("src"),
+            reference_app_root().join("spell-audio").join("src"),
+            reference_examples_root().join("audio_smoke_demo").join("src"),
+            reference_examples_root().join("topdown_arena_showcase"),
         ] {
-            let root = repo_root().join(rel);
             for file in collect_arc_files(&root) {
                 let source = fs::read_to_string(&file).expect("source should be readable");
                 parse_module(&source)

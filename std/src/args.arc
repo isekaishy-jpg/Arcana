@@ -1,7 +1,7 @@
-import std.kernel.host
+import std.kernel.args
 
 export fn count() -> Int:
-    return std.kernel.host.arg_count :: :: call
+    return std.kernel.args.arg_count :: :: call
 
 export fn get(index: Int) -> Str:
-    return std.kernel.host.arg_get :: index :: call
+    return std.kernel.args.arg_get :: index :: call

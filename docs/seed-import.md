@@ -13,12 +13,12 @@ Imported from `MeadowLang`:
 - `conformance/check_parity_fixtures`
 - `conformance/fixtures/types_guard_workspace`
 - `std`
-- `grimoires/arcana-frontend`
-- `grimoires/arcana-compiler-core`
-- `grimoires/arcana-selfhost-compiler`
-- `grimoires/winspell`
-- `grimoires/spell-events`
-- `examples`
+- `grimoires/reference/toolchain/arcana-frontend`
+- `grimoires/reference/toolchain/arcana-compiler-core`
+- `grimoires/reference/toolchain/arcana-selfhost-compiler`
+- `grimoires/reference/app/winspell`
+- `grimoires/reference/app/spell-events`
+- `grimoires/reference/examples` (imported from the original top-level `examples/` tree)
 
 Imported as historical context only and now superseded/reference-only:
 - `docs/reference/backend/ir-backend-roadmap.md`
@@ -37,11 +37,13 @@ Intentionally excluded:
 
 The imported source corpus is treated as behavioral reference only. It does not grant permission to change the frozen Arcana language before selfhost.
 Imported planning material does not define rewrite architecture unless `docs/specs/spec-status.md` classifies it as current authority.
-Imported `std` and grimoires are behavioral carryover only: their current layering, helper inventory, runtime assumptions, and backend couplings are not rewrite authority.
+Imported `std` and `grimoires/reference/*` are behavioral carryover only: their current layering, helper inventory, runtime assumptions, and backend couplings are not rewrite authority.
 Rebuild `std` around the rewrite architecture and move showcase/game-specific logic back out into showcase/app grimoires where appropriate.
 Carried `winspell` and `spell-events` express the requirement for first-party window/input/canvas and primitive graphics/text support, not a commitment to MeadowLang's prior `winit`/VM/bytecode implementation stack.
-Track carried std modules and first-party grimoire roles through `docs/specs/std/std/v1-status.md` and `docs/specs/grimoires/grimoires/v1-status.md` so imported behavior does not silently become rewrite authority.
-Architecture/selfhost-progress review should privilege approved docs plus `crates/*`; imported `std`, grimoires, examples, and generated direct-emit artifacts are migration corpus unless a current scope explicitly ratifies the exact surface under discussion.
+The current `grimoires/` tree is a mixed migration workspace, not a promise that Arcana's final bootstrap/selfhost package layout matches the carried MeadowLang split.
+Track carried std modules and future Arcana-owned app/media grimoire roles through `docs/specs/std/std/v1-status.md` and `docs/specs/grimoires/grimoires/v1-status.md` so imported behavior does not silently become rewrite authority.
+Architecture/selfhost-progress review should privilege approved docs plus `crates/*`; imported `std`, `grimoires/reference/*`, and generated direct-emit artifacts are migration corpus unless a current scope explicitly ratifies the exact surface under discussion.
+Reference corpus is expected to shrink over time rather than remain a permanent parallel development tree. Once the rewrite-owned runtime/app substrate is working, owned grimoires are usable, and an owned showcase exists, `grimoires/reference/*` should move out of normal default validation and remain only as selective migration/conformance pressure until final archive or deletion.
 
 Current omission:
-- `grimoires/arcana-compiler-core/src/direct_emit_specs_061.arc` was replaced with a minimal placeholder module because the carried-over generated payload exceeded GitHub's 100 MB per-file limit. The original behavior must be regenerated later if the new toolchain needs that direct-emit snapshot during bootstrap work.
+- `grimoires/reference/toolchain/arcana-compiler-core/src/direct_emit_specs_061.arc` was replaced with a minimal placeholder module because the carried-over generated payload exceeded GitHub's 100 MB per-file limit. The original behavior must be regenerated later if the new toolchain needs that direct-emit snapshot during bootstrap work.

@@ -1,5 +1,0 @@
-name = "selfhost_frontend_mvp"
-kind = "app"
-
-[deps]
-arcana_frontend = { path = "../../grimoires/arcana-frontend" }

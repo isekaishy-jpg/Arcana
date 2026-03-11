@@ -1,7 +1,9 @@
 use std::env;
 use std::path::PathBuf;
 
-use arcana_frontend::{check_path, compute_member_fingerprints};
+use arcana_frontend::{
+    check_path, check_workspace_graph, compute_member_fingerprints_for_checked_workspace,
+};
 use arcana_package::{
     BuildDisposition, execute_build, load_workspace_graph, plan_build, plan_workspace,
     read_lockfile, render_build_summary, write_lockfile,
@@ -69,10 +71,6 @@ fn run_check(path: PathBuf) -> Result<i32, String> {
 }
 
 fn run_build(workspace_dir: PathBuf, plan_only: bool) -> Result<i32, String> {
-    if !plan_only {
-        check_path(&workspace_dir)?;
-    }
-
     let graph = load_workspace_graph(&workspace_dir)?;
     let order = plan_workspace(&graph)?;
     if plan_only {
@@ -82,7 +80,8 @@ fn run_build(workspace_dir: PathBuf, plan_only: bool) -> Result<i32, String> {
         return Ok(0);
     }
 
-    let fingerprints = compute_member_fingerprints(&graph)?;
+    let checked = check_workspace_graph(&graph)?;
+    let fingerprints = compute_member_fingerprints_for_checked_workspace(&graph, &checked)?;
     let lock_path = graph.root_dir.join("Arcana.lock");
     let existing_lock = read_lockfile(&lock_path)?;
     let statuses = plan_build(&graph, &order, &fingerprints, existing_lock.as_ref())?;

@@ -10,7 +10,7 @@ This audit is retained as adoption history only. It does not define the current 
 - Scan scope:
   - `std/src/**/*.arc`
   - `grimoires/**/*.arc`
-  - `examples/**/*.arc`
+  - `grimoires/reference/examples/**/*.arc`
 
 ## Rewrite Criteria
 - Statement-only chain context (no expression-result dependency).
@@ -70,7 +70,7 @@ This audit is retained as adoption history only. It does not define the current 
 
 ## Non-Std Findings
 - `grimoires/**`: existing chain usage already covers clear pipeline-style behavior paths (notably showcase/winspell flows); additional rewrites were not high-confidence non-breaking improvements.
-- `examples/**`: chain-focused examples already exercise forward/reverse/mixed forms; additional forced rewrites in non-chain demos would reduce readability.
+- `grimoires/reference/examples/**`: chain-focused examples already exercise forward/reverse/mixed forms; additional forced rewrites in non-chain demos would reduce readability.
 
 ## Parity Evidence
 - `cargo test -p arcana-compiler`
@@ -79,9 +79,9 @@ This audit is retained as adoption history only. It does not define the current 
 ## Plan 47 Boundary Migration Addendum
 - Scheduler-boundary files were rechecked for explicit boundary contracts under Plan 47.
 - Guard coverage now includes:
-  - `examples/behavior_phases`
-  - `examples/grimoire_behavior_app`
-  - `examples/grimoire_ecs_schedule`
-  - `examples/grimoire_ecs_mini_game`
-  - `examples/topdown_arena_showcase/showcase_core`
+  - `grimoires/reference/examples/behavior_phases`
+  - `grimoires/reference/examples/grimoire_behavior_app`
+  - `grimoires/reference/examples/grimoire_ecs_schedule`
+  - `grimoires/reference/examples/grimoire_ecs_mini_game`
+  - `grimoires/reference/examples/topdown_arena_showcase/showcase_core`
 - Contract-scheduled behavior execution is native-only; VM emits deterministic migration diagnostics.

@@ -1,0 +1,7 @@
+name = "ecs_game"
+kind = "app"
+
+[deps]
+shared_core = { path = "../shared_core" }
+winspell = { path = "../../../app/winspell" }
+spell_events = { path = "../../../app/spell-events" }

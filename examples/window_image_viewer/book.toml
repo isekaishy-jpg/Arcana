@@ -1,5 +1,0 @@
-name = "window_image_viewer"
-kind = "app"
-
-[deps]
-winspell = { path = "../../grimoires/winspell" }

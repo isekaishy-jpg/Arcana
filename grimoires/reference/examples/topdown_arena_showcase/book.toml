@@ -1,0 +1,5 @@
+name = "topdown_arena_showcase"
+kind = "app"
+
+[workspace]
+members = ["../../app/winspell", "../../app/spell-events", "showcase_core", "showcase_visual", "showcase_verify"]

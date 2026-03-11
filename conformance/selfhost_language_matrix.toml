@@ -5,13 +5,13 @@ owner = "Arcana selfhost/compiler team"
 [[feature]]
 id = "core_fn_let_if_while_return"
 status = "required"
-positive = ["examples/hello", "examples/counter"]
+positive = ["grimoires/reference/examples/hello", "grimoires/reference/examples/counter"]
 negative = ["conformance/check_parity_fixtures/parse_error.arc"]
 
 [[feature]]
 id = "records"
 status = "required"
-positive = ["examples/records", "examples/arena_ast_builder"]
+positive = ["grimoires/reference/examples/records", "grimoires/reference/examples/arena_ast_builder"]
 negative = [
     "conformance/check_parity_fixtures/parse_error.arc",
     "conformance/check_parity_packages/unresolved_type_ref",
@@ -20,19 +20,19 @@ negative = [
 [[feature]]
 id = "enums_match"
 status = "required"
-positive = ["examples/enum_match_core", "examples/plan13_generics_match"]
+positive = ["grimoires/reference/examples/enum_match_core", "grimoires/reference/examples/plan13_generics_match"]
 negative = ["conformance/check_parity_fixtures/parse_error.arc"]
 
 [[feature]]
 id = "impl_and_traits_v2"
 status = "required"
-positive = ["examples/impl_methods_core", "examples/trait_v2_iter_ecs"]
+positive = ["grimoires/reference/examples/impl_methods_core", "grimoires/reference/examples/trait_v2_iter_ecs"]
 negative = ["conformance/check_parity_fixtures/unresolved_symbol.arc"]
 
 [[feature]]
 id = "qualified_phrases"
 status = "required"
-positive = ["examples/grimoire_std_methods_app", "examples/pair_try_pop"]
+positive = ["grimoires/reference/examples/grimoire_std_methods_app", "grimoires/reference/examples/pair_try_pop"]
 negative = [
     "conformance/check_parity_fixtures/phrase_arg_arity.arc",
     "conformance/check_parity_fixtures/phrase_arg_shape.arc",
@@ -42,9 +42,9 @@ negative = [
 id = "forewords_and_lang_items"
 status = "required"
 positive = [
-    "examples/forewords_builtin_app",
-    "examples/result_qmark",
-    "examples/interop_boundary_contracts",
+    "grimoires/reference/examples/forewords_builtin_app",
+    "grimoires/reference/examples/result_qmark",
+    "grimoires/reference/examples/interop_boundary_contracts",
 ]
 negative = [
     "conformance/check_parity_fixtures/invalid_statement_foreword.arc",
@@ -59,7 +59,7 @@ negative = [
 [[feature]]
 id = "chain_phrases"
 status = "required"
-positive = ["examples/chain_forward_pipeline", "examples/chain_styles_matrix"]
+positive = ["grimoires/reference/examples/chain_forward_pipeline", "grimoires/reference/examples/chain_styles_matrix"]
 negative = [
     "conformance/check_parity_fixtures/missing_chain_contract.arc",
     "conformance/check_parity_fixtures/unknown_chain_style.arc",
@@ -72,7 +72,7 @@ negative = [
 [[feature]]
 id = "collections_list_array_map"
 status = "required"
-positive = ["examples/list_core", "examples/array_core", "examples/map_core"]
+positive = ["grimoires/reference/examples/list_core", "grimoires/reference/examples/array_core", "grimoires/reference/examples/map_core"]
 negative = [
     "conformance/check_parity_fixtures/phrase_arg_shape.arc",
     "conformance/check_parity_packages/unresolved_expr_type_arg",
@@ -81,7 +81,7 @@ negative = [
 [[feature]]
 id = "pair_tuples_v1"
 status = "required"
-positive = ["examples/pair_try_pop", "examples/events_poll_demo"]
+positive = ["grimoires/reference/examples/pair_try_pop", "grimoires/reference/examples/events_poll_demo"]
 negative = [
     "conformance/check_parity_fixtures/tuple_field_out_of_range.arc",
     "conformance/check_parity_fixtures/tuple_destructure_let.arc",
@@ -93,13 +93,13 @@ negative = [
 [[feature]]
 id = "for_loop_iteration"
 status = "required"
-positive = ["examples/for_collections", "examples/map_index_compound"]
+positive = ["grimoires/reference/examples/for_collections", "grimoires/reference/examples/map_index_compound"]
 negative = ["conformance/check_parity_fixtures/parse_error.arc"]
 
 [[feature]]
 id = "memory_phrase_allocators"
 status = "required"
-positive = ["examples/memory_phrase_frame_pool", "examples/pool_reuse_cycle"]
+positive = ["grimoires/reference/examples/memory_phrase_frame_pool", "grimoires/reference/examples/pool_reuse_cycle"]
 negative = [
     "conformance/check_parity_fixtures/memory_phrase_arg_arity.arc",
     "conformance/check_parity_fixtures/unresolved_symbol.arc",
@@ -109,13 +109,13 @@ negative = [
 [[feature]]
 id = "intrinsic_kernel_abi"
 status = "required"
-positive = ["std", "examples/selfhost_host_tool_mvp"]
+positive = ["std", "grimoires/reference/examples/selfhost_host_tool_mvp"]
 negative = ["conformance/check_parity_fixtures/malformed_intrinsic.arc"]
 
 [[feature]]
 id = "ownership_lifetimes"
 status = "required"
-positive = ["examples/arena_id_safety", "examples/frame_scratch_cycle"]
+positive = ["grimoires/reference/examples/arena_id_safety", "grimoires/reference/examples/frame_scratch_cycle"]
 negative = [
     "conformance/check_parity_fixtures/parse_error.arc",
     "conformance/check_parity_packages/undeclared_lifetime",
@@ -124,13 +124,13 @@ negative = [
 [[feature]]
 id = "defer_and_qmark"
 status = "required"
-positive = ["examples/defer_scope", "examples/result_qmark"]
+positive = ["grimoires/reference/examples/defer_scope", "grimoires/reference/examples/result_qmark"]
 negative = ["conformance/check_parity_fixtures/unresolved_symbol.arc"]
 
 [[feature]]
 id = "page_rollups_v1"
 status = "required"
-positive = ["examples/page_rollup_cleanup"]
+positive = ["grimoires/reference/examples/page_rollup_cleanup"]
 negative = [
     "conformance/check_parity_fixtures/page_rollup_stray.arc",
     "conformance/check_parity_fixtures/page_rollup_bad_subject.arc",
@@ -141,35 +141,35 @@ negative = [
 [[feature]]
 id = "async_weave_split"
 status = "required"
-positive = ["examples/async_main", "examples/split_join", "examples/channel_async"]
+positive = ["grimoires/reference/examples/async_main", "grimoires/reference/examples/split_join", "grimoires/reference/examples/channel_async"]
 negative = ["conformance/check_parity_fixtures/parse_error.arc"]
 
 [[feature]]
 id = "behaviors_and_ecs"
 status = "required"
-positive = ["examples/grimoire_behavior_app", "examples/grimoire_ecs_schedule", "examples/grimoire_ecs_mini_game"]
+positive = ["grimoires/reference/examples/grimoire_behavior_app", "grimoires/reference/examples/grimoire_ecs_schedule", "grimoires/reference/examples/grimoire_ecs_mini_game"]
 negative = ["conformance/check_parity_fixtures/missing_chain_contract.arc"]
 
 [[feature]]
 id = "host_platform"
 status = "required"
-positive = ["examples/selfhost_host_tool_mvp", "examples/selfhost_frontend_mvp"]
+positive = ["grimoires/reference/examples/selfhost_host_tool_mvp", "grimoires/reference/examples/selfhost_frontend_mvp"]
 negative = ["conformance/check_parity_fixtures/non_arc_fixture.txt"]
 
 [[feature]]
 id = "window_canvas_input"
 status = "required"
-positive = ["examples/window_hello", "examples/events_poll_demo", "examples/input_tester"]
+positive = ["grimoires/reference/examples/window_hello", "grimoires/reference/examples/events_poll_demo", "grimoires/reference/examples/input_tester"]
 negative = ["conformance/check_parity_fixtures/unresolved_symbol.arc"]
 
 [[feature]]
 id = "workspace_build"
 status = "required"
-positive = ["examples/workspace_vertical_slice", "examples/topdown_arena_showcase"]
+positive = ["grimoires/reference/examples/workspace_vertical_slice", "grimoires/reference/examples/topdown_arena_showcase"]
 negative = ["conformance/check_parity_fixtures/non_arc_fixture.txt"]
 
 [[feature]]
 id = "stdlib_frontend_grimoires"
 status = "required"
-positive = ["std/src", "grimoires/arcana-frontend/src", "grimoires/arcana-selfhost-compiler/src"]
+positive = ["std/src", "grimoires/reference/toolchain/arcana-frontend/src", "grimoires/reference/toolchain/arcana-selfhost-compiler/src"]
 negative = ["conformance/check_parity_fixtures/unresolved_symbol.arc"]

@@ -29,11 +29,12 @@ Arcana is a Rust-first rewrite of the frozen Arcana language and tooling stack. 
 - Lua/SQL boundary-varietal compile-time contracts now have example and negative conformance coverage, and the carried first-class ECS direction is documented without freezing generalized ECS query authoring into the selfhost baseline
 - Impl header generic/lifetime params now survive syntax/HIR lowering, so inherited `T`/`'a` scope is available to later frontend work
 - Next compiler debt is the runnable backend/runtime slice plus later typed-frontend deepening beyond the current conservative ownership and borrow-flow checks
-- Seed-imported docs, grimoires, `std`, examples, and conformance fixtures from MeadowLang
+- Seed-imported docs, `std`, and reference corpus under `grimoires/reference/*` plus conformance fixtures from MeadowLang
 - Meadow-vs-Arcana language-behavior audit captured in `docs/reference/audits/meadow_language_behavior_audit_v1.md`
-- Imported `std` and first-party grimoires are behavioral seed corpus only; current rewrite authority comes from `PLAN.md`, `docs/rewrite-roadmap.md`, and the active scope docs under `docs/specs/`
+- Imported `std` and all current `grimoires/reference/*` packages are behavioral seed corpus only; current rewrite authority comes from `PLAN.md`, `docs/rewrite-roadmap.md`, and the active scope docs under `docs/specs/`
+- Rewrite-owned app/media grimoires now scaffold under `grimoires/owned/*`
 - `docs/specs/std/std/v1-scope.md` defines how the rewrite treats `std`: rebuild-owned first-party library surface, not MeadowLang layering to preserve wholesale
-- `docs/specs/std/std/v1-status.md` and `docs/specs/grimoires/grimoires/v1-status.md` track which std modules and first-party grimoire roles are bootstrap-required, transitional-carried, or deferred
+- `docs/specs/std/std/v1-status.md` and `docs/specs/grimoires/grimoires/v1-status.md` track which std modules and future Arcana-owned app/media grimoire roles are bootstrap-required, transitional-carried, or deferred
 - `arcana check` with shared package/HIR loading, symbol-based module and `use` resolution, direct-dependency enforcement, implicit `std`, and stable file/line/column diagnostics
 - `arcana build` now runs frontend validation, lowers packages through placeholder IR, and emits placeholder AOT artifacts
 - Placeholder artifacts now include package/module counts, dependency-edge counts, exported declaration-surface rows, and per-module summary rows for debugging/cache inspection
@@ -42,8 +43,8 @@ Arcana is a Rust-first rewrite of the frozen Arcana language and tooling stack. 
 
 ```powershell
 cargo test --workspace
-cargo run -q -p arcana-cli -- check examples\workspace_vertical_slice
-cargo run -q -p arcana-cli -- build examples\workspace_vertical_slice --plan
+cargo run -q -p arcana-cli -- check grimoires\reference\examples\workspace_vertical_slice
+cargo run -q -p arcana-cli -- build grimoires\reference\examples\workspace_vertical_slice --plan
 ```
 
 ## Boundaries
@@ -52,5 +53,5 @@ cargo run -q -p arcana-cli -- build examples\workspace_vertical_slice --plan
 - No Git or registry dependencies yet; only local path dependencies are enabled
 - No public bytecode compatibility contract in this repo
 - `docs/specs/selfhost-host/selfhost-host/v1-scope.md` freezes host-core packages; `docs/specs/selfhost-host/selfhost-host/app-substrate-v1-scope.md` freezes the rewrite-owned app/runtime substrate
-- `docs/specs/grimoires/grimoires/v1-scope.md` freezes required first-party grimoire roles by responsibility rather than by carried Meadow-era package names
+- `docs/specs/grimoires/grimoires/v1-scope.md` freezes required future Arcana-owned app/media grimoire roles by responsibility rather than by carried Meadow-era package names
 - The imported `arcana-compiler-core` direct-emit corpus includes one placeholder shard where the original generated payload exceeded GitHub's hard file limit; see `docs/seed-import.md`

@@ -11,6 +11,7 @@ Scope notes:
 - What *does* affect the language/runtime contract is the subset explicitly ratified by active scope docs, the selfhost language matrix, and any compiler/runtime seams that are intentionally first-party.
 - Bootstrap readiness and transitional carried status are tracked in `docs/specs/std/std/v1-status.md`.
 - Deferred std work is tracked in `docs/specs/std/std/deferred-roadmap.md`.
+- The current approved `std` domain inventory, public surface shape, and split `std.kernel.*` topology are now considered frozen for the pre-selfhost rewrite unless a concrete roadmap blocker proves they must change.
 
 ## Governing Rules
 
@@ -22,7 +23,12 @@ Scope notes:
 - If bootstrap seams such as typed opaque app/runtime handles are later replaced, the successor model must stay explicit about resource family, ownership/validity expectations, and diagnostics; no erased generic-handle fallback is permitted.
 - Third-party Rust crates may sit under the implementation, but they must remain replaceable private details. Public `std` must not collapse into wrapper-shaped mirrors of crate APIs or crate-specific semantics.
 - Kernel/intrinsic bindings are implementation seams, not public-library design guidance.
+- Kernel/intrinsic bindings should stay split by runtime domain plus any narrow shared-error seam; do not reintroduce a catch-all host bucket that mixes args/env/path/fs/process/resource failure state into one module.
 - Every `std` surface change must update this scope or `docs/specs/std/std/v1-status.md` in the same patch.
+- After this freeze point, `std` changes before selfhost should be limited to:
+  - contract-preserving bug fixes,
+  - runtime/backend implementation work that satisfies the already approved surface,
+  - narrowly justified additions or corrections proven necessary by Milestone 6 or by owned grimoire development on approved domains.
 
 ## Approved First-Party `std` Domains Before Selfhost
 
@@ -47,7 +53,7 @@ Scope notes:
   - `std.manifest`
 - Shared low-level types needed by the app/runtime substrate:
   - `std.types.core`
-- Low-level time and audio substrate needed by first-party grimoires:
+- Low-level time and audio substrate needed by future Arcana-owned grimoire layers:
   - `std.time`
   - `std.audio`
 
@@ -80,6 +86,9 @@ Scope notes:
   - first-party host support
   - first-party app/runtime substrate for real showcases
   - ECS/runtime extras that are intentionally part of Arcana's direction
+- The pre-selfhost `std` freeze is a real reusable baseline for future Arcana libraries in the approved domains, not a temporary surface meant only for owned grimoires or bootstrap demos.
+- It is acceptable for Arcana to add more std domains later through explicit scope, but the domains approved here should already be shaped as forward-looking third-party library substrate rather than one-off migration scaffolding.
 - Public std additions are allowed before selfhost when they are genuinely bootstrap-required or substrate-required, but they must be documented as such in `docs/specs/std/std/v1-status.md`.
 - Move app/demo/showcase-specific convenience back out of `std` unless it earns explicit first-party scope.
 - Avoid broad root/prelude reexports of unratified convenience layers.
+- If Milestone 6 or owned-grimoire work discovers a missing substrate capability, prefer adding it inside an already approved domain rather than reopening top-level std architecture.

@@ -1,0 +1,5 @@
+name = "window_hello"
+kind = "app"
+
+[deps]
+winspell = { path = "../../app/winspell" }
