@@ -24,6 +24,7 @@ dependencies = [
  "arcana-hir",
  "arcana-package",
  "arcana-syntax",
+ "sha2",
  "toml",
 ]
 

@@ -60,8 +60,16 @@
   - `book.toml` remains the package manifest,
   - `Arcana.lock` remains the lockfile,
   - `arcana check`,
+  - `arcana test`,
+  - `arcana format`,
+  - `arcana review` as a smaller advisory layer only after enough real Arcana showcase/tooling corpus exists to justify Arcana-native usage guidance,
   - `arcana build --plan`,
   - `arcana build`.
+- Tooling boundary before selfhost is explicit:
+  - `arcana check` remains the correctness gate for parsing, typing, ownership/borrowing, lifetime, boundary, and other compiler-owned diagnostics,
+  - `arcana test` is a pre-selfhost requirement,
+  - `arcana format` is also expected before selfhost, but should be driven by explicit formatting doctrine and syntax maturity rather than ad hoc style guesses,
+  - `arcana review` must stay intentionally smaller pre-selfhost and should only grow beyond compiler-owned/spec-backed advice once the rewrite has real showcase-scale Arcana code to learn from.
 - First-party package milestone includes both host-core and windowing layers:
   - host/core packages for text, fs, path, process, args/env,
   - app/runtime packages for window/input/canvas/events/time/audio plus primitive graphics/text,
@@ -82,8 +90,9 @@
   5. first-party host/io plus app/runtime packages compile on the new frontend,
   6. internal IR and first AOT backend with rewrite-owned host/window/input/canvas/events/graphics/text substrate,
   7. runnable proof on carried-over examples such as `hello`, one host tool, and one window demo,
-  8. port `arcana-frontend`, then `arcana-compiler-core`, then `arcana-selfhost-compiler`,
-  9. declare selfhost only when the new compiler can build its own compiler corpus without using the old MeadowLang implementation.
+  8. add first-party `arcana test` and `arcana format` on the rewrite-owned toolchain, and keep `arcana review` limited to compiler-owned/spec-backed advice until showcase-scale corpus exists,
+  9. port `arcana-frontend`, then `arcana-compiler-core`, then `arcana-selfhost-compiler`,
+  10. declare selfhost only when the new compiler can build its own compiler corpus without using the old MeadowLang implementation.
 
 ## Tests and Acceptance Criteria
 - Freeze enforcement:

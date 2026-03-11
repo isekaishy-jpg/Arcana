@@ -15,4 +15,4 @@ fn smoke() -> Int:
     return 0
 
 fn main() -> Int:
-    return helper()
+    return helper :: :: call

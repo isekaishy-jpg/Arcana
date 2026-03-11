@@ -8,7 +8,7 @@ Arcana is a Rust-first rewrite of the frozen Arcana language and tooling stack. 
 - Language-freeze policy and CI guardrails
 - `AnyBox` policy guard for code-bearing paths
 - Cross-cutting spec-status and contract docs now explicitly lock page rollups, pair tuples, callable/context direction, and the AnyBox ban before typed frontend hardening
-- Path-only package graph, deterministic workspace planning, `Arcana.lock` v1, placeholder build artifacts, and declaration-surface API fingerprints for rebuild propagation
+- Path-only package graph, deterministic workspace planning, `Arcana.lock` v1, placeholder build artifacts, normalized HIR member fingerprints, and resolved API-fingerprint-based rebuild propagation
 - Shared HIR module, package, and workspace summaries now sit between syntax parsing, frontend checks, and package graph consumers
 - Symbol-based module and imported-name resolution now lives in HIR and is consumed by frontend diagnostics
 - Unsupported top-level syntax now fails explicitly instead of being silently skipped
@@ -28,7 +28,7 @@ Arcana is a Rust-first rewrite of the frozen Arcana language and tooling stack. 
 - `arcana check` now also enforces recursive boundary-safe typing for carried Lua/SQL boundary contracts across nested record/enum surfaces
 - Lua/SQL boundary-varietal compile-time contracts now have example and negative conformance coverage, and the carried first-class ECS direction is documented without freezing generalized ECS query authoring into the selfhost baseline
 - Impl header generic/lifetime params now survive syntax/HIR lowering, so inherited `T`/`'a` scope is available to later frontend work
-- Remaining opaque/frontend debt is now mostly the genuinely ambiguous/harder expression leftovers plus deeper expression typing and ownership/borrow flow
+- Next compiler debt is the runnable backend/runtime slice plus later typed-frontend deepening beyond the current conservative ownership and borrow-flow checks
 - Seed-imported docs, grimoires, `std`, examples, and conformance fixtures from MeadowLang
 - Meadow-vs-Arcana language-behavior audit captured in `docs/reference/audits/meadow_language_behavior_audit_v1.md`
 - Imported `std` and first-party grimoires are behavioral seed corpus only; current rewrite authority comes from `PLAN.md`, `docs/rewrite-roadmap.md`, and the active scope docs under `docs/specs/`

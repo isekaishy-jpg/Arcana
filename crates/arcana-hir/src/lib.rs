@@ -165,13 +165,6 @@ pub struct HirPageRollup {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct HirRawBlockEntry {
-    pub text: String,
-    pub span: Span,
-    pub children: Vec<HirRawBlockEntry>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HirMatchArm {
     pub patterns: Vec<HirMatchPattern>,
     pub value: HirExpr,
@@ -190,9 +183,6 @@ pub enum HirMatchPattern {
     Variant {
         path: String,
         args: Vec<HirMatchPattern>,
-    },
-    Opaque {
-        text: String,
     },
 }
 
@@ -273,10 +263,6 @@ pub enum HirBinaryOp {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HirExpr {
-    Opaque {
-        text: String,
-        attached: Vec<HirRawBlockEntry>,
-    },
     Path {
         segments: Vec<String>,
     },
@@ -390,9 +376,6 @@ impl HirAssignOp {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HirAssignTarget {
-    Opaque {
-        text: String,
-    },
     Name {
         text: String,
     },
@@ -518,6 +501,10 @@ impl HirModuleSummary {
     }
 
     pub fn exported_surface_rows(&self) -> Vec<String> {
+        self.api_fingerprint_rows()
+    }
+
+    pub fn api_fingerprint_rows(&self) -> Vec<String> {
         let mut rows = self
             .directives
             .iter()
@@ -537,6 +524,15 @@ impl HirModuleSummary {
                 }),
         );
         rows.sort();
+        rows
+    }
+
+    pub fn hir_fingerprint_rows(&self) -> Vec<String> {
+        let mut rows = Vec::new();
+        rows.extend(self.directives.iter().map(render_directive_fingerprint));
+        rows.extend(self.lang_items.iter().map(render_lang_item_fingerprint));
+        rows.extend(self.symbols.iter().map(render_symbol_fingerprint));
+        rows.extend(self.impls.iter().map(render_impl_fingerprint));
         rows
     }
 }
@@ -582,13 +578,31 @@ impl HirPackageSummary {
     }
 
     pub fn exported_surface_rows(&self) -> Vec<String> {
+        self.api_fingerprint_rows()
+    }
+
+    pub fn api_fingerprint_rows(&self) -> Vec<String> {
         let mut rows = Vec::new();
         for module in &self.modules {
-            for row in module.exported_surface_rows() {
+            for row in module.api_fingerprint_rows() {
                 rows.push(format!("module={}:{}", module.module_id, row));
             }
         }
         rows.sort();
+        rows
+    }
+
+    pub fn hir_fingerprint_rows(&self) -> Vec<String> {
+        let mut rows = vec![format!(
+            "package_name={}",
+            quote_fingerprint_text(&self.package_name)
+        )];
+        rows.extend(self.dependency_edges.iter().map(render_dependency_edge_fingerprint));
+        for module in &self.modules {
+            for row in module.hir_fingerprint_rows() {
+                rows.push(format!("module={}:{}", module.module_id, row));
+            }
+        }
         rows
     }
 }
@@ -871,6 +885,10 @@ fn encode_surface_text(text: &str) -> String {
     text.replace('\\', "\\\\").replace('\n', "\\n")
 }
 
+fn quote_fingerprint_text(text: &str) -> String {
+    format!("{text:?}")
+}
+
 fn render_function_signature(symbol: &HirSymbol) -> String {
     let mut rendered = String::new();
     if symbol.is_async {
@@ -986,6 +1004,680 @@ fn render_named_type_header(keyword: &str, symbol: &HirSymbol) -> String {
     }
     rendered.push(':');
     rendered
+}
+
+fn render_directive_fingerprint(directive: &HirDirective) -> String {
+    format!(
+        "directive(kind={}|path=[{}]|alias={}|forewords=[{}])",
+        directive.kind.as_str(),
+        directive
+            .path
+            .iter()
+            .map(|segment| quote_fingerprint_text(segment))
+            .collect::<Vec<_>>()
+            .join(","),
+        directive
+            .alias
+            .as_ref()
+            .map(|alias| quote_fingerprint_text(alias))
+            .unwrap_or_else(|| "none".to_string()),
+        directive
+            .forewords
+            .iter()
+            .map(render_foreword_fingerprint)
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
+fn render_lang_item_fingerprint(lang_item: &HirLangItem) -> String {
+    format!(
+        "lang(name={}|target=[{}])",
+        quote_fingerprint_text(&lang_item.name),
+        lang_item
+            .target
+            .iter()
+            .map(|segment| quote_fingerprint_text(segment))
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
+fn render_symbol_fingerprint(symbol: &HirSymbol) -> String {
+    format!(
+        concat!(
+            "symbol(",
+            "kind={}|name={}|exported={}|async={}|signature={}|type_params=[{}]|",
+            "where_clause={}|behavior_attrs=[{}]|forewords=[{}]|intrinsic={}|body={}|",
+            "statements=[{}]|rollups=[{}])"
+        ),
+        symbol.kind.as_str(),
+        quote_fingerprint_text(&symbol.name),
+        symbol.exported,
+        symbol.is_async,
+        quote_fingerprint_text(&symbol.api_signature_text()),
+        symbol
+            .type_params
+            .iter()
+            .map(|param| quote_fingerprint_text(param))
+            .collect::<Vec<_>>()
+            .join(","),
+        symbol
+            .where_clause
+            .as_ref()
+            .map(|clause| quote_fingerprint_text(clause))
+            .unwrap_or_else(|| "none".to_string()),
+        symbol
+            .behavior_attrs
+            .iter()
+            .map(render_behavior_attr_fingerprint)
+            .collect::<Vec<_>>()
+            .join(","),
+        symbol
+            .forewords
+            .iter()
+            .map(render_foreword_fingerprint)
+            .collect::<Vec<_>>()
+            .join(","),
+        symbol
+            .intrinsic_impl
+            .as_ref()
+            .map(|intrinsic| quote_fingerprint_text(intrinsic))
+            .unwrap_or_else(|| "none".to_string()),
+        render_symbol_body_fingerprint(&symbol.body),
+        symbol
+            .statements
+            .iter()
+            .map(render_statement_fingerprint)
+            .collect::<Vec<_>>()
+            .join(","),
+        symbol
+            .rollups
+            .iter()
+            .map(render_rollup_fingerprint)
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
+fn render_behavior_attr_fingerprint(attr: &HirBehaviorAttr) -> String {
+    format!(
+        "attr(name={}|value={})",
+        quote_fingerprint_text(&attr.name),
+        quote_fingerprint_text(&attr.value)
+    )
+}
+
+fn render_foreword_fingerprint(foreword: &HirForewordApp) -> String {
+    format!(
+        "foreword(name={}|args=[{}])",
+        quote_fingerprint_text(&foreword.name),
+        foreword
+            .args
+            .iter()
+            .map(render_foreword_arg_fingerprint)
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
+fn render_foreword_arg_fingerprint(arg: &HirForewordArg) -> String {
+    format!(
+        "arg(name={}|value={})",
+        arg.name
+            .as_ref()
+            .map(|name| quote_fingerprint_text(name))
+            .unwrap_or_else(|| "none".to_string()),
+        quote_fingerprint_text(&arg.value)
+    )
+}
+
+fn render_symbol_body_fingerprint(body: &HirSymbolBody) -> String {
+    match body {
+        HirSymbolBody::None => "none".to_string(),
+        HirSymbolBody::Record { fields } => format!(
+            "record([{}])",
+            fields
+                .iter()
+                .map(|field| format!(
+                    "field(name={}|ty={})",
+                    quote_fingerprint_text(&field.name),
+                    quote_fingerprint_text(&field.ty)
+                ))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        HirSymbolBody::Enum { variants } => format!(
+            "enum([{}])",
+            variants
+                .iter()
+                .map(|variant| format!(
+                    "variant(name={}|payload={})",
+                    quote_fingerprint_text(&variant.name),
+                    variant
+                        .payload
+                        .as_ref()
+                        .map(|payload| quote_fingerprint_text(payload))
+                        .unwrap_or_else(|| "none".to_string())
+                ))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        HirSymbolBody::Trait {
+            assoc_types,
+            methods,
+        } => format!(
+            "trait(assoc_types=[{}]|methods=[{}])",
+            assoc_types
+                .iter()
+                .map(|assoc_type| format!(
+                    "assoc_type(name={}|default={})",
+                    quote_fingerprint_text(&assoc_type.name),
+                    assoc_type
+                        .default_ty
+                        .as_ref()
+                        .map(|default_ty| quote_fingerprint_text(default_ty))
+                        .unwrap_or_else(|| "none".to_string())
+                ))
+                .collect::<Vec<_>>()
+                .join(","),
+            methods
+                .iter()
+                .map(render_symbol_fingerprint)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+    }
+}
+
+fn render_impl_fingerprint(impl_decl: &HirImplDecl) -> String {
+    format!(
+        concat!(
+            "impl(type_params=[{}]|trait={}|target={}|assoc_types=[{}]|methods=[{}]|",
+            "body_entries=[{}]|surface={})"
+        ),
+        impl_decl
+            .type_params
+            .iter()
+            .map(|param| quote_fingerprint_text(param))
+            .collect::<Vec<_>>()
+            .join(","),
+        impl_decl
+            .trait_path
+            .as_ref()
+            .map(|trait_path| quote_fingerprint_text(trait_path))
+            .unwrap_or_else(|| "none".to_string()),
+        quote_fingerprint_text(&impl_decl.target_type),
+        impl_decl
+            .assoc_types
+            .iter()
+            .map(|assoc_type| format!(
+                "assoc(name={}|value={})",
+                quote_fingerprint_text(&assoc_type.name),
+                assoc_type
+                    .value_ty
+                    .as_ref()
+                    .map(|value_ty| quote_fingerprint_text(value_ty))
+                    .unwrap_or_else(|| "none".to_string())
+            ))
+            .collect::<Vec<_>>()
+            .join(","),
+        impl_decl
+            .methods
+            .iter()
+            .map(render_symbol_fingerprint)
+            .collect::<Vec<_>>()
+            .join(","),
+        impl_decl
+            .body_entries
+            .iter()
+            .map(|entry| quote_fingerprint_text(entry))
+            .collect::<Vec<_>>()
+            .join(","),
+        quote_fingerprint_text(&impl_decl.surface_text)
+    )
+}
+
+fn render_rollup_fingerprint(rollup: &HirPageRollup) -> String {
+    format!(
+        "rollup(kind={}|subject={}|handler=[{}])",
+        rollup.kind.as_str(),
+        quote_fingerprint_text(&rollup.subject),
+        rollup
+            .handler_path
+            .iter()
+            .map(|segment| quote_fingerprint_text(segment))
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
+fn render_statement_fingerprint(statement: &HirStatement) -> String {
+    format!(
+        "stmt(forewords=[{}]|rollups=[{}]|kind={})",
+        statement
+            .forewords
+            .iter()
+            .map(render_foreword_fingerprint)
+            .collect::<Vec<_>>()
+            .join(","),
+        statement
+            .rollups
+            .iter()
+            .map(render_rollup_fingerprint)
+            .collect::<Vec<_>>()
+            .join(","),
+        render_statement_kind_fingerprint(&statement.kind)
+    )
+}
+
+fn render_statement_kind_fingerprint(kind: &HirStatementKind) -> String {
+    match kind {
+        HirStatementKind::Let {
+            mutable,
+            name,
+            value,
+        } => format!(
+            "let(mutable={}|name={}|value={})",
+            mutable,
+            quote_fingerprint_text(name),
+            render_expr_fingerprint(value)
+        ),
+        HirStatementKind::Return { value } => format!(
+            "return({})",
+            value
+                .as_ref()
+                .map(render_expr_fingerprint)
+                .unwrap_or_else(|| "none".to_string())
+        ),
+        HirStatementKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => format!(
+            "if(cond={}|then=[{}]|else={})",
+            render_expr_fingerprint(condition),
+            then_branch
+                .iter()
+                .map(render_statement_fingerprint)
+                .collect::<Vec<_>>()
+                .join(","),
+            else_branch
+                .as_ref()
+                .map(|branch| format!(
+                    "[{}]",
+                    branch
+                        .iter()
+                        .map(render_statement_fingerprint)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ))
+                .unwrap_or_else(|| "none".to_string())
+        ),
+        HirStatementKind::While { condition, body } => format!(
+            "while(cond={}|body=[{}])",
+            render_expr_fingerprint(condition),
+            body.iter()
+                .map(render_statement_fingerprint)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        HirStatementKind::For {
+            binding,
+            iterable,
+            body,
+        } => format!(
+            "for(binding={}|iterable={}|body=[{}])",
+            quote_fingerprint_text(binding),
+            render_expr_fingerprint(iterable),
+            body.iter()
+                .map(render_statement_fingerprint)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        HirStatementKind::Defer { expr } => {
+            format!("defer({})", render_expr_fingerprint(expr))
+        }
+        HirStatementKind::Break => "break".to_string(),
+        HirStatementKind::Continue => "continue".to_string(),
+        HirStatementKind::Assign { target, op, value } => format!(
+            "assign(target={}|op={}|value={})",
+            render_assign_target_fingerprint(target),
+            op.as_str(),
+            render_expr_fingerprint(value)
+        ),
+        HirStatementKind::Expr { expr } => {
+            format!("expr({})", render_expr_fingerprint(expr))
+        }
+    }
+}
+
+fn render_assign_target_fingerprint(target: &HirAssignTarget) -> String {
+    match target {
+        HirAssignTarget::Name { text } => {
+            format!("name({})", quote_fingerprint_text(text))
+        }
+        HirAssignTarget::MemberAccess { target, member } => format!(
+            "member(base={}|member={})",
+            render_assign_target_fingerprint(target),
+            quote_fingerprint_text(member)
+        ),
+        HirAssignTarget::Index { target, index } => format!(
+            "index(base={}|index={})",
+            render_assign_target_fingerprint(target),
+            render_expr_fingerprint(index)
+        ),
+    }
+}
+
+fn render_expr_fingerprint(expr: &HirExpr) -> String {
+    match expr {
+        HirExpr::Path { segments } => format!(
+            "path([{}])",
+            segments
+                .iter()
+                .map(|segment| quote_fingerprint_text(segment))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        HirExpr::BoolLiteral { value } => format!("bool({value})"),
+        HirExpr::IntLiteral { text } => format!("int({})", quote_fingerprint_text(text)),
+        HirExpr::StrLiteral { text } => format!("str({})", quote_fingerprint_text(text)),
+        HirExpr::Pair { left, right } => format!(
+            "pair(left={}|right={})",
+            render_expr_fingerprint(left),
+            render_expr_fingerprint(right)
+        ),
+        HirExpr::CollectionLiteral { items } => format!(
+            "collection([{}])",
+            items.iter()
+                .map(render_expr_fingerprint)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        HirExpr::Match { subject, arms } => format!(
+            "match(subject={}|arms=[{}])",
+            render_expr_fingerprint(subject),
+            arms.iter()
+                .map(render_match_arm_fingerprint)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        HirExpr::Chain {
+            style,
+            introducer,
+            steps,
+        } => format!(
+            "chain(style={}|introducer={}|steps=[{}])",
+            quote_fingerprint_text(style),
+            render_chain_introducer_fingerprint(*introducer),
+            steps.iter()
+                .map(render_chain_step_fingerprint)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        HirExpr::MemoryPhrase {
+            family,
+            arena,
+            init_args,
+            constructor,
+            attached,
+        } => format!(
+            "memory(family={}|arena={}|args=[{}]|constructor={}|attached=[{}])",
+            quote_fingerprint_text(family),
+            render_expr_fingerprint(arena),
+            init_args
+                .iter()
+                .map(render_phrase_arg_fingerprint)
+                .collect::<Vec<_>>()
+                .join(","),
+            quote_fingerprint_text(constructor),
+            attached
+                .iter()
+                .map(render_header_attachment_fingerprint)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        HirExpr::GenericApply { expr, type_args } => format!(
+            "generic_apply(expr={}|type_args=[{}])",
+            render_expr_fingerprint(expr),
+            type_args
+                .iter()
+                .map(|arg| quote_fingerprint_text(arg))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        HirExpr::QualifiedPhrase {
+            subject,
+            args,
+            qualifier,
+            attached,
+        } => format!(
+            "qualified(subject={}|args=[{}]|qualifier={}|attached=[{}])",
+            render_expr_fingerprint(subject),
+            args.iter()
+                .map(render_phrase_arg_fingerprint)
+                .collect::<Vec<_>>()
+                .join(","),
+            quote_fingerprint_text(qualifier),
+            attached
+                .iter()
+                .map(render_header_attachment_fingerprint)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        HirExpr::Await { expr } => format!("await({})", render_expr_fingerprint(expr)),
+        HirExpr::Unary { op, expr } => format!(
+            "unary(op={}|expr={})",
+            render_unary_op_fingerprint(*op),
+            render_expr_fingerprint(expr)
+        ),
+        HirExpr::Binary { left, op, right } => format!(
+            "binary(left={}|op={}|right={})",
+            render_expr_fingerprint(left),
+            render_binary_op_fingerprint(*op),
+            render_expr_fingerprint(right)
+        ),
+        HirExpr::MemberAccess { expr, member } => format!(
+            "member(expr={}|member={})",
+            render_expr_fingerprint(expr),
+            quote_fingerprint_text(member)
+        ),
+        HirExpr::Index { expr, index } => format!(
+            "index(expr={}|index={})",
+            render_expr_fingerprint(expr),
+            render_expr_fingerprint(index)
+        ),
+        HirExpr::Slice {
+            expr,
+            start,
+            end,
+            inclusive_end,
+        } => format!(
+            "slice(expr={}|start={}|end={}|inclusive_end={})",
+            render_expr_fingerprint(expr),
+            start
+                .as_ref()
+                .map(|expr| render_expr_fingerprint(expr))
+                .unwrap_or_else(|| "none".to_string()),
+            end.as_ref()
+                .map(|expr| render_expr_fingerprint(expr))
+                .unwrap_or_else(|| "none".to_string()),
+            inclusive_end
+        ),
+        HirExpr::Range {
+            start,
+            end,
+            inclusive_end,
+        } => format!(
+            "range(start={}|end={}|inclusive_end={})",
+            start
+                .as_ref()
+                .map(|expr| render_expr_fingerprint(expr))
+                .unwrap_or_else(|| "none".to_string()),
+            end.as_ref()
+                .map(|expr| render_expr_fingerprint(expr))
+                .unwrap_or_else(|| "none".to_string()),
+            inclusive_end
+        ),
+    }
+}
+
+fn render_match_arm_fingerprint(arm: &HirMatchArm) -> String {
+    format!(
+        "arm(patterns=[{}]|value={})",
+        arm.patterns
+            .iter()
+            .map(render_match_pattern_fingerprint)
+            .collect::<Vec<_>>()
+            .join(","),
+        render_expr_fingerprint(&arm.value)
+    )
+}
+
+fn render_match_pattern_fingerprint(pattern: &HirMatchPattern) -> String {
+    match pattern {
+        HirMatchPattern::Wildcard => "wildcard".to_string(),
+        HirMatchPattern::Literal { text } => {
+            format!("literal({})", quote_fingerprint_text(text))
+        }
+        HirMatchPattern::Name { text } => format!("name({})", quote_fingerprint_text(text)),
+        HirMatchPattern::Variant { path, args } => format!(
+            "variant(path={}|args=[{}])",
+            quote_fingerprint_text(path),
+            args.iter()
+                .map(render_match_pattern_fingerprint)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+    }
+}
+
+fn render_chain_step_fingerprint(step: &HirChainStep) -> String {
+    format!(
+        "step(incoming={}|stage={}|bind_args=[{}]|text={})",
+        step.incoming
+            .map(render_chain_connector_fingerprint)
+            .unwrap_or("none"),
+        render_expr_fingerprint(&step.stage),
+        step.bind_args
+            .iter()
+            .map(render_expr_fingerprint)
+            .collect::<Vec<_>>()
+            .join(","),
+        quote_fingerprint_text(&step.text)
+    )
+}
+
+fn render_phrase_arg_fingerprint(arg: &HirPhraseArg) -> String {
+    match arg {
+        HirPhraseArg::Positional(expr) => {
+            format!("pos({})", render_expr_fingerprint(expr))
+        }
+        HirPhraseArg::Named { name, value } => format!(
+            "named(name={}|value={})",
+            quote_fingerprint_text(name),
+            render_expr_fingerprint(value)
+        ),
+    }
+}
+
+fn render_header_attachment_fingerprint(attachment: &HirHeaderAttachment) -> String {
+    match attachment {
+        HirHeaderAttachment::Named {
+            name,
+            value,
+            forewords,
+            ..
+        } => format!(
+            "named(name={}|value={}|forewords=[{}])",
+            quote_fingerprint_text(name),
+            render_expr_fingerprint(value),
+            forewords
+                .iter()
+                .map(render_foreword_fingerprint)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        HirHeaderAttachment::Chain {
+            expr, forewords, ..
+        } => format!(
+            "chain(expr={}|forewords=[{}])",
+            render_expr_fingerprint(expr),
+            forewords
+                .iter()
+                .map(render_foreword_fingerprint)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+    }
+}
+
+fn render_dependency_edge_fingerprint(edge: &HirModuleDependency) -> String {
+    format!(
+        "dep(source={}|kind={}|target=[{}]|alias={})",
+        quote_fingerprint_text(&edge.source_module_id),
+        edge.kind.as_str(),
+        edge.target_path
+            .iter()
+            .map(|segment| quote_fingerprint_text(segment))
+            .collect::<Vec<_>>()
+            .join(","),
+        edge.alias
+            .as_ref()
+            .map(|alias| quote_fingerprint_text(alias))
+            .unwrap_or_else(|| "none".to_string())
+    )
+}
+
+fn render_chain_connector_fingerprint(connector: HirChainConnector) -> &'static str {
+    match connector {
+        HirChainConnector::Forward => "forward",
+        HirChainConnector::Reverse => "reverse",
+    }
+}
+
+fn render_chain_introducer_fingerprint(introducer: HirChainIntroducer) -> &'static str {
+    match introducer {
+        HirChainIntroducer::Forward => "forward",
+        HirChainIntroducer::Reverse => "reverse",
+    }
+}
+
+fn render_unary_op_fingerprint(op: HirUnaryOp) -> &'static str {
+    match op {
+        HirUnaryOp::Neg => "neg",
+        HirUnaryOp::Not => "not",
+        HirUnaryOp::BitNot => "bit_not",
+        HirUnaryOp::BorrowRead => "borrow_read",
+        HirUnaryOp::BorrowMut => "borrow_mut",
+        HirUnaryOp::Deref => "deref",
+        HirUnaryOp::Weave => "weave",
+        HirUnaryOp::Split => "split",
+    }
+}
+
+fn render_binary_op_fingerprint(op: HirBinaryOp) -> &'static str {
+    match op {
+        HirBinaryOp::Or => "or",
+        HirBinaryOp::And => "and",
+        HirBinaryOp::EqEq => "eqeq",
+        HirBinaryOp::NotEq => "noteq",
+        HirBinaryOp::Lt => "lt",
+        HirBinaryOp::LtEq => "lteq",
+        HirBinaryOp::Gt => "gt",
+        HirBinaryOp::GtEq => "gteq",
+        HirBinaryOp::BitOr => "bitor",
+        HirBinaryOp::BitXor => "bitxor",
+        HirBinaryOp::BitAnd => "bitand",
+        HirBinaryOp::Shl => "shl",
+        HirBinaryOp::Shr => "shr",
+        HirBinaryOp::Add => "add",
+        HirBinaryOp::Sub => "sub",
+        HirBinaryOp::Mul => "mul",
+        HirBinaryOp::Div => "div",
+        HirBinaryOp::Mod => "mod",
+    }
 }
 
 fn resolve_module_target(
@@ -1582,9 +2274,6 @@ fn lower_assign_op(op: &ParsedAssignOp) -> HirAssignOp {
 
 fn lower_assign_target(target: &arcana_syntax::AssignTarget) -> HirAssignTarget {
     match target {
-        arcana_syntax::AssignTarget::Opaque { text } => {
-            HirAssignTarget::Opaque { text: text.clone() }
-        }
         arcana_syntax::AssignTarget::Name { text } => HirAssignTarget::Name { text: text.clone() },
         arcana_syntax::AssignTarget::MemberAccess { target, member } => {
             HirAssignTarget::MemberAccess {
@@ -1597,17 +2286,6 @@ fn lower_assign_target(target: &arcana_syntax::AssignTarget) -> HirAssignTarget 
             index: lower_expr(index),
         },
     }
-}
-
-fn lower_raw_block_entries(entries: &[arcana_syntax::RawBlockEntry]) -> Vec<HirRawBlockEntry> {
-    entries
-        .iter()
-        .map(|entry| HirRawBlockEntry {
-            text: entry.text.clone(),
-            span: entry.span,
-            children: lower_raw_block_entries(&entry.children),
-        })
-        .collect()
 }
 
 fn lower_header_attachments(
@@ -1644,10 +2322,6 @@ fn lower_header_attachments(
 
 fn lower_expr(expr: &ParsedExpr) -> HirExpr {
     match expr {
-        ParsedExpr::Opaque { text, attached } => HirExpr::Opaque {
-            text: text.clone(),
-            attached: lower_raw_block_entries(attached),
-        },
         ParsedExpr::Path { segments } => HirExpr::Path {
             segments: segments.clone(),
         },
@@ -1763,9 +2437,6 @@ fn lower_match_pattern(pattern: &arcana_syntax::MatchPattern) -> HirMatchPattern
             path: path.clone(),
             args: args.iter().map(lower_match_pattern).collect(),
         },
-        arcana_syntax::MatchPattern::Opaque { text } => {
-            HirMatchPattern::Opaque { text: text.clone() }
-        }
     }
 }
 

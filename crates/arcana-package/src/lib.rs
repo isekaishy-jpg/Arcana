@@ -9,6 +9,7 @@ use arcana_hir::{
 };
 use arcana_ir::lower_package;
 use pathdiff::diff_paths;
+#[cfg(test)]
 use sha2::{Digest, Sha256};
 
 pub type PackageResult<T> = Result<T, String>;
@@ -400,7 +401,8 @@ pub fn plan_workspace(graph: &WorkspaceGraph) -> PackageResult<Vec<String>> {
     Ok(ordered)
 }
 
-pub fn compute_member_fingerprints(
+#[cfg(test)]
+fn compute_member_fingerprints(
     graph: &WorkspaceGraph,
 ) -> PackageResult<HashMap<String, MemberFingerprints>> {
     let mut out = HashMap::new();
@@ -922,39 +924,39 @@ fn validate_grimoire_layout(dir: &Path, kind: &GrimoireKind) -> PackageResult<()
     Ok(())
 }
 
+#[cfg(test)]
 fn compute_member_fingerprint(member: &WorkspaceMember) -> PackageResult<MemberFingerprints> {
     let files = collect_arc_files(&member.abs_dir.join("src"))?;
-    let manifest_path = member.abs_dir.join("book.toml");
-    let source = compute_source_fingerprint(member, &manifest_path, &files)?;
-    let api = compute_api_fingerprint(member, &files)?;
+    let package = build_member_package_summary(member, &files)?;
+    let source = compute_source_fingerprint(member, &package);
+    let api = compute_api_fingerprint(member, &package);
     Ok(MemberFingerprints { source, api })
 }
 
+#[cfg(test)]
 fn compute_source_fingerprint(
     member: &WorkspaceMember,
-    manifest_path: &Path,
-    files: &[PathBuf],
-) -> PackageResult<String> {
+    package: &arcana_hir::HirPackageSummary,
+) -> String {
     let mut hasher = Sha256::new();
-    for file in files
-        .iter()
-        .cloned()
-        .chain(std::iter::once(manifest_path.to_path_buf()))
-    {
-        let rel = file
-            .strip_prefix(&member.abs_dir)
-            .unwrap_or(&file)
-            .to_string_lossy()
-            .replace('\\', "/");
-        hasher.update(rel.as_bytes());
-        let bytes =
-            fs::read(&file).map_err(|e| format!("failed to read `{}`: {e}", file.display()))?;
-        hasher.update(bytes);
+    hasher.update(b"arcana_hir_member_v1\n");
+    hasher.update(format!("name={}\n", member.name).as_bytes());
+    hasher.update(format!("kind={}\n", member.kind.as_str()).as_bytes());
+    for dep in &member.deps {
+        hasher.update(format!("dep={dep}\n").as_bytes());
     }
-    Ok(format!("sha256:{:x}", hasher.finalize()))
+    for row in package.hir_fingerprint_rows() {
+        hasher.update(row.as_bytes());
+        hasher.update(b"\n");
+    }
+    format!("sha256:{:x}", hasher.finalize())
 }
 
-fn compute_api_fingerprint(member: &WorkspaceMember, files: &[PathBuf]) -> PackageResult<String> {
+#[cfg(test)]
+fn compute_api_fingerprint(
+    member: &WorkspaceMember,
+    package: &arcana_hir::HirPackageSummary,
+) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"arcana_api_v2\n");
     hasher.update(format!("name={}\n", member.name).as_bytes());
@@ -962,13 +964,11 @@ fn compute_api_fingerprint(member: &WorkspaceMember, files: &[PathBuf]) -> Packa
     for dep in &member.deps {
         hasher.update(format!("dep={dep}\n").as_bytes());
     }
-
-    let package = build_member_package_summary(member, files)?;
-    for row in package.exported_surface_rows() {
+    for row in package.api_fingerprint_rows() {
         hasher.update(row.as_bytes());
         hasher.update(b"\n");
     }
-    Ok(format!("sha256:{:x}", hasher.finalize()))
+    format!("sha256:{:x}", hasher.finalize())
 }
 
 fn load_member_package_summary(
@@ -977,6 +977,7 @@ fn load_member_package_summary(
     Ok(load_member_hir_package(member)?.summary)
 }
 
+#[cfg(test)]
 fn build_member_package_summary(
     member: &WorkspaceMember,
     files: &[PathBuf],
@@ -1354,6 +1355,39 @@ mod tests {
     }
 
     #[test]
+    fn whitespace_only_edit_is_cache_hit_only() {
+        let dir = temp_dir("whitespace_hit");
+        write_file(
+            &dir.join("book.toml"),
+            "name = \"ws\"\nkind = \"app\"\n[workspace]\nmembers = [\"app\"]\n",
+        );
+        write_grimoire(&dir.join("app"), GrimoireKind::App, "app", &[]);
+        let graph = load_workspace_graph(&dir).expect("load graph");
+        let order = plan_workspace(&graph).expect("plan");
+        let first_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
+        let first_statuses = plan_build(&graph, &order, &first_fingerprints, None).expect("plan");
+        execute_build(&graph, &first_statuses).expect("execute build");
+        let lock_path = write_lockfile(&graph, &order, &first_statuses).expect("lockfile");
+        let existing = read_lockfile(&lock_path)
+            .expect("read lock")
+            .expect("lock exists");
+
+        write_file(
+            &dir.join("app/src/shelf.arc"),
+            "fn main() -> Int:\n\n    return 0\n",
+        );
+        let second_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
+        let second_statuses =
+            plan_build(&graph, &order, &second_fingerprints, Some(&existing)).expect("plan");
+        assert!(
+            second_statuses
+                .iter()
+                .all(|status| status.disposition == BuildDisposition::CacheHit)
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn built_artifact_includes_public_surface_rows() {
         let dir = temp_dir("artifact_surface");
         write_file(
@@ -1453,7 +1487,7 @@ mod tests {
         write_grimoire(&dir.join("core"), GrimoireKind::Lib, "core", &[]);
         write_file(
             &dir.join("core/src/book.arc"),
-            "export fn shared_value() -> Int:\n    return helper()\n",
+            "export fn shared_value() -> Int:\n    return helper :: :: call\n",
         );
         write_file(
             &dir.join("core/src/helper.arc"),

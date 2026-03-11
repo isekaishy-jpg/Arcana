@@ -92,6 +92,7 @@ This document defines how Arcana spec files are interpreted during the rewrite.
 - Rebuild imported `std` for the rewrite architecture instead of preserving Meadow-era layering; showcase/game convenience logic does not become std contract just because it was carried over.
 - `std` is rewrite-owned first-party library surface, not an imported MeadowLang artifact to preserve wholesale.
 - Imported-std review and any app/runtime handle redesign must preserve Arcana's explicit/unambiguous doctrine: typed, named, auditable contracts over ambiguous convenience or erased fallback carriers.
+- Ownership and borrowing work follows the same doctrine: copy Rust where its mutability/borrow/ownership rules are explicit and unambiguous, then tailor to Arcana's ratified surface while making any remaining behavior explicit in syntax, static rules, and diagnostics.
 - First-party runtime/package ownership means more than wrapping upstream Rust crates: third-party crates may exist as private implementation details, but they must not define the public Arcana substrate or the reason first-party `std` exists.
 - First-party grimoire responsibilities must be explicit before bootstrap so carried package names do not silently define the ecosystem.
 - First-party window/input/canvas and primitive graphics/text remain pre-selfhost requirements for real apps/showcases, but carried `winspell`/`spell-events` code does not freeze the old implementation stack.

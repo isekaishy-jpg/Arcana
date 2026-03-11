@@ -1,10 +1,10 @@
 use std::env;
 use std::path::PathBuf;
 
-use arcana_frontend::check_path;
+use arcana_frontend::{check_path, compute_member_fingerprints};
 use arcana_package::{
-    BuildDisposition, compute_member_fingerprints, execute_build, load_workspace_graph, plan_build,
-    plan_workspace, read_lockfile, render_build_summary, write_lockfile,
+    BuildDisposition, execute_build, load_workspace_graph, plan_build, plan_workspace,
+    read_lockfile, render_build_summary, write_lockfile,
 };
 
 fn main() {

@@ -1,15 +1,20 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use arcana_hir::{
-    HirAssignTarget, HirChainStep, HirExpr, HirHeaderAttachment, HirImplDecl, HirMatchPattern,
-    HirModule, HirModuleSummary, HirResolvedModule, HirResolvedTarget, HirResolvedWorkspace,
-    HirStatement, HirStatementKind, HirSymbol, HirSymbolBody, HirSymbolKind, HirWorkspacePackage,
-    HirWorkspaceSummary, lower_module_text, resolve_workspace,
+    HirAssignTarget, HirBinaryOp, HirChainStep, HirExpr, HirHeaderAttachment, HirImplDecl,
+    HirMatchPattern, HirModule, HirModuleSummary, HirResolvedModule, HirResolvedTarget,
+    HirResolvedWorkspace, HirStatement, HirStatementKind, HirSymbol, HirSymbolBody, HirSymbolKind,
+    HirUnaryOp, HirWorkspacePackage, HirWorkspaceSummary, lower_module_text, resolve_workspace,
 };
-use arcana_package::load_workspace_hir as load_package_workspace_hir;
+use arcana_package::{
+    MemberFingerprints, WorkspaceGraph,
+    load_workspace_hir as load_package_workspace_hir,
+    load_workspace_hir_from_graph as load_package_workspace_hir_from_graph,
+};
 use arcana_syntax::Span;
+use sha2::{Digest, Sha256};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CheckSummary {
@@ -44,6 +49,27 @@ impl Diagnostic {
 enum SurfaceSymbolUse {
     TypeLike,
     Trait,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExprTypeClass {
+    Bool,
+    Int,
+    Str,
+    Pair,
+    Collection,
+}
+
+impl ExprTypeClass {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Bool => "Bool",
+            Self::Int => "Int",
+            Self::Str => "Str",
+            Self::Pair => "pair",
+            Self::Collection => "collection",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -96,32 +122,1771 @@ impl TypeScope {
 #[derive(Clone, Debug, Default)]
 struct ValueScope {
     locals: BTreeSet<String>,
+    mutable_locals: BTreeSet<String>,
+    params: BTreeSet<String>,
+    ownership: BTreeMap<String, OwnershipClass>,
+    type_texts: BTreeMap<String, String>,
 }
 
 impl ValueScope {
-    fn with_params<'a, I>(&self, params: I) -> Self
-    where
-        I: IntoIterator<Item = &'a str>,
-    {
+    fn with_symbol_params(&self, params: &[arcana_hir::HirParam]) -> Self {
         let mut next = self.clone();
         for param in params {
-            next.locals.insert(param.to_string());
+            next.locals.insert(param.name.clone());
+            next.params.insert(param.name.clone());
+            if matches!(param.mode, Some(arcana_hir::HirParamMode::Edit)) {
+                next.mutable_locals.insert(param.name.clone());
+            }
         }
         next
     }
 
-    fn with_local(&self, name: &str) -> Self {
+    fn with_local(&self, name: &str, mutable: bool) -> Self {
         let mut next = self.clone();
         next.locals.insert(name.to_string());
+        if mutable {
+            next.mutable_locals.insert(name.to_string());
+        }
         next
     }
 
-    fn insert(&mut self, name: &str) {
+    fn insert(&mut self, name: &str, mutable: bool) {
         self.locals.insert(name.to_string());
+        if mutable {
+            self.mutable_locals.insert(name.to_string());
+        }
+    }
+
+    fn insert_typed(
+        &mut self,
+        name: &str,
+        mutable: bool,
+        ownership: OwnershipClass,
+        type_text: Option<String>,
+    ) {
+        self.insert(name, mutable);
+        self.ownership.insert(name.to_string(), ownership);
+        if let Some(type_text) = type_text {
+            self.type_texts.insert(name.to_string(), type_text);
+        } else {
+            self.type_texts.remove(name);
+        }
     }
 
     fn contains(&self, name: &str) -> bool {
         self.locals.contains(name)
+    }
+
+    fn is_mutable(&self, name: &str) -> bool {
+        self.mutable_locals.contains(name)
+    }
+
+    fn is_param(&self, name: &str) -> bool {
+        self.params.contains(name)
+    }
+
+    fn ownership_of(&self, name: &str) -> OwnershipClass {
+        self.ownership.get(name).copied().unwrap_or_default()
+    }
+
+    fn type_text_of(&self, name: &str) -> Option<&str> {
+        self.type_texts.get(name).map(String::as_str)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum OwnershipClass {
+    Copy,
+    Move,
+    #[default]
+    Unknown,
+}
+
+impl OwnershipClass {
+    const fn is_move_only(self) -> bool {
+        matches!(self, Self::Move)
+    }
+}
+
+fn infer_expr_type(expr: &HirExpr) -> Option<ExprTypeClass> {
+    match expr {
+        HirExpr::BoolLiteral { .. } => Some(ExprTypeClass::Bool),
+        HirExpr::IntLiteral { .. } => Some(ExprTypeClass::Int),
+        HirExpr::StrLiteral { .. } => Some(ExprTypeClass::Str),
+        HirExpr::Pair { .. } => Some(ExprTypeClass::Pair),
+        HirExpr::CollectionLiteral { .. } => Some(ExprTypeClass::Collection),
+        HirExpr::Unary { op, .. } => match op {
+            HirUnaryOp::Not => Some(ExprTypeClass::Bool),
+            HirUnaryOp::Neg | HirUnaryOp::BitNot => Some(ExprTypeClass::Int),
+            HirUnaryOp::BorrowRead
+            | HirUnaryOp::BorrowMut
+            | HirUnaryOp::Deref
+            | HirUnaryOp::Weave
+            | HirUnaryOp::Split => None,
+        },
+        HirExpr::Binary { op, .. } => match op {
+            HirBinaryOp::And
+            | HirBinaryOp::Or
+            | HirBinaryOp::EqEq
+            | HirBinaryOp::NotEq
+            | HirBinaryOp::Lt
+            | HirBinaryOp::LtEq
+            | HirBinaryOp::Gt
+            | HirBinaryOp::GtEq => Some(ExprTypeClass::Bool),
+            HirBinaryOp::Sub
+            | HirBinaryOp::Mul
+            | HirBinaryOp::Div
+            | HirBinaryOp::Mod
+            | HirBinaryOp::BitOr
+            | HirBinaryOp::BitXor
+            | HirBinaryOp::BitAnd
+            | HirBinaryOp::Shl
+            | HirBinaryOp::Shr => Some(ExprTypeClass::Int),
+            HirBinaryOp::Add => None,
+        },
+        _ => None,
+    }
+}
+
+fn push_type_contract_diagnostic(
+    module_path: &Path,
+    span: Span,
+    diagnostics: &mut Vec<Diagnostic>,
+    message: String,
+) {
+    diagnostics.push(Diagnostic {
+        path: module_path.to_path_buf(),
+        line: span.line,
+        column: span.column,
+        message,
+    });
+}
+
+fn validate_expected_expr_type(
+    module_path: &Path,
+    expr: &HirExpr,
+    span: Span,
+    diagnostics: &mut Vec<Diagnostic>,
+    expected: ExprTypeClass,
+    context: &str,
+) {
+    let Some(actual) = infer_expr_type(expr) else {
+        return;
+    };
+    if actual != expected {
+        push_type_contract_diagnostic(
+            module_path,
+            span,
+            diagnostics,
+            format!("{context} requires {}, found {}", expected.label(), actual.label()),
+        );
+    }
+}
+
+fn is_tuple_projection_member(member: &str) -> bool {
+    matches!(member, "0" | "1")
+}
+
+fn binary_op_token(op: HirBinaryOp) -> &'static str {
+    match op {
+        HirBinaryOp::Or => "or",
+        HirBinaryOp::And => "and",
+        HirBinaryOp::EqEq => "==",
+        HirBinaryOp::NotEq => "!=",
+        HirBinaryOp::Lt => "<",
+        HirBinaryOp::LtEq => "<=",
+        HirBinaryOp::Gt => ">",
+        HirBinaryOp::GtEq => ">=",
+        HirBinaryOp::BitOr => "|",
+        HirBinaryOp::BitXor => "^",
+        HirBinaryOp::BitAnd => "&",
+        HirBinaryOp::Shl => "<<",
+        HirBinaryOp::Shr => "shr",
+        HirBinaryOp::Add => "+",
+        HirBinaryOp::Sub => "-",
+        HirBinaryOp::Mul => "*",
+        HirBinaryOp::Div => "/",
+        HirBinaryOp::Mod => "%",
+    }
+}
+
+fn unary_op_token(op: HirUnaryOp) -> &'static str {
+    match op {
+        HirUnaryOp::Neg => "-",
+        HirUnaryOp::Not => "not",
+        HirUnaryOp::BitNot => "~",
+        HirUnaryOp::BorrowRead => "&",
+        HirUnaryOp::BorrowMut => "*",
+        HirUnaryOp::Deref => "*",
+        HirUnaryOp::Weave => "weave",
+        HirUnaryOp::Split => "split",
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PlaceMutability {
+    Immutable,
+    Mutable,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct LocalBorrowState {
+    shared_count: usize,
+    mutable: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+struct BorrowFlowState {
+    locals: BTreeMap<String, LocalBorrowState>,
+    moved_locals: BTreeSet<String>,
+}
+
+impl BorrowFlowState {
+    fn local_state(&self, name: &str) -> LocalBorrowState {
+        self.locals.get(name).copied().unwrap_or_default()
+    }
+
+    fn has_shared_borrow(&self, name: &str) -> bool {
+        self.local_state(name).shared_count > 0
+    }
+
+    fn has_mut_borrow(&self, name: &str) -> bool {
+        self.local_state(name).mutable
+    }
+
+    fn has_any_borrow(&self, name: &str) -> bool {
+        let state = self.local_state(name);
+        state.mutable || state.shared_count > 0
+    }
+
+    fn has_moved(&self, name: &str) -> bool {
+        self.moved_locals.contains(name)
+    }
+
+    fn note_shared_borrow(&mut self, name: &str) {
+        let state = self.locals.entry(name.to_string()).or_default();
+        state.shared_count += 1;
+    }
+
+    fn note_mut_borrow(&mut self, name: &str) {
+        let state = self.locals.entry(name.to_string()).or_default();
+        state.mutable = true;
+    }
+
+    fn note_moved(&mut self, name: &str) {
+        self.moved_locals.insert(name.to_string());
+    }
+
+    fn clear_local(&mut self, name: &str) {
+        self.locals.remove(name);
+        self.moved_locals.remove(name);
+    }
+
+    fn merge_moves_from(&mut self, other: &Self) {
+        self.moved_locals.extend(other.moved_locals.iter().cloned());
+    }
+}
+
+fn expr_place_mutability(expr: &HirExpr, scope: &ValueScope) -> Option<PlaceMutability> {
+    match expr {
+        HirExpr::Path { segments } if segments.len() == 1 && scope.contains(&segments[0]) => {
+            Some(if scope.is_mutable(&segments[0]) {
+                PlaceMutability::Mutable
+            } else {
+                PlaceMutability::Immutable
+            })
+        }
+        HirExpr::MemberAccess { expr, .. } | HirExpr::Index { expr, .. } => {
+            expr_place_mutability(expr, scope)
+        }
+        HirExpr::Unary {
+            op: HirUnaryOp::Deref,
+            ..
+        } => Some(PlaceMutability::Unknown),
+        _ => None,
+    }
+}
+
+fn expr_place_root_local<'a>(expr: &'a HirExpr, scope: &ValueScope) -> Option<&'a str> {
+    match expr {
+        HirExpr::Path { segments } if segments.len() == 1 && scope.contains(&segments[0]) => {
+            Some(segments[0].as_str())
+        }
+        HirExpr::MemberAccess { expr, .. } | HirExpr::Index { expr, .. } => {
+            expr_place_root_local(expr, scope)
+        }
+        _ => None,
+    }
+}
+
+fn assign_target_root_local<'a>(target: &'a HirAssignTarget, scope: &ValueScope) -> Option<&'a str> {
+    match target {
+        HirAssignTarget::Name { text } if scope.contains(text) => Some(text.as_str()),
+        HirAssignTarget::MemberAccess { target, .. } | HirAssignTarget::Index { target, .. } => {
+            assign_target_root_local(target, scope)
+        }
+        _ => None,
+    }
+}
+
+fn ownership_of_builtin_type(name: &str) -> OwnershipClass {
+    match name {
+        "Int" | "Bool" | "RangeInt" | "ArenaId" | "FrameId" | "PoolId" | "AtomicInt"
+        | "AtomicBool" => OwnershipClass::Copy,
+        "Str" | "List" | "Array" | "Map" | "Arena" | "FrameArena" | "PoolArena"
+        | "Task" | "Thread" | "Channel" | "Mutex" => OwnershipClass::Move,
+        _ => OwnershipClass::Unknown,
+    }
+}
+
+fn infer_type_ownership(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    type_scope: &TypeScope,
+    text: &str,
+) -> OwnershipClass {
+    let trimmed = text.trim_start();
+    if trimmed.starts_with('&') {
+        return OwnershipClass::Copy;
+    }
+
+    let refs = collect_surface_refs(text);
+    let Some(path) = refs.paths.first() else {
+        return OwnershipClass::Unknown;
+    };
+    if path.len() == 1 && type_scope.allows_type_name(&path[0]) {
+        return OwnershipClass::Unknown;
+    }
+    if path.len() == 1 {
+        let builtin = ownership_of_builtin_type(&path[0]);
+        if builtin != OwnershipClass::Unknown {
+            return builtin;
+        }
+    }
+    let Some(symbol_ref) = lookup_symbol_path(workspace, resolved_module, path) else {
+        return OwnershipClass::Unknown;
+    };
+    match symbol_ref.symbol.kind {
+        HirSymbolKind::Record | HirSymbolKind::Enum => OwnershipClass::Move,
+        _ => OwnershipClass::Unknown,
+    }
+}
+
+fn infer_expr_type_text(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    type_scope: &TypeScope,
+    scope: &ValueScope,
+    expr: &HirExpr,
+) -> Option<String> {
+    match expr {
+        HirExpr::BoolLiteral { .. } => Some("Bool".to_string()),
+        HirExpr::IntLiteral { .. } => Some("Int".to_string()),
+        HirExpr::StrLiteral { .. } => Some("Str".to_string()),
+        HirExpr::Path { segments } if segments.len() == 1 && scope.contains(&segments[0]) => {
+            scope.type_text_of(&segments[0]).map(ToOwned::to_owned)
+        }
+        HirExpr::Unary { op, expr }
+            if matches!(op, HirUnaryOp::BorrowRead | HirUnaryOp::BorrowMut) =>
+        {
+            infer_expr_type_text(workspace, resolved_module, type_scope, scope, expr)
+                .map(|text| format!("& {text}"))
+        }
+        HirExpr::GenericApply { expr, .. } => {
+            infer_expr_type_text(workspace, resolved_module, type_scope, scope, expr)
+        }
+        HirExpr::QualifiedPhrase {
+            subject,
+            qualifier,
+            ..
+        } => resolve_qualified_phrase_target_symbol(
+            workspace,
+            resolved_module,
+            type_scope,
+            scope,
+            subject,
+            qualifier,
+        )
+        .and_then(|symbol| symbol.return_type.clone().or_else(|| match symbol.kind {
+            HirSymbolKind::Record | HirSymbolKind::Enum => Some(symbol.name.clone()),
+            _ => None,
+        })),
+        HirExpr::MemberAccess { expr, .. } => {
+            infer_expr_type_text(workspace, resolved_module, type_scope, scope, expr)
+        }
+        _ => None,
+    }
+}
+
+fn infer_expr_ownership(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    type_scope: &TypeScope,
+    scope: &ValueScope,
+    expr: &HirExpr,
+) -> OwnershipClass {
+    match expr {
+        HirExpr::BoolLiteral { .. } | HirExpr::IntLiteral { .. } => OwnershipClass::Copy,
+        HirExpr::StrLiteral { .. } | HirExpr::CollectionLiteral { .. } => OwnershipClass::Move,
+        HirExpr::Pair { left, right } => {
+            let left_kind = infer_expr_ownership(workspace, resolved_module, type_scope, scope, left);
+            let right_kind =
+                infer_expr_ownership(workspace, resolved_module, type_scope, scope, right);
+            if left_kind == OwnershipClass::Copy && right_kind == OwnershipClass::Copy {
+                OwnershipClass::Copy
+            } else if left_kind.is_move_only() || right_kind.is_move_only() {
+                OwnershipClass::Move
+            } else {
+                OwnershipClass::Unknown
+            }
+        }
+        HirExpr::Path { segments } if segments.len() == 1 && scope.contains(&segments[0]) => {
+            scope.ownership_of(&segments[0])
+        }
+        HirExpr::Unary { op, .. } if matches!(op, HirUnaryOp::BorrowRead | HirUnaryOp::BorrowMut) => {
+            OwnershipClass::Copy
+        }
+        _ => infer_expr_type_text(workspace, resolved_module, type_scope, scope, expr)
+            .map(|ty| infer_type_ownership(workspace, resolved_module, type_scope, &ty))
+            .unwrap_or_default(),
+    }
+}
+
+fn flatten_callable_expr_path(expr: &HirExpr) -> Option<Vec<String>> {
+    match expr {
+        HirExpr::GenericApply { expr, .. } => flatten_callable_expr_path(expr),
+        _ => flatten_member_expr_path(expr),
+    }
+}
+
+fn erase_type_generics(text: &str) -> String {
+    let mut out = String::new();
+    let mut depth = 0usize;
+    for ch in text.chars() {
+        match ch {
+            '[' => depth += 1,
+            ']' => depth = depth.saturating_sub(1),
+            _ if depth == 0 && !ch.is_whitespace() => out.push(ch),
+            _ => {}
+        }
+    }
+    out
+}
+
+fn lookup_method_symbol_for_type<'a>(
+    workspace: &'a HirWorkspaceSummary,
+    type_text: &str,
+    method_name: &str,
+) -> Option<&'a HirSymbol> {
+    let wanted = erase_type_generics(type_text);
+    for package in workspace.packages.values() {
+        for module in &package.summary.modules {
+            for impl_decl in &module.impls {
+                let target = erase_type_generics(&impl_decl.target_type);
+                if target != wanted {
+                    continue;
+                }
+                if let Some(method) = impl_decl.methods.iter().find(|method| method.name == method_name)
+                {
+                    return Some(method);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn resolve_qualified_phrase_target_symbol<'a>(
+    workspace: &'a HirWorkspaceSummary,
+    resolved_module: &'a HirResolvedModule,
+    type_scope: &TypeScope,
+    scope: &ValueScope,
+    subject: &HirExpr,
+    qualifier: &str,
+) -> Option<&'a HirSymbol> {
+    if qualifier == "call" {
+        let path = flatten_callable_expr_path(subject)?;
+        return lookup_symbol_path(workspace, resolved_module, &path).map(|resolved| resolved.symbol);
+    }
+
+    if let Some(path) = split_simple_path(qualifier) {
+        if let Some(resolved) = lookup_symbol_path(workspace, resolved_module, &path) {
+            return Some(resolved.symbol);
+        }
+    }
+
+    if is_identifier_text(qualifier) {
+        let subject_ty = infer_expr_type_text(workspace, resolved_module, type_scope, scope, subject)?;
+        return lookup_method_symbol_for_type(workspace, &subject_ty, qualifier);
+    }
+
+    None
+}
+
+fn collect_qualified_phrase_param_exprs<'a>(
+    symbol: &'a HirSymbol,
+    subject: &'a HirExpr,
+    args: &'a [arcana_hir::HirPhraseArg],
+    qualifier: &str,
+) -> Vec<(&'a arcana_hir::HirParam, &'a HirExpr)> {
+    let mut bindings = Vec::new();
+    let mut next_positional = 0usize;
+
+    if qualifier != "call" {
+        if let Some(param) = symbol.params.first() {
+            bindings.push((param, subject));
+            next_positional = 1;
+        }
+    }
+
+    for arg in args {
+        match arg {
+            arcana_hir::HirPhraseArg::Positional(expr) => {
+                if let Some(param) = symbol.params.get(next_positional) {
+                    bindings.push((param, expr));
+                    next_positional += 1;
+                }
+            }
+            arcana_hir::HirPhraseArg::Named { name, value } => {
+                if let Some(param) = symbol.params.iter().find(|param| param.name == *name) {
+                    bindings.push((param, value));
+                }
+            }
+        }
+    }
+
+    bindings
+}
+
+fn validate_borrow_operand_place(
+    module_path: &Path,
+    scope: &ValueScope,
+    expr: &HirExpr,
+    span: Span,
+    diagnostics: &mut Vec<Diagnostic>,
+    mutable: bool,
+) {
+    let op = if mutable { "&mut" } else { "&" };
+    let Some(place_mutability) = expr_place_mutability(expr, scope) else {
+        push_type_contract_diagnostic(
+            module_path,
+            span,
+            diagnostics,
+            format!("operand of `{op}` must be a local place expression"),
+        );
+        return;
+    };
+
+    if let Some(name) = expr_place_root_local(expr, scope) {
+        if mutable && !scope.is_mutable(name) {
+            push_type_contract_diagnostic(
+                module_path,
+                span,
+                diagnostics,
+                format!("cannot mutably borrow immutable local `{name}`"),
+            );
+            return;
+        }
+    }
+
+    if mutable && matches!(place_mutability, PlaceMutability::Immutable) {
+        let name = expr_place_root_local(expr, scope).unwrap_or("value");
+        push_type_contract_diagnostic(
+            module_path,
+            span,
+            diagnostics,
+            format!("cannot mutably borrow immutable local `{name}`"),
+        );
+    }
+}
+
+fn validate_direct_local_place_access(
+    module_path: &Path,
+    scope: &ValueScope,
+    state: &BorrowFlowState,
+    expr: &HirExpr,
+    span: Span,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let Some(name) = expr_place_root_local(expr, scope) else {
+        return;
+    };
+    if state.has_moved(name) {
+        push_type_contract_diagnostic(
+            module_path,
+            span,
+            diagnostics,
+            format!("use of moved local `{name}`"),
+        );
+        return;
+    }
+    if state.has_mut_borrow(name) {
+        push_type_contract_diagnostic(
+            module_path,
+            span,
+            diagnostics,
+            format!("cannot access local `{name}` directly while it is mutably borrowed"),
+        );
+    }
+}
+
+fn validate_place_expr_borrow_flow(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    type_scope: &TypeScope,
+    module_path: &Path,
+    scope: &ValueScope,
+    expr: &HirExpr,
+    span: Span,
+    state: &mut BorrowFlowState,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    match expr {
+        HirExpr::Path { .. } => {}
+        HirExpr::MemberAccess { expr, .. } => {
+            validate_place_expr_borrow_flow(
+                workspace,
+                resolved_module,
+                type_scope,
+                module_path,
+                scope,
+                expr,
+                span,
+                state,
+                diagnostics,
+            );
+        }
+        HirExpr::Index { expr, index } => {
+            validate_place_expr_borrow_flow(
+                workspace,
+                resolved_module,
+                type_scope,
+                module_path,
+                scope,
+                expr,
+                span,
+                state,
+                diagnostics,
+            );
+            validate_expr_borrow_flow_inner(
+                workspace,
+                resolved_module,
+                type_scope,
+                module_path,
+                scope,
+                index,
+                span,
+                state,
+                false,
+                diagnostics,
+            );
+        }
+        other => {
+            validate_expr_borrow_flow_inner(
+                workspace,
+                resolved_module,
+                type_scope,
+                module_path,
+                scope,
+                other,
+                span,
+                state,
+                false,
+                diagnostics,
+            );
+        }
+    }
+}
+
+fn validate_borrow_op_conflict(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    type_scope: &TypeScope,
+    module_path: &Path,
+    scope: &ValueScope,
+    expr: &HirExpr,
+    span: Span,
+    state: &mut BorrowFlowState,
+    diagnostics: &mut Vec<Diagnostic>,
+    mutable: bool,
+) {
+    validate_place_expr_borrow_flow(
+        workspace,
+        resolved_module,
+        type_scope,
+        module_path,
+        scope,
+        expr,
+        span,
+        state,
+        diagnostics,
+    );
+    let Some(name) = expr_place_root_local(expr, scope) else {
+        return;
+    };
+    if state.has_moved(name) {
+        push_type_contract_diagnostic(
+            module_path,
+            span,
+            diagnostics,
+            format!("use of moved local `{name}`"),
+        );
+        return;
+    }
+    if mutable {
+        if state.has_mut_borrow(name) {
+            push_type_contract_diagnostic(
+                module_path,
+                span,
+                diagnostics,
+                format!("cannot mutably borrow `{name}` while it is already mutably borrowed"),
+            );
+        } else if state.has_shared_borrow(name) {
+            push_type_contract_diagnostic(
+                module_path,
+                span,
+                diagnostics,
+                format!("cannot mutably borrow `{name}` while it is already borrowed"),
+            );
+        }
+        state.note_mut_borrow(name);
+    } else {
+        if state.has_mut_borrow(name) {
+            push_type_contract_diagnostic(
+                module_path,
+                span,
+                diagnostics,
+                format!("cannot borrow `{name}` while it is mutably borrowed"),
+            );
+        }
+        state.note_shared_borrow(name);
+    }
+}
+
+fn validate_call_param_mode_flow(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    module_path: &Path,
+    type_scope: &TypeScope,
+    scope: &ValueScope,
+    subject: &HirExpr,
+    args: &[arcana_hir::HirPhraseArg],
+    qualifier: &str,
+    span: Span,
+    state: &mut BorrowFlowState,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let Some(symbol) = resolve_qualified_phrase_target_symbol(
+        workspace,
+        resolved_module,
+        type_scope,
+        scope,
+        subject,
+        qualifier,
+    ) else {
+        return;
+    };
+
+    for (param, expr) in collect_qualified_phrase_param_exprs(symbol, subject, args, qualifier) {
+        match param.mode {
+            Some(arcana_hir::HirParamMode::Read) | None => {
+                if let Some(name) = expr_place_root_local(expr, scope) {
+                    if state.has_moved(name) {
+                        push_type_contract_diagnostic(
+                            module_path,
+                            span,
+                            diagnostics,
+                            format!("use of moved local `{name}`"),
+                        );
+                    } else if state.has_mut_borrow(name) {
+                        push_type_contract_diagnostic(
+                            module_path,
+                            span,
+                            diagnostics,
+                            format!(
+                                "cannot pass local `{name}` to read parameter `{}` while it is mutably borrowed",
+                                param.name
+                            ),
+                        );
+                    } else {
+                        state.note_shared_borrow(name);
+                    }
+                }
+            }
+            Some(arcana_hir::HirParamMode::Edit) => {
+                if expr_place_mutability(expr, scope).is_none() {
+                    push_type_contract_diagnostic(
+                        module_path,
+                        span,
+                        diagnostics,
+                        format!("argument for edit parameter `{}` must be a local place expression", param.name),
+                    );
+                    continue;
+                }
+                let Some(name) = expr_place_root_local(expr, scope) else {
+                    continue;
+                };
+                if state.has_moved(name) {
+                    push_type_contract_diagnostic(
+                        module_path,
+                        span,
+                        diagnostics,
+                        format!("use of moved local `{name}`"),
+                    );
+                } else if state.has_mut_borrow(name) {
+                    push_type_contract_diagnostic(
+                        module_path,
+                        span,
+                        diagnostics,
+                        format!(
+                            "cannot pass local `{name}` to edit parameter `{}` while it is already mutably borrowed",
+                            param.name
+                        ),
+                    );
+                } else if state.has_shared_borrow(name) {
+                    push_type_contract_diagnostic(
+                        module_path,
+                        span,
+                        diagnostics,
+                        format!(
+                            "cannot pass local `{name}` to edit parameter `{}` while it is already borrowed",
+                            param.name
+                        ),
+                    );
+                } else {
+                    state.note_mut_borrow(name);
+                }
+            }
+            Some(arcana_hir::HirParamMode::Take) => {
+                let Some(name) = expr_place_root_local(expr, scope) else {
+                    continue;
+                };
+                if !scope.ownership_of(name).is_move_only() {
+                    continue;
+                }
+                if state.has_moved(name) {
+                    push_type_contract_diagnostic(
+                        module_path,
+                        span,
+                        diagnostics,
+                        format!("use of moved local `{name}`"),
+                    );
+                } else if state.has_any_borrow(name) {
+                    push_type_contract_diagnostic(
+                        module_path,
+                        span,
+                        diagnostics,
+                        format!("cannot move local `{name}` while it is borrowed"),
+                    );
+                } else {
+                    state.note_moved(name);
+                }
+            }
+        }
+    }
+}
+
+fn note_qualified_phrase_moves(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    type_scope: &TypeScope,
+    scope: &ValueScope,
+    subject: &HirExpr,
+    args: &[arcana_hir::HirPhraseArg],
+    qualifier: &str,
+    state: &mut BorrowFlowState,
+) {
+    let Some(symbol) = resolve_qualified_phrase_target_symbol(
+        workspace,
+        resolved_module,
+        type_scope,
+        scope,
+        subject,
+        qualifier,
+    ) else {
+        return;
+    };
+
+    for (param, expr) in collect_qualified_phrase_param_exprs(symbol, subject, args, qualifier) {
+        if !matches!(param.mode, Some(arcana_hir::HirParamMode::Take)) {
+            continue;
+        }
+        let Some(name) = expr_place_root_local(expr, scope) else {
+            continue;
+        };
+        if scope.ownership_of(name).is_move_only() {
+            state.note_moved(name);
+        }
+    }
+}
+
+fn validate_expr_borrow_flow(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    type_scope: &TypeScope,
+    module_path: &Path,
+    scope: &ValueScope,
+    expr: &HirExpr,
+    span: Span,
+    state: &BorrowFlowState,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let mut temp_state = state.clone();
+    validate_expr_borrow_flow_inner(
+        workspace,
+        resolved_module,
+        type_scope,
+        module_path,
+        scope,
+        expr,
+        span,
+        &mut temp_state,
+        false,
+        diagnostics,
+    );
+}
+
+fn validate_expr_borrow_flow_inner(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    type_scope: &TypeScope,
+    module_path: &Path,
+    scope: &ValueScope,
+    expr: &HirExpr,
+    span: Span,
+    state: &mut BorrowFlowState,
+    within_place: bool,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    match expr {
+        HirExpr::Path { segments } => {
+            if !within_place && segments.len() == 1 && scope.contains(&segments[0]) {
+                validate_direct_local_place_access(module_path, scope, state, expr, span, diagnostics);
+            }
+        }
+        HirExpr::BoolLiteral { .. } | HirExpr::IntLiteral { .. } | HirExpr::StrLiteral { .. } => {}
+        HirExpr::Pair { left, right } => {
+            validate_expr_borrow_flow_inner(
+                workspace,
+                resolved_module,
+                type_scope,
+                module_path,
+                scope,
+                left,
+                span,
+                state,
+                false,
+                diagnostics,
+            );
+            validate_expr_borrow_flow_inner(
+                workspace,
+                resolved_module,
+                type_scope,
+                module_path,
+                scope,
+                right,
+                span,
+                state,
+                false,
+                diagnostics,
+            );
+        }
+        HirExpr::CollectionLiteral { items } => {
+            for item in items {
+                validate_expr_borrow_flow_inner(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    module_path,
+                    scope,
+                    item,
+                    span,
+                    state,
+                    false,
+                    diagnostics,
+                );
+            }
+        }
+        HirExpr::Match { subject, arms } => {
+            validate_expr_borrow_flow_inner(
+                workspace,
+                resolved_module,
+                type_scope,
+                module_path,
+                scope,
+                subject,
+                span,
+                state,
+                false,
+                diagnostics,
+            );
+            for arm in arms {
+                let mut arm_state = state.clone();
+                validate_expr_borrow_flow_inner(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    module_path,
+                    scope,
+                    &arm.value,
+                    arm.span,
+                    &mut arm_state,
+                    false,
+                    diagnostics,
+                );
+            }
+        }
+        HirExpr::Chain { steps, .. } => {
+            for step in steps {
+                validate_expr_borrow_flow_inner(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    module_path,
+                    scope,
+                    &step.stage,
+                    span,
+                    state,
+                    false,
+                    diagnostics,
+                );
+                for arg in &step.bind_args {
+                    validate_expr_borrow_flow_inner(
+                        workspace,
+                        resolved_module,
+                        type_scope,
+                        module_path,
+                        scope,
+                        arg,
+                        span,
+                        state,
+                        false,
+                        diagnostics,
+                    );
+                }
+            }
+        }
+        HirExpr::MemoryPhrase {
+            arena,
+            init_args,
+            attached,
+            ..
+        } => {
+            validate_expr_borrow_flow_inner(
+                workspace,
+                resolved_module,
+                type_scope,
+                module_path,
+                scope,
+                arena,
+                span,
+                state,
+                false,
+                diagnostics,
+            );
+            for arg in init_args {
+                match arg {
+                    arcana_hir::HirPhraseArg::Positional(expr)
+                    | arcana_hir::HirPhraseArg::Named { value: expr, .. } => {
+                        validate_expr_borrow_flow_inner(
+                            workspace,
+                            resolved_module,
+                            type_scope,
+                            module_path,
+                            scope,
+                            expr,
+                            span,
+                            state,
+                            false,
+                            diagnostics,
+                        );
+                    }
+                }
+            }
+            for attachment in attached {
+                match attachment {
+                    HirHeaderAttachment::Named { value, span, .. }
+                    | HirHeaderAttachment::Chain {
+                        expr: value, span, ..
+                    } => validate_expr_borrow_flow_inner(
+                        workspace,
+                        resolved_module,
+                        type_scope,
+                        module_path,
+                        scope,
+                        value,
+                        *span,
+                        state,
+                        false,
+                        diagnostics,
+                    ),
+                }
+            }
+        }
+        HirExpr::GenericApply { expr, .. } | HirExpr::Await { expr } => {
+            validate_expr_borrow_flow_inner(
+                workspace,
+                resolved_module,
+                type_scope,
+                module_path,
+                scope,
+                expr,
+                span,
+                state,
+                false,
+                diagnostics,
+            );
+        }
+        HirExpr::QualifiedPhrase {
+            subject,
+            args,
+            qualifier,
+            attached,
+            ..
+        } => {
+            validate_expr_borrow_flow_inner(
+                workspace,
+                resolved_module,
+                type_scope,
+                module_path,
+                scope,
+                subject,
+                span,
+                state,
+                false,
+                diagnostics,
+            );
+            for arg in args {
+                match arg {
+                    arcana_hir::HirPhraseArg::Positional(expr)
+                    | arcana_hir::HirPhraseArg::Named { value: expr, .. } => {
+                        validate_expr_borrow_flow_inner(
+                            workspace,
+                            resolved_module,
+                            type_scope,
+                            module_path,
+                            scope,
+                            expr,
+                            span,
+                            state,
+                            false,
+                            diagnostics,
+                        );
+                    }
+                }
+            }
+            for attachment in attached {
+                match attachment {
+                    HirHeaderAttachment::Named { value, span, .. }
+                    | HirHeaderAttachment::Chain {
+                        expr: value, span, ..
+                    } => validate_expr_borrow_flow_inner(
+                        workspace,
+                        resolved_module,
+                        type_scope,
+                        module_path,
+                        scope,
+                        value,
+                        *span,
+                        state,
+                        false,
+                        diagnostics,
+                    ),
+                }
+            }
+            validate_call_param_mode_flow(
+                workspace,
+                resolved_module,
+                module_path,
+                type_scope,
+                scope,
+                subject,
+                args,
+                qualifier,
+                span,
+                state,
+                diagnostics,
+            );
+        }
+        HirExpr::Unary { op, expr } => match op {
+            HirUnaryOp::BorrowRead => validate_borrow_op_conflict(
+                workspace,
+                resolved_module,
+                type_scope,
+                module_path,
+                scope,
+                expr,
+                span,
+                state,
+                diagnostics,
+                false,
+            ),
+            HirUnaryOp::BorrowMut => validate_borrow_op_conflict(
+                workspace,
+                resolved_module,
+                type_scope,
+                module_path,
+                scope,
+                expr,
+                span,
+                state,
+                diagnostics,
+                true,
+            ),
+            HirUnaryOp::Deref | HirUnaryOp::Neg | HirUnaryOp::Not | HirUnaryOp::BitNot => {
+                validate_expr_borrow_flow_inner(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    module_path,
+                    scope,
+                    expr,
+                    span,
+                    state,
+                    false,
+                    diagnostics,
+                );
+            }
+            HirUnaryOp::Weave | HirUnaryOp::Split => {
+                validate_expr_borrow_flow_inner(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    module_path,
+                    scope,
+                    expr,
+                    span,
+                    state,
+                    false,
+                    diagnostics,
+                );
+            }
+        },
+        HirExpr::Binary { left, right, .. } => {
+            validate_expr_borrow_flow_inner(
+                workspace,
+                resolved_module,
+                type_scope,
+                module_path,
+                scope,
+                left,
+                span,
+                state,
+                false,
+                diagnostics,
+            );
+            validate_expr_borrow_flow_inner(
+                workspace,
+                resolved_module,
+                type_scope,
+                module_path,
+                scope,
+                right,
+                span,
+                state,
+                false,
+                diagnostics,
+            );
+        }
+        HirExpr::MemberAccess { expr: target, .. } => {
+            if !within_place {
+                validate_direct_local_place_access(module_path, scope, state, expr, span, diagnostics);
+            }
+            validate_expr_borrow_flow_inner(
+                workspace,
+                resolved_module,
+                type_scope,
+                module_path,
+                scope,
+                target,
+                span,
+                state,
+                true,
+                diagnostics,
+            );
+        }
+        HirExpr::Index { expr: target, index } => {
+            if !within_place {
+                validate_direct_local_place_access(module_path, scope, state, expr, span, diagnostics);
+            }
+            validate_expr_borrow_flow_inner(
+                workspace,
+                resolved_module,
+                type_scope,
+                module_path,
+                scope,
+                target,
+                span,
+                state,
+                true,
+                diagnostics,
+            );
+            validate_expr_borrow_flow_inner(
+                workspace,
+                resolved_module,
+                type_scope,
+                module_path,
+                scope,
+                index,
+                span,
+                state,
+                false,
+                diagnostics,
+            );
+        }
+        HirExpr::Slice { expr: target, start, end, .. } => {
+            if !within_place {
+                validate_direct_local_place_access(module_path, scope, state, expr, span, diagnostics);
+            }
+            validate_expr_borrow_flow_inner(
+                workspace,
+                resolved_module,
+                type_scope,
+                module_path,
+                scope,
+                target,
+                span,
+                state,
+                true,
+                diagnostics,
+            );
+            if let Some(start) = start {
+                validate_expr_borrow_flow_inner(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    module_path,
+                    scope,
+                    start,
+                    span,
+                    state,
+                    false,
+                    diagnostics,
+                );
+            }
+            if let Some(end) = end {
+                validate_expr_borrow_flow_inner(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    module_path,
+                    scope,
+                    end,
+                    span,
+                    state,
+                    false,
+                    diagnostics,
+                );
+            }
+        }
+        HirExpr::Range { start, end, .. } => {
+            if let Some(start) = start {
+                validate_expr_borrow_flow_inner(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    module_path,
+                    scope,
+                    start,
+                    span,
+                    state,
+                    false,
+                    diagnostics,
+                );
+            }
+            if let Some(end) = end {
+                validate_expr_borrow_flow_inner(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    module_path,
+                    scope,
+                    end,
+                    span,
+                    state,
+                    false,
+                    diagnostics,
+                );
+            }
+        }
+    }
+}
+
+fn collect_expr_local_borrows(
+    expr: &HirExpr,
+    scope: &ValueScope,
+    borrows: &mut Vec<(String, bool)>,
+) {
+    match expr {
+        HirExpr::Unary { op, expr } => {
+            if matches!(op, HirUnaryOp::BorrowRead | HirUnaryOp::BorrowMut) {
+                if let Some(name) = expr_place_root_local(expr, scope) {
+                    borrows.push((name.to_string(), matches!(op, HirUnaryOp::BorrowMut)));
+                }
+            }
+            collect_expr_local_borrows(expr, scope, borrows);
+        }
+        HirExpr::Pair { left, right } | HirExpr::Binary { left, right, .. } => {
+            collect_expr_local_borrows(left, scope, borrows);
+            collect_expr_local_borrows(right, scope, borrows);
+        }
+        HirExpr::CollectionLiteral { items } => {
+            for item in items {
+                collect_expr_local_borrows(item, scope, borrows);
+            }
+        }
+        HirExpr::Match { subject, arms } => {
+            collect_expr_local_borrows(subject, scope, borrows);
+            for arm in arms {
+                collect_expr_local_borrows(&arm.value, scope, borrows);
+            }
+        }
+        HirExpr::Chain { steps, .. } => {
+            for step in steps {
+                collect_expr_local_borrows(&step.stage, scope, borrows);
+                for arg in &step.bind_args {
+                    collect_expr_local_borrows(arg, scope, borrows);
+                }
+            }
+        }
+        HirExpr::MemoryPhrase {
+            arena,
+            init_args,
+            attached,
+            ..
+        } => {
+            collect_expr_local_borrows(arena, scope, borrows);
+            for arg in init_args {
+                match arg {
+                    arcana_hir::HirPhraseArg::Positional(expr)
+                    | arcana_hir::HirPhraseArg::Named { value: expr, .. } => {
+                        collect_expr_local_borrows(expr, scope, borrows);
+                    }
+                }
+            }
+            for attachment in attached {
+                match attachment {
+                    HirHeaderAttachment::Named { value, .. }
+                    | HirHeaderAttachment::Chain { expr: value, .. } => {
+                        collect_expr_local_borrows(value, scope, borrows);
+                    }
+                }
+            }
+        }
+        HirExpr::GenericApply { expr, .. }
+        | HirExpr::Await { expr }
+        | HirExpr::MemberAccess { expr, .. } => collect_expr_local_borrows(expr, scope, borrows),
+        HirExpr::QualifiedPhrase {
+            subject,
+            args,
+            attached,
+            ..
+        } => {
+            collect_expr_local_borrows(subject, scope, borrows);
+            for arg in args {
+                match arg {
+                    arcana_hir::HirPhraseArg::Positional(expr)
+                    | arcana_hir::HirPhraseArg::Named { value: expr, .. } => {
+                        collect_expr_local_borrows(expr, scope, borrows);
+                    }
+                }
+            }
+            for attachment in attached {
+                match attachment {
+                    HirHeaderAttachment::Named { value, .. }
+                    | HirHeaderAttachment::Chain { expr: value, .. } => {
+                        collect_expr_local_borrows(value, scope, borrows);
+                    }
+                }
+            }
+        }
+        HirExpr::Index { expr, index } => {
+            collect_expr_local_borrows(expr, scope, borrows);
+            collect_expr_local_borrows(index, scope, borrows);
+        }
+        HirExpr::Slice {
+            expr, start, end, ..
+        } => {
+            collect_expr_local_borrows(expr, scope, borrows);
+            if let Some(start) = start {
+                collect_expr_local_borrows(start, scope, borrows);
+            }
+            if let Some(end) = end {
+                collect_expr_local_borrows(end, scope, borrows);
+            }
+        }
+        HirExpr::Range { start, end, .. } => {
+            if let Some(start) = start {
+                collect_expr_local_borrows(start, scope, borrows);
+            }
+            if let Some(end) = end {
+                collect_expr_local_borrows(end, scope, borrows);
+            }
+        }
+        HirExpr::Path { .. } | HirExpr::BoolLiteral { .. } | HirExpr::IntLiteral { .. } | HirExpr::StrLiteral { .. } => {}
+    }
+}
+
+fn note_escaping_expr_borrows(state: &mut BorrowFlowState, expr: &HirExpr, scope: &ValueScope) {
+    let mut borrows = Vec::new();
+    collect_expr_local_borrows(expr, scope, &mut borrows);
+    for (name, mutable) in borrows {
+        if mutable {
+            state.note_mut_borrow(&name);
+        } else {
+            state.note_shared_borrow(&name);
+        }
+    }
+}
+
+fn note_expr_moves(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    type_scope: &TypeScope,
+    scope: &ValueScope,
+    expr: &HirExpr,
+    state: &mut BorrowFlowState,
+) {
+    match expr {
+        HirExpr::QualifiedPhrase {
+            subject,
+            args,
+            qualifier,
+            ..
+        } => {
+            note_qualified_phrase_moves(
+                workspace,
+                resolved_module,
+                type_scope,
+                scope,
+                subject,
+                args,
+                qualifier,
+                state,
+            );
+            note_expr_moves(workspace, resolved_module, type_scope, scope, subject, state);
+            for arg in args {
+                match arg {
+                    arcana_hir::HirPhraseArg::Positional(expr)
+                    | arcana_hir::HirPhraseArg::Named { value: expr, .. } => {
+                        note_expr_moves(workspace, resolved_module, type_scope, scope, expr, state);
+                    }
+                }
+            }
+        }
+        HirExpr::GenericApply { expr, .. } | HirExpr::Await { expr } | HirExpr::MemberAccess { expr, .. } => {
+            note_expr_moves(workspace, resolved_module, type_scope, scope, expr, state);
+        }
+        HirExpr::Unary { expr, .. } => {
+            note_expr_moves(workspace, resolved_module, type_scope, scope, expr, state);
+        }
+        HirExpr::Pair { left, right } | HirExpr::Binary { left, right, .. } => {
+            note_expr_moves(workspace, resolved_module, type_scope, scope, left, state);
+            note_expr_moves(workspace, resolved_module, type_scope, scope, right, state);
+        }
+        HirExpr::CollectionLiteral { items } => {
+            for item in items {
+                note_expr_moves(workspace, resolved_module, type_scope, scope, item, state);
+            }
+        }
+        HirExpr::Match { subject, arms } => {
+            note_expr_moves(workspace, resolved_module, type_scope, scope, subject, state);
+            for arm in arms {
+                note_expr_moves(workspace, resolved_module, type_scope, scope, &arm.value, state);
+            }
+        }
+        HirExpr::Chain { steps, .. } => {
+            for step in steps {
+                note_expr_moves(workspace, resolved_module, type_scope, scope, &step.stage, state);
+                for arg in &step.bind_args {
+                    note_expr_moves(workspace, resolved_module, type_scope, scope, arg, state);
+                }
+            }
+        }
+        HirExpr::MemoryPhrase {
+            arena,
+            init_args,
+            attached,
+            ..
+        } => {
+            note_expr_moves(workspace, resolved_module, type_scope, scope, arena, state);
+            for arg in init_args {
+                match arg {
+                    arcana_hir::HirPhraseArg::Positional(expr)
+                    | arcana_hir::HirPhraseArg::Named { value: expr, .. } => {
+                        note_expr_moves(workspace, resolved_module, type_scope, scope, expr, state);
+                    }
+                }
+            }
+            for attachment in attached {
+                match attachment {
+                    HirHeaderAttachment::Named { value, .. }
+                    | HirHeaderAttachment::Chain { expr: value, .. } => {
+                        note_expr_moves(workspace, resolved_module, type_scope, scope, value, state);
+                    }
+                }
+            }
+        }
+        HirExpr::Index { expr, index } => {
+            note_expr_moves(workspace, resolved_module, type_scope, scope, expr, state);
+            note_expr_moves(workspace, resolved_module, type_scope, scope, index, state);
+        }
+        HirExpr::Slice {
+            expr, start, end, ..
+        } => {
+            note_expr_moves(workspace, resolved_module, type_scope, scope, expr, state);
+            if let Some(start) = start {
+                note_expr_moves(workspace, resolved_module, type_scope, scope, start, state);
+            }
+            if let Some(end) = end {
+                note_expr_moves(workspace, resolved_module, type_scope, scope, end, state);
+            }
+        }
+        HirExpr::Range { start, end, .. } => {
+            if let Some(start) = start {
+                note_expr_moves(workspace, resolved_module, type_scope, scope, start, state);
+            }
+            if let Some(end) = end {
+                note_expr_moves(workspace, resolved_module, type_scope, scope, end, state);
+            }
+        }
+        HirExpr::Path { .. } | HirExpr::BoolLiteral { .. } | HirExpr::IntLiteral { .. } | HirExpr::StrLiteral { .. } => {}
+    }
+}
+
+fn collect_returned_local_borrows(expr: &HirExpr, scope: &ValueScope, roots: &mut BTreeSet<String>) {
+    match expr {
+        HirExpr::Unary { op, expr } => {
+            if matches!(op, HirUnaryOp::BorrowRead | HirUnaryOp::BorrowMut) {
+                if let Some(name) = expr_place_root_local(expr, scope) {
+                    roots.insert(name.to_string());
+                }
+            }
+            collect_returned_local_borrows(expr, scope, roots);
+        }
+        HirExpr::Pair { left, right } | HirExpr::Binary { left, right, .. } => {
+            collect_returned_local_borrows(left, scope, roots);
+            collect_returned_local_borrows(right, scope, roots);
+        }
+        HirExpr::CollectionLiteral { items } => {
+            for item in items {
+                collect_returned_local_borrows(item, scope, roots);
+            }
+        }
+        HirExpr::Match { subject, arms } => {
+            collect_returned_local_borrows(subject, scope, roots);
+            for arm in arms {
+                collect_returned_local_borrows(&arm.value, scope, roots);
+            }
+        }
+        HirExpr::Chain { steps, .. } => {
+            for step in steps {
+                collect_returned_local_borrows(&step.stage, scope, roots);
+                for arg in &step.bind_args {
+                    collect_returned_local_borrows(arg, scope, roots);
+                }
+            }
+        }
+        HirExpr::MemoryPhrase {
+            arena,
+            init_args,
+            attached,
+            ..
+        } => {
+            collect_returned_local_borrows(arena, scope, roots);
+            for arg in init_args {
+                match arg {
+                    arcana_hir::HirPhraseArg::Positional(expr)
+                    | arcana_hir::HirPhraseArg::Named { value: expr, .. } => {
+                        collect_returned_local_borrows(expr, scope, roots);
+                    }
+                }
+            }
+            for attachment in attached {
+                match attachment {
+                    HirHeaderAttachment::Named { value, .. }
+                    | HirHeaderAttachment::Chain { expr: value, .. } => {
+                        collect_returned_local_borrows(value, scope, roots);
+                    }
+                }
+            }
+        }
+        HirExpr::GenericApply { expr, .. }
+        | HirExpr::Await { expr }
+        | HirExpr::MemberAccess { expr, .. } => collect_returned_local_borrows(expr, scope, roots),
+        HirExpr::QualifiedPhrase {
+            subject,
+            args,
+            attached,
+            ..
+        } => {
+            collect_returned_local_borrows(subject, scope, roots);
+            for arg in args {
+                match arg {
+                    arcana_hir::HirPhraseArg::Positional(expr)
+                    | arcana_hir::HirPhraseArg::Named { value: expr, .. } => {
+                        collect_returned_local_borrows(expr, scope, roots);
+                    }
+                }
+            }
+            for attachment in attached {
+                match attachment {
+                    HirHeaderAttachment::Named { value, .. }
+                    | HirHeaderAttachment::Chain { expr: value, .. } => {
+                        collect_returned_local_borrows(value, scope, roots);
+                    }
+                }
+            }
+        }
+        HirExpr::Index { expr, index } => {
+            collect_returned_local_borrows(expr, scope, roots);
+            collect_returned_local_borrows(index, scope, roots);
+        }
+        HirExpr::Slice {
+            expr, start, end, ..
+        } => {
+            collect_returned_local_borrows(expr, scope, roots);
+            if let Some(start) = start {
+                collect_returned_local_borrows(start, scope, roots);
+            }
+            if let Some(end) = end {
+                collect_returned_local_borrows(end, scope, roots);
+            }
+        }
+        HirExpr::Range { start, end, .. } => {
+            if let Some(start) = start {
+                collect_returned_local_borrows(start, scope, roots);
+            }
+            if let Some(end) = end {
+                collect_returned_local_borrows(end, scope, roots);
+            }
+        }
+        HirExpr::Path { .. } | HirExpr::BoolLiteral { .. } | HirExpr::IntLiteral { .. } | HirExpr::StrLiteral { .. } => {}
+    }
+}
+
+fn validate_return_borrow_ties(
+    module_path: &Path,
+    scope: &ValueScope,
+    expr: &HirExpr,
+    span: Span,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let mut roots = BTreeSet::new();
+    collect_returned_local_borrows(expr, scope, &mut roots);
+    for root in roots {
+        if scope.is_param(&root) {
+            continue;
+        }
+        push_type_contract_diagnostic(
+            module_path,
+            span,
+            diagnostics,
+            format!(
+                "returned reference must be tied to input lifetimes; local `{root}` does not live long enough"
+            ),
+        );
     }
 }
 
@@ -199,6 +1964,23 @@ pub fn load_workspace_hir(path: &Path) -> Result<HirWorkspaceSummary, String> {
     load_package_workspace_hir(&root_dir)
 }
 
+pub fn compute_member_fingerprints(
+    graph: &WorkspaceGraph,
+) -> Result<HashMap<String, MemberFingerprints>, String> {
+    let workspace = load_package_workspace_hir_from_graph(&graph.root_dir, graph)?;
+    let resolved_workspace =
+        resolve_workspace(&workspace).map_err(|errors| render_resolution_errors(&workspace, errors))?;
+    let mut fingerprints = HashMap::new();
+
+    for member in &graph.members {
+        let source = compute_member_source_fingerprint(member, &workspace)?;
+        let api = compute_resolved_api_fingerprint(member, &workspace, &resolved_workspace)?;
+        fingerprints.insert(member.name.clone(), MemberFingerprints { source, api });
+    }
+
+    Ok(fingerprints)
+}
+
 pub fn lower_to_hir(summary: &CheckSummary) -> HirModule {
     HirModule {
         symbol_count: summary.symbol_count.max(summary.module_count),
@@ -218,6 +2000,551 @@ fn check_file(path: &Path) -> Result<CheckSummary, String> {
         directive_count: hir.directives.len(),
         symbol_count: hir.symbols.len(),
     })
+}
+
+fn render_resolution_errors(
+    workspace: &HirWorkspaceSummary,
+    errors: Vec<arcana_hir::HirResolutionError>,
+) -> String {
+    errors
+        .into_iter()
+        .map(|error| {
+            let package = workspace.package(&error.package_name);
+            let path = package
+                .and_then(|package| package.module_path(&error.source_module_id))
+                .cloned()
+                .unwrap_or_else(|| {
+                    package
+                        .map(|package| package.root_dir.join("src").join("unknown.arc"))
+                        .unwrap_or_else(|| PathBuf::from("unknown.arc"))
+                });
+            Diagnostic {
+                path,
+                line: error.span.line,
+                column: error.span.column,
+                message: error.message,
+            }
+            .render()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn compute_resolved_api_fingerprint(
+    member: &arcana_package::WorkspaceMember,
+    workspace: &HirWorkspaceSummary,
+    resolved_workspace: &arcana_hir::HirResolvedWorkspace,
+) -> Result<String, String> {
+    let package = workspace
+        .package(&member.name)
+        .ok_or_else(|| format!("package `{}` is not loaded in workspace HIR", member.name))?;
+    let resolved_package = resolved_workspace
+        .package(&member.name)
+        .ok_or_else(|| format!("resolved package `{}` is not loaded", member.name))?;
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"arcana_resolved_api_v1\n");
+    hasher.update(format!("name={}\n", member.name).as_bytes());
+    hasher.update(format!("kind={}\n", member.kind.as_str()).as_bytes());
+    for dep in &member.deps {
+        hasher.update(format!("dep={dep}\n").as_bytes());
+    }
+
+    for row in resolved_package_api_rows(package, resolved_package, workspace)? {
+        hasher.update(row.as_bytes());
+        hasher.update(b"\n");
+    }
+
+    Ok(format!("sha256:{:x}", hasher.finalize()))
+}
+
+fn compute_member_source_fingerprint(
+    member: &arcana_package::WorkspaceMember,
+    workspace: &HirWorkspaceSummary,
+) -> Result<String, String> {
+    let package = workspace
+        .package(&member.name)
+        .ok_or_else(|| format!("package `{}` is not loaded in workspace HIR", member.name))?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"arcana_hir_member_v1\n");
+    hasher.update(format!("name={}\n", member.name).as_bytes());
+    hasher.update(format!("kind={}\n", member.kind.as_str()).as_bytes());
+    for dep in &member.deps {
+        hasher.update(format!("dep={dep}\n").as_bytes());
+    }
+    for row in package.summary.hir_fingerprint_rows() {
+        hasher.update(row.as_bytes());
+        hasher.update(b"\n");
+    }
+    Ok(format!("sha256:{:x}", hasher.finalize()))
+}
+
+fn resolved_package_api_rows(
+    package: &HirWorkspacePackage,
+    resolved_package: &arcana_hir::HirResolvedPackage,
+    workspace: &HirWorkspaceSummary,
+) -> Result<Vec<String>, String> {
+    let mut rows = Vec::new();
+    for module in &package.summary.modules {
+        let resolved_module = resolved_package
+            .module(&module.module_id)
+            .ok_or_else(|| format!("resolved module `{}` is not loaded", module.module_id))?;
+        for row in resolved_module_api_rows(
+            package,
+            module,
+            resolved_module,
+            workspace,
+        ) {
+            rows.push(format!("module={}:{}", module.module_id, row));
+        }
+    }
+    rows.sort();
+    Ok(rows)
+}
+
+fn resolved_module_api_rows(
+    package: &HirWorkspacePackage,
+    module: &HirModuleSummary,
+    resolved_module: &arcana_hir::HirResolvedModule,
+    workspace: &HirWorkspaceSummary,
+) -> Vec<String> {
+    let mut rows = resolved_module
+        .directives
+        .iter()
+        .filter(|directive| directive.kind == arcana_hir::HirDirectiveKind::Reexport)
+        .map(|directive| {
+            format!(
+                "reexport:local={}|target={}",
+                directive.local_name,
+                render_resolved_target_fingerprint(&directive.target)
+            )
+        })
+        .collect::<Vec<_>>();
+
+    for symbol in &module.symbols {
+        if symbol.exported {
+            rows.push(format!(
+                "export:{}:{}",
+                symbol.kind.as_str(),
+                render_symbol_api_fingerprint(workspace, resolved_module, symbol)
+            ));
+        }
+    }
+
+    let module_scope = TypeScope::default();
+    for impl_decl in &module.impls {
+        if impl_decl_is_public(package, resolved_module, workspace, &module_scope, impl_decl) {
+            rows.push(format!(
+                "impl:{}",
+                render_impl_api_fingerprint(workspace, resolved_module, impl_decl)
+            ));
+        }
+    }
+
+    rows.sort();
+    rows
+}
+
+fn render_resolved_target_fingerprint(target: &arcana_hir::HirResolvedTarget) -> String {
+    match target {
+        arcana_hir::HirResolvedTarget::Module { module_id, .. } => {
+            format!("module:{module_id}")
+        }
+        arcana_hir::HirResolvedTarget::Symbol {
+            module_id,
+            symbol_name,
+            ..
+        } => format!("symbol:{module_id}.{symbol_name}"),
+    }
+}
+
+fn render_symbol_api_fingerprint(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &arcana_hir::HirResolvedModule,
+    symbol: &HirSymbol,
+) -> String {
+    let base = match symbol.kind {
+        HirSymbolKind::Fn | HirSymbolKind::System => {
+            render_callable_symbol_api_fingerprint(workspace, resolved_module, symbol, &TypeScope::default())
+        }
+        HirSymbolKind::Record => render_record_api_fingerprint(workspace, resolved_module, symbol),
+        HirSymbolKind::Enum => render_enum_api_fingerprint(workspace, resolved_module, symbol),
+        HirSymbolKind::Trait => render_trait_api_fingerprint(workspace, resolved_module, symbol),
+        HirSymbolKind::Behavior => {
+            render_behavior_api_fingerprint(workspace, resolved_module, symbol)
+        }
+        HirSymbolKind::Const => {
+            canonicalize_surface_text(workspace, resolved_module, &TypeScope::default(), &symbol.surface_text)
+        }
+    };
+    append_symbol_contract_metadata(base, workspace, resolved_module, symbol)
+}
+
+fn render_callable_symbol_api_fingerprint(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &arcana_hir::HirResolvedModule,
+    symbol: &HirSymbol,
+    scope: &TypeScope,
+) -> String {
+    let mut rendered = String::new();
+    if symbol.is_async {
+        rendered.push_str("async");
+    }
+    rendered.push_str("fn:");
+    rendered.push_str(&symbol.name);
+    rendered.push('[');
+    rendered.push_str(
+        &symbol
+            .type_params
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(","),
+    );
+    rendered.push(']');
+    if let Some(where_clause) = &symbol.where_clause {
+        rendered.push_str("|where=");
+        rendered.push_str(&canonicalize_surface_text(
+            workspace,
+            resolved_module,
+            &scope.with_params(&symbol.type_params),
+            where_clause,
+        ));
+    }
+    rendered.push('(');
+    rendered.push_str(
+        &symbol
+            .params
+            .iter()
+            .map(|param| {
+                let mut part = String::new();
+                if let Some(mode) = param.mode {
+                    part.push_str(mode.as_str());
+                    part.push(':');
+                }
+                part.push_str(&param.name);
+                part.push(':');
+                part.push_str(&canonicalize_surface_text(
+                    workspace,
+                    resolved_module,
+                    &scope.with_params(&symbol.type_params),
+                    &param.ty,
+                ));
+                part
+            })
+            .collect::<Vec<_>>()
+            .join(","),
+    );
+    rendered.push(')');
+    if let Some(return_type) = &symbol.return_type {
+        rendered.push_str("->");
+        rendered.push_str(&canonicalize_surface_text(
+            workspace,
+            resolved_module,
+            &scope.with_params(&symbol.type_params),
+            return_type,
+        ));
+    }
+    rendered
+}
+
+fn append_symbol_contract_metadata(
+    mut base: String,
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &arcana_hir::HirResolvedModule,
+    symbol: &HirSymbol,
+) -> String {
+    if !symbol.forewords.is_empty() {
+        base.push_str("|forewords=[");
+        base.push_str(
+            &symbol
+                .forewords
+                .iter()
+                .map(|foreword| render_foreword_api_fingerprint(workspace, resolved_module, foreword))
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+        base.push(']');
+    }
+    if let Some(intrinsic_impl) = &symbol.intrinsic_impl {
+        base.push_str("|intrinsic=");
+        base.push_str(intrinsic_impl);
+    }
+    base
+}
+
+fn render_foreword_api_fingerprint(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &arcana_hir::HirResolvedModule,
+    foreword: &arcana_hir::HirForewordApp,
+) -> String {
+    format!(
+        "{}[{}]",
+        foreword.name,
+        foreword
+            .args
+            .iter()
+            .map(|arg| {
+                let value = canonicalize_foreword_arg_value(
+                    workspace,
+                    resolved_module,
+                    &arg.value,
+                );
+                match &arg.name {
+                    Some(name) => format!("{name}={value}"),
+                    None => value,
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
+fn canonicalize_foreword_arg_value(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &arcana_hir::HirResolvedModule,
+    value: &str,
+) -> String {
+    let trimmed = value.trim();
+    if let Some(unquoted) = trimmed
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+    {
+        return format!("str:{unquoted}");
+    }
+    if let Some(path) = split_simple_path(trimmed) {
+        return format!(
+            "path:{}",
+            canonicalize_surface_path(workspace, resolved_module, &TypeScope::default(), &path)
+        );
+    }
+    trimmed.to_string()
+}
+
+fn render_record_api_fingerprint(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &arcana_hir::HirResolvedModule,
+    symbol: &HirSymbol,
+) -> String {
+    let scope = TypeScope::default().with_params(&symbol.type_params);
+    let fields = match &symbol.body {
+        HirSymbolBody::Record { fields } => fields
+            .iter()
+            .map(|field| {
+                format!(
+                    "{}:{}",
+                    field.name,
+                    canonicalize_surface_text(workspace, resolved_module, &scope, &field.ty)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(","),
+        _ => String::new(),
+    };
+    let mut rendered = format!("record:{}[{}]", symbol.name, symbol.type_params.join(","));
+    if let Some(where_clause) = &symbol.where_clause {
+        rendered.push_str("|where=");
+        rendered.push_str(&canonicalize_surface_text(workspace, resolved_module, &scope, where_clause));
+    }
+    rendered.push_str("|fields=[");
+    rendered.push_str(&fields);
+    rendered.push(']');
+    rendered
+}
+
+fn render_enum_api_fingerprint(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &arcana_hir::HirResolvedModule,
+    symbol: &HirSymbol,
+) -> String {
+    let scope = TypeScope::default().with_params(&symbol.type_params);
+    let variants = match &symbol.body {
+        HirSymbolBody::Enum { variants } => variants
+            .iter()
+            .map(|variant| match &variant.payload {
+                Some(payload) => format!(
+                    "{}({})",
+                    variant.name,
+                    canonicalize_surface_text(workspace, resolved_module, &scope, payload)
+                ),
+                None => variant.name.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join(","),
+        _ => String::new(),
+    };
+    let mut rendered = format!("enum:{}[{}]", symbol.name, symbol.type_params.join(","));
+    if let Some(where_clause) = &symbol.where_clause {
+        rendered.push_str("|where=");
+        rendered.push_str(&canonicalize_surface_text(workspace, resolved_module, &scope, where_clause));
+    }
+    rendered.push_str("|variants=[");
+    rendered.push_str(&variants);
+    rendered.push(']');
+    rendered
+}
+
+fn render_trait_api_fingerprint(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &arcana_hir::HirResolvedModule,
+    symbol: &HirSymbol,
+) -> String {
+    let scope = TypeScope::default().with_params(&symbol.type_params);
+    let mut rendered = format!("trait:{}[{}]", symbol.name, symbol.type_params.join(","));
+    if let Some(where_clause) = &symbol.where_clause {
+        rendered.push_str("|where=");
+        rendered.push_str(&canonicalize_surface_text(workspace, resolved_module, &scope, where_clause));
+    }
+    if let HirSymbolBody::Trait {
+        assoc_types,
+        methods,
+    } = &symbol.body
+    {
+        rendered.push_str("|assoc=[");
+        rendered.push_str(
+            &assoc_types
+                .iter()
+                .map(|assoc_type| match &assoc_type.default_ty {
+                    Some(default_ty) => format!(
+                        "{}={}",
+                        assoc_type.name,
+                        canonicalize_surface_text(workspace, resolved_module, &scope, default_ty)
+                    ),
+                    None => assoc_type.name.clone(),
+                })
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+        rendered.push(']');
+        let method_scope = scope.with_assoc_types(assoc_types.iter().map(|assoc_type| assoc_type.name.clone()));
+        rendered.push_str("|methods=[");
+        rendered.push_str(
+            &methods
+                .iter()
+                .map(|method| render_callable_symbol_api_fingerprint(workspace, resolved_module, method, &method_scope))
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+        rendered.push(']');
+    }
+    rendered
+}
+
+fn render_behavior_api_fingerprint(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &arcana_hir::HirResolvedModule,
+    symbol: &HirSymbol,
+) -> String {
+    let mut rendered = String::from("behavior[");
+    rendered.push_str(
+        &symbol
+            .behavior_attrs
+            .iter()
+            .map(|attr| format!("{}={}", attr.name, attr.value))
+            .collect::<Vec<_>>()
+            .join(","),
+    );
+    rendered.push(']');
+    rendered.push_str(&render_callable_symbol_api_fingerprint(
+        workspace,
+        resolved_module,
+        symbol,
+        &TypeScope::default(),
+    ));
+    rendered
+}
+
+fn render_impl_api_fingerprint(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &arcana_hir::HirResolvedModule,
+    impl_decl: &HirImplDecl,
+) -> String {
+    let scope = TypeScope::default()
+        .with_params(&impl_decl.type_params)
+        .with_assoc_types(impl_decl.assoc_types.iter().map(|assoc_type| assoc_type.name.clone()))
+        .with_self();
+    let mut rendered = format!(
+        "target={}",
+        canonicalize_surface_text(workspace, resolved_module, &scope, &impl_decl.target_type)
+    );
+    if let Some(trait_path) = &impl_decl.trait_path {
+        rendered.push_str("|trait=");
+        rendered.push_str(&canonicalize_surface_text(workspace, resolved_module, &scope, trait_path));
+    }
+    rendered.push_str("|assoc=[");
+    rendered.push_str(
+        &impl_decl
+            .assoc_types
+            .iter()
+            .map(|assoc_type| match &assoc_type.value_ty {
+                Some(value_ty) => format!(
+                    "{}={}",
+                    assoc_type.name,
+                    canonicalize_surface_text(workspace, resolved_module, &scope, value_ty)
+                ),
+                None => assoc_type.name.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join(","),
+    );
+    rendered.push(']');
+    rendered.push_str("|methods=[");
+    rendered.push_str(
+        &impl_decl
+            .methods
+            .iter()
+            .map(|method| render_callable_symbol_api_fingerprint(workspace, resolved_module, method, &scope.with_params(&method.type_params)))
+            .collect::<Vec<_>>()
+            .join(","),
+    );
+    rendered.push(']');
+    rendered
+}
+
+fn impl_decl_is_public(
+    package: &HirWorkspacePackage,
+    resolved_module: &arcana_hir::HirResolvedModule,
+    workspace: &HirWorkspaceSummary,
+    scope: &TypeScope,
+    impl_decl: &HirImplDecl,
+) -> bool {
+    if !surface_text_is_public(
+        package,
+        resolved_module,
+        workspace,
+        scope,
+        &impl_decl.target_type,
+    ) {
+        return false;
+    }
+    impl_decl.trait_path.as_ref().is_none_or(|trait_path| {
+        surface_text_is_public(package, resolved_module, workspace, scope, trait_path)
+    })
+}
+
+fn surface_text_is_public(
+    package: &HirWorkspacePackage,
+    resolved_module: &arcana_hir::HirResolvedModule,
+    workspace: &HirWorkspaceSummary,
+    scope: &TypeScope,
+    text: &str,
+) -> bool {
+    let refs = collect_surface_refs(text);
+    if refs.paths.is_empty() {
+        return true;
+    }
+    for path in refs.paths {
+        if path.len() == 1 && (scope.allows_type_name(&path[0]) || is_builtin_type_name(&path[0])) {
+            continue;
+        }
+        let Some(symbol_ref) = lookup_symbol_path(workspace, resolved_module, &path) else {
+            return false;
+        };
+        if symbol_ref.package_name == package.summary.package_name && !symbol_ref.symbol.exported {
+            return false;
+        }
+    }
+    true
 }
 
 fn validate_packages(workspace: &HirWorkspaceSummary) -> Result<CheckSummary, String> {
@@ -421,6 +2748,18 @@ fn validate_symbol_surface_types(
             SurfaceSymbolUse::TypeLike,
             diagnostics,
         );
+        for lifetime in collect_surface_refs(return_type).lifetimes {
+            if lifetime != "'static" && symbol.params.is_empty() {
+                diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: symbol.span.line,
+                    column: symbol.span.column,
+                    message: format!(
+                        "return lifetime `{lifetime}` must be tied to an input parameter"
+                    ),
+                });
+            }
+        }
     }
     if let Some(where_clause) = &symbol.where_clause {
         validate_type_surface_text(
@@ -853,8 +3192,13 @@ fn validate_symbol_value_semantics(
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     let type_scope = inherited_type_scope.with_params(&symbol.type_params);
-    let mut scope =
-        inherited_scope.with_params(symbol.params.iter().map(|param| param.name.as_str()));
+    let mut scope = inherited_scope.with_symbol_params(&symbol.params);
+    for param in &symbol.params {
+        let ownership = infer_type_ownership(workspace, resolved_module, &type_scope, &param.ty);
+        scope.ownership.insert(param.name.clone(), ownership);
+        scope.type_texts.insert(param.name.clone(), param.ty.clone());
+    }
+    let mut borrow_state = BorrowFlowState::default();
     validate_rollup_handlers(
         workspace,
         resolved_module,
@@ -869,6 +3213,7 @@ fn validate_symbol_value_semantics(
         &symbol.statements,
         &type_scope,
         &mut scope,
+        &mut borrow_state,
         diagnostics,
     );
 
@@ -952,6 +3297,7 @@ fn validate_statement_block_semantics(
     statements: &[HirStatement],
     type_scope: &TypeScope,
     scope: &mut ValueScope,
+    borrow_state: &mut BorrowFlowState,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     for statement in statements {
@@ -963,7 +3309,11 @@ fn validate_statement_block_semantics(
             diagnostics,
         );
         match &statement.kind {
-            HirStatementKind::Let { name, value, .. } => {
+            HirStatementKind::Let {
+                mutable,
+                name,
+                value,
+            } => {
                 validate_expr_semantics(
                     workspace,
                     resolved_module,
@@ -974,7 +3324,32 @@ fn validate_statement_block_semantics(
                     statement.span,
                     diagnostics,
                 );
-                scope.insert(name);
+                validate_expr_borrow_flow(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    module_path,
+                    scope,
+                    value,
+                    statement.span,
+                    borrow_state,
+                    diagnostics,
+                );
+                note_expr_moves(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    scope,
+                    value,
+                    borrow_state,
+                );
+                note_escaping_expr_borrows(borrow_state, value, scope);
+                borrow_state.clear_local(name);
+                let ownership =
+                    infer_expr_ownership(workspace, resolved_module, type_scope, scope, value);
+                let type_text =
+                    infer_expr_type_text(workspace, resolved_module, type_scope, scope, value);
+                scope.insert_typed(name, *mutable, ownership, type_text);
             }
             HirStatementKind::Return { value } => {
                 if let Some(value) = value {
@@ -983,6 +3358,24 @@ fn validate_statement_block_semantics(
                         resolved_module,
                         module_path,
                         type_scope,
+                        scope,
+                        value,
+                        statement.span,
+                        diagnostics,
+                    );
+                    validate_expr_borrow_flow(
+                        workspace,
+                        resolved_module,
+                        type_scope,
+                        module_path,
+                        scope,
+                        value,
+                        statement.span,
+                        borrow_state,
+                        diagnostics,
+                    );
+                    validate_return_borrow_ties(
+                        module_path,
                         scope,
                         value,
                         statement.span,
@@ -1005,7 +3398,35 @@ fn validate_statement_block_semantics(
                     statement.span,
                     diagnostics,
                 );
+                validate_expr_borrow_flow(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    module_path,
+                    scope,
+                    condition,
+                    statement.span,
+                    borrow_state,
+                    diagnostics,
+                );
+                note_expr_moves(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    scope,
+                    condition,
+                    borrow_state,
+                );
+                validate_expected_expr_type(
+                    module_path,
+                    condition,
+                    statement.span,
+                    diagnostics,
+                    ExprTypeClass::Bool,
+                    "if condition",
+                );
                 let mut then_scope = scope.clone();
+                let mut then_borrows = borrow_state.clone();
                 validate_statement_block_semantics(
                     workspace,
                     resolved_module,
@@ -1013,10 +3434,13 @@ fn validate_statement_block_semantics(
                     then_branch,
                     type_scope,
                     &mut then_scope,
+                    &mut then_borrows,
                     diagnostics,
                 );
+                borrow_state.merge_moves_from(&then_borrows);
                 if let Some(else_branch) = else_branch {
                     let mut else_scope = scope.clone();
+                    let mut else_borrows = borrow_state.clone();
                     validate_statement_block_semantics(
                         workspace,
                         resolved_module,
@@ -1024,8 +3448,10 @@ fn validate_statement_block_semantics(
                         else_branch,
                         type_scope,
                         &mut else_scope,
+                        &mut else_borrows,
                         diagnostics,
                     );
+                    borrow_state.merge_moves_from(&else_borrows);
                 }
             }
             HirStatementKind::While { condition, body } => {
@@ -1039,7 +3465,35 @@ fn validate_statement_block_semantics(
                     statement.span,
                     diagnostics,
                 );
+                validate_expr_borrow_flow(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    module_path,
+                    scope,
+                    condition,
+                    statement.span,
+                    borrow_state,
+                    diagnostics,
+                );
+                note_expr_moves(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    scope,
+                    condition,
+                    borrow_state,
+                );
+                validate_expected_expr_type(
+                    module_path,
+                    condition,
+                    statement.span,
+                    diagnostics,
+                    ExprTypeClass::Bool,
+                    "while condition",
+                );
                 let mut body_scope = scope.clone();
+                let mut body_borrows = borrow_state.clone();
                 validate_statement_block_semantics(
                     workspace,
                     resolved_module,
@@ -1047,8 +3501,10 @@ fn validate_statement_block_semantics(
                     body,
                     type_scope,
                     &mut body_scope,
+                    &mut body_borrows,
                     diagnostics,
                 );
+                borrow_state.merge_moves_from(&body_borrows);
             }
             HirStatementKind::For {
                 binding,
@@ -1065,7 +3521,27 @@ fn validate_statement_block_semantics(
                     statement.span,
                     diagnostics,
                 );
-                let mut body_scope = scope.with_local(binding);
+                validate_expr_borrow_flow(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    module_path,
+                    scope,
+                    iterable,
+                    statement.span,
+                    borrow_state,
+                    diagnostics,
+                );
+                note_expr_moves(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    scope,
+                    iterable,
+                    borrow_state,
+                );
+                let mut body_scope = scope.with_local(binding, false);
+                let mut body_borrows = borrow_state.clone();
                 validate_statement_block_semantics(
                     workspace,
                     resolved_module,
@@ -1073,8 +3549,10 @@ fn validate_statement_block_semantics(
                     body,
                     type_scope,
                     &mut body_scope,
+                    &mut body_borrows,
                     diagnostics,
                 );
+                borrow_state.merge_moves_from(&body_borrows);
             }
             HirStatementKind::Defer { expr } | HirStatementKind::Expr { expr } => {
                 validate_expr_semantics(
@@ -1086,6 +3564,25 @@ fn validate_statement_block_semantics(
                     expr,
                     statement.span,
                     diagnostics,
+                );
+                validate_expr_borrow_flow(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    module_path,
+                    scope,
+                    expr,
+                    statement.span,
+                    borrow_state,
+                    diagnostics,
+                );
+                note_expr_moves(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    scope,
+                    expr,
+                    borrow_state,
                 );
             }
             HirStatementKind::Assign { target, value, .. } => {
@@ -1099,6 +3596,17 @@ fn validate_statement_block_semantics(
                     statement.span,
                     diagnostics,
                 );
+                validate_assign_target_borrow_flow(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    module_path,
+                    scope,
+                    target,
+                    statement.span,
+                    borrow_state,
+                    diagnostics,
+                );
                 validate_expr_semantics(
                     workspace,
                     resolved_module,
@@ -1109,6 +3617,53 @@ fn validate_statement_block_semantics(
                     statement.span,
                     diagnostics,
                 );
+                validate_expr_borrow_flow(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    module_path,
+                    scope,
+                    value,
+                    statement.span,
+                    borrow_state,
+                    diagnostics,
+                );
+                note_expr_moves(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    scope,
+                    value,
+                    borrow_state,
+                );
+                if let HirAssignTarget::Name { text } = target {
+                    if scope.contains(text) {
+                        borrow_state.clear_local(text);
+                        let ownership = infer_expr_ownership(
+                            workspace,
+                            resolved_module,
+                            type_scope,
+                            scope,
+                            value,
+                        );
+                        let type_text = infer_expr_type_text(
+                            workspace,
+                            resolved_module,
+                            type_scope,
+                            scope,
+                            value,
+                        );
+                        scope.ownership.insert(text.clone(), ownership);
+                        if let Some(type_text) = type_text {
+                            scope.type_texts.insert(text.clone(), type_text);
+                        } else {
+                            scope.type_texts.remove(text);
+                        }
+                    }
+                }
+                if matches!(target, HirAssignTarget::Name { text } if scope.contains(text)) {
+                    note_escaping_expr_borrows(borrow_state, value, scope);
+                }
             }
             HirStatementKind::Break | HirStatementKind::Continue => {}
         }
@@ -1126,16 +3681,6 @@ fn validate_assign_target_semantics(
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     match target {
-        HirAssignTarget::Opaque { text } => validate_opaque_value_text(
-            workspace,
-            resolved_module,
-            module_path,
-            scope,
-            text,
-            span,
-            "assignment target",
-            diagnostics,
-        ),
         HirAssignTarget::Name { text } => validate_value_path_segments(
             workspace,
             resolved_module,
@@ -1202,6 +3747,77 @@ fn validate_assign_target_semantics(
     }
 }
 
+fn validate_assign_target_borrow_flow(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    type_scope: &TypeScope,
+    module_path: &Path,
+    scope: &ValueScope,
+    target: &HirAssignTarget,
+    span: Span,
+    state: &BorrowFlowState,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if let Some(name) = assign_target_root_local(target, scope) {
+        if !matches!(target, HirAssignTarget::Name { .. }) && state.has_moved(name) {
+            push_type_contract_diagnostic(
+                module_path,
+                span,
+                diagnostics,
+                format!("use of moved local `{name}`"),
+            );
+        } else if state.has_any_borrow(name) {
+            push_type_contract_diagnostic(
+                module_path,
+                span,
+                diagnostics,
+                format!("cannot assign to local `{name}` while it is borrowed"),
+            );
+        }
+    }
+
+    match target {
+        HirAssignTarget::Name { .. } => {}
+        HirAssignTarget::MemberAccess { target, .. } => {
+            validate_assign_target_borrow_flow(
+                workspace,
+                resolved_module,
+                type_scope,
+                module_path,
+                scope,
+                target,
+                span,
+                state,
+                diagnostics,
+            );
+        }
+        HirAssignTarget::Index { target, index } => {
+            validate_assign_target_borrow_flow(
+                workspace,
+                resolved_module,
+                type_scope,
+                module_path,
+                scope,
+                target,
+                span,
+                state,
+                diagnostics,
+            );
+            validate_expr_borrow_flow(
+                workspace,
+                resolved_module,
+                type_scope,
+                module_path,
+                scope,
+                index,
+                span,
+                state,
+                diagnostics,
+            );
+        }
+    }
+}
+
 fn validate_expr_semantics(
     workspace: &HirWorkspaceSummary,
     resolved_module: &HirResolvedModule,
@@ -1213,16 +3829,6 @@ fn validate_expr_semantics(
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     match expr {
-        HirExpr::Opaque { text, .. } => validate_opaque_value_text(
-            workspace,
-            resolved_module,
-            module_path,
-            scope,
-            text,
-            span,
-            "value expression",
-            diagnostics,
-        ),
         HirExpr::Path { segments } => validate_value_path_segments(
             workspace,
             resolved_module,
@@ -1430,7 +4036,7 @@ fn validate_expr_semantics(
                 );
             }
         }
-        HirExpr::Await { expr } | HirExpr::Unary { expr, .. } => validate_expr_semantics(
+        HirExpr::Await { expr } => validate_expr_semantics(
             workspace,
             resolved_module,
             module_path,
@@ -1440,7 +4046,58 @@ fn validate_expr_semantics(
             span,
             diagnostics,
         ),
-        HirExpr::Binary { left, right, .. } => {
+        HirExpr::Unary { op, expr } => {
+            validate_expr_semantics(
+                workspace,
+                resolved_module,
+                module_path,
+                type_scope,
+                scope,
+                expr,
+                span,
+                diagnostics,
+            );
+            match op {
+                HirUnaryOp::Not => validate_expected_expr_type(
+                    module_path,
+                    expr,
+                    span,
+                    diagnostics,
+                    ExprTypeClass::Bool,
+                    &format!("operand of `{}`", unary_op_token(*op)),
+                ),
+                HirUnaryOp::Neg | HirUnaryOp::BitNot => validate_expected_expr_type(
+                    module_path,
+                    expr,
+                    span,
+                    diagnostics,
+                    ExprTypeClass::Int,
+                    &format!("operand of `{}`", unary_op_token(*op)),
+                ),
+                HirUnaryOp::BorrowRead => {
+                    validate_borrow_operand_place(
+                        module_path,
+                        scope,
+                        expr,
+                        span,
+                        diagnostics,
+                        false,
+                    );
+                }
+                HirUnaryOp::BorrowMut => {
+                    validate_borrow_operand_place(
+                        module_path,
+                        scope,
+                        expr,
+                        span,
+                        diagnostics,
+                        true,
+                    );
+                }
+                HirUnaryOp::Deref | HirUnaryOp::Weave | HirUnaryOp::Split => {}
+            }
+        }
+        HirExpr::Binary { left, op, right } => {
             validate_expr_semantics(
                 workspace,
                 resolved_module,
@@ -1461,6 +4118,59 @@ fn validate_expr_semantics(
                 span,
                 diagnostics,
             );
+            match op {
+                HirBinaryOp::And | HirBinaryOp::Or => {
+                    validate_expected_expr_type(
+                        module_path,
+                        left,
+                        span,
+                        diagnostics,
+                        ExprTypeClass::Bool,
+                        &format!("left operand of `{}`", binary_op_token(*op)),
+                    );
+                    validate_expected_expr_type(
+                        module_path,
+                        right,
+                        span,
+                        diagnostics,
+                        ExprTypeClass::Bool,
+                        &format!("right operand of `{}`", binary_op_token(*op)),
+                    );
+                }
+                HirBinaryOp::Sub
+                | HirBinaryOp::Mul
+                | HirBinaryOp::Div
+                | HirBinaryOp::Mod
+                | HirBinaryOp::BitOr
+                | HirBinaryOp::BitXor
+                | HirBinaryOp::BitAnd
+                | HirBinaryOp::Shl
+                | HirBinaryOp::Shr => {
+                    validate_expected_expr_type(
+                        module_path,
+                        left,
+                        span,
+                        diagnostics,
+                        ExprTypeClass::Int,
+                        &format!("left operand of `{}`", binary_op_token(*op)),
+                    );
+                    validate_expected_expr_type(
+                        module_path,
+                        right,
+                        span,
+                        diagnostics,
+                        ExprTypeClass::Int,
+                        &format!("right operand of `{}`", binary_op_token(*op)),
+                    );
+                }
+                HirBinaryOp::Add
+                | HirBinaryOp::EqEq
+                | HirBinaryOp::NotEq
+                | HirBinaryOp::Lt
+                | HirBinaryOp::LtEq
+                | HirBinaryOp::Gt
+                | HirBinaryOp::GtEq => {}
+            }
         }
         member_expr @ HirExpr::MemberAccess { expr, .. } => {
             if let Some(path) = flatten_member_expr_path(member_expr) {
@@ -1489,6 +4199,23 @@ fn validate_expr_semantics(
                 span,
                 diagnostics,
             );
+            if let HirExpr::MemberAccess { member, .. } = member_expr {
+                if is_tuple_projection_member(member) {
+                    if let Some(actual) = infer_expr_type(expr) {
+                        if actual != ExprTypeClass::Pair {
+                            push_type_contract_diagnostic(
+                                module_path,
+                                span,
+                                diagnostics,
+                                format!(
+                                    "tuple field access `.{member}` requires a pair value, found {}",
+                                    actual.label()
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
         }
         HirExpr::Index { expr, index } => {
             validate_expr_semantics(
@@ -1536,6 +4263,14 @@ fn validate_expr_semantics(
                     span,
                     diagnostics,
                 );
+                validate_expected_expr_type(
+                    module_path,
+                    start,
+                    span,
+                    diagnostics,
+                    ExprTypeClass::Int,
+                    "slice start",
+                );
             }
             if let Some(end) = end {
                 validate_expr_semantics(
@@ -1547,6 +4282,14 @@ fn validate_expr_semantics(
                     end,
                     span,
                     diagnostics,
+                );
+                validate_expected_expr_type(
+                    module_path,
+                    end,
+                    span,
+                    diagnostics,
+                    ExprTypeClass::Int,
+                    "slice end",
                 );
             }
         }
@@ -1753,16 +4496,14 @@ fn validate_header_attachment_semantics(
 
 fn validate_match_pattern_semantics(pattern: &HirMatchPattern, scope: &mut ValueScope) {
     match pattern {
-        HirMatchPattern::Wildcard
-        | HirMatchPattern::Literal { .. }
-        | HirMatchPattern::Opaque { .. } => {}
+        HirMatchPattern::Wildcard | HirMatchPattern::Literal { .. } => {}
         HirMatchPattern::Name { text } => {
             let is_binding = match split_simple_path(text) {
                 Some(path) => path.len() == 1,
                 None => true,
             };
             if is_binding {
-                scope.insert(text.trim());
+                scope.insert(text.trim(), false);
             }
         }
         HirMatchPattern::Variant { args, .. } => {
@@ -1771,34 +4512,6 @@ fn validate_match_pattern_semantics(pattern: &HirMatchPattern, scope: &mut Value
             }
         }
     }
-}
-
-fn validate_opaque_value_text(
-    workspace: &HirWorkspaceSummary,
-    resolved_module: &HirResolvedModule,
-    module_path: &Path,
-    scope: &ValueScope,
-    text: &str,
-    span: Span,
-    context: &str,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    if matches!(text.trim(), "true" | "false") {
-        return;
-    }
-    let Some(path) = split_simple_path(text) else {
-        return;
-    };
-    validate_value_path_segments(
-        workspace,
-        resolved_module,
-        module_path,
-        scope,
-        &path,
-        span,
-        context,
-        diagnostics,
-    );
 }
 
 fn validate_value_path_segments(
@@ -2325,6 +5038,106 @@ fn split_simple_path(text: &str) -> Option<Vec<String>> {
     }
 }
 
+fn canonicalize_surface_text(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &arcana_hir::HirResolvedModule,
+    scope: &TypeScope,
+    text: &str,
+) -> String {
+    let chars = text.chars().collect::<Vec<_>>();
+    let mut out = String::new();
+    let mut index = 0usize;
+
+    while index < chars.len() {
+        let ch = chars[index];
+        if ch.is_whitespace() {
+            index += 1;
+            continue;
+        }
+        if ch == '\'' {
+            let start = index;
+            index += 1;
+            while index < chars.len() && is_ident_continue(chars[index]) {
+                index += 1;
+            }
+            out.push_str(&chars[start..index].iter().collect::<String>());
+            continue;
+        }
+        if is_ident_start(ch) && !is_projection_tail(&chars, index) {
+            let start = index;
+            let mut end = index;
+            let mut segments = Vec::new();
+            let mut keyword = None::<String>;
+            loop {
+                let segment_start = end;
+                end += 1;
+                while end < chars.len() && is_ident_continue(chars[end]) {
+                    end += 1;
+                }
+                let segment = chars[segment_start..end].iter().collect::<String>();
+                if is_surface_keyword(&segment) {
+                    keyword = Some(segment);
+                    segments.clear();
+                    break;
+                }
+                segments.push(segment);
+
+                let Some(dot_idx) = next_non_ws_index(&chars, end) else {
+                    break;
+                };
+                if chars[dot_idx] != '.' {
+                    break;
+                }
+                let Some(next_idx) = next_non_ws_index(&chars, dot_idx + 1) else {
+                    break;
+                };
+                if !is_ident_start(chars[next_idx]) {
+                    break;
+                }
+                end = next_idx;
+            }
+
+            if let Some(keyword) = keyword {
+                out.push_str(&keyword);
+                index = end;
+                continue;
+            }
+            if !segments.is_empty() {
+                out.push_str(&canonicalize_surface_path(
+                    workspace,
+                    resolved_module,
+                    scope,
+                    &segments,
+                ));
+                index = end;
+                continue;
+            }
+            out.push_str(&chars[start..end].iter().collect::<String>());
+            index = end;
+            continue;
+        }
+        out.push(ch);
+        index += 1;
+    }
+
+    out
+}
+
+fn canonicalize_surface_path(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &arcana_hir::HirResolvedModule,
+    scope: &TypeScope,
+    path: &[String],
+) -> String {
+    if path.len() == 1 && (scope.allows_type_name(&path[0]) || is_builtin_type_name(&path[0])) {
+        return path[0].clone();
+    }
+    if let Some(symbol_ref) = lookup_symbol_path(workspace, resolved_module, path) {
+        return format!("{}.{}", symbol_ref.module_id, symbol_ref.symbol.name);
+    }
+    path.join(".")
+}
+
 fn collect_surface_refs(text: &str) -> SurfaceRefs {
     let chars = text.chars().collect::<Vec<_>>();
     let mut refs = SurfaceRefs::default();
@@ -2442,7 +5255,13 @@ fn is_surface_keyword(token: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_path, check_sources, load_workspace_hir, lower_to_hir};
+    use super::{
+        check_path, check_sources, compute_member_fingerprints, load_workspace_hir, lower_to_hir,
+    };
+    use arcana_package::{
+        BuildDisposition, execute_build, load_workspace_graph, plan_build, plan_workspace,
+        read_lockfile, write_lockfile,
+    };
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -2664,6 +5483,153 @@ mod tests {
     }
 
     #[test]
+    fn typed_api_fingerprint_ignores_equivalent_export_type_spelling() {
+        let root = make_temp_workspace(
+            "typed_api_surface_spelling",
+            &["app", "core"],
+            &[
+                (
+                    "app/book.toml",
+                    "name = \"app\"\nkind = \"app\"\n\n[deps]\ncore = { path = \"../core\" }\n",
+                ),
+                (
+                    "app/src/shelf.arc",
+                    "import core\nfn main() -> Int:\n    let value = core.make_counter :: :: call\n    return value.value\n",
+                ),
+                ("app/src/types.arc", ""),
+                ("core/book.toml", "name = \"core\"\nkind = \"lib\"\n"),
+                (
+                    "core/src/book.arc",
+                    "import types\nuse types.Counter\nexport fn make_counter() -> Counter:\n    return pool: entities :> value = 0 <: Counter\n",
+                ),
+                ("core/src/types.arc", "export record Counter:\n    value: Int\n"),
+            ],
+        );
+
+        let graph = load_workspace_graph(&root).expect("load graph");
+        let order = plan_workspace(&graph).expect("plan");
+        let first_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
+        let first_statuses = plan_build(&graph, &order, &first_fingerprints, None).expect("plan");
+        execute_build(&graph, &first_statuses).expect("execute");
+        let lock_path = write_lockfile(&graph, &order, &first_statuses).expect("lock");
+        let existing = read_lockfile(&lock_path).expect("read").expect("lock");
+
+        fs::write(
+            root.join("core/src/book.arc"),
+            "import types\nexport fn make_counter() -> types.Counter:\n    return pool: entities :> value = 0 <: types.Counter\n",
+        )
+        .expect("rewrite should succeed");
+
+        let second_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
+        let second_statuses =
+            plan_build(&graph, &order, &second_fingerprints, Some(&existing)).expect("plan");
+        assert_eq!(second_statuses[0].member, "core");
+        assert_eq!(second_statuses[0].disposition, BuildDisposition::Built);
+        assert_eq!(second_statuses[1].member, "app");
+        assert_eq!(second_statuses[1].disposition, BuildDisposition::CacheHit);
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn typed_api_fingerprint_rebuilds_dependents_for_boundary_contract_changes() {
+        let root = make_temp_workspace(
+            "typed_api_boundary_contract",
+            &["app", "core"],
+            &[
+                (
+                    "app/book.toml",
+                    "name = \"app\"\nkind = \"app\"\n\n[deps]\ncore = { path = \"../core\" }\n",
+                ),
+                (
+                    "app/src/shelf.arc",
+                    "import core\nfn main() -> Int:\n    return core.boundary_value :: 1 :: call\n",
+                ),
+                ("app/src/types.arc", ""),
+                ("core/book.toml", "name = \"core\"\nkind = \"lib\"\n"),
+                (
+                    "core/src/book.arc",
+                    "#boundary[target = \"lua\"]\nexport fn boundary_value(value: Int) -> Int:\n    return value\n",
+                ),
+                ("core/src/types.arc", ""),
+            ],
+        );
+
+        let graph = load_workspace_graph(&root).expect("load graph");
+        let order = plan_workspace(&graph).expect("plan");
+        let first_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
+        let first_statuses = plan_build(&graph, &order, &first_fingerprints, None).expect("plan");
+        execute_build(&graph, &first_statuses).expect("execute");
+        let lock_path = write_lockfile(&graph, &order, &first_statuses).expect("lock");
+        let existing = read_lockfile(&lock_path).expect("read").expect("lock");
+
+        fs::write(
+            root.join("core/src/book.arc"),
+            "#boundary[target = \"sql\"]\nexport fn boundary_value(value: Int) -> Int:\n    return value\n",
+        )
+        .expect("rewrite should succeed");
+
+        let second_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
+        let second_statuses =
+            plan_build(&graph, &order, &second_fingerprints, Some(&existing)).expect("plan");
+        assert_eq!(second_statuses[0].member, "core");
+        assert_eq!(second_statuses[0].disposition, BuildDisposition::Built);
+        assert_eq!(second_statuses[1].member, "app");
+        assert_eq!(second_statuses[1].disposition, BuildDisposition::Built);
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn typed_api_fingerprint_rebuilds_dependents_for_public_impl_method_changes() {
+        let root = make_temp_workspace(
+            "typed_api_impl_methods",
+            &["app", "core"],
+            &[
+                (
+                    "app/book.toml",
+                    "name = \"app\"\nkind = \"app\"\n\n[deps]\ncore = { path = \"../core\" }\n",
+                ),
+                (
+                    "app/src/shelf.arc",
+                    "import core\nfn main() -> Int:\n    let counter = core.make_counter :: :: call\n    return counter :: 1 :: add\n",
+                ),
+                ("app/src/types.arc", ""),
+                ("core/book.toml", "name = \"core\"\nkind = \"lib\"\n"),
+                (
+                    "core/src/book.arc",
+                    "import types\nuse types.Counter\nexport fn make_counter() -> Counter:\n    return pool: entities :> value = 0 <: Counter\n\nimpl Counter:\n    fn add(self: Counter, value: Int) -> Int:\n        return self.value + value\n",
+                ),
+                ("core/src/types.arc", "export record Counter:\n    value: Int\n"),
+            ],
+        );
+
+        let graph = load_workspace_graph(&root).expect("load graph");
+        let order = plan_workspace(&graph).expect("plan");
+        let first_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
+        let first_statuses = plan_build(&graph, &order, &first_fingerprints, None).expect("plan");
+        execute_build(&graph, &first_statuses).expect("execute");
+        let lock_path = write_lockfile(&graph, &order, &first_statuses).expect("lock");
+        let existing = read_lockfile(&lock_path).expect("read").expect("lock");
+
+        fs::write(
+            root.join("core/src/book.arc"),
+            "import types\nuse types.Counter\nexport fn make_counter() -> Counter:\n    return pool: entities :> value = 0 <: Counter\n\nimpl Counter:\n    fn add(self: Counter, value: Int, scale: Int) -> Int:\n        return self.value + value + scale\n",
+        )
+        .expect("rewrite should succeed");
+
+        let second_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
+        let second_statuses =
+            plan_build(&graph, &order, &second_fingerprints, Some(&existing)).expect("plan");
+        assert_eq!(second_statuses[0].member, "core");
+        assert_eq!(second_statuses[0].disposition, BuildDisposition::Built);
+        assert_eq!(second_statuses[1].member, "app");
+        assert_eq!(second_statuses[1].disposition, BuildDisposition::Built);
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
     fn check_path_handles_real_first_party_grimoire() {
         let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
@@ -2830,6 +5796,404 @@ mod tests {
     }
 
     #[test]
+    fn check_path_rejects_non_bool_if_condition() {
+        let root = make_temp_package(
+            "typed_if_condition",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    "fn main() -> Int:\n    if 1:\n        return 0\n    return 0\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("non-bool if condition should fail");
+        assert!(err.contains("if condition requires Bool, found Int"), "{err}");
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_non_bool_not_operand() {
+        let root = make_temp_package(
+            "typed_not_operand",
+            "app",
+            &[],
+            &[
+                ("src/shelf.arc", "fn main() -> Bool:\n    return not 1\n"),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("non-bool `not` operand should fail");
+        assert!(err.contains("operand of `not` requires Bool, found Int"), "{err}");
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_non_int_shift_operand() {
+        let root = make_temp_package(
+            "typed_shift_operand",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    "fn main() -> Int:\n    return 1 << \"x\"\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("non-int shift operand should fail");
+        assert!(err.contains("right operand of `<<` requires Int, found Str"), "{err}");
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_tuple_projection_on_non_pair() {
+        let root = make_temp_package(
+            "typed_tuple_projection",
+            "app",
+            &[],
+            &[
+                ("src/shelf.arc", "fn main() -> Int:\n    return (\"x\").0\n"),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("tuple projection on non-pair should fail");
+        assert!(
+            err.contains("tuple field access `.0` requires a pair value, found Str"),
+            "{err}"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_borrow_of_non_place_expression() {
+        let root = make_temp_package(
+            "typed_non_place_borrow",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    "fn main() -> Int:\n    let x = &(1 + 2)\n    return 0\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("borrow of non-place should fail");
+        assert!(
+            err.contains("operand of `&` must be a local place expression"),
+            "{err}"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_mutable_borrow_of_immutable_local() {
+        let root = make_temp_package(
+            "typed_immutable_mut_borrow",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    "fn main() -> Int:\n    let x = 1\n    let y = &mut x\n    return 0\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("mutable borrow of immutable local should fail");
+        assert!(err.contains("cannot mutably borrow immutable local `x`"), "{err}");
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_mutable_borrow_while_shared_borrow_active() {
+        let root = make_temp_package(
+            "typed_borrow_conflict",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    "fn main() -> Int:\n    let mut x = 1\n    let a = &x\n    let b = &mut x\n    return 0\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("conflicting borrows should fail");
+        assert!(
+            err.contains("cannot mutably borrow `x` while it is already borrowed"),
+            "{err}"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_assignment_while_local_borrowed() {
+        let root = make_temp_package(
+            "typed_assign_while_borrowed",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    "fn main() -> Int:\n    let mut x = 1\n    let a = &x\n    x = 2\n    return 0\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("assignment while borrowed should fail");
+        assert!(err.contains("cannot assign to local `x` while it is borrowed"), "{err}");
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_direct_access_while_mutably_borrowed() {
+        let root = make_temp_package(
+            "typed_mut_borrow_direct_access",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    "fn main() -> Int:\n    let mut x = 1\n    let a = &mut x\n    let y = x + 1\n    return y\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("direct access while mutably borrowed should fail");
+        assert!(
+            err.contains("cannot access local `x` directly while it is mutably borrowed"),
+            "{err}"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_allows_assignment_to_edit_param() {
+        let root = make_temp_package(
+            "typed_edit_param_assign",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    "fn bump(edit n: Int):\n    n = n + 1\nfn main() -> Int:\n    return 0\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let summary = check_path(&root).expect("assignment to edit param should check");
+        assert_eq!(summary.package_count, 1);
+        assert_eq!(summary.module_count, 2);
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_untied_return_lifetime() {
+        let root = make_temp_package(
+            "typed_untied_return_lifetime",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    "fn bad['a]() -> &'a Int:\n    return 1\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("untied return lifetime should fail");
+        assert!(
+            err.contains("return lifetime `'a` must be tied to an input parameter"),
+            "{err}"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_return_borrow_of_local() {
+        let root = make_temp_package(
+            "typed_return_local_borrow",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    "fn bad['a](read value: &'a Int) -> &'a Int:\n    let x = 1\n    return &x\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("return borrow of local should fail");
+        assert!(
+            err.contains(
+                "returned reference must be tied to input lifetimes; local `x` does not live long enough"
+            ),
+            "{err}"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_use_after_take_move() {
+        let root = make_temp_package(
+            "typed_take_use_after_move",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    "fn consume(take value: Str):\n    return\nfn main() -> Int:\n    let s = \"hi\"\n    consume :: s :: call\n    s :: :: std.io.print\n    return 0\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("use after take-move should fail");
+        assert!(err.contains("use of moved local `s`"), "{err}");
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_take_move_while_borrowed() {
+        let root = make_temp_package(
+            "typed_take_while_borrowed",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    "fn consume(take value: Str):\n    return\nfn main() -> Int:\n    let s = \"hi\"\n    let r = &s\n    consume :: s :: call\n    return 0\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("moving borrowed local should fail");
+        assert!(err.contains("cannot move local `s` while it is borrowed"), "{err}");
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_allows_copy_value_after_take_param_call() {
+        let root = make_temp_package(
+            "typed_take_copy_ok",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    "fn consume(take value: Int):\n    return\nfn main() -> Int:\n    let x = 1\n    consume :: x :: call\n    return x\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let summary = check_path(&root).expect("copy value after take call should check");
+        assert_eq!(summary.package_count, 1);
+        assert_eq!(summary.module_count, 2);
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_non_place_edit_param_call() {
+        let root = make_temp_package(
+            "typed_edit_non_place",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    "fn bump(edit n: Int):\n    n = n + 1\nfn main() -> Int:\n    bump :: (1 + 2) :: call\n    return 0\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("edit call on non-place should fail");
+        assert!(
+            err.contains("argument for edit parameter `n` must be a local place expression"),
+            "{err}"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_method_style_take_use_after_move() {
+        let root = make_temp_package(
+            "typed_method_take_move",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    "record Bag:\n    n: Int\nimpl Bag:\n    fn push(edit self: Bag, take value: Str):\n        self.n = self.n + 1\nfn main() -> Int:\n    let bag = Bag :: n = 0 :: call\n    let s = \"hi\"\n    bag :: s :: push\n    let t = s\n    return 0\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("method-style take move should fail");
+        assert!(err.contains("use of moved local `s`"), "{err}");
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_accepts_return_lifetime_tied_to_param() {
+        let root = make_temp_package(
+            "typed_tied_return_lifetime",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    "fn keep['a](read value: &'a Int) -> &'a Int:\n    return value\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let summary = check_path(&root).expect("tied return lifetime should check");
+        assert_eq!(summary.package_count, 1);
+        assert_eq!(summary.module_count, 2);
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
     fn check_path_handles_local_member_field_access() {
         let root = make_temp_package(
             "local_member_access",
@@ -2949,6 +6313,38 @@ mod tests {
             fs::write(path, contents).expect("source file should be writable");
         }
 
+        root
+    }
+
+    fn make_temp_workspace(name: &str, members: &[&str], files: &[(&str, &str)]) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "arcana-frontend-workspace-test-{}-{}",
+            unique_test_id(),
+            name
+        ));
+        if root.exists() {
+            fs::remove_dir_all(&root).expect("stale temp dir should be removable");
+        }
+        fs::create_dir_all(&root).expect("workspace dir should be creatable");
+        let workspace_members = members
+            .iter()
+            .map(|member| format!("\"{member}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        fs::write(
+            root.join("book.toml"),
+            format!(
+                "name = \"workspace\"\nkind = \"app\"\n[workspace]\nmembers = [{workspace_members}]\n"
+            ),
+        )
+        .expect("workspace manifest should be writable");
+        for (rel_path, contents) in files {
+            let path = root.join(rel_path);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).expect("parent dirs should be creatable");
+            }
+            fs::write(path, contents).expect("file should be writable");
+        }
         root
     }
 

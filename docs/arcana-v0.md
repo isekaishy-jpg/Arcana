@@ -26,6 +26,8 @@ Arcana v0 currently includes:
 
 ## Commands
 
+Current shipped rewrite commands:
+
 - `arcana check`
 - `arcana build --plan`
 - `arcana build`
@@ -33,13 +35,26 @@ Arcana v0 currently includes:
 Current rewrite public interfaces stop there until the first runnable AOT backend lands.
 Carried `run`/`compile`/artifact-execution expectations remain future-facing backend work, not current rewrite CLI contract.
 
+Planned before selfhost, but not shipped yet:
+
+- `arcana test`
+- `arcana format`
+- `arcana review` as a smaller advisory layer after the rewrite has enough real showcase-scale Arcana code to justify Arcana-native usage guidance
+
+Tooling roles are intentionally distinct:
+
+- `arcana check` is the correctness gate for parser/frontend/type/ownership/borrow/lifetime/boundary validation and other compiler-owned diagnostics
+- `arcana test` is the first-party test discovery/execution surface
+- `arcana format` is the first-party deterministic formatter
+- `arcana review` is not a second typechecker; it is the later advisory layer and should stay small pre-selfhost
+
 Single-file checking is intentionally minimal: it does not resolve `import`/`use`/`reexport`.
 Use grimoire/workspace mode (`arcana check <grimoire-dir>`, `arcana build <workspace-dir>`) for std/module-based programs.
 Source files are hard-standardized to `.arc` in file-mode commands and module loading.
 Migration helper: `powershell -ExecutionPolicy Bypass -File scripts/migrate_source_extensions_to_arc.ps1` (add `-Apply` to execute).
 
-`arcana build --member <name>` is strict: if non-target members have source fingerprint drift,
-build fails and requires a full `arcana build <workspace-dir>` refresh.
+Current rewrite builds operate at workspace scope; cache invalidation and rebuild decisions are
+driven by member fingerprints inside `arcana build <workspace-dir>`.
 
 Detailed backend, selfhost, and bootstrap workflow policy is tracked outside this document.
 
@@ -467,6 +482,13 @@ See:
 
 Arcana now enforces lexical ownership and borrowing rules with explicit lifetimes.
 
+Ownership rationale:
+
+- Arcana follows Rust where Rust's mutability, borrowing, and ownership rules are explicit and unambiguous.
+- Arcana does not copy Rust wholesale; the carried Arcana surface and any explicitly ratified Arcana-specific needs still control the final rule shape.
+- Any ownership or borrowing behavior that would otherwise be implicit or ambiguous must be made explicit in Arcana syntax, static rules, and diagnostics rather than left as convention or hidden inference.
+- Milestone work should therefore prefer explicit place-based reasoning, explicit conflict checks, and explicit lifetime ties over convenience-heavy or erased behavior.
+
 Core syntax:
 
 - lifetime params: `'a`, `'b`
@@ -627,8 +649,8 @@ Where a domain scope exists under `docs/specs/**/v1-scope.md`, that domain scope
 - `edit` call arguments currently must be local bindings (not field expressions)
 - Access checking is currently root-binding based (conservative)
 - Moves inside `while` loops are currently rejected
-- boundary checks now enforce payload/target rules, direct signature-shape safety, and recursive record/enum boundary-safe typing after HIR resolution; later work still needs full ownership/backend boundary flow
-- full ownership/borrow flow is still being re-established in the rewrite; current frontend covers declaration-surface lifetimes and conservative body resolution first
+- boundary checks now enforce payload/target rules, direct signature-shape safety, and recursive record/enum boundary-safe typing after HIR resolution; later work still needs deeper backend/runtime boundary flow
+- the current frontend now covers declaration-surface lifetimes plus conservative body-level expression typing, ownership, borrow, move, and return-lifetime diagnostics on the rewrite path
 
 ## Canvas/Window/Input (v0.16 shelf-first)
 

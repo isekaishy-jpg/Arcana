@@ -199,9 +199,6 @@ pub enum MatchPattern {
         path: String,
         args: Vec<MatchPattern>,
     },
-    Opaque {
-        text: String,
-    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -266,10 +263,6 @@ pub enum BinaryOp {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Expr {
-    Opaque {
-        text: String,
-        attached: Vec<RawBlockEntry>,
-    },
     Path {
         segments: Vec<String>,
     },
@@ -383,9 +376,6 @@ impl AssignOp {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AssignTarget {
-    Opaque {
-        text: String,
-    },
     Name {
         text: String,
     },
@@ -1717,7 +1707,7 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
         });
     }
 
-    if let Some((target, op, value)) = parse_assignment_statement(&entry.text) {
+    if let Some((target, op, value)) = parse_assignment_statement(&entry.text)? {
         return Ok(Statement {
             kind: StatementKind::Assign {
                 target,
@@ -1782,10 +1772,10 @@ fn parse_expression(text: &str, attached: &[RawBlockEntry], span: Span) -> Resul
             constructor,
             attached: parse_header_attachments(attached)?,
         }),
-        _ => Ok(Expr::Opaque {
-            text: trimmed.to_string(),
-            attached: attached.to_vec(),
-        }),
+        _ => Err(format!(
+            "{}:{}: attached blocks are only valid on standalone qualified/memory phrase statements",
+            span.line, span.column
+        )),
     }
 }
 
@@ -1801,6 +1791,9 @@ fn parse_expression_core(text: &str) -> Result<Expr, String> {
         return Ok(expr);
     }
     if let Some(expr) = parse_memory_phrase(trimmed)? {
+        return Ok(expr);
+    }
+    if let Some(expr) = parse_qualified_phrase(trimmed)? {
         return Ok(expr);
     }
     if let Some(expr) = parse_pair_expression(trimmed)? {
@@ -1834,24 +1827,28 @@ fn parse_non_tuple_comma_expression(text: &str) -> Result<Option<Expr>, String> 
     if trimmed.is_empty() || !contains_top_level_char(trimmed, ',') {
         return Ok(None);
     }
+    let qualified_before_comma = top_level_token_precedes_first_comma(trimmed, "::");
+    let memory_before_comma = top_level_token_precedes_first_comma(trimmed, ":>");
     if let Some(expr) = parse_chain_expression(trimmed)? {
         return Ok(Some(expr));
     }
-    if let Some(expr) = parse_memory_phrase(trimmed)? {
-        if matches!(
-            &expr,
-            Expr::MemoryPhrase { constructor, .. } if is_memory_constructor_like(constructor)
-        ) {
-            return Ok(Some(expr));
+    if memory_before_comma {
+        if let Some(expr) = parse_memory_phrase(trimmed)? {
+            if matches!(
+                &expr,
+                Expr::MemoryPhrase { constructor, .. } if is_memory_constructor_like(constructor)
+            ) {
+                return Ok(Some(expr));
+            }
         }
     }
-    if let Some(expr) = parse_qualified_phrase(trimmed)? {
+    if qualified_before_comma {
         if matches!(
-            &expr,
-            Expr::QualifiedPhrase { qualifier, .. }
+            parse_qualified_phrase(trimmed)?,
+            Some(Expr::QualifiedPhrase { ref qualifier, .. })
                 if classify_qualified_phrase_qualifier(qualifier).is_some()
         ) {
-            return Ok(Some(expr));
+            return parse_qualified_phrase(trimmed);
         }
     }
     Ok(None)
@@ -2007,6 +2004,9 @@ fn parse_binary_layer(
 }
 
 fn parse_unary_expression(text: &str) -> Result<Expr, String> {
+    if let Some(expr) = parse_grouped_non_tuple_expression(text)? {
+        return Ok(expr);
+    }
     if let Some(inner) = strip_group_parens(text) {
         return parse_expression_core(inner);
     }
@@ -2098,10 +2098,7 @@ fn parse_postfix_expression(text: &str) -> Result<Expr, String> {
     if let Some(expr) = parse_path_expression(text) {
         return Ok(expr);
     }
-    Ok(Expr::Opaque {
-        text: text.trim().to_string(),
-        attached: Vec::new(),
-    })
+    Err(format!("unsupported expression syntax `{}`", text.trim()))
 }
 
 fn parse_literal_expression(text: &str) -> Option<Expr> {
@@ -2392,13 +2389,14 @@ fn parse_memory_phrase(text: &str) -> Result<Option<Expr>, String> {
             "unknown memory type `{family}`; supported now: arena, frame, pool (reserved for future expansion)"
         ));
     }
+    let arena = parse_expression_core(arena_text)?;
     let init_args = match parse_phrase_args(init_text, PhraseArgContext::Memory)? {
         Some(args) => args,
         None => return Ok(None),
     };
     Ok(Some(Expr::MemoryPhrase {
         family: family.to_string(),
-        arena: Box::new(parse_expression_core(arena_text)?),
+        arena: Box::new(arena),
         init_args,
         constructor: constructor.to_string(),
         attached: Vec::new(),
@@ -2452,21 +2450,36 @@ fn parse_qualified_phrase(text: &str) -> Result<Option<Expr>, String> {
     let subject_text = text[..positions[0]].trim();
     let args_text = text[positions[0] + 2..positions[1]].trim();
     let qualifier = text[positions[1] + 2..].trim();
-    if subject_text.is_empty() || qualifier.is_empty() {
+    if subject_text.is_empty()
+        || qualifier.is_empty()
+        || subject_text_defers_to_unary(subject_text)
+    {
         return Ok(None);
     }
+
+    let subject = parse_expression_core(subject_text)?;
 
     let args = match parse_phrase_args(args_text, PhraseArgContext::Qualified)? {
         Some(args) => args,
         None => return Ok(None),
     };
-
     Ok(Some(Expr::QualifiedPhrase {
-        subject: Box::new(parse_expression_core(subject_text)?),
+        subject: Box::new(subject),
         args,
         qualifier: qualifier.to_string(),
         attached: Vec::new(),
     }))
+}
+
+fn subject_text_defers_to_unary(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    trimmed.starts_with('&')
+        || trimmed.starts_with('-')
+        || trimmed.starts_with('~')
+        || trimmed.starts_with('*')
+        || trimmed.starts_with("weave ")
+        || trimmed.starts_with("split ")
+        || trimmed.starts_with("not ")
 }
 
 fn parse_header_attachments(entries: &[RawBlockEntry]) -> Result<Vec<HeaderAttachment>, String> {
@@ -2802,36 +2815,34 @@ fn split_member_access(text: &str) -> Option<(&str, &str)> {
     Some((base, member))
 }
 
-fn parse_assign_target(text: &str) -> AssignTarget {
+fn parse_assign_target(text: &str) -> Result<AssignTarget, String> {
     let trimmed = text.trim();
     if let Some((base, inside)) = split_trailing_bracket_suffix(trimmed) {
         let base = base.trim();
         if !base.is_empty() && should_parse_index_brackets(inside) {
             if let Ok(index) = parse_expression_core(inside.trim()) {
-                return AssignTarget::Index {
-                    target: Box::new(parse_assign_target(base)),
+                return Ok(AssignTarget::Index {
+                    target: Box::new(parse_assign_target(base)?),
                     index,
-                };
+                });
             }
         }
     }
 
     if let Some((base, member)) = split_member_access(trimmed) {
-        return AssignTarget::MemberAccess {
-            target: Box::new(parse_assign_target(base)),
+        return Ok(AssignTarget::MemberAccess {
+            target: Box::new(parse_assign_target(base)?),
             member: member.to_string(),
-        };
+        });
     }
 
     if is_identifier(trimmed) {
-        return AssignTarget::Name {
+        return Ok(AssignTarget::Name {
             text: trimmed.to_string(),
-        };
+        });
     }
 
-    AssignTarget::Opaque {
-        text: trimmed.to_string(),
-    }
+    Err(format!("unsupported assignment target `{trimmed}`"))
 }
 
 fn find_top_level_binary_op(text: &str, ops: &[BinaryOpSpec]) -> Option<(usize, BinaryOp, usize)> {
@@ -2939,13 +2950,17 @@ fn strip_group_parens(text: &str) -> Option<&str> {
 }
 
 fn contains_top_level_char(text: &str, needle: char) -> bool {
+    find_top_level_char_index(text, needle).is_some()
+}
+
+fn find_top_level_char_index(text: &str, needle: char) -> Option<usize> {
     let mut depth_paren = 0usize;
     let mut depth_bracket = 0usize;
     let mut depth_brace = 0usize;
     let mut in_string = false;
     let mut escape = false;
 
-    for ch in text.chars() {
+    for (idx, ch) in text.char_indices() {
         if in_string {
             if escape {
                 escape = false;
@@ -2974,11 +2989,21 @@ fn contains_top_level_char(text: &str, needle: char) -> bool {
         }
 
         if depth_paren == 0 && depth_bracket == 0 && depth_brace == 0 && ch == needle {
-            return true;
+            return Some(idx);
         }
     }
 
-    false
+    None
+}
+
+fn top_level_token_precedes_first_comma(text: &str, token: &str) -> bool {
+    match (
+        find_top_level_char_index(text, ','),
+        find_top_level_token(text, token),
+    ) {
+        (Some(comma), Some(token_index)) => token_index < comma,
+        _ => false,
+    }
 }
 
 fn find_top_level_named_eq(text: &str) -> Option<usize> {
@@ -3187,9 +3212,7 @@ fn parse_match_pattern(text: &str) -> Result<MatchPattern, String> {
             text: trimmed.to_string(),
         });
     }
-    Ok(MatchPattern::Opaque {
-        text: trimmed.to_string(),
-    })
+    Err(format!("unsupported `match` pattern `{trimmed}`"))
 }
 
 fn parse_variant_pattern(text: &str) -> Result<Option<MatchPattern>, String> {
@@ -3244,14 +3267,16 @@ fn parse_block_header(rest: &str, keyword: &str, span: Span) -> Result<String, S
     Ok(header.to_string())
 }
 
-fn parse_assignment_statement(text: &str) -> Option<(AssignTarget, AssignOp, String)> {
-    let (index, op, op_len) = find_top_level_assignment_op(text)?;
+fn parse_assignment_statement(text: &str) -> Result<Option<(AssignTarget, AssignOp, String)>, String> {
+    let Some((index, op, op_len)) = find_top_level_assignment_op(text) else {
+        return Ok(None);
+    };
     let target = text[..index].trim();
     let value = text[index + op_len..].trim();
     if target.is_empty() || value.is_empty() {
-        return None;
+        return Ok(None);
     }
-    Some((parse_assign_target(target), op, value.to_string()))
+    Ok(Some((parse_assign_target(target)?, op, value.to_string())))
 }
 
 fn find_top_level_assignment_op(text: &str) -> Option<(usize, AssignOp, usize)> {
@@ -3572,7 +3597,6 @@ fn statement_can_own_rollups(statement: &Statement) -> bool {
 
 fn expr_has_attached_block(expr: &Expr) -> bool {
     match expr {
-        Expr::Opaque { attached, .. } => !attached.is_empty(),
         Expr::QualifiedPhrase { attached, .. } | Expr::MemoryPhrase { attached, .. } => {
             !attached.is_empty()
         }
@@ -4326,14 +4350,6 @@ fn validate_expr_phrase_contract(
     allow_header_attachments: bool,
 ) -> Result<(), String> {
     match expr {
-        Expr::Opaque { attached, .. } => {
-            if !attached.is_empty() {
-                return Err(format!(
-                    "{}:{}: attached blocks are only valid on standalone qualified/memory phrase statements",
-                    span.line, span.column
-                ));
-            }
-        }
         Expr::Path { .. }
         | Expr::BoolLiteral { .. }
         | Expr::IntLiteral { .. }
@@ -4682,9 +4698,7 @@ fn statement_rollup_subjects(statement: &Statement) -> Option<BTreeSet<String>> 
             names.insert(binding.clone());
             Some(names)
         }
-        StatementKind::Expr { expr } if expr_has_attached_block(expr) => {
-            Some(immediate_attached_block_bindings(expr))
-        }
+        StatementKind::Expr { expr } if expr_has_attached_block(expr) => Some(BTreeSet::new()),
         _ => Some(BTreeSet::new()),
     }
 }
@@ -4697,35 +4711,6 @@ fn immediate_statement_bindings(statements: &[Statement]) -> BTreeSet<String> {
         }
     }
     names
-}
-
-fn immediate_attached_block_bindings(expr: &Expr) -> BTreeSet<String> {
-    match expr {
-        Expr::Opaque { attached, .. } => immediate_raw_block_bindings(attached),
-        Expr::QualifiedPhrase { .. } | Expr::MemoryPhrase { .. } => BTreeSet::new(),
-        _ => BTreeSet::new(),
-    }
-}
-
-fn immediate_raw_block_bindings(entries: &[RawBlockEntry]) -> BTreeSet<String> {
-    let mut names = BTreeSet::new();
-    for entry in entries {
-        if let Some(name) = immediate_raw_block_binding_name(&entry.text) {
-            names.insert(name);
-        }
-    }
-    names
-}
-
-fn immediate_raw_block_binding_name(text: &str) -> Option<String> {
-    let trimmed = text.trim();
-    let rest = trimmed.strip_prefix("let ")?;
-    let rest = rest.strip_prefix("mut ").unwrap_or(rest).trim_start();
-    let name = rest
-        .chars()
-        .take_while(|ch| is_identifier_continue(*ch))
-        .collect::<String>();
-    if name.is_empty() { None } else { Some(name) }
 }
 
 fn collect_rollup_subjects(rollups: &[PageRollup]) -> BTreeSet<String> {
@@ -4911,7 +4896,6 @@ fn validate_statement_block_tuple_contract(statements: &[Statement]) -> Result<(
 
 fn validate_expr_tuple_contract(expr: &Expr, span: Span) -> Result<(), String> {
     match expr {
-        Expr::Opaque { text, .. } => validate_tuple_expression_text(text, span),
         Expr::Path { .. }
         | Expr::BoolLiteral { .. }
         | Expr::IntLiteral { .. }
@@ -5035,7 +5019,6 @@ fn validate_header_attachment_tuple_contract(
 
 fn validate_assign_target_tuple_contract(target: &AssignTarget, span: Span) -> Result<(), String> {
     match target {
-        AssignTarget::Opaque { text } => validate_tuple_expression_text(text, span),
         AssignTarget::Name { .. } => Ok(()),
         AssignTarget::MemberAccess { target, member } => {
             validate_assign_target_tuple_contract(target, span)?;
@@ -5127,11 +5110,6 @@ fn validate_tuple_type_contract(text: &str, span: Span, context: &str) -> Result
     validate_tuple_groups_in_text(text, span, context, "tuple types")
 }
 
-fn validate_tuple_expression_text(text: &str, span: Span) -> Result<(), String> {
-    validate_numeric_tuple_member_selectors(text, span)?;
-    validate_tuple_expression_groups(text, span)
-}
-
 fn validate_tuple_groups_in_text(
     text: &str,
     span: Span,
@@ -5191,141 +5169,6 @@ fn validate_tuple_groups_in_text(
             }
             index = close_idx + 1;
             continue;
-        }
-
-        index += ch.len_utf8();
-    }
-
-    Ok(())
-}
-
-fn validate_tuple_expression_groups(text: &str, span: Span) -> Result<(), String> {
-    let text = text.trim();
-    let mut index = 0usize;
-    let mut in_string = false;
-    let mut escape = false;
-
-    while index < text.len() {
-        let mut chars = text[index..].chars();
-        let Some(ch) = chars.next() else {
-            break;
-        };
-
-        if in_string {
-            if escape {
-                escape = false;
-            } else if ch == '\\' {
-                escape = true;
-            } else if ch == '"' {
-                in_string = false;
-            }
-            index += ch.len_utf8();
-            continue;
-        }
-
-        if ch == '"' {
-            in_string = true;
-            index += ch.len_utf8();
-            continue;
-        }
-
-        if ch == '(' {
-            let Some(close_idx) = find_matching_delim(text, index, '(', ')') else {
-                break;
-            };
-            let inner = text[index + 1..close_idx].trim();
-            if contains_top_level_char(inner, ',') {
-                if let Some(parsed) = parse_non_tuple_comma_expression(inner)? {
-                    validate_expr_tuple_contract(&parsed, span)?
-                } else {
-                    let parts = split_top_level(inner, ',')
-                        .into_iter()
-                        .map(str::trim)
-                        .collect::<Vec<_>>();
-                    if parts.len() != 2 || parts.iter().any(|part| part.is_empty()) {
-                        return Err(format!(
-                            "{}:{}: tuple literals must have exactly 2 elements in v1",
-                            span.line, span.column
-                        ));
-                    }
-                    for part in parts {
-                        validate_tuple_expression_text(part, span)?;
-                    }
-                }
-            } else if !inner.is_empty() {
-                validate_tuple_expression_text(inner, span)?;
-            }
-            index = close_idx + 1;
-            continue;
-        }
-
-        index += ch.len_utf8();
-    }
-
-    Ok(())
-}
-
-fn validate_numeric_tuple_member_selectors(text: &str, span: Span) -> Result<(), String> {
-    let text = text.trim();
-    let mut index = 0usize;
-    let mut in_string = false;
-    let mut escape = false;
-
-    while index < text.len() {
-        let mut chars = text[index..].chars();
-        let Some(ch) = chars.next() else {
-            break;
-        };
-
-        if in_string {
-            if escape {
-                escape = false;
-            } else if ch == '\\' {
-                escape = true;
-            } else if ch == '"' {
-                in_string = false;
-            }
-            index += ch.len_utf8();
-            continue;
-        }
-
-        if ch == '"' {
-            in_string = true;
-            index += ch.len_utf8();
-            continue;
-        }
-
-        if ch == '.' {
-            if matches!(text[..index].chars().next_back(), Some('.'))
-                || matches!(text[index + 1..].chars().next(), Some('.'))
-            {
-                index += 1;
-                continue;
-            }
-
-            let mut end = index + 1;
-            while end < text.len() {
-                let mut digits = text[end..].chars();
-                let Some(next) = digits.next() else {
-                    break;
-                };
-                if !next.is_ascii_digit() {
-                    break;
-                }
-                end += next.len_utf8();
-            }
-
-            if end > index + 1 {
-                let member = &text[index + 1..end];
-                if member != "0" && member != "1" {
-                    return Err(format!(
-                        "{}:{}: tuple field access only supports `.0` and `.1` in v1",
-                        span.line, span.column
-                    ));
-                }
-                index = end;
-                continue;
-            }
         }
 
         index += ch.len_utf8();
@@ -5505,6 +5348,9 @@ fn is_identifier_continue(ch: char) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
     use super::freeze::{FROZEN_AST_NODE_KINDS, FROZEN_TOKEN_KINDS};
     use super::{
         AssignTarget, BinaryOp, ChainConnector, ChainIntroducer, ChainStep, DirectiveKind, Expr,
@@ -5528,6 +5374,33 @@ mod tests {
         steps.iter().map(|step| step.text.clone()).collect()
     }
 
+    fn repo_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .canonicalize()
+            .expect("repo root should resolve")
+    }
+
+    fn collect_arc_files(root: &Path) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let entries = fs::read_dir(&dir).expect("dir should be readable");
+            for entry in entries {
+                let entry = entry.expect("entry should be readable");
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().and_then(|ext| ext.to_str()) == Some("arc") {
+                    files.push(path);
+                }
+            }
+        }
+        files.sort();
+        files
+    }
+
     #[test]
     fn frozen_lists_are_unique() {
         let mut tokens = FROZEN_TOKEN_KINDS.to_vec();
@@ -5545,6 +5418,25 @@ mod tests {
     fn parse_module_rejects_tabs() {
         let err = parse_module("fn main()\n\treturn 0\n").expect_err("expected tab rejection");
         assert!(err.contains("tabs are not allowed"));
+    }
+
+    #[test]
+    fn carried_corpus_parses_as_supported_syntax() {
+        for rel in [
+            "std/src",
+            "grimoires/winspell/src",
+            "grimoires/spell-events/src",
+            "grimoires/spell-audio/src",
+            "examples/audio_smoke_demo/src",
+            "examples/topdown_arena_showcase",
+        ] {
+            let root = repo_root().join(rel);
+            for file in collect_arc_files(&root) {
+                let source = fs::read_to_string(&file).expect("source should be readable");
+                parse_module(&source)
+                    .unwrap_or_else(|err| panic!("{} should parse: {err}", file.display()));
+            }
+        }
     }
 
     #[test]
@@ -6378,6 +6270,139 @@ mod tests {
             }
             other => panic!("expected return statement, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_module_keeps_parenthesized_phrase_args_structured() {
+        let parsed = parse_module(
+            "fn main(text: Str, i: Int) -> Int:\n    let b = (std.text.byte_at :: text, i :: call)\n    return 0\n",
+        )
+        .expect("parse should pass");
+
+        match &parsed.symbols[0].statements[0].kind {
+            StatementKind::Let { value, .. } => {
+                assert!(matches!(value, Expr::QualifiedPhrase { qualifier, .. } if qualifier == "call"));
+            }
+            other => panic!("expected let statement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_module_keeps_parenthesized_pairs_with_phrase_pair_args() {
+        let parsed = parse_module(
+            "fn main(a: Int, b: Int) -> (Bool, Int):\n    return (true, widget.emit :: (a, b) :: call)\n",
+        )
+        .expect("parse should pass");
+
+        match &parsed.symbols[0].statements[0].kind {
+            StatementKind::Return { value } => match value.as_ref().expect("return value expected") {
+                Expr::Pair { left, right } => {
+                    assert!(matches!(left.as_ref(), Expr::BoolLiteral { value: true }));
+                    match right.as_ref() {
+                        Expr::QualifiedPhrase { args, qualifier, .. } => {
+                            assert_eq!(qualifier, "call");
+                            assert_eq!(args.len(), 1);
+                            assert!(matches!(&args[0], PhraseArg::Positional(Expr::Pair { .. })));
+                        }
+                        other => panic!("expected qualified phrase rhs, got {other:?}"),
+                    }
+                }
+                other => panic!("expected pair return, got {other:?}"),
+            },
+            other => panic!("expected return statement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_module_keeps_pair_rhs_phrase_calls_from_std_ecs_shape() {
+        let parsed = parse_module(
+            "fn main() -> (Bool, Int):\n    return (true, get_component[Int] :: :: call)\n",
+        )
+        .expect("parse should pass");
+
+        match &parsed.symbols[0].statements[0].kind {
+            StatementKind::Return { value } => match value.as_ref().expect("return value expected") {
+                Expr::Pair { left, right } => {
+                    assert!(matches!(left.as_ref(), Expr::BoolLiteral { value: true }));
+                    assert!(matches!(
+                        right.as_ref(),
+                        Expr::QualifiedPhrase { qualifier, .. } if qualifier == "call"
+                    ));
+                }
+                other => panic!("expected pair return, got {other:?}"),
+            },
+            other => panic!("expected return statement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_module_keeps_grouped_phrase_call_as_phrase_arg() {
+        let parsed = parse_module(
+            "fn main(edit out: List[Int], a: Int) -> Int:\n    out :: (Widget.emit :: a != 0 :: call) :: push\n    return 0\n",
+        )
+        .expect("parse should pass");
+
+        match &parsed.symbols[0].statements[0].kind {
+            StatementKind::Expr {
+                expr: Expr::QualifiedPhrase { qualifier, args, .. },
+            } => {
+                assert_eq!(qualifier, "push");
+                assert_eq!(args.len(), 1);
+                assert!(matches!(
+                    &args[0],
+                    PhraseArg::Positional(Expr::QualifiedPhrase { qualifier, .. }) if qualifier == "call"
+                ));
+            }
+            other => panic!("expected push phrase, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_module_keeps_grouped_phrase_with_comma_args() {
+        let parsed = parse_module(
+            "fn main(text: Str, i: Int) -> Bool:\n    return (std.text.byte_at :: text, i :: call) == 0\n",
+        )
+        .expect("parse should pass");
+
+        match &parsed.symbols[0].statements[0].kind {
+            StatementKind::Return { value } => match value.as_ref().expect("return value expected") {
+                Expr::Binary { left, op, right } => {
+                    assert_eq!(*op, BinaryOp::EqEq);
+                    match left.as_ref() {
+                        Expr::QualifiedPhrase { qualifier, .. } if qualifier == "call" => {}
+                        other => panic!("expected qualified phrase lhs, got {other:?}"),
+                    }
+                    assert!(matches!(right.as_ref(), Expr::IntLiteral { text } if text == "0"));
+                }
+                other => panic!("expected equality return, got {other:?}"),
+            },
+            other => panic!("expected return statement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_expression_core_keeps_grouped_phrase_subjects() {
+        let inner = super::parse_expression_core("(Widget.emit :: a != 0 :: call)")
+            .expect("grouped phrase should parse");
+        match inner {
+            Expr::QualifiedPhrase { ref qualifier, .. } if qualifier == "call" => {}
+            other => panic!("expected grouped qualified phrase, got {other:?}"),
+        }
+
+        let outer = super::parse_qualified_phrase("out :: (Widget.emit :: a != 0 :: call) :: push")
+            .expect("qualified phrase parse should not error");
+        assert!(matches!(outer, Some(Expr::QualifiedPhrase { qualifier, .. }) if qualifier == "push"));
+    }
+
+    #[test]
+    fn parse_expression_core_keeps_grouped_phrase_with_comma_args() {
+        let inner = super::parse_qualified_phrase("std.text.byte_at :: text, i :: call")
+            .expect("qualified phrase parse should not error");
+        assert!(matches!(inner, Some(Expr::QualifiedPhrase { qualifier, .. }) if qualifier == "call"));
+
+        let grouped = super::parse_expression_core("(std.text.byte_at :: text, i :: call)")
+            .expect("grouped phrase should parse");
+        assert!(matches!(grouped, Expr::QualifiedPhrase { qualifier, .. } if qualifier == "call"));
     }
 
     #[test]
