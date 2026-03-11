@@ -68,3 +68,30 @@ trigger_condition: ready_when=Arcana-side tooling needs richer manifest tables, 
 owner: Arcana std/tooling team
 acceptance_criteria: std grows only the additional, narrowly named package/manifest pieces the Arcana-side package layer actually needs beyond the current baseline, while keeping `std.config` as a narrow deterministic config-document substrate rather than a broad serialization framework.
 status: deferred
+
+id: STD-D7
+title: config document encapsulation and indexing review
+reason_deferred: `std.config` is good enough for the pre-selfhost bootstrap contract, but its current semantic document model still exposes keyed storage and stable-order fields directly. If future Arcana-side tooling leans on it heavily, the next cleanup may be to hide more representation behind accessors or to add stronger indexing guarantees. That may also become irrelevant if later language/runtime systems give Arcana a better source-level document/opaque-data model.
+target_window: post-selfhost tooling hardening
+trigger_condition: ready_when=Arcana-side tooling uses `std.config` heavily enough that direct record-shape coupling or repeated document access becomes a maintenance or performance issue; verify=any redesign preserves deterministic ordering and fail-fast duplicate handling while reducing representation leakage; blocked_by=the current pre-selfhost contract intentionally prioritizes explicitness and simplicity over stronger encapsulation.
+owner: Arcana std/tooling team
+acceptance_criteria: either `std.config` is intentionally re-ratified as the stable semantic document shape, or it is narrowed behind a more explicit accessor/index model without reopening generic serialization scope; if later systems/features make the current record shape irrelevant, this item may be closed without direct std surgery.
+status: deferred
+
+id: STD-D8
+title: manifest lookup/index model review
+reason_deferred: `std.manifest` now has an explicit typed wrapper and correct lockfile parity for the current bootstrap contract, but its lookup tables are still list-backed and optimized for clarity rather than heavy package-driver use. If Arcana-side tooling later depends on it deeply, it may want a different indexed representation. This may also be superseded entirely if manifest/lock handling remains inside a different owned toolchain layer post-selfhost.
+target_window: post-selfhost package/tooling ownership review
+trigger_condition: ready_when=Arcana-side package/workspace tooling starts using `std.manifest` as a hot path rather than as an occasional deterministic helper; verify=any new lookup/index model stays explicit and Arcana-specific while keeping `book.toml` / `Arcana.lock` semantics stable; blocked_by=the Rust rewrite still owns the real package/build driver.
+owner: Arcana std/tooling team
+acceptance_criteria: either `std.manifest` remains a small explicit helper because heavier tooling lives elsewhere, or it gains a clearer indexed representation that removes repeated linear scans without turning into a second sprawling package driver; later systems/features may make this item unnecessary.
+status: deferred
+
+id: STD-D9
+title: remaining builtin-family migration review
+reason_deferred: runtime/resource handles have been moved out of the Rust builtin registry, but concurrency and memory families still remain compiler-known builtins. That is acceptable for the current roadmap, but later language features such as broader opaque/source-declared type support or different ownership/runtime systems may make another migration desirable or make the issue disappear on its own.
+target_window: post-selfhost language/runtime cleanup
+trigger_condition: ready_when=the selfhost compiler and runtime are stable enough to revisit the remaining builtin families without destabilizing the core roadmap; verify=any migration reduces compiler special-casing and keeps ownership/boundary behavior explicit; blocked_by=the current language still intentionally reserves some builtin families at the compiler level.
+owner: Arcana language/runtime team
+acceptance_criteria: either the remaining builtin families are intentionally re-ratified with rewrite-owned rationale, or they move behind a more general source-level mechanism without reintroducing ambiguity or special-case drift; if later systems/features make the current builtin boundary irrelevant, this item may be retired.
+status: deferred
