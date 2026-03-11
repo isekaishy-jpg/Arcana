@@ -28,11 +28,12 @@ Arcana is a Rust-first rewrite of the frozen Arcana language and tooling stack. 
 - `arcana check` now also enforces recursive boundary-safe typing for carried Lua/SQL boundary contracts across nested record/enum surfaces
 - Lua/SQL boundary-varietal compile-time contracts now have example and negative conformance coverage, and the carried first-class ECS direction is documented without freezing generalized ECS query authoring into the selfhost baseline
 - Impl header generic/lifetime params now survive syntax/HIR lowering, so inherited `T`/`'a` scope is available to later frontend work
-- Next compiler debt is the runnable backend/runtime slice plus later typed-frontend deepening beyond the current conservative ownership and borrow-flow checks
+- Next compiler debt is the runnable backend/runtime slice plus pre-selfhost tooling work for `arcana test` and `arcana format`
 - Seed-imported docs, `std`, and reference corpus under `grimoires/reference/*` plus conformance fixtures from MeadowLang
 - Meadow-vs-Arcana language-behavior audit captured in `docs/reference/audits/meadow_language_behavior_audit_v1.md`
 - Imported `std` and all current `grimoires/reference/*` packages are behavioral seed corpus only; current rewrite authority comes from `PLAN.md`, `docs/rewrite-roadmap.md`, and the active scope docs under `docs/specs/`
 - Rewrite-owned app/media grimoires now scaffold under `grimoires/owned/*`
+- Rewrite-owned app/media grimoire scaffolds now check in crate-side regression coverage against the new frontend, and pre-selfhost `std` shape is frozen unless Milestone 6/runtime work proves a concrete blocker
 - `docs/specs/std/std/v1-scope.md` defines how the rewrite treats `std`: rebuild-owned first-party library surface, not MeadowLang layering to preserve wholesale
 - `docs/specs/std/std/v1-status.md` and `docs/specs/grimoires/grimoires/v1-status.md` track which std modules and future Arcana-owned app/media grimoire roles are bootstrap-required, transitional-carried, or deferred
 - `arcana check` with shared package/HIR loading, symbol-based module and `use` resolution, direct-dependency enforcement, implicit `std`, and stable file/line/column diagnostics

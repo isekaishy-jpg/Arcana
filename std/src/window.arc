@@ -1,13 +1,9 @@
 import std.kernel.gfx
-import std.kernel.error
 import std.result
 use std.result.Result
 
 export fn open(title: Str, width: Int, height: Int) -> Result[Window, Str]:
-    let pair = std.kernel.gfx.window_open_try :: title, width, height :: call
-    if pair.0:
-        return Result.Ok[Window, Str] :: pair.1 :: call
-    return Result.Err[Window, Str] :: (std.kernel.error.last_error_take :: :: call) :: call
+    return std.kernel.gfx.window_open :: title, width, height :: call
 
 export fn alive(read win: Window) -> Bool:
     return std.kernel.gfx.canvas_alive :: win :: call
@@ -51,5 +47,5 @@ export fn set_topmost(edit win: Window, enabled: Bool):
 export fn set_cursor_visible(edit win: Window, enabled: Bool):
     std.kernel.gfx.window_set_cursor_visible :: win, enabled :: call
 
-export fn close(edit win: Window):
-    std.kernel.gfx.window_close :: win :: call
+export fn close(take win: Window) -> Result[Unit, Str]:
+    return std.kernel.gfx.window_close :: win :: call

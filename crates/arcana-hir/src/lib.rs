@@ -500,6 +500,13 @@ impl HirModuleSummary {
         self.symbols.iter().any(|symbol| symbol.name == name)
     }
 
+    pub fn symbol_count(&self, name: &str) -> usize {
+        self.symbols
+            .iter()
+            .filter(|symbol| symbol.name == name)
+            .count()
+    }
+
     pub fn exported_surface_rows(&self) -> Vec<String> {
         self.api_fingerprint_rows()
     }
@@ -1809,12 +1816,18 @@ fn resolve_use_target(
         let resolved_module = resolved_package
             .module(&module_id)
             .ok_or_else(|| format!("resolved module `{module_id}` is not loaded"))?;
-        if resolved_module.has_symbol(symbol_name) {
+        let symbol_count = resolved_module.symbol_count(symbol_name);
+        if symbol_count == 1 {
             return Ok(ResolvedUseTarget::Symbol {
                 package_name,
                 module_id,
                 symbol_name: symbol_name.clone(),
             });
+        }
+        if symbol_count > 1 {
+            return Err(format!(
+                "symbol `{symbol_name}` is defined multiple times in module `{module_id}`"
+            ));
         }
         return Err(format!(
             "unresolved symbol `{symbol_name}` in module `{module_id}`"
@@ -1972,11 +1985,26 @@ pub fn resolve_workspace(
     for package in workspace.packages.values() {
         let mut modules = BTreeMap::new();
         for module in &package.summary.modules {
-            let mut bindings = BTreeMap::new();
+            let mut bindings: BTreeMap<String, HirResolvedBinding> = BTreeMap::new();
             for symbol in &module.symbols {
-                bindings
-                    .entry(symbol.name.clone())
-                    .or_insert(HirResolvedBinding {
+                if let Some(existing) = bindings.get(&symbol.name) {
+                    errors.push(HirResolutionError {
+                        package_name: package.summary.package_name.clone(),
+                        source_module_id: module.module_id.clone(),
+                        span: symbol.span,
+                        message: format!(
+                            "duplicate symbol `{}` in module `{}`; first declared at {}:{}",
+                            symbol.name,
+                            module.module_id,
+                            existing.span.line,
+                            existing.span.column
+                        ),
+                    });
+                    continue;
+                }
+                bindings.insert(
+                    symbol.name.clone(),
+                    HirResolvedBinding {
                         local_name: symbol.name.clone(),
                         origin: HirBindingOrigin::LocalSymbol,
                         target: HirResolvedTarget::Symbol {
@@ -1985,7 +2013,8 @@ pub fn resolve_workspace(
                             symbol_name: symbol.name.clone(),
                         },
                         span: symbol.span,
-                    });
+                    },
+                );
             }
 
             let mut directives = Vec::new();
@@ -2029,14 +2058,43 @@ pub fn resolve_workspace(
                             .alias
                             .clone()
                             .unwrap_or_else(|| target.binding_name());
-                        bindings
-                            .entry(local_name.clone())
-                            .or_insert(HirResolvedBinding {
+                        if let Some(existing) = bindings.get(&local_name) {
+                            if matches!(existing.origin, HirBindingOrigin::Directive(_))
+                                && existing.target == target
+                            {
+                                directives.push(HirResolvedDirective {
+                                    source_module_id: module.module_id.clone(),
+                                    local_name,
+                                    kind: directive.kind,
+                                    target,
+                                    alias: directive.alias.clone(),
+                                    span: directive.span,
+                                });
+                                continue;
+                            }
+                            errors.push(HirResolutionError {
+                                package_name: package.summary.package_name.clone(),
+                                source_module_id: module.module_id.clone(),
+                                span: directive.span,
+                                message: format!(
+                                    "duplicate binding `{}` in module `{}`; first bound at {}:{}",
+                                    local_name,
+                                    module.module_id,
+                                    existing.span.line,
+                                    existing.span.column
+                                ),
+                            });
+                            continue;
+                        }
+                        bindings.insert(
+                            local_name.clone(),
+                            HirResolvedBinding {
                                 local_name: local_name.clone(),
                                 origin: HirBindingOrigin::Directive(directive.kind),
                                 target: target.clone(),
                                 span: directive.span,
-                            });
+                            },
+                        );
                         directives.push(HirResolvedDirective {
                             source_module_id: module.module_id.clone(),
                             local_name,
@@ -3911,6 +3969,175 @@ mod tests {
         assert_eq!(errors.len(), 1);
         assert!(errors[0].message.contains("not a direct dependency"));
         assert_eq!(errors[0].source_module_id, "app");
+    }
+
+    #[test]
+    fn resolve_workspace_rejects_duplicate_top_level_symbols() {
+        let app_summary = build_package_summary(
+            "app",
+            vec![
+                lower_module_text(
+                    "app",
+                    "export fn mouse_in_window(read win: Window) -> Bool:\n    return false\nexport fn mouse_in_window(read win: Window) -> Bool:\n    return true\n",
+                )
+                .expect("app should lower"),
+            ],
+        );
+        let app_layout = build_package_layout(
+            &app_summary,
+            BTreeMap::from([(
+                "app".to_string(),
+                Path::new("C:/repo/app/src/shelf.arc").to_path_buf(),
+            )]),
+            BTreeMap::new(),
+        )
+        .expect("app layout should build");
+        let app_package = build_workspace_package(
+            Path::new("C:/repo/app").to_path_buf(),
+            BTreeSet::new(),
+            app_summary,
+            app_layout,
+        )
+        .expect("app package should build");
+
+        let workspace = build_workspace_summary(vec![app_package]).expect("workspace builds");
+        let errors = resolve_workspace(&workspace).expect_err("resolution should fail");
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].message.contains("duplicate symbol `mouse_in_window`"));
+        assert_eq!(errors[0].source_module_id, "app");
+    }
+
+    #[test]
+    fn resolve_workspace_rejects_duplicate_directive_bindings() {
+        let std_summary = build_package_summary(
+            "std",
+            vec![
+                lower_module_text("std.io", "export fn print() -> Int:\n    return 0\n")
+                    .expect("std.io should lower"),
+                lower_module_text("std.text", "export fn len() -> Int:\n    return 0\n")
+                    .expect("std.text should lower"),
+            ],
+        );
+        let std_layout = build_package_layout(
+            &std_summary,
+            BTreeMap::from([
+                (
+                    "std.io".to_string(),
+                    Path::new("C:/repo/std/src/io.arc").to_path_buf(),
+                ),
+                (
+                    "std.text".to_string(),
+                    Path::new("C:/repo/std/src/text.arc").to_path_buf(),
+                ),
+            ]),
+            BTreeMap::new(),
+        )
+        .expect("std layout should build");
+        let std_package = build_workspace_package(
+            Path::new("C:/repo/std").to_path_buf(),
+            BTreeSet::new(),
+            std_summary,
+            std_layout,
+        )
+        .expect("std package should build");
+
+        let app_summary = build_package_summary(
+            "app",
+            vec![lower_module_text(
+                "app",
+                "use std.io as io\nuse std.text as io\nfn main() -> Int:\n    return 0\n",
+            )
+            .expect("app should lower")],
+        );
+        let app_layout = build_package_layout(
+            &app_summary,
+            BTreeMap::from([(
+                "app".to_string(),
+                Path::new("C:/repo/app/src/shelf.arc").to_path_buf(),
+            )]),
+            BTreeMap::new(),
+        )
+        .expect("app layout should build");
+        let app_package = build_workspace_package(
+            Path::new("C:/repo/app").to_path_buf(),
+            BTreeSet::from(["std".to_string()]),
+            app_summary,
+            app_layout,
+        )
+        .expect("app package should build");
+
+        let workspace =
+            build_workspace_summary(vec![app_package, std_package]).expect("workspace builds");
+        let errors = resolve_workspace(&workspace).expect_err("resolution should fail");
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].message.contains("duplicate binding `io`"));
+        assert_eq!(errors[0].source_module_id, "app");
+    }
+
+    #[test]
+    fn resolve_workspace_allows_duplicate_directives_when_target_matches() {
+        let std_summary = build_package_summary(
+            "std",
+            vec![lower_module_text("std.io", "export fn print() -> Int:\n    return 0\n")
+                .expect("std.io should lower")],
+        );
+        let std_layout = build_package_layout(
+            &std_summary,
+            BTreeMap::from([(
+                "std.io".to_string(),
+                Path::new("C:/repo/std/src/io.arc").to_path_buf(),
+            )]),
+            BTreeMap::new(),
+        )
+        .expect("std layout should build");
+        let std_package = build_workspace_package(
+            Path::new("C:/repo/std").to_path_buf(),
+            BTreeSet::new(),
+            std_summary,
+            std_layout,
+        )
+        .expect("std package should build");
+
+        let app_summary = build_package_summary(
+            "app",
+            vec![lower_module_text(
+                "app",
+                "import std.io\nuse std.io as io\nfn main() -> Int:\n    return 0\n",
+            )
+            .expect("app should lower")],
+        );
+        let app_layout = build_package_layout(
+            &app_summary,
+            BTreeMap::from([(
+                "app".to_string(),
+                Path::new("C:/repo/app/src/shelf.arc").to_path_buf(),
+            )]),
+            BTreeMap::new(),
+        )
+        .expect("app layout should build");
+        let app_package = build_workspace_package(
+            Path::new("C:/repo/app").to_path_buf(),
+            BTreeSet::from(["std".to_string()]),
+            app_summary,
+            app_layout,
+        )
+        .expect("app package should build");
+
+        let workspace =
+            build_workspace_summary(vec![app_package, std_package]).expect("workspace builds");
+        let resolved = resolve_workspace(&workspace).expect("resolution should succeed");
+        let app_module = resolved
+            .package("app")
+            .and_then(|pkg| pkg.module("app"))
+            .expect("app module should resolve");
+        assert_eq!(
+            app_module
+                .bindings
+                .get("io")
+                .expect("alias should resolve")
+                .local_name,
+            "io"
+        );
     }
 
     #[test]

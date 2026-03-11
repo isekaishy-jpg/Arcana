@@ -1,4 +1,3 @@
-import std.kernel.error
 import std.kernel.process
 import std.bytes
 import std.result
@@ -10,18 +9,13 @@ export record ExecCapture:
     utf8: (Bool, Bool)
 
 export fn exec_status(program: Str, read args: List[Str]) -> Result[Int, Str]:
-    let pair = std.kernel.process.process_exec_status_try :: program, args :: call
-    if pair.0:
-        return Result.Ok[Int, Str] :: pair.1 :: call
-    return Result.Err[Int, Str] :: (std.kernel.error.last_error_take :: :: call) :: call
+    return std.kernel.process.process_exec_status :: program, args :: call
 
 export fn exec_capture(program: Str, read args: List[Str]) -> Result[std.process.ExecCapture, Str]:
-    let pair = std.kernel.process.process_exec_capture_try :: program, args :: call
-    if pair.0:
-        let payload = pair.1
-        let capture = std.process.ExecCapture :: status = payload.0, output = (payload.1.0, payload.1.1.0), utf8 = (payload.1.1.1.0, payload.1.1.1.1) :: call
-        return Result.Ok[std.process.ExecCapture, Str] :: capture :: call
-    return Result.Err[std.process.ExecCapture, Str] :: (std.kernel.error.last_error_take :: :: call) :: call
+    let capture = std.kernel.process.process_exec_capture :: program, args :: call
+    return match capture:
+        Result.Ok(payload) => Result.Ok[std.process.ExecCapture, Str] :: (std.process.ExecCapture :: status = payload.0, output = (payload.1.0, payload.1.1.0), utf8 = (payload.1.1.1.0, payload.1.1.1.1) :: call) :: call
+        Result.Err(err) => Result.Err[std.process.ExecCapture, Str] :: err :: call
 
 impl ExecCapture:
     fn success(read self: std.process.ExecCapture) -> Bool:

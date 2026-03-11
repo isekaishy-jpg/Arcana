@@ -23,7 +23,7 @@ Scope notes:
 - If bootstrap seams such as typed opaque app/runtime handles are later replaced, the successor model must stay explicit about resource family, ownership/validity expectations, and diagnostics; no erased generic-handle fallback is permitted.
 - Third-party Rust crates may sit under the implementation, but they must remain replaceable private details. Public `std` must not collapse into wrapper-shaped mirrors of crate APIs or crate-specific semantics.
 - Kernel/intrinsic bindings are implementation seams, not public-library design guidance.
-- Kernel/intrinsic bindings should stay split by runtime domain plus any narrow shared-error seam; do not reintroduce a catch-all host bucket that mixes args/env/path/fs/process/resource failure state into one module.
+- Kernel/intrinsic bindings should stay split by runtime domain and should carry failure through operation-local `Result[...]` returns; do not reintroduce a catch-all host bucket or out-of-band global error slot for args/env/path/fs/process/resource failure state.
 - Every `std` surface change must update this scope or `docs/specs/std/std/v1-status.md` in the same patch.
 - After this freeze point, `std` changes before selfhost should be limited to:
   - contract-preserving bug fixes,
@@ -51,6 +51,8 @@ Scope notes:
   - `std.memory`
 - Toolchain/bootstrap support that remains required before selfhost:
   - `std.manifest`
+    - scoped to Arcana `book.toml` / `Arcana.lock` parsing helpers
+    - not a generic TOML/JSON/YAML/serialization surface
 - Shared low-level types needed by the app/runtime substrate:
   - `std.types.core`
 - Low-level time and audio substrate needed by future Arcana-owned grimoire layers:

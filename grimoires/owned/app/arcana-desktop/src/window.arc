@@ -12,8 +12,8 @@ export fn open_cfg(read cfg: arcana_desktop.types.WindowConfig) -> Result[Window
 export fn alive(read win: Window) -> Bool:
     return std.window.alive :: win :: call
 
-export fn close(edit win: Window):
-    std.window.close :: win :: call
+export fn close(take win: Window) -> Result[Unit, Str]:
+    return std.window.close :: win :: call
 
 export fn size(read win: Window) -> (Int, Int):
     return std.window.size :: win :: call

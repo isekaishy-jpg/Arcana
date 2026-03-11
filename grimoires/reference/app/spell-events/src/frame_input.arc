@@ -6,5 +6,6 @@ export record FrameInput:
     wheel_y: Int
 
 export fn snapshot(read win: Window) -> FrameInput:
-    let pos = std.input.mouse_pos :: win :: call
-    return spell_events.frame_input.FrameInput :: mouse_x = pos.0, mouse_y = pos.1, wheel_y = (std.input.mouse_wheel_y :: win :: call) :: call
+    let frame = std.input.begin_frame :: win :: call
+    let pos = std.input.mouse_pos :: frame :: call
+    return spell_events.frame_input.FrameInput :: mouse_x = pos.0, mouse_y = pos.1, wheel_y = (std.input.mouse_wheel_y :: frame :: call) :: call

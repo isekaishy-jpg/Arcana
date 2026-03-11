@@ -454,10 +454,10 @@ fn assign_target_root_local<'a>(
 
 fn ownership_of_builtin_type(name: &str) -> OwnershipClass {
     match name {
-        "Int" | "Bool" | "RangeInt" | "ArenaId" | "FrameId" | "PoolId" | "AtomicInt"
-        | "AtomicBool" => OwnershipClass::Copy,
+        "Int" | "Unit" | "Bool" | "RangeInt" | "ArenaId" | "FrameId" | "PoolId"
+        | "AtomicInt" | "AtomicBool" => OwnershipClass::Copy,
         "Str" | "List" | "Array" | "Map" | "Arena" | "FrameArena" | "PoolArena" | "Task"
-        | "Thread" | "Channel" | "Mutex" => OwnershipClass::Move,
+        | "Thread" | "Channel" | "Mutex" | "InputFrame" => OwnershipClass::Move,
         _ => OwnershipClass::Unknown,
     }
 }
@@ -2746,6 +2746,7 @@ fn is_boundary_unsafe_builtin_name(name: &str) -> bool {
             | "RangeInt"
             | "Window"
             | "Image"
+            | "InputFrame"
             | "FileStream"
             | "AudioDevice"
             | "AudioBuffer"
@@ -4974,6 +4975,38 @@ mod tests {
     }
 
     #[test]
+    fn check_path_handles_owned_desktop_grimoire() {
+        let summary = check_path(&owned_app_root().join("arcana-desktop"))
+            .expect("owned desktop grimoire should check");
+        assert!(summary.package_count >= 2);
+        assert!(summary.module_count >= 6);
+    }
+
+    #[test]
+    fn check_path_handles_owned_graphics_grimoire() {
+        let summary = check_path(&owned_app_root().join("arcana-graphics"))
+            .expect("owned graphics grimoire should check");
+        assert!(summary.package_count >= 2);
+        assert!(summary.module_count >= 5);
+    }
+
+    #[test]
+    fn check_path_handles_owned_text_grimoire() {
+        let summary = check_path(&owned_app_root().join("arcana-text"))
+            .expect("owned text grimoire should check");
+        assert!(summary.package_count >= 2);
+        assert!(summary.module_count >= 4);
+    }
+
+    #[test]
+    fn check_path_handles_owned_audio_grimoire() {
+        let summary = check_path(&owned_app_root().join("arcana-audio"))
+            .expect("owned audio grimoire should check");
+        assert!(summary.package_count >= 2);
+        assert!(summary.module_count >= 5);
+    }
+
+    #[test]
     fn check_path_handles_builtin_foreword_example() {
         let summary = check_path(
             &reference_examples_root().join("forewords_builtin_app"),
@@ -5374,6 +5407,58 @@ mod tests {
     }
 
     #[test]
+    fn check_path_rejects_duplicate_top_level_symbols() {
+        let root = make_temp_package(
+            "typed_duplicate_top_level_symbol",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    "export fn mouse_in_window(read win: Window) -> Bool:\n    return false\nexport fn mouse_in_window(read win: Window) -> Bool:\n    return true\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("duplicate top-level symbol should fail");
+        assert!(err.contains("duplicate symbol `mouse_in_window`"), "{err}");
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_duplicate_directive_bindings() {
+        let root = make_temp_workspace(
+            "typed_duplicate_directive_binding",
+            &["app", "io", "text"],
+            &[
+                (
+                    "app/book.toml",
+                    "name = \"app\"\nkind = \"app\"\n\n[deps]\nio = { path = \"../io\" }\ntext = { path = \"../text\" }\n",
+                ),
+                (
+                    "app/src/shelf.arc",
+                    "use io as io\nuse text as io\nfn main() -> Int:\n    return 0\n",
+                ),
+                ("app/src/types.arc", ""),
+                ("io/book.toml", "name = \"io\"\nkind = \"lib\"\n"),
+                ("io/src/book.arc", "export fn print() -> Int:\n    return 0\n"),
+                ("io/src/types.arc", ""),
+                ("text/book.toml", "name = \"text\"\nkind = \"lib\"\n"),
+                ("text/src/book.arc", "export fn print() -> Int:\n    return 0\n"),
+                ("text/src/types.arc", ""),
+            ],
+        );
+
+        let err =
+            check_path(&root.join("app")).expect_err("duplicate directive binding should fail");
+        assert!(err.contains("duplicate binding `io`"), "{err}");
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
     fn check_path_rejects_return_borrow_of_local() {
         let root = make_temp_package(
             "typed_return_local_borrow",
@@ -5700,6 +5785,14 @@ mod tests {
 
     fn reference_root() -> PathBuf {
         repo_root().join("grimoires").join("reference")
+    }
+
+    fn owned_root() -> PathBuf {
+        repo_root().join("grimoires").join("owned")
+    }
+
+    fn owned_app_root() -> PathBuf {
+        owned_root().join("app")
     }
 
     fn reference_app_root() -> PathBuf {

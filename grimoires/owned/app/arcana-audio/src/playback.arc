@@ -12,8 +12,8 @@ export fn play_wav(read device: AudioDevice, path: Str) -> Result[AudioPlayback,
         Result.Ok(value) => std.audio.play_buffer :: device, value :: call
         Result.Err(err) => Result.Err[AudioPlayback, Str] :: err :: call
 
-export fn stop(read playback: AudioPlayback):
-    playback :: :: stop
+export fn stop(take playback: AudioPlayback) -> Result[Unit, Str]:
+    return playback :: :: stop
 
 export fn pause(read playback: AudioPlayback):
     playback :: :: pause

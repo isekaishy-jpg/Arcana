@@ -1,5 +1,4 @@
 import std.kernel.gfx
-import std.kernel.error
 import std.result
 import std.window
 use std.result.Result
@@ -103,10 +102,7 @@ export fn rgb(r: Int, g: Int, b: Int) -> Int:
     return std.kernel.gfx.canvas_rgb :: r, g, b :: call
 
 export fn image_load(path: Str) -> Result[Image, Str]:
-    let pair = std.kernel.gfx.image_load_try :: path :: call
-    if pair.0:
-        return Result.Ok[Image, Str] :: pair.1 :: call
-    return Result.Err[Image, Str] :: (std.kernel.error.last_error_take :: :: call) :: call
+    return std.kernel.gfx.image_load :: path :: call
 
 export fn image_size(read img: Image) -> (Int, Int):
     return std.kernel.gfx.canvas_image_size :: img :: call

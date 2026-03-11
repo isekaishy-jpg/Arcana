@@ -6,8 +6,8 @@ use std.result.Result
 export fn default_output() -> Result[AudioDevice, Str]:
     return std.audio.default_output :: :: call
 
-export fn close(read device: AudioDevice):
-    std.audio.output_close :: device :: call
+export fn close(take device: AudioDevice) -> Result[Unit, Str]:
+    return std.audio.output_close :: device :: call
 
 export fn default_output_config() -> arcana_audio.types.OutputConfig:
     return arcana_audio.types.OutputConfig :: gain_milli = 1000 :: call

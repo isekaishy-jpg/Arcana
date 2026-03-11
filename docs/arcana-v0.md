@@ -656,10 +656,11 @@ Desktop APIs are now shelf-first through toolchain std modules:
 - `std.window`:
   - `open -> Result[Window, Str]`, `alive`
   - `size`, `resized`, `fullscreen`, `minimized`, `maximized`, `focused`
-  - `set_title`, `set_resizable`, `set_fullscreen`, `set_minimized`, `set_maximized`, `set_topmost`, `set_cursor_visible`, `close`
+  - `set_title`, `set_resizable`, `set_fullscreen`, `set_minimized`, `set_maximized`, `set_topmost`, `set_cursor_visible`, `close -> Result[Unit, Str]`
 - `std.input`:
-  - `key_code`, `key_down`, `key_pressed`, `key_released`
-  - `mouse_button_code`, `mouse_pos`, `mouse_down`, `mouse_pressed`, `mouse_released`, `mouse_wheel_y`, `mouse_in_window`
+  - `begin_frame(read win) -> std.events.AppFrame`, `key_code`
+  - `key_down`, `key_pressed`, `key_released` on `std.events.AppFrame`
+  - `mouse_button_code`, `mouse_pos`, `mouse_down`, `mouse_pressed`, `mouse_released`, `mouse_wheel_y`, `mouse_in_window` on `std.events.AppFrame`
 
 Recommended app-facing layer:
 
@@ -681,11 +682,11 @@ Notes:
 - `std.canvas.fill`, `std.canvas.rect`, `std.canvas.label`, and `std.canvas.present` require `edit win`.
 - `std.canvas.rgb` clamps channels to `0..255`.
 - `std.canvas.rect` rejects negative width/height at runtime.
-- Input state is updated on `canvas.alive :: win :: call` and remains stable for that frame.
+- Edge-triggered input state is advanced explicitly by `std.input.begin_frame :: win :: call` or `std.events.pump :: win :: call`, both of which return `std.events.AppFrame` so per-frame input reads and drained events stay aligned at one public boundary.
 - Input/window/image APIs are main-thread-only.
 - `std.input.key_code` / `std.input.mouse_button_code` resolve string names at runtime.
 - Public typed event queue APIs are available through `std.events`.
-- `canvas.alive :: win :: call` is also the input/window lifecycle pump boundary.
+- `canvas.alive :: win :: call` is only a lifecycle query; it is not the input/event frame pump boundary.
 - `window.resized :: win :: call` is a per-frame edge flag.
 - `std.canvas.image_load` supports PNG-only in v0.12+.
 - Image blits use nearest-neighbor scaling and source-over alpha blending.
@@ -699,12 +700,13 @@ New modules:
 - `std.events`
 - `std.ecs`
 
-`std.events` provides typed queue access sourced from the same frame pump boundary:
+`std.events` provides typed queue access sourced from the explicit frame pump boundary:
 
-- `std.events.poll(read win) -> Option[std.events.AppEvent]`
-- `std.events.drain(read win) -> List[std.events.AppEvent]`
+- `std.events.poll(read frame: std.events.AppFrame) -> Option[std.events.AppEvent]`
+- `std.events.drain(read frame: std.events.AppFrame) -> List[std.events.AppEvent]`
+- `std.events.pump(read win) -> std.events.AppFrame`
 
-`std.events.poll` is sourced from a single backend event-record poll per step and returns `Option[...]` explicitly rather than relying on separate kind/payload probes in public std.
+`std.events.poll` and `std.events.drain` operate on the `std.events.AppFrame` produced by the explicit frame pump boundary rather than polling the window directly. `std.events.pump` returns both the drained event list and the frame-local input token for the same step.
 
 `std.events.AppEvent` variants:
 
@@ -722,6 +724,7 @@ Rewrite note:
 - `std.ecs` and `std.behaviors.step` remain first-party language/runtime surface.
 - `std.time` and `std.audio` are bootstrap-owned low-level substrate categories; higher-level loop and playback policy belongs in Arcana-owned grimoire layers.
 - `std.audio.default_output`, `std.audio.buffer_load_wav`, and `std.audio.play_buffer` are explicit `Result[...]` APIs.
+- `std.audio.output_close` and playback `stop` are consuming lifecycle operations with explicit `Result[Unit, Str]`.
 - carried historical `std.app` fixed-step helpers are convenience corpus only and are not part of the current std surface.
 
 `std.ecs` currently provides scheduler-phase helpers for behavior/system stepping:
@@ -955,7 +958,7 @@ Policy:
   - `stream_read(read stream, max_bytes) -> Result[Array[Int], Str]`
   - `stream_write(read stream, bytes) -> Result[Int, Str]`
   - `stream_eof(read stream) -> Result[Bool, Str]`
-  - `stream_close(read stream) -> Result[Bool, Str]`
+  - `stream_close(take stream) -> Result[Unit, Str]`
 
 Host-tool bootstrap example:
 

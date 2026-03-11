@@ -1,14 +1,17 @@
-intrinsic fn default_output_try() -> (Bool, AudioDevice) = AudioDefaultOutputTry
-intrinsic fn output_close(read device: AudioDevice) = AudioOutputClose
+import std.result
+use std.result.Result
+
+intrinsic fn default_output() -> Result[AudioDevice, Str] = AudioDefaultOutputTry
+intrinsic fn output_close(read device: AudioDevice) -> Result[Unit, Str] = AudioOutputClose
 intrinsic fn output_sample_rate_hz(read device: AudioDevice) -> Int = AudioOutputSampleRateHz
 intrinsic fn output_channels(read device: AudioDevice) -> Int = AudioOutputChannels
-intrinsic fn buffer_load_wav_try(path: Str) -> (Bool, AudioBuffer) = AudioBufferLoadWavTry
+intrinsic fn buffer_load_wav(path: Str) -> Result[AudioBuffer, Str] = AudioBufferLoadWavTry
 intrinsic fn buffer_frames(read buffer: AudioBuffer) -> Int = AudioBufferFrames
 intrinsic fn buffer_channels(read buffer: AudioBuffer) -> Int = AudioBufferChannels
 intrinsic fn buffer_sample_rate_hz(read buffer: AudioBuffer) -> Int = AudioBufferSampleRateHz
-intrinsic fn play_buffer_try(read device: AudioDevice, read buffer: AudioBuffer) -> (Bool, AudioPlayback) = AudioPlayBufferTry
+intrinsic fn play_buffer(read device: AudioDevice, read buffer: AudioBuffer) -> Result[AudioPlayback, Str] = AudioPlayBufferTry
 intrinsic fn output_set_gain_milli(read device: AudioDevice, milli: Int) = AudioOutputSetGainMilli
-intrinsic fn playback_stop(read playback: AudioPlayback) = AudioPlaybackStop
+intrinsic fn playback_stop(read playback: AudioPlayback) -> Result[Unit, Str] = AudioPlaybackStop
 intrinsic fn playback_pause(read playback: AudioPlayback) = AudioPlaybackPause
 intrinsic fn playback_resume(read playback: AudioPlayback) = AudioPlaybackResume
 intrinsic fn playback_playing(read playback: AudioPlayback) -> Bool = AudioPlaybackPlaying

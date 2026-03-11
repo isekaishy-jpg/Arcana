@@ -4196,6 +4196,7 @@ fn type_text_is_boundary_safe(text: &str) -> bool {
                 | "RangeInt"
                 | "Window"
                 | "Image"
+                | "InputFrame"
                 | "FileStream"
                 | "AudioDevice"
                 | "AudioBuffer"

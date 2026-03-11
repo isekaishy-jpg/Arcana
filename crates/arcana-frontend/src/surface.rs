@@ -89,6 +89,7 @@ pub(crate) fn is_builtin_type_name(name: &str) -> bool {
     matches!(
         name,
         "Int"
+            | "Unit"
             | "Str"
             | "Bool"
             | "RangeInt"
@@ -109,6 +110,7 @@ pub(crate) fn is_builtin_type_name(name: &str) -> bool {
             | "AtomicBool"
             | "Window"
             | "Image"
+            | "InputFrame"
             | "FileStream"
             | "AudioDevice"
             | "AudioBuffer"

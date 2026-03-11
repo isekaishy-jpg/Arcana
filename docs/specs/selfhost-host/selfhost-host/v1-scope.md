@@ -17,6 +17,7 @@ Scope notes:
 - `std.fs` binary APIs: `read_bytes`, `write_bytes`
 - `std.fs` stream APIs: `stream_open_read`, `stream_open_write`, `stream_read`, `stream_write`, `stream_eof`, `stream_close`
   - stream APIs use an explicit typed `FileStream` handle, not raw `Int` stream ids
+  - `stream_close` is a consuming `take` operation and returns `Result[Unit, Str]`
 - `std.process`: `exec_status`, `exec_capture`
 - `std.bytes`: UTF-8 bytes conversions and explicit byte-array helpers (`len`, `at`, `slice`, `starts_with`, `ends_with`, `find`, `contains`, `concat`, `sha256_hex`, byte-buffer helpers)
 - `std.text`: byte-oriented UTF-8 helpers plus explicit search/trim/split/join/repeat/int-parse helpers (`len_bytes`, `byte_at`, `slice_bytes`, `starts_with`, `ends_with`, `find`, `contains`, `split_lines`, `split`, `join`, `trim_start`, `trim_end`, `trim`, `repeat`, `to_int`, `from_int`)
