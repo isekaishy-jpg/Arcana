@@ -77,11 +77,11 @@ export fn validate_byte(value: Int) -> Bool:
 export fn new_buf() -> List[Int]:
     return std.collections.list.new[Int] :: :: call
 
-export fn buf_push(edit buf: List[Int], value: Int) -> Result[Bool, Str]:
+export fn buf_push(edit buf: List[Int], value: Int) -> Result[Unit, Str]:
     if not (std.bytes.validate_byte :: value :: call):
-        return Result.Err[Bool, Str] :: "byte value out of range 0..255" :: call
+        return Result.Err[Unit, Str] :: "byte value out of range 0..255" :: call
     buf :: value :: push
-    return Result.Ok[Bool, Str] :: true :: call
+    return Result.Ok[Unit, Str] :: :: call
 
 export fn buf_extend(edit buf: List[Int], read bytes: Array[Int]) -> Result[Int, Str]:
     let mut added = 0

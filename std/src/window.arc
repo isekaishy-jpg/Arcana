@@ -2,6 +2,8 @@ import std.kernel.gfx
 import std.result
 use std.result.Result
 
+export opaque type Window as move, boundary_unsafe
+
 export fn open(title: Str, width: Int, height: Int) -> Result[Window, Str]:
     return std.kernel.gfx.window_open :: title, width, height :: call
 

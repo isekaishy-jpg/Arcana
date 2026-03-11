@@ -15,10 +15,10 @@ export fn list_dir_or_empty(path: Str) -> List[Str]:
 
 export fn mkdir_all_or_false(path: Str) -> Bool:
     return match std.fs.mkdir_all :: path :: call:
-        Result.Ok(ok) => ok
+        Result.Ok(_) => true
         Result.Err(_) => false
 
 export fn write_text_or_false(path: Str, text: Str) -> Bool:
     return match std.fs.write_text :: path, text :: call:
-        Result.Ok(ok) => ok
+        Result.Ok(_) => true
         Result.Err(_) => false

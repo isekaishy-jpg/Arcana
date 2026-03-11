@@ -1,6 +1,7 @@
 import std.canvas
 import std.window
 import std.input
+import std.events
 import std.behaviors
 import std.concurrent
 import std.io
@@ -22,7 +23,8 @@ async fn main() -> Int:
     let b = canvas.rgb :: 20, 16, 30 :: call
 
     while canvas.alive :: win :: call:
-        if input.key_pressed :: win, esc :: call:
+        let frame = std.events.pump :: win :: call
+        if input.key_pressed :: frame, esc :: call:
             window.close :: win :: call
         if frames % 2 == 0:
             canvas.fill :: win, a :: call

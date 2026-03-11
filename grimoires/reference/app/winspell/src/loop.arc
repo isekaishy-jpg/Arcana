@@ -1,5 +1,6 @@
 import winspell.window
 import winspell.draw
+use std.window.Window
 
 export record FrameConfig:
     clear: Int

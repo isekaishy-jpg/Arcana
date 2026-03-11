@@ -2,6 +2,7 @@ import std.canvas
 import std.window
 import std.result
 use std.result.Result
+use std.window.Window
 
 export fn open(title: Str, width: Int, height: Int) -> Result[Window, Str]:
     return std.canvas.open :: title, width, height :: call

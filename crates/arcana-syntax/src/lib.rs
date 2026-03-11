@@ -46,6 +46,7 @@ pub enum SymbolKind {
     System,
     Record,
     Enum,
+    OpaqueType,
     Trait,
     Behavior,
     Const,
@@ -58,11 +59,48 @@ impl SymbolKind {
             Self::System => "system",
             Self::Record => "record",
             Self::Enum => "enum",
+            Self::OpaqueType => "opaque type",
             Self::Trait => "trait",
             Self::Behavior => "behavior",
             Self::Const => "const",
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpaqueOwnershipPolicy {
+    Copy,
+    Move,
+}
+
+impl OpaqueOwnershipPolicy {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Copy => "copy",
+            Self::Move => "move",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpaqueBoundaryPolicy {
+    Safe,
+    Unsafe,
+}
+
+impl OpaqueBoundaryPolicy {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Safe => "boundary_safe",
+            Self::Unsafe => "boundary_unsafe",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OpaqueTypePolicy {
+    pub ownership: OpaqueOwnershipPolicy,
+    pub boundary: OpaqueBoundaryPolicy,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -462,6 +500,7 @@ pub struct SymbolDecl {
     pub params: Vec<ParamDecl>,
     pub return_type: Option<String>,
     pub behavior_attrs: Vec<BehaviorAttr>,
+    pub opaque_policy: Option<OpaqueTypePolicy>,
     pub forewords: Vec<ForewordApp>,
     pub intrinsic_impl: Option<String>,
     pub body: SymbolBody,
@@ -904,6 +943,12 @@ fn parse_symbol_entry(entry: &RawBlockEntry) -> Result<Option<SymbolDecl>, Strin
                 entry.span.line, entry.span.column
             ));
         }
+        if rest.starts_with("opaque type ") {
+            return Err(format!(
+                "{}:{}: malformed opaque type declaration",
+                entry.span.line, entry.span.column
+            ));
+        }
         return Ok(None);
     };
     if symbol.intrinsic_impl.is_some() && !entry.children.is_empty() {
@@ -928,6 +973,9 @@ fn parse_symbol_header(trimmed: &str, span: Span) -> Option<SymbolDecl> {
         return Some(symbol);
     }
     if let Some(symbol) = parse_system_symbol(rest, exported, span) {
+        return Some(symbol);
+    }
+    if let Some(symbol) = parse_opaque_symbol(rest, exported, span) {
         return Some(symbol);
     }
     let (is_async, rest) = if let Some(rest) = rest.strip_prefix("async ") {
@@ -961,6 +1009,7 @@ fn parse_symbol_header(trimmed: &str, span: Span) -> Option<SymbolDecl> {
             params: signature.params,
             return_type: signature.return_type,
             behavior_attrs: Vec::new(),
+            opaque_policy: None,
             forewords: Vec::new(),
             intrinsic_impl: None,
             body: SymbolBody::None,
@@ -993,6 +1042,7 @@ fn parse_behavior_symbol(rest: &str, exported: bool, span: Span) -> Option<Symbo
         params: signature.params,
         return_type: signature.return_type,
         behavior_attrs: attrs,
+        opaque_policy: None,
         forewords: Vec::new(),
         intrinsic_impl: None,
         body: SymbolBody::None,
@@ -1027,6 +1077,7 @@ fn parse_system_symbol(rest: &str, exported: bool, span: Span) -> Option<SymbolD
         params: signature.params,
         return_type: signature.return_type,
         behavior_attrs: attrs,
+        opaque_policy: None,
         forewords: Vec::new(),
         intrinsic_impl: None,
         body: SymbolBody::None,
@@ -1055,6 +1106,7 @@ fn parse_intrinsic_symbol(rest: &str, exported: bool, span: Span) -> Option<Symb
         params: signature.params,
         return_type: signature.return_type,
         behavior_attrs: Vec::new(),
+        opaque_policy: None,
         forewords: Vec::new(),
         intrinsic_impl: Some(binding.to_string()),
         body: SymbolBody::None,
@@ -1062,6 +1114,73 @@ fn parse_intrinsic_symbol(rest: &str, exported: bool, span: Span) -> Option<Symb
         rollups: Vec::new(),
         surface_text: format!("intrinsic fn {} = {}", signature_text.trim(), binding),
         span,
+    })
+}
+
+fn parse_opaque_symbol(rest: &str, exported: bool, span: Span) -> Option<SymbolDecl> {
+    let header = rest.strip_prefix("opaque type ")?.trim();
+    let name = parse_symbol_name(header)?;
+    let after_name = &header[name.len()..];
+    let (type_params, where_clause, remainder) = parse_type_params_and_where(after_name.trim())?;
+    let remainder = remainder.trim();
+    let policy_text = remainder.strip_prefix("as ")?;
+    let policy = parse_opaque_type_policy(policy_text)?;
+    Some(SymbolDecl {
+        name,
+        kind: SymbolKind::OpaqueType,
+        exported,
+        is_async: false,
+        type_params,
+        where_clause,
+        params: Vec::new(),
+        return_type: None,
+        behavior_attrs: Vec::new(),
+        opaque_policy: Some(policy),
+        forewords: Vec::new(),
+        intrinsic_impl: None,
+        body: SymbolBody::None,
+        statements: Vec::new(),
+        rollups: Vec::new(),
+        surface_text: format!("opaque type {header}"),
+        span,
+    })
+}
+
+fn parse_opaque_type_policy(text: &str) -> Option<OpaqueTypePolicy> {
+    let mut ownership = None;
+    let mut boundary = None;
+    for atom in split_top_level(text.trim(), ',') {
+        let atom = atom.trim();
+        if atom.is_empty() {
+            continue;
+        }
+        match atom {
+            "copy" => {
+                if ownership.replace(OpaqueOwnershipPolicy::Copy).is_some() {
+                    return None;
+                }
+            }
+            "move" => {
+                if ownership.replace(OpaqueOwnershipPolicy::Move).is_some() {
+                    return None;
+                }
+            }
+            "boundary_safe" => {
+                if boundary.replace(OpaqueBoundaryPolicy::Safe).is_some() {
+                    return None;
+                }
+            }
+            "boundary_unsafe" => {
+                if boundary.replace(OpaqueBoundaryPolicy::Unsafe).is_some() {
+                    return None;
+                }
+            }
+            _ => return None,
+        }
+    }
+    Some(OpaqueTypePolicy {
+        ownership: ownership?,
+        boundary: boundary?,
     })
 }
 
@@ -1075,7 +1194,11 @@ fn collect_symbol_surface(trimmed: &str, kind: &SymbolKind, entries: &[RawBlockE
 
     if matches!(
         kind,
-        SymbolKind::Fn | SymbolKind::Behavior | SymbolKind::System | SymbolKind::Const
+        SymbolKind::Fn
+            | SymbolKind::Behavior
+            | SymbolKind::System
+            | SymbolKind::Const
+            | SymbolKind::OpaqueType
     ) {
         return surface_lines.join("\n");
     }
@@ -1100,7 +1223,11 @@ fn parse_symbol_signature(kind: SymbolKind, rest: &str) -> Option<ParsedSymbolSi
     let after_name = &header[name.len()..];
     let (type_params, where_clause, params, return_type) = match kind {
         SymbolKind::Fn | SymbolKind::System => parse_function_signature_tail(after_name)?,
-        SymbolKind::Record | SymbolKind::Enum | SymbolKind::Trait | SymbolKind::Behavior => {
+        SymbolKind::Record
+        | SymbolKind::Enum
+        | SymbolKind::Trait
+        | SymbolKind::Behavior
+        | SymbolKind::OpaqueType => {
             parse_named_type_tail(after_name)?
         }
         SymbolKind::Const => parse_const_signature_tail(after_name),
@@ -1366,7 +1493,14 @@ fn parse_impl_decl(entry: &RawBlockEntry) -> Result<Option<ImplDecl>, String> {
 
 fn parse_symbol_body(kind: &SymbolKind, entries: &[RawBlockEntry]) -> Result<SymbolBody, String> {
     match kind {
-        SymbolKind::Fn | SymbolKind::Const | SymbolKind::Behavior | SymbolKind::System => {
+        SymbolKind::Fn
+        | SymbolKind::Const
+        | SymbolKind::Behavior
+        | SymbolKind::System
+        | SymbolKind::OpaqueType => {
+            if matches!(kind, SymbolKind::OpaqueType) && !entries.is_empty() {
+                return Err("opaque types cannot own nested blocks".to_string());
+            }
             Ok(SymbolBody::None)
         }
         SymbolKind::Record => Ok(SymbolBody::Record {
@@ -1456,7 +1590,11 @@ fn parse_symbol_statements(
         SymbolKind::Fn | SymbolKind::Behavior | SymbolKind::System => {
             parse_statement_block(entries, 0)
         }
-        SymbolKind::Trait | SymbolKind::Record | SymbolKind::Enum | SymbolKind::Const => {
+        SymbolKind::Trait
+        | SymbolKind::Record
+        | SymbolKind::Enum
+        | SymbolKind::Const
+        | SymbolKind::OpaqueType => {
             Ok(Vec::new())
         }
     }
@@ -3612,6 +3750,7 @@ enum ForewordTarget {
     Function,
     Record,
     Enum,
+    OpaqueType,
     Trait,
     TraitMethod,
     ImplMethod,
@@ -3648,6 +3787,7 @@ fn symbol_foreword_target(kind: SymbolKind) -> ForewordTarget {
         SymbolKind::Fn => ForewordTarget::Function,
         SymbolKind::Record => ForewordTarget::Record,
         SymbolKind::Enum => ForewordTarget::Enum,
+        SymbolKind::OpaqueType => ForewordTarget::OpaqueType,
         SymbolKind::Trait => ForewordTarget::Trait,
         SymbolKind::Behavior => ForewordTarget::Behavior,
         SymbolKind::System => ForewordTarget::System,
@@ -3662,6 +3802,7 @@ fn foreword_target_allows(target: ForewordTarget, foreword_name: &str) -> bool {
             ForewordTarget::Function
                 | ForewordTarget::Record
                 | ForewordTarget::Enum
+                | ForewordTarget::OpaqueType
                 | ForewordTarget::Trait
                 | ForewordTarget::TraitMethod
                 | ForewordTarget::ImplMethod
@@ -3680,6 +3821,7 @@ fn foreword_target_allows(target: ForewordTarget, foreword_name: &str) -> bool {
                 | ForewordTarget::Function
                 | ForewordTarget::Record
                 | ForewordTarget::Enum
+                | ForewordTarget::OpaqueType
                 | ForewordTarget::TraitMethod
                 | ForewordTarget::ImplMethod
                 | ForewordTarget::Const
@@ -4179,31 +4321,146 @@ fn type_text_is_mut_ref(text: &str) -> bool {
     rest.starts_with("mut ") || (rest.starts_with('\'') && rest.contains(" mut "))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BuiltinOwnershipClass {
+    Copy,
+    Move,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BuiltinTypeInfo {
+    pub name: &'static str,
+    pub ownership: BuiltinOwnershipClass,
+    pub boundary_unsafe: bool,
+}
+
+// Single source of truth for the remaining language-reserved builtin types.
+// Runtime/resource handles are now source-declared opaque types in `std.*`.
+const BUILTIN_TYPE_INFOS: &[BuiltinTypeInfo] = &[
+    BuiltinTypeInfo {
+        name: "Int",
+        ownership: BuiltinOwnershipClass::Copy,
+        boundary_unsafe: false,
+    },
+    BuiltinTypeInfo {
+        name: "Unit",
+        ownership: BuiltinOwnershipClass::Copy,
+        boundary_unsafe: false,
+    },
+    BuiltinTypeInfo {
+        name: "Str",
+        ownership: BuiltinOwnershipClass::Move,
+        boundary_unsafe: false,
+    },
+    BuiltinTypeInfo {
+        name: "Bool",
+        ownership: BuiltinOwnershipClass::Copy,
+        boundary_unsafe: false,
+    },
+    BuiltinTypeInfo {
+        name: "RangeInt",
+        ownership: BuiltinOwnershipClass::Copy,
+        boundary_unsafe: true,
+    },
+    BuiltinTypeInfo {
+        name: "List",
+        ownership: BuiltinOwnershipClass::Move,
+        boundary_unsafe: false,
+    },
+    BuiltinTypeInfo {
+        name: "Array",
+        ownership: BuiltinOwnershipClass::Move,
+        boundary_unsafe: false,
+    },
+    BuiltinTypeInfo {
+        name: "Map",
+        ownership: BuiltinOwnershipClass::Move,
+        boundary_unsafe: false,
+    },
+    BuiltinTypeInfo {
+        name: "Arena",
+        ownership: BuiltinOwnershipClass::Move,
+        boundary_unsafe: true,
+    },
+    BuiltinTypeInfo {
+        name: "ArenaId",
+        ownership: BuiltinOwnershipClass::Copy,
+        boundary_unsafe: true,
+    },
+    BuiltinTypeInfo {
+        name: "FrameArena",
+        ownership: BuiltinOwnershipClass::Move,
+        boundary_unsafe: true,
+    },
+    BuiltinTypeInfo {
+        name: "FrameId",
+        ownership: BuiltinOwnershipClass::Copy,
+        boundary_unsafe: true,
+    },
+    BuiltinTypeInfo {
+        name: "PoolArena",
+        ownership: BuiltinOwnershipClass::Move,
+        boundary_unsafe: true,
+    },
+    BuiltinTypeInfo {
+        name: "PoolId",
+        ownership: BuiltinOwnershipClass::Copy,
+        boundary_unsafe: true,
+    },
+    BuiltinTypeInfo {
+        name: "Task",
+        ownership: BuiltinOwnershipClass::Move,
+        boundary_unsafe: true,
+    },
+    BuiltinTypeInfo {
+        name: "Thread",
+        ownership: BuiltinOwnershipClass::Move,
+        boundary_unsafe: true,
+    },
+    BuiltinTypeInfo {
+        name: "Channel",
+        ownership: BuiltinOwnershipClass::Move,
+        boundary_unsafe: true,
+    },
+    BuiltinTypeInfo {
+        name: "Mutex",
+        ownership: BuiltinOwnershipClass::Move,
+        boundary_unsafe: true,
+    },
+    BuiltinTypeInfo {
+        name: "AtomicInt",
+        ownership: BuiltinOwnershipClass::Copy,
+        boundary_unsafe: true,
+    },
+    BuiltinTypeInfo {
+        name: "AtomicBool",
+        ownership: BuiltinOwnershipClass::Copy,
+        boundary_unsafe: true,
+    },
+];
+
+pub fn builtin_type_info(name: &str) -> Option<BuiltinTypeInfo> {
+    BUILTIN_TYPE_INFOS
+        .iter()
+        .find(|info| info.name == name)
+        .copied()
+}
+
+pub fn is_builtin_type_name(name: &str) -> bool {
+    builtin_type_info(name).is_some()
+}
+
+pub fn builtin_ownership_class(name: &str) -> Option<BuiltinOwnershipClass> {
+    builtin_type_info(name).map(|info| info.ownership)
+}
+
+pub fn is_builtin_boundary_unsafe_type_name(name: &str) -> bool {
+    builtin_type_info(name).is_some_and(|info| info.boundary_unsafe)
+}
+
 fn type_text_is_boundary_safe(text: &str) -> bool {
     for token in type_name_tokens(text) {
-        if matches!(
-            token.as_str(),
-            "Task"
-                | "Thread"
-                | "Channel"
-                | "Mutex"
-                | "Arena"
-                | "ArenaId"
-                | "FrameArena"
-                | "FrameId"
-                | "PoolArena"
-                | "PoolId"
-                | "RangeInt"
-                | "Window"
-                | "Image"
-                | "InputFrame"
-                | "FileStream"
-                | "AudioDevice"
-                | "AudioBuffer"
-                | "AudioPlayback"
-                | "AtomicInt"
-                | "AtomicBool"
-        ) {
+        if is_builtin_boundary_unsafe_type_name(token.as_str()) {
             return false;
         }
     }
@@ -5350,14 +5607,16 @@ fn is_identifier_continue(ch: char) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::fs;
     use std::path::{Path, PathBuf};
 
     use super::freeze::{FROZEN_AST_NODE_KINDS, FROZEN_TOKEN_KINDS};
     use super::{
         AssignTarget, BinaryOp, ChainConnector, ChainIntroducer, ChainStep, DirectiveKind, Expr,
-        ForewordApp, ForewordArg, HeaderAttachment, MatchPattern, ParamMode, PhraseArg, Statement,
-        StatementKind, SymbolBody, SymbolKind, UnaryOp, parse_module,
+        ForewordApp, ForewordArg, HeaderAttachment, MatchPattern, OpaqueBoundaryPolicy,
+        OpaqueOwnershipPolicy, OpaqueTypePolicy, ParamMode, PhraseArg, Statement, StatementKind,
+        SymbolBody, SymbolKind, UnaryOp, BUILTIN_TYPE_INFOS, builtin_type_info, parse_module,
     };
 
     fn expr_is_path(expr: &Expr, name: &str) -> bool {
@@ -6916,5 +7175,75 @@ mod tests {
         let err = parse_module("fn main() -> Int:\n    return match value:\n")
             .expect_err("match should fail");
         assert!(err.contains("malformed `match` expression"), "{err}");
+    }
+
+    #[test]
+    fn builtin_type_info_names_are_unique() {
+        let mut seen = BTreeSet::new();
+        for info in BUILTIN_TYPE_INFOS {
+            assert!(
+                seen.insert(info.name),
+                "duplicate builtin type entry `{}`",
+                info.name
+            );
+        }
+    }
+
+    #[test]
+    fn parse_module_handles_opaque_type_declarations() {
+        let parsed = parse_module(
+            "export opaque type Window as move, boundary_unsafe\nopaque type Token[T] as move, boundary_safe\n",
+        )
+        .expect("opaque types should parse");
+
+        assert_eq!(parsed.symbols.len(), 2);
+        assert_eq!(parsed.symbols[0].kind, SymbolKind::OpaqueType);
+        assert!(parsed.symbols[0].exported);
+        assert_eq!(parsed.symbols[0].name, "Window");
+        assert_eq!(parsed.symbols[0].opaque_policy.expect("policy"), OpaqueTypePolicy {
+            ownership: OpaqueOwnershipPolicy::Move,
+            boundary: OpaqueBoundaryPolicy::Unsafe,
+        });
+
+        assert_eq!(parsed.symbols[1].kind, SymbolKind::OpaqueType);
+        assert_eq!(parsed.symbols[1].name, "Token");
+        assert_eq!(parsed.symbols[1].type_params, vec!["T".to_string()]);
+        assert_eq!(parsed.symbols[1].opaque_policy.expect("policy"), OpaqueTypePolicy {
+            ownership: OpaqueOwnershipPolicy::Move,
+            boundary: OpaqueBoundaryPolicy::Safe,
+        });
+    }
+
+    #[test]
+    fn parse_module_rejects_invalid_opaque_type_declarations() {
+        for source in [
+            "opaque type Window\n",
+            "opaque type Window as move\n",
+            "opaque type Window as boundary_safe\n",
+            "opaque type Window as move, move, boundary_safe\n",
+            "opaque type Window as move, boundary_safe, nope\n",
+            "opaque type Window as move, boundary_safe:\n    fn build() -> Int:\n        return 0\n",
+        ] {
+            let err = parse_module(source).expect_err("opaque declaration should fail");
+            assert!(err.contains("opaque type"), "{err}");
+        }
+    }
+
+    #[test]
+    fn runtime_handles_are_not_builtin_types() {
+        for name in [
+            "Window",
+            "Image",
+            "FileStream",
+            "AudioDevice",
+            "AudioBuffer",
+            "AudioPlayback",
+            "AppFrame",
+        ] {
+            assert!(
+                builtin_type_info(name).is_none(),
+                "{name} should be source-declared opaque type, not builtin"
+            );
+        }
     }
 }

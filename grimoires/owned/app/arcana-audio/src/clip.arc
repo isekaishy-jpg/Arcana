@@ -2,6 +2,7 @@ import std.audio
 import std.result
 import arcana_audio.types
 use std.result.Result
+use std.audio.AudioBuffer
 
 export fn load_wav(path: Str) -> Result[AudioBuffer, Str]:
     return std.audio.buffer_load_wav :: path :: call

@@ -1,6 +1,8 @@
 import std.canvas
 import std.result
 use std.result.Result
+use std.canvas.Image
+use std.window.Window
 
 export record RectSpec:
     pos: (Int, Int)

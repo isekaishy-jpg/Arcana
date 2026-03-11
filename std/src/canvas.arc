@@ -2,6 +2,9 @@ import std.kernel.gfx
 import std.result
 import std.window
 use std.result.Result
+use std.window.Window
+
+export opaque type Image as move, boundary_unsafe
 
 export record RectSpec:
     pos: (Int, Int)

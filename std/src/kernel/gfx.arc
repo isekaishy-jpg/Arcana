@@ -1,5 +1,8 @@
 import std.result
+use std.canvas.Image
+use std.events.AppFrame
 use std.result.Result
+use std.window.Window
 
 intrinsic fn window_open(title: Str, width: Int, height: Int) -> Result[Window, Str] = WindowOpenTry
 intrinsic fn canvas_alive(read win: Window) -> Bool = CanvasAlive
@@ -30,18 +33,16 @@ intrinsic fn window_set_minimized(edit win: Window, enabled: Bool) = WindowSetMi
 intrinsic fn window_set_maximized(edit win: Window, enabled: Bool) = WindowSetMaximized
 intrinsic fn window_set_topmost(edit win: Window, enabled: Bool) = WindowSetTopmost
 intrinsic fn window_set_cursor_visible(edit win: Window, enabled: Bool) = WindowSetCursorVisible
-intrinsic fn window_close(read win: Window) -> Result[Unit, Str] = WindowClose
-
-intrinsic fn input_frame_begin(read win: Window) -> InputFrame = InputFrameBegin
+intrinsic fn window_close(take win: Window) -> Result[Unit, Str] = WindowClose
 
 intrinsic fn input_key_code(name: Str) -> Int = InputKeyCode
-intrinsic fn input_key_down(read frame: InputFrame, key: Int) -> Bool = InputKeyDown
-intrinsic fn input_key_pressed(read frame: InputFrame, key: Int) -> Bool = InputKeyPressed
-intrinsic fn input_key_released(read frame: InputFrame, key: Int) -> Bool = InputKeyReleased
+intrinsic fn input_key_down(read frame: AppFrame, key: Int) -> Bool = InputKeyDown
+intrinsic fn input_key_pressed(read frame: AppFrame, key: Int) -> Bool = InputKeyPressed
+intrinsic fn input_key_released(read frame: AppFrame, key: Int) -> Bool = InputKeyReleased
 intrinsic fn input_mouse_button_code(name: Str) -> Int = InputMouseButtonCode
-intrinsic fn input_mouse_pos(read frame: InputFrame) -> (Int, Int) = InputMousePos
-intrinsic fn input_mouse_down(read frame: InputFrame, button: Int) -> Bool = InputMouseDown
-intrinsic fn input_mouse_pressed(read frame: InputFrame, button: Int) -> Bool = InputMousePressed
-intrinsic fn input_mouse_released(read frame: InputFrame, button: Int) -> Bool = InputMouseReleased
-intrinsic fn input_mouse_wheel_y(read frame: InputFrame) -> Int = InputMouseWheelY
-intrinsic fn input_mouse_in_window(read frame: InputFrame) -> Bool = InputMouseInWindow
+intrinsic fn input_mouse_pos(read frame: AppFrame) -> (Int, Int) = InputMousePos
+intrinsic fn input_mouse_down(read frame: AppFrame, button: Int) -> Bool = InputMouseDown
+intrinsic fn input_mouse_pressed(read frame: AppFrame, button: Int) -> Bool = InputMousePressed
+intrinsic fn input_mouse_released(read frame: AppFrame, button: Int) -> Bool = InputMouseReleased
+intrinsic fn input_mouse_wheel_y(read frame: AppFrame) -> Int = InputMouseWheelY
+intrinsic fn input_mouse_in_window(read frame: AppFrame) -> Bool = InputMouseInWindow

@@ -24,6 +24,7 @@ reexport std.fs
 reexport std.process
 reexport std.bytes
 reexport std.text
+reexport std.config
 reexport std.manifest
 reexport std.memory
 reexport std.iter

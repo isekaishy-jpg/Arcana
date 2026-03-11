@@ -2,6 +2,10 @@ import std.kernel.audio
 import std.result
 use std.result.Result
 
+export opaque type AudioDevice as move, boundary_unsafe
+export opaque type AudioBuffer as move, boundary_unsafe
+export opaque type AudioPlayback as move, boundary_unsafe
+
 export fn default_output() -> Result[AudioDevice, Str]:
     return std.kernel.audio.default_output :: :: call
 
@@ -26,20 +30,20 @@ export fn buffer_channels(read buffer: AudioBuffer) -> Int:
 export fn buffer_sample_rate_hz(read buffer: AudioBuffer) -> Int:
     return std.kernel.audio.buffer_sample_rate_hz :: buffer :: call
 
-export fn play_buffer(read device: AudioDevice, read buffer: AudioBuffer) -> Result[AudioPlayback, Str]:
+export fn play_buffer(edit device: AudioDevice, read buffer: AudioBuffer) -> Result[AudioPlayback, Str]:
     return std.kernel.audio.play_buffer :: device, buffer :: call
 
-export fn output_set_gain_milli(read device: AudioDevice, milli: Int):
+export fn output_set_gain_milli(edit device: AudioDevice, milli: Int):
     std.kernel.audio.output_set_gain_milli :: device, milli :: call
 
 impl AudioPlayback:
     fn stop(take self: AudioPlayback) -> Result[Unit, Str]:
         return std.kernel.audio.playback_stop :: self :: call
 
-    fn pause(read self: AudioPlayback):
+    fn pause(edit self: AudioPlayback):
         std.kernel.audio.playback_pause :: self :: call
 
-    fn resume(read self: AudioPlayback):
+    fn resume(edit self: AudioPlayback):
         std.kernel.audio.playback_resume :: self :: call
 
     fn playing(read self: AudioPlayback) -> Bool:
@@ -51,10 +55,10 @@ impl AudioPlayback:
     fn finished(read self: AudioPlayback) -> Bool:
         return std.kernel.audio.playback_finished :: self :: call
 
-    fn set_gain_milli(read self: AudioPlayback, milli: Int):
+    fn set_gain_milli(edit self: AudioPlayback, milli: Int):
         std.kernel.audio.playback_set_gain_milli :: self, milli :: call
 
-    fn set_looping(read self: AudioPlayback, looping: Bool):
+    fn set_looping(edit self: AudioPlayback, looping: Bool):
         std.kernel.audio.playback_set_looping :: self, looping :: call
 
     fn looping(read self: AudioPlayback) -> Bool:

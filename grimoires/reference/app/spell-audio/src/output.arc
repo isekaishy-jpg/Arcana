@@ -2,6 +2,7 @@ import std.audio
 import std.result
 import spell_audio.types
 use std.result.Result
+use std.audio.AudioDevice
 
 export fn default_output() -> Result[AudioDevice, Str]:
     return std.audio.default_output :: :: call

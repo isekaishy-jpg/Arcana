@@ -1,6 +1,7 @@
 import std.canvas
 import std.window
 import std.input
+import std.events
 import std.collections.array
 import std.concurrent
 use std.canvas as canvas
@@ -23,10 +24,11 @@ fn main() -> Int:
     let mut tick = 0
 
     while canvas.alive :: win :: call:
-        if input.key_pressed :: win, key_escape :: call:
+        let frame = std.events.pump :: win :: call
+        if input.key_pressed :: frame, key_escape :: call:
             window.close :: win :: call
 
-        if input.key_pressed :: win, key_space :: call:
+        if input.key_pressed :: frame, key_space :: call:
             let mut y = 0
             while y < h:
                 let mut x = 0

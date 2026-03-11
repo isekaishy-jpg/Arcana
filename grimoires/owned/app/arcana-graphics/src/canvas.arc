@@ -1,5 +1,6 @@
 import std.canvas
 import arcana_graphics.types
+use std.window.Window
 
 export fn fill(edit win: Window, color: Int):
     std.canvas.fill :: win, color :: call

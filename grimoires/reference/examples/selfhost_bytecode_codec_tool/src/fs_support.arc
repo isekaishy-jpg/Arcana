@@ -10,5 +10,5 @@ export fn read_bytes_or_empty(path: Str) -> Array[Int]:
 
 export fn write_bytes_or_false(path: Str, read bytes: Array[Int]) -> Bool:
     return match std.fs.write_bytes :: path, bytes :: call:
-        Result.Ok(ok) => ok
+        Result.Ok(_) => true
         Result.Err(_) => false

@@ -181,6 +181,9 @@ fn render_symbol_api_fingerprint(
         ),
         HirSymbolKind::Record => render_record_api_fingerprint(workspace, resolved_module, symbol),
         HirSymbolKind::Enum => render_enum_api_fingerprint(workspace, resolved_module, symbol),
+        HirSymbolKind::OpaqueType => {
+            render_opaque_type_api_fingerprint(workspace, resolved_module, symbol)
+        }
         HirSymbolKind::Trait => render_trait_api_fingerprint(workspace, resolved_module, symbol),
         HirSymbolKind::Behavior => {
             render_behavior_api_fingerprint(workspace, resolved_module, symbol)
@@ -193,6 +196,36 @@ fn render_symbol_api_fingerprint(
         ),
     };
     append_symbol_contract_metadata(base, workspace, resolved_module, symbol)
+}
+
+fn render_opaque_type_api_fingerprint(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    symbol: &HirSymbol,
+) -> String {
+    let scope = TypeScope::default().with_params(&symbol.type_params);
+    let mut rendered = String::new();
+    rendered.push_str("opaque:");
+    rendered.push_str(&symbol.name);
+    rendered.push('[');
+    rendered.push_str(&symbol.type_params.join(","));
+    rendered.push(']');
+    if let Some(where_clause) = &symbol.where_clause {
+        rendered.push_str("|where=");
+        rendered.push_str(&canonicalize_surface_text(
+            workspace,
+            resolved_module,
+            &scope,
+            where_clause,
+        ));
+    }
+    if let Some(policy) = symbol.opaque_policy {
+        rendered.push_str("|ownership=");
+        rendered.push_str(policy.ownership.as_str());
+        rendered.push_str("|boundary=");
+        rendered.push_str(policy.boundary.as_str());
+    }
+    rendered
 }
 
 fn render_callable_symbol_api_fingerprint(

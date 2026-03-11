@@ -2,6 +2,7 @@ import std.window
 import std.result
 import arcana_desktop.types
 use std.result.Result
+use std.window.Window
 
 export fn open(title: Str, width: Int, height: Int) -> Result[Window, Str]:
     return std.window.open :: title, width, height :: call

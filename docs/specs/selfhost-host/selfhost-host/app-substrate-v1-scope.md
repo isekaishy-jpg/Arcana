@@ -10,7 +10,7 @@ Scope notes:
 - ECS scheduling/components remain first-party language/runtime surface. They are not demoted to showcase-only helpers.
 - Carried convenience modules such as `std.app` fixed-step helpers and `std.tooling` planning helpers are not ratified here; they may be rebuilt, relocated, or dropped unless later approved by an explicit scope.
 - Higher-level desktop loop, routing, and audio policy belongs in Arcana-owned grimoire layers above this substrate, not in the substrate itself.
-- Current typed opaque resource handles in this substrate are bootstrap-approved seams, not a promise that the long-term rewrite-owned runtime resource model will keep the exact same public handle shape after bootstrap.
+- Current source-declared opaque resource handles in this substrate are bootstrap-approved seams, not a promise that the long-term rewrite-owned runtime resource model will keep the exact same public handle shape after bootstrap.
 - Any future handle-model review must preserve Arcana's explicit/unambiguous doctrine: typed resource families, explicit validity/ownership rules, deterministic diagnostics, and no erased catch-all runtime handle.
 
 ## Included
@@ -19,22 +19,22 @@ Scope notes:
   - `size`, `resized`, `fullscreen`, `minimized`, `maximized`, `focused`
   - `set_title`, `set_resizable`, `set_fullscreen`, `set_minimized`, `set_maximized`, `set_topmost`, `set_cursor_visible`, `close -> Result[Unit, Str]`
 - `std.input`:
-  - `begin_frame(read win) -> std.events.AppFrame`
   - `key_code`
-  - `key_down`, `key_pressed`, `key_released` on `std.events.AppFrame`
-  - `mouse_button_code`, `mouse_pos`, `mouse_down`, `mouse_pressed`, `mouse_released`, `mouse_wheel_y`, `mouse_in_window` on `std.events.AppFrame`
+  - `key_down`, `key_pressed`, `key_released` on `AppFrame`
+  - `mouse_button_code`, `mouse_pos`, `mouse_down`, `mouse_pressed`, `mouse_released`, `mouse_wheel_y`, `mouse_in_window` on `AppFrame`
 - `std.canvas`:
   - bootstrap compatibility wrappers `open -> Result[Window, Str]`, `alive`
   - `fill`, `rect`, `rect_draw`, `line`, `line_draw`, `circle_fill`, `circle_fill_draw`
   - `label`, `label_draw`, `label_size`, `present`, `rgb`
   - `image_load -> Result[Image, Str]`, `image_size`, `blit`, `blit_scaled`, `blit_region`
-  - current bootstrap seam uses typed opaque `Window` and `Image` handles plus explicit failure results for resource-creation/load boundaries
+  - current bootstrap seam uses source-declared opaque `Window` and `Image` handles plus explicit failure results for resource-creation/load boundaries
   - primitive draw records `RectSpec`, `LineSpec`, `CircleFillSpec`, and `LabelSpec`
 - `std.events`:
-  - `poll -> Option[std.events.AppEvent]`, `drain -> List[std.events.AppEvent]`, `pump -> std.events.AppFrame`
+  - `poll(edit frame) -> Option[std.events.AppEvent]`, `drain(take frame) -> List[std.events.AppEvent]`, `pump(edit win) -> AppFrame`
   - typed `std.events.AppEvent` queue surface sourced from the same frame pump boundary, with polling defined by a single backend event record per step rather than separate kind/payload probes
-  - `std.events.AppFrame` carries both the drained event list and the internal frame-local input token for that step
-  - edge-triggered input state is advanced explicitly by `std.input.begin_frame` or `std.events.pump`, and `std.events.poll` / `std.events.drain` no longer bypass that frame token
+  - `AppFrame` is a move-only source-declared opaque per-step frame handle shared by `std.events` and `std.input`
+  - edge-triggered input state is advanced explicitly by `std.events.pump`, which mutates frame state through `edit win`
+  - `std.events.poll` consumes one event from `AppFrame`, and `std.events.drain` consumes the remaining frame-local queue instead of rereading it
 - `std.time`:
   - monotonic time points and durations
   - low-level sleep/frame-timing primitives
@@ -42,8 +42,8 @@ Scope notes:
   - low-level audio device, buffer, and playback substrate
   - device info/config hooks: `default_output -> Result[AudioDevice, Str]`, `output_close -> Result[Unit, Str]`, `output_sample_rate_hz`, `output_channels`, `output_set_gain_milli`
   - buffer hooks: `buffer_load_wav -> Result[AudioBuffer, Str]`, `buffer_frames`, `buffer_channels`, `buffer_sample_rate_hz`
-  - playback hooks: `play_buffer -> Result[AudioPlayback, Str]`, `stop -> Result[Unit, Str]`, `pause`, `resume`, `playing`, `paused`, `finished`, `set_gain_milli`, `set_looping`, `looping`, `position_frames`
-  - current bootstrap seam uses typed opaque audio handles plus explicit failure results for device/buffer/playback acquisition
+  - playback hooks: `play_buffer(edit device, read buffer) -> Result[AudioPlayback, Str]`, `stop -> Result[Unit, Str]`, `pause`, `resume`, `playing`, `paused`, `finished`, `set_gain_milli`, `set_looping`, `looping`, `position_frames`
+  - current bootstrap seam uses source-declared opaque audio handles plus explicit failure results for device/buffer/playback acquisition
 - Primitive graphics/text support sufficient for real apps/showcases:
   - solid fills
   - rectangle draw

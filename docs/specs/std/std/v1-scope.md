@@ -50,9 +50,24 @@ Scope notes:
   - `std.collections.*`
   - `std.memory`
 - Toolchain/bootstrap support that remains required before selfhost:
+  - `std.config`
+    - generic, deterministic section/key config-document parser substrate
+    - exposes a semantic keyed document model with stable section/key order, not a flat parser-entry bag
+    - suitable for Arcana-side config/manifest-style readers
+    - not a generic TOML/JSON/YAML/serialization umbrella
   - `std.manifest`
-    - scoped to Arcana `book.toml` / `Arcana.lock` parsing helpers
-    - not a generic TOML/JSON/YAML/serialization surface
+    - Arcana-specific `book.toml` / `Arcana.lock` helpers built on `std.config`
+    - not the source of truth for the Rust rewrite package parser and not a generic data-format layer
+- Source-declared runtime/resource opaque types owned by approved std domains:
+  - `std.window.Window`
+  - `std.canvas.Image`
+  - `std.fs.FileStream`
+  - `std.events.AppFrame`
+  - `std.audio.AudioDevice`
+  - `std.audio.AudioBuffer`
+  - `std.audio.AudioPlayback`
+  - these are declared in std source via `opaque type ... as <ownership>, <boundary>` rather than held as Rust-only builtin names
+  - pre-selfhost use of opaque type declarations is currently restricted to package `std`
 - Shared low-level types needed by the app/runtime substrate:
   - `std.types.core`
 - Low-level time and audio substrate needed by future Arcana-owned grimoire layers:

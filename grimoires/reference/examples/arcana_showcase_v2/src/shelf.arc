@@ -188,25 +188,32 @@ fn main() -> Int:
     t :: :: join
 
     while canvas.alive :: win :: call:
-        let frame_events = events.drain :: win :: call
-        stats["events"] += frame_events :: :: len
-        for ev in frame_events:
-            let k = match ev:
-                events.AppEvent.WindowCloseRequested => 1
-                events.AppEvent.WindowResized(sz) => 2
-                events.AppEvent.KeyDown(_) => 3
-                events.AppEvent.KeyUp(_) => 4
-                events.AppEvent.MouseDown(_) => 5
-                events.AppEvent.MouseUp(_) => 6
-                events.AppEvent.MouseMove(_) => 7
-                events.AppEvent.MouseWheelY(_) => 8
-                events.AppEvent.WindowFocused(_) => 9
+        let mut frame = events.pump :: win :: call
+        let mut event_count = 0
+        while true:
+            let next = events.poll :: frame :: call
+            let k = match next:
+                Option.Some(ev) => match ev:
+                    events.AppEvent.WindowCloseRequested => 1
+                    events.AppEvent.WindowResized(_) => 2
+                    events.AppEvent.KeyDown(_) => 3
+                    events.AppEvent.KeyUp(_) => 4
+                    events.AppEvent.MouseDown(_) => 5
+                    events.AppEvent.MouseUp(_) => 6
+                    events.AppEvent.MouseMove(_) => 7
+                    events.AppEvent.MouseWheelY(_) => 8
+                    events.AppEvent.WindowFocused(_) => 9
+                Option.None => 0
+            if k == 0:
+                break
+            event_count += 1
             if k == 1:
                 window.close :: win :: call
             if k == 2:
                 stats["resizes"] += 1
+        stats["events"] += event_count
 
-        if input.key_pressed :: win, key_escape :: call:
+        if input.key_pressed :: frame, key_escape :: call:
             window.close :: win :: call
 
         let dims = window.size :: win :: call
@@ -220,13 +227,13 @@ fn main() -> Int:
             stats["frames"] += 1
 
             let mut move_x = 0
-            if input.key_down :: win, key_left :: call:
+            if input.key_down :: frame, key_left :: call:
                 move_x -= player.speed
-            if input.key_down :: win, key_right :: call:
+            if input.key_down :: frame, key_right :: call:
                 move_x += player.speed
-            if input.key_down :: win, key_a :: call:
+            if input.key_down :: frame, key_a :: call:
                 move_x -= player.speed
-            if input.key_down :: win, key_d :: call:
+            if input.key_down :: frame, key_d :: call:
                 move_x += player.speed
 
             player.x += move_x
@@ -298,16 +305,15 @@ fn main() -> Int:
             if alive == 0:
                 window.close :: win :: call
 
-            if input.key_pressed :: win, key_space :: call:
+            if input.key_pressed :: frame, key_space :: call:
                 arena: flashes :> player.x, player.y <: make_flash
                     forward :=> flash_id_echo
 
             if stats["frames"] > 720:
                 window.close :: win :: call
 
-        let ev_len = frame_events :: :: len
         let mut bg = color_bg
-        if ev_len > 0:
+        if event_count > 0:
             bg = color_event
         canvas.fill :: win, bg :: call
 

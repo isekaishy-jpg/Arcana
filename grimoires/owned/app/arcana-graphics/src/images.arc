@@ -2,6 +2,8 @@ import std.canvas
 import std.result
 import arcana_graphics.types
 use std.result.Result
+use std.canvas.Image
+use std.window.Window
 
 export fn load(path: Str) -> Result[Image, Str]:
     return std.canvas.image_load :: path :: call

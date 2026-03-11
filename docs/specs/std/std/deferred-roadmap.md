@@ -62,9 +62,9 @@ status: deferred
 
 id: STD-D6
 title: manifest and package substrate beyond explicit baseline helpers
-reason_deferred: `std.path` now includes canonical path resolution and explicit prefix handling, and `std.manifest` now includes explicit workspace-member, dependency-path, and lockfile lookup helpers. The remaining deferred work is only whatever structured manifest/rendering support Arcana-side tooling later proves it still needs.
+reason_deferred: `std.path` now includes canonical path resolution and explicit prefix handling, `std.config` now provides the generic section/key parser substrate, and `std.manifest` now stays as a thin Arcana-specific wrapper over that substrate. The remaining deferred work is only whatever richer manifest/rendering support Arcana-side tooling later proves it still needs.
 target_window: before any Arcana-owned package/workspace driver needs more than the current explicit path and manifest baseline
-trigger_condition: ready_when=Arcana-side tooling needs richer manifest tables, typed lockfile rendering, or other deterministic package helpers beyond the current explicit lookup set; verify=the promoted helpers stay substrate-level and deterministic rather than becoming a generic config framework; blocked_by=the current package/build driver still lives in the Rust rewrite.
+trigger_condition: ready_when=Arcana-side tooling needs richer manifest tables, typed lockfile rendering, or other deterministic package helpers beyond the current explicit lookup set; verify=the promoted helpers stay substrate-level and deterministic without turning `std.config` into a broad TOML/JSON/YAML/serde umbrella; blocked_by=the current package/build driver still lives in the Rust rewrite.
 owner: Arcana std/tooling team
-acceptance_criteria: std grows only the additional, narrowly named package/manifest pieces the Arcana-side package layer actually needs beyond the current baseline, without turning std into a generic config framework.
+acceptance_criteria: std grows only the additional, narrowly named package/manifest pieces the Arcana-side package layer actually needs beyond the current baseline, while keeping `std.config` as a narrow deterministic config-document substrate rather than a broad serialization framework.
 status: deferred

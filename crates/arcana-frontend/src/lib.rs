@@ -15,10 +15,13 @@ use arcana_package::{
     MemberFingerprints, WorkspaceGraph, load_workspace_hir as load_package_workspace_hir,
     load_workspace_hir_from_graph as load_package_workspace_hir_from_graph,
 };
-use arcana_syntax::Span;
+use arcana_syntax::{
+    BuiltinOwnershipClass, Span, builtin_ownership_class, builtin_type_info,
+    is_builtin_boundary_unsafe_type_name, is_builtin_type_name,
+};
 use surface::{
-    ResolvedSymbolRef, SurfaceSymbolUse, collect_surface_refs, is_builtin_type_name,
-    lookup_symbol_path, split_simple_path, surface_use_name, symbol_matches_surface_use,
+    ResolvedSymbolRef, SurfaceSymbolUse, collect_surface_refs, lookup_symbol_path,
+    split_simple_path, surface_use_name, symbol_matches_surface_use,
 };
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -453,13 +456,26 @@ fn assign_target_root_local<'a>(
 }
 
 fn ownership_of_builtin_type(name: &str) -> OwnershipClass {
-    match name {
-        "Int" | "Unit" | "Bool" | "RangeInt" | "ArenaId" | "FrameId" | "PoolId"
-        | "AtomicInt" | "AtomicBool" => OwnershipClass::Copy,
-        "Str" | "List" | "Array" | "Map" | "Arena" | "FrameArena" | "PoolArena" | "Task"
-        | "Thread" | "Channel" | "Mutex" | "InputFrame" => OwnershipClass::Move,
-        _ => OwnershipClass::Unknown,
+    match builtin_ownership_class(name) {
+        Some(BuiltinOwnershipClass::Copy) => OwnershipClass::Copy,
+        Some(BuiltinOwnershipClass::Move) => OwnershipClass::Move,
+        None => OwnershipClass::Unknown,
     }
+}
+
+fn ownership_of_opaque_symbol(symbol: &HirSymbol) -> OwnershipClass {
+    match symbol.opaque_policy.map(|policy| policy.ownership) {
+        Some(arcana_hir::HirOpaqueOwnershipPolicy::Copy) => OwnershipClass::Copy,
+        Some(arcana_hir::HirOpaqueOwnershipPolicy::Move) => OwnershipClass::Move,
+        None => OwnershipClass::Unknown,
+    }
+}
+
+fn opaque_symbol_is_boundary_unsafe(symbol: &HirSymbol) -> bool {
+    matches!(
+        symbol.opaque_policy.map(|policy| policy.boundary),
+        Some(arcana_hir::HirOpaqueBoundaryPolicy::Unsafe)
+    )
 }
 
 fn infer_type_ownership(
@@ -490,6 +506,7 @@ fn infer_type_ownership(
         return OwnershipClass::Unknown;
     };
     match symbol_ref.symbol.kind {
+        HirSymbolKind::OpaqueType => ownership_of_opaque_symbol(symbol_ref.symbol),
         HirSymbolKind::Record | HirSymbolKind::Enum => OwnershipClass::Move,
         _ => OwnershipClass::Unknown,
     }
@@ -945,7 +962,7 @@ fn validate_call_param_mode_flow(
                 }
             }
             Some(arcana_hir::HirParamMode::Edit) => {
-                if expr_place_mutability(expr, scope).is_none() {
+                let Some(mutability) = expr_place_mutability(expr, scope) else {
                     push_type_contract_diagnostic(
                         module_path,
                         span,
@@ -956,7 +973,7 @@ fn validate_call_param_mode_flow(
                         ),
                     );
                     continue;
-                }
+                };
                 let Some(name) = expr_place_root_local(expr, scope) else {
                     continue;
                 };
@@ -966,6 +983,16 @@ fn validate_call_param_mode_flow(
                         span,
                         diagnostics,
                         format!("use of moved local `{name}`"),
+                    );
+                } else if matches!(mutability, PlaceMutability::Immutable) {
+                    push_type_contract_diagnostic(
+                        module_path,
+                        span,
+                        diagnostics,
+                        format!(
+                            "cannot pass immutable local `{name}` to edit parameter `{}`",
+                            param.name
+                        ),
                     );
                 } else if state.has_mut_borrow(name) {
                     push_type_contract_diagnostic(
@@ -2009,6 +2036,41 @@ fn validate_return_borrow_ties(
     }
 }
 
+fn validate_opaque_constructor_semantics(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    module_path: &Path,
+    type_scope: &TypeScope,
+    scope: &ValueScope,
+    subject: &HirExpr,
+    qualifier: &str,
+    span: Span,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if qualifier != "call" {
+        return;
+    }
+    let Some(symbol) = resolve_qualified_phrase_target_symbol(
+        workspace,
+        resolved_module,
+        type_scope,
+        scope,
+        subject,
+        qualifier,
+    ) else {
+        return;
+    };
+    if symbol.kind != HirSymbolKind::OpaqueType {
+        return;
+    }
+    diagnostics.push(Diagnostic {
+        path: module_path.to_path_buf(),
+        line: span.line,
+        column: span.column,
+        message: format!("opaque type `{}` is not constructible", symbol.name),
+    });
+}
+
 pub fn check_sources<'a, I>(sources: I) -> Result<CheckSummary, String>
 where
     I: IntoIterator<Item = &'a str>,
@@ -2250,6 +2312,26 @@ fn validate_module_semantics(
     }
 
     for symbol in &module.symbols {
+        if symbol.kind == HirSymbolKind::OpaqueType && package.summary.package_name != "std" {
+            diagnostics.push(Diagnostic {
+                path: module_path.clone(),
+                line: symbol.span.line,
+                column: symbol.span.column,
+                message: "opaque type declarations are restricted to package `std` in v1"
+                    .to_string(),
+            });
+        }
+        if symbol.kind == HirSymbolKind::OpaqueType && is_builtin_type_name(&symbol.name) {
+            diagnostics.push(Diagnostic {
+                path: module_path.clone(),
+                line: symbol.span.line,
+                column: symbol.span.column,
+                message: format!(
+                    "opaque type `{}` conflicts with reserved builtin type name",
+                    symbol.name
+                ),
+            });
+        }
         validate_symbol_surface_types(
             workspace,
             resolved_module,
@@ -2308,6 +2390,14 @@ fn validate_symbol_surface_types(
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     let scope = inherited_scope.with_params(&symbol.type_params);
+    if symbol.kind == HirSymbolKind::OpaqueType && symbol.opaque_policy.is_none() {
+        diagnostics.push(Diagnostic {
+            path: module_path.to_path_buf(),
+            line: symbol.span.line,
+            column: symbol.span.column,
+            message: format!("opaque type `{}` is missing required policy atoms", symbol.name),
+        });
+    }
     for param in &symbol.params {
         validate_type_surface_text(
             workspace,
@@ -2719,41 +2809,19 @@ fn boundary_symbol_is_safe(
                 )
             })
         }),
+        _ if symbol_ref.symbol.kind == HirSymbolKind::OpaqueType => {
+            !opaque_symbol_is_boundary_unsafe(symbol_ref.symbol)
+        }
         _ => scope.allows_type_name(&symbol_ref.symbol.name),
     }
 }
 
 fn is_boundary_safe_builtin_name(name: &str) -> bool {
-    matches!(
-        name,
-        "Int" | "Bool" | "Str" | "Unit" | "List" | "Array" | "Map"
-    )
+    builtin_type_info(name).is_some_and(|info| !info.boundary_unsafe)
 }
 
 fn is_boundary_unsafe_builtin_name(name: &str) -> bool {
-    matches!(
-        name,
-        "Task"
-            | "Thread"
-            | "Channel"
-            | "Mutex"
-            | "Arena"
-            | "ArenaId"
-            | "FrameArena"
-            | "FrameId"
-            | "PoolArena"
-            | "PoolId"
-            | "RangeInt"
-            | "Window"
-            | "Image"
-            | "InputFrame"
-            | "FileStream"
-            | "AudioDevice"
-            | "AudioBuffer"
-            | "AudioPlayback"
-            | "AtomicInt"
-            | "AtomicBool"
-    )
+    is_builtin_boundary_unsafe_type_name(name)
 }
 
 fn parse_symbol_or_string_literal(value: &str) -> Option<String> {
@@ -3588,6 +3656,7 @@ fn validate_expr_semantics(
         HirExpr::QualifiedPhrase {
             subject,
             args,
+            qualifier,
             attached,
             ..
         } => {
@@ -3624,6 +3693,17 @@ fn validate_expr_semantics(
                     diagnostics,
                 );
             }
+            validate_opaque_constructor_semantics(
+                workspace,
+                resolved_module,
+                module_path,
+                type_scope,
+                scope,
+                subject,
+                qualifier,
+                span,
+                diagnostics,
+            );
         }
         HirExpr::Await { expr } => validate_expr_semantics(
             workspace,
@@ -5576,6 +5656,30 @@ mod tests {
     }
 
     #[test]
+    fn check_path_rejects_immutable_local_edit_param_call() {
+        let root = make_temp_package(
+            "typed_edit_immutable_local",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    "fn bump(edit n: Int):\n    n = n + 1\nfn main() -> Int:\n    let x = 1\n    bump :: x :: call\n    return 0\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("edit call on immutable local should fail");
+        assert!(
+            err.contains("cannot pass immutable local `x` to edit parameter `n`"),
+            "{err}"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
     fn check_path_rejects_method_style_take_use_after_move() {
         let root = make_temp_package(
             "typed_method_take_move",
@@ -5592,6 +5696,177 @@ mod tests {
 
         let err = check_path(&root).expect_err("method-style take move should fail");
         assert!(err.contains("use of moved local `s`"), "{err}");
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_window_use_after_close() {
+        let std_dep = repo_root()
+            .join("std")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let root = make_temp_package(
+            "typed_window_use_after_close",
+            "app",
+            &[("std", std_dep.as_str())],
+            &[
+                (
+                    "src/shelf.arc",
+                    "import std.window\nuse std.window.Window\nfn bad(take win: Window) -> Int:\n    std.window.close :: win :: call\n    let alive = std.window.alive :: win :: call\n    return 0\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("window use after close should fail");
+        assert!(err.contains("use of moved local `win`"), "{err}");
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_stream_use_after_close() {
+        let std_dep = repo_root()
+            .join("std")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let root = make_temp_package(
+            "typed_stream_use_after_close",
+            "app",
+            &[("std", std_dep.as_str())],
+            &[
+                (
+                    "src/shelf.arc",
+                    "import std.fs\nuse std.fs.FileStream\nfn bad(take stream: FileStream) -> Int:\n    std.fs.stream_close :: stream :: call\n    let done = std.fs.stream_eof :: stream :: call\n    return 0\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("stream use after close should fail");
+        assert!(err.contains("use of moved local `stream`"), "{err}");
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_opaque_type_outside_std() {
+        let root = make_temp_package(
+            "opaque_type_outside_std",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    "export opaque type Token as move, boundary_safe\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("opaque types outside std should fail");
+        assert!(
+            err.contains("opaque type declarations are restricted to package `std`"),
+            "{err}"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_accepts_std_owned_opaque_type_impl_target() {
+        let root = make_temp_package(
+            "std",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    "export opaque type Token[T] as move, boundary_safe\nimpl[T] Token[T]:\n    fn id(read self: Token[T]) -> Int:\n        return 0\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        check_path(&root).expect("std opaque type impl target should check");
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_std_opaque_type_builtin_name_collision() {
+        let root = make_temp_package(
+            "std",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    "export opaque type Int as move, boundary_safe\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("builtin-name opaque type should fail");
+        assert!(
+            err.contains("opaque type `Int` conflicts with reserved builtin type name"),
+            "{err}"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_opaque_type_constructor_use() {
+        let std_dep = repo_root()
+            .join("std")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let root = make_temp_package(
+            "opaque_type_constructor_use",
+            "app",
+            &[("std", std_dep.as_str())],
+            &[
+                (
+                    "src/shelf.arc",
+                    "use std.window.Window\nfn bad() -> Int:\n    let win = Window :: :: call\n    return 0\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("opaque constructors should fail");
+        assert!(err.contains("opaque type `Window` is not constructible"), "{err}");
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_boundary_unsafe_std_opaque_type() {
+        let std_dep = repo_root()
+            .join("std")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let root = make_temp_package(
+            "opaque_type_boundary_contract",
+            "app",
+            &[("std", std_dep.as_str())],
+            &[
+                (
+                    "src/shelf.arc",
+                    "use std.window.Window\n#boundary[target = \"lua\"]\nexport fn bad(read win: Window) -> Int:\n    return 0\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("boundary-unsafe opaque type should fail");
+        assert!(
+            err.contains("type `Window` is not boundary-safe for target `lua`"),
+            "{err}"
+        );
 
         fs::remove_dir_all(root).expect("cleanup should succeed");
     }

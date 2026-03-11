@@ -5,8 +5,10 @@ use std::path::{Path, PathBuf};
 
 use arcana_syntax::{
     AssignOp as ParsedAssignOp, DirectiveKind as ParsedDirectiveKind, Expr as ParsedExpr,
-    ParamMode as ParsedParamMode, ParsedModule, Span, StatementKind as ParsedStatementKind,
-    SymbolKind as ParsedSymbolKind, parse_module,
+    OpaqueBoundaryPolicy as ParsedOpaqueBoundaryPolicy,
+    OpaqueOwnershipPolicy as ParsedOpaqueOwnershipPolicy,
+    OpaqueTypePolicy as ParsedOpaqueTypePolicy, ParamMode as ParsedParamMode, ParsedModule, Span,
+    StatementKind as ParsedStatementKind, SymbolKind as ParsedSymbolKind, parse_module,
 };
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -47,6 +49,7 @@ pub enum HirSymbolKind {
     System,
     Record,
     Enum,
+    OpaqueType,
     Trait,
     Behavior,
     Const,
@@ -59,11 +62,48 @@ impl HirSymbolKind {
             Self::System => "system",
             Self::Record => "record",
             Self::Enum => "enum",
+            Self::OpaqueType => "opaque_type",
             Self::Trait => "trait",
             Self::Behavior => "behavior",
             Self::Const => "const",
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HirOpaqueOwnershipPolicy {
+    Copy,
+    Move,
+}
+
+impl HirOpaqueOwnershipPolicy {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Copy => "copy",
+            Self::Move => "move",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HirOpaqueBoundaryPolicy {
+    Safe,
+    Unsafe,
+}
+
+impl HirOpaqueBoundaryPolicy {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Safe => "boundary_safe",
+            Self::Unsafe => "boundary_unsafe",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HirOpaqueTypePolicy {
+    pub ownership: HirOpaqueOwnershipPolicy,
+    pub boundary: HirOpaqueBoundaryPolicy,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -77,6 +117,7 @@ pub struct HirSymbol {
     pub params: Vec<HirParam>,
     pub return_type: Option<String>,
     pub behavior_attrs: Vec<HirBehaviorAttr>,
+    pub opaque_policy: Option<HirOpaqueTypePolicy>,
     pub forewords: Vec<HirForewordApp>,
     pub intrinsic_impl: Option<String>,
     pub body: HirSymbolBody,
@@ -550,6 +591,7 @@ impl HirSymbol {
             HirSymbolKind::Fn | HirSymbolKind::System => render_function_signature(self),
             HirSymbolKind::Record => render_record_signature(self),
             HirSymbolKind::Enum => render_enum_signature(self),
+            HirSymbolKind::OpaqueType => render_opaque_signature(self),
             HirSymbolKind::Trait => render_trait_signature(self),
             HirSymbolKind::Behavior => render_behavior_signature(self),
             _ => self.surface_text.clone(),
@@ -850,6 +892,7 @@ pub fn lower_parsed_module(
                         value: attr.value.clone(),
                     })
                     .collect(),
+                opaque_policy: symbol.opaque_policy.as_ref().map(lower_opaque_policy),
                 forewords: lower_forewords(&symbol.forewords),
                 intrinsic_impl: symbol.intrinsic_impl.clone(),
                 body: lower_symbol_body(&symbol.body),
@@ -978,6 +1021,28 @@ fn render_trait_signature(symbol: &HirSymbol) -> String {
         lines.extend(methods.iter().map(render_function_signature));
     }
     lines.join("\n")
+}
+
+fn render_opaque_signature(symbol: &HirSymbol) -> String {
+    let mut rendered = String::new();
+    rendered.push_str("opaque type ");
+    rendered.push_str(&symbol.name);
+    if !symbol.type_params.is_empty() || symbol.where_clause.is_some() {
+        rendered.push('[');
+        let mut parts = symbol.type_params.clone();
+        if let Some(where_clause) = &symbol.where_clause {
+            parts.push(format!("where {where_clause}"));
+        }
+        rendered.push_str(&parts.join(", "));
+        rendered.push(']');
+    }
+    if let Some(policy) = symbol.opaque_policy {
+        rendered.push_str(" as ");
+        rendered.push_str(policy.ownership.as_str());
+        rendered.push_str(", ");
+        rendered.push_str(policy.boundary.as_str());
+    }
+    rendered
 }
 
 fn render_behavior_signature(symbol: &HirSymbol) -> String {
@@ -2192,9 +2257,23 @@ fn lower_symbol_kind(kind: &ParsedSymbolKind) -> HirSymbolKind {
         ParsedSymbolKind::System => HirSymbolKind::System,
         ParsedSymbolKind::Record => HirSymbolKind::Record,
         ParsedSymbolKind::Enum => HirSymbolKind::Enum,
+        ParsedSymbolKind::OpaqueType => HirSymbolKind::OpaqueType,
         ParsedSymbolKind::Trait => HirSymbolKind::Trait,
         ParsedSymbolKind::Behavior => HirSymbolKind::Behavior,
         ParsedSymbolKind::Const => HirSymbolKind::Const,
+    }
+}
+
+fn lower_opaque_policy(policy: &ParsedOpaqueTypePolicy) -> HirOpaqueTypePolicy {
+    HirOpaqueTypePolicy {
+        ownership: match policy.ownership {
+            ParsedOpaqueOwnershipPolicy::Copy => HirOpaqueOwnershipPolicy::Copy,
+            ParsedOpaqueOwnershipPolicy::Move => HirOpaqueOwnershipPolicy::Move,
+        },
+        boundary: match policy.boundary {
+            ParsedOpaqueBoundaryPolicy::Safe => HirOpaqueBoundaryPolicy::Safe,
+            ParsedOpaqueBoundaryPolicy::Unsafe => HirOpaqueBoundaryPolicy::Unsafe,
+        },
     }
 }
 
@@ -2272,6 +2351,7 @@ fn lower_trait_or_impl_method(method: &arcana_syntax::SymbolDecl) -> HirSymbol {
                 value: attr.value.clone(),
             })
             .collect(),
+        opaque_policy: method.opaque_policy.as_ref().map(lower_opaque_policy),
         forewords: lower_forewords(&method.forewords),
         intrinsic_impl: method.intrinsic_impl.clone(),
         body: lower_symbol_body(&method.body),
@@ -2655,6 +2735,28 @@ mod tests {
 
     fn expr_is_str_literal(expr: &HirExpr, text: &str) -> bool {
         matches!(expr, HirExpr::StrLiteral { text: value } if value == text)
+    }
+
+    #[test]
+    fn lower_module_handles_opaque_type_declarations() {
+        let module = lower_module_text(
+            "pkg.types",
+            "export opaque type Window as move, boundary_unsafe\nopaque type Token[T] as move, boundary_safe\n",
+        )
+        .expect("opaque types should lower");
+
+        assert_eq!(module.symbols.len(), 2);
+        assert_eq!(module.symbols[0].kind, HirSymbolKind::OpaqueType);
+        assert_eq!(module.symbols[0].name, "Window");
+        let policy = module.symbols[0].opaque_policy.expect("opaque policy");
+        assert_eq!(policy.ownership, super::HirOpaqueOwnershipPolicy::Move);
+        assert_eq!(policy.boundary, super::HirOpaqueBoundaryPolicy::Unsafe);
+
+        assert_eq!(module.symbols[1].kind, HirSymbolKind::OpaqueType);
+        assert_eq!(module.symbols[1].type_params, vec!["T".to_string()]);
+        let policy = module.symbols[1].opaque_policy.expect("opaque policy");
+        assert_eq!(policy.ownership, super::HirOpaqueOwnershipPolicy::Move);
+        assert_eq!(policy.boundary, super::HirOpaqueBoundaryPolicy::Safe);
     }
 
     fn chain_step_texts(steps: &[HirChainStep]) -> Vec<String> {

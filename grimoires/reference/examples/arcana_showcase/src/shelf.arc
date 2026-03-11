@@ -94,35 +94,41 @@ fn main() -> Int:
     while canvas.alive :: win :: call:
         let step = winspell.loop.fixed_runner_step :: runner, 16 :: call
         let _alpha = step.1
-        let frame_events = events.drain :: win :: call
-        let event_count = frame_events :: :: len
+        let mut frame = events.pump :: win :: call
+        let mut event_count = 0
+        while true:
+            let next = events.poll :: frame :: call
+            let keep_going = next :: :: is_some
+            if keep_going == false:
+                break
+            event_count += 1
         metrics["events"] += event_count
         metrics["frames"] += 1
 
-        if input.key_pressed :: win, key_escape :: call:
+        if input.key_pressed :: frame, key_escape :: call:
             window.close :: win :: call
         let frames_now = metrics["frames"]
         if frames_now > 360:
             window.close :: win :: call
 
-        if input.key_down :: win, key_left :: call:
+        if input.key_down :: frame, key_left :: call:
             px -= speed
-        if input.key_down :: win, key_right :: call:
+        if input.key_down :: frame, key_right :: call:
             px += speed
-        if input.key_down :: win, key_up :: call:
+        if input.key_down :: frame, key_up :: call:
             py -= speed
-        if input.key_down :: win, key_down :: call:
+        if input.key_down :: frame, key_down :: call:
             py += speed
 
-        if input.mouse_pressed :: win, mouse_left :: call:
+        if input.mouse_pressed :: frame, mouse_left :: call:
             metrics["clicks"] += 1
 
-        let m = input.mouse_pos :: win :: call
-        if input.mouse_down :: win, mouse_left :: call:
+        let m = input.mouse_pos :: frame :: call
+        if input.mouse_down :: frame, mouse_left :: call:
             px = m.0
             py = m.1
 
-        let wheel = input.mouse_wheel_y :: win :: call
+        let wheel = input.mouse_wheel_y :: frame :: call
         if wheel != 0:
             speed += wheel
             if speed < 1:
@@ -150,7 +156,7 @@ fn main() -> Int:
             trail_ids = list.new[ArenaId[TrailPoint]] :: :: call
             metrics["resets"] += 1
 
-        if input.key_pressed :: win, key_space :: call:
+        if input.key_pressed :: frame, key_space :: call:
             make_point :: px, py :: call
                 forward :=> point_energy => chain_ping
             arena: trail :> px, py <: make_point

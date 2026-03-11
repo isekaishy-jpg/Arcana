@@ -2,6 +2,7 @@ use arcana_hir::{
     HirModuleSummary, HirResolvedModule, HirResolvedTarget, HirSymbol, HirSymbolKind,
     HirWorkspacePackage, HirWorkspaceSummary,
 };
+use arcana_syntax::is_builtin_type_name;
 
 use super::TypeScope;
 
@@ -71,7 +72,10 @@ pub(crate) fn symbol_matches_surface_use(
         SurfaceSymbolUse::TypeLike => {
             matches!(
                 kind,
-                HirSymbolKind::Record | HirSymbolKind::Enum | HirSymbolKind::Trait
+                HirSymbolKind::Record
+                    | HirSymbolKind::Enum
+                    | HirSymbolKind::OpaqueType
+                    | HirSymbolKind::Trait
             )
         }
         SurfaceSymbolUse::Trait => kind == HirSymbolKind::Trait,
@@ -83,39 +87,6 @@ pub(crate) fn surface_use_name(expected_use: SurfaceSymbolUse) -> &'static str {
         SurfaceSymbolUse::TypeLike => "type",
         SurfaceSymbolUse::Trait => "trait",
     }
-}
-
-pub(crate) fn is_builtin_type_name(name: &str) -> bool {
-    matches!(
-        name,
-        "Int"
-            | "Unit"
-            | "Str"
-            | "Bool"
-            | "RangeInt"
-            | "List"
-            | "Array"
-            | "Map"
-            | "Arena"
-            | "ArenaId"
-            | "FrameArena"
-            | "FrameId"
-            | "PoolArena"
-            | "PoolId"
-            | "Task"
-            | "Thread"
-            | "Channel"
-            | "Mutex"
-            | "AtomicInt"
-            | "AtomicBool"
-            | "Window"
-            | "Image"
-            | "InputFrame"
-            | "FileStream"
-            | "AudioDevice"
-            | "AudioBuffer"
-            | "AudioPlayback"
-    )
 }
 
 pub(crate) fn split_simple_path(text: &str) -> Option<Vec<String>> {

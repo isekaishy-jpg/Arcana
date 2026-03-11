@@ -1,3 +1,6 @@
+use std.events.AppFrame
+use std.window.Window
+
 enum Event:
     None
     WindowResized((Int, Int))
@@ -10,7 +13,11 @@ enum Event:
     MouseMove((Int, Int))
     MouseWheelY(Int)
 
-intrinsic fn poll_raw(read win: Window) -> (Int, (Int, Int)) = EventsPoll
+intrinsic fn pump_frame(edit win: Window) -> AppFrame = EventsPump
+intrinsic fn poll_frame(edit frame: AppFrame) -> (Int, (Int, Int)) = EventsPoll
+
+fn pump(edit win: Window) -> AppFrame:
+    return std.kernel.events.pump_frame :: win :: call
 
 fn decode(kind: Int, a: Int, b: Int) -> std.kernel.events.Event:
     if kind == 1:
@@ -33,6 +40,6 @@ fn decode(kind: Int, a: Int, b: Int) -> std.kernel.events.Event:
         return std.kernel.events.Event.MouseWheelY :: a :: call
     return std.kernel.events.Event.None :: :: call
 
-fn poll(read win: Window) -> std.kernel.events.Event:
-    let raw = std.kernel.events.poll_raw :: win :: call
+fn poll(edit frame: AppFrame) -> std.kernel.events.Event:
+    let raw = std.kernel.events.poll_frame :: frame :: call
     return std.kernel.events.decode :: raw.0, raw.1.0, raw.1.1 :: call

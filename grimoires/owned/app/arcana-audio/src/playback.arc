@@ -2,11 +2,14 @@ import std.audio
 import std.result
 import arcana_audio.clip
 use std.result.Result
+use std.audio.AudioBuffer
+use std.audio.AudioDevice
+use std.audio.AudioPlayback
 
-export fn play(read device: AudioDevice, read clip: AudioBuffer) -> Result[AudioPlayback, Str]:
+export fn play(edit device: AudioDevice, read clip: AudioBuffer) -> Result[AudioPlayback, Str]:
     return std.audio.play_buffer :: device, clip :: call
 
-export fn play_wav(read device: AudioDevice, path: Str) -> Result[AudioPlayback, Str]:
+export fn play_wav(edit device: AudioDevice, path: Str) -> Result[AudioPlayback, Str]:
     let clip = arcana_audio.clip.load_wav :: path :: call
     return match clip:
         Result.Ok(value) => std.audio.play_buffer :: device, value :: call
@@ -15,10 +18,10 @@ export fn play_wav(read device: AudioDevice, path: Str) -> Result[AudioPlayback,
 export fn stop(take playback: AudioPlayback) -> Result[Unit, Str]:
     return playback :: :: stop
 
-export fn pause(read playback: AudioPlayback):
+export fn pause(edit playback: AudioPlayback):
     playback :: :: pause
 
-export fn resume(read playback: AudioPlayback):
+export fn resume(edit playback: AudioPlayback):
     playback :: :: resume
 
 export fn playing(read playback: AudioPlayback) -> Bool:
@@ -30,10 +33,10 @@ export fn paused(read playback: AudioPlayback) -> Bool:
 export fn finished(read playback: AudioPlayback) -> Bool:
     return playback :: :: finished
 
-export fn set_gain_milli(read playback: AudioPlayback, milli: Int):
+export fn set_gain_milli(edit playback: AudioPlayback, milli: Int):
     playback :: milli :: set_gain_milli
 
-export fn set_looping(read playback: AudioPlayback, looping: Bool):
+export fn set_looping(edit playback: AudioPlayback, looping: Bool):
     playback :: looping :: set_looping
 
 export fn looping(read playback: AudioPlayback) -> Bool:

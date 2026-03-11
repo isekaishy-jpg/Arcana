@@ -646,6 +646,24 @@ Where a domain scope exists under `docs/specs/**/v1-scope.md`, that domain scope
 - boundary checks now enforce payload/target rules, direct signature-shape safety, and recursive record/enum boundary-safe typing after HIR resolution; later work still needs deeper backend/runtime boundary flow
 - the current frontend now covers declaration-surface lifetimes plus conservative body-level expression typing, ownership, borrow, move, and return-lifetime diagnostics on the rewrite path
 
+## Opaque Types (v0.17)
+
+Arcana now has source-level opaque type declarations for trusted std-owned runtime/resource handles:
+
+- syntax: `export opaque type Window as move, boundary_unsafe`
+- required inline policy atoms:
+  - one ownership atom: `copy` or `move`
+  - one boundary atom: `boundary_safe` or `boundary_unsafe`
+- opaque types are type-like for signatures, impl targets, trait impl targets, and API fingerprints
+- opaque types are non-constructible in expressions:
+  - no phrase construction
+  - no implied fields or payload access
+  - no record/enum behavior by default
+- v1 restriction:
+  - opaque type declarations are currently restricted to package `std`
+
+Current std-owned runtime handles such as `Window`, `Image`, `FileStream`, `AudioDevice`, `AudioBuffer`, `AudioPlayback`, and `AppFrame` now live as source-declared opaque std types rather than Rust-only reserved builtin names.
+
 ## Canvas/Window/Input (v0.16 shelf-first)
 
 Desktop APIs are now shelf-first through toolchain std modules:
@@ -658,9 +676,9 @@ Desktop APIs are now shelf-first through toolchain std modules:
   - `size`, `resized`, `fullscreen`, `minimized`, `maximized`, `focused`
   - `set_title`, `set_resizable`, `set_fullscreen`, `set_minimized`, `set_maximized`, `set_topmost`, `set_cursor_visible`, `close -> Result[Unit, Str]`
 - `std.input`:
-  - `begin_frame(read win) -> std.events.AppFrame`, `key_code`
-  - `key_down`, `key_pressed`, `key_released` on `std.events.AppFrame`
-  - `mouse_button_code`, `mouse_pos`, `mouse_down`, `mouse_pressed`, `mouse_released`, `mouse_wheel_y`, `mouse_in_window` on `std.events.AppFrame`
+  - `key_code`
+  - `key_down`, `key_pressed`, `key_released` on `AppFrame`
+  - `mouse_button_code`, `mouse_pos`, `mouse_down`, `mouse_pressed`, `mouse_released`, `mouse_wheel_y`, `mouse_in_window` on `AppFrame`
 
 Recommended app-facing layer:
 
@@ -678,11 +696,11 @@ Surface policy:
 
 Notes:
 
-- `Window` and `Image` are typed opaque values, and creation/load boundaries are explicit `Result[...]` APIs rather than infallible handle producers.
+- `Window`, `Image`, `FileStream`, `AudioDevice`, `AudioBuffer`, `AudioPlayback`, and `AppFrame` are source-declared opaque std types, and creation/load boundaries are explicit `Result[...]` APIs rather than infallible handle producers.
 - `std.canvas.fill`, `std.canvas.rect`, `std.canvas.label`, and `std.canvas.present` require `edit win`.
 - `std.canvas.rgb` clamps channels to `0..255`.
 - `std.canvas.rect` rejects negative width/height at runtime.
-- Edge-triggered input state is advanced explicitly by `std.input.begin_frame :: win :: call` or `std.events.pump :: win :: call`, both of which return `std.events.AppFrame` so per-frame input reads and drained events stay aligned at one public boundary.
+- Edge-triggered input state is advanced explicitly by `std.events.pump :: win :: call`, which requires `edit win` and returns `AppFrame` so per-frame input reads and drained events stay aligned at one public boundary.
 - Input/window/image APIs are main-thread-only.
 - `std.input.key_code` / `std.input.mouse_button_code` resolve string names at runtime.
 - Public typed event queue APIs are available through `std.events`.
@@ -702,11 +720,11 @@ New modules:
 
 `std.events` provides typed queue access sourced from the explicit frame pump boundary:
 
-- `std.events.poll(read frame: std.events.AppFrame) -> Option[std.events.AppEvent]`
-- `std.events.drain(read frame: std.events.AppFrame) -> List[std.events.AppEvent]`
-- `std.events.pump(read win) -> std.events.AppFrame`
+- `std.events.poll(edit frame: AppFrame) -> Option[std.events.AppEvent]`
+- `std.events.drain(take frame: AppFrame) -> List[std.events.AppEvent]`
+- `std.events.pump(edit win) -> AppFrame`
 
-`std.events.poll` and `std.events.drain` operate on the `std.events.AppFrame` produced by the explicit frame pump boundary rather than polling the window directly. `std.events.pump` returns both the drained event list and the frame-local input token for the same step.
+`std.events.poll` consumes one event from the move-only `AppFrame` produced by the explicit frame pump boundary, and `std.events.drain` consumes the remaining queue for that frame. `std.events.pump` is the single public frame-advance operation.
 
 `std.events.AppEvent` variants:
 
@@ -723,7 +741,7 @@ Rewrite note:
 - `std.events` is part of the first-party app/runtime substrate required before selfhost.
 - `std.ecs` and `std.behaviors.step` remain first-party language/runtime surface.
 - `std.time` and `std.audio` are bootstrap-owned low-level substrate categories; higher-level loop and playback policy belongs in Arcana-owned grimoire layers.
-- `std.audio.default_output`, `std.audio.buffer_load_wav`, and `std.audio.play_buffer` are explicit `Result[...]` APIs.
+- `std.audio.default_output`, `std.audio.buffer_load_wav`, and `std.audio.play_buffer(edit device, read buffer)` are explicit `Result[...]` APIs.
 - `std.audio.output_close` and playback `stop` are consuming lifecycle operations with explicit `Result[Unit, Str]`.
 - carried historical `std.app` fixed-step helpers are convenience corpus only and are not part of the current std surface.
 
@@ -955,8 +973,8 @@ Policy:
 - `std.fs` includes streaming APIs with a typed `FileStream` handle:
   - `stream_open_read(path) -> Result[FileStream, Str]`
   - `stream_open_write(path, append) -> Result[FileStream, Str]`
-  - `stream_read(read stream, max_bytes) -> Result[Array[Int], Str]`
-  - `stream_write(read stream, bytes) -> Result[Int, Str]`
+  - `stream_read(edit stream, max_bytes) -> Result[Array[Int], Str]`
+  - `stream_write(edit stream, bytes) -> Result[Int, Str]`
   - `stream_eof(read stream) -> Result[Bool, Str]`
   - `stream_close(take stream) -> Result[Unit, Str]`
 
