@@ -2,12 +2,12 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use arcana_aot::{AOT_PLACEHOLDER_FORMAT, compile_package};
+use arcana_aot::{AOT_INTERNAL_FORMAT, compile_package, render_package_artifact};
 use arcana_hir::{
     HirWorkspacePackage, HirWorkspaceSummary, build_package_layout, build_package_summary,
     build_workspace_package, build_workspace_summary, derive_source_module_path, lower_module_text,
 };
-use arcana_ir::lower_package;
+use arcana_ir::lower_workspace_package;
 use pathdiff::diff_paths;
 
 pub type PackageResult<T> = Result<T, String>;
@@ -574,7 +574,7 @@ pub fn plan_build(
             api_fingerprint,
             artifact_rel_path,
             kind: member.kind.clone(),
-            format: AOT_PLACEHOLDER_FORMAT.to_string(),
+            format: AOT_INTERNAL_FORMAT.to_string(),
         });
     }
 
@@ -583,6 +583,17 @@ pub fn plan_build(
 
 pub fn execute_build(graph: &WorkspaceGraph, statuses: &[BuildStatus]) -> PackageResult<PathBuf> {
     let cache_root = graph.root_dir.join(CACHE_DIR);
+    let workspace = load_workspace_hir_from_graph(&graph.root_dir, graph)?;
+    let lowered_packages = workspace
+        .packages
+        .values()
+        .map(|package| {
+            (
+                package.summary.package_name.clone(),
+                lower_workspace_package(package),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     fs::create_dir_all(cache_root.join(LOGS_DIR)).map_err(|e| {
         format!(
             "failed to create cache logs directory `{}`: {e}",
@@ -597,9 +608,22 @@ pub fn execute_build(graph: &WorkspaceGraph, statuses: &[BuildStatus]) -> Packag
         let member = graph
             .member(&status.member)
             .ok_or_else(|| format!("missing workspace member `{}`", status.member))?;
-        let package_summary = load_member_package_summary(member)?;
-        let ir_package = lower_package(&package_summary);
-        let artifact = compile_package(&ir_package);
+        let linked_package_names = collect_linked_package_names(graph, &workspace, &status.member)?;
+        let root_package = lowered_packages
+            .get(&member.name)
+            .cloned()
+            .ok_or_else(|| format!("missing lowered package `{}`", member.name))?;
+        let linked_packages = linked_package_names
+            .into_iter()
+            .filter(|name| name != &member.name)
+            .map(|name| {
+                lowered_packages
+                    .get(&name)
+                    .cloned()
+                    .ok_or_else(|| format!("missing lowered linked package `{name}`"))
+            })
+            .collect::<PackageResult<Vec<_>>>()?;
+        let artifact = compile_package(&link_ir_packages(root_package, linked_packages));
         if artifact.format != status.format {
             return Err(format!(
                 "artifact format mismatch for `{}`: planner={}, compiler={}",
@@ -615,28 +639,13 @@ pub fn execute_build(graph: &WorkspaceGraph, statuses: &[BuildStatus]) -> Packag
                 )
             })?;
         }
-        let module_rows = artifact
-            .modules
-            .iter()
-            .map(|module| {
-                format!(
-                    "{}:symbols={}:items={}",
-                    module.module_id, module.symbol_count, module.item_count
-                )
-            })
-            .collect::<Vec<_>>();
         let rendered = format!(
-            "format = \"{}\"\nmember = \"{}\"\npackage = \"{}\"\nkind = \"{}\"\nfingerprint = \"{}\"\napi_fingerprint = \"{}\"\nmodule_count = {}\ndependency_edge_count = {}\nsurface_rows = {}\nmodule_rows = {}\n",
-            artifact.format,
+            "member = \"{}\"\nkind = \"{}\"\nfingerprint = \"{}\"\napi_fingerprint = \"{}\"\n{}",
             status.member,
-            artifact.package_name,
             status.kind.as_str(),
             status.fingerprint,
             status.api_fingerprint,
-            artifact.module_count,
-            artifact.dependency_edge_count,
-            format_string_array(&artifact.exported_surface_rows),
-            format_string_array(&module_rows)
+            render_package_artifact(&artifact)
         );
         fs::write(&artifact_path, rendered).map_err(|e| {
             format!(
@@ -654,6 +663,111 @@ pub fn execute_build(graph: &WorkspaceGraph, statuses: &[BuildStatus]) -> Packag
     fs::write(&summary_path, render_build_summary(statuses, graph))
         .map_err(|e| format!("failed to write `{}`: {e}", summary_path.display()))?;
     Ok(summary_path)
+}
+
+fn collect_linked_package_names(
+    graph: &WorkspaceGraph,
+    workspace: &HirWorkspaceSummary,
+    root_member: &str,
+) -> PackageResult<Vec<String>> {
+    let mut names = collect_transitive_member_names(graph, root_member)?;
+    let uses_std = names.iter().any(|name| {
+        workspace
+            .package(name)
+            .map(package_uses_implicit_std)
+            .unwrap_or(false)
+    });
+    if uses_std && workspace.package("std").is_some() {
+        names.insert("std".to_string());
+    }
+    Ok(names.into_iter().collect())
+}
+
+fn collect_transitive_member_names(
+    graph: &WorkspaceGraph,
+    root_member: &str,
+) -> PackageResult<BTreeSet<String>> {
+    let mut pending = vec![root_member.to_string()];
+    let mut visited = BTreeSet::new();
+    while let Some(name) = pending.pop() {
+        if !visited.insert(name.clone()) {
+            continue;
+        }
+        let member = graph
+            .member(&name)
+            .ok_or_else(|| format!("missing workspace member `{name}`"))?;
+        for dep in member.deps.iter().rev() {
+            pending.push(dep.clone());
+        }
+    }
+    Ok(visited)
+}
+
+fn package_uses_implicit_std(package: &HirWorkspacePackage) -> bool {
+    package.summary.dependency_edges.iter().any(|edge| {
+        edge.target_path
+            .first()
+            .is_some_and(|segment| segment == "std")
+    })
+}
+
+fn link_ir_packages(
+    root: arcana_ir::IrPackage,
+    mut linked: Vec<arcana_ir::IrPackage>,
+) -> arcana_ir::IrPackage {
+    linked.sort_by(|left, right| left.package_name.cmp(&right.package_name));
+
+    let mut direct_deps = root.direct_deps.iter().cloned().collect::<BTreeSet<_>>();
+    if linked.iter().any(|package| package.package_name == "std") {
+        direct_deps.insert("std".to_string());
+    }
+
+    let mut modules = root.modules.clone();
+    let mut dependency_rows = root
+        .dependency_rows
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut exported_surface_rows = root
+        .exported_surface_rows
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut runtime_requirements = root
+        .runtime_requirements
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut routines = root.routines.clone();
+
+    for package in linked {
+        modules.extend(package.modules);
+        dependency_rows.extend(package.dependency_rows);
+        exported_surface_rows.extend(package.exported_surface_rows);
+        runtime_requirements.extend(package.runtime_requirements);
+        routines.extend(package.routines);
+    }
+
+    modules.sort_by(|left, right| left.module_id.cmp(&right.module_id));
+    routines.sort_by(|left, right| {
+        left.module_id
+            .cmp(&right.module_id)
+            .then_with(|| left.symbol_name.cmp(&right.symbol_name))
+            .then_with(|| left.signature_row.cmp(&right.signature_row))
+    });
+
+    arcana_ir::IrPackage {
+        package_name: root.package_name,
+        root_module_id: root.root_module_id,
+        direct_deps: direct_deps.into_iter().collect(),
+        modules,
+        dependency_edge_count: dependency_rows.len(),
+        dependency_rows: dependency_rows.into_iter().collect(),
+        exported_surface_rows: exported_surface_rows.into_iter().collect(),
+        runtime_requirements: runtime_requirements.into_iter().collect(),
+        entrypoints: root.entrypoints,
+        routines,
+    }
 }
 
 pub fn write_lockfile(
@@ -909,12 +1023,6 @@ fn validate_grimoire_layout(dir: &Path, kind: &GrimoireKind) -> PackageResult<()
         return Err(format!("missing `src/types.arc` in `{}`", dir.display()));
     }
     Ok(())
-}
-
-fn load_member_package_summary(
-    member: &WorkspaceMember,
-) -> PackageResult<arcana_hir::HirPackageSummary> {
-    Ok(load_member_hir_package(member)?.summary)
 }
 
 fn load_package_hir(
@@ -1344,17 +1452,29 @@ mod tests {
             .expect("core status");
         let artifact = fs::read_to_string(graph.root_dir.join(&core.artifact_rel_path))
             .expect("artifact should exist");
-        assert!(artifact.contains("format = \"aot-placeholder-v1\""));
+        assert!(artifact.contains("format = \"arcana-aot-v1\""));
         assert!(artifact.contains("package = \"core\""));
+        assert!(artifact.contains("root_module = \"core\""));
         assert!(artifact.contains("module_count = 2"));
         assert!(artifact.contains("dependency_edge_count = 1"));
+        assert!(artifact.contains("direct_deps = []"));
+        assert!(artifact.contains("dependency_rows = ["));
+        assert!(artifact.contains("runtime_requirements = []"));
+        assert!(artifact.contains("entrypoint_rows = []"));
+        assert!(artifact.contains("routine_rows = ["));
+        assert!(artifact.contains("statement_rows = ["));
         assert!(artifact.contains("module=core:export:fn:fn shared_value() -> Int:"));
         assert!(artifact.contains("module=core:reexport:types"));
         assert!(
             artifact.contains("module=core.types:export:record:record Counter:\\\\nvalue: Int")
         );
         assert!(artifact.contains("module_rows = ["));
-        assert!(artifact.contains("core:symbols=1:items=4"));
+        assert!(artifact.contains("core:fn:shared_value:async=false:exported=true"));
+        assert!(
+            artifact
+                .contains("core:shared_value:0:stmt(core=return(int(0)),forewords=[],rollups=[])")
+        );
+        assert!(artifact.contains("core:symbols=1:items=4:lines=3:non_empty_lines=3"));
         let _ = fs::remove_dir_all(&dir);
     }
 

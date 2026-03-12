@@ -23,8 +23,8 @@ Scope notes:
 - `std.text`: byte-oriented UTF-8 helpers plus explicit search/trim/split/join/repeat/int-parse helpers (`len_bytes`, `byte_at`, `slice_bytes`, `starts_with`, `ends_with`, `find`, `contains`, `split_lines`, `split`, `join`, `trim_start`, `trim_end`, `trim`, `repeat`, `to_int`, `from_int`)
 - Native runtime host-root sandbox enforcement for filesystem APIs.
 - Native process execution capability gate (`--allow-process` required).
-- Host-tool MVP example at `grimoires/reference/examples/selfhost_host_tool_mvp`.
-- Arcana frontend verification MVP at `grimoires/reference/examples/selfhost_frontend_mvp`.
+- Rewrite-owned host-core tool proof lane that exercises the approved host surface.
+- Rewrite-owned frontend/backend verification proof lane built on the approved host-core surface.
 
 ## Excluded
 - Network/socket APIs.

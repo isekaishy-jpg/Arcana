@@ -1,6 +1,0 @@
-name = "grimoire_ecs_mini_game"
-kind = "app"
-
-[deps]
-winspell = { path = "../../app/winspell" }
-spell_events = { path = "../../app/spell-events" }

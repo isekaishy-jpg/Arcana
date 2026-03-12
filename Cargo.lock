@@ -7,6 +7,7 @@ name = "arcana-aot"
 version = "0.1.0"
 dependencies = [
  "arcana-ir",
+ "toml",
 ]
 
 [[package]]
@@ -52,6 +53,17 @@ dependencies = [
  "pathdiff",
  "sha2",
  "toml",
+]
+
+[[package]]
+name = "arcana-runtime"
+version = "0.1.0"
+dependencies = [
+ "arcana-aot",
+ "arcana-frontend",
+ "arcana-package",
+ "pathdiff",
+ "sha2",
 ]
 
 [[package]]

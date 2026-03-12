@@ -783,7 +783,7 @@ Workspace/build notes:
 - `arcana build <workspace-dir> --plan` prints deterministic build order.
 - `arcana build <workspace-dir>` builds workspace members in topo order and writes `Arcana.lock`.
 - Grimoire `[deps]` path dependencies are import-resolvable in compile/check/run flows (`import <dep>.*`).
-- Build/cache artifact layout is a toolchain detail and is not frozen here.
+- Build/cache artifact layout is a toolchain detail and is not frozen here; current build artifacts are internal backend-contract output, not a public execution or bytecode format.
 
 See:
 

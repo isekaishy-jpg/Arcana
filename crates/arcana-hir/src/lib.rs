@@ -646,7 +646,11 @@ impl HirPackageSummary {
             "package_name={}",
             quote_fingerprint_text(&self.package_name)
         )];
-        rows.extend(self.dependency_edges.iter().map(render_dependency_edge_fingerprint));
+        rows.extend(
+            self.dependency_edges
+                .iter()
+                .map(render_dependency_edge_fingerprint),
+        );
         for module in &self.modules {
             for row in module.hir_fingerprint_rows() {
                 rows.push(format!("module={}:{}", module.module_id, row));
@@ -1462,7 +1466,8 @@ fn render_expr_fingerprint(expr: &HirExpr) -> String {
         ),
         HirExpr::CollectionLiteral { items } => format!(
             "collection([{}])",
-            items.iter()
+            items
+                .iter()
                 .map(render_expr_fingerprint)
                 .collect::<Vec<_>>()
                 .join(",")
@@ -1483,7 +1488,8 @@ fn render_expr_fingerprint(expr: &HirExpr) -> String {
             "chain(style={}|introducer={}|steps=[{}])",
             quote_fingerprint_text(style),
             render_chain_introducer_fingerprint(*introducer),
-            steps.iter()
+            steps
+                .iter()
                 .map(render_chain_step_fingerprint)
                 .collect::<Vec<_>>()
                 .join(",")
@@ -2059,10 +2065,7 @@ pub fn resolve_workspace(
                         span: symbol.span,
                         message: format!(
                             "duplicate symbol `{}` in module `{}`; first declared at {}:{}",
-                            symbol.name,
-                            module.module_id,
-                            existing.span.line,
-                            existing.span.column
+                            symbol.name, module.module_id, existing.span.line, existing.span.column
                         ),
                     });
                     continue;
@@ -2437,14 +2440,12 @@ fn lower_header_attachments(
                 value,
                 forewords,
                 span,
-            } => {
-                HirHeaderAttachment::Named {
-                    name: name.clone(),
-                    value: lower_expr(value),
-                    forewords: lower_forewords(forewords),
-                    span: *span,
-                }
-            }
+            } => HirHeaderAttachment::Named {
+                name: name.clone(),
+                value: lower_expr(value),
+                forewords: lower_forewords(forewords),
+                span: *span,
+            },
             arcana_syntax::HeaderAttachment::Chain {
                 expr,
                 forewords,
@@ -2604,9 +2605,7 @@ fn lower_chain_connector(connector: arcana_syntax::ChainConnector) -> HirChainCo
     }
 }
 
-fn lower_chain_introducer(
-    introducer: arcana_syntax::ChainIntroducer,
-) -> HirChainIntroducer {
+fn lower_chain_introducer(introducer: arcana_syntax::ChainIntroducer) -> HirChainIntroducer {
     match introducer {
         arcana_syntax::ChainIntroducer::Forward => HirChainIntroducer::Forward,
         arcana_syntax::ChainIntroducer::Reverse => HirChainIntroducer::Reverse,
@@ -3114,10 +3113,10 @@ mod tests {
             HirStatementKind::Return { value } => {
                 match value.as_ref().expect("match return expected") {
                     HirExpr::Match { subject, arms } => {
-                    assert!(matches!(
-                        subject.as_ref(),
-                        expr if expr_is_path(expr, "t")
-                    ));
+                        assert!(matches!(
+                            subject.as_ref(),
+                            expr if expr_is_path(expr, "t")
+                        ));
                         assert_eq!(
                             arms[0].patterns,
                             vec![
@@ -3378,17 +3377,17 @@ mod tests {
                         qualifier,
                         attached,
                     } => {
-                    assert_eq!(qualifier, "call");
-                    assert!(attached.is_empty());
-                    assert!(matches!(
-                        subject.as_ref(),
-                        HirExpr::GenericApply { expr, type_args }
-                            if type_args == &vec!["Int".to_string()]
-                                && matches!(
-                                    expr.as_ref(),
-                                    HirExpr::MemberAccess { member, .. } if member == "print"
-                                )
-                    ));
+                        assert_eq!(qualifier, "call");
+                        assert!(attached.is_empty());
+                        assert!(matches!(
+                            subject.as_ref(),
+                            HirExpr::GenericApply { expr, type_args }
+                                if type_args == &vec!["Int".to_string()]
+                                    && matches!(
+                                        expr.as_ref(),
+                                        HirExpr::MemberAccess { member, .. } if member == "print"
+                                    )
+                        ));
                         assert_eq!(args.len(), 2);
                     }
                     other => panic!("expected print phrase, got {other:?}"),
@@ -3583,9 +3582,7 @@ mod tests {
             HirStatementKind::Let {
                 value:
                     HirExpr::QualifiedPhrase {
-                        subject,
-                        qualifier,
-                        ..
+                        subject, qualifier, ..
                     },
                 ..
             } => {
@@ -4105,7 +4102,11 @@ mod tests {
         let workspace = build_workspace_summary(vec![app_package]).expect("workspace builds");
         let errors = resolve_workspace(&workspace).expect_err("resolution should fail");
         assert_eq!(errors.len(), 1);
-        assert!(errors[0].message.contains("duplicate symbol `mouse_in_window`"));
+        assert!(
+            errors[0]
+                .message
+                .contains("duplicate symbol `mouse_in_window`")
+        );
         assert_eq!(errors[0].source_module_id, "app");
     }
 
@@ -4145,11 +4146,13 @@ mod tests {
 
         let app_summary = build_package_summary(
             "app",
-            vec![lower_module_text(
-                "app",
-                "use std.io as io\nuse std.text as io\nfn main() -> Int:\n    return 0\n",
-            )
-            .expect("app should lower")],
+            vec![
+                lower_module_text(
+                    "app",
+                    "use std.io as io\nuse std.text as io\nfn main() -> Int:\n    return 0\n",
+                )
+                .expect("app should lower"),
+            ],
         );
         let app_layout = build_package_layout(
             &app_summary,
@@ -4180,8 +4183,10 @@ mod tests {
     fn resolve_workspace_allows_duplicate_directives_when_target_matches() {
         let std_summary = build_package_summary(
             "std",
-            vec![lower_module_text("std.io", "export fn print() -> Int:\n    return 0\n")
-                .expect("std.io should lower")],
+            vec![
+                lower_module_text("std.io", "export fn print() -> Int:\n    return 0\n")
+                    .expect("std.io should lower"),
+            ],
         );
         let std_layout = build_package_layout(
             &std_summary,
@@ -4202,11 +4207,13 @@ mod tests {
 
         let app_summary = build_package_summary(
             "app",
-            vec![lower_module_text(
-                "app",
-                "import std.io\nuse std.io as io\nfn main() -> Int:\n    return 0\n",
-            )
-            .expect("app should lower")],
+            vec![
+                lower_module_text(
+                    "app",
+                    "import std.io\nuse std.io as io\nfn main() -> Int:\n    return 0\n",
+                )
+                .expect("app should lower"),
+            ],
         );
         let app_layout = build_package_layout(
             &app_summary,

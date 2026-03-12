@@ -42,9 +42,10 @@ Allowed pre-selfhost language edits are limited to:
 ## 4A. Rewrite Review Boundary
 
 - Architecture and selfhost-progress review must privilege approved specs plus `crates/*`, because that is the actual rewrite implementation.
-- Imported `std`, `grimoires/reference/*`, conformance fixtures, and generated direct-emit snapshots are carried source corpus unless a current approved scope explicitly ratifies the exact surface being discussed.
-- Findings discovered only in carried corpus must be labeled as transitional migration work or corpus drift, not as rewrite-crate dependence.
-- Carried corpus may still expose pressure or missing substrate needs, but it must not silently redefine rewrite architecture.
+- Rewrite-owned `std`, rewrite-owned grimoires, and `crates/*` are the active first-party implementation surface.
+- Archived historical MeadowLang corpus, conformance fixtures, and generated direct-emit snapshots are migration context unless a current approved scope explicitly ratifies the exact surface being discussed.
+- Findings discovered only in archived historical material must be labeled as transitional migration work or corpus drift, not as rewrite-crate dependence.
+- Historical material may still expose pressure or missing substrate needs, but it must not silently redefine rewrite architecture.
 
 ## 5. Dependency Scope Before Selfhost
 

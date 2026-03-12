@@ -2395,7 +2395,10 @@ fn validate_symbol_surface_types(
             path: module_path.to_path_buf(),
             line: symbol.span.line,
             column: symbol.span.column,
-            message: format!("opaque type `{}` is missing required policy atoms", symbol.name),
+            message: format!(
+                "opaque type `{}` is missing required policy atoms",
+                symbol.name
+            ),
         });
     }
     for param in &symbol.params {
@@ -5039,22 +5042,6 @@ mod tests {
     }
 
     #[test]
-    fn check_path_handles_reference_window_grimoire() {
-        let summary = check_path(&reference_app_root().join("winspell"))
-            .expect("reference window grimoire should check");
-        assert!(summary.package_count >= 2);
-        assert!(summary.module_count >= 5);
-    }
-
-    #[test]
-    fn check_path_handles_reference_audio_grimoire() {
-        let summary = check_path(&reference_app_root().join("spell-audio"))
-            .expect("reference audio grimoire should check");
-        assert!(summary.package_count >= 2);
-        assert!(summary.module_count >= 4);
-    }
-
-    #[test]
     fn check_path_handles_owned_desktop_grimoire() {
         let summary = check_path(&owned_app_root().join("arcana-desktop"))
             .expect("owned desktop grimoire should check");
@@ -5087,23 +5074,47 @@ mod tests {
     }
 
     #[test]
-    fn check_path_handles_builtin_foreword_example() {
-        let summary = check_path(
-            &reference_examples_root().join("forewords_builtin_app"),
-        )
-            .expect("foreword example should check");
-        assert_eq!(summary.package_count, 2);
-        assert!(summary.module_count >= 3);
+    fn check_path_accepts_builtin_foreword_package() {
+        let root = make_temp_package(
+            "builtin_foreword_positive",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    "#test\nfn smoke() -> Int:\n    return 0\nfn main() -> Int:\n    return 0\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let summary = check_path(&root).expect("builtin foreword package should check");
+        assert_eq!(summary.package_count, 1);
+        assert_eq!(summary.module_count, 2);
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
     }
 
     #[test]
-    fn check_path_handles_boundary_interop_example() {
-        let summary = check_path(
-            &reference_examples_root().join("interop_boundary_contracts"),
-        )
-        .expect("boundary interop example should check");
-        assert_eq!(summary.package_count, 2);
-        assert!(summary.module_count >= 3);
+    fn check_path_accepts_boundary_interop_package() {
+        let root = make_temp_package(
+            "boundary_interop_positive",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    "import types\n#boundary[target = \"lua\"]\nexport fn bridge(read payload: types.Payload) -> Int:\n    return payload.value\nfn main() -> Int:\n    return 0\n",
+                ),
+                ("src/types.arc", "export record Payload:\n    value: Int\n"),
+            ],
+        );
+
+        let summary = check_path(&root).expect("boundary interop package should check");
+        assert_eq!(summary.package_count, 1);
+        assert_eq!(summary.module_count, 2);
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
     }
 
     #[test]
@@ -5114,21 +5125,25 @@ mod tests {
     }
 
     #[test]
-    fn check_path_handles_page_rollup_example() {
-        let summary = check_path(
-            &reference_examples_root().join("page_rollup_cleanup"),
-        )
-            .expect("page rollup example should check");
-        assert_eq!(summary.package_count, 2);
-        assert!(summary.module_count >= 3);
-    }
+    fn check_path_accepts_page_rollup_package() {
+        let root = make_temp_package(
+            "page_rollup_positive",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    "fn cleanup(value: Int):\n    return\nfn run(seed: Int) -> Int:\n    let local = seed\n    while local > 0:\n        let scratch = local\n        local -= 1\n    [scratch, cleanup]#cleanup\n    return local\n[seed, cleanup]#cleanup\nfn main() -> Int:\n    return run :: 1 :: call\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
 
-    #[test]
-    fn check_path_handles_audio_smoke_example() {
-        let summary = check_path(&reference_examples_root().join("audio_smoke_demo"))
-            .expect("audio smoke example should check");
-        assert!(summary.package_count >= 2);
-        assert!(summary.module_count >= 4);
+        let summary = check_path(&root).expect("page rollup package should check");
+        assert_eq!(summary.package_count, 1);
+        assert_eq!(summary.module_count, 2);
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
     }
 
     #[test]
@@ -5523,10 +5538,16 @@ mod tests {
                 ),
                 ("app/src/types.arc", ""),
                 ("io/book.toml", "name = \"io\"\nkind = \"lib\"\n"),
-                ("io/src/book.arc", "export fn print() -> Int:\n    return 0\n"),
+                (
+                    "io/src/book.arc",
+                    "export fn print() -> Int:\n    return 0\n",
+                ),
                 ("io/src/types.arc", ""),
                 ("text/book.toml", "name = \"text\"\nkind = \"lib\"\n"),
-                ("text/src/book.arc", "export fn print() -> Int:\n    return 0\n"),
+                (
+                    "text/src/book.arc",
+                    "export fn print() -> Int:\n    return 0\n",
+                ),
                 ("text/src/types.arc", ""),
             ],
         );
@@ -5702,10 +5723,7 @@ mod tests {
 
     #[test]
     fn check_path_rejects_window_use_after_close() {
-        let std_dep = repo_root()
-            .join("std")
-            .to_string_lossy()
-            .replace('\\', "/");
+        let std_dep = repo_root().join("std").to_string_lossy().replace('\\', "/");
         let root = make_temp_package(
             "typed_window_use_after_close",
             "app",
@@ -5727,10 +5745,7 @@ mod tests {
 
     #[test]
     fn check_path_rejects_stream_use_after_close() {
-        let std_dep = repo_root()
-            .join("std")
-            .to_string_lossy()
-            .replace('\\', "/");
+        let std_dep = repo_root().join("std").to_string_lossy().replace('\\', "/");
         let root = make_temp_package(
             "typed_stream_use_after_close",
             "app",
@@ -5820,10 +5835,7 @@ mod tests {
 
     #[test]
     fn check_path_rejects_opaque_type_constructor_use() {
-        let std_dep = repo_root()
-            .join("std")
-            .to_string_lossy()
-            .replace('\\', "/");
+        let std_dep = repo_root().join("std").to_string_lossy().replace('\\', "/");
         let root = make_temp_package(
             "opaque_type_constructor_use",
             "app",
@@ -5838,17 +5850,17 @@ mod tests {
         );
 
         let err = check_path(&root).expect_err("opaque constructors should fail");
-        assert!(err.contains("opaque type `Window` is not constructible"), "{err}");
+        assert!(
+            err.contains("opaque type `Window` is not constructible"),
+            "{err}"
+        );
 
         fs::remove_dir_all(root).expect("cleanup should succeed");
     }
 
     #[test]
     fn check_path_rejects_boundary_unsafe_std_opaque_type() {
-        let std_dep = repo_root()
-            .join("std")
-            .to_string_lossy()
-            .replace('\\', "/");
+        let std_dep = repo_root().join("std").to_string_lossy().replace('\\', "/");
         let root = make_temp_package(
             "opaque_type_boundary_contract",
             "app",
@@ -5916,29 +5928,83 @@ mod tests {
     }
 
     #[test]
-    fn check_path_handles_enum_variant_constructor_example() {
-        let summary = check_path(&reference_examples_root().join("result_qmark"))
-            .expect("enum variant constructors should resolve");
+    fn check_path_handles_result_variant_constructor_package() {
+        let std_dep = repo_root().join("std").to_string_lossy().replace('\\', "/");
+        let root = make_temp_package(
+            "result_variant_positive",
+            "app",
+            &[("std", std_dep.as_str())],
+            &[
+                (
+                    "src/shelf.arc",
+                    "import std.result\nuse std.result.Result\nfn parse(flag: Bool) -> Result[Int, Str]:\n    if flag:\n        return Result.Ok[Int, Str] :: 1 :: call\n    return Result.Err[Int, Str] :: \"bad\" :: call\nfn main() -> Int:\n    let parsed = parse :: true :: call\n    return match parsed:\n        Result.Ok(value) => value\n        Result.Err(_) => 0\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let summary = check_path(&root).expect("result variant package should resolve");
         assert_eq!(summary.package_count, 2);
-        assert!(summary.module_count >= 3);
+        assert!(summary.module_count >= 2);
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
     }
 
     #[test]
-    fn check_path_handles_mixed_chain_example() {
-        let summary = check_path(&reference_examples_root().join("chain_styles_matrix"))
-            .expect("mixed chain example should resolve");
-        assert_eq!(summary.package_count, 2);
+    fn check_path_handles_mixed_chain_package() {
+        let root = make_temp_package(
+            "mixed_chain_positive",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    "import stage\nfn main() -> Int:\n    let seed = 1\n    let score = forward :=> stage.seed with (seed) => stage.inc <= stage.dec <= stage.emit\n    return score\n",
+                ),
+                (
+                    "src/stage.arc",
+                    "export fn seed(seed: Int) -> Int:\n    return seed\nexport fn inc(value: Int) -> Int:\n    return value + 1\nexport fn dec(value: Int) -> Int:\n    return value - 1\nexport fn emit(value: Int) -> Int:\n    return value\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let summary = check_path(&root).expect("mixed chain package should resolve");
+        assert_eq!(summary.package_count, 1);
         assert!(summary.module_count >= 3);
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
     }
 
     #[test]
-    fn check_path_handles_bound_chain_showcase() {
-        let summary = check_path(
-            &reference_examples_root().join("topdown_arena_showcase"),
-        )
-            .expect("bound chain showcase should resolve");
-        assert!(summary.package_count >= 3);
-        assert!(summary.module_count >= 10);
+    fn check_path_handles_bound_chain_workspace() {
+        let root = make_temp_workspace(
+            "bound_chain_workspace",
+            &["app", "core"],
+            &[
+                (
+                    "app/book.toml",
+                    "name = \"app\"\nkind = \"app\"\n\n[deps]\ncore = { path = \"../core\" }\n",
+                ),
+                (
+                    "app/src/shelf.arc",
+                    "import core\nfn main() -> Int:\n    let seed = 1\n    let score = forward :=> core.seed with (seed) => core.inc <= core.dec <= core.emit\n    return score\n",
+                ),
+                ("app/src/types.arc", ""),
+                ("core/book.toml", "name = \"core\"\nkind = \"lib\"\n"),
+                (
+                    "core/src/book.arc",
+                    "export fn seed(seed: Int) -> Int:\n    return seed\nexport fn inc(value: Int) -> Int:\n    return value + 1\nexport fn dec(value: Int) -> Int:\n    return value - 1\nexport fn emit(value: Int) -> Int:\n    return value\n",
+                ),
+                ("core/src/types.arc", ""),
+            ],
+        );
+
+        let summary = check_path(&root).expect("bound chain workspace should resolve");
+        assert_eq!(summary.package_count, 2);
+        assert!(summary.module_count >= 4);
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
     }
 
     #[test]
@@ -5965,21 +6031,42 @@ mod tests {
 
     #[test]
     fn load_workspace_hir_exposes_package_summaries() {
-        let workspace = load_workspace_hir(
-            &reference_examples_root().join("workspace_vertical_slice"),
-        )
-        .expect("workspace hir should load");
-        assert!(workspace.package("desktop_app").is_some());
-        assert!(workspace.package("winspell").is_some());
+        let root = make_temp_workspace(
+            "workspace_hir_summary",
+            &["app", "core"],
+            &[
+                (
+                    "app/book.toml",
+                    "name = \"app\"\nkind = \"app\"\n\n[deps]\ncore = { path = \"../core\" }\n",
+                ),
+                (
+                    "app/src/shelf.arc",
+                    "import core\nfn main() -> Int:\n    return core.id :: 1 :: call\n",
+                ),
+                ("app/src/types.arc", ""),
+                ("core/book.toml", "name = \"core\"\nkind = \"lib\"\n"),
+                (
+                    "core/src/book.arc",
+                    "export fn id(x: Int) -> Int:\n    return x\n",
+                ),
+                ("core/src/types.arc", ""),
+            ],
+        );
+
+        let workspace = load_workspace_hir(&root).expect("workspace hir should load");
+        assert!(workspace.package("app").is_some());
+        assert!(workspace.package("core").is_some());
         assert!(
             workspace
-                .package("winspell")
-                .expect("winspell package should exist")
+                .package("app")
+                .expect("app package should exist")
                 .summary
                 .dependency_edges
                 .iter()
-                .any(|edge| edge.target_path == vec!["std".to_string(), "canvas".to_string()])
+                .any(|edge| edge.target_path == vec!["core".to_string()])
         );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
     }
 
     fn make_temp_package(
@@ -6058,24 +6145,12 @@ mod tests {
             .expect("repo root should resolve")
     }
 
-    fn reference_root() -> PathBuf {
-        repo_root().join("grimoires").join("reference")
-    }
-
     fn owned_root() -> PathBuf {
         repo_root().join("grimoires").join("owned")
     }
 
     fn owned_app_root() -> PathBuf {
         owned_root().join("app")
-    }
-
-    fn reference_app_root() -> PathBuf {
-        reference_root().join("app")
-    }
-
-    fn reference_examples_root() -> PathBuf {
-        reference_root().join("examples")
     }
 
     fn unique_test_id() -> u64 {

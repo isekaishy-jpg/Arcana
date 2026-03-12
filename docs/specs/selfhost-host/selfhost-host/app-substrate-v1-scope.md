@@ -4,7 +4,7 @@ This scope freezes the rewrite-owned first-party app/runtime substrate required 
 
 Scope notes:
 - This file covers the app-facing first-party substrate that sits above host-core packages and below consumer grimoires.
-- The rewrite is expected to own the backend/runtime boundary for this substrate. Imported `winspell` and `spell-events` are consumer/reference corpus, not implementation authority.
+- The rewrite is expected to own the backend/runtime boundary for this substrate. Historical MeadowLang desktop/event corpus is consumer/reference context, not implementation authority.
 - The substrate defined here is a real pre-selfhost Rust runtime commitment of the rewrite. It is not a placeholder promise to keep using imported library layers until after bootstrap.
 - Third-party Rust crates may be used under this substrate only as replaceable implementation details; the public substrate contract, semantics, diagnostics, and resource model must remain Arcana-owned.
 - ECS scheduling/components remain first-party language/runtime surface. They are not demoted to showcase-only helpers.

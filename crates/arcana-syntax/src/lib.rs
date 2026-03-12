@@ -1227,9 +1227,7 @@ fn parse_symbol_signature(kind: SymbolKind, rest: &str) -> Option<ParsedSymbolSi
         | SymbolKind::Enum
         | SymbolKind::Trait
         | SymbolKind::Behavior
-        | SymbolKind::OpaqueType => {
-            parse_named_type_tail(after_name)?
-        }
+        | SymbolKind::OpaqueType => parse_named_type_tail(after_name)?,
         SymbolKind::Const => parse_const_signature_tail(after_name),
     };
 
@@ -1594,9 +1592,7 @@ fn parse_symbol_statements(
         | SymbolKind::Record
         | SymbolKind::Enum
         | SymbolKind::Const
-        | SymbolKind::OpaqueType => {
-            Ok(Vec::new())
-        }
+        | SymbolKind::OpaqueType => Ok(Vec::new()),
     }
 }
 
@@ -2588,9 +2584,7 @@ fn parse_qualified_phrase(text: &str) -> Result<Option<Expr>, String> {
     let subject_text = text[..positions[0]].trim();
     let args_text = text[positions[0] + 2..positions[1]].trim();
     let qualifier = text[positions[1] + 2..].trim();
-    if subject_text.is_empty()
-        || qualifier.is_empty()
-        || subject_text_defers_to_unary(subject_text)
+    if subject_text.is_empty() || qualifier.is_empty() || subject_text_defers_to_unary(subject_text)
     {
         return Ok(None);
     }
@@ -3405,7 +3399,9 @@ fn parse_block_header(rest: &str, keyword: &str, span: Span) -> Result<String, S
     Ok(header.to_string())
 }
 
-fn parse_assignment_statement(text: &str) -> Result<Option<(AssignTarget, AssignOp, String)>, String> {
+fn parse_assignment_statement(
+    text: &str,
+) -> Result<Option<(AssignTarget, AssignOp, String)>, String> {
     let Some((index, op, op_len)) = find_top_level_assignment_op(text) else {
         return Ok(None);
     };
@@ -5613,10 +5609,10 @@ mod tests {
 
     use super::freeze::{FROZEN_AST_NODE_KINDS, FROZEN_TOKEN_KINDS};
     use super::{
-        AssignTarget, BinaryOp, ChainConnector, ChainIntroducer, ChainStep, DirectiveKind, Expr,
-        ForewordApp, ForewordArg, HeaderAttachment, MatchPattern, OpaqueBoundaryPolicy,
-        OpaqueOwnershipPolicy, OpaqueTypePolicy, ParamMode, PhraseArg, Statement, StatementKind,
-        SymbolBody, SymbolKind, UnaryOp, BUILTIN_TYPE_INFOS, builtin_type_info, parse_module,
+        AssignTarget, BUILTIN_TYPE_INFOS, BinaryOp, ChainConnector, ChainIntroducer, ChainStep,
+        DirectiveKind, Expr, ForewordApp, ForewordArg, HeaderAttachment, MatchPattern,
+        OpaqueBoundaryPolicy, OpaqueOwnershipPolicy, OpaqueTypePolicy, ParamMode, PhraseArg,
+        Statement, StatementKind, SymbolBody, SymbolKind, UnaryOp, builtin_type_info, parse_module,
     };
 
     fn expr_is_path(expr: &Expr, name: &str) -> bool {
@@ -5643,16 +5639,8 @@ mod tests {
             .expect("repo root should resolve")
     }
 
-    fn reference_root() -> PathBuf {
-        repo_root().join("grimoires").join("reference")
-    }
-
-    fn reference_app_root() -> PathBuf {
-        reference_root().join("app")
-    }
-
-    fn reference_examples_root() -> PathBuf {
-        reference_root().join("examples")
+    fn owned_app_root() -> PathBuf {
+        repo_root().join("grimoires").join("owned").join("app")
     }
 
     fn collect_arc_files(root: &Path) -> Vec<PathBuf> {
@@ -5694,14 +5682,25 @@ mod tests {
     }
 
     #[test]
-    fn carried_corpus_parses_as_supported_syntax() {
+    fn rewrite_owned_and_conformance_corpus_parses_as_supported_syntax() {
         for root in [
             repo_root().join("std").join("src"),
-            reference_app_root().join("winspell").join("src"),
-            reference_app_root().join("spell-events").join("src"),
-            reference_app_root().join("spell-audio").join("src"),
-            reference_examples_root().join("audio_smoke_demo").join("src"),
-            reference_examples_root().join("topdown_arena_showcase"),
+            owned_app_root().join("arcana-desktop").join("src"),
+            owned_app_root().join("arcana-graphics").join("src"),
+            owned_app_root().join("arcana-text").join("src"),
+            owned_app_root().join("arcana-audio").join("src"),
+            repo_root()
+                .join("conformance")
+                .join("fixtures")
+                .join("types_guard_workspace")
+                .join("app")
+                .join("src"),
+            repo_root()
+                .join("conformance")
+                .join("fixtures")
+                .join("types_guard_workspace")
+                .join("core")
+                .join("src"),
         ] {
             for file in collect_arc_files(&root) {
                 let source = fs::read_to_string(&file).expect("source should be readable");
@@ -6553,7 +6552,9 @@ mod tests {
 
         match &parsed.symbols[0].statements[0].kind {
             StatementKind::Let { value, .. } => {
-                assert!(matches!(value, Expr::QualifiedPhrase { qualifier, .. } if qualifier == "call"));
+                assert!(
+                    matches!(value, Expr::QualifiedPhrase { qualifier, .. } if qualifier == "call")
+                );
             }
             other => panic!("expected let statement, got {other:?}"),
         }
@@ -6567,11 +6568,14 @@ mod tests {
         .expect("parse should pass");
 
         match &parsed.symbols[0].statements[0].kind {
-            StatementKind::Return { value } => match value.as_ref().expect("return value expected") {
+            StatementKind::Return { value } => match value.as_ref().expect("return value expected")
+            {
                 Expr::Pair { left, right } => {
                     assert!(matches!(left.as_ref(), Expr::BoolLiteral { value: true }));
                     match right.as_ref() {
-                        Expr::QualifiedPhrase { args, qualifier, .. } => {
+                        Expr::QualifiedPhrase {
+                            args, qualifier, ..
+                        } => {
                             assert_eq!(qualifier, "call");
                             assert_eq!(args.len(), 1);
                             assert!(matches!(&args[0], PhraseArg::Positional(Expr::Pair { .. })));
@@ -6593,7 +6597,8 @@ mod tests {
         .expect("parse should pass");
 
         match &parsed.symbols[0].statements[0].kind {
-            StatementKind::Return { value } => match value.as_ref().expect("return value expected") {
+            StatementKind::Return { value } => match value.as_ref().expect("return value expected")
+            {
                 Expr::Pair { left, right } => {
                     assert!(matches!(left.as_ref(), Expr::BoolLiteral { value: true }));
                     assert!(matches!(
@@ -6616,7 +6621,10 @@ mod tests {
 
         match &parsed.symbols[0].statements[0].kind {
             StatementKind::Expr {
-                expr: Expr::QualifiedPhrase { qualifier, args, .. },
+                expr:
+                    Expr::QualifiedPhrase {
+                        qualifier, args, ..
+                    },
             } => {
                 assert_eq!(qualifier, "push");
                 assert_eq!(args.len(), 1);
@@ -6637,7 +6645,8 @@ mod tests {
         .expect("parse should pass");
 
         match &parsed.symbols[0].statements[0].kind {
-            StatementKind::Return { value } => match value.as_ref().expect("return value expected") {
+            StatementKind::Return { value } => match value.as_ref().expect("return value expected")
+            {
                 Expr::Binary { left, op, right } => {
                     assert_eq!(*op, BinaryOp::EqEq);
                     match left.as_ref() {
@@ -6663,14 +6672,18 @@ mod tests {
 
         let outer = super::parse_qualified_phrase("out :: (Widget.emit :: a != 0 :: call) :: push")
             .expect("qualified phrase parse should not error");
-        assert!(matches!(outer, Some(Expr::QualifiedPhrase { qualifier, .. }) if qualifier == "push"));
+        assert!(
+            matches!(outer, Some(Expr::QualifiedPhrase { qualifier, .. }) if qualifier == "push")
+        );
     }
 
     #[test]
     fn parse_expression_core_keeps_grouped_phrase_with_comma_args() {
         let inner = super::parse_qualified_phrase("std.text.byte_at :: text, i :: call")
             .expect("qualified phrase parse should not error");
-        assert!(matches!(inner, Some(Expr::QualifiedPhrase { qualifier, .. }) if qualifier == "call"));
+        assert!(
+            matches!(inner, Some(Expr::QualifiedPhrase { qualifier, .. }) if qualifier == "call")
+        );
 
         let grouped = super::parse_expression_core("(std.text.byte_at :: text, i :: call)")
             .expect("grouped phrase should parse");
@@ -7200,18 +7213,24 @@ mod tests {
         assert_eq!(parsed.symbols[0].kind, SymbolKind::OpaqueType);
         assert!(parsed.symbols[0].exported);
         assert_eq!(parsed.symbols[0].name, "Window");
-        assert_eq!(parsed.symbols[0].opaque_policy.expect("policy"), OpaqueTypePolicy {
-            ownership: OpaqueOwnershipPolicy::Move,
-            boundary: OpaqueBoundaryPolicy::Unsafe,
-        });
+        assert_eq!(
+            parsed.symbols[0].opaque_policy.expect("policy"),
+            OpaqueTypePolicy {
+                ownership: OpaqueOwnershipPolicy::Move,
+                boundary: OpaqueBoundaryPolicy::Unsafe,
+            }
+        );
 
         assert_eq!(parsed.symbols[1].kind, SymbolKind::OpaqueType);
         assert_eq!(parsed.symbols[1].name, "Token");
         assert_eq!(parsed.symbols[1].type_params, vec!["T".to_string()]);
-        assert_eq!(parsed.symbols[1].opaque_policy.expect("policy"), OpaqueTypePolicy {
-            ownership: OpaqueOwnershipPolicy::Move,
-            boundary: OpaqueBoundaryPolicy::Safe,
-        });
+        assert_eq!(
+            parsed.symbols[1].opaque_policy.expect("policy"),
+            OpaqueTypePolicy {
+                ownership: OpaqueOwnershipPolicy::Move,
+                boundary: OpaqueBoundaryPolicy::Safe,
+            }
+        );
     }
 
     #[test]

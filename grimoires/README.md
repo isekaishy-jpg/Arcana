@@ -1,15 +1,12 @@
 # Grimoires Workspace
 
-This directory holds both rewrite-owned grimoire scaffolds and reference/imported corpus.
+This directory holds rewrite-owned grimoire scaffolds.
 
 Rules:
 - Packages under `grimoires/owned/*` are rewrite-owned app/media grimoire scaffolds.
-- Packages under `grimoires/reference/*` are reference/imported corpus only.
-- Reference packages may still be checked, compared, or used by migration examples, but that does not make their layout authoritative.
+- Historical MeadowLang grimoire corpus is archived outside this repo and does not make its old layout authoritative.
 - Current authority for future Arcana-owned app/media grimoire roles is `docs/specs/grimoires/grimoires/v1-scope.md` and `docs/specs/grimoires/grimoires/v1-status.md`.
-- Those docs freeze required responsibilities and substrate boundaries, not the package split of the carried reference corpus.
+- Those docs freeze required responsibilities and substrate boundaries, not any historical Meadow-era package split.
 
 Current contents:
 - `owned/app/*`
-- `reference/toolchain/*`
-- `reference/app/*`

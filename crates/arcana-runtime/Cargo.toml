@@ -1,0 +1,13 @@
+[package]
+name = "arcana-runtime"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+arcana-aot.workspace = true
+pathdiff.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+arcana-frontend.workspace = true
+arcana-package.workspace = true

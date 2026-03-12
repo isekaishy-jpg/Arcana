@@ -16,7 +16,7 @@ Rules:
 id: STD-ARGS
 classification: bootstrap-required
 why: command-line bootstrap and host-tool entrypoint arguments
-consumers: `grimoires/reference/examples/selfhost_host_tool_mvp`, `grimoires/reference/toolchain/arcana-selfhost-compiler`
+consumers: owned host-core tools, future owned compiler/tooling entrypoints
 current_source: mixed
 still_needs_rebuild: keep surface narrow and host-root safe under the rewrite runtime boundary
 update_note: keep argument access low-level; do not add parsing or CLI-framework helpers here
@@ -34,7 +34,7 @@ promotion_condition: rewrite-owned host-core runtime satisfies documented env su
 id: STD-PATH
 classification: bootstrap-required
 why: workspace, artifact, and manifest path handling during bootstrap
-consumers: `grimoires/reference/toolchain/arcana-frontend`, `grimoires/reference/toolchain/arcana-compiler-core`, `grimoires/reference/toolchain/arcana-selfhost-compiler`, `grimoires/reference/examples/selfhost_host_tool_mvp`
+consumers: package/build runtime, owned host-core tools, future owned compiler/tooling flows
 current_source: mixed
 still_needs_rebuild: narrow convenience drift and align with approved host-core scope
 update_note: keep only path substrate helpers; `is_absolute`, `stem`, `with_ext`, `relative_to`, `canonicalize`, and `strip_prefix` are now ratified as explicit end-user baseline helpers, path policy helpers still do not belong in `std.path`, and path failures now travel through operation-local `Result[...]` returns instead of a shared error slot
@@ -43,7 +43,7 @@ promotion_condition: public path surface matches approved host-core scope and re
 id: STD-FS
 classification: bootstrap-required
 why: source loading, artifact writes, and host-tool IO during bootstrap
-consumers: `grimoires/reference/toolchain/arcana-frontend`, `grimoires/reference/toolchain/arcana-compiler-core`, `grimoires/reference/toolchain/arcana-selfhost-compiler`, `grimoires/reference/examples/selfhost_host_tool_mvp`
+consumers: package/build runtime, owned host-core tools, future owned compiler/tooling flows
 current_source: mixed
 still_needs_rebuild: narrow fallback-helper drift and align with approved host-core scope
 update_note: keep filesystem APIs substrate-level; the carried fallback wrappers `read_text_or`, `list_dir_or_empty`, `mkdir_all_or_false`, `write_text_or_false`, `read_bytes_or_empty`, and `write_bytes_or_false` were removed from `std.fs`, explicit end-user helpers such as `create_dir`, `remove_dir`, `copy_file`, `rename`, `file_size`, and `modified_unix_ms` are now part of the approved host-core baseline, stream APIs now use a source-declared opaque `FileStream` handle instead of raw `Int` ids, terminal success cases now use `Result[Unit, Str]` rather than `Result[Bool, Str]`, fallible operations carry operation-local `Result[...]` errors rather than a shared error slot, and `stream_close` is a consuming `take` operation
@@ -52,7 +52,7 @@ promotion_condition: rewrite-owned host-core runtime satisfies approved fs surfa
 id: STD-PROCESS
 classification: bootstrap-required
 why: host-tool execution status checks and controlled process capability gate
-consumers: `grimoires/reference/examples/selfhost_host_tool_mvp`
+consumers: owned host-core tools
 current_source: rewrite-owned
 still_needs_rebuild: keep the public surface contracted to approved status-only process execution unless new bootstrap need is documented
 update_note: `std.process` now includes explicit capture helpers for end-user tools, uses operation-local `Result[...]` failure transport, and must not re-expose compiler bootstrap escape hatches or drift into process-management framework policy
@@ -97,7 +97,7 @@ promotion_condition: already effectively stable once rewrite-owned toolchain con
 id: STD-BYTES-TEXT
 classification: bootstrap-required
 why: source loading, tokenization, manifest parsing, and host-tool text handling
-consumers: `grimoires/reference/toolchain/arcana-frontend`, `grimoires/reference/toolchain/arcana-compiler-core`, `grimoires/reference/toolchain/arcana-selfhost-compiler`, host-tool examples
+consumers: frontend/parser/typecheck, package/build tooling, owned host-core tools
 current_source: mixed
 still_needs_rebuild: keep byte-oriented UTF-8 helpers while preventing parser-specific convenience drift from becoming default std contract
 update_note: the approved baseline now includes explicit search/trim/split/join/repeat/int-parse text helpers plus explicit bytes search/concat and `sha256_hex` helpers, but parser-specific or formatting-policy helpers still need review before entering std
@@ -133,7 +133,7 @@ promotion_condition: rewrite-owned runtime satisfies current async/concurrency e
 id: STD-ECS-BEHAVIORS
 classification: bootstrap-required
 why: ECS scheduling/components and behavior stepping are first-party Arcana direction
-consumers: `grimoires/reference/examples/grimoire_ecs_schedule`, `grimoires/reference/examples/grimoire_ecs_mini_game`, `grimoires/reference/examples/topdown_arena_showcase`, behavior examples
+consumers: owned ECS/behavior runtime, owned showcase layers, behavior examples
 current_source: mixed
 still_needs_rebuild: preserve first-party ECS/runtime surface while keeping broad query authoring out of the pre-selfhost baseline
 update_note: `std.ecs`, `std.behaviors`, and `std.behavior_traits` stay first-party; revisit only to split layering more clearly, not to demote them
@@ -151,7 +151,7 @@ promotion_condition: rewrite-owned substrate uses a small stable core-type layer
 id: STD-WINDOW
 classification: bootstrap-required
 why: raw window lifecycle/state/control substrate for desktop apps and showcases
-consumers: `grimoires/owned/app/arcana-desktop`, reference window/showcase corpus
+consumers: `grimoires/owned/app/arcana-desktop`, owned window/showcase proofs
 current_source: carried
 still_needs_rebuild: backend/runtime ownership under the rewrite, without inheriting old framework policy
 update_note: keep only raw window substrate here; `open` is now explicitly fallible (`Result[Window, Str]`), `close` is now a consuming `take` operation with explicit `Result[Unit, Str]`, `alive` remains a lifecycle query rather than the input/event frame pump, `std.canvas.open`/`alive` remain bootstrap compatibility wrappers, ergonomic desktop loops and policies belong in future Arcana-owned grimoire layers, and the current source-declared opaque `Window` handle is a bootstrap seam rather than a permanently ratified resource model
@@ -160,7 +160,7 @@ promotion_condition: rewrite-owned app/runtime backend implements the approved l
 id: STD-INPUT
 classification: bootstrap-required
 why: raw keyboard/mouse polling and code lookup for desktop apps and showcases
-consumers: `grimoires/owned/app/arcana-desktop`, reference input/showcase corpus
+consumers: `grimoires/owned/app/arcana-desktop`, owned input/showcase proofs
 current_source: carried
 still_needs_rebuild: backend/runtime ownership under the rewrite and documented event/input timing semantics
 update_note: action mapping and richer input helpers belong in grimoires above `std.input`; edge-triggered and per-frame state now flows through the move-only source-declared opaque `AppFrame` handle produced by `std.events.pump(edit win)`, and that frame-advance operation is an explicit window mutation rather than a read-only query
@@ -169,7 +169,7 @@ promotion_condition: rewrite-owned input substrate satisfies the approved low-le
 id: STD-EVENTS
 classification: bootstrap-required
 why: typed event queue and frame-pump boundary for desktop consumers
-consumers: `grimoires/owned/app/arcana-desktop`, reference event/showcase corpus
+consumers: `grimoires/owned/app/arcana-desktop`, owned event/showcase proofs
 current_source: carried
 still_needs_rebuild: confirm deterministic event pump semantics under the rewrite backend/runtime
 update_note: routing, snapshots, and keybind helpers belong in grimoires above `std.events`; the public event surface is `Option`/`List`-based, assumes a single backend event-record poll per step rather than separate kind/payload probes, and requires `poll(edit frame)` / `drain(take frame)` to consume the queue carried by the move-only source-declared opaque `AppFrame` handle so event reads stay aligned with the explicit frame boundary
@@ -178,7 +178,7 @@ promotion_condition: rewrite-owned event substrate and pump semantics are docume
 id: STD-CANVAS
 classification: bootstrap-required
 why: primitive render/text/image substrate for desktop apps and showcase proof
-consumers: `grimoires/owned/app/arcana-graphics`, `grimoires/owned/app/arcana-text`, reference window/showcase corpus
+consumers: `grimoires/owned/app/arcana-graphics`, `grimoires/owned/app/arcana-text`, owned window/showcase proofs
 current_source: carried
 still_needs_rebuild: backend/runtime ownership under the rewrite and explicit primitive-graphics contract
 update_note: keep canvas low-level; the approved independent-development baseline now includes line draw, filled circle draw, and default-font label measurement in addition to rect/text/image primitives, `open` stays as a bootstrap compatibility wrapper over `std.window.open`, `image_load` is now explicitly fallible (`Result[Image, Str]`), UI kits and richer scene/render abstractions belong in grimoires, and the current source-declared opaque `Image` handle is only a bootstrap seam until the rewrite-owned resource model is revisited
@@ -187,7 +187,7 @@ promotion_condition: rewrite-owned app/runtime backend satisfies primitive rende
 id: STD-TIME
 classification: bootstrap-required
 why: low-level monotonic timing substrate for run-loop and frame-timing grimoires
-consumers: `grimoires/owned/app/arcana-desktop`, reference showcase/runtime-smoke corpus
+consumers: `grimoires/owned/app/arcana-desktop`, owned showcase/runtime-smoke proofs
 current_source: rewrite-owned
 still_needs_rebuild: runtime/backend implementation of monotonic clocks beyond the current compile-time substrate
 update_note: keep `std.time` low-level; fixed-step or app-loop policy stays out of std
@@ -196,7 +196,7 @@ promotion_condition: rewrite-owned runtime implements the documented monotonic t
 id: STD-AUDIO
 classification: bootstrap-required
 why: low-level audio output/buffer/playback substrate needed to support a later first-party audio grimoire
-consumers: `grimoires/owned/app/arcana-audio`, reference audio-smoke corpus
+consumers: `grimoires/owned/app/arcana-audio`, owned audio-smoke proofs
 current_source: rewrite-owned
 still_needs_rebuild: runtime/backend implementation of audio device/buffer/playback intrinsics
 update_note: keep `std.audio` substrate-level; `default_output`, `buffer_load_wav`, and `play_buffer(edit device, read buffer)` are explicitly fallible (`Result[...]`) acquisition/start operations, `output_close` and playback `stop` are consuming lifecycle operations with explicit `Result[Unit, Str]`, output lifecycle/info hooks plus pause/resume/looping/gain/position playback control remain baseline, mixing/streaming policy and ergonomic playback helpers belong in grimoires, and the current source-declared opaque audio handles are bootstrap seams rather than long-term resource-model commitments

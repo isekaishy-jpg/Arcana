@@ -4,11 +4,11 @@ Arcana is a Rust-first rewrite of the frozen Arcana language and tooling stack. 
 
 ## Current State
 
-- Rust workspace scaffold for syntax, HIR, frontend, package manager, IR, AOT, and CLI layers
+- Rust workspace scaffold for syntax, HIR, frontend, package manager, IR, AOT, runtime, and CLI layers
 - Language-freeze policy and CI guardrails
 - `AnyBox` policy guard for code-bearing paths
 - Cross-cutting spec-status and contract docs now explicitly lock page rollups, pair tuples, callable/context direction, and the AnyBox ban before typed frontend hardening
-- Path-only package graph, deterministic workspace planning, `Arcana.lock` v1, placeholder build artifacts, normalized HIR member fingerprints, and resolved API-fingerprint-based rebuild propagation
+- Path-only package graph, deterministic workspace planning, `Arcana.lock` v1, internal backend-contract build artifacts, normalized HIR member fingerprints, and resolved API-fingerprint-based rebuild propagation
 - Shared HIR module, package, and workspace summaries now sit between syntax parsing, frontend checks, and package graph consumers
 - Symbol-based module and imported-name resolution now lives in HIR and is consumed by frontend diagnostics
 - Unsupported top-level syntax now fails explicitly instead of being silently skipped
@@ -28,24 +28,26 @@ Arcana is a Rust-first rewrite of the frozen Arcana language and tooling stack. 
 - `arcana check` now also enforces recursive boundary-safe typing for carried Lua/SQL boundary contracts across nested record/enum surfaces
 - Lua/SQL boundary-varietal compile-time contracts now have example and negative conformance coverage, and the carried first-class ECS direction is documented without freezing generalized ECS query authoring into the selfhost baseline
 - Impl header generic/lifetime params now survive syntax/HIR lowering, so inherited `T`/`'a` scope is available to later frontend work
-- Next compiler debt is the runnable backend/runtime slice plus pre-selfhost tooling work for `arcana test` and `arcana format`
-- Seed-imported docs, `std`, and reference corpus under `grimoires/reference/*` plus conformance fixtures from MeadowLang
+- Next compiler debt is approved `std` runtime closure, native AOT artifact emission, and pre-selfhost tooling work for `arcana test` and `arcana format`
+- Seed-imported frozen docs, conformance fixtures, and historical MeadowLang corpus were used to bootstrap the rewrite; the broad reference tree is now archived outside this repo
 - Meadow-vs-Arcana language-behavior audit captured in `docs/reference/audits/meadow_language_behavior_audit_v1.md`
-- Imported `std` and all current `grimoires/reference/*` packages are behavioral seed corpus only; current rewrite authority comes from `PLAN.md`, `docs/rewrite-roadmap.md`, and the active scope docs under `docs/specs/`
+- Current rewrite authority comes from `PLAN.md`, `docs/rewrite-roadmap.md`, the active scope docs under `docs/specs/`, and `crates/*`; archived MeadowLang corpus is migration context only, while `std` is rewrite-owned first-party surface
 - Rewrite-owned app/media grimoires now scaffold under `grimoires/owned/*`
 - Rewrite-owned app/media grimoire scaffolds now check in crate-side regression coverage against the new frontend, and pre-selfhost `std` shape is frozen unless Milestone 6/runtime work proves a concrete blocker
 - `docs/specs/std/std/v1-scope.md` defines how the rewrite treats `std`: rebuild-owned first-party library surface, not MeadowLang layering to preserve wholesale
 - `docs/specs/std/std/v1-status.md` and `docs/specs/grimoires/grimoires/v1-status.md` track which std modules and future Arcana-owned app/media grimoire roles are bootstrap-required, transitional-carried, or deferred
 - `arcana check` with shared package/HIR loading, symbol-based module and `use` resolution, direct-dependency enforcement, implicit `std`, and stable file/line/column diagnostics
-- `arcana build` now runs frontend validation, lowers packages through placeholder IR, and emits placeholder AOT artifacts
-- Placeholder artifacts now include package/module counts, dependency-edge counts, exported declaration-surface rows, and per-module summary rows for debugging/cache inspection
+- `arcana build` now runs frontend validation, lowers packages through internal IR, and emits unstable internal backend-contract artifacts that carry package metadata plus lowered routine/body rows for the Milestone 6 runtime/backend slice
+- `arcana-runtime` now loads that internal backend-contract artifact into a parsed Rust-side execution plan, so the Milestone 6 runtime path no longer starts from package/build-only strings or reparse executable rows on each routine call
+- `arcana-runtime` now executes a real Milestone 6 backend lane over that parsed plan: `main`, local/control-flow semantics (`let`, arithmetic/comparison, `if`/`while`/`for`, assignment, `break`/`continue`, scoped `defer`), routine parameters, named/attached phrase parsing, first-class `Record` / `List` / `Array` values for the current data-model slice, and record-member / impl-method execution where the lowered backend artifact carries those routines
+- `arcana build` now links the member artifact with the transitive workspace dependency closure plus implicit rewrite-owned `std` when used, and the internal IR/AOT contract now carries impl methods, behavior attrs, and routine type-parameter rows as executable runtime metadata, so `arcana-runtime` can execute linked std routine bodies instead of relying only on path-matched wrappers; current crate-side regression coverage proves counter, args/tool, local record/impl execution, linked `std.text`, linked `std.option` / typed enum variants, linked `std.collections.array`, linked `std.env` / `std.io` / `std.bytes`, linked full `std.fs` including stream APIs over explicit typed `FileStream` handles, linked `std.process`, synthetic host-core workspace apps against the current `std.args` / `std.env` / `std.io` / `std.path` / `std.fs` / `std.process` / `std.bytes` / `std.text` / `std.result` / `std.option` / `std.collections.list` / `std.collections.array` host-core subset, synthetic app-substrate workspace apps against the current `std.window` / `std.events` / `std.input` / `std.canvas` / `std.time` / `std.audio` seams over explicit typed `Window` / `Image` / `AppFrame` / `AudioDevice` / `AudioBuffer` / `AudioPlayback` handles, linked/synthetic ECS runtime coverage for `behavior[...]`, `system[...]`, `std.behaviors`, `std.ecs`, and `std.kernel.ecs`, and runtime proof that an app built on the owned `arcana_desktop` / `arcana_audio` grimoires executes end to end on the current synthetic host; this completes the first runnable backend lane, while the remaining backend work is approved-`std` runtime closure plus native AOT `exe` / `dll` artifact emission for real host smoke
 
 ## Commands
 
 ```powershell
 cargo test --workspace
-cargo run -q -p arcana-cli -- check grimoires\reference\examples\workspace_vertical_slice
-cargo run -q -p arcana-cli -- build grimoires\reference\examples\workspace_vertical_slice --plan
+cargo run -q -p arcana-cli -- check grimoires\owned\app\arcana-desktop
+cargo run -q -p arcana-cli -- check grimoires\owned\app\arcana-audio
 ```
 
 ## Boundaries
@@ -55,4 +57,4 @@ cargo run -q -p arcana-cli -- build grimoires\reference\examples\workspace_verti
 - No public bytecode compatibility contract in this repo
 - `docs/specs/selfhost-host/selfhost-host/v1-scope.md` freezes host-core packages; `docs/specs/selfhost-host/selfhost-host/app-substrate-v1-scope.md` freezes the rewrite-owned app/runtime substrate
 - `docs/specs/grimoires/grimoires/v1-scope.md` freezes required future Arcana-owned app/media grimoire roles by responsibility rather than by carried Meadow-era package names
-- The imported `arcana-compiler-core` direct-emit corpus includes one placeholder shard where the original generated payload exceeded GitHub's hard file limit; see `docs/seed-import.md`
+- Historical seed-import notes and archived-corpus context live in `docs/seed-import.md`

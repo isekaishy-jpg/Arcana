@@ -1,7 +1,0 @@
-name = "showcase_visual"
-kind = "app"
-
-[deps]
-showcase_core = { path = "../showcase_core" }
-winspell = { path = "../../../app/winspell" }
-spell_events = { path = "../../../app/spell-events" }

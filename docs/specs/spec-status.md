@@ -34,9 +34,9 @@ This document defines how Arcana spec files are interpreted during the rewrite.
 - If a contract question materially affects parser shape, typed HIR, IR, or selfhost grimoires, it should not remain implicit.
 - Imported MeadowLang planning docs do not define current rewrite architecture unless they are explicitly listed here as frozen, approved, reserved, or deferred authority.
 - Reference-only material should live under `docs/reference/` whenever practical so historical context is not mixed into the active spec tree.
-- Imported `std` and `grimoires/reference/*` are behavioral seed corpus only; they do not define rewrite layering, backend architecture, or public package surface except where current scope docs explicitly ratify them.
-- Architecture/selfhost-progress reviews must privilege approved docs plus `crates/*` over carried corpus; issues found only in `std/`, `grimoires/reference/*`, or generated snapshots must be labeled as transitional/corpus drift unless a current scope explicitly makes them authoritative.
-- `grimoires/reference/*` is intentionally temporary. Once the rewrite-owned runtime/app stack and owned showcase path are proven, the reference corpus should leave the default development loop and remain only as selective migration/conformance material.
+- `std` is rewrite-owned first-party surface. Archived historical MeadowLang corpus and generated snapshots do not define rewrite layering, backend architecture, or public package surface except where current scope docs explicitly ratify them.
+- Architecture/selfhost-progress reviews must privilege approved docs plus `crates/*`; issues found only in archived historical material or generated snapshots must be labeled as transitional/corpus drift unless a current scope explicitly makes them authoritative.
+- The broad MeadowLang reference corpus is archived outside the repo and is not part of the default development loop.
 
 ## Current Registry Seed
 

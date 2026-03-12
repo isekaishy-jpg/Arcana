@@ -1,5 +1,0 @@
-name = "audio_smoke_demo"
-kind = "app"
-
-[deps]
-spell_audio = { path = "../../app/spell-audio" }

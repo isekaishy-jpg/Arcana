@@ -1,1 +1,0 @@
-// structural types module

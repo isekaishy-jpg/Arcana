@@ -14,14 +14,8 @@
   - the selfhost language matrix,
   - the std and grimoire scope/status docs,
   - the chain, memory, host, backend, and policy docs that describe behavior rather than old implementation.
-- Copy forward source reference corpus that defines required behavior:
-  - `std`,
-  - `grimoires/reference/toolchain/arcana-frontend`,
-  - `grimoires/reference/toolchain/arcana-compiler-core`,
-  - `grimoires/reference/toolchain/arcana-selfhost-compiler`,
-  - `grimoires/reference/app/winspell`,
-  - `grimoires/reference/app/spell-events`,
-  - `grimoires/reference/examples/*` and the conformance targets referenced by the selfhost language matrix.
+- Carry forward `std` and the frozen conformance material in-tree.
+- Historical MeadowLang reference corpus was useful during bootstrap, but it is now archived outside this repo and no longer participates in default validation or architecture decisions.
 - Do not copy old Rust implementation crates, old bytecode/runtime binaries, `PLAN*.md`, `tmp/`, `target/`, `.arcana/` artifacts, or generated golden outputs.
 - Add a repo policy document on day 1 that states:
   - language frozen until selfhost,
@@ -75,12 +69,13 @@
   - app/runtime packages for window/input/canvas/events/time/audio plus primitive graphics/text,
   - ECS/behavior runtime substrate remains first-party and is not treated as showcase-only logic,
   - then future Arcana-owned app/media grimoires for desktop facade, event/input utility, and audio facade prove the package surface is usable,
-  - reference compiler corpus under `grimoires/reference/toolchain/*` remains validation pressure and selfhost-closure corpus, not the target package architecture to preserve,
+  - owned compiler/tooling corpus and explicit conformance fixtures provide validation pressure without preserving Meadow-era package decomposition,
   - and those packages are real Rust-side runtime commitments of the rewrite, not temporary compatibility shims to be deferred until after selfhost.
 - Artifact strategy is explicit:
   - no public bytecode compatibility contract in the new repo,
   - internal IR may be serialized for tests/cache/bootstrap only,
-  - AOT is the intended public delivery path,
+  - the current internal artifact/runtime lane is a bootstrap step, not the final delivery contract,
+  - AOT is the intended public delivery path, including native `exe` / `dll` artifact emission,
   - if a temporary interpreter or bootstrap artifact exists, it stays internal and unstable until after selfhost,
   - but the required host/app/runtime substrate still lands as rewrite-owned Rust implementation work before selfhost.
 - Selfhost sequence is fixed:
@@ -89,16 +84,16 @@
   3. parser/HIR/frontend for the frozen language matrix,
   4. incremental build and cache correctness,
   5. first-party host/io plus app/runtime packages compile on the new frontend,
-  6. internal IR and first AOT backend with rewrite-owned host/window/input/canvas/events/graphics/text substrate,
-  7. runnable proof on carried-over examples such as `hello`, one host tool, and one window demo,
-  8. add first-party `arcana test` and `arcana format` on the rewrite-owned toolchain, and keep `arcana review` limited to compiler-owned/spec-backed advice until showcase-scale corpus exists,
-  9. write any needed Arcana-owned layers on top of the new toolchain and validate against the reference compiler corpus without preserving Meadow-era package decomposition by default,
-  10. declare selfhost only when the new compiler can build the reference compiler corpus without using the old MeadowLang implementation.
-- Reference-corpus quarantine policy:
-  - architectural quarantine is immediate: `grimoires/reference/*` and other carried corpus remain behavioral reference only and must not define current rewrite architecture,
-  - operational quarantine begins once Milestone 6 is complete, the owned app/media grimoires are usable on the rewrite-owned runtime substrate, and at least one real owned showcase exists,
-  - from that point, reference corpus should stop being part of normal default validation and move to selective migration/conformance pressure only,
-  - post-selfhost, keep only distilled conformance fixtures and narrowly useful historical reference; do not keep broad carried reference trees in the default development loop by inertia.
+  6. internal IR and first runnable backend with rewrite-owned host/window/input/canvas/events/graphics/text substrate,
+  7. close the approved rewrite-owned `std` runtime surface so `std` is broadly runnable rather than only the initial host/app substrate slice,
+  8. native AOT artifact emission for the owned `hello`-class, host-core tool, window demo, and audio smoke paths on real hosts, with native `exe` / `dll` outputs rather than only internal backend artifacts,
+  9. add first-party `arcana test` and `arcana format` on the rewrite-owned toolchain, and keep `arcana review` limited to compiler-owned/spec-backed advice until showcase-scale corpus exists,
+  10. write any needed Arcana-owned layers on top of the new toolchain and validate against the owned compiler/tooling corpus plus explicit conformance fixtures without preserving Meadow-era package decomposition by default,
+  11. declare selfhost only when the new compiler can build the owned Arcana compiler/tooling corpus with no fallback to the legacy MeadowLang implementation.
+- Historical-corpus archive policy:
+  - broad MeadowLang reference corpus is archived outside this repo and is not part of normal validation,
+  - approved docs, `crates/*`, rewrite-owned `std`, rewrite-owned grimoires, and conformance fixtures define day-to-day rewrite work,
+  - archived material may still be consulted manually for migration questions, but it must not re-enter architecture review or default validation by inertia.
 
 ## Tests and Acceptance Criteria
 - Freeze enforcement:
@@ -118,8 +113,10 @@
   - compile tests for window/input/canvas/time/audio packages,
   - package-level tests proving the required future Arcana-owned app/media grimoire roles build against the new package/runtime boundary.
 - Backend/selfhost:
-  - first AOT milestone must run `hello`, one host-tool example, and one window example,
-  - selfhost milestone must build the reference compiler corpus with the new toolchain and no fallback to the legacy MeadowLang repo.
+  - first runnable backend milestone must run `hello`, one owned host-core tool proof, and one owned window proof,
+  - std-runtime-closure milestone must cover the approved rewrite-owned `std` surface needed by owned grimoires rather than only the initial Milestone 6 subset,
+  - native-artifact milestone must emit real `exe` / `dll` outputs and support real window/audio smoke on non-synthetic hosts,
+  - selfhost milestone must build the owned Arcana compiler/tooling corpus with the new toolchain and no fallback to the legacy MeadowLang repo.
 
 ## Assumptions and Defaults
 - The frozen baseline is the current Arcana v0 language contract plus the existing selfhost language matrix.

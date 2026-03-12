@@ -1,5 +1,0 @@
-name = "selfhost_bytecode_writer_tool"
-kind = "app"
-
-[deps]
-arcana_compiler_core = { path = "../../toolchain/arcana-compiler-core" }
