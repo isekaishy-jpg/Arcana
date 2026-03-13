@@ -336,7 +336,7 @@ pub enum HirExpr {
         family: String,
         arena: Box<HirExpr>,
         init_args: Vec<HirPhraseArg>,
-        constructor: String,
+        constructor: Box<HirExpr>,
         attached: Vec<HirHeaderAttachment>,
     },
     GenericApply {
@@ -1509,7 +1509,7 @@ fn render_expr_fingerprint(expr: &HirExpr) -> String {
                 .map(render_phrase_arg_fingerprint)
                 .collect::<Vec<_>>()
                 .join(","),
-            quote_fingerprint_text(constructor),
+            render_expr_fingerprint(constructor),
             attached
                 .iter()
                 .map(render_header_attachment_fingerprint)
@@ -2504,7 +2504,7 @@ fn lower_expr(expr: &ParsedExpr) -> HirExpr {
             family: family.clone(),
             arena: Box::new(lower_expr(arena)),
             init_args: init_args.iter().map(lower_phrase_arg).collect(),
-            constructor: constructor.clone(),
+            constructor: Box::new(lower_expr(constructor)),
             attached: lower_header_attachments(attached),
         },
         ParsedExpr::GenericApply { expr, type_args } => HirExpr::GenericApply {
@@ -3032,7 +3032,10 @@ mod tests {
                 ..
             } => {
                 assert_eq!(family, "arena");
-                assert_eq!(constructor, "Item");
+                match constructor.as_ref() {
+                    HirExpr::Path { segments } => assert_eq!(segments, &vec!["Item".to_string()]),
+                    other => panic!("expected constructor path, got {other:?}"),
+                }
             }
             other => panic!("expected memory phrase, got {other:?}"),
         }
@@ -3667,7 +3670,12 @@ mod tests {
                     },
             } => {
                 assert_eq!(family, "arena");
-                assert_eq!(constructor, "make_node");
+                match constructor.as_ref() {
+                    HirExpr::Path { segments } => {
+                        assert_eq!(segments, &vec!["make_node".to_string()])
+                    }
+                    other => panic!("expected constructor path, got {other:?}"),
+                }
                 assert_eq!(attached.len(), 2);
                 assert!(matches!(
                     &attached[0],

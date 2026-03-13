@@ -25,16 +25,24 @@ Pair-only tuples are the current stabilization point, not the intended permanent
 
 - Tuples are value aggregates.
 - Whole-tuple construction and whole-value passing/returning are supported.
-- Tuples may appear in `match` and equality where element types permit it.
+- Tuple-specific `match` patterns are not part of the v1 contract.
+- Current tuple use around `match` is limited to ordinary whole-value flow plus explicit `.0` / `.1` access before matching.
 - Tuples may be nested to build protocol payloads, but named records are preferred once the shape becomes semantically meaningful.
 
 ## Explicit Exclusions
 
 - No tuple destructuring in bindings, parameters, or `for` headers.
+- No tuple patterns in `match`.
 - No named tuple fields.
 - No tuple methods or special tuple traits.
 - No variadic tuple families.
 - No tuple field assignment such as `pair.0 = x`.
+
+## Narrowing Note
+
+- Older frozen summary text used broader tuple/match wording.
+- The rewrite v1 baseline intentionally does not carry Meadow-era tuple-pattern behavior forward as implicit contract.
+- If tuple patterns return, they must come back through an explicit redesign and updated coverage, not by inference from archived behavior.
 
 ## Equality and Type Behavior
 

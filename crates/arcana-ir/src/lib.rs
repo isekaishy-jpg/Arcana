@@ -169,6 +169,17 @@ fn render_phrase_arg(arg: &HirPhraseArg) -> String {
     }
 }
 
+fn render_phrase_qualifier_kind(qualifier: &str) -> &'static str {
+    match qualifier.trim() {
+        "call" => "call",
+        "?" => "try",
+        ">" => "apply",
+        ">>" => "await_apply",
+        other if other.contains('.') => "named_path",
+        _ => "bare_method",
+    }
+}
+
 fn render_chain_connector(connector: HirChainConnector) -> &'static str {
     match connector {
         HirChainConnector::Forward => "=>",
@@ -332,13 +343,14 @@ fn render_expr(expr: &HirExpr) -> String {
             constructor,
             attached,
         } => format!(
-            "memory(family={family},arena={},init=[{}],ctor={constructor},attached=[{}])",
+            "memory(family={family},arena={},init=[{}],ctor={},attached=[{}])",
             render_expr(arena),
             init_args
                 .iter()
                 .map(render_phrase_arg)
                 .collect::<Vec<_>>()
                 .join(","),
+            render_expr(constructor),
             attached
                 .iter()
                 .map(render_header_attachment)
@@ -356,12 +368,13 @@ fn render_expr(expr: &HirExpr) -> String {
             qualifier,
             attached,
         } => format!(
-            "phrase(subject={},args=[{}],qualifier={qualifier},attached=[{}])",
+            "phrase(subject={},args=[{}],kind={},qualifier={qualifier},attached=[{}])",
             render_expr(subject),
             args.iter()
                 .map(render_phrase_arg)
                 .collect::<Vec<_>>()
                 .join(","),
+            render_phrase_qualifier_kind(qualifier),
             attached
                 .iter()
                 .map(render_header_attachment)

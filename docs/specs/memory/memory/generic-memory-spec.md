@@ -1,5 +1,11 @@
 # Generic Memory System Spec (Saved Reference)
 
+Status: `reference-only`
+
+Historical carryover note:
+- This Meadow-era planning/spec text is kept for audit context.
+- Current rewrite authority for memory surface now lives in `docs/specs/memory/memory/v1-scope.md`.
+
 This is the canonical generic reference for Arcana memory-system evolution after Plan 31.
 
 ## Goals

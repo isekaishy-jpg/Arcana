@@ -1452,7 +1452,7 @@ mod tests {
             .expect("core status");
         let artifact = fs::read_to_string(graph.root_dir.join(&core.artifact_rel_path))
             .expect("artifact should exist");
-        assert!(artifact.contains("format = \"arcana-aot-v1\""));
+        assert!(artifact.contains("format = \"arcana-aot-v2\""));
         assert!(artifact.contains("package = \"core\""));
         assert!(artifact.contains("root_module = \"core\""));
         assert!(artifact.contains("module_count = 2"));
@@ -1469,11 +1469,8 @@ mod tests {
             artifact.contains("module=core.types:export:record:record Counter:\\\\nvalue: Int")
         );
         assert!(artifact.contains("module_rows = ["));
-        assert!(artifact.contains("core:fn:shared_value:async=false:exported=true"));
-        assert!(
-            artifact
-                .contains("core:shared_value:0:stmt(core=return(int(0)),forewords=[],rollups=[])")
-        );
+        assert!(artifact.contains("0:core:fn:shared_value:async=false:exported=true"));
+        assert!(artifact.contains("0:0:stmt(core=return(int(0)),forewords=[],rollups=[])"));
         assert!(artifact.contains("core:symbols=1:items=4:lines=3:non_empty_lines=3"));
         let _ = fs::remove_dir_all(&dir);
     }

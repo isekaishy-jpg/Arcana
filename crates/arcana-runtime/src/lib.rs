@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::io::{Read, Seek, Write};
 use std::path::{Component, Path, PathBuf};
@@ -30,6 +30,7 @@ pub struct RuntimeRoutinePlan {
     pub intrinsic_impl: Option<String>,
     pub foreword_rows: Vec<String>,
     pub rollup_rows: Vec<String>,
+    rollups: Vec<ParsedPageRollup>,
     statements: Vec<ParsedStmt>,
 }
 
@@ -112,6 +113,89 @@ pub struct RuntimeAudioBufferHandle(u64);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RuntimeAudioPlaybackHandle(u64);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RuntimeChannelHandle(u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RuntimeMutexHandle(u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RuntimeAtomicIntHandle(u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RuntimeAtomicBoolHandle(u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RuntimeArenaHandle(u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RuntimeFrameArenaHandle(u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RuntimePoolArenaHandle(u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RuntimeTaskHandle(u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RuntimeThreadHandle(u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct RuntimeLocalHandle(u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RuntimeArenaIdValue {
+    arena: RuntimeArenaHandle,
+    slot: u64,
+    generation: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RuntimeFrameIdValue {
+    arena: RuntimeFrameArenaHandle,
+    slot: u64,
+    generation: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RuntimePoolIdValue {
+    arena: RuntimePoolArenaHandle,
+    slot: u64,
+    generation: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RuntimeReferenceTarget {
+    Local {
+        local: RuntimeLocalHandle,
+        members: Vec<String>,
+    },
+    ArenaSlot {
+        id: RuntimeArenaIdValue,
+        members: Vec<String>,
+    },
+    FrameSlot {
+        id: RuntimeFrameIdValue,
+        members: Vec<String>,
+    },
+    PoolSlot {
+        id: RuntimePoolIdValue,
+        members: Vec<String>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeReferenceValue {
+    mutable: bool,
+    target: RuntimeReferenceTarget,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeResolvedPlace {
+    mutable: bool,
+    target: RuntimeReferenceTarget,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RuntimeOpaqueValue {
     FileStream(RuntimeFileStreamHandle),
@@ -121,9 +205,25 @@ enum RuntimeOpaqueValue {
     AudioDevice(RuntimeAudioDeviceHandle),
     AudioBuffer(RuntimeAudioBufferHandle),
     AudioPlayback(RuntimeAudioPlaybackHandle),
+    Channel(RuntimeChannelHandle),
+    Mutex(RuntimeMutexHandle),
+    AtomicInt(RuntimeAtomicIntHandle),
+    AtomicBool(RuntimeAtomicBoolHandle),
+    Arena(RuntimeArenaHandle),
+    ArenaId(RuntimeArenaIdValue),
+    FrameArena(RuntimeFrameArenaHandle),
+    FrameId(RuntimeFrameIdValue),
+    PoolArena(RuntimePoolArenaHandle),
+    PoolId(RuntimePoolIdValue),
+    Task(RuntimeTaskHandle),
+    Thread(RuntimeThreadHandle),
 }
 
 pub trait RuntimeHost {
+    fn supports_runtime_requirement(&self, requirement: &str) -> bool {
+        let _ = requirement;
+        true
+    }
     fn print(&mut self, text: &str) -> Result<(), String>;
     fn eprint(&mut self, text: &str) -> Result<(), String>;
     fn flush_stdout(&mut self) -> Result<(), String> {
@@ -858,6 +958,7 @@ pub struct BufferedHost {
     pub stdin: Vec<String>,
     pub args: Vec<String>,
     pub env: BTreeMap<String, String>,
+    pub supported_runtime_requirements: Option<BTreeSet<String>>,
     pub allow_process: bool,
     pub cwd: String,
     pub sandbox_root: String,
@@ -1139,6 +1240,12 @@ impl BufferedHost {
 }
 
 impl RuntimeHost for BufferedHost {
+    fn supports_runtime_requirement(&self, requirement: &str) -> bool {
+        self.supported_runtime_requirements
+            .as_ref()
+            .is_none_or(|supported| supported.contains(requirement))
+    }
+
     fn print(&mut self, text: &str) -> Result<(), String> {
         self.stdout.push(text.to_string());
         Ok(())
@@ -2161,6 +2268,13 @@ enum RuntimeValue {
     Pair(Box<RuntimeValue>, Box<RuntimeValue>),
     Array(Vec<RuntimeValue>),
     List(Vec<RuntimeValue>),
+    Map(Vec<(RuntimeValue, RuntimeValue)>),
+    Range {
+        start: Option<i64>,
+        end: Option<i64>,
+        inclusive_end: bool,
+    },
+    Ref(RuntimeReferenceValue),
     Opaque(RuntimeOpaqueValue),
     Record {
         name: String,
@@ -2190,9 +2304,36 @@ enum ParsedExpr {
         subject: Box<ParsedExpr>,
         arms: Vec<ParsedMatchArm>,
     },
+    Chain {
+        style: String,
+        introducer: ParsedChainIntroducer,
+        steps: Vec<ParsedChainStep>,
+    },
+    MemoryPhrase {
+        family: String,
+        arena: Box<ParsedExpr>,
+        init_args: Vec<ParsedPhraseArg>,
+        constructor: Box<ParsedExpr>,
+        attached: Vec<ParsedHeaderAttachment>,
+    },
     Member {
         expr: Box<ParsedExpr>,
         member: String,
+    },
+    Index {
+        expr: Box<ParsedExpr>,
+        index: Box<ParsedExpr>,
+    },
+    Slice {
+        expr: Box<ParsedExpr>,
+        start: Option<Box<ParsedExpr>>,
+        end: Option<Box<ParsedExpr>>,
+        inclusive_end: bool,
+    },
+    Range {
+        start: Option<Box<ParsedExpr>>,
+        end: Option<Box<ParsedExpr>>,
+        inclusive_end: bool,
     },
     Generic {
         expr: Box<ParsedExpr>,
@@ -2201,8 +2342,12 @@ enum ParsedExpr {
     Phrase {
         subject: Box<ParsedExpr>,
         args: Vec<ParsedPhraseArg>,
+        qualifier_kind: ParsedPhraseQualifierKind,
         qualifier: String,
         attached: Vec<ParsedHeaderAttachment>,
+    },
+    Await {
+        expr: Box<ParsedExpr>,
     },
     Unary {
         op: ParsedUnaryOp,
@@ -2215,10 +2360,27 @@ enum ParsedExpr {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ParsedPhraseQualifierKind {
+    Call,
+    Try,
+    Apply,
+    AwaitApply,
+    BareMethod,
+    NamedPath,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ParsedMatchArm {
     patterns: Vec<ParsedMatchPattern>,
     value: ParsedExpr,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ParsedPageRollup {
+    kind: String,
+    subject: String,
+    handler_path: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2231,6 +2393,19 @@ struct ParsedPhraseArg {
 struct RuntimeCallArg {
     name: Option<String>,
     value: RuntimeValue,
+    source_expr: ParsedExpr,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BoundRuntimeArg {
+    value: RuntimeValue,
+    source_expr: ParsedExpr,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RoutineExecutionOutcome {
+    value: RuntimeValue,
+    final_args: Vec<RuntimeValue>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2257,21 +2432,27 @@ enum ParsedStmt {
         name: String,
         value: ParsedExpr,
     },
-    Expr(ParsedExpr),
+    Expr {
+        expr: ParsedExpr,
+        rollups: Vec<ParsedPageRollup>,
+    },
     Return(Option<ParsedExpr>),
     If {
         condition: ParsedExpr,
         then_branch: Vec<ParsedStmt>,
         else_branch: Vec<ParsedStmt>,
+        rollups: Vec<ParsedPageRollup>,
     },
     While {
         condition: ParsedExpr,
         body: Vec<ParsedStmt>,
+        rollups: Vec<ParsedPageRollup>,
     },
     For {
         binding: String,
         iterable: ParsedExpr,
         body: Vec<ParsedStmt>,
+        rollups: Vec<ParsedPageRollup>,
     },
     Defer(ParsedExpr),
     Break,
@@ -2288,6 +2469,11 @@ enum ParsedUnaryOp {
     Neg,
     Not,
     BitNot,
+    BorrowRead,
+    BorrowMut,
+    Deref,
+    Weave,
+    Split,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2342,7 +2528,9 @@ enum ParsedAssignOp {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RuntimeLocal {
+    handle: RuntimeLocalHandle,
     mutable: bool,
+    moved: bool,
     value: RuntimeValue,
 }
 
@@ -2360,14 +2548,173 @@ enum FlowSignal {
     Continue,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RuntimeEvalSignal {
+    Message(String),
+    Return(RuntimeValue),
+}
+
+type RuntimeEvalResult<T> = Result<T, RuntimeEvalSignal>;
+
+impl From<String> for RuntimeEvalSignal {
+    fn from(value: String) -> Self {
+        Self::Message(value)
+    }
+}
+
+fn runtime_eval_message(signal: RuntimeEvalSignal) -> String {
+    match signal {
+        RuntimeEvalSignal::Message(message) => message,
+        RuntimeEvalSignal::Return(value) => {
+            format!("runtime try qualifier `?` returned from unsupported context with `{value:?}`")
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct RuntimeExecutionState {
+    next_local_handle: u64,
+    rollup_frames: Vec<RuntimeRollupFrame>,
     next_entity_id: i64,
     live_entities: BTreeSet<i64>,
     component_slots: BTreeMap<Vec<String>, BTreeMap<i64, RuntimeValue>>,
+    next_arena_handle: u64,
+    arenas: BTreeMap<RuntimeArenaHandle, RuntimeArenaState>,
+    next_frame_arena_handle: u64,
+    frame_arenas: BTreeMap<RuntimeFrameArenaHandle, RuntimeFrameArenaState>,
+    next_pool_arena_handle: u64,
+    pool_arenas: BTreeMap<RuntimePoolArenaHandle, RuntimePoolArenaState>,
+    next_task_handle: u64,
+    tasks: BTreeMap<RuntimeTaskHandle, RuntimeTaskState>,
+    next_thread_handle: u64,
+    threads: BTreeMap<RuntimeThreadHandle, RuntimeThreadState>,
+    async_context_depth: usize,
+    next_scheduler_thread_id: i64,
+    current_thread_id: i64,
+    next_channel_handle: u64,
+    channels: BTreeMap<RuntimeChannelHandle, RuntimeChannelState>,
+    next_mutex_handle: u64,
+    mutexes: BTreeMap<RuntimeMutexHandle, RuntimeMutexState>,
+    next_atomic_int_handle: u64,
+    atomic_ints: BTreeMap<RuntimeAtomicIntHandle, i64>,
+    next_atomic_bool_handle: u64,
+    atomic_bools: BTreeMap<RuntimeAtomicBoolHandle, bool>,
 }
 
 type RuntimeTypeBindings = BTreeMap<String, String>;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeChannelState {
+    type_args: Vec<String>,
+    capacity: usize,
+    queue: VecDeque<RuntimeValue>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeMutexState {
+    type_args: Vec<String>,
+    value: Option<RuntimeValue>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeArenaState {
+    type_args: Vec<String>,
+    next_slot: u64,
+    generation: u64,
+    slots: BTreeMap<u64, RuntimeValue>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeFrameArenaState {
+    type_args: Vec<String>,
+    next_slot: u64,
+    generation: u64,
+    slots: BTreeMap<u64, RuntimeValue>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimePoolArenaState {
+    type_args: Vec<String>,
+    next_slot: u64,
+    free_slots: Vec<u64>,
+    generations: BTreeMap<u64, u64>,
+    slots: BTreeMap<u64, RuntimeValue>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeRollupFrame {
+    rollups: Vec<ParsedPageRollup>,
+    subjects: BTreeSet<String>,
+    active: BTreeMap<String, RuntimeValue>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeDeferredCall {
+    callable: Vec<String>,
+    current_module_id: String,
+    type_args: Vec<String>,
+    call_args: Vec<RuntimeCallArg>,
+    scopes: Vec<RuntimeScope>,
+    thread_id: i64,
+    allow_async: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeDeferredExpr {
+    expr: ParsedExpr,
+    current_module_id: String,
+    aliases: BTreeMap<String, Vec<String>>,
+    type_bindings: RuntimeTypeBindings,
+    scopes: Vec<RuntimeScope>,
+    thread_id: i64,
+    allow_async: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RuntimeDeferredWork {
+    Call(RuntimeDeferredCall),
+    Expr(RuntimeDeferredExpr),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RuntimePendingState {
+    Pending(RuntimeDeferredWork),
+    Running,
+    Completed(RuntimeValue),
+    Failed(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeTaskState {
+    type_args: Vec<String>,
+    state: RuntimePendingState,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeThreadState {
+    type_args: Vec<String>,
+    state: RuntimePendingState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ParsedChainConnector {
+    Forward,
+    Reverse,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ParsedChainIntroducer {
+    Forward,
+    Reverse,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ParsedChainStep {
+    incoming: Option<ParsedChainConnector>,
+    stage: ParsedExpr,
+    bind_args: Vec<ParsedExpr>,
+    text: String,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RuntimeIntrinsic {
@@ -2463,6 +2810,56 @@ enum RuntimeIntrinsic {
     TimeMonotonicNowNs,
     ConcurrentSleep,
     ConcurrentBehaviorStep,
+    ConcurrentThreadId,
+    ConcurrentTaskDone,
+    ConcurrentTaskJoin,
+    ConcurrentThreadDone,
+    ConcurrentThreadJoin,
+    ConcurrentChannelNew,
+    ConcurrentChannelSend,
+    ConcurrentChannelRecv,
+    ConcurrentMutexNew,
+    ConcurrentMutexTake,
+    ConcurrentMutexPut,
+    ConcurrentAtomicIntNew,
+    ConcurrentAtomicIntLoad,
+    ConcurrentAtomicIntStore,
+    ConcurrentAtomicIntAdd,
+    ConcurrentAtomicIntSub,
+    ConcurrentAtomicIntSwap,
+    ConcurrentAtomicBoolNew,
+    ConcurrentAtomicBoolLoad,
+    ConcurrentAtomicBoolStore,
+    ConcurrentAtomicBoolSwap,
+    MemoryArenaNew,
+    MemoryArenaAlloc,
+    MemoryArenaLen,
+    MemoryArenaHas,
+    MemoryArenaGet,
+    MemoryArenaBorrowRead,
+    MemoryArenaBorrowEdit,
+    MemoryArenaSet,
+    MemoryArenaRemove,
+    MemoryArenaReset,
+    MemoryFrameNew,
+    MemoryFrameAlloc,
+    MemoryFrameLen,
+    MemoryFrameHas,
+    MemoryFrameGet,
+    MemoryFrameBorrowRead,
+    MemoryFrameBorrowEdit,
+    MemoryFrameSet,
+    MemoryFrameReset,
+    MemoryPoolNew,
+    MemoryPoolAlloc,
+    MemoryPoolLen,
+    MemoryPoolHas,
+    MemoryPoolGet,
+    MemoryPoolBorrowRead,
+    MemoryPoolBorrowEdit,
+    MemoryPoolSet,
+    MemoryPoolRemove,
+    MemoryPoolReset,
     AudioDefaultOutputTry,
     AudioOutputClose,
     AudioOutputSampleRateHz,
@@ -2501,10 +2898,21 @@ enum RuntimeIntrinsic {
     ResultOk,
     ResultErr,
     ListNew,
+    ListLen,
+    ListPush,
+    ListPop,
+    ListTryPopOr,
     ArrayNew,
     ArrayLen,
     ArrayFromList,
     ArrayToList,
+    MapNew,
+    MapLen,
+    MapHas,
+    MapGet,
+    MapSet,
+    MapRemove,
+    MapTryGetOr,
     EcsSetSingleton,
     EcsHasSingleton,
     EcsGetSingleton,
@@ -2532,6 +2940,11 @@ fn lower_routine(routine: &AotRoutineArtifact) -> Result<RuntimeRoutinePlan, Str
         .iter()
         .map(|row| parse_behavior_attr_row(row))
         .collect::<Result<BTreeMap<_, _>, String>>()?;
+    let rollups = routine
+        .rollup_rows
+        .iter()
+        .map(|row| parse_rollup_row(row))
+        .collect::<Result<Vec<_>, String>>()?;
     let statements = routine
         .statement_rows
         .iter()
@@ -2550,6 +2963,7 @@ fn lower_routine(routine: &AotRoutineArtifact) -> Result<RuntimeRoutinePlan, Str
         intrinsic_impl: routine.intrinsic_impl.clone(),
         foreword_rows: routine.foreword_rows.clone(),
         rollup_rows: routine.rollup_rows.clone(),
+        rollups,
         statements,
     })
 }
@@ -2793,6 +3207,83 @@ fn parse_behavior_attr_row(text: &str) -> Result<(String, String), String> {
     Ok((name.to_string(), value.to_string()))
 }
 
+fn parse_rollup_row(text: &str) -> Result<ParsedPageRollup, String> {
+    let parts = text.splitn(3, ':').collect::<Vec<_>>();
+    if parts.len() != 3 {
+        return Err(format!("malformed runtime rollup row `{text}`"));
+    }
+    let kind = parts[0].trim();
+    let subject = parts[1].trim();
+    let handler = parts[2].trim();
+    if kind != "cleanup" {
+        return Err(format!("unsupported runtime rollup kind `{kind}`"));
+    }
+    if subject.is_empty() {
+        return Err(format!("runtime rollup row missing subject in `{text}`"));
+    }
+    if handler.is_empty() {
+        return Err(format!(
+            "runtime rollup row missing handler path in `{text}`"
+        ));
+    }
+    Ok(ParsedPageRollup {
+        kind: kind.to_string(),
+        subject: subject.to_string(),
+        handler_path: handler.split('.').map(ToString::to_string).collect(),
+    })
+}
+
+fn parse_chain_connector(text: &str) -> Result<Option<ParsedChainConnector>, String> {
+    match text.trim() {
+        "start" => Ok(None),
+        "=>" => Ok(Some(ParsedChainConnector::Forward)),
+        "<=" => Ok(Some(ParsedChainConnector::Reverse)),
+        other => Err(format!("unsupported runtime chain connector `{other}`")),
+    }
+}
+
+fn parse_chain_introducer(text: &str) -> Result<ParsedChainIntroducer, String> {
+    match text.trim() {
+        "forward" => Ok(ParsedChainIntroducer::Forward),
+        "reverse" => Ok(ParsedChainIntroducer::Reverse),
+        other => Err(format!("unsupported runtime chain introducer `{other}`")),
+    }
+}
+
+fn parse_chain_step(text: &str) -> Result<ParsedChainStep, String> {
+    let inner = strip_prefix_suffix(text, "step(", ")")?;
+    let parts = split_top_level(inner);
+    if parts.len() != 4 {
+        return Err(format!("malformed runtime chain step `{text}`"));
+    }
+    let incoming = parse_chain_connector(&parts[0])?;
+    let fields = parse_named_fields(&parts[1..].join(","))?;
+    let stage = parse_expr(
+        fields
+            .get("stage")
+            .ok_or_else(|| format!("runtime chain step missing stage in `{text}`"))?,
+    )?;
+    let bind_args = parse_list(
+        fields
+            .get("bind")
+            .ok_or_else(|| format!("runtime chain step missing bind args in `{text}`"))?,
+    )?
+    .into_iter()
+    .map(|item| parse_expr(&item))
+    .collect::<Result<Vec<_>, String>>()?;
+    let text_value = decode_row_string(
+        fields
+            .get("text")
+            .ok_or_else(|| format!("runtime chain step missing text in `{text}`"))?,
+    )?;
+    Ok(ParsedChainStep {
+        incoming,
+        stage,
+        bind_args,
+        text: text_value,
+    })
+}
+
 fn parse_match_pattern(text: &str) -> Result<ParsedMatchPattern, String> {
     if text == "_" {
         return Ok(ParsedMatchPattern::Wildcard);
@@ -2890,6 +3381,11 @@ fn parse_unary_op(text: &str) -> Result<ParsedUnaryOp, String> {
         "-" => Ok(ParsedUnaryOp::Neg),
         "not" => Ok(ParsedUnaryOp::Not),
         "~" => Ok(ParsedUnaryOp::BitNot),
+        "&" => Ok(ParsedUnaryOp::BorrowRead),
+        "&mut" => Ok(ParsedUnaryOp::BorrowMut),
+        "*" => Ok(ParsedUnaryOp::Deref),
+        "weave" => Ok(ParsedUnaryOp::Weave),
+        "split" => Ok(ParsedUnaryOp::Split),
         _ => Err(format!("unsupported runtime unary op `{text}`")),
     }
 }
@@ -2995,6 +3491,73 @@ fn parse_expr(text: &str) -> Result<ParsedExpr, String> {
             arms,
         });
     }
+    if text.starts_with("chain(") && text.ends_with(')') {
+        let fields = parse_named_fields(strip_prefix_suffix(text, "chain(", ")")?)?;
+        let style = fields
+            .get("style")
+            .ok_or_else(|| format!("chain expression missing style in `{text}`"))?
+            .to_string();
+        let introducer = parse_chain_introducer(
+            fields
+                .get("introducer")
+                .ok_or_else(|| format!("chain expression missing introducer in `{text}`"))?,
+        )?;
+        let steps = parse_list(
+            fields
+                .get("steps")
+                .ok_or_else(|| format!("chain expression missing steps in `{text}`"))?,
+        )?
+        .into_iter()
+        .map(|item| parse_chain_step(&item))
+        .collect::<Result<Vec<_>, String>>()?;
+        return Ok(ParsedExpr::Chain {
+            style,
+            introducer,
+            steps,
+        });
+    }
+    if text.starts_with("await(") && text.ends_with(')') {
+        return Ok(ParsedExpr::Await {
+            expr: Box::new(parse_expr(strip_prefix_suffix(text, "await(", ")")?)?),
+        });
+    }
+    if text.starts_with("memory(") && text.ends_with(')') {
+        let fields = parse_named_fields(strip_prefix_suffix(text, "memory(", ")")?)?;
+        let init_args = parse_list(
+            fields
+                .get("init")
+                .ok_or_else(|| format!("memory phrase missing init args in `{text}`"))?,
+        )?
+        .into_iter()
+        .map(|item| parse_phrase_arg(&item))
+        .collect::<Result<Vec<_>, String>>()?;
+        let attached = parse_list(
+            fields
+                .get("attached")
+                .ok_or_else(|| format!("memory phrase missing attached args in `{text}`"))?,
+        )?
+        .into_iter()
+        .map(|item| parse_header_attachment(&item))
+        .collect::<Result<Vec<_>, String>>()?;
+        return Ok(ParsedExpr::MemoryPhrase {
+            family: fields
+                .get("family")
+                .ok_or_else(|| format!("memory phrase missing family in `{text}`"))?
+                .to_string(),
+            arena: Box::new(parse_expr(
+                fields
+                    .get("arena")
+                    .ok_or_else(|| format!("memory phrase missing arena in `{text}`"))?,
+            )?),
+            init_args,
+            constructor: Box::new(parse_expr(
+                fields
+                    .get("ctor")
+                    .ok_or_else(|| format!("memory phrase missing constructor in `{text}`"))?,
+            )?),
+            attached,
+        });
+    }
     if text.starts_with("path(") && text.ends_with(')') {
         let inner = strip_prefix_suffix(text, "path(", ")")?;
         if inner.is_empty() {
@@ -3013,6 +3576,62 @@ fn parse_expr(text: &str) -> Result<ParsedExpr, String> {
         return Ok(ParsedExpr::Member {
             expr: Box::new(parse_expr(&parts[0])?),
             member: parts[1].to_string(),
+        });
+    }
+    if text.starts_with("index(") && text.ends_with(')') {
+        let inner = strip_prefix_suffix(text, "index(", ")")?;
+        let parts = split_top_level(inner);
+        if parts.len() != 2 {
+            return Err(format!("malformed index expression `{text}`"));
+        }
+        return Ok(ParsedExpr::Index {
+            expr: Box::new(parse_expr(&parts[0])?),
+            index: Box::new(parse_expr(&parts[1])?),
+        });
+    }
+    if text.starts_with("slice(") && text.ends_with(')') {
+        let fields = parse_named_fields(strip_prefix_suffix(text, "slice(", ")")?)?;
+        return Ok(ParsedExpr::Slice {
+            expr: Box::new(parse_expr(fields.get("expr").ok_or_else(|| {
+                format!("slice expression missing expr in `{text}`")
+            })?)?),
+            start: parse_optional_runtime_expr(
+                fields
+                    .get("start")
+                    .ok_or_else(|| format!("slice expression missing start in `{text}`"))?,
+            )?,
+            end: parse_optional_runtime_expr(
+                fields
+                    .get("end")
+                    .ok_or_else(|| format!("slice expression missing end in `{text}`"))?,
+            )?,
+            inclusive_end: parse_runtime_bool_keyword(
+                fields
+                    .get("inclusive")
+                    .ok_or_else(|| format!("slice expression missing inclusive in `{text}`"))?,
+                "slice inclusive",
+            )?,
+        });
+    }
+    if text.starts_with("range(") && text.ends_with(')') {
+        let fields = parse_named_fields(strip_prefix_suffix(text, "range(", ")")?)?;
+        return Ok(ParsedExpr::Range {
+            start: parse_optional_runtime_expr(
+                fields
+                    .get("start")
+                    .ok_or_else(|| format!("range expression missing start in `{text}`"))?,
+            )?,
+            end: parse_optional_runtime_expr(
+                fields
+                    .get("end")
+                    .ok_or_else(|| format!("range expression missing end in `{text}`"))?,
+            )?,
+            inclusive_end: parse_runtime_bool_keyword(
+                fields
+                    .get("inclusive")
+                    .ok_or_else(|| format!("range expression missing inclusive in `{text}`"))?,
+                "range inclusive",
+            )?,
         });
     }
     if text.starts_with("unary(") && text.ends_with(')') {
@@ -3070,6 +3689,14 @@ fn parse_expr(text: &str) -> Result<ParsedExpr, String> {
         .into_iter()
         .map(|item| parse_header_attachment(&item))
         .collect::<Result<Vec<_>, String>>()?;
+        let qualifier = fields
+            .get("qualifier")
+            .ok_or_else(|| format!("phrase missing qualifier in `{text}`"))?
+            .to_string();
+        let qualifier_kind = match fields.get("kind") {
+            Some(kind) => parse_phrase_qualifier_kind(kind)?,
+            None => classify_phrase_qualifier_kind(&qualifier)?,
+        };
         return Ok(ParsedExpr::Phrase {
             subject: Box::new(parse_expr(
                 fields
@@ -3077,14 +3704,67 @@ fn parse_expr(text: &str) -> Result<ParsedExpr, String> {
                     .ok_or_else(|| format!("phrase missing subject in `{text}`"))?,
             )?),
             args,
-            qualifier: fields
-                .get("qualifier")
-                .ok_or_else(|| format!("phrase missing qualifier in `{text}`"))?
-                .to_string(),
+            qualifier_kind,
+            qualifier,
             attached,
         });
     }
     Err(format!("unsupported runtime expression `{text}`"))
+}
+
+fn parse_phrase_qualifier_kind(text: &str) -> Result<ParsedPhraseQualifierKind, String> {
+    match text.trim() {
+        "call" => Ok(ParsedPhraseQualifierKind::Call),
+        "try" => Ok(ParsedPhraseQualifierKind::Try),
+        "apply" => Ok(ParsedPhraseQualifierKind::Apply),
+        "await_apply" => Ok(ParsedPhraseQualifierKind::AwaitApply),
+        "bare_method" => Ok(ParsedPhraseQualifierKind::BareMethod),
+        "named_path" => Ok(ParsedPhraseQualifierKind::NamedPath),
+        other => Err(format!(
+            "unsupported runtime phrase qualifier kind `{other}`"
+        )),
+    }
+}
+
+fn is_simple_runtime_path(text: &str) -> bool {
+    text.split('.').all(|segment| {
+        let mut chars = segment.chars();
+        let Some(first) = chars.next() else {
+            return false;
+        };
+        (first == '_' || first.is_ascii_alphabetic())
+            && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+    })
+}
+
+fn classify_phrase_qualifier_kind(text: &str) -> Result<ParsedPhraseQualifierKind, String> {
+    match text.trim() {
+        "call" => Ok(ParsedPhraseQualifierKind::Call),
+        "?" => Ok(ParsedPhraseQualifierKind::Try),
+        ">" => Ok(ParsedPhraseQualifierKind::Apply),
+        ">>" => Ok(ParsedPhraseQualifierKind::AwaitApply),
+        other if is_simple_runtime_path(other) && other.contains('.') => {
+            Ok(ParsedPhraseQualifierKind::NamedPath)
+        }
+        other if is_simple_runtime_path(other) => Ok(ParsedPhraseQualifierKind::BareMethod),
+        other => Err(format!("unsupported runtime phrase qualifier `{other}`")),
+    }
+}
+
+fn parse_runtime_bool_keyword(text: &str, context: &str) -> Result<bool, String> {
+    match text.trim() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        other => Err(format!("invalid runtime bool `{other}` in {context}")),
+    }
+}
+
+fn parse_optional_runtime_expr(text: &str) -> Result<Option<Box<ParsedExpr>>, String> {
+    if text.trim() == "none" {
+        Ok(None)
+    } else {
+        Ok(Some(Box::new(parse_expr(text)?)))
+    }
 }
 
 fn parse_phrase_arg(text: &str) -> Result<ParsedPhraseArg, String> {
@@ -3103,14 +3783,6 @@ fn parse_phrase_arg(text: &str) -> Result<ParsedPhraseArg, String> {
 fn parse_header_attachment(text: &str) -> Result<ParsedHeaderAttachment, String> {
     if text.starts_with("named(") && text.ends_with(')') {
         let fields = parse_named_fields(strip_prefix_suffix(text, "named(", ")")?)?;
-        let forewords = parse_list(
-            fields
-                .get("forewords")
-                .ok_or_else(|| format!("named attachment missing forewords in `{text}`"))?,
-        )?;
-        if !forewords.is_empty() {
-            return Err("attached phrase forewords are not implemented yet".to_string());
-        }
         let named_fields = fields
             .into_iter()
             .filter(|(name, _)| name != "forewords")
@@ -3134,12 +3806,8 @@ fn parse_header_attachment(text: &str) -> Result<ParsedHeaderAttachment, String>
         if parts.len() != 2 {
             return Err(format!("malformed chain attachment `{text}`"));
         }
-        let (_, forewords_text) = split_top_level_assignment(&parts[1])
+        let _ = split_top_level_assignment(&parts[1])
             .ok_or_else(|| format!("chain attachment missing forewords in `{text}`"))?;
-        let forewords = parse_list(forewords_text)?;
-        if !forewords.is_empty() {
-            return Err("attached phrase forewords are not implemented yet".to_string());
-        }
         return Ok(ParsedHeaderAttachment::Chain {
             expr: parse_expr(&parts[0])?,
         });
@@ -3206,7 +3874,7 @@ fn parse_assign_target(text: &str) -> Result<ParsedAssignTarget, String> {
 
 fn parse_stmt(text: &str) -> Result<ParsedStmt, String> {
     let fields = parse_named_fields(strip_prefix_suffix(text, "stmt(", ")")?)?;
-    let forewords = parse_list(
+    let _forewords = parse_list(
         fields
             .get("forewords")
             .ok_or_else(|| format!("runtime stmt missing forewords in `{text}`"))?,
@@ -3215,10 +3883,10 @@ fn parse_stmt(text: &str) -> Result<ParsedStmt, String> {
         fields
             .get("rollups")
             .ok_or_else(|| format!("runtime stmt missing rollups in `{text}`"))?,
-    )?;
-    if !forewords.is_empty() || !rollups.is_empty() {
-        return Err("runtime stmt forewords/rollups are not implemented yet".to_string());
-    }
+    )?
+    .into_iter()
+    .map(|row| parse_rollup_row(&row))
+    .collect::<Result<Vec<_>, String>>()?;
     let core = fields
         .get("core")
         .ok_or_else(|| format!("runtime stmt missing core in `{text}`"))?;
@@ -3247,9 +3915,10 @@ fn parse_stmt(text: &str) -> Result<ParsedStmt, String> {
         });
     }
     if core.starts_with("expr(") && core.ends_with(')') {
-        return Ok(ParsedStmt::Expr(parse_expr(strip_prefix_suffix(
-            core, "expr(", ")",
-        )?)?));
+        return Ok(ParsedStmt::Expr {
+            expr: parse_expr(strip_prefix_suffix(core, "expr(", ")")?)?,
+            rollups,
+        });
     }
     if core.starts_with("return(") && core.ends_with(')') {
         let inner = strip_prefix_suffix(core, "return(", ")")?;
@@ -3283,6 +3952,7 @@ fn parse_stmt(text: &str) -> Result<ParsedStmt, String> {
             .into_iter()
             .map(|item| parse_stmt(&item))
             .collect::<Result<Vec<_>, String>>()?,
+            rollups,
         });
     }
     if core.starts_with("while(") && core.ends_with(')') {
@@ -3301,6 +3971,7 @@ fn parse_stmt(text: &str) -> Result<ParsedStmt, String> {
             .into_iter()
             .map(|item| parse_stmt(&item))
             .collect::<Result<Vec<_>, String>>()?,
+            rollups,
         });
     }
     if core.starts_with("for(") && core.ends_with(')') {
@@ -3323,6 +3994,7 @@ fn parse_stmt(text: &str) -> Result<ParsedStmt, String> {
             .into_iter()
             .map(|item| parse_stmt(&item))
             .collect::<Result<Vec<_>, String>>()?,
+            rollups,
         });
     }
     if core.starts_with("defer(") && core.ends_with(')') {
@@ -3379,6 +4051,26 @@ fn resolve_callable_path(
     }
 }
 
+fn resolve_named_qualifier_callable_path(
+    expr: &ParsedExpr,
+    aliases: &BTreeMap<String, Vec<String>>,
+) -> Option<Vec<String>> {
+    match expr {
+        ParsedExpr::Path(segments) if segments.len() == 1 => resolve_callable_path(expr, aliases),
+        ParsedExpr::Path(segments) => {
+            if let Some(prefix) = aliases.get(&segments[0]) {
+                let mut path = prefix.clone();
+                path.extend(segments[1..].iter().cloned());
+                Some(path)
+            } else {
+                Some(segments.clone())
+            }
+        }
+        ParsedExpr::Generic { expr, .. } => resolve_named_qualifier_callable_path(expr, aliases),
+        _ => resolve_callable_path(expr, aliases),
+    }
+}
+
 fn extract_generic_type_args(expr: &ParsedExpr) -> Vec<String> {
     match expr {
         ParsedExpr::Generic { expr, type_args } => {
@@ -3406,6 +4098,94 @@ fn resolve_runtime_type_args(
                 .unwrap_or_else(|| arg.clone())
         })
         .collect()
+}
+
+fn parse_runtime_callable_expr(text: &str) -> ParsedExpr {
+    let trimmed = text.trim();
+    let (path_text, type_args) = if let Some(start) = trimmed.rfind('[') {
+        if trimmed.ends_with(']') {
+            (
+                trimmed[..start].trim(),
+                split_runtime_type_args(&trimmed[start + 1..trimmed.len() - 1]),
+            )
+        } else {
+            (trimmed, Vec::new())
+        }
+    } else {
+        (trimmed, Vec::new())
+    };
+    let path = ParsedExpr::Path(path_text.split('.').map(ToString::to_string).collect());
+    if type_args.is_empty() {
+        path
+    } else {
+        ParsedExpr::Generic {
+            expr: Box::new(path),
+            type_args,
+        }
+    }
+}
+
+fn split_runtime_type_args(text: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut depth = 0i32;
+    let mut current = String::new();
+    for ch in text.chars() {
+        match ch {
+            '[' => {
+                depth += 1;
+                current.push(ch);
+            }
+            ']' => {
+                depth -= 1;
+                current.push(ch);
+            }
+            ',' if depth == 0 => {
+                let trimmed = current.trim();
+                if !trimmed.is_empty() {
+                    args.push(trimmed.to_string());
+                }
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    let trimmed = current.trim();
+    if !trimmed.is_empty() {
+        args.push(trimmed.to_string());
+    }
+    args
+}
+
+fn parse_runtime_value_type_args(type_name: &str) -> Vec<String> {
+    let Some(start) = type_name.rfind('[') else {
+        return Vec::new();
+    };
+    if !type_name.ends_with(']') {
+        return Vec::new();
+    }
+    split_runtime_type_args(&type_name[start + 1..type_name.len() - 1])
+}
+
+fn runtime_type_root_name(type_name: &str) -> String {
+    let base = type_name
+        .split_once('[')
+        .map(|(head, _)| head)
+        .unwrap_or(type_name)
+        .trim();
+    base.rsplit('.').next().unwrap_or(base).to_string()
+}
+
+fn runtime_variant_enum_name(variant_name: &str) -> String {
+    let mut segments = variant_name
+        .split('.')
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    if segments.len() >= 2 {
+        segments.pop();
+        segments.join(".")
+    } else {
+        variant_name.to_string()
+    }
 }
 
 fn resolve_routine_index(
@@ -3436,6 +4216,28 @@ fn resolve_routine_index(
                 routine.module_id == prefixed_module && routine.symbol_name == symbol_name
             })
         })
+}
+
+fn resolve_routine_candidate_indices(
+    plan: &RuntimePackagePlan,
+    current_module_id: &str,
+    callable_path: &[String],
+) -> Vec<usize> {
+    let (module_id, symbol_name) = match callable_path {
+        [] => return Vec::new(),
+        [symbol_name] => (current_module_id.to_string(), symbol_name.clone()),
+        _ => (
+            callable_path[..callable_path.len() - 1].join("."),
+            callable_path.last().cloned().unwrap_or_default(),
+        ),
+    };
+    plan.routines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, routine)| {
+            (routine.module_id == module_id && routine.symbol_name == symbol_name).then_some(index)
+        })
+        .collect()
 }
 
 fn resolve_runtime_intrinsic_path(callable_path: &[String]) -> Option<RuntimeIntrinsic> {
@@ -3582,6 +4384,115 @@ fn resolve_runtime_intrinsic_path(callable_path: &[String]) -> Option<RuntimeInt
         | ["std", "kernel", "process", "process_exec_capture"] => {
             Some(RuntimeIntrinsic::ProcessExecCaptureTry)
         }
+        ["std", "concurrent", "channel"] | ["std", "kernel", "concurrency", "channel_new"] => {
+            Some(RuntimeIntrinsic::ConcurrentChannelNew)
+        }
+        ["std", "concurrent", "mutex"] | ["std", "kernel", "concurrency", "mutex_new"] => {
+            Some(RuntimeIntrinsic::ConcurrentMutexNew)
+        }
+        ["std", "concurrent", "atomic_int"]
+        | ["std", "kernel", "concurrency", "atomic_int_new"] => {
+            Some(RuntimeIntrinsic::ConcurrentAtomicIntNew)
+        }
+        ["std", "concurrent", "atomic_bool"]
+        | ["std", "kernel", "concurrency", "atomic_bool_new"] => {
+            Some(RuntimeIntrinsic::ConcurrentAtomicBoolNew)
+        }
+        ["std", "concurrent", "sleep"] | ["std", "kernel", "concurrency", "sleep"] => {
+            Some(RuntimeIntrinsic::ConcurrentSleep)
+        }
+        ["std", "concurrent", "thread_id"] | ["std", "kernel", "concurrency", "thread_id"] => {
+            Some(RuntimeIntrinsic::ConcurrentThreadId)
+        }
+        ["std", "kernel", "concurrency", "task_done"] => Some(RuntimeIntrinsic::ConcurrentTaskDone),
+        ["std", "kernel", "concurrency", "task_join"] => Some(RuntimeIntrinsic::ConcurrentTaskJoin),
+        ["std", "kernel", "concurrency", "thread_done"] => {
+            Some(RuntimeIntrinsic::ConcurrentThreadDone)
+        }
+        ["std", "kernel", "concurrency", "thread_join"] => {
+            Some(RuntimeIntrinsic::ConcurrentThreadJoin)
+        }
+        ["std", "memory", "new"] | ["std", "kernel", "memory", "arena_new"] => {
+            Some(RuntimeIntrinsic::MemoryArenaNew)
+        }
+        ["std", "memory", "frame_new"] | ["std", "kernel", "memory", "frame_new"] => {
+            Some(RuntimeIntrinsic::MemoryFrameNew)
+        }
+        ["std", "memory", "pool_new"] | ["std", "kernel", "memory", "pool_new"] => {
+            Some(RuntimeIntrinsic::MemoryPoolNew)
+        }
+        ["std", "kernel", "memory", "arena_alloc"] => Some(RuntimeIntrinsic::MemoryArenaAlloc),
+        ["std", "kernel", "memory", "arena_len"] => Some(RuntimeIntrinsic::MemoryArenaLen),
+        ["std", "kernel", "memory", "arena_has"] => Some(RuntimeIntrinsic::MemoryArenaHas),
+        ["std", "kernel", "memory", "arena_get"] => Some(RuntimeIntrinsic::MemoryArenaGet),
+        ["std", "kernel", "memory", "arena_borrow_read"] => {
+            Some(RuntimeIntrinsic::MemoryArenaBorrowRead)
+        }
+        ["std", "kernel", "memory", "arena_borrow_edit"] => {
+            Some(RuntimeIntrinsic::MemoryArenaBorrowEdit)
+        }
+        ["std", "kernel", "memory", "arena_set"] => Some(RuntimeIntrinsic::MemoryArenaSet),
+        ["std", "kernel", "memory", "arena_remove"] => Some(RuntimeIntrinsic::MemoryArenaRemove),
+        ["std", "kernel", "memory", "arena_reset"] => Some(RuntimeIntrinsic::MemoryArenaReset),
+        ["std", "kernel", "memory", "frame_alloc"] => Some(RuntimeIntrinsic::MemoryFrameAlloc),
+        ["std", "kernel", "memory", "frame_len"] => Some(RuntimeIntrinsic::MemoryFrameLen),
+        ["std", "kernel", "memory", "frame_has"] => Some(RuntimeIntrinsic::MemoryFrameHas),
+        ["std", "kernel", "memory", "frame_get"] => Some(RuntimeIntrinsic::MemoryFrameGet),
+        ["std", "kernel", "memory", "frame_borrow_read"] => {
+            Some(RuntimeIntrinsic::MemoryFrameBorrowRead)
+        }
+        ["std", "kernel", "memory", "frame_borrow_edit"] => {
+            Some(RuntimeIntrinsic::MemoryFrameBorrowEdit)
+        }
+        ["std", "kernel", "memory", "frame_set"] => Some(RuntimeIntrinsic::MemoryFrameSet),
+        ["std", "kernel", "memory", "frame_reset"] => Some(RuntimeIntrinsic::MemoryFrameReset),
+        ["std", "kernel", "memory", "pool_alloc"] => Some(RuntimeIntrinsic::MemoryPoolAlloc),
+        ["std", "kernel", "memory", "pool_len"] => Some(RuntimeIntrinsic::MemoryPoolLen),
+        ["std", "kernel", "memory", "pool_has"] => Some(RuntimeIntrinsic::MemoryPoolHas),
+        ["std", "kernel", "memory", "pool_get"] => Some(RuntimeIntrinsic::MemoryPoolGet),
+        ["std", "kernel", "memory", "pool_borrow_read"] => {
+            Some(RuntimeIntrinsic::MemoryPoolBorrowRead)
+        }
+        ["std", "kernel", "memory", "pool_borrow_edit"] => {
+            Some(RuntimeIntrinsic::MemoryPoolBorrowEdit)
+        }
+        ["std", "kernel", "memory", "pool_set"] => Some(RuntimeIntrinsic::MemoryPoolSet),
+        ["std", "kernel", "memory", "pool_remove"] => Some(RuntimeIntrinsic::MemoryPoolRemove),
+        ["std", "kernel", "memory", "pool_reset"] => Some(RuntimeIntrinsic::MemoryPoolReset),
+        ["std", "kernel", "concurrency", "channel_send"] => {
+            Some(RuntimeIntrinsic::ConcurrentChannelSend)
+        }
+        ["std", "kernel", "concurrency", "channel_recv"] => {
+            Some(RuntimeIntrinsic::ConcurrentChannelRecv)
+        }
+        ["std", "kernel", "concurrency", "mutex_take"] => {
+            Some(RuntimeIntrinsic::ConcurrentMutexTake)
+        }
+        ["std", "kernel", "concurrency", "mutex_put"] => Some(RuntimeIntrinsic::ConcurrentMutexPut),
+        ["std", "kernel", "concurrency", "atomic_int_load"] => {
+            Some(RuntimeIntrinsic::ConcurrentAtomicIntLoad)
+        }
+        ["std", "kernel", "concurrency", "atomic_int_store"] => {
+            Some(RuntimeIntrinsic::ConcurrentAtomicIntStore)
+        }
+        ["std", "kernel", "concurrency", "atomic_int_add"] => {
+            Some(RuntimeIntrinsic::ConcurrentAtomicIntAdd)
+        }
+        ["std", "kernel", "concurrency", "atomic_int_sub"] => {
+            Some(RuntimeIntrinsic::ConcurrentAtomicIntSub)
+        }
+        ["std", "kernel", "concurrency", "atomic_int_swap"] => {
+            Some(RuntimeIntrinsic::ConcurrentAtomicIntSwap)
+        }
+        ["std", "kernel", "concurrency", "atomic_bool_load"] => {
+            Some(RuntimeIntrinsic::ConcurrentAtomicBoolLoad)
+        }
+        ["std", "kernel", "concurrency", "atomic_bool_store"] => {
+            Some(RuntimeIntrinsic::ConcurrentAtomicBoolStore)
+        }
+        ["std", "kernel", "concurrency", "atomic_bool_swap"] => {
+            Some(RuntimeIntrinsic::ConcurrentAtomicBoolSwap)
+        }
         ["std", "text", "len_bytes"] | ["std", "kernel", "text", "text_len_bytes"] => {
             Some(RuntimeIntrinsic::TextLenBytes)
         }
@@ -3624,6 +4535,23 @@ fn resolve_runtime_intrinsic_path(callable_path: &[String]) -> Option<RuntimeInt
         ["std", "collections", "list", "new"] | ["std", "kernel", "collections", "list_new"] => {
             Some(RuntimeIntrinsic::ListNew)
         }
+        ["std", "kernel", "collections", "list_len"] => Some(RuntimeIntrinsic::ListLen),
+        ["std", "kernel", "collections", "list_push"] => Some(RuntimeIntrinsic::ListPush),
+        ["std", "kernel", "collections", "list_pop"] => Some(RuntimeIntrinsic::ListPop),
+        ["std", "kernel", "collections", "list_try_pop_or"] => Some(RuntimeIntrinsic::ListTryPopOr),
+        ["std", "kernel", "collections", "array_new"] => Some(RuntimeIntrinsic::ArrayNew),
+        ["std", "kernel", "collections", "array_len"] => Some(RuntimeIntrinsic::ArrayLen),
+        ["std", "kernel", "collections", "array_from_list"] => {
+            Some(RuntimeIntrinsic::ArrayFromList)
+        }
+        ["std", "kernel", "collections", "array_to_list"] => Some(RuntimeIntrinsic::ArrayToList),
+        ["std", "kernel", "collections", "map_new"] => Some(RuntimeIntrinsic::MapNew),
+        ["std", "kernel", "collections", "map_len"] => Some(RuntimeIntrinsic::MapLen),
+        ["std", "kernel", "collections", "map_has"] => Some(RuntimeIntrinsic::MapHas),
+        ["std", "kernel", "collections", "map_get"] => Some(RuntimeIntrinsic::MapGet),
+        ["std", "kernel", "collections", "map_set"] => Some(RuntimeIntrinsic::MapSet),
+        ["std", "kernel", "collections", "map_remove"] => Some(RuntimeIntrinsic::MapRemove),
+        ["std", "kernel", "collections", "map_try_get_or"] => Some(RuntimeIntrinsic::MapTryGetOr),
         ["Result", "Ok"] | ["std", "result", "Result", "Ok"] => Some(RuntimeIntrinsic::ResultOk),
         ["Result", "Err"] | ["std", "result", "Result", "Err"] => Some(RuntimeIntrinsic::ResultErr),
         _ => None,
@@ -3722,6 +4650,56 @@ fn resolve_runtime_intrinsic_impl(intrinsic_impl: &str) -> Option<RuntimeIntrins
         "HostTimeMonotonicNowNs" => Some(RuntimeIntrinsic::TimeMonotonicNowNs),
         "ConcurrentSleep" => Some(RuntimeIntrinsic::ConcurrentSleep),
         "ConcurrentBehaviorStep" => Some(RuntimeIntrinsic::ConcurrentBehaviorStep),
+        "ConcurrentThreadId" => Some(RuntimeIntrinsic::ConcurrentThreadId),
+        "ConcurrentTaskDone" => Some(RuntimeIntrinsic::ConcurrentTaskDone),
+        "ConcurrentTaskJoin" => Some(RuntimeIntrinsic::ConcurrentTaskJoin),
+        "ConcurrentThreadDone" => Some(RuntimeIntrinsic::ConcurrentThreadDone),
+        "ConcurrentThreadJoin" => Some(RuntimeIntrinsic::ConcurrentThreadJoin),
+        "ConcurrentChannelNew" => Some(RuntimeIntrinsic::ConcurrentChannelNew),
+        "ConcurrentChannelSend" => Some(RuntimeIntrinsic::ConcurrentChannelSend),
+        "ConcurrentChannelRecv" => Some(RuntimeIntrinsic::ConcurrentChannelRecv),
+        "ConcurrentMutexNew" => Some(RuntimeIntrinsic::ConcurrentMutexNew),
+        "ConcurrentMutexTake" => Some(RuntimeIntrinsic::ConcurrentMutexTake),
+        "ConcurrentMutexPut" => Some(RuntimeIntrinsic::ConcurrentMutexPut),
+        "ConcurrentAtomicIntNew" => Some(RuntimeIntrinsic::ConcurrentAtomicIntNew),
+        "ConcurrentAtomicIntLoad" => Some(RuntimeIntrinsic::ConcurrentAtomicIntLoad),
+        "ConcurrentAtomicIntStore" => Some(RuntimeIntrinsic::ConcurrentAtomicIntStore),
+        "ConcurrentAtomicIntAdd" => Some(RuntimeIntrinsic::ConcurrentAtomicIntAdd),
+        "ConcurrentAtomicIntSub" => Some(RuntimeIntrinsic::ConcurrentAtomicIntSub),
+        "ConcurrentAtomicIntSwap" => Some(RuntimeIntrinsic::ConcurrentAtomicIntSwap),
+        "ConcurrentAtomicBoolNew" => Some(RuntimeIntrinsic::ConcurrentAtomicBoolNew),
+        "ConcurrentAtomicBoolLoad" => Some(RuntimeIntrinsic::ConcurrentAtomicBoolLoad),
+        "ConcurrentAtomicBoolStore" => Some(RuntimeIntrinsic::ConcurrentAtomicBoolStore),
+        "ConcurrentAtomicBoolSwap" => Some(RuntimeIntrinsic::ConcurrentAtomicBoolSwap),
+        "MemoryArenaNew" => Some(RuntimeIntrinsic::MemoryArenaNew),
+        "MemoryArenaAlloc" => Some(RuntimeIntrinsic::MemoryArenaAlloc),
+        "MemoryArenaLen" => Some(RuntimeIntrinsic::MemoryArenaLen),
+        "MemoryArenaHas" => Some(RuntimeIntrinsic::MemoryArenaHas),
+        "MemoryArenaGet" => Some(RuntimeIntrinsic::MemoryArenaGet),
+        "MemoryArenaBorrowRead" => Some(RuntimeIntrinsic::MemoryArenaBorrowRead),
+        "MemoryArenaBorrowEdit" => Some(RuntimeIntrinsic::MemoryArenaBorrowEdit),
+        "MemoryArenaSet" => Some(RuntimeIntrinsic::MemoryArenaSet),
+        "MemoryArenaRemove" => Some(RuntimeIntrinsic::MemoryArenaRemove),
+        "MemoryArenaReset" => Some(RuntimeIntrinsic::MemoryArenaReset),
+        "MemoryFrameNew" => Some(RuntimeIntrinsic::MemoryFrameNew),
+        "MemoryFrameAlloc" => Some(RuntimeIntrinsic::MemoryFrameAlloc),
+        "MemoryFrameLen" => Some(RuntimeIntrinsic::MemoryFrameLen),
+        "MemoryFrameHas" => Some(RuntimeIntrinsic::MemoryFrameHas),
+        "MemoryFrameGet" => Some(RuntimeIntrinsic::MemoryFrameGet),
+        "MemoryFrameBorrowRead" => Some(RuntimeIntrinsic::MemoryFrameBorrowRead),
+        "MemoryFrameBorrowEdit" => Some(RuntimeIntrinsic::MemoryFrameBorrowEdit),
+        "MemoryFrameSet" => Some(RuntimeIntrinsic::MemoryFrameSet),
+        "MemoryFrameReset" => Some(RuntimeIntrinsic::MemoryFrameReset),
+        "MemoryPoolNew" => Some(RuntimeIntrinsic::MemoryPoolNew),
+        "MemoryPoolAlloc" => Some(RuntimeIntrinsic::MemoryPoolAlloc),
+        "MemoryPoolLen" => Some(RuntimeIntrinsic::MemoryPoolLen),
+        "MemoryPoolHas" => Some(RuntimeIntrinsic::MemoryPoolHas),
+        "MemoryPoolGet" => Some(RuntimeIntrinsic::MemoryPoolGet),
+        "MemoryPoolBorrowRead" => Some(RuntimeIntrinsic::MemoryPoolBorrowRead),
+        "MemoryPoolBorrowEdit" => Some(RuntimeIntrinsic::MemoryPoolBorrowEdit),
+        "MemoryPoolSet" => Some(RuntimeIntrinsic::MemoryPoolSet),
+        "MemoryPoolRemove" => Some(RuntimeIntrinsic::MemoryPoolRemove),
+        "MemoryPoolReset" => Some(RuntimeIntrinsic::MemoryPoolReset),
         "AudioDefaultOutputTry" => Some(RuntimeIntrinsic::AudioDefaultOutputTry),
         "AudioOutputClose" => Some(RuntimeIntrinsic::AudioOutputClose),
         "AudioOutputSampleRateHz" => Some(RuntimeIntrinsic::AudioOutputSampleRateHz),
@@ -3758,10 +4736,21 @@ fn resolve_runtime_intrinsic_impl(intrinsic_impl: &str) -> Option<RuntimeIntrins
         "HostBytesSlice" => Some(RuntimeIntrinsic::BytesSlice),
         "HostBytesSha256Hex" => Some(RuntimeIntrinsic::BytesSha256Hex),
         "ListNew" => Some(RuntimeIntrinsic::ListNew),
+        "ListLen" => Some(RuntimeIntrinsic::ListLen),
+        "ListPush" => Some(RuntimeIntrinsic::ListPush),
+        "ListPop" => Some(RuntimeIntrinsic::ListPop),
+        "ListTryPopOr" => Some(RuntimeIntrinsic::ListTryPopOr),
         "ArrayNew" => Some(RuntimeIntrinsic::ArrayNew),
         "ArrayLen" => Some(RuntimeIntrinsic::ArrayLen),
         "ArrayFromList" => Some(RuntimeIntrinsic::ArrayFromList),
         "ArrayToList" => Some(RuntimeIntrinsic::ArrayToList),
+        "MapNew" => Some(RuntimeIntrinsic::MapNew),
+        "MapLen" => Some(RuntimeIntrinsic::MapLen),
+        "MapHas" => Some(RuntimeIntrinsic::MapHas),
+        "MapGet" => Some(RuntimeIntrinsic::MapGet),
+        "MapSet" => Some(RuntimeIntrinsic::MapSet),
+        "MapRemove" => Some(RuntimeIntrinsic::MapRemove),
+        "MapTryGetOr" => Some(RuntimeIntrinsic::MapTryGetOr),
         "EcsSetSingleton" => Some(RuntimeIntrinsic::EcsSetSingleton),
         "EcsHasSingleton" => Some(RuntimeIntrinsic::EcsHasSingleton),
         "EcsGetSingleton" => Some(RuntimeIntrinsic::EcsGetSingleton),
@@ -3801,6 +4790,81 @@ fn runtime_value_to_string(value: &RuntimeValue) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+        RuntimeValue::Map(entries) => format!(
+            "{{{}}}",
+            entries
+                .iter()
+                .map(|(key, value)| format!(
+                    "{}: {}",
+                    runtime_value_to_string(key),
+                    runtime_value_to_string(value)
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        RuntimeValue::Range {
+            start,
+            end,
+            inclusive_end,
+        } => {
+            let mut rendered = String::new();
+            if let Some(start) = start {
+                rendered.push_str(&start.to_string());
+            }
+            rendered.push_str(if *inclusive_end { "..=" } else { ".." });
+            if let Some(end) = end {
+                rendered.push_str(&end.to_string());
+            }
+            rendered
+        }
+        RuntimeValue::Ref(reference) => match &reference.target {
+            RuntimeReferenceTarget::Local { local, members } => {
+                if members.is_empty() {
+                    format!("<ref:{}>", local.0)
+                } else {
+                    format!("<ref:{}:{}>", local.0, members.join("."))
+                }
+            }
+            RuntimeReferenceTarget::ArenaSlot { id, members } => {
+                if members.is_empty() {
+                    format!("<ref:Arena:{}:{}:{}>", id.arena.0, id.slot, id.generation)
+                } else {
+                    format!(
+                        "<ref:Arena:{}:{}:{}:{}>",
+                        id.arena.0,
+                        id.slot,
+                        id.generation,
+                        members.join(".")
+                    )
+                }
+            }
+            RuntimeReferenceTarget::FrameSlot { id, members } => {
+                if members.is_empty() {
+                    format!("<ref:Frame:{}:{}:{}>", id.arena.0, id.slot, id.generation)
+                } else {
+                    format!(
+                        "<ref:Frame:{}:{}:{}:{}>",
+                        id.arena.0,
+                        id.slot,
+                        id.generation,
+                        members.join(".")
+                    )
+                }
+            }
+            RuntimeReferenceTarget::PoolSlot { id, members } => {
+                if members.is_empty() {
+                    format!("<ref:Pool:{}:{}:{}>", id.arena.0, id.slot, id.generation)
+                } else {
+                    format!(
+                        "<ref:Pool:{}:{}:{}:{}>",
+                        id.arena.0,
+                        id.slot,
+                        id.generation,
+                        members.join(".")
+                    )
+                }
+            }
+        },
         RuntimeValue::Opaque(RuntimeOpaqueValue::FileStream(handle)) => {
             format!("<FileStream:{}>", handle.0)
         }
@@ -3821,6 +4885,42 @@ fn runtime_value_to_string(value: &RuntimeValue) -> String {
         }
         RuntimeValue::Opaque(RuntimeOpaqueValue::AudioPlayback(handle)) => {
             format!("<AudioPlayback:{}>", handle.0)
+        }
+        RuntimeValue::Opaque(RuntimeOpaqueValue::Channel(handle)) => {
+            format!("<Channel:{}>", handle.0)
+        }
+        RuntimeValue::Opaque(RuntimeOpaqueValue::Mutex(handle)) => {
+            format!("<Mutex:{}>", handle.0)
+        }
+        RuntimeValue::Opaque(RuntimeOpaqueValue::AtomicInt(handle)) => {
+            format!("<AtomicInt:{}>", handle.0)
+        }
+        RuntimeValue::Opaque(RuntimeOpaqueValue::AtomicBool(handle)) => {
+            format!("<AtomicBool:{}>", handle.0)
+        }
+        RuntimeValue::Opaque(RuntimeOpaqueValue::Arena(handle)) => {
+            format!("<Arena:{}>", handle.0)
+        }
+        RuntimeValue::Opaque(RuntimeOpaqueValue::ArenaId(id)) => {
+            format!("<ArenaId:{}:{}:{}>", id.arena.0, id.slot, id.generation)
+        }
+        RuntimeValue::Opaque(RuntimeOpaqueValue::FrameArena(handle)) => {
+            format!("<FrameArena:{}>", handle.0)
+        }
+        RuntimeValue::Opaque(RuntimeOpaqueValue::FrameId(id)) => {
+            format!("<FrameId:{}:{}:{}>", id.arena.0, id.slot, id.generation)
+        }
+        RuntimeValue::Opaque(RuntimeOpaqueValue::PoolArena(handle)) => {
+            format!("<PoolArena:{}>", handle.0)
+        }
+        RuntimeValue::Opaque(RuntimeOpaqueValue::PoolId(id)) => {
+            format!("<PoolId:{}:{}:{}>", id.arena.0, id.slot, id.generation)
+        }
+        RuntimeValue::Opaque(RuntimeOpaqueValue::Task(handle)) => {
+            format!("<Task:{}>", handle.0)
+        }
+        RuntimeValue::Opaque(RuntimeOpaqueValue::Thread(handle)) => {
+            format!("<Thread:{}>", handle.0)
         }
         RuntimeValue::Record { name, fields } => format!(
             "{}{{{}}}",
@@ -3854,14 +4954,325 @@ fn lookup_local<'a>(scopes: &'a [RuntimeScope], name: &str) -> Option<&'a Runtim
     scopes.iter().rev().find_map(|scope| scope.locals.get(name))
 }
 
-fn lookup_local_mut<'a>(
+fn read_runtime_local_value(scopes: &[RuntimeScope], name: &str) -> Result<RuntimeValue, String> {
+    let local = lookup_local(scopes, name)
+        .ok_or_else(|| format!("unsupported runtime value path `{name}`"))?;
+    if local.moved {
+        return Err(format!("use of moved local `{name}`"));
+    }
+    Ok(local.value.clone())
+}
+
+fn lookup_local_mut_by_handle<'a>(
     scopes: &'a mut [RuntimeScope],
-    name: &str,
+    handle: RuntimeLocalHandle,
 ) -> Option<&'a mut RuntimeLocal> {
-    scopes
-        .iter_mut()
-        .rev()
-        .find_map(|scope| scope.locals.get_mut(name))
+    scopes.iter_mut().rev().find_map(|scope| {
+        scope
+            .locals
+            .values_mut()
+            .find(|local| local.handle == handle)
+    })
+}
+
+fn lookup_local_with_name_by_handle<'a>(
+    scopes: &'a [RuntimeScope],
+    handle: RuntimeLocalHandle,
+) -> Option<(&'a str, &'a RuntimeLocal)> {
+    scopes.iter().rev().find_map(|scope| {
+        scope
+            .locals
+            .iter()
+            .find_map(|(name, local)| (local.handle == handle).then_some((name.as_str(), local)))
+    })
+}
+
+fn push_runtime_rollup_frame(
+    state: &mut RuntimeExecutionState,
+    rollups: &[ParsedPageRollup],
+    scopes: &[RuntimeScope],
+) {
+    if rollups.is_empty() {
+        return;
+    }
+    let subjects = rollups
+        .iter()
+        .map(|rollup| rollup.subject.clone())
+        .collect::<BTreeSet<_>>();
+    let mut active = BTreeMap::new();
+    for subject in &subjects {
+        if let Ok(value) = read_runtime_local_value(scopes, subject) {
+            active.insert(subject.clone(), value);
+        }
+    }
+    state.rollup_frames.push(RuntimeRollupFrame {
+        rollups: rollups.to_vec(),
+        subjects,
+        active,
+    });
+}
+
+fn pop_runtime_rollup_frame(state: &mut RuntimeExecutionState) -> Option<RuntimeRollupFrame> {
+    state.rollup_frames.pop()
+}
+
+fn update_runtime_rollup_binding(
+    state: &mut RuntimeExecutionState,
+    name: &str,
+    value: &RuntimeValue,
+) {
+    for frame in state.rollup_frames.iter_mut().rev() {
+        if frame.subjects.contains(name) {
+            frame.active.insert(name.to_string(), value.clone());
+            break;
+        }
+    }
+}
+
+fn insert_runtime_local(
+    state: &mut RuntimeExecutionState,
+    scope: &mut RuntimeScope,
+    name: String,
+    mutable: bool,
+    value: RuntimeValue,
+) {
+    update_runtime_rollup_binding(state, &name, &value);
+    let handle = RuntimeLocalHandle(state.next_local_handle);
+    state.next_local_handle += 1;
+    scope.locals.insert(
+        name,
+        RuntimeLocal {
+            handle,
+            mutable,
+            moved: false,
+            value,
+        },
+    );
+}
+
+fn runtime_reference_with_member(
+    target: &RuntimeReferenceTarget,
+    member: String,
+) -> RuntimeReferenceTarget {
+    match target {
+        RuntimeReferenceTarget::Local { local, members } => {
+            let mut next_members = members.clone();
+            next_members.push(member);
+            RuntimeReferenceTarget::Local {
+                local: *local,
+                members: next_members,
+            }
+        }
+        RuntimeReferenceTarget::ArenaSlot { id, members } => {
+            let mut next_members = members.clone();
+            next_members.push(member);
+            RuntimeReferenceTarget::ArenaSlot {
+                id: *id,
+                members: next_members,
+            }
+        }
+        RuntimeReferenceTarget::FrameSlot { id, members } => {
+            let mut next_members = members.clone();
+            next_members.push(member);
+            RuntimeReferenceTarget::FrameSlot {
+                id: *id,
+                members: next_members,
+            }
+        }
+        RuntimeReferenceTarget::PoolSlot { id, members } => {
+            let mut next_members = members.clone();
+            next_members.push(member);
+            RuntimeReferenceTarget::PoolSlot {
+                id: *id,
+                members: next_members,
+            }
+        }
+    }
+}
+
+fn runtime_reference_members(target: &RuntimeReferenceTarget) -> &[String] {
+    match target {
+        RuntimeReferenceTarget::Local { members, .. }
+        | RuntimeReferenceTarget::ArenaSlot { members, .. }
+        | RuntimeReferenceTarget::FrameSlot { members, .. }
+        | RuntimeReferenceTarget::PoolSlot { members, .. } => members,
+    }
+}
+
+fn runtime_reference_root_value(
+    scopes: &[RuntimeScope],
+    state: &RuntimeExecutionState,
+    target: &RuntimeReferenceTarget,
+) -> Result<RuntimeValue, String> {
+    match target {
+        RuntimeReferenceTarget::Local { local, .. } => {
+            let (name, runtime_local) = lookup_local_with_name_by_handle(scopes, *local)
+                .ok_or_else(|| format!("runtime reference local `{}` is unresolved", local.0))?;
+            if runtime_local.moved {
+                return Err(format!("use of moved local `{name}`"));
+            }
+            Ok(runtime_local.value.clone())
+        }
+        RuntimeReferenceTarget::ArenaSlot { id, .. } => {
+            let arena = state
+                .arenas
+                .get(&id.arena)
+                .ok_or_else(|| format!("invalid Arena handle `{}`", id.arena.0))?;
+            if !arena_id_is_live(id.arena, arena, *id) {
+                return Err(format!(
+                    "stale or invalid ArenaId `{}` for Arena `{}`",
+                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::ArenaId(
+                        *id
+                    ))),
+                    id.arena.0
+                ));
+            }
+            arena
+                .slots
+                .get(&id.slot)
+                .cloned()
+                .ok_or_else(|| format!("Arena slot `{}` is missing", id.slot))
+        }
+        RuntimeReferenceTarget::FrameSlot { id, .. } => {
+            let arena = state
+                .frame_arenas
+                .get(&id.arena)
+                .ok_or_else(|| format!("invalid FrameArena handle `{}`", id.arena.0))?;
+            if !frame_id_is_live(id.arena, arena, *id) {
+                return Err(format!(
+                    "stale or invalid FrameId `{}` for FrameArena `{}`",
+                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::FrameId(
+                        *id
+                    ))),
+                    id.arena.0
+                ));
+            }
+            arena
+                .slots
+                .get(&id.slot)
+                .cloned()
+                .ok_or_else(|| format!("FrameArena slot `{}` is missing", id.slot))
+        }
+        RuntimeReferenceTarget::PoolSlot { id, .. } => {
+            let arena = state
+                .pool_arenas
+                .get(&id.arena)
+                .ok_or_else(|| format!("invalid PoolArena handle `{}`", id.arena.0))?;
+            if !pool_id_is_live(id.arena, arena, *id) {
+                return Err(format!(
+                    "stale or invalid PoolId `{}` for PoolArena `{}`",
+                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::PoolId(*id))),
+                    id.arena.0
+                ));
+            }
+            arena
+                .slots
+                .get(&id.slot)
+                .cloned()
+                .ok_or_else(|| format!("PoolArena slot `{}` is missing", id.slot))
+        }
+    }
+}
+
+fn assign_member_chain(
+    base: RuntimeValue,
+    members: &[String],
+    value: RuntimeValue,
+) -> Result<RuntimeValue, String> {
+    let Some((member, rest)) = members.split_first() else {
+        return Ok(value);
+    };
+    let child = eval_member_value(base.clone(), member)?;
+    let updated_child = assign_member_chain(child, rest, value)?;
+    assign_record_member(base, member, updated_child)
+}
+
+fn read_runtime_reference(
+    scopes: &[RuntimeScope],
+    state: &RuntimeExecutionState,
+    reference: &RuntimeReferenceValue,
+) -> Result<RuntimeValue, String> {
+    let mut value = runtime_reference_root_value(scopes, state, &reference.target)?;
+    for member in runtime_reference_members(&reference.target) {
+        value = eval_member_value(value, member)?;
+    }
+    Ok(value)
+}
+
+fn write_runtime_reference(
+    scopes: &mut Vec<RuntimeScope>,
+    state: &mut RuntimeExecutionState,
+    reference: &RuntimeReferenceValue,
+    value: RuntimeValue,
+) -> Result<(), String> {
+    if !reference.mutable {
+        return Err("runtime reference is not mutable".to_string());
+    }
+    let members = runtime_reference_members(&reference.target);
+    let updated_root = if members.is_empty() {
+        value
+    } else {
+        let root = runtime_reference_root_value(scopes, state, &reference.target)?;
+        assign_member_chain(root, members, value)?
+    };
+    match &reference.target {
+        RuntimeReferenceTarget::Local { local, .. } => {
+            let runtime_local = lookup_local_mut_by_handle(scopes, *local)
+                .ok_or_else(|| format!("runtime reference local `{}` is unresolved", local.0))?;
+            runtime_local.moved = false;
+            runtime_local.value = updated_root;
+            Ok(())
+        }
+        RuntimeReferenceTarget::ArenaSlot { id, .. } => {
+            let arena = state
+                .arenas
+                .get_mut(&id.arena)
+                .ok_or_else(|| format!("invalid Arena handle `{}`", id.arena.0))?;
+            if !arena_id_is_live(id.arena, arena, *id) {
+                return Err(format!(
+                    "stale or invalid ArenaId `{}` for Arena `{}`",
+                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::ArenaId(
+                        *id
+                    ))),
+                    id.arena.0
+                ));
+            }
+            arena.slots.insert(id.slot, updated_root);
+            Ok(())
+        }
+        RuntimeReferenceTarget::FrameSlot { id, .. } => {
+            let arena = state
+                .frame_arenas
+                .get_mut(&id.arena)
+                .ok_or_else(|| format!("invalid FrameArena handle `{}`", id.arena.0))?;
+            if !frame_id_is_live(id.arena, arena, *id) {
+                return Err(format!(
+                    "stale or invalid FrameId `{}` for FrameArena `{}`",
+                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::FrameId(
+                        *id
+                    ))),
+                    id.arena.0
+                ));
+            }
+            arena.slots.insert(id.slot, updated_root);
+            Ok(())
+        }
+        RuntimeReferenceTarget::PoolSlot { id, .. } => {
+            let arena = state
+                .pool_arenas
+                .get_mut(&id.arena)
+                .ok_or_else(|| format!("invalid PoolArena handle `{}`", id.arena.0))?;
+            if !pool_id_is_live(id.arena, arena, *id) {
+                return Err(format!(
+                    "stale or invalid PoolId `{}` for PoolArena `{}`",
+                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::PoolId(*id))),
+                    id.arena.0
+                ));
+            }
+            arena.slots.insert(id.slot, updated_root);
+            Ok(())
+        }
+    }
 }
 
 fn expect_int(value: RuntimeValue, context: &str) -> Result<i64, String> {
@@ -3980,6 +5391,103 @@ fn expect_audio_playback(
     Ok(handle)
 }
 
+fn expect_channel(value: RuntimeValue, context: &str) -> Result<RuntimeChannelHandle, String> {
+    let RuntimeValue::Opaque(RuntimeOpaqueValue::Channel(handle)) = value else {
+        return Err(format!("{context} expected Channel"));
+    };
+    Ok(handle)
+}
+
+fn expect_mutex(value: RuntimeValue, context: &str) -> Result<RuntimeMutexHandle, String> {
+    let RuntimeValue::Opaque(RuntimeOpaqueValue::Mutex(handle)) = value else {
+        return Err(format!("{context} expected Mutex"));
+    };
+    Ok(handle)
+}
+
+fn expect_atomic_int(value: RuntimeValue, context: &str) -> Result<RuntimeAtomicIntHandle, String> {
+    let RuntimeValue::Opaque(RuntimeOpaqueValue::AtomicInt(handle)) = value else {
+        return Err(format!("{context} expected AtomicInt"));
+    };
+    Ok(handle)
+}
+
+fn expect_atomic_bool(
+    value: RuntimeValue,
+    context: &str,
+) -> Result<RuntimeAtomicBoolHandle, String> {
+    let RuntimeValue::Opaque(RuntimeOpaqueValue::AtomicBool(handle)) = value else {
+        return Err(format!("{context} expected AtomicBool"));
+    };
+    Ok(handle)
+}
+
+fn expect_arena(value: RuntimeValue, context: &str) -> Result<RuntimeArenaHandle, String> {
+    let RuntimeValue::Opaque(RuntimeOpaqueValue::Arena(handle)) = value else {
+        return Err(format!("{context} expected Arena"));
+    };
+    Ok(handle)
+}
+
+fn expect_arena_id(value: RuntimeValue, context: &str) -> Result<RuntimeArenaIdValue, String> {
+    let RuntimeValue::Opaque(RuntimeOpaqueValue::ArenaId(id)) = value else {
+        return Err(format!("{context} expected ArenaId"));
+    };
+    Ok(id)
+}
+
+fn expect_frame_arena(
+    value: RuntimeValue,
+    context: &str,
+) -> Result<RuntimeFrameArenaHandle, String> {
+    let RuntimeValue::Opaque(RuntimeOpaqueValue::FrameArena(handle)) = value else {
+        return Err(format!("{context} expected FrameArena"));
+    };
+    Ok(handle)
+}
+
+fn expect_frame_id(value: RuntimeValue, context: &str) -> Result<RuntimeFrameIdValue, String> {
+    let RuntimeValue::Opaque(RuntimeOpaqueValue::FrameId(id)) = value else {
+        return Err(format!("{context} expected FrameId"));
+    };
+    Ok(id)
+}
+
+fn expect_pool_arena(value: RuntimeValue, context: &str) -> Result<RuntimePoolArenaHandle, String> {
+    let RuntimeValue::Opaque(RuntimeOpaqueValue::PoolArena(handle)) = value else {
+        return Err(format!("{context} expected PoolArena"));
+    };
+    Ok(handle)
+}
+
+fn expect_pool_id(value: RuntimeValue, context: &str) -> Result<RuntimePoolIdValue, String> {
+    let RuntimeValue::Opaque(RuntimeOpaqueValue::PoolId(id)) = value else {
+        return Err(format!("{context} expected PoolId"));
+    };
+    Ok(id)
+}
+
+fn expect_task(value: RuntimeValue, context: &str) -> Result<RuntimeTaskHandle, String> {
+    let RuntimeValue::Opaque(RuntimeOpaqueValue::Task(handle)) = value else {
+        return Err(format!("{context} expected Task"));
+    };
+    Ok(handle)
+}
+
+fn expect_thread(value: RuntimeValue, context: &str) -> Result<RuntimeThreadHandle, String> {
+    let RuntimeValue::Opaque(RuntimeOpaqueValue::Thread(handle)) = value else {
+        return Err(format!("{context} expected Thread"));
+    };
+    Ok(handle)
+}
+
+fn expect_reference(value: RuntimeValue, context: &str) -> Result<RuntimeReferenceValue, String> {
+    let RuntimeValue::Ref(reference) = value else {
+        return Err(format!("{context} expected reference"));
+    };
+    Ok(reference)
+}
+
 fn bytes_to_runtime_array(bytes: impl IntoIterator<Item = u8>) -> RuntimeValue {
     RuntimeValue::Array(
         bytes
@@ -4012,6 +5520,193 @@ fn ecs_slot_mut<'a>(
     key: &[String],
 ) -> &'a mut BTreeMap<i64, RuntimeValue> {
     state.component_slots.entry(key.to_vec()).or_default()
+}
+
+fn insert_runtime_channel(
+    state: &mut RuntimeExecutionState,
+    type_args: &[String],
+    capacity: usize,
+) -> RuntimeChannelHandle {
+    let handle = RuntimeChannelHandle(state.next_channel_handle);
+    state.next_channel_handle += 1;
+    state.channels.insert(
+        handle,
+        RuntimeChannelState {
+            type_args: type_args.to_vec(),
+            capacity,
+            queue: VecDeque::new(),
+        },
+    );
+    handle
+}
+
+fn insert_runtime_mutex(
+    state: &mut RuntimeExecutionState,
+    type_args: &[String],
+    value: RuntimeValue,
+) -> RuntimeMutexHandle {
+    let handle = RuntimeMutexHandle(state.next_mutex_handle);
+    state.next_mutex_handle += 1;
+    state.mutexes.insert(
+        handle,
+        RuntimeMutexState {
+            type_args: type_args.to_vec(),
+            value: Some(value),
+        },
+    );
+    handle
+}
+
+fn insert_runtime_atomic_int(
+    state: &mut RuntimeExecutionState,
+    value: i64,
+) -> RuntimeAtomicIntHandle {
+    let handle = RuntimeAtomicIntHandle(state.next_atomic_int_handle);
+    state.next_atomic_int_handle += 1;
+    state.atomic_ints.insert(handle, value);
+    handle
+}
+
+fn insert_runtime_atomic_bool(
+    state: &mut RuntimeExecutionState,
+    value: bool,
+) -> RuntimeAtomicBoolHandle {
+    let handle = RuntimeAtomicBoolHandle(state.next_atomic_bool_handle);
+    state.next_atomic_bool_handle += 1;
+    state.atomic_bools.insert(handle, value);
+    handle
+}
+
+fn insert_runtime_arena(
+    state: &mut RuntimeExecutionState,
+    type_args: &[String],
+) -> RuntimeArenaHandle {
+    let handle = RuntimeArenaHandle(state.next_arena_handle);
+    state.next_arena_handle += 1;
+    state.arenas.insert(
+        handle,
+        RuntimeArenaState {
+            type_args: type_args.to_vec(),
+            next_slot: 0,
+            generation: 0,
+            slots: BTreeMap::new(),
+        },
+    );
+    handle
+}
+
+fn insert_runtime_frame_arena(
+    state: &mut RuntimeExecutionState,
+    type_args: &[String],
+) -> RuntimeFrameArenaHandle {
+    let handle = RuntimeFrameArenaHandle(state.next_frame_arena_handle);
+    state.next_frame_arena_handle += 1;
+    state.frame_arenas.insert(
+        handle,
+        RuntimeFrameArenaState {
+            type_args: type_args.to_vec(),
+            next_slot: 0,
+            generation: 0,
+            slots: BTreeMap::new(),
+        },
+    );
+    handle
+}
+
+fn insert_runtime_pool_arena(
+    state: &mut RuntimeExecutionState,
+    type_args: &[String],
+) -> RuntimePoolArenaHandle {
+    let handle = RuntimePoolArenaHandle(state.next_pool_arena_handle);
+    state.next_pool_arena_handle += 1;
+    state.pool_arenas.insert(
+        handle,
+        RuntimePoolArenaState {
+            type_args: type_args.to_vec(),
+            next_slot: 0,
+            free_slots: Vec::new(),
+            generations: BTreeMap::new(),
+            slots: BTreeMap::new(),
+        },
+    );
+    handle
+}
+
+fn insert_runtime_task(
+    state: &mut RuntimeExecutionState,
+    type_args: &[String],
+    pending: RuntimePendingState,
+) -> RuntimeTaskHandle {
+    let handle = RuntimeTaskHandle(state.next_task_handle);
+    state.next_task_handle += 1;
+    state.tasks.insert(
+        handle,
+        RuntimeTaskState {
+            type_args: type_args.to_vec(),
+            state: pending,
+        },
+    );
+    handle
+}
+
+fn allocate_scheduler_thread_id(state: &mut RuntimeExecutionState) -> i64 {
+    if state.next_scheduler_thread_id <= 0 {
+        state.next_scheduler_thread_id = 1;
+    }
+    let thread_id = state.next_scheduler_thread_id;
+    state.next_scheduler_thread_id += 1;
+    thread_id
+}
+
+fn runtime_async_calls_allowed(state: &RuntimeExecutionState) -> bool {
+    state.async_context_depth > 0
+}
+
+fn insert_runtime_thread(
+    state: &mut RuntimeExecutionState,
+    type_args: &[String],
+    pending: RuntimePendingState,
+) -> RuntimeThreadHandle {
+    let handle = RuntimeThreadHandle(state.next_thread_handle);
+    state.next_thread_handle += 1;
+    state.threads.insert(
+        handle,
+        RuntimeThreadState {
+            type_args: type_args.to_vec(),
+            state: pending,
+        },
+    );
+    handle
+}
+
+fn arena_id_is_live(
+    handle: RuntimeArenaHandle,
+    arena: &RuntimeArenaState,
+    id: RuntimeArenaIdValue,
+) -> bool {
+    id.arena == handle && id.generation == arena.generation && arena.slots.contains_key(&id.slot)
+}
+
+fn frame_id_is_live(
+    handle: RuntimeFrameArenaHandle,
+    arena: &RuntimeFrameArenaState,
+    id: RuntimeFrameIdValue,
+) -> bool {
+    id.arena == handle && id.generation == arena.generation && arena.slots.contains_key(&id.slot)
+}
+
+fn pool_slot_generation(pool: &RuntimePoolArenaState, slot: u64) -> u64 {
+    pool.generations.get(&slot).copied().unwrap_or(0)
+}
+
+fn pool_id_is_live(
+    handle: RuntimePoolArenaHandle,
+    arena: &RuntimePoolArenaState,
+    id: RuntimePoolIdValue,
+) -> bool {
+    id.arena == handle
+        && id.generation == pool_slot_generation(arena, id.slot)
+        && arena.slots.contains_key(&id.slot)
 }
 
 fn ecs_entity_exists(state: &RuntimeExecutionState, entity: i64) -> bool {
@@ -4067,12 +5762,13 @@ fn collect_call_args(
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
     host: &mut dyn RuntimeHost,
-) -> Result<Vec<RuntimeCallArg>, String> {
+) -> RuntimeEvalResult<Vec<RuntimeCallArg>> {
     let mut values = args
         .iter()
         .map(|arg| {
             Ok(RuntimeCallArg {
                 name: arg.name.clone(),
+                source_expr: arg.value.clone(),
                 value: eval_expr(
                     &arg.value,
                     plan,
@@ -4085,7 +5781,7 @@ fn collect_call_args(
                 )?,
             })
         })
-        .collect::<Result<Vec<_>, String>>()?;
+        .collect::<RuntimeEvalResult<Vec<_>>>()?;
     for attachment in attached {
         let (name, value) = match attachment {
             ParsedHeaderAttachment::Named { name, value } => (
@@ -4115,7 +5811,15 @@ fn collect_call_args(
                 )?,
             ),
         };
-        values.push(RuntimeCallArg { name, value });
+        let source_expr = match attachment {
+            ParsedHeaderAttachment::Named { value, .. } => value.clone(),
+            ParsedHeaderAttachment::Chain { expr } => expr.clone(),
+        };
+        values.push(RuntimeCallArg {
+            name,
+            value,
+            source_expr,
+        });
     }
     Ok(values)
 }
@@ -4123,7 +5827,7 @@ fn collect_call_args(
 fn bind_call_args_for_routine(
     routine: &RuntimeRoutinePlan,
     args: Vec<RuntimeCallArg>,
-) -> Result<Vec<RuntimeValue>, String> {
+) -> Result<Vec<BoundRuntimeArg>, String> {
     let mut bound = vec![None; routine.params.len()];
     let mut next_positional = 0usize;
     for arg in args {
@@ -4156,7 +5860,10 @@ fn bind_call_args_for_routine(
                 routine.symbol_name, routine.params[index].name
             ));
         }
-        bound[index] = Some(arg.value);
+        bound[index] = Some(BoundRuntimeArg {
+            value: arg.value,
+            source_expr: arg.source_expr,
+        });
     }
     let missing = routine
         .params
@@ -4203,26 +5910,742 @@ fn opaque_type_name(value: &RuntimeOpaqueValue) -> &'static str {
         RuntimeOpaqueValue::AudioDevice(_) => "std.audio.AudioDevice",
         RuntimeOpaqueValue::AudioBuffer(_) => "std.audio.AudioBuffer",
         RuntimeOpaqueValue::AudioPlayback(_) => "std.audio.AudioPlayback",
+        RuntimeOpaqueValue::Channel(_) => "std.concurrent.Channel",
+        RuntimeOpaqueValue::Mutex(_) => "std.concurrent.Mutex",
+        RuntimeOpaqueValue::AtomicInt(_) => "std.concurrent.AtomicInt",
+        RuntimeOpaqueValue::AtomicBool(_) => "std.concurrent.AtomicBool",
+        RuntimeOpaqueValue::Arena(_) => "std.memory.Arena",
+        RuntimeOpaqueValue::ArenaId(_) => "std.memory.ArenaId",
+        RuntimeOpaqueValue::FrameArena(_) => "std.memory.FrameArena",
+        RuntimeOpaqueValue::FrameId(_) => "std.memory.FrameId",
+        RuntimeOpaqueValue::PoolArena(_) => "std.memory.PoolArena",
+        RuntimeOpaqueValue::PoolId(_) => "std.memory.PoolId",
+        RuntimeOpaqueValue::Task(_) => "std.concurrent.Task",
+        RuntimeOpaqueValue::Thread(_) => "std.concurrent.Thread",
     }
 }
 
-fn runtime_method_callable_path(receiver: &RuntimeValue, qualifier: &str) -> Option<Vec<String>> {
-    let type_name = match receiver {
-        RuntimeValue::Record { name, .. } => name.as_str(),
-        RuntimeValue::Opaque(value) => opaque_type_name(value),
-        _ => return None,
-    };
-    let mut segments = type_name
-        .split('.')
-        .map(ToString::to_string)
-        .collect::<Vec<_>>();
-    if segments.len() > 1 {
-        segments.pop();
-        segments.push(qualifier.to_string());
-        Some(segments)
-    } else {
-        Some(vec![qualifier.to_string()])
+fn guessed_runtime_method_callable_path(
+    receiver: &RuntimeValue,
+    qualifier: &str,
+) -> Option<Vec<String>> {
+    match receiver {
+        RuntimeValue::List(_) => Some(vec![
+            "std".to_string(),
+            "collections".to_string(),
+            "list".to_string(),
+            qualifier.to_string(),
+        ]),
+        RuntimeValue::Array(_) => Some(vec![
+            "std".to_string(),
+            "collections".to_string(),
+            "array".to_string(),
+            qualifier.to_string(),
+        ]),
+        RuntimeValue::Map(_) => Some(vec![
+            "std".to_string(),
+            "collections".to_string(),
+            "map".to_string(),
+            qualifier.to_string(),
+        ]),
+        RuntimeValue::Record { name, .. } => {
+            let mut segments = name.split('.').map(ToString::to_string).collect::<Vec<_>>();
+            if segments.len() > 1 {
+                segments.pop();
+                segments.push(qualifier.to_string());
+                Some(segments)
+            } else {
+                Some(vec![qualifier.to_string()])
+            }
+        }
+        RuntimeValue::Opaque(value) => {
+            let mut segments = opaque_type_name(value)
+                .split('.')
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            if segments.len() > 1 {
+                segments.pop();
+                segments.push(qualifier.to_string());
+                Some(segments)
+            } else {
+                Some(vec![qualifier.to_string()])
+            }
+        }
+        RuntimeValue::Variant { name, .. } => {
+            let mut segments = name.split('.').map(ToString::to_string).collect::<Vec<_>>();
+            if segments.len() >= 2 {
+                segments.pop();
+                segments.pop();
+                segments.push(qualifier.to_string());
+                Some(segments)
+            } else {
+                Some(vec![qualifier.to_string()])
+            }
+        }
+        _ => None,
     }
+}
+
+fn resolve_runtime_method_callable_path(
+    plan: &RuntimePackagePlan,
+    current_module_id: &str,
+    receiver: &RuntimeValue,
+    qualifier: &str,
+    state: &RuntimeExecutionState,
+) -> Option<Vec<String>> {
+    if let Some(callable) = guessed_runtime_method_callable_path(receiver, qualifier) {
+        if resolve_routine_index(plan, current_module_id, &callable).is_some()
+            || resolve_runtime_intrinsic_path(&callable).is_some()
+        {
+            return Some(callable);
+        }
+    }
+
+    let receiver_root = runtime_value_type_root(receiver)?;
+    let mut matches = plan
+        .routines
+        .iter()
+        .filter(|routine| {
+            routine.symbol_name == qualifier
+                && routine
+                    .params
+                    .first()
+                    .map(|param| runtime_type_root_name(&param.ty) == receiver_root)
+                    .unwrap_or(false)
+        })
+        .map(|routine| {
+            let mut path = routine
+                .module_id
+                .split('.')
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            path.push(routine.symbol_name.clone());
+            path
+        })
+        .collect::<Vec<_>>();
+
+    matches.sort();
+    matches.dedup();
+
+    if matches.len() == 1 {
+        return matches.into_iter().next();
+    }
+
+    let receiver_type = runtime_value_type_name(receiver, state)?;
+    let narrowed = plan
+        .routines
+        .iter()
+        .filter(|routine| {
+            routine.symbol_name == qualifier
+                && routine
+                    .params
+                    .first()
+                    .map(|param| {
+                        runtime_type_root_name(&param.ty) == receiver_root
+                            && (param.ty == receiver_type
+                                || runtime_type_root_name(&param.ty)
+                                    == runtime_type_root_name(&receiver_type))
+                    })
+                    .unwrap_or(false)
+        })
+        .map(|routine| {
+            let mut path = routine
+                .module_id
+                .split('.')
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            path.push(routine.symbol_name.clone());
+            path
+        })
+        .collect::<Vec<_>>();
+    if narrowed.len() == 1 {
+        return narrowed.into_iter().next();
+    }
+
+    None
+}
+
+fn runtime_receiver_type_args(
+    receiver: &RuntimeValue,
+    state: &RuntimeExecutionState,
+) -> Vec<String> {
+    match receiver {
+        RuntimeValue::Record { name, .. } => parse_runtime_value_type_args(name),
+        RuntimeValue::Opaque(RuntimeOpaqueValue::Channel(handle)) => state
+            .channels
+            .get(handle)
+            .map(|channel| channel.type_args.clone())
+            .unwrap_or_default(),
+        RuntimeValue::Opaque(RuntimeOpaqueValue::Mutex(handle)) => state
+            .mutexes
+            .get(handle)
+            .map(|mutex| mutex.type_args.clone())
+            .unwrap_or_default(),
+        RuntimeValue::Opaque(RuntimeOpaqueValue::Arena(handle)) => state
+            .arenas
+            .get(handle)
+            .map(|arena| arena.type_args.clone())
+            .unwrap_or_default(),
+        RuntimeValue::Opaque(RuntimeOpaqueValue::FrameArena(handle)) => state
+            .frame_arenas
+            .get(handle)
+            .map(|arena| arena.type_args.clone())
+            .unwrap_or_default(),
+        RuntimeValue::Opaque(RuntimeOpaqueValue::PoolArena(handle)) => state
+            .pool_arenas
+            .get(handle)
+            .map(|arena| arena.type_args.clone())
+            .unwrap_or_default(),
+        RuntimeValue::Opaque(RuntimeOpaqueValue::Task(handle)) => state
+            .tasks
+            .get(handle)
+            .map(|task| task.type_args.clone())
+            .unwrap_or_default(),
+        RuntimeValue::Opaque(RuntimeOpaqueValue::Thread(handle)) => state
+            .threads
+            .get(handle)
+            .map(|thread| thread.type_args.clone())
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+fn runtime_value_type_root(receiver: &RuntimeValue) -> Option<String> {
+    match receiver {
+        RuntimeValue::Int(_) => Some("Int".to_string()),
+        RuntimeValue::Bool(_) => Some("Bool".to_string()),
+        RuntimeValue::Str(_) => Some("Str".to_string()),
+        RuntimeValue::Pair(_, _) => Some("Pair".to_string()),
+        RuntimeValue::Array(_) => Some("Array".to_string()),
+        RuntimeValue::List(_) => Some("List".to_string()),
+        RuntimeValue::Map(_) => Some("Map".to_string()),
+        RuntimeValue::Range { .. } => Some("RangeInt".to_string()),
+        RuntimeValue::Ref(_) => Some("Ref".to_string()),
+        RuntimeValue::Opaque(value) => Some(runtime_type_root_name(opaque_type_name(value))),
+        RuntimeValue::Record { name, .. } => Some(runtime_type_root_name(name)),
+        RuntimeValue::Variant { name, .. } => {
+            Some(runtime_type_root_name(&runtime_variant_enum_name(name)))
+        }
+        RuntimeValue::Unit => Some("Unit".to_string()),
+    }
+}
+
+fn runtime_value_type_name(
+    receiver: &RuntimeValue,
+    state: &RuntimeExecutionState,
+) -> Option<String> {
+    match receiver {
+        RuntimeValue::Int(_) => Some("Int".to_string()),
+        RuntimeValue::Bool(_) => Some("Bool".to_string()),
+        RuntimeValue::Str(_) => Some("Str".to_string()),
+        RuntimeValue::Pair(_, _) => Some("Pair".to_string()),
+        RuntimeValue::Array(_) => Some("Array".to_string()),
+        RuntimeValue::List(_) => Some("List".to_string()),
+        RuntimeValue::Map(_) => Some("Map".to_string()),
+        RuntimeValue::Range { .. } => Some("RangeInt".to_string()),
+        RuntimeValue::Ref(_) => Some("Ref".to_string()),
+        RuntimeValue::Opaque(_) => {
+            let mut type_name = opaque_type_name(match receiver {
+                RuntimeValue::Opaque(value) => value,
+                _ => unreachable!(),
+            })
+            .to_string();
+            let type_args = runtime_receiver_type_args(receiver, state);
+            if !type_args.is_empty() {
+                type_name.push('[');
+                type_name.push_str(&type_args.join(", "));
+                type_name.push(']');
+            }
+            Some(type_name)
+        }
+        RuntimeValue::Record { name, .. } => Some(name.clone()),
+        RuntimeValue::Variant { name, .. } => Some(runtime_variant_enum_name(name)),
+        RuntimeValue::Unit => Some("Unit".to_string()),
+    }
+}
+
+fn runtime_value_is_copy(value: &RuntimeValue) -> bool {
+    match value {
+        RuntimeValue::Int(_)
+        | RuntimeValue::Bool(_)
+        | RuntimeValue::Range { .. }
+        | RuntimeValue::Ref(_)
+        | RuntimeValue::Unit => true,
+        RuntimeValue::Pair(left, right) => {
+            runtime_value_is_copy(left) && runtime_value_is_copy(right)
+        }
+        RuntimeValue::Opaque(RuntimeOpaqueValue::AtomicInt(_))
+        | RuntimeValue::Opaque(RuntimeOpaqueValue::AtomicBool(_))
+        | RuntimeValue::Opaque(RuntimeOpaqueValue::ArenaId(_))
+        | RuntimeValue::Opaque(RuntimeOpaqueValue::FrameId(_))
+        | RuntimeValue::Opaque(RuntimeOpaqueValue::PoolId(_)) => true,
+        RuntimeValue::Str(_)
+        | RuntimeValue::Array(_)
+        | RuntimeValue::List(_)
+        | RuntimeValue::Map(_)
+        | RuntimeValue::Opaque(_)
+        | RuntimeValue::Record { .. }
+        | RuntimeValue::Variant { .. } => false,
+    }
+}
+
+fn expr_to_assign_target(expr: &ParsedExpr) -> Option<ParsedAssignTarget> {
+    match expr {
+        ParsedExpr::Path(segments) if segments.len() == 1 => {
+            Some(ParsedAssignTarget::Name(segments[0].clone()))
+        }
+        ParsedExpr::Member { expr, member } => Some(ParsedAssignTarget::Member {
+            target: Box::new(expr_to_assign_target(expr)?),
+            member: member.clone(),
+        }),
+        ParsedExpr::Index { expr, index } => Some(ParsedAssignTarget::Index {
+            target: Box::new(expr_to_assign_target(expr)?),
+            index: (**index).clone(),
+        }),
+        ParsedExpr::Generic { expr, .. } => expr_to_assign_target(expr),
+        ParsedExpr::Unary { op, expr }
+            if matches!(
+                op,
+                ParsedUnaryOp::BorrowRead | ParsedUnaryOp::BorrowMut | ParsedUnaryOp::Deref
+            ) =>
+        {
+            expr_to_assign_target(expr)
+        }
+        _ => None,
+    }
+}
+
+fn expr_root_local_name(expr: &ParsedExpr) -> Option<&str> {
+    match expr {
+        ParsedExpr::Path(segments) if segments.len() == 1 => Some(segments[0].as_str()),
+        ParsedExpr::Generic { expr, .. } => expr_root_local_name(expr),
+        _ => None,
+    }
+}
+
+fn consume_take_arg_root_local(
+    scopes: &mut [RuntimeScope],
+    source_expr: &ParsedExpr,
+) -> Result<(), String> {
+    let Some(name) = expr_root_local_name(source_expr) else {
+        return Ok(());
+    };
+    let Some(local) = scopes
+        .iter_mut()
+        .rev()
+        .find_map(|scope| scope.locals.get_mut(name))
+    else {
+        return Ok(());
+    };
+    if local.moved {
+        return Err(format!("use of moved local `{name}`"));
+    }
+    if runtime_value_is_copy(&local.value) {
+        return Ok(());
+    }
+    local.moved = true;
+    Ok(())
+}
+
+fn consume_take_bound_args(
+    scopes: &mut [RuntimeScope],
+    routine: &RuntimeRoutinePlan,
+    args: &[BoundRuntimeArg],
+) -> Result<(), String> {
+    for (param, bound_arg) in routine.params.iter().zip(args) {
+        if param.mode.as_deref() != Some("take") {
+            continue;
+        }
+        consume_take_arg_root_local(scopes, &bound_arg.source_expr)?;
+    }
+    Ok(())
+}
+
+fn assign_record_member(
+    base: RuntimeValue,
+    member: &str,
+    value: RuntimeValue,
+) -> Result<RuntimeValue, String> {
+    match base {
+        RuntimeValue::Pair(left, right) => match member {
+            "0" => Ok(RuntimeValue::Pair(Box::new(value), right)),
+            "1" => Ok(RuntimeValue::Pair(left, Box::new(value))),
+            _ => Err(format!("pair has no member `.{member}`")),
+        },
+        RuntimeValue::Record { name, mut fields } => {
+            if !fields.contains_key(member) {
+                return Err(format!("record `{name}` has no field `.{member}`"));
+            }
+            fields.insert(member.to_string(), value);
+            Ok(RuntimeValue::Record { name, fields })
+        }
+        other => Err(format!(
+            "unsupported runtime member assignment `.{member}` on `{other:?}`"
+        )),
+    }
+}
+
+fn resolve_assign_target_place(
+    scopes: &[RuntimeScope],
+    target: &ParsedAssignTarget,
+) -> Result<RuntimeResolvedPlace, String> {
+    match target {
+        ParsedAssignTarget::Name(name) => {
+            let local = lookup_local(scopes, name)
+                .ok_or_else(|| format!("runtime assignment target `{name}` is unresolved"))?;
+            match &local.value {
+                RuntimeValue::Ref(reference) => Ok(RuntimeResolvedPlace {
+                    mutable: reference.mutable,
+                    target: reference.target.clone(),
+                }),
+                _ => Ok(RuntimeResolvedPlace {
+                    mutable: local.mutable,
+                    target: RuntimeReferenceTarget::Local {
+                        local: local.handle,
+                        members: Vec::new(),
+                    },
+                }),
+            }
+        }
+        ParsedAssignTarget::Member { target, member } => {
+            let place = resolve_assign_target_place(scopes, target)?;
+            Ok(RuntimeResolvedPlace {
+                mutable: place.mutable,
+                target: runtime_reference_with_member(&place.target, member.clone()),
+            })
+        }
+        ParsedAssignTarget::Index { .. } => Err(format!(
+            "unsupported runtime assignment target `{target:?}`"
+        )),
+    }
+}
+
+fn read_assign_target_value(
+    scopes: &[RuntimeScope],
+    state: &RuntimeExecutionState,
+    target: &ParsedAssignTarget,
+) -> Result<RuntimeValue, String> {
+    let place = resolve_assign_target_place(scopes, target)?;
+    read_runtime_reference(
+        scopes,
+        state,
+        &RuntimeReferenceValue {
+            mutable: place.mutable,
+            target: place.target,
+        },
+    )
+}
+
+fn write_assign_target_value(
+    scopes: &mut Vec<RuntimeScope>,
+    state: &mut RuntimeExecutionState,
+    target: &ParsedAssignTarget,
+    value: RuntimeValue,
+) -> Result<(), String> {
+    let place = resolve_assign_target_place(scopes, target)?;
+    if !place.mutable {
+        return Err(format!(
+            "runtime assignment target `{target:?}` is not mutable"
+        ));
+    }
+    write_runtime_reference(
+        scopes,
+        state,
+        &RuntimeReferenceValue {
+            mutable: true,
+            target: place.target,
+        },
+        value,
+    )
+}
+
+fn assign_runtime_index_value(
+    base: RuntimeValue,
+    index: RuntimeValue,
+    value: RuntimeValue,
+    scopes: &[RuntimeScope],
+    state: &RuntimeExecutionState,
+) -> Result<RuntimeValue, String> {
+    let base = read_runtime_value_if_ref(base, scopes, state)?;
+    let index = expect_int(index, "indexed assignment")?;
+    match base {
+        RuntimeValue::List(mut values) => {
+            let index = runtime_index_to_usize(index, values.len(), "list index assignment")?;
+            values[index] = value;
+            Ok(RuntimeValue::List(values))
+        }
+        RuntimeValue::Array(mut values) => {
+            let index = runtime_index_to_usize(index, values.len(), "array index assignment")?;
+            values[index] = value;
+            Ok(RuntimeValue::Array(values))
+        }
+        other => Err(format!(
+            "runtime indexed assignment expects List or Array, got `{other:?}`"
+        )),
+    }
+}
+
+fn read_assign_target_value_runtime(
+    target: &ParsedAssignTarget,
+    plan: &RuntimePackagePlan,
+    current_module_id: &str,
+    scopes: &mut Vec<RuntimeScope>,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
+) -> Result<RuntimeValue, String> {
+    match target {
+        ParsedAssignTarget::Index { target, index } => eval_runtime_index_value(
+            read_assign_target_value_runtime(
+                target,
+                plan,
+                current_module_id,
+                scopes,
+                aliases,
+                type_bindings,
+                state,
+                host,
+            )?,
+            eval_expr(
+                index,
+                plan,
+                current_module_id,
+                scopes,
+                aliases,
+                type_bindings,
+                state,
+                host,
+            )
+            .map_err(runtime_eval_message)?,
+            scopes,
+            state,
+        ),
+        _ => read_assign_target_value(scopes, state, target),
+    }
+}
+
+fn write_assign_target_value_runtime(
+    target: &ParsedAssignTarget,
+    value: RuntimeValue,
+    plan: &RuntimePackagePlan,
+    current_module_id: &str,
+    scopes: &mut Vec<RuntimeScope>,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
+) -> Result<(), String> {
+    match target {
+        ParsedAssignTarget::Index {
+            target: base_target,
+            index,
+        } => {
+            let updated = assign_runtime_index_value(
+                read_assign_target_value_runtime(
+                    base_target,
+                    plan,
+                    current_module_id,
+                    scopes,
+                    aliases,
+                    type_bindings,
+                    state,
+                    host,
+                )?,
+                eval_expr(
+                    index,
+                    plan,
+                    current_module_id,
+                    scopes,
+                    aliases,
+                    type_bindings,
+                    state,
+                    host,
+                )
+                .map_err(runtime_eval_message)?,
+                value,
+                scopes,
+                state,
+            )?;
+            write_assign_target_value_runtime(
+                base_target,
+                updated,
+                plan,
+                current_module_id,
+                scopes,
+                aliases,
+                type_bindings,
+                state,
+                host,
+            )
+        }
+        _ => write_assign_target_value(scopes, state, target, value),
+    }
+}
+
+fn apply_assignment_op(
+    current: RuntimeValue,
+    op: ParsedAssignOp,
+    value: RuntimeValue,
+) -> Result<RuntimeValue, String> {
+    Ok(match op {
+        ParsedAssignOp::Assign => value,
+        ParsedAssignOp::AddAssign => apply_runtime_add(current, value, "+=")?,
+        ParsedAssignOp::SubAssign => {
+            RuntimeValue::Int(expect_int(current, "-=")? - expect_int(value, "-=")?)
+        }
+        ParsedAssignOp::MulAssign => {
+            RuntimeValue::Int(expect_int(current, "*=")? * expect_int(value, "*=")?)
+        }
+        ParsedAssignOp::DivAssign => {
+            RuntimeValue::Int(expect_int(current, "/=")? / expect_int(value, "/=")?)
+        }
+        ParsedAssignOp::ModAssign => {
+            RuntimeValue::Int(expect_int(current, "%=")? % expect_int(value, "%=")?)
+        }
+        ParsedAssignOp::BitAndAssign => {
+            RuntimeValue::Int(expect_int(current, "&=")? & expect_int(value, "&=")?)
+        }
+        ParsedAssignOp::BitOrAssign => {
+            RuntimeValue::Int(expect_int(current, "|=")? | expect_int(value, "|=")?)
+        }
+        ParsedAssignOp::BitXorAssign => {
+            RuntimeValue::Int(expect_int(current, "^=")? ^ expect_int(value, "^=")?)
+        }
+        ParsedAssignOp::ShlAssign => {
+            RuntimeValue::Int(expect_int(current, "<<=")? << expect_int(value, "<<=")?)
+        }
+        ParsedAssignOp::ShrAssign => {
+            RuntimeValue::Int(expect_int(current, "shr=")? >> expect_int(value, "shr=")?)
+        }
+    })
+}
+
+fn apply_runtime_add(
+    left: RuntimeValue,
+    right: RuntimeValue,
+    context: &str,
+) -> Result<RuntimeValue, String> {
+    match (left, right) {
+        (RuntimeValue::Int(left), RuntimeValue::Int(right)) => Ok(RuntimeValue::Int(left + right)),
+        (RuntimeValue::Str(mut left), RuntimeValue::Str(right)) => {
+            left.push_str(&right);
+            Ok(RuntimeValue::Str(left))
+        }
+        (left, right) => Err(format!(
+            "{context} expected Int or Str operands of the same type, got `{left:?}` and `{right:?}`"
+        )),
+    }
+}
+
+fn intrinsic_edit_arg_indices(intrinsic: RuntimeIntrinsic) -> &'static [usize] {
+    match intrinsic {
+        RuntimeIntrinsic::ListPush
+        | RuntimeIntrinsic::ListPop
+        | RuntimeIntrinsic::ListTryPopOr
+        | RuntimeIntrinsic::MapSet
+        | RuntimeIntrinsic::MapRemove => &[0],
+        _ => &[],
+    }
+}
+
+fn intrinsic_take_arg_indices(intrinsic: RuntimeIntrinsic) -> &'static [usize] {
+    match intrinsic {
+        RuntimeIntrinsic::FsStreamCloseTry
+        | RuntimeIntrinsic::WindowClose
+        | RuntimeIntrinsic::AudioOutputClose
+        | RuntimeIntrinsic::AudioPlaybackStop
+        | RuntimeIntrinsic::ArrayFromList
+        | RuntimeIntrinsic::ConcurrentMutexNew
+        | RuntimeIntrinsic::EcsSetSingleton => &[0],
+        RuntimeIntrinsic::ListPush
+        | RuntimeIntrinsic::ListTryPopOr
+        | RuntimeIntrinsic::ConcurrentChannelSend
+        | RuntimeIntrinsic::ConcurrentMutexPut
+        | RuntimeIntrinsic::MemoryArenaAlloc
+        | RuntimeIntrinsic::MemoryFrameAlloc
+        | RuntimeIntrinsic::MemoryPoolAlloc
+        | RuntimeIntrinsic::EcsSetComponentAt => &[1],
+        RuntimeIntrinsic::MapSet
+        | RuntimeIntrinsic::MapTryGetOr
+        | RuntimeIntrinsic::MemoryArenaSet
+        | RuntimeIntrinsic::MemoryFrameSet
+        | RuntimeIntrinsic::MemoryPoolSet => &[2],
+        _ => &[],
+    }
+}
+
+fn write_back_call_args(
+    scopes: &mut Vec<RuntimeScope>,
+    state: &mut RuntimeExecutionState,
+    edit_arg_indices: &[usize],
+    call_args: &[RuntimeCallArg],
+    final_args: &[RuntimeValue],
+) -> Result<(), String> {
+    for &index in edit_arg_indices {
+        let Some(call_arg) = call_args.get(index) else {
+            continue;
+        };
+        let Some(value) = final_args.get(index) else {
+            continue;
+        };
+        if matches!(value, RuntimeValue::Ref(_)) {
+            continue;
+        }
+        let target = expr_to_assign_target(&call_arg.source_expr).ok_or_else(|| {
+            format!(
+                "runtime edit argument `{:?}` is not a writable place",
+                call_arg.source_expr
+            )
+        })?;
+        write_assign_target_value(scopes, state, &target, value.clone())?;
+    }
+    Ok(())
+}
+
+fn consume_take_call_args(
+    scopes: &mut [RuntimeScope],
+    take_arg_indices: &[usize],
+    call_args: &[RuntimeCallArg],
+) -> Result<(), String> {
+    for &index in take_arg_indices {
+        let Some(call_arg) = call_args.get(index) else {
+            continue;
+        };
+        consume_take_arg_root_local(scopes, &call_arg.source_expr)?;
+    }
+    Ok(())
+}
+
+fn write_back_bound_args(
+    scopes: &mut Vec<RuntimeScope>,
+    state: &mut RuntimeExecutionState,
+    routine: &RuntimeRoutinePlan,
+    args: &[BoundRuntimeArg],
+    final_args: &[RuntimeValue],
+) -> Result<(), String> {
+    for (index, param) in routine.params.iter().enumerate() {
+        if param.mode.as_deref() != Some("edit") {
+            continue;
+        }
+        let Some(bound_arg) = args.get(index) else {
+            continue;
+        };
+        let Some(value) = final_args.get(index) else {
+            continue;
+        };
+        if matches!(value, RuntimeValue::Ref(_)) {
+            continue;
+        }
+        let target = expr_to_assign_target(&bound_arg.source_expr).ok_or_else(|| {
+            format!(
+                "runtime edit argument for `{}` is not a writable place",
+                param.name
+            )
+        })?;
+        write_assign_target_value(scopes, state, &target, value.clone())?;
+    }
+    Ok(())
 }
 
 fn eval_member_value(base: RuntimeValue, member: &str) -> Result<RuntimeValue, String> {
@@ -4261,6 +6684,187 @@ fn eval_member_value(base: RuntimeValue, member: &str) -> Result<RuntimeValue, S
     }
 }
 
+fn eval_runtime_member_value(
+    base: RuntimeValue,
+    member: &str,
+    scopes: &[RuntimeScope],
+    state: &RuntimeExecutionState,
+) -> Result<RuntimeValue, String> {
+    match base {
+        RuntimeValue::Ref(reference) => {
+            let value = read_runtime_reference(scopes, state, &reference)?;
+            eval_member_value(value, member)
+        }
+        other => eval_member_value(other, member),
+    }
+}
+
+fn read_runtime_value_if_ref(
+    value: RuntimeValue,
+    scopes: &[RuntimeScope],
+    state: &RuntimeExecutionState,
+) -> Result<RuntimeValue, String> {
+    match value {
+        RuntimeValue::Ref(reference) => read_runtime_reference(scopes, state, &reference),
+        other => Ok(other),
+    }
+}
+
+fn runtime_index_to_usize(index: i64, len: usize, context: &str) -> Result<usize, String> {
+    if index < 0 {
+        return Err(format!("{context} index must be non-negative"));
+    }
+    let index = usize::try_from(index)
+        .map_err(|_| format!("{context} index `{index}` does not fit in usize"))?;
+    if index >= len {
+        return Err(format!(
+            "{context} index `{index}` is out of bounds for length `{len}`"
+        ));
+    }
+    Ok(index)
+}
+
+fn runtime_slice_bound_to_usize(
+    bound: Option<i64>,
+    default: usize,
+    len: usize,
+    context: &str,
+    bound_name: &str,
+) -> Result<usize, String> {
+    let Some(bound) = bound else {
+        return Ok(default);
+    };
+    if bound < 0 {
+        return Err(format!("{context} {bound_name} must be non-negative"));
+    }
+    let bound = usize::try_from(bound)
+        .map_err(|_| format!("{context} {bound_name} `{bound}` does not fit in usize"))?;
+    if bound > len {
+        return Err(format!(
+            "{context} {bound_name} `{bound}` is out of bounds for length `{len}`"
+        ));
+    }
+    Ok(bound)
+}
+
+fn eval_runtime_index_value(
+    base: RuntimeValue,
+    index: RuntimeValue,
+    scopes: &[RuntimeScope],
+    state: &RuntimeExecutionState,
+) -> Result<RuntimeValue, String> {
+    let base = read_runtime_value_if_ref(base, scopes, state)?;
+    let index = expect_int(index, "index")?;
+    match base {
+        RuntimeValue::List(values) => {
+            let index = runtime_index_to_usize(index, values.len(), "list index")?;
+            values
+                .get(index)
+                .cloned()
+                .ok_or_else(|| format!("list index `{index}` is out of bounds"))
+        }
+        RuntimeValue::Array(values) => {
+            let index = runtime_index_to_usize(index, values.len(), "array index")?;
+            values
+                .get(index)
+                .cloned()
+                .ok_or_else(|| format!("array index `{index}` is out of bounds"))
+        }
+        other => Err(format!(
+            "runtime index expects List or Array, got `{other:?}`"
+        )),
+    }
+}
+
+fn eval_runtime_slice_value(
+    base: RuntimeValue,
+    start: Option<RuntimeValue>,
+    end: Option<RuntimeValue>,
+    inclusive_end: bool,
+    scopes: &[RuntimeScope],
+    state: &RuntimeExecutionState,
+) -> Result<RuntimeValue, String> {
+    let base = read_runtime_value_if_ref(base, scopes, state)?;
+    let values = match base {
+        RuntimeValue::List(values) | RuntimeValue::Array(values) => values,
+        other => {
+            return Err(format!(
+                "runtime slice expects List or Array, got `{other:?}`"
+            ));
+        }
+    };
+    let len = values.len();
+    let start = runtime_slice_bound_to_usize(
+        start
+            .map(|value| expect_int(value, "slice start"))
+            .transpose()?,
+        0,
+        len,
+        "slice",
+        "start",
+    )?;
+    let raw_end = runtime_slice_bound_to_usize(
+        end.clone()
+            .map(|value| expect_int(value, "slice end"))
+            .transpose()?,
+        len,
+        len,
+        "slice",
+        "end",
+    )?;
+    let end = if inclusive_end {
+        if end.is_some() {
+            if raw_end >= len {
+                return Err(format!(
+                    "slice inclusive end `{raw_end}` is out of bounds for length `{len}`"
+                ));
+            }
+            raw_end + 1
+        } else {
+            len
+        }
+    } else {
+        raw_end
+    };
+    if start > end {
+        return Err(format!(
+            "slice start `{start}` must be less than or equal to end `{end}`"
+        ));
+    }
+    Ok(RuntimeValue::List(values[start..end].to_vec()))
+}
+
+fn eval_optional_runtime_int_expr(
+    expr: Option<&ParsedExpr>,
+    plan: &RuntimePackagePlan,
+    current_module_id: &str,
+    scopes: &mut Vec<RuntimeScope>,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
+    context: &str,
+) -> RuntimeEvalResult<Option<i64>> {
+    Ok(expr
+        .map(|expr| {
+            expect_int(
+                eval_expr(
+                    expr,
+                    plan,
+                    current_module_id,
+                    scopes,
+                    aliases,
+                    type_bindings,
+                    state,
+                    host,
+                )?,
+                context,
+            )
+            .map_err(RuntimeEvalSignal::from)
+        })
+        .transpose()?)
+}
+
 fn eval_match_expr(
     subject: &ParsedExpr,
     arms: &[ParsedMatchArm],
@@ -4271,7 +6875,7 @@ fn eval_match_expr(
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
     host: &mut dyn RuntimeHost,
-) -> Result<RuntimeValue, String> {
+) -> RuntimeEvalResult<RuntimeValue> {
     let subject = eval_expr(
         subject,
         plan,
@@ -4290,13 +6894,7 @@ fn eval_match_expr(
             }
             let mut scope = RuntimeScope::default();
             for (name, value) in bindings {
-                scope.locals.insert(
-                    name,
-                    RuntimeLocal {
-                        mutable: false,
-                        value,
-                    },
-                );
+                insert_runtime_local(state, &mut scope, name, false, value);
             }
             scopes.push(scope);
             let result = eval_expr(
@@ -4313,7 +6911,9 @@ fn eval_match_expr(
             return result;
         }
     }
-    Err("runtime match expression had no matching arm".to_string())
+    Err("runtime match expression had no matching arm"
+        .to_string()
+        .into())
 }
 
 fn err_variant(message: String) -> RuntimeValue {
@@ -4325,6 +6925,7 @@ fn err_variant(message: String) -> RuntimeValue {
 
 fn try_construct_record_value(
     callable: &[String],
+    resolved_type_args: &[String],
     args: &[ParsedPhraseArg],
     attached: &[ParsedHeaderAttachment],
     plan: &RuntimePackagePlan,
@@ -4334,7 +6935,7 @@ fn try_construct_record_value(
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
     host: &mut dyn RuntimeHost,
-) -> Result<Option<RuntimeValue>, String> {
+) -> RuntimeEvalResult<Option<RuntimeValue>> {
     if !attached.is_empty() {
         return Ok(None);
     }
@@ -4350,7 +6951,8 @@ fn try_construct_record_value(
             return Err(format!(
                 "record constructor `{}` provided duplicate field `{name}`",
                 callable.join(".")
-            ));
+            )
+            .into());
         }
         fields.insert(
             name.clone(),
@@ -4366,10 +6968,12 @@ fn try_construct_record_value(
             )?,
         );
     }
-    Ok(Some(RuntimeValue::Record {
-        name: callable.join("."),
-        fields,
-    }))
+    let name = if resolved_type_args.is_empty() {
+        callable.join(".")
+    } else {
+        format!("{}[{}]", callable.join("."), resolved_type_args.join(", "))
+    };
+    Ok(Some(RuntimeValue::Record { name, fields }))
 }
 
 fn looks_like_variant_constructor(callable: &[String]) -> bool {
@@ -4397,7 +7001,7 @@ fn try_construct_variant_value(
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
     host: &mut dyn RuntimeHost,
-) -> Result<Option<RuntimeValue>, String> {
+) -> RuntimeEvalResult<Option<RuntimeValue>> {
     if !looks_like_variant_constructor(callable) || !attached.is_empty() {
         return Ok(None);
     }
@@ -4427,15 +7031,245 @@ fn into_iterable_values(value: RuntimeValue) -> Result<Vec<RuntimeValue>, String
     match value {
         RuntimeValue::List(values) => Ok(values),
         RuntimeValue::Array(values) => Ok(values),
+        RuntimeValue::Map(entries) => Ok(entries
+            .into_iter()
+            .map(|(key, value)| make_pair(key, value))
+            .collect()),
+        RuntimeValue::Range {
+            start,
+            end,
+            inclusive_end,
+        } => {
+            let Some(end) = end else {
+                return Err("runtime for-loop range must have an end bound".to_string());
+            };
+            let start = start.unwrap_or(0);
+            let iter = if inclusive_end {
+                (start..=end).collect::<Vec<_>>()
+            } else {
+                (start..end).collect::<Vec<_>>()
+            };
+            Ok(iter.into_iter().map(RuntimeValue::Int).collect())
+        }
         other => Err(format!(
-            "runtime for-loop expects List or Array, got `{other:?}`"
+            "runtime for-loop expects List, Array, Map, or RangeInt, got `{other:?}`"
         )),
     }
 }
 
-fn eval_qualifier(
+fn resolve_routine_index_for_call(
+    plan: &RuntimePackagePlan,
+    current_module_id: &str,
+    callable: &[String],
+    call_args: &[RuntimeCallArg],
+) -> Result<Option<usize>, String> {
+    let candidates = resolve_routine_candidate_indices(plan, current_module_id, callable);
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+    if candidates.len() == 1 {
+        return Ok(candidates.into_iter().next());
+    }
+    let Some(receiver_root) = call_args
+        .first()
+        .and_then(|arg| runtime_value_type_root(&arg.value))
+    else {
+        return Err(format!(
+            "runtime call `{}` is ambiguous with no receiver type information",
+            callable.join(".")
+        ));
+    };
+    let filtered = candidates
+        .into_iter()
+        .filter(|index| {
+            plan.routines
+                .get(*index)
+                .and_then(|routine| routine.params.first())
+                .map(|param| runtime_type_root_name(&param.ty) == receiver_root)
+                .unwrap_or(false)
+        })
+        .collect::<Vec<_>>();
+    match filtered.as_slice() {
+        [] => Err(format!(
+            "runtime call `{}` has no overload matching receiver `{receiver_root}`",
+            callable.join(".")
+        )),
+        [index] => Ok(Some(*index)),
+        _ => Err(format!(
+            "runtime call `{}` remains ambiguous for receiver `{receiver_root}`",
+            callable.join(".")
+        )),
+    }
+}
+
+fn resolve_rollup_handler_callable_path(
+    plan: &RuntimePackagePlan,
+    current_module_id: &str,
+    handler_path: &[String],
+) -> Vec<String> {
+    if resolve_routine_index(plan, current_module_id, handler_path).is_some()
+        || resolve_runtime_intrinsic_path(handler_path).is_some()
+    {
+        return handler_path.to_vec();
+    }
+    if handler_path.len() == 1 {
+        let symbol_name = &handler_path[0];
+        let matches = plan
+            .routines
+            .iter()
+            .filter(|routine| routine.symbol_name == *symbol_name)
+            .collect::<Vec<_>>();
+        if let [routine] = matches.as_slice() {
+            let mut callable = routine
+                .module_id
+                .split('.')
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            callable.push(symbol_name.clone());
+            return callable;
+        }
+    }
+    handler_path.to_vec()
+}
+
+fn execute_call_by_path(
+    callable: &[String],
+    current_module_id: &str,
+    type_args: Vec<String>,
+    call_args: Vec<RuntimeCallArg>,
+    plan: &RuntimePackagePlan,
+    scopes: &mut Vec<RuntimeScope>,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
+    allow_async: bool,
+) -> Result<RuntimeValue, String> {
+    if let Some(routine_index) =
+        resolve_routine_index_for_call(plan, current_module_id, callable, &call_args)?
+    {
+        let routine = plan
+            .routines
+            .get(routine_index)
+            .ok_or_else(|| format!("invalid routine index `{routine_index}`"))?;
+        let bound_args = bind_call_args_for_routine(routine, call_args)?;
+        consume_take_bound_args(scopes, routine, &bound_args)?;
+        let values = bound_args
+            .iter()
+            .map(|arg| arg.value.clone())
+            .collect::<Vec<_>>();
+        let outcome = execute_routine_call_with_state(
+            plan,
+            routine_index,
+            type_args,
+            values,
+            state,
+            host,
+            allow_async,
+        )?;
+        write_back_bound_args(scopes, state, routine, &bound_args, &outcome.final_args)?;
+        return Ok(outcome.value);
+    }
+    let intrinsic = resolve_runtime_intrinsic_path(callable)
+        .ok_or_else(|| format!("unsupported runtime callable `{}`", callable.join(".")))?;
+    if call_args.iter().any(|arg| arg.name.is_some()) {
+        return Err(format!(
+            "runtime intrinsic `{}` does not yet support named-only fallback binding",
+            callable.join(".")
+        ));
+    }
+    consume_take_call_args(scopes, intrinsic_take_arg_indices(intrinsic), &call_args)?;
+    let mut values = call_args
+        .iter()
+        .map(|arg| arg.value.clone())
+        .collect::<Vec<_>>();
+    let value = execute_runtime_intrinsic(intrinsic, &type_args, &mut values, plan, state, host)?;
+    write_back_call_args(
+        scopes,
+        state,
+        intrinsic_edit_arg_indices(intrinsic),
+        &call_args,
+        &values,
+    )?;
+    Ok(value)
+}
+
+fn execute_runtime_apply_phrase(
     subject: &ParsedExpr,
     args: &[ParsedPhraseArg],
+    attached: &[ParsedHeaderAttachment],
+    plan: &RuntimePackagePlan,
+    current_module_id: &str,
+    scopes: &mut Vec<RuntimeScope>,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
+    allow_async: bool,
+) -> RuntimeEvalResult<RuntimeValue> {
+    let callable = resolve_callable_path(subject, aliases)
+        .ok_or_else(|| format!("unsupported runtime callable `{subject:?}`"))?;
+    let type_args = resolve_runtime_type_args(&extract_generic_type_args(subject), type_bindings);
+    if resolve_routine_index(plan, current_module_id, &callable).is_none()
+        && resolve_runtime_intrinsic_path(&callable).is_none()
+    {
+        if let Some(record) = try_construct_record_value(
+            &callable,
+            &type_args,
+            args,
+            attached,
+            plan,
+            current_module_id,
+            scopes,
+            aliases,
+            type_bindings,
+            state,
+            host,
+        )? {
+            return Ok(record);
+        }
+        if let Some(variant) = try_construct_variant_value(
+            &callable,
+            args,
+            attached,
+            plan,
+            current_module_id,
+            scopes,
+            aliases,
+            type_bindings,
+            state,
+            host,
+        )? {
+            return Ok(variant);
+        }
+        return Err(format!("unsupported runtime callable `{}`", callable.join(".")).into());
+    }
+    let call_args = collect_call_args(
+        args,
+        attached,
+        plan,
+        current_module_id,
+        scopes,
+        aliases,
+        type_bindings,
+        state,
+        host,
+    )?;
+    Ok(execute_call_by_path(
+        &callable,
+        current_module_id,
+        type_args,
+        call_args,
+        plan,
+        scopes,
+        state,
+        host,
+        allow_async,
+    )?)
+}
+
+fn execute_runtime_method_call(
+    subject: &ParsedExpr,
+    args: &[ParsedPhraseArg],
+    attached: &[ParsedHeaderAttachment],
     qualifier: &str,
     plan: &RuntimePackagePlan,
     current_module_id: &str,
@@ -4444,319 +7278,199 @@ fn eval_qualifier(
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
     host: &mut dyn RuntimeHost,
-) -> Result<RuntimeValue, String> {
-    match qualifier {
-        "len" => {
-            if !args.is_empty() {
-                return Err("collection len expects zero arguments".to_string());
-            }
-            let base = eval_expr(
-                subject,
-                plan,
-                current_module_id,
-                scopes,
-                aliases,
-                type_bindings,
-                state,
-                host,
-            )?;
-            let len = match base {
-                RuntimeValue::List(values) => values.len(),
-                RuntimeValue::Array(values) => values.len(),
-                other => {
-                    return Err(format!(
-                        "collection len expects List or Array subject, got `{other:?}`"
-                    ));
-                }
-            };
-            Ok(RuntimeValue::Int(i64::try_from(len).map_err(|_| {
-                "collection length does not fit in i64".to_string()
-            })?))
-        }
-        "is_ok" => {
-            if !args.is_empty() {
-                return Err("result is_ok expects zero arguments".to_string());
-            }
-            let base = eval_expr(
-                subject,
-                plan,
-                current_module_id,
-                scopes,
-                aliases,
-                type_bindings,
-                state,
-                host,
-            )?;
-            let RuntimeValue::Variant { name, payload } = base else {
-                return Err("result is_ok expects Result subject".to_string());
-            };
+) -> RuntimeEvalResult<RuntimeValue> {
+    let receiver = eval_expr(
+        subject,
+        plan,
+        current_module_id,
+        scopes,
+        aliases,
+        type_bindings,
+        state,
+        host,
+    )?;
+    let Some(callable) =
+        resolve_runtime_method_callable_path(plan, current_module_id, &receiver, qualifier, state)
+    else {
+        return Err(format!("unsupported runtime qualifier `{qualifier}`").into());
+    };
+    let type_args = runtime_receiver_type_args(&receiver, state);
+    let mut call_args = vec![RuntimeCallArg {
+        name: None,
+        value: receiver,
+        source_expr: subject.clone(),
+    }];
+    call_args.extend(collect_call_args(
+        args,
+        attached,
+        plan,
+        current_module_id,
+        scopes,
+        aliases,
+        type_bindings,
+        state,
+        host,
+    )?);
+    Ok(execute_call_by_path(
+        &callable,
+        current_module_id,
+        type_args,
+        call_args,
+        plan,
+        scopes,
+        state,
+        host,
+        runtime_async_calls_allowed(state),
+    )?)
+}
+
+fn execute_runtime_named_qualifier_call(
+    subject: &ParsedExpr,
+    args: &[ParsedPhraseArg],
+    attached: &[ParsedHeaderAttachment],
+    qualifier: &str,
+    plan: &RuntimePackagePlan,
+    current_module_id: &str,
+    scopes: &mut Vec<RuntimeScope>,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
+) -> RuntimeEvalResult<RuntimeValue> {
+    let receiver = eval_expr(
+        subject,
+        plan,
+        current_module_id,
+        scopes,
+        aliases,
+        type_bindings,
+        state,
+        host,
+    )?;
+    let callable_expr = parse_runtime_callable_expr(qualifier);
+    let callable = resolve_named_qualifier_callable_path(&callable_expr, aliases)
+        .ok_or_else(|| format!("unsupported runtime named qualifier callable `{qualifier}`"))?;
+    let type_args =
+        resolve_runtime_type_args(&extract_generic_type_args(&callable_expr), type_bindings);
+    let mut call_args = vec![RuntimeCallArg {
+        name: None,
+        value: receiver,
+        source_expr: subject.clone(),
+    }];
+    call_args.extend(collect_call_args(
+        args,
+        attached,
+        plan,
+        current_module_id,
+        scopes,
+        aliases,
+        type_bindings,
+        state,
+        host,
+    )?);
+    Ok(execute_call_by_path(
+        &callable,
+        current_module_id,
+        type_args,
+        call_args,
+        plan,
+        scopes,
+        state,
+        host,
+        runtime_async_calls_allowed(state),
+    )?)
+}
+
+fn eval_qualifier(
+    subject: &ParsedExpr,
+    args: &[ParsedPhraseArg],
+    attached: &[ParsedHeaderAttachment],
+    qualifier: &str,
+    plan: &RuntimePackagePlan,
+    current_module_id: &str,
+    scopes: &mut Vec<RuntimeScope>,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
+) -> RuntimeEvalResult<RuntimeValue> {
+    execute_runtime_method_call(
+        subject,
+        args,
+        attached,
+        qualifier,
+        plan,
+        current_module_id,
+        scopes,
+        aliases,
+        type_bindings,
+        state,
+        host,
+    )
+}
+
+fn try_unwrap_runtime_result(value: RuntimeValue) -> RuntimeEvalResult<RuntimeValue> {
+    match value {
+        RuntimeValue::Variant { name, payload } if variant_name_matches(&name, "Result.Ok") => {
             match payload.as_slice() {
-                [_] if variant_name_matches(&name, "Result.Ok") => Ok(RuntimeValue::Bool(true)),
-                [_] if variant_name_matches(&name, "Result.Err") => Ok(RuntimeValue::Bool(false)),
-                _ => Err("result is_ok expects Result subject".to_string()),
+                [value] => Ok(value.clone()),
+                _ => Err(format!(
+                    "runtime try qualifier `?` expected Result.Ok with one payload value, got `{name}`"
+                )
+                .into()),
             }
         }
-        "is_err" => {
-            if !args.is_empty() {
-                return Err("result is_err expects zero arguments".to_string());
-            }
-            let base = eval_expr(
-                subject,
-                plan,
-                current_module_id,
-                scopes,
-                aliases,
-                type_bindings,
-                state,
-                host,
-            )?;
-            let RuntimeValue::Variant { name, payload } = base else {
-                return Err("result is_err expects Result subject".to_string());
-            };
-            match payload.as_slice() {
-                [_] if variant_name_matches(&name, "Result.Ok") => Ok(RuntimeValue::Bool(false)),
-                [_] if variant_name_matches(&name, "Result.Err") => Ok(RuntimeValue::Bool(true)),
-                _ => Err("result is_err expects Result subject".to_string()),
-            }
+        RuntimeValue::Variant { ref name, .. } if variant_name_matches(name, "Result.Err") => {
+            Err(RuntimeEvalSignal::Return(value))
         }
-        "unwrap_or" => {
-            if args.len() != 1 {
-                return Err("variant unwrap_or expects one argument".to_string());
-            }
-            let fallback = eval_expr(
-                &args[0].value,
-                plan,
-                current_module_id,
-                scopes,
-                aliases,
-                type_bindings,
-                state,
-                host,
-            )?;
-            let base = eval_expr(
-                subject,
-                plan,
-                current_module_id,
-                scopes,
-                aliases,
-                type_bindings,
-                state,
-                host,
-            )?;
-            let RuntimeValue::Variant { name, payload } = base else {
-                return Err("variant unwrap_or expects Result or Option subject".to_string());
-            };
-            match payload.as_slice() {
-                [value] if variant_name_matches(&name, "Result.Ok") => Ok(value.clone()),
-                [_] if variant_name_matches(&name, "Result.Err") => Ok(fallback),
-                [value] if variant_name_matches(&name, "Option.Some") => Ok(value.clone()),
-                [] if variant_name_matches(&name, "Option.None") => Ok(fallback),
-                _ => Err("variant unwrap_or expects Result or Option subject".to_string()),
-            }
-        }
-        "is_some" => {
-            if !args.is_empty() {
-                return Err("option is_some expects zero arguments".to_string());
-            }
-            let base = eval_expr(
-                subject,
-                plan,
-                current_module_id,
-                scopes,
-                aliases,
-                type_bindings,
-                state,
-                host,
-            )?;
-            let RuntimeValue::Variant { name, payload } = base else {
-                return Err("option is_some expects Option subject".to_string());
-            };
-            match payload.as_slice() {
-                [_] if variant_name_matches(&name, "Option.Some") => Ok(RuntimeValue::Bool(true)),
-                [] if variant_name_matches(&name, "Option.None") => Ok(RuntimeValue::Bool(false)),
-                _ => Err("option is_some expects Option subject".to_string()),
-            }
-        }
-        "is_none" => {
-            if !args.is_empty() {
-                return Err("option is_none expects zero arguments".to_string());
-            }
-            let base = eval_expr(
-                subject,
-                plan,
-                current_module_id,
-                scopes,
-                aliases,
-                type_bindings,
-                state,
-                host,
-            )?;
-            let RuntimeValue::Variant { name, payload } = base else {
-                return Err("option is_none expects Option subject".to_string());
-            };
-            match payload.as_slice() {
-                [_] if variant_name_matches(&name, "Option.Some") => Ok(RuntimeValue::Bool(false)),
-                [] if variant_name_matches(&name, "Option.None") => Ok(RuntimeValue::Bool(true)),
-                _ => Err("option is_none expects Option subject".to_string()),
-            }
-        }
-        "to_list" => {
-            if !args.is_empty() {
-                return Err("array to_list expects zero arguments".to_string());
-            }
-            let base = eval_expr(
-                subject,
-                plan,
-                current_module_id,
-                scopes,
-                aliases,
-                type_bindings,
-                state,
-                host,
-            )?;
-            let RuntimeValue::Array(values) = base else {
-                return Err("array to_list expects Array subject".to_string());
-            };
-            Ok(RuntimeValue::List(values))
-        }
-        "push" => {
-            if args.len() != 1 {
-                return Err("list push expects one argument".to_string());
-            }
-            let ParsedExpr::Path(segments) = subject else {
-                return Err("list push requires a local List subject".to_string());
-            };
-            if segments.len() != 1 {
-                return Err("list push requires a local List subject".to_string());
-            }
-            let value = eval_expr(
-                &args[0].value,
-                plan,
-                current_module_id,
-                scopes,
-                aliases,
-                type_bindings,
-                state,
-                host,
-            )?;
-            let local = lookup_local_mut(scopes, &segments[0])
-                .ok_or_else(|| format!("runtime local `{}` is unresolved", segments[0]))?;
-            if !local.mutable {
-                return Err(format!("runtime local `{}` is not mutable", segments[0]));
-            }
-            let RuntimeValue::List(values) = &mut local.value else {
-                return Err(format!("runtime local `{}` is not a List", segments[0]));
-            };
-            values.push(value);
-            Ok(RuntimeValue::Unit)
-        }
-        "pop" => {
-            if !args.is_empty() {
-                return Err("list pop expects zero arguments".to_string());
-            }
-            let ParsedExpr::Path(segments) = subject else {
-                return Err("list pop requires a local List subject".to_string());
-            };
-            if segments.len() != 1 {
-                return Err("list pop requires a local List subject".to_string());
-            }
-            let local = lookup_local_mut(scopes, &segments[0])
-                .ok_or_else(|| format!("runtime local `{}` is unresolved", segments[0]))?;
-            if !local.mutable {
-                return Err(format!("runtime local `{}` is not mutable", segments[0]));
-            }
-            let RuntimeValue::List(values) = &mut local.value else {
-                return Err(format!("runtime local `{}` is not a List", segments[0]));
-            };
-            values
-                .pop()
-                .ok_or_else(|| format!("list pop on `{}` was empty", segments[0]))
-        }
-        "try_pop_or" => {
-            if args.len() != 1 {
-                return Err("list try_pop_or expects one argument".to_string());
-            }
-            let ParsedExpr::Path(segments) = subject else {
-                return Err("list try_pop_or requires a local List subject".to_string());
-            };
-            if segments.len() != 1 {
-                return Err("list try_pop_or requires a local List subject".to_string());
-            }
-            let fallback = eval_expr(
-                &args[0].value,
-                plan,
-                current_module_id,
-                scopes,
-                aliases,
-                type_bindings,
-                state,
-                host,
-            )?;
-            let local = lookup_local_mut(scopes, &segments[0])
-                .ok_or_else(|| format!("runtime local `{}` is unresolved", segments[0]))?;
-            if !local.mutable {
-                return Err(format!("runtime local `{}` is not mutable", segments[0]));
-            }
-            let RuntimeValue::List(values) = &mut local.value else {
-                return Err(format!("runtime local `{}` is not a List", segments[0]));
-            };
-            Ok(match values.pop() {
-                Some(value) => {
-                    RuntimeValue::Pair(Box::new(RuntimeValue::Bool(true)), Box::new(value))
-                }
-                None => RuntimeValue::Pair(Box::new(RuntimeValue::Bool(false)), Box::new(fallback)),
-            })
-        }
-        _ => {
-            let receiver = eval_expr(
-                subject,
-                plan,
-                current_module_id,
-                scopes,
-                aliases,
-                type_bindings,
-                state,
-                host,
-            )?;
-            let Some(callable) = runtime_method_callable_path(&receiver, qualifier) else {
-                return Err(format!("unsupported runtime qualifier `{qualifier}`"));
-            };
-            let Some(routine_index) = resolve_routine_index(plan, current_module_id, &callable)
-            else {
-                return Err(format!(
-                    "unsupported runtime qualifier `{qualifier}` for receiver `{receiver:?}`"
-                ));
-            };
-            let mut values = vec![receiver];
-            values.extend(
-                args.iter()
-                    .map(|arg| {
-                        eval_expr(
-                            &arg.value,
-                            plan,
-                            current_module_id,
-                            scopes,
-                            aliases,
-                            type_bindings,
-                            state,
-                            host,
-                        )
-                    })
-                    .collect::<Result<Vec<_>, String>>()?,
-            );
-            execute_routine_with_state(plan, routine_index, Vec::new(), values, state, host)
-        }
+        other => Err(format!(
+            "runtime try qualifier `?` expects Result-shape value, got `{other:?}`"
+        )
+        .into()),
     }
+}
+
+fn eval_try_qualifier(
+    subject: &ParsedExpr,
+    args: &[ParsedPhraseArg],
+    attached: &[ParsedHeaderAttachment],
+    plan: &RuntimePackagePlan,
+    current_module_id: &str,
+    scopes: &mut Vec<RuntimeScope>,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
+) -> RuntimeEvalResult<RuntimeValue> {
+    if !args.is_empty() {
+        return Err("`:: ?` does not accept arguments".to_string().into());
+    }
+    if !attached.is_empty() {
+        return Err("`:: ?` does not support an attached block"
+            .to_string()
+            .into());
+    }
+    try_unwrap_runtime_result(eval_expr(
+        subject,
+        plan,
+        current_module_id,
+        scopes,
+        aliases,
+        type_bindings,
+        state,
+        host,
+    )?)
 }
 
 fn execute_runtime_intrinsic(
     intrinsic: RuntimeIntrinsic,
     type_args: &[String],
-    args: Vec<RuntimeValue>,
+    final_args: &mut Vec<RuntimeValue>,
     plan: &RuntimePackagePlan,
     state: &mut RuntimeExecutionState,
     host: &mut dyn RuntimeHost,
 ) -> Result<RuntimeValue, String> {
+    let args = final_args.clone();
     match intrinsic {
         RuntimeIntrinsic::IoPrint => {
             let value = expect_single_arg(args, "print")?;
@@ -5537,6 +8251,659 @@ fn execute_runtime_intrinsic(
                 plan, &phase, state, host,
             )?))
         }
+        RuntimeIntrinsic::ConcurrentThreadId => {
+            if !args.is_empty() {
+                return Err("thread_id expects zero arguments".to_string());
+            }
+            Ok(RuntimeValue::Int(state.current_thread_id))
+        }
+        RuntimeIntrinsic::ConcurrentTaskDone => {
+            let handle = expect_task(expect_single_arg(args, "task_done")?, "task_done")?;
+            let task = state
+                .tasks
+                .get(&handle)
+                .ok_or_else(|| format!("invalid Task handle `{}`", handle.0))?;
+            Ok(RuntimeValue::Bool(pending_state_is_done(&task.state)))
+        }
+        RuntimeIntrinsic::ConcurrentTaskJoin => {
+            let handle = expect_task(expect_single_arg(args, "task_join")?, "task_join")?;
+            drive_runtime_task(handle, plan, state, host)?;
+            let task = state
+                .tasks
+                .get(&handle)
+                .ok_or_else(|| format!("invalid Task handle `{}`", handle.0))?;
+            pending_state_value(&task.state, &format!("Task `{}`", handle.0))
+        }
+        RuntimeIntrinsic::ConcurrentThreadDone => {
+            let handle = expect_thread(expect_single_arg(args, "thread_done")?, "thread_done")?;
+            let thread = state
+                .threads
+                .get(&handle)
+                .ok_or_else(|| format!("invalid Thread handle `{}`", handle.0))?;
+            Ok(RuntimeValue::Bool(pending_state_is_done(&thread.state)))
+        }
+        RuntimeIntrinsic::ConcurrentThreadJoin => {
+            let handle = expect_thread(expect_single_arg(args, "thread_join")?, "thread_join")?;
+            drive_runtime_thread(handle, plan, state, host)?;
+            let thread = state
+                .threads
+                .get(&handle)
+                .ok_or_else(|| format!("invalid Thread handle `{}`", handle.0))?;
+            pending_state_value(&thread.state, &format!("Thread `{}`", handle.0))
+        }
+        RuntimeIntrinsic::ConcurrentChannelNew => {
+            let capacity = expect_int(expect_single_arg(args, "channel_new")?, "channel_new")?;
+            if capacity < 0 {
+                return Err("channel_new capacity must be non-negative".to_string());
+            }
+            let handle = insert_runtime_channel(state, type_args, capacity as usize);
+            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::Channel(handle)))
+        }
+        RuntimeIntrinsic::ConcurrentChannelSend => {
+            if args.len() != 2 {
+                return Err("channel_send expects two arguments".to_string());
+            }
+            let handle = expect_channel(args[0].clone(), "channel_send")?;
+            let channel = state
+                .channels
+                .get_mut(&handle)
+                .ok_or_else(|| format!("invalid Channel handle `{}`", handle.0))?;
+            if channel.queue.len() >= channel.capacity {
+                return Err("channel_send would exceed channel capacity".to_string());
+            }
+            channel.queue.push_back(args[1].clone());
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::ConcurrentChannelRecv => {
+            let handle = expect_channel(expect_single_arg(args, "channel_recv")?, "channel_recv")?;
+            let channel = state
+                .channels
+                .get_mut(&handle)
+                .ok_or_else(|| format!("invalid Channel handle `{}`", handle.0))?;
+            channel
+                .queue
+                .pop_front()
+                .ok_or_else(|| "channel_recv called on empty channel".to_string())
+        }
+        RuntimeIntrinsic::ConcurrentMutexNew => {
+            let value = expect_single_arg(args, "mutex_new")?;
+            let handle = insert_runtime_mutex(state, type_args, value);
+            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::Mutex(handle)))
+        }
+        RuntimeIntrinsic::ConcurrentMutexTake => {
+            let handle = expect_mutex(expect_single_arg(args, "mutex_take")?, "mutex_take")?;
+            let mutex = state
+                .mutexes
+                .get_mut(&handle)
+                .ok_or_else(|| format!("invalid Mutex handle `{}`", handle.0))?;
+            mutex
+                .value
+                .take()
+                .ok_or_else(|| "mutex_take called on empty mutex".to_string())
+        }
+        RuntimeIntrinsic::ConcurrentMutexPut => {
+            if args.len() != 2 {
+                return Err("mutex_put expects two arguments".to_string());
+            }
+            let handle = expect_mutex(args[0].clone(), "mutex_put")?;
+            let mutex = state
+                .mutexes
+                .get_mut(&handle)
+                .ok_or_else(|| format!("invalid Mutex handle `{}`", handle.0))?;
+            if mutex.value.is_some() {
+                return Err("mutex_put called while mutex already holds a value".to_string());
+            }
+            mutex.value = Some(args[1].clone());
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::ConcurrentAtomicIntNew => {
+            let value = expect_int(expect_single_arg(args, "atomic_int_new")?, "atomic_int_new")?;
+            let handle = insert_runtime_atomic_int(state, value);
+            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::AtomicInt(handle)))
+        }
+        RuntimeIntrinsic::ConcurrentAtomicIntLoad => {
+            let handle = expect_atomic_int(
+                expect_single_arg(args, "atomic_int_load")?,
+                "atomic_int_load",
+            )?;
+            let value = state
+                .atomic_ints
+                .get(&handle)
+                .copied()
+                .ok_or_else(|| format!("invalid AtomicInt handle `{}`", handle.0))?;
+            Ok(RuntimeValue::Int(value))
+        }
+        RuntimeIntrinsic::ConcurrentAtomicIntStore => {
+            if args.len() != 2 {
+                return Err("atomic_int_store expects two arguments".to_string());
+            }
+            let handle = expect_atomic_int(args[0].clone(), "atomic_int_store")?;
+            let value = expect_int(args[1].clone(), "atomic_int_store")?;
+            let slot = state
+                .atomic_ints
+                .get_mut(&handle)
+                .ok_or_else(|| format!("invalid AtomicInt handle `{}`", handle.0))?;
+            *slot = value;
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::ConcurrentAtomicIntAdd => {
+            if args.len() != 2 {
+                return Err("atomic_int_add expects two arguments".to_string());
+            }
+            let handle = expect_atomic_int(args[0].clone(), "atomic_int_add")?;
+            let delta = expect_int(args[1].clone(), "atomic_int_add")?;
+            let slot = state
+                .atomic_ints
+                .get_mut(&handle)
+                .ok_or_else(|| format!("invalid AtomicInt handle `{}`", handle.0))?;
+            *slot += delta;
+            Ok(RuntimeValue::Int(*slot))
+        }
+        RuntimeIntrinsic::ConcurrentAtomicIntSub => {
+            if args.len() != 2 {
+                return Err("atomic_int_sub expects two arguments".to_string());
+            }
+            let handle = expect_atomic_int(args[0].clone(), "atomic_int_sub")?;
+            let delta = expect_int(args[1].clone(), "atomic_int_sub")?;
+            let slot = state
+                .atomic_ints
+                .get_mut(&handle)
+                .ok_or_else(|| format!("invalid AtomicInt handle `{}`", handle.0))?;
+            *slot -= delta;
+            Ok(RuntimeValue::Int(*slot))
+        }
+        RuntimeIntrinsic::ConcurrentAtomicIntSwap => {
+            if args.len() != 2 {
+                return Err("atomic_int_swap expects two arguments".to_string());
+            }
+            let handle = expect_atomic_int(args[0].clone(), "atomic_int_swap")?;
+            let value = expect_int(args[1].clone(), "atomic_int_swap")?;
+            let slot = state
+                .atomic_ints
+                .get_mut(&handle)
+                .ok_or_else(|| format!("invalid AtomicInt handle `{}`", handle.0))?;
+            let old = *slot;
+            *slot = value;
+            Ok(RuntimeValue::Int(old))
+        }
+        RuntimeIntrinsic::ConcurrentAtomicBoolNew => {
+            let value = expect_bool(
+                expect_single_arg(args, "atomic_bool_new")?,
+                "atomic_bool_new",
+            )?;
+            let handle = insert_runtime_atomic_bool(state, value);
+            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::AtomicBool(handle)))
+        }
+        RuntimeIntrinsic::ConcurrentAtomicBoolLoad => {
+            let handle = expect_atomic_bool(
+                expect_single_arg(args, "atomic_bool_load")?,
+                "atomic_bool_load",
+            )?;
+            let value = state
+                .atomic_bools
+                .get(&handle)
+                .copied()
+                .ok_or_else(|| format!("invalid AtomicBool handle `{}`", handle.0))?;
+            Ok(RuntimeValue::Bool(value))
+        }
+        RuntimeIntrinsic::ConcurrentAtomicBoolStore => {
+            if args.len() != 2 {
+                return Err("atomic_bool_store expects two arguments".to_string());
+            }
+            let handle = expect_atomic_bool(args[0].clone(), "atomic_bool_store")?;
+            let value = expect_bool(args[1].clone(), "atomic_bool_store")?;
+            let slot = state
+                .atomic_bools
+                .get_mut(&handle)
+                .ok_or_else(|| format!("invalid AtomicBool handle `{}`", handle.0))?;
+            *slot = value;
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::ConcurrentAtomicBoolSwap => {
+            if args.len() != 2 {
+                return Err("atomic_bool_swap expects two arguments".to_string());
+            }
+            let handle = expect_atomic_bool(args[0].clone(), "atomic_bool_swap")?;
+            let value = expect_bool(args[1].clone(), "atomic_bool_swap")?;
+            let slot = state
+                .atomic_bools
+                .get_mut(&handle)
+                .ok_or_else(|| format!("invalid AtomicBool handle `{}`", handle.0))?;
+            let old = *slot;
+            *slot = value;
+            Ok(RuntimeValue::Bool(old))
+        }
+        RuntimeIntrinsic::MemoryArenaNew => {
+            let capacity = expect_int(expect_single_arg(args, "arena_new")?, "arena_new")?;
+            if capacity < 0 {
+                return Err("arena_new capacity must be non-negative".to_string());
+            }
+            let handle = insert_runtime_arena(state, type_args);
+            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::Arena(handle)))
+        }
+        RuntimeIntrinsic::MemoryArenaAlloc => {
+            if args.len() != 2 {
+                return Err("arena_alloc expects two arguments".to_string());
+            }
+            let handle = expect_arena(args[0].clone(), "arena_alloc")?;
+            let arena = state
+                .arenas
+                .get_mut(&handle)
+                .ok_or_else(|| format!("invalid Arena handle `{}`", handle.0))?;
+            let slot = arena.next_slot;
+            arena.next_slot += 1;
+            arena.slots.insert(slot, args[1].clone());
+            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::ArenaId(
+                RuntimeArenaIdValue {
+                    arena: handle,
+                    slot,
+                    generation: arena.generation,
+                },
+            )))
+        }
+        RuntimeIntrinsic::MemoryArenaLen => {
+            let handle = expect_arena(expect_single_arg(args, "arena_len")?, "arena_len")?;
+            let arena = state
+                .arenas
+                .get(&handle)
+                .ok_or_else(|| format!("invalid Arena handle `{}`", handle.0))?;
+            Ok(RuntimeValue::Int(arena.slots.len() as i64))
+        }
+        RuntimeIntrinsic::MemoryArenaHas => {
+            if args.len() != 2 {
+                return Err("arena_has expects two arguments".to_string());
+            }
+            let handle = expect_arena(args[0].clone(), "arena_has")?;
+            let id = expect_arena_id(args[1].clone(), "arena_has")?;
+            let arena = state
+                .arenas
+                .get(&handle)
+                .ok_or_else(|| format!("invalid Arena handle `{}`", handle.0))?;
+            Ok(RuntimeValue::Bool(arena_id_is_live(handle, arena, id)))
+        }
+        RuntimeIntrinsic::MemoryArenaGet => {
+            if args.len() != 2 {
+                return Err("arena access expects two arguments".to_string());
+            }
+            let handle = expect_arena(args[0].clone(), "arena_access")?;
+            let id = expect_arena_id(args[1].clone(), "arena_access")?;
+            let arena = state
+                .arenas
+                .get(&handle)
+                .ok_or_else(|| format!("invalid Arena handle `{}`", handle.0))?;
+            if !arena_id_is_live(handle, arena, id) {
+                return Err(format!(
+                    "stale or invalid ArenaId `{}` for Arena `{}`",
+                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::ArenaId(id))),
+                    handle.0
+                ));
+            }
+            arena
+                .slots
+                .get(&id.slot)
+                .cloned()
+                .ok_or_else(|| format!("Arena slot `{}` is missing", id.slot))
+        }
+        RuntimeIntrinsic::MemoryArenaBorrowRead | RuntimeIntrinsic::MemoryArenaBorrowEdit => {
+            if args.len() != 2 {
+                return Err("arena borrow expects two arguments".to_string());
+            }
+            let handle = expect_arena(args[0].clone(), "arena_borrow")?;
+            let id = expect_arena_id(args[1].clone(), "arena_borrow")?;
+            let arena = state
+                .arenas
+                .get(&handle)
+                .ok_or_else(|| format!("invalid Arena handle `{}`", handle.0))?;
+            if !arena_id_is_live(handle, arena, id) {
+                return Err(format!(
+                    "stale or invalid ArenaId `{}` for Arena `{}`",
+                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::ArenaId(id))),
+                    handle.0
+                ));
+            }
+            Ok(RuntimeValue::Ref(RuntimeReferenceValue {
+                mutable: matches!(intrinsic, RuntimeIntrinsic::MemoryArenaBorrowEdit),
+                target: RuntimeReferenceTarget::ArenaSlot {
+                    id,
+                    members: Vec::new(),
+                },
+            }))
+        }
+        RuntimeIntrinsic::MemoryArenaSet => {
+            if args.len() != 3 {
+                return Err("arena_set expects three arguments".to_string());
+            }
+            let handle = expect_arena(args[0].clone(), "arena_set")?;
+            let id = expect_arena_id(args[1].clone(), "arena_set")?;
+            let arena = state
+                .arenas
+                .get_mut(&handle)
+                .ok_or_else(|| format!("invalid Arena handle `{}`", handle.0))?;
+            if !arena_id_is_live(handle, arena, id) {
+                return Err(format!(
+                    "stale or invalid ArenaId `{}` for Arena `{}`",
+                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::ArenaId(id))),
+                    handle.0
+                ));
+            }
+            arena.slots.insert(id.slot, args[2].clone());
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::MemoryArenaRemove => {
+            if args.len() != 2 {
+                return Err("arena_remove expects two arguments".to_string());
+            }
+            let handle = expect_arena(args[0].clone(), "arena_remove")?;
+            let id = expect_arena_id(args[1].clone(), "arena_remove")?;
+            let arena = state
+                .arenas
+                .get_mut(&handle)
+                .ok_or_else(|| format!("invalid Arena handle `{}`", handle.0))?;
+            if !arena_id_is_live(handle, arena, id) {
+                return Err(format!(
+                    "stale or invalid ArenaId `{}` for Arena `{}`",
+                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::ArenaId(id))),
+                    handle.0
+                ));
+            }
+            arena.slots.remove(&id.slot);
+            Ok(RuntimeValue::Bool(true))
+        }
+        RuntimeIntrinsic::MemoryArenaReset => {
+            let handle = expect_arena(expect_single_arg(args, "arena_reset")?, "arena_reset")?;
+            let arena = state
+                .arenas
+                .get_mut(&handle)
+                .ok_or_else(|| format!("invalid Arena handle `{}`", handle.0))?;
+            arena.generation += 1;
+            arena.next_slot = 0;
+            arena.slots.clear();
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::MemoryFrameNew => {
+            let capacity = expect_int(expect_single_arg(args, "frame_new")?, "frame_new")?;
+            if capacity < 0 {
+                return Err("frame_new capacity must be non-negative".to_string());
+            }
+            let handle = insert_runtime_frame_arena(state, type_args);
+            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::FrameArena(handle)))
+        }
+        RuntimeIntrinsic::MemoryFrameAlloc => {
+            if args.len() != 2 {
+                return Err("frame_alloc expects two arguments".to_string());
+            }
+            let handle = expect_frame_arena(args[0].clone(), "frame_alloc")?;
+            let arena = state
+                .frame_arenas
+                .get_mut(&handle)
+                .ok_or_else(|| format!("invalid FrameArena handle `{}`", handle.0))?;
+            let slot = arena.next_slot;
+            arena.next_slot += 1;
+            arena.slots.insert(slot, args[1].clone());
+            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::FrameId(
+                RuntimeFrameIdValue {
+                    arena: handle,
+                    slot,
+                    generation: arena.generation,
+                },
+            )))
+        }
+        RuntimeIntrinsic::MemoryFrameLen => {
+            let handle = expect_frame_arena(expect_single_arg(args, "frame_len")?, "frame_len")?;
+            let arena = state
+                .frame_arenas
+                .get(&handle)
+                .ok_or_else(|| format!("invalid FrameArena handle `{}`", handle.0))?;
+            Ok(RuntimeValue::Int(arena.slots.len() as i64))
+        }
+        RuntimeIntrinsic::MemoryFrameHas => {
+            if args.len() != 2 {
+                return Err("frame_has expects two arguments".to_string());
+            }
+            let handle = expect_frame_arena(args[0].clone(), "frame_has")?;
+            let id = expect_frame_id(args[1].clone(), "frame_has")?;
+            let arena = state
+                .frame_arenas
+                .get(&handle)
+                .ok_or_else(|| format!("invalid FrameArena handle `{}`", handle.0))?;
+            Ok(RuntimeValue::Bool(frame_id_is_live(handle, arena, id)))
+        }
+        RuntimeIntrinsic::MemoryFrameGet => {
+            if args.len() != 2 {
+                return Err("frame access expects two arguments".to_string());
+            }
+            let handle = expect_frame_arena(args[0].clone(), "frame_access")?;
+            let id = expect_frame_id(args[1].clone(), "frame_access")?;
+            let arena = state
+                .frame_arenas
+                .get(&handle)
+                .ok_or_else(|| format!("invalid FrameArena handle `{}`", handle.0))?;
+            if !frame_id_is_live(handle, arena, id) {
+                return Err(format!(
+                    "stale or invalid FrameId `{}` for FrameArena `{}`",
+                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::FrameId(id))),
+                    handle.0
+                ));
+            }
+            arena
+                .slots
+                .get(&id.slot)
+                .cloned()
+                .ok_or_else(|| format!("FrameArena slot `{}` is missing", id.slot))
+        }
+        RuntimeIntrinsic::MemoryFrameBorrowRead | RuntimeIntrinsic::MemoryFrameBorrowEdit => {
+            if args.len() != 2 {
+                return Err("frame borrow expects two arguments".to_string());
+            }
+            let handle = expect_frame_arena(args[0].clone(), "frame_borrow")?;
+            let id = expect_frame_id(args[1].clone(), "frame_borrow")?;
+            let arena = state
+                .frame_arenas
+                .get(&handle)
+                .ok_or_else(|| format!("invalid FrameArena handle `{}`", handle.0))?;
+            if !frame_id_is_live(handle, arena, id) {
+                return Err(format!(
+                    "stale or invalid FrameId `{}` for FrameArena `{}`",
+                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::FrameId(id))),
+                    handle.0
+                ));
+            }
+            Ok(RuntimeValue::Ref(RuntimeReferenceValue {
+                mutable: matches!(intrinsic, RuntimeIntrinsic::MemoryFrameBorrowEdit),
+                target: RuntimeReferenceTarget::FrameSlot {
+                    id,
+                    members: Vec::new(),
+                },
+            }))
+        }
+        RuntimeIntrinsic::MemoryFrameSet => {
+            if args.len() != 3 {
+                return Err("frame_set expects three arguments".to_string());
+            }
+            let handle = expect_frame_arena(args[0].clone(), "frame_set")?;
+            let id = expect_frame_id(args[1].clone(), "frame_set")?;
+            let arena = state
+                .frame_arenas
+                .get_mut(&handle)
+                .ok_or_else(|| format!("invalid FrameArena handle `{}`", handle.0))?;
+            if !frame_id_is_live(handle, arena, id) {
+                return Err(format!(
+                    "stale or invalid FrameId `{}` for FrameArena `{}`",
+                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::FrameId(id))),
+                    handle.0
+                ));
+            }
+            arena.slots.insert(id.slot, args[2].clone());
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::MemoryFrameReset => {
+            let handle =
+                expect_frame_arena(expect_single_arg(args, "frame_reset")?, "frame_reset")?;
+            let arena = state
+                .frame_arenas
+                .get_mut(&handle)
+                .ok_or_else(|| format!("invalid FrameArena handle `{}`", handle.0))?;
+            arena.generation += 1;
+            arena.next_slot = 0;
+            arena.slots.clear();
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::MemoryPoolNew => {
+            let capacity = expect_int(expect_single_arg(args, "pool_new")?, "pool_new")?;
+            if capacity < 0 {
+                return Err("pool_new capacity must be non-negative".to_string());
+            }
+            let handle = insert_runtime_pool_arena(state, type_args);
+            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::PoolArena(handle)))
+        }
+        RuntimeIntrinsic::MemoryPoolAlloc => {
+            if args.len() != 2 {
+                return Err("pool_alloc expects two arguments".to_string());
+            }
+            let handle = expect_pool_arena(args[0].clone(), "pool_alloc")?;
+            let arena = state
+                .pool_arenas
+                .get_mut(&handle)
+                .ok_or_else(|| format!("invalid PoolArena handle `{}`", handle.0))?;
+            let slot = arena.free_slots.pop().unwrap_or_else(|| {
+                let slot = arena.next_slot;
+                arena.next_slot += 1;
+                arena.generations.entry(slot).or_insert(0);
+                slot
+            });
+            let generation = pool_slot_generation(arena, slot);
+            arena.slots.insert(slot, args[1].clone());
+            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::PoolId(
+                RuntimePoolIdValue {
+                    arena: handle,
+                    slot,
+                    generation,
+                },
+            )))
+        }
+        RuntimeIntrinsic::MemoryPoolLen => {
+            let handle = expect_pool_arena(expect_single_arg(args, "pool_len")?, "pool_len")?;
+            let arena = state
+                .pool_arenas
+                .get(&handle)
+                .ok_or_else(|| format!("invalid PoolArena handle `{}`", handle.0))?;
+            Ok(RuntimeValue::Int(arena.slots.len() as i64))
+        }
+        RuntimeIntrinsic::MemoryPoolHas => {
+            if args.len() != 2 {
+                return Err("pool_has expects two arguments".to_string());
+            }
+            let handle = expect_pool_arena(args[0].clone(), "pool_has")?;
+            let id = expect_pool_id(args[1].clone(), "pool_has")?;
+            let arena = state
+                .pool_arenas
+                .get(&handle)
+                .ok_or_else(|| format!("invalid PoolArena handle `{}`", handle.0))?;
+            Ok(RuntimeValue::Bool(pool_id_is_live(handle, arena, id)))
+        }
+        RuntimeIntrinsic::MemoryPoolGet => {
+            if args.len() != 2 {
+                return Err("pool access expects two arguments".to_string());
+            }
+            let handle = expect_pool_arena(args[0].clone(), "pool_access")?;
+            let id = expect_pool_id(args[1].clone(), "pool_access")?;
+            let arena = state
+                .pool_arenas
+                .get(&handle)
+                .ok_or_else(|| format!("invalid PoolArena handle `{}`", handle.0))?;
+            if !pool_id_is_live(handle, arena, id) {
+                return Err(format!(
+                    "stale or invalid PoolId `{}` for PoolArena `{}`",
+                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::PoolId(id))),
+                    handle.0
+                ));
+            }
+            arena
+                .slots
+                .get(&id.slot)
+                .cloned()
+                .ok_or_else(|| format!("PoolArena slot `{}` is missing", id.slot))
+        }
+        RuntimeIntrinsic::MemoryPoolBorrowRead | RuntimeIntrinsic::MemoryPoolBorrowEdit => {
+            if args.len() != 2 {
+                return Err("pool borrow expects two arguments".to_string());
+            }
+            let handle = expect_pool_arena(args[0].clone(), "pool_borrow")?;
+            let id = expect_pool_id(args[1].clone(), "pool_borrow")?;
+            let arena = state
+                .pool_arenas
+                .get(&handle)
+                .ok_or_else(|| format!("invalid PoolArena handle `{}`", handle.0))?;
+            if !pool_id_is_live(handle, arena, id) {
+                return Err(format!(
+                    "stale or invalid PoolId `{}` for PoolArena `{}`",
+                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::PoolId(id))),
+                    handle.0
+                ));
+            }
+            Ok(RuntimeValue::Ref(RuntimeReferenceValue {
+                mutable: matches!(intrinsic, RuntimeIntrinsic::MemoryPoolBorrowEdit),
+                target: RuntimeReferenceTarget::PoolSlot {
+                    id,
+                    members: Vec::new(),
+                },
+            }))
+        }
+        RuntimeIntrinsic::MemoryPoolSet => {
+            if args.len() != 3 {
+                return Err("pool_set expects three arguments".to_string());
+            }
+            let handle = expect_pool_arena(args[0].clone(), "pool_set")?;
+            let id = expect_pool_id(args[1].clone(), "pool_set")?;
+            let arena = state
+                .pool_arenas
+                .get_mut(&handle)
+                .ok_or_else(|| format!("invalid PoolArena handle `{}`", handle.0))?;
+            if !pool_id_is_live(handle, arena, id) {
+                return Err(format!(
+                    "stale or invalid PoolId `{}` for PoolArena `{}`",
+                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::PoolId(id))),
+                    handle.0
+                ));
+            }
+            arena.slots.insert(id.slot, args[2].clone());
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::MemoryPoolRemove => {
+            if args.len() != 2 {
+                return Err("pool_remove expects two arguments".to_string());
+            }
+            let handle = expect_pool_arena(args[0].clone(), "pool_remove")?;
+            let id = expect_pool_id(args[1].clone(), "pool_remove")?;
+            let arena = state
+                .pool_arenas
+                .get_mut(&handle)
+                .ok_or_else(|| format!("invalid PoolArena handle `{}`", handle.0))?;
+            if !pool_id_is_live(handle, arena, id) {
+                return Err(format!(
+                    "stale or invalid PoolId `{}` for PoolArena `{}`",
+                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::PoolId(id))),
+                    handle.0
+                ));
+            }
+            arena.slots.remove(&id.slot);
+            *arena.generations.entry(id.slot).or_insert(0) += 1;
+            arena.free_slots.push(id.slot);
+            Ok(RuntimeValue::Bool(true))
+        }
+        RuntimeIntrinsic::MemoryPoolReset => {
+            let handle = expect_pool_arena(expect_single_arg(args, "pool_reset")?, "pool_reset")?;
+            let arena = state
+                .pool_arenas
+                .get_mut(&handle)
+                .ok_or_else(|| format!("invalid PoolArena handle `{}`", handle.0))?;
+            arena.slots.clear();
+            for generation in arena.generations.values_mut() {
+                *generation += 1;
+            }
+            arena.free_slots = arena.generations.keys().copied().rev().collect();
+            Ok(RuntimeValue::Unit)
+        }
         RuntimeIntrinsic::AudioDefaultOutputTry => {
             if !args.is_empty() {
                 return Err("audio_default_output expects zero arguments".to_string());
@@ -5903,6 +9270,48 @@ fn execute_runtime_intrinsic(
             }
             Ok(RuntimeValue::List(Vec::new()))
         }
+        RuntimeIntrinsic::ListLen => {
+            let value = expect_single_arg(args, "list_len")?;
+            let RuntimeValue::List(values) = value else {
+                return Err("list_len expects List".to_string());
+            };
+            Ok(RuntimeValue::Int(i64::try_from(values.len()).map_err(
+                |_| "list length does not fit in i64".to_string(),
+            )?))
+        }
+        RuntimeIntrinsic::ListPush => {
+            if args.len() != 2 {
+                return Err("list_push expects two arguments".to_string());
+            }
+            let Some(RuntimeValue::List(values)) = final_args.get_mut(0) else {
+                return Err("list_push expects List".to_string());
+            };
+            values.push(args[1].clone());
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::ListPop => {
+            if args.len() != 1 {
+                return Err("list_pop expects one argument".to_string());
+            }
+            let Some(RuntimeValue::List(values)) = final_args.get_mut(0) else {
+                return Err("list_pop expects List".to_string());
+            };
+            values
+                .pop()
+                .ok_or_else(|| "list_pop called on empty list".to_string())
+        }
+        RuntimeIntrinsic::ListTryPopOr => {
+            if args.len() != 2 {
+                return Err("list_try_pop_or expects two arguments".to_string());
+            }
+            let Some(RuntimeValue::List(values)) = final_args.get_mut(0) else {
+                return Err("list_try_pop_or expects List".to_string());
+            };
+            Ok(match values.pop() {
+                Some(value) => make_pair(RuntimeValue::Bool(true), value),
+                None => make_pair(RuntimeValue::Bool(false), args[1].clone()),
+            })
+        }
         RuntimeIntrinsic::ArrayNew => {
             if args.len() != 2 {
                 return Err("array_new expects two arguments".to_string());
@@ -5935,6 +9344,88 @@ fn execute_runtime_intrinsic(
                 return Err("array_to_list expects Array".to_string());
             };
             Ok(RuntimeValue::List(values))
+        }
+        RuntimeIntrinsic::MapNew => {
+            if !args.is_empty() {
+                return Err("map_new expects zero arguments".to_string());
+            }
+            Ok(RuntimeValue::Map(Vec::new()))
+        }
+        RuntimeIntrinsic::MapLen => {
+            let value = expect_single_arg(args, "map_len")?;
+            let RuntimeValue::Map(entries) = value else {
+                return Err("map_len expects Map".to_string());
+            };
+            Ok(RuntimeValue::Int(i64::try_from(entries.len()).map_err(
+                |_| "map length does not fit in i64".to_string(),
+            )?))
+        }
+        RuntimeIntrinsic::MapHas => {
+            if args.len() != 2 {
+                return Err("map_has expects two arguments".to_string());
+            }
+            let RuntimeValue::Map(entries) = args[0].clone() else {
+                return Err("map_has expects Map".to_string());
+            };
+            Ok(RuntimeValue::Bool(
+                entries.iter().any(|(entry_key, _)| *entry_key == args[1]),
+            ))
+        }
+        RuntimeIntrinsic::MapGet => {
+            if args.len() != 2 {
+                return Err("map_get expects two arguments".to_string());
+            }
+            let RuntimeValue::Map(entries) = args[0].clone() else {
+                return Err("map_get expects Map".to_string());
+            };
+            entries
+                .into_iter()
+                .find_map(|(entry_key, entry_value)| (entry_key == args[1]).then_some(entry_value))
+                .ok_or_else(|| "map_get key was not present".to_string())
+        }
+        RuntimeIntrinsic::MapSet => {
+            if args.len() != 3 {
+                return Err("map_set expects three arguments".to_string());
+            }
+            let Some(RuntimeValue::Map(entries)) = final_args.get_mut(0) else {
+                return Err("map_set expects Map".to_string());
+            };
+            if let Some((_, entry_value)) = entries
+                .iter_mut()
+                .find(|(entry_key, _)| *entry_key == args[1])
+            {
+                *entry_value = args[2].clone();
+            } else {
+                entries.push((args[1].clone(), args[2].clone()));
+            }
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::MapRemove => {
+            if args.len() != 2 {
+                return Err("map_remove expects two arguments".to_string());
+            }
+            let Some(RuntimeValue::Map(entries)) = final_args.get_mut(0) else {
+                return Err("map_remove expects Map".to_string());
+            };
+            let original_len = entries.len();
+            entries.retain(|(entry_key, _)| *entry_key != args[1]);
+            Ok(RuntimeValue::Bool(entries.len() != original_len))
+        }
+        RuntimeIntrinsic::MapTryGetOr => {
+            if args.len() != 3 {
+                return Err("map_try_get_or expects three arguments".to_string());
+            }
+            let RuntimeValue::Map(entries) = args[0].clone() else {
+                return Err("map_try_get_or expects Map".to_string());
+            };
+            Ok(
+                match entries.into_iter().find_map(|(entry_key, entry_value)| {
+                    (entry_key == args[1]).then_some(entry_value)
+                }) {
+                    Some(value) => make_pair(RuntimeValue::Bool(true), value),
+                    None => make_pair(RuntimeValue::Bool(false), args[2].clone()),
+                },
+            )
         }
         RuntimeIntrinsic::EcsSetSingleton => {
             let key = require_runtime_type_key(type_args, "ecs_set_singleton")?;
@@ -6050,7 +9541,17 @@ fn match_pattern(
             true
         }
         ParsedMatchPattern::Literal(text) => match value {
-            RuntimeValue::Str(value) => value == text,
+            RuntimeValue::Int(value) => text.parse::<i64>().is_ok_and(|literal| *value == literal),
+            RuntimeValue::Bool(value) => match text.as_str() {
+                "true" => *value,
+                "false" => !*value,
+                _ => false,
+            },
+            RuntimeValue::Str(value) => text
+                .starts_with('"')
+                .then(|| decode_source_string_literal(text).ok())
+                .flatten()
+                .is_some_and(|literal| literal == *value),
             _ => false,
         },
         ParsedMatchPattern::Variant { path, args } => match value {
@@ -6107,9 +9608,7 @@ fn apply_binary_op(
         ParsedBinaryOp::Shr => Ok(RuntimeValue::Int(
             expect_int(left, "shr")? >> expect_int(right, "shr")?,
         )),
-        ParsedBinaryOp::Add => Ok(RuntimeValue::Int(
-            expect_int(left, "+")? + expect_int(right, "+")?,
-        )),
+        ParsedBinaryOp::Add => apply_runtime_add(left, right, "+"),
         ParsedBinaryOp::Sub => Ok(RuntimeValue::Int(
             expect_int(left, "-")? - expect_int(right, "-")?,
         )),
@@ -6128,6 +9627,784 @@ fn apply_binary_op(
     }
 }
 
+fn normalized_chain_indices(
+    introducer: ParsedChainIntroducer,
+    steps: &[ParsedChainStep],
+) -> Vec<usize> {
+    if steps.is_empty() {
+        return Vec::new();
+    }
+    match introducer {
+        ParsedChainIntroducer::Reverse => (0..steps.len()).rev().collect(),
+        ParsedChainIntroducer::Forward => {
+            let reverse_start = steps.iter().enumerate().skip(1).find_map(|(index, step)| {
+                (step.incoming == Some(ParsedChainConnector::Reverse)).then_some(index)
+            });
+            match reverse_start {
+                Some(start) => {
+                    let mut out = (0..start).collect::<Vec<_>>();
+                    for index in (start..steps.len()).rev() {
+                        out.push(index);
+                    }
+                    out
+                }
+                None => (0..steps.len()).collect(),
+            }
+        }
+    }
+}
+
+fn build_runtime_call_args_from_chain_stage(
+    stage: &ParsedChainStep,
+    input: Option<RuntimeValue>,
+    plan: &RuntimePackagePlan,
+    current_module_id: &str,
+    scopes: &mut Vec<RuntimeScope>,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
+) -> RuntimeEvalResult<(Vec<String>, Vec<String>, Vec<RuntimeCallArg>)> {
+    let callable = resolve_callable_path(&stage.stage, aliases)
+        .ok_or_else(|| format!("unsupported runtime chain stage `{}`", stage.text))?;
+    let type_args =
+        resolve_runtime_type_args(&extract_generic_type_args(&stage.stage), type_bindings);
+    let mut call_args = Vec::new();
+    if let Some(input_value) = input {
+        call_args.push(RuntimeCallArg {
+            name: None,
+            value: input_value,
+            source_expr: ParsedExpr::Path(vec!["$chain_input".to_string()]),
+        });
+    }
+    for bound in &stage.bind_args {
+        call_args.push(RuntimeCallArg {
+            name: None,
+            value: eval_expr(
+                bound,
+                plan,
+                current_module_id,
+                scopes,
+                aliases,
+                type_bindings,
+                state,
+                host,
+            )?,
+            source_expr: bound.clone(),
+        });
+    }
+    Ok((callable, type_args, call_args))
+}
+
+fn reject_edit_chain_stage_call(
+    callable: &[String],
+    current_module_id: &str,
+    call_args: &[RuntimeCallArg],
+    plan: &RuntimePackagePlan,
+) -> RuntimeEvalResult<()> {
+    if let Some(routine_index) =
+        resolve_routine_index_for_call(plan, current_module_id, callable, call_args)?
+    {
+        let routine = plan
+            .routines
+            .get(routine_index)
+            .ok_or_else(|| format!("invalid routine index `{routine_index}`"))?;
+        if routine
+            .params
+            .iter()
+            .any(|param| param.mode.as_deref() == Some("edit"))
+        {
+            return Err(format!(
+                "chain stage `{}` does not yet support `edit` parameters",
+                callable.join(".")
+            )
+            .into());
+        }
+        return Ok(());
+    }
+    let intrinsic = resolve_runtime_intrinsic_path(callable)
+        .ok_or_else(|| format!("unsupported runtime callable `{}`", callable.join(".")))?;
+    if !intrinsic_edit_arg_indices(intrinsic).is_empty() {
+        return Err(format!(
+            "chain stage `{}` does not yet support `edit` intrinsic arguments",
+            callable.join(".")
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn execute_runtime_chain_stage(
+    stage: &ParsedChainStep,
+    input: Option<RuntimeValue>,
+    allow_async: bool,
+    plan: &RuntimePackagePlan,
+    current_module_id: &str,
+    scopes: &mut Vec<RuntimeScope>,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
+) -> RuntimeEvalResult<RuntimeValue> {
+    let (callable, type_args, call_args) = build_runtime_call_args_from_chain_stage(
+        stage,
+        input,
+        plan,
+        current_module_id,
+        scopes,
+        aliases,
+        type_bindings,
+        state,
+        host,
+    )?;
+    reject_edit_chain_stage_call(&callable, current_module_id, &call_args, plan)?;
+    Ok(execute_call_by_path(
+        &callable,
+        current_module_id,
+        type_args,
+        call_args,
+        plan,
+        scopes,
+        state,
+        host,
+        allow_async,
+    )?)
+}
+
+fn spawn_runtime_chain_stage(
+    op: ParsedUnaryOp,
+    stage: &ParsedChainStep,
+    input: RuntimeValue,
+    plan: &RuntimePackagePlan,
+    current_module_id: &str,
+    scopes: &mut Vec<RuntimeScope>,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
+) -> RuntimeEvalResult<RuntimeValue> {
+    let (callable, type_args, call_args) = build_runtime_call_args_from_chain_stage(
+        stage,
+        Some(input),
+        plan,
+        current_module_id,
+        scopes,
+        aliases,
+        type_bindings,
+        state,
+        host,
+    )?;
+    reject_edit_chain_stage_call(&callable, current_module_id, &call_args, plan)?;
+    if let Some(routine_index) =
+        resolve_routine_index_for_call(plan, current_module_id, &callable, &call_args)?
+    {
+        let routine = plan
+            .routines
+            .get(routine_index)
+            .ok_or_else(|| format!("invalid routine index `{routine_index}`"))?;
+        let bound_args = bind_call_args_for_routine(routine, call_args.clone())?;
+        consume_take_bound_args(scopes, routine, &bound_args)?;
+    } else {
+        let intrinsic = resolve_runtime_intrinsic_path(&callable)
+            .ok_or_else(|| format!("unsupported runtime callable `{}`", callable.join(".")))?;
+        consume_take_call_args(scopes, intrinsic_take_arg_indices(intrinsic), &call_args)?;
+    }
+    let thread_id = match op {
+        ParsedUnaryOp::Weave => state.current_thread_id,
+        ParsedUnaryOp::Split => allocate_scheduler_thread_id(state),
+        _ => unreachable!(),
+    };
+    let pending = RuntimePendingState::Pending(RuntimeDeferredWork::Call(RuntimeDeferredCall {
+        callable,
+        current_module_id: current_module_id.to_string(),
+        type_args: type_args.clone(),
+        call_args,
+        scopes: scopes.clone(),
+        thread_id,
+        allow_async: true,
+    }));
+    let value = match op {
+        ParsedUnaryOp::Weave => RuntimeValue::Opaque(RuntimeOpaqueValue::Task(
+            insert_runtime_task(state, &type_args, pending),
+        )),
+        ParsedUnaryOp::Split => RuntimeValue::Opaque(RuntimeOpaqueValue::Thread(
+            insert_runtime_thread(state, &type_args, pending),
+        )),
+        _ => unreachable!(),
+    };
+    Ok(value)
+}
+
+fn eval_runtime_chain_expr(
+    style: &str,
+    introducer: ParsedChainIntroducer,
+    steps: &[ParsedChainStep],
+    plan: &RuntimePackagePlan,
+    current_module_id: &str,
+    scopes: &mut Vec<RuntimeScope>,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
+) -> RuntimeEvalResult<RuntimeValue> {
+    if steps.is_empty() {
+        return Err("runtime chain expression must contain at least one stage"
+            .to_string()
+            .into());
+    }
+    let ordered = normalized_chain_indices(introducer, steps)
+        .into_iter()
+        .map(|index| &steps[index])
+        .collect::<Vec<_>>();
+    let seed = execute_runtime_chain_stage(
+        ordered[0],
+        None,
+        true,
+        plan,
+        current_module_id,
+        scopes,
+        aliases,
+        type_bindings,
+        state,
+        host,
+    )?;
+    if ordered.len() == 1 {
+        return Ok(seed);
+    }
+    match style {
+        "forward" | "lazy" | "async" | "plan" => {
+            let mut current = seed;
+            for stage in ordered.iter().skip(1) {
+                current = execute_runtime_chain_stage(
+                    stage,
+                    Some(current),
+                    true,
+                    plan,
+                    current_module_id,
+                    scopes,
+                    aliases,
+                    type_bindings,
+                    state,
+                    host,
+                )?;
+                if style == "async" {
+                    match current {
+                        RuntimeValue::Opaque(RuntimeOpaqueValue::Task(_))
+                        | RuntimeValue::Opaque(RuntimeOpaqueValue::Thread(_)) => {
+                            current = await_runtime_value(current, plan, state, host)?
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Ok(current)
+        }
+        "collect" | "broadcast" => {
+            let mut values = Vec::new();
+            for stage in ordered.iter().skip(1) {
+                values.push(execute_runtime_chain_stage(
+                    stage,
+                    Some(seed.clone()),
+                    true,
+                    plan,
+                    current_module_id,
+                    scopes,
+                    aliases,
+                    type_bindings,
+                    state,
+                    host,
+                )?);
+            }
+            Ok(RuntimeValue::List(values))
+        }
+        "parallel" => {
+            let mut values = Vec::new();
+            for stage in ordered.iter().skip(1) {
+                let is_async_stage = build_runtime_call_args_from_chain_stage(
+                    stage,
+                    Some(seed.clone()),
+                    plan,
+                    current_module_id,
+                    &mut scopes.clone(),
+                    aliases,
+                    type_bindings,
+                    state,
+                    host,
+                )
+                .ok()
+                .and_then(|(callable, _, call_args)| {
+                    resolve_routine_index_for_call(plan, current_module_id, &callable, &call_args)
+                        .ok()
+                        .flatten()
+                })
+                .and_then(|routine_index| plan.routines.get(routine_index))
+                .map(|routine| routine.is_async)
+                .unwrap_or(false);
+                let spawned = spawn_runtime_chain_stage(
+                    if is_async_stage {
+                        ParsedUnaryOp::Weave
+                    } else {
+                        ParsedUnaryOp::Split
+                    },
+                    stage,
+                    seed.clone(),
+                    plan,
+                    current_module_id,
+                    scopes,
+                    aliases,
+                    type_bindings,
+                    state,
+                    host,
+                )?;
+                values.push(await_runtime_value(spawned, plan, state, host)?);
+            }
+            Ok(RuntimeValue::List(values))
+        }
+        other => Err(format!("unsupported runtime chain style `{other}`").into()),
+    }
+}
+
+fn pending_state_is_done(state: &RuntimePendingState) -> bool {
+    matches!(
+        state,
+        RuntimePendingState::Completed(_) | RuntimePendingState::Failed(_)
+    )
+}
+
+fn pending_state_value(state: &RuntimePendingState, context: &str) -> Result<RuntimeValue, String> {
+    match state {
+        RuntimePendingState::Completed(value) => Ok(value.clone()),
+        RuntimePendingState::Failed(message) => Err(message.clone()),
+        RuntimePendingState::Pending(_) => Err(format!("{context} is not completed")),
+        RuntimePendingState::Running => Err(format!("{context} is already running")),
+    }
+}
+
+fn execute_deferred_work(
+    pending: RuntimeDeferredWork,
+    plan: &RuntimePackagePlan,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
+) -> Result<RuntimeValue, String> {
+    match pending {
+        RuntimeDeferredWork::Call(pending) => {
+            let RuntimeDeferredCall {
+                callable,
+                current_module_id,
+                type_args,
+                call_args,
+                mut scopes,
+                thread_id,
+                allow_async,
+            } = pending;
+            let previous_thread_id = state.current_thread_id;
+            state.current_thread_id = thread_id;
+            let result = execute_call_by_path(
+                &callable,
+                &current_module_id,
+                type_args,
+                call_args,
+                plan,
+                &mut scopes,
+                state,
+                host,
+                allow_async,
+            );
+            state.current_thread_id = previous_thread_id;
+            result
+        }
+        RuntimeDeferredWork::Expr(pending) => {
+            let RuntimeDeferredExpr {
+                expr,
+                current_module_id,
+                aliases,
+                type_bindings,
+                mut scopes,
+                thread_id,
+                allow_async,
+            } = pending;
+            let previous_thread_id = state.current_thread_id;
+            let previous_async_depth = state.async_context_depth;
+            state.current_thread_id = thread_id;
+            if allow_async {
+                state.async_context_depth += 1;
+            }
+            let result = eval_expr(
+                &expr,
+                plan,
+                &current_module_id,
+                &mut scopes,
+                &aliases,
+                &type_bindings,
+                state,
+                host,
+            )
+            .map_err(runtime_eval_message);
+            state.current_thread_id = previous_thread_id;
+            state.async_context_depth = previous_async_depth;
+            result
+        }
+    }
+}
+
+fn drive_runtime_task(
+    handle: RuntimeTaskHandle,
+    plan: &RuntimePackagePlan,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
+) -> Result<(), String> {
+    let pending = {
+        let task = state
+            .tasks
+            .get_mut(&handle)
+            .ok_or_else(|| format!("invalid Task handle `{}`", handle.0))?;
+        match std::mem::replace(&mut task.state, RuntimePendingState::Running) {
+            RuntimePendingState::Pending(pending) => pending,
+            RuntimePendingState::Completed(value) => {
+                task.state = RuntimePendingState::Completed(value);
+                return Ok(());
+            }
+            RuntimePendingState::Failed(message) => {
+                task.state = RuntimePendingState::Failed(message);
+                return Ok(());
+            }
+            RuntimePendingState::Running => {
+                return Err(format!("Task `{}` is already running", handle.0));
+            }
+        }
+    };
+    let next_state = match execute_deferred_work(pending, plan, state, host) {
+        Ok(value) => RuntimePendingState::Completed(value),
+        Err(message) => RuntimePendingState::Failed(message),
+    };
+    state
+        .tasks
+        .get_mut(&handle)
+        .ok_or_else(|| format!("invalid Task handle `{}`", handle.0))?
+        .state = next_state;
+    Ok(())
+}
+
+fn drive_runtime_thread(
+    handle: RuntimeThreadHandle,
+    plan: &RuntimePackagePlan,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
+) -> Result<(), String> {
+    let pending = {
+        let thread = state
+            .threads
+            .get_mut(&handle)
+            .ok_or_else(|| format!("invalid Thread handle `{}`", handle.0))?;
+        match std::mem::replace(&mut thread.state, RuntimePendingState::Running) {
+            RuntimePendingState::Pending(pending) => pending,
+            RuntimePendingState::Completed(value) => {
+                thread.state = RuntimePendingState::Completed(value);
+                return Ok(());
+            }
+            RuntimePendingState::Failed(message) => {
+                thread.state = RuntimePendingState::Failed(message);
+                return Ok(());
+            }
+            RuntimePendingState::Running => {
+                return Err(format!("Thread `{}` is already running", handle.0));
+            }
+        }
+    };
+    let next_state = match execute_deferred_work(pending, plan, state, host) {
+        Ok(value) => RuntimePendingState::Completed(value),
+        Err(message) => RuntimePendingState::Failed(message),
+    };
+    state
+        .threads
+        .get_mut(&handle)
+        .ok_or_else(|| format!("invalid Thread handle `{}`", handle.0))?
+        .state = next_state;
+    Ok(())
+}
+
+fn capture_spawned_phrase_call(
+    op: ParsedUnaryOp,
+    subject: &ParsedExpr,
+    args: &[ParsedPhraseArg],
+    attached: &[ParsedHeaderAttachment],
+    qualifier_kind: ParsedPhraseQualifierKind,
+    qualifier: &str,
+    plan: &RuntimePackagePlan,
+    current_module_id: &str,
+    scopes: &mut Vec<RuntimeScope>,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
+) -> RuntimeEvalResult<Option<RuntimeValue>> {
+    let (callable, type_args, call_args) = match qualifier_kind {
+        ParsedPhraseQualifierKind::Call | ParsedPhraseQualifierKind::Apply => {
+            if qualifier != "call" && qualifier_kind == ParsedPhraseQualifierKind::Call {
+                return Ok(None);
+            }
+            let callable = resolve_callable_path(subject, aliases)
+                .ok_or_else(|| format!("unsupported runtime callable `{subject:?}`"))?;
+            let type_args =
+                resolve_runtime_type_args(&extract_generic_type_args(subject), type_bindings);
+            let call_args = collect_call_args(
+                args,
+                attached,
+                plan,
+                current_module_id,
+                scopes,
+                aliases,
+                type_bindings,
+                state,
+                host,
+            )?;
+            (callable, type_args, call_args)
+        }
+        ParsedPhraseQualifierKind::NamedPath => {
+            let receiver = eval_expr(
+                subject,
+                plan,
+                current_module_id,
+                scopes,
+                aliases,
+                type_bindings,
+                state,
+                host,
+            )?;
+            let callable_expr = parse_runtime_callable_expr(qualifier);
+            let callable = resolve_named_qualifier_callable_path(&callable_expr, aliases)
+                .ok_or_else(|| {
+                    format!("unsupported runtime named qualifier callable `{qualifier}`")
+                })?;
+            let type_args = resolve_runtime_type_args(
+                &extract_generic_type_args(&callable_expr),
+                type_bindings,
+            );
+            let mut call_args = vec![RuntimeCallArg {
+                name: None,
+                value: receiver,
+                source_expr: subject.clone(),
+            }];
+            call_args.extend(collect_call_args(
+                args,
+                attached,
+                plan,
+                current_module_id,
+                scopes,
+                aliases,
+                type_bindings,
+                state,
+                host,
+            )?);
+            (callable, type_args, call_args)
+        }
+        ParsedPhraseQualifierKind::BareMethod => {
+            let receiver = eval_expr(
+                subject,
+                plan,
+                current_module_id,
+                scopes,
+                aliases,
+                type_bindings,
+                state,
+                host,
+            )?;
+            let callable = resolve_runtime_method_callable_path(
+                plan,
+                current_module_id,
+                &receiver,
+                qualifier,
+                state,
+            )
+            .ok_or_else(|| format!("unsupported runtime qualifier `{qualifier}`"))?;
+            let type_args = runtime_receiver_type_args(&receiver, state);
+            let mut call_args = vec![RuntimeCallArg {
+                name: None,
+                value: receiver,
+                source_expr: subject.clone(),
+            }];
+            call_args.extend(collect_call_args(
+                args,
+                attached,
+                plan,
+                current_module_id,
+                scopes,
+                aliases,
+                type_bindings,
+                state,
+                host,
+            )?);
+            (callable, type_args, call_args)
+        }
+        ParsedPhraseQualifierKind::Try | ParsedPhraseQualifierKind::AwaitApply => return Ok(None),
+    };
+
+    if let Some(routine_index) =
+        resolve_routine_index_for_call(plan, current_module_id, &callable, &call_args)?
+    {
+        let routine = plan
+            .routines
+            .get(routine_index)
+            .ok_or_else(|| format!("invalid routine index `{routine_index}`"))?;
+        let bound_args = bind_call_args_for_routine(routine, call_args.clone())?;
+        if routine
+            .params
+            .iter()
+            .any(|param| param.mode.as_deref() == Some("edit"))
+        {
+            return Err("spawned runtime calls do not yet support `edit` parameters"
+                .to_string()
+                .into());
+        }
+        consume_take_bound_args(scopes, routine, &bound_args)?;
+    } else {
+        let intrinsic = resolve_runtime_intrinsic_path(&callable)
+            .ok_or_else(|| format!("unsupported runtime callable `{}`", callable.join(".")))?;
+        if !intrinsic_edit_arg_indices(intrinsic).is_empty() {
+            return Err(
+                "spawned runtime intrinsic calls do not yet support `edit` arguments"
+                    .to_string()
+                    .into(),
+            );
+        }
+        consume_take_call_args(scopes, intrinsic_take_arg_indices(intrinsic), &call_args)?;
+    }
+
+    let thread_id = match op {
+        ParsedUnaryOp::Weave => state.current_thread_id,
+        ParsedUnaryOp::Split => allocate_scheduler_thread_id(state),
+        _ => unreachable!(),
+    };
+    let pending = RuntimePendingState::Pending(RuntimeDeferredWork::Call(RuntimeDeferredCall {
+        callable,
+        current_module_id: current_module_id.to_string(),
+        type_args: type_args.clone(),
+        call_args,
+        scopes: scopes.clone(),
+        thread_id,
+        allow_async: true,
+    }));
+    let value = match op {
+        ParsedUnaryOp::Weave => RuntimeValue::Opaque(RuntimeOpaqueValue::Task(
+            insert_runtime_task(state, &type_args, pending),
+        )),
+        ParsedUnaryOp::Split => RuntimeValue::Opaque(RuntimeOpaqueValue::Thread(
+            insert_runtime_thread(state, &type_args, pending),
+        )),
+        _ => unreachable!(),
+    };
+    Ok(Some(value))
+}
+
+fn spawn_runtime_expr(
+    op: ParsedUnaryOp,
+    expr: &ParsedExpr,
+    current_module_id: &str,
+    scopes: &[RuntimeScope],
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+) -> RuntimeValue {
+    let thread_id = match op {
+        ParsedUnaryOp::Weave => state.current_thread_id,
+        ParsedUnaryOp::Split => allocate_scheduler_thread_id(state),
+        _ => unreachable!(),
+    };
+    let pending = RuntimePendingState::Pending(RuntimeDeferredWork::Expr(RuntimeDeferredExpr {
+        expr: expr.clone(),
+        current_module_id: current_module_id.to_string(),
+        aliases: aliases.clone(),
+        type_bindings: type_bindings.clone(),
+        scopes: scopes.to_vec(),
+        thread_id,
+        allow_async: true,
+    }));
+    match op {
+        ParsedUnaryOp::Weave => RuntimeValue::Opaque(RuntimeOpaqueValue::Task(
+            insert_runtime_task(state, &[], pending),
+        )),
+        ParsedUnaryOp::Split => RuntimeValue::Opaque(RuntimeOpaqueValue::Thread(
+            insert_runtime_thread(state, &[], pending),
+        )),
+        _ => unreachable!(),
+    }
+}
+
+fn await_runtime_value(
+    value: RuntimeValue,
+    plan: &RuntimePackagePlan,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
+) -> Result<RuntimeValue, String> {
+    match value {
+        RuntimeValue::Opaque(RuntimeOpaqueValue::Task(handle)) => {
+            drive_runtime_task(handle, plan, state, host)?;
+            let task = state
+                .tasks
+                .get(&handle)
+                .ok_or_else(|| format!("invalid Task handle `{}`", handle.0))?;
+            pending_state_value(&task.state, &format!("Task `{}`", handle.0))
+        }
+        RuntimeValue::Opaque(RuntimeOpaqueValue::Thread(handle)) => {
+            drive_runtime_thread(handle, plan, state, host)?;
+            let thread = state
+                .threads
+                .get(&handle)
+                .ok_or_else(|| format!("invalid Thread handle `{}`", handle.0))?;
+            pending_state_value(&thread.state, &format!("Thread `{}`", handle.0))
+        }
+        other => Err(format!("await expects Task or Thread, got `{other:?}`")),
+    }
+}
+
+fn eval_spawn_expr(
+    op: ParsedUnaryOp,
+    expr: &ParsedExpr,
+    plan: &RuntimePackagePlan,
+    current_module_id: &str,
+    scopes: &mut Vec<RuntimeScope>,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
+) -> RuntimeEvalResult<RuntimeValue> {
+    if let ParsedExpr::Phrase {
+        subject,
+        args,
+        qualifier_kind,
+        qualifier,
+        attached,
+    } = expr
+    {
+        if let Some(spawned) = capture_spawned_phrase_call(
+            op,
+            subject,
+            args,
+            attached,
+            *qualifier_kind,
+            qualifier,
+            plan,
+            current_module_id,
+            scopes,
+            aliases,
+            type_bindings,
+            state,
+            host,
+        )? {
+            return Ok(spawned);
+        }
+    }
+    Ok(spawn_runtime_expr(
+        op,
+        expr,
+        current_module_id,
+        scopes,
+        aliases,
+        type_bindings,
+        state,
+    ))
+}
+
 fn eval_expr(
     expr: &ParsedExpr,
     plan: &RuntimePackagePlan,
@@ -6137,7 +10414,7 @@ fn eval_expr(
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
     host: &mut dyn RuntimeHost,
-) -> Result<RuntimeValue, String> {
+) -> RuntimeEvalResult<RuntimeValue> {
     match expr {
         ParsedExpr::Int(value) => Ok(RuntimeValue::Int(*value)),
         ParsedExpr::Bool(value) => Ok(RuntimeValue::Bool(*value)),
@@ -6179,7 +10456,7 @@ fn eval_expr(
                         host,
                     )
                 })
-                .collect::<Result<Vec<_>, String>>()?,
+                .collect::<RuntimeEvalResult<Vec<_>>>()?,
         )),
         ParsedExpr::Match { subject, arms } => eval_match_expr(
             subject,
@@ -6192,13 +10469,28 @@ fn eval_expr(
             state,
             host,
         ),
-        ParsedExpr::Path(segments) if segments.len() == 1 => lookup_local(scopes, &segments[0])
-            .map(|local| local.value.clone())
-            .ok_or_else(|| format!("unsupported runtime value path `{}`", segments[0])),
-        ParsedExpr::Path(segments) => Err(format!(
-            "unsupported runtime value path `{}`",
-            segments.join(".")
-        )),
+        ParsedExpr::Chain {
+            style,
+            introducer,
+            steps,
+        } => eval_runtime_chain_expr(
+            style,
+            *introducer,
+            steps,
+            plan,
+            current_module_id,
+            scopes,
+            aliases,
+            type_bindings,
+            state,
+            host,
+        ),
+        ParsedExpr::Path(segments) if segments.len() == 1 => {
+            Ok(read_runtime_local_value(scopes, &segments[0])?)
+        }
+        ParsedExpr::Path(segments) => {
+            Err(format!("unsupported runtime value path `{}`", segments.join(".")).into())
+        }
         ParsedExpr::Member { expr, member } => {
             let base = eval_expr(
                 expr,
@@ -6210,8 +10502,110 @@ fn eval_expr(
                 state,
                 host,
             )?;
-            eval_member_value(base, member)
+            Ok(eval_runtime_member_value(base, member, scopes, state)?)
         }
+        ParsedExpr::Index { expr, index } => Ok(eval_runtime_index_value(
+            eval_expr(
+                expr,
+                plan,
+                current_module_id,
+                scopes,
+                aliases,
+                type_bindings,
+                state,
+                host,
+            )?,
+            eval_expr(
+                index,
+                plan,
+                current_module_id,
+                scopes,
+                aliases,
+                type_bindings,
+                state,
+                host,
+            )?,
+            scopes,
+            state,
+        )?),
+        ParsedExpr::Slice {
+            expr,
+            start,
+            end,
+            inclusive_end,
+        } => Ok(eval_runtime_slice_value(
+            eval_expr(
+                expr,
+                plan,
+                current_module_id,
+                scopes,
+                aliases,
+                type_bindings,
+                state,
+                host,
+            )?,
+            start
+                .as_deref()
+                .map(|expr| {
+                    eval_expr(
+                        expr,
+                        plan,
+                        current_module_id,
+                        scopes,
+                        aliases,
+                        type_bindings,
+                        state,
+                        host,
+                    )
+                })
+                .transpose()?,
+            end.as_deref()
+                .map(|expr| {
+                    eval_expr(
+                        expr,
+                        plan,
+                        current_module_id,
+                        scopes,
+                        aliases,
+                        type_bindings,
+                        state,
+                        host,
+                    )
+                })
+                .transpose()?,
+            *inclusive_end,
+            scopes,
+            state,
+        )?),
+        ParsedExpr::Range {
+            start,
+            end,
+            inclusive_end,
+        } => Ok(RuntimeValue::Range {
+            start: eval_optional_runtime_int_expr(
+                start.as_deref(),
+                plan,
+                current_module_id,
+                scopes,
+                aliases,
+                type_bindings,
+                state,
+                host,
+                "range start",
+            )?,
+            end: eval_optional_runtime_int_expr(
+                end.as_deref(),
+                plan,
+                current_module_id,
+                scopes,
+                aliases,
+                type_bindings,
+                state,
+                host,
+                "range end",
+            )?,
+            inclusive_end: *inclusive_end,
+        }),
         ParsedExpr::Generic { expr, .. } => eval_expr(
             expr,
             plan,
@@ -6222,8 +10616,8 @@ fn eval_expr(
             state,
             host,
         ),
-        ParsedExpr::Unary { op, expr } => {
-            let value = eval_expr(
+        ParsedExpr::Await { expr } => Ok(await_runtime_value(
+            eval_expr(
                 expr,
                 plan,
                 current_module_id,
@@ -6232,13 +10626,99 @@ fn eval_expr(
                 type_bindings,
                 state,
                 host,
-            )?;
-            match op {
-                ParsedUnaryOp::Neg => Ok(RuntimeValue::Int(-expect_int(value, "unary -")?)),
-                ParsedUnaryOp::Not => Ok(RuntimeValue::Bool(!expect_bool(value, "not")?)),
-                ParsedUnaryOp::BitNot => Ok(RuntimeValue::Int(!expect_int(value, "~")?)),
+            )?,
+            plan,
+            state,
+            host,
+        )?),
+        ParsedExpr::Unary { op, expr } => match op {
+            ParsedUnaryOp::Weave | ParsedUnaryOp::Split => eval_spawn_expr(
+                *op,
+                expr,
+                plan,
+                current_module_id,
+                scopes,
+                aliases,
+                type_bindings,
+                state,
+                host,
+            ),
+            ParsedUnaryOp::BorrowRead | ParsedUnaryOp::BorrowMut => {
+                let target = expr_to_assign_target(expr).ok_or_else(|| {
+                    format!(
+                        "runtime borrow operand `{:?}` is not a writable place",
+                        expr
+                    )
+                })?;
+                let place = resolve_assign_target_place(scopes, &target)?;
+                if matches!(op, ParsedUnaryOp::BorrowMut) && !place.mutable {
+                    return Err(format!(
+                        "runtime mutable borrow operand `{:?}` is not mutable",
+                        expr
+                    )
+                    .into());
+                }
+                Ok(RuntimeValue::Ref(RuntimeReferenceValue {
+                    mutable: matches!(op, ParsedUnaryOp::BorrowMut),
+                    target: place.target,
+                }))
             }
-        }
+            ParsedUnaryOp::Deref => {
+                let reference = expect_reference(
+                    eval_expr(
+                        expr,
+                        plan,
+                        current_module_id,
+                        scopes,
+                        aliases,
+                        type_bindings,
+                        state,
+                        host,
+                    )?,
+                    "deref",
+                )?;
+                Ok(read_runtime_reference(scopes, state, &reference)?)
+            }
+            ParsedUnaryOp::Neg => Ok(RuntimeValue::Int(-expect_int(
+                eval_expr(
+                    expr,
+                    plan,
+                    current_module_id,
+                    scopes,
+                    aliases,
+                    type_bindings,
+                    state,
+                    host,
+                )?,
+                "unary -",
+            )?)),
+            ParsedUnaryOp::Not => Ok(RuntimeValue::Bool(!expect_bool(
+                eval_expr(
+                    expr,
+                    plan,
+                    current_module_id,
+                    scopes,
+                    aliases,
+                    type_bindings,
+                    state,
+                    host,
+                )?,
+                "not",
+            )?)),
+            ParsedUnaryOp::BitNot => Ok(RuntimeValue::Int(!expect_int(
+                eval_expr(
+                    expr,
+                    plan,
+                    current_module_id,
+                    scopes,
+                    aliases,
+                    type_bindings,
+                    state,
+                    host,
+                )?,
+                "~",
+            )?)),
+        },
         ParsedExpr::Binary { left, op, right } => match op {
             ParsedBinaryOp::Or => {
                 let left = expect_bool(
@@ -6325,104 +10805,18 @@ fn eval_expr(
                     state,
                     host,
                 )?;
-                apply_binary_op(*other, left, right)
+                Ok(apply_binary_op(*other, left, right)?)
             }
         },
         ParsedExpr::Phrase {
             subject,
             args,
+            qualifier_kind,
             qualifier,
             attached,
-        } => {
-            if qualifier == "std.io.print"
-                || qualifier == "std.io.print_line"
-                || qualifier == "std.io.eprint"
-                || qualifier == "std.io.eprint_line"
-            {
-                if !args.is_empty() {
-                    return Err(format!("{qualifier} expects zero explicit arguments"));
-                }
-                if !attached.is_empty() {
-                    return Err(format!("{qualifier} does not support attached arguments"));
-                }
-                let intrinsic = match qualifier.as_str() {
-                    "std.io.print" => RuntimeIntrinsic::IoPrint,
-                    "std.io.print_line" => RuntimeIntrinsic::IoPrintLine,
-                    "std.io.eprint" => RuntimeIntrinsic::IoEprint,
-                    "std.io.eprint_line" => RuntimeIntrinsic::IoEprintLine,
-                    _ => unreachable!(),
-                };
-                let value = eval_expr(
-                    subject,
-                    plan,
-                    current_module_id,
-                    scopes,
-                    aliases,
-                    type_bindings,
-                    state,
-                    host,
-                )?;
-                return execute_runtime_intrinsic(intrinsic, &[], vec![value], plan, state, host);
-            }
-            if qualifier != "call" {
-                return eval_qualifier(
-                    subject,
-                    args,
-                    qualifier,
-                    plan,
-                    current_module_id,
-                    scopes,
-                    aliases,
-                    type_bindings,
-                    state,
-                    host,
-                );
-            }
-            let callable = resolve_callable_path(subject, aliases)
-                .ok_or_else(|| format!("unsupported runtime callable `{subject:?}`"))?;
-            let type_args =
-                resolve_runtime_type_args(&extract_generic_type_args(subject), type_bindings);
-            let routine_index = resolve_routine_index(plan, current_module_id, &callable);
-            let intrinsic = if routine_index.is_none() {
-                resolve_runtime_intrinsic_path(&callable)
-            } else {
-                None
-            };
-            if routine_index.is_none() && intrinsic.is_none() {
-                if let Some(record) = try_construct_record_value(
-                    &callable,
-                    args,
-                    attached,
-                    plan,
-                    current_module_id,
-                    scopes,
-                    aliases,
-                    type_bindings,
-                    state,
-                    host,
-                )? {
-                    return Ok(record);
-                }
-                if let Some(variant) = try_construct_variant_value(
-                    &callable,
-                    args,
-                    attached,
-                    plan,
-                    current_module_id,
-                    scopes,
-                    aliases,
-                    type_bindings,
-                    state,
-                    host,
-                )? {
-                    return Ok(variant);
-                }
-                return Err(format!(
-                    "unsupported runtime callable `{}`",
-                    callable.join(".")
-                ));
-            }
-            let call_args = collect_call_args(
+        } => match qualifier_kind {
+            ParsedPhraseQualifierKind::Call => execute_runtime_apply_phrase(
+                subject,
                 args,
                 attached,
                 plan,
@@ -6432,78 +10826,187 @@ fn eval_expr(
                 type_bindings,
                 state,
                 host,
-            )?;
-            if let Some(intrinsic) = intrinsic {
-                if call_args.iter().any(|arg| arg.name.is_some()) {
-                    return Err(format!(
-                        "runtime intrinsic `{}` does not yet support named-only fallback binding",
-                        callable.join(".")
-                    ));
+                runtime_async_calls_allowed(state),
+            ),
+            ParsedPhraseQualifierKind::NamedPath => execute_runtime_named_qualifier_call(
+                subject,
+                args,
+                attached,
+                qualifier,
+                plan,
+                current_module_id,
+                scopes,
+                aliases,
+                type_bindings,
+                state,
+                host,
+            ),
+            ParsedPhraseQualifierKind::BareMethod => eval_qualifier(
+                subject,
+                args,
+                attached,
+                qualifier,
+                plan,
+                current_module_id,
+                scopes,
+                aliases,
+                type_bindings,
+                state,
+                host,
+            ),
+            ParsedPhraseQualifierKind::Try => eval_try_qualifier(
+                subject,
+                args,
+                attached,
+                plan,
+                current_module_id,
+                scopes,
+                aliases,
+                type_bindings,
+                state,
+                host,
+            ),
+            ParsedPhraseQualifierKind::Apply => execute_runtime_apply_phrase(
+                subject,
+                args,
+                attached,
+                plan,
+                current_module_id,
+                scopes,
+                aliases,
+                type_bindings,
+                state,
+                host,
+                runtime_async_calls_allowed(state),
+            ),
+            ParsedPhraseQualifierKind::AwaitApply => {
+                if args.is_empty() && attached.is_empty() {
+                    return Ok(await_runtime_value(
+                        eval_expr(
+                            subject,
+                            plan,
+                            current_module_id,
+                            scopes,
+                            aliases,
+                            type_bindings,
+                            state,
+                            host,
+                        )?,
+                        plan,
+                        state,
+                        host,
+                    )?);
                 }
-                let values = call_args.into_iter().map(|arg| arg.value).collect();
-                return execute_runtime_intrinsic(intrinsic, &type_args, values, plan, state, host);
+                let value = execute_runtime_apply_phrase(
+                    subject,
+                    args,
+                    attached,
+                    plan,
+                    current_module_id,
+                    scopes,
+                    aliases,
+                    type_bindings,
+                    state,
+                    host,
+                    true,
+                )?;
+                match value {
+                    RuntimeValue::Opaque(RuntimeOpaqueValue::Task(_))
+                    | RuntimeValue::Opaque(RuntimeOpaqueValue::Thread(_)) => {
+                        Ok(await_runtime_value(value, plan, state, host)?)
+                    }
+                    other => Ok(other),
+                }
             }
-            let routine_index = routine_index.expect("routine index should exist");
-            let routine = plan
-                .routines
-                .get(routine_index)
-                .ok_or_else(|| format!("invalid routine index `{routine_index}`"))?;
-            let values = bind_call_args_for_routine(routine, call_args)?;
-            execute_routine_with_state(plan, routine_index, type_args, values, state, host)
+        },
+        ParsedExpr::MemoryPhrase {
+            family,
+            arena,
+            init_args,
+            constructor,
+            attached,
+        } => {
+            let arena_value = eval_expr(
+                arena,
+                plan,
+                current_module_id,
+                scopes,
+                aliases,
+                type_bindings,
+                state,
+                host,
+            )?;
+            let constructed = execute_runtime_apply_phrase(
+                constructor,
+                init_args,
+                attached,
+                plan,
+                current_module_id,
+                scopes,
+                aliases,
+                type_bindings,
+                state,
+                host,
+                false,
+            )?;
+            let intrinsic = match family.as_str() {
+                "arena" => RuntimeIntrinsic::MemoryArenaAlloc,
+                "frame" => RuntimeIntrinsic::MemoryFrameAlloc,
+                "pool" => RuntimeIntrinsic::MemoryPoolAlloc,
+                other => return Err(format!("unsupported runtime memory family `{other}`").into()),
+            };
+            let type_args = runtime_receiver_type_args(&arena_value, state);
+            let mut values = vec![arena_value, constructed];
+            Ok(execute_runtime_intrinsic(
+                intrinsic,
+                &type_args,
+                &mut values,
+                plan,
+                state,
+                host,
+            )?)
         }
     }
 }
 
 fn apply_assign(
-    scopes: &mut Vec<RuntimeScope>,
     target: &ParsedAssignTarget,
     op: ParsedAssignOp,
     value: RuntimeValue,
-) -> Result<(), String> {
-    let ParsedAssignTarget::Name(name) = target else {
-        return Err(format!(
-            "unsupported runtime assignment target `{target:?}`"
-        ));
+    plan: &RuntimePackagePlan,
+    current_module_id: &str,
+    scopes: &mut Vec<RuntimeScope>,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
+) -> RuntimeEvalResult<()> {
+    let updated = if matches!(op, ParsedAssignOp::Assign) {
+        value
+    } else {
+        let current = read_assign_target_value_runtime(
+            target,
+            plan,
+            current_module_id,
+            scopes,
+            aliases,
+            type_bindings,
+            state,
+            host,
+        )?;
+        apply_assignment_op(current, op, value)?
     };
-    let local = lookup_local_mut(scopes, name)
-        .ok_or_else(|| format!("runtime assignment target `{name}` is unresolved"))?;
-    if !local.mutable {
-        return Err(format!("runtime assignment target `{name}` is not mutable"));
-    }
-    local.value = match op {
-        ParsedAssignOp::Assign => value,
-        ParsedAssignOp::AddAssign => {
-            RuntimeValue::Int(expect_int(local.value.clone(), "+=")? + expect_int(value, "+=")?)
-        }
-        ParsedAssignOp::SubAssign => {
-            RuntimeValue::Int(expect_int(local.value.clone(), "-=")? - expect_int(value, "-=")?)
-        }
-        ParsedAssignOp::MulAssign => {
-            RuntimeValue::Int(expect_int(local.value.clone(), "*=")? * expect_int(value, "*=")?)
-        }
-        ParsedAssignOp::DivAssign => {
-            RuntimeValue::Int(expect_int(local.value.clone(), "/=")? / expect_int(value, "/=")?)
-        }
-        ParsedAssignOp::ModAssign => {
-            RuntimeValue::Int(expect_int(local.value.clone(), "%=")? % expect_int(value, "%=")?)
-        }
-        ParsedAssignOp::BitAndAssign => {
-            RuntimeValue::Int(expect_int(local.value.clone(), "&=")? & expect_int(value, "&=")?)
-        }
-        ParsedAssignOp::BitOrAssign => {
-            RuntimeValue::Int(expect_int(local.value.clone(), "|=")? | expect_int(value, "|=")?)
-        }
-        ParsedAssignOp::BitXorAssign => {
-            RuntimeValue::Int(expect_int(local.value.clone(), "^=")? ^ expect_int(value, "^=")?)
-        }
-        ParsedAssignOp::ShlAssign => {
-            RuntimeValue::Int(expect_int(local.value.clone(), "<<=")? << expect_int(value, "<<=")?)
-        }
-        ParsedAssignOp::ShrAssign => RuntimeValue::Int(
-            expect_int(local.value.clone(), "shr=")? >> expect_int(value, "shr=")?,
-        ),
-    };
-    Ok(())
+    Ok(write_assign_target_value_runtime(
+        target,
+        updated,
+        plan,
+        current_module_id,
+        scopes,
+        aliases,
+        type_bindings,
+        state,
+        host,
+    )?)
 }
 
 fn run_scope_defers(
@@ -6514,7 +11017,7 @@ fn run_scope_defers(
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
     host: &mut dyn RuntimeHost,
-) -> Result<(), String> {
+) -> RuntimeEvalResult<()> {
     let deferred = scopes
         .last_mut()
         .ok_or_else(|| "runtime scope stack is empty".to_string())?
@@ -6537,8 +11040,62 @@ fn run_scope_defers(
     Ok(())
 }
 
+fn execute_page_rollups(
+    frame: RuntimeRollupFrame,
+    plan: &RuntimePackagePlan,
+    current_module_id: &str,
+    scopes: &mut Vec<RuntimeScope>,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
+) -> RuntimeEvalResult<()> {
+    for rollup in frame.rollups.into_iter().rev() {
+        if rollup.kind != "cleanup" {
+            return Err(format!("unsupported runtime rollup kind `{}`", rollup.kind).into());
+        }
+        let Some(subject_value) = frame.active.get(&rollup.subject).cloned() else {
+            continue;
+        };
+        let callable =
+            resolve_rollup_handler_callable_path(plan, current_module_id, &rollup.handler_path);
+        let _ = execute_call_by_path(
+            &callable,
+            current_module_id,
+            Vec::new(),
+            vec![RuntimeCallArg {
+                name: None,
+                value: subject_value,
+                source_expr: ParsedExpr::Path(vec![rollup.subject.clone()]),
+            }],
+            plan,
+            scopes,
+            state,
+            host,
+            false,
+        )?;
+    }
+    Ok(())
+}
+
+fn finish_runtime_rollups<T>(
+    result: RuntimeEvalResult<T>,
+    frame: Option<RuntimeRollupFrame>,
+    plan: &RuntimePackagePlan,
+    current_module_id: &str,
+    scopes: &mut Vec<RuntimeScope>,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
+) -> RuntimeEvalResult<T> {
+    if let Some(frame) = frame {
+        if !matches!(result, Err(RuntimeEvalSignal::Message(_))) {
+            execute_page_rollups(frame, plan, current_module_id, scopes, state, host)?;
+        }
+    }
+    result
+}
+
 fn execute_scoped_block(
     statements: &[ParsedStmt],
+    rollups: &[ParsedPageRollup],
     scopes: &mut Vec<RuntimeScope>,
     scope: RuntimeScope,
     plan: &RuntimePackagePlan,
@@ -6547,7 +11104,8 @@ fn execute_scoped_block(
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
     host: &mut dyn RuntimeHost,
-) -> Result<FlowSignal, String> {
+) -> RuntimeEvalResult<FlowSignal> {
+    push_runtime_rollup_frame(state, rollups, scopes);
     scopes.push(scope);
     let result = execute_statements(
         statements,
@@ -6570,7 +11128,12 @@ fn execute_scoped_block(
     );
     scopes.pop();
     defer_result?;
-    result
+    let frame = if rollups.is_empty() {
+        None
+    } else {
+        pop_runtime_rollup_frame(state)
+    };
+    finish_runtime_rollups(result, frame, plan, current_module_id, scopes, state, host)
 }
 
 fn execute_statements(
@@ -6582,7 +11145,7 @@ fn execute_statements(
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
     host: &mut dyn RuntimeHost,
-) -> Result<FlowSignal, String> {
+) -> RuntimeEvalResult<FlowSignal> {
     for statement in statements {
         let signal = match statement {
             ParsedStmt::Let {
@@ -6603,23 +11166,31 @@ fn execute_statements(
                 let current_scope = scopes
                     .last_mut()
                     .ok_or_else(|| "runtime scope stack is empty".to_string())?;
-                current_scope.locals.insert(
-                    name.clone(),
-                    RuntimeLocal {
-                        mutable: *mutable,
-                        value,
-                    },
-                );
+                insert_runtime_local(state, current_scope, name.clone(), *mutable, value);
                 FlowSignal::Next
             }
-            ParsedStmt::Expr(expr) => {
-                let _ = eval_expr(
-                    expr,
+            ParsedStmt::Expr { expr, rollups } => {
+                push_runtime_rollup_frame(state, rollups, scopes);
+                finish_runtime_rollups(
+                    eval_expr(
+                        expr,
+                        plan,
+                        current_module_id,
+                        scopes,
+                        aliases,
+                        type_bindings,
+                        state,
+                        host,
+                    )
+                    .map(|_| FlowSignal::Next),
+                    if rollups.is_empty() {
+                        None
+                    } else {
+                        pop_runtime_rollup_frame(state)
+                    },
                     plan,
                     current_module_id,
                     scopes,
-                    aliases,
-                    type_bindings,
                     state,
                     host,
                 )?;
@@ -6642,6 +11213,7 @@ fn execute_statements(
                 condition,
                 then_branch,
                 else_branch,
+                rollups,
             } => {
                 if expect_bool(
                     eval_expr(
@@ -6658,6 +11230,7 @@ fn execute_statements(
                 )? {
                     execute_scoped_block(
                         then_branch,
+                        rollups,
                         scopes,
                         RuntimeScope::default(),
                         plan,
@@ -6672,6 +11245,7 @@ fn execute_statements(
                 } else {
                     execute_scoped_block(
                         else_branch,
+                        rollups,
                         scopes,
                         RuntimeScope::default(),
                         plan,
@@ -6683,86 +11257,121 @@ fn execute_statements(
                     )?
                 }
             }
-            ParsedStmt::While { condition, body } => loop {
-                if !expect_bool(
-                    eval_expr(
-                        condition,
-                        plan,
-                        current_module_id,
-                        scopes,
-                        aliases,
-                        type_bindings,
-                        state,
-                        host,
-                    )?,
-                    "while condition",
-                )? {
-                    break FlowSignal::Next;
-                }
-                match execute_scoped_block(
-                    body,
-                    scopes,
-                    RuntimeScope::default(),
+            ParsedStmt::While {
+                condition,
+                body,
+                rollups,
+            } => {
+                push_runtime_rollup_frame(state, rollups, scopes);
+                let result = (|| -> RuntimeEvalResult<FlowSignal> {
+                    loop {
+                        if !expect_bool(
+                            eval_expr(
+                                condition,
+                                plan,
+                                current_module_id,
+                                scopes,
+                                aliases,
+                                type_bindings,
+                                state,
+                                host,
+                            )?,
+                            "while condition",
+                        )? {
+                            break Ok(FlowSignal::Next);
+                        }
+                        match execute_scoped_block(
+                            body,
+                            &[],
+                            scopes,
+                            RuntimeScope::default(),
+                            plan,
+                            current_module_id,
+                            aliases,
+                            type_bindings,
+                            state,
+                            host,
+                        )? {
+                            FlowSignal::Next | FlowSignal::Continue => {}
+                            FlowSignal::Break => break Ok(FlowSignal::Next),
+                            FlowSignal::Return(value) => break Ok(FlowSignal::Return(value)),
+                        }
+                    }
+                })();
+                finish_runtime_rollups(
+                    result,
+                    if rollups.is_empty() {
+                        None
+                    } else {
+                        pop_runtime_rollup_frame(state)
+                    },
                     plan,
                     current_module_id,
-                    aliases,
-                    type_bindings,
+                    scopes,
                     state,
                     host,
-                )? {
-                    FlowSignal::Next | FlowSignal::Continue => {}
-                    FlowSignal::Break => break FlowSignal::Next,
-                    FlowSignal::Return(value) => break FlowSignal::Return(value),
-                }
-            },
+                )?
+            }
             ParsedStmt::For {
                 binding,
                 iterable,
                 body,
+                rollups,
             } => {
-                let values = into_iterable_values(eval_expr(
-                    iterable,
-                    plan,
-                    current_module_id,
-                    scopes,
-                    aliases,
-                    type_bindings,
-                    state,
-                    host,
-                )?)?;
-                let mut loop_signal = FlowSignal::Next;
-                for value in values {
-                    let mut scope = RuntimeScope::default();
-                    scope.locals.insert(
-                        binding.clone(),
-                        RuntimeLocal {
-                            mutable: false,
-                            value,
-                        },
-                    );
-                    match execute_scoped_block(
-                        body,
-                        scopes,
-                        scope,
+                push_runtime_rollup_frame(state, rollups, scopes);
+                let result = (|| -> RuntimeEvalResult<FlowSignal> {
+                    let values = into_iterable_values(eval_expr(
+                        iterable,
                         plan,
                         current_module_id,
+                        scopes,
                         aliases,
                         type_bindings,
                         state,
                         host,
-                    )? {
-                        FlowSignal::Next | FlowSignal::Continue => {}
-                        FlowSignal::Break => {
-                            loop_signal = FlowSignal::Next;
-                            break;
-                        }
-                        FlowSignal::Return(value) => {
-                            loop_signal = FlowSignal::Return(value);
-                            break;
+                    )?)?;
+                    let mut loop_signal = FlowSignal::Next;
+                    for value in values {
+                        let mut scope = RuntimeScope::default();
+                        insert_runtime_local(state, &mut scope, binding.clone(), false, value);
+                        match execute_scoped_block(
+                            body,
+                            &[],
+                            scopes,
+                            scope,
+                            plan,
+                            current_module_id,
+                            aliases,
+                            type_bindings,
+                            state,
+                            host,
+                        )? {
+                            FlowSignal::Next | FlowSignal::Continue => {}
+                            FlowSignal::Break => {
+                                loop_signal = FlowSignal::Next;
+                                break;
+                            }
+                            FlowSignal::Return(value) => {
+                                loop_signal = FlowSignal::Return(value);
+                                break;
+                            }
                         }
                     }
-                }
-                loop_signal
+                    Ok(loop_signal)
+                })();
+                finish_runtime_rollups(
+                    result,
+                    if rollups.is_empty() {
+                        None
+                    } else {
+                        pop_runtime_rollup_frame(state)
+                    },
+                    plan,
+                    current_module_id,
+                    scopes,
+                    state,
+                    host,
+                )?
             }
             ParsedStmt::Defer(expr) => {
                 scopes
@@ -6785,7 +11394,18 @@ fn execute_statements(
                     state,
                     host,
                 )?;
-                apply_assign(scopes, target, *op, value)?;
+                apply_assign(
+                    target,
+                    *op,
+                    value,
+                    plan,
+                    current_module_id,
+                    scopes,
+                    aliases,
+                    type_bindings,
+                    state,
+                    host,
+                )?;
                 FlowSignal::Next
             }
         };
@@ -6796,14 +11416,15 @@ fn execute_statements(
     Ok(FlowSignal::Next)
 }
 
-fn execute_routine_with_state(
+fn execute_routine_call_with_state(
     plan: &RuntimePackagePlan,
     routine_index: usize,
     type_args: Vec<String>,
-    args: Vec<RuntimeValue>,
+    mut args: Vec<RuntimeValue>,
     state: &mut RuntimeExecutionState,
     host: &mut dyn RuntimeHost,
-) -> Result<RuntimeValue, String> {
+    allow_async: bool,
+) -> Result<RoutineExecutionOutcome, String> {
     let routine = plan
         .routines
         .get(routine_index)
@@ -6815,9 +11436,13 @@ fn execute_routine_with_state(
                 routine.symbol_name
             )
         })?;
-        return execute_runtime_intrinsic(intrinsic, &type_args, args, plan, state, host);
+        let value = execute_runtime_intrinsic(intrinsic, &type_args, &mut args, plan, state, host)?;
+        return Ok(RoutineExecutionOutcome {
+            value,
+            final_args: args,
+        });
     }
-    if routine.is_async {
+    if routine.is_async && !allow_async {
         return Err(format!(
             "async routine `{}` is not executable in the current runtime lane",
             routine.symbol_name
@@ -6831,7 +11456,10 @@ fn execute_routine_with_state(
             args.len()
         ));
     }
-    if !routine.type_params.is_empty() && type_args.len() != routine.type_params.len() {
+    if !routine.type_params.is_empty()
+        && !type_args.is_empty()
+        && type_args.len() != routine.type_params.len()
+    {
         return Err(format!(
             "routine `{}` expected {} type arguments, got {}",
             routine.symbol_name,
@@ -6844,39 +11472,140 @@ fn execute_routine_with_state(
         .get(&routine.module_id)
         .cloned()
         .unwrap_or_default();
+    let resolved_type_args = if type_args.is_empty() {
+        routine.type_params.clone()
+    } else {
+        type_args
+    };
     let type_bindings = routine
         .type_params
         .iter()
         .cloned()
-        .zip(type_args)
+        .zip(resolved_type_args)
         .collect::<RuntimeTypeBindings>();
-    let mut initial_scope = RuntimeScope::default();
-    for (param, value) in routine.params.iter().zip(args) {
-        initial_scope.locals.insert(
-            param.name.clone(),
-            RuntimeLocal {
-                mutable: param.mode.as_deref() == Some("edit"),
+    let entered_async_context = routine.is_async;
+    if entered_async_context {
+        state.async_context_depth += 1;
+    }
+    let execution_result = (|| -> Result<RoutineExecutionOutcome, String> {
+        let mut initial_scope = RuntimeScope::default();
+        push_runtime_rollup_frame(state, &routine.rollups, &[]);
+        for (param, value) in routine.params.iter().zip(args) {
+            insert_runtime_local(
+                state,
+                &mut initial_scope,
+                param.name.clone(),
+                param.mode.as_deref() == Some("edit"),
                 value,
-            },
+            );
+        }
+        let mut scopes = Vec::new();
+        scopes.push(initial_scope);
+        let result = execute_statements(
+            &routine.statements,
+            &mut scopes,
+            plan,
+            &routine.module_id,
+            &aliases,
+            &type_bindings,
+            state,
+            host,
         );
+        let defer_result = run_scope_defers(
+            plan,
+            &routine.module_id,
+            &mut scopes,
+            &aliases,
+            &type_bindings,
+            state,
+            host,
+        );
+        let routine_rollup_frame = pop_runtime_rollup_frame(state);
+        let final_scope = scopes
+            .pop()
+            .ok_or_else(|| "runtime scope stack is empty".to_string())?;
+        match defer_result {
+            Ok(()) => {}
+            Err(RuntimeEvalSignal::Message(message)) => return Err(message),
+            Err(RuntimeEvalSignal::Return(value)) => {
+                if let Some(frame) = routine_rollup_frame {
+                    execute_page_rollups(frame, plan, &routine.module_id, &mut scopes, state, host)
+                        .map_err(runtime_eval_message)?;
+                }
+                let final_args = routine
+                    .params
+                    .iter()
+                    .map(|param| {
+                        final_scope
+                            .locals
+                            .get(&param.name)
+                            .map(|local| local.value.clone())
+                            .ok_or_else(|| {
+                                format!(
+                                    "runtime routine `{}` lost bound parameter `{}`",
+                                    routine.symbol_name, param.name
+                                )
+                            })
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                return Ok(RoutineExecutionOutcome { value, final_args });
+            }
+        }
+        if let Some(frame) = routine_rollup_frame {
+            if !matches!(result, Err(RuntimeEvalSignal::Message(_))) {
+                execute_page_rollups(frame, plan, &routine.module_id, &mut scopes, state, host)
+                    .map_err(runtime_eval_message)?;
+            }
+        }
+        let result = match result {
+            Ok(signal) => signal,
+            Err(RuntimeEvalSignal::Message(message)) => return Err(message),
+            Err(RuntimeEvalSignal::Return(value)) => FlowSignal::Return(value),
+        };
+        let value = match result {
+            FlowSignal::Next => RuntimeValue::Unit,
+            FlowSignal::Return(value) => value,
+            FlowSignal::Break => return Err("break escaped the top-level routine".to_string()),
+            FlowSignal::Continue => {
+                return Err("continue escaped the top-level routine".to_string());
+            }
+        };
+        let final_args = routine
+            .params
+            .iter()
+            .map(|param| {
+                final_scope
+                    .locals
+                    .get(&param.name)
+                    .map(|local| local.value.clone())
+                    .ok_or_else(|| {
+                        format!(
+                            "runtime routine `{}` lost bound parameter `{}`",
+                            routine.symbol_name, param.name
+                        )
+                    })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok(RoutineExecutionOutcome { value, final_args })
+    })();
+    if entered_async_context {
+        state.async_context_depth = state.async_context_depth.saturating_sub(1);
     }
-    let mut scopes = Vec::new();
-    match execute_scoped_block(
-        &routine.statements,
-        &mut scopes,
-        initial_scope,
-        plan,
-        &routine.module_id,
-        &aliases,
-        &type_bindings,
-        state,
-        host,
-    )? {
-        FlowSignal::Next => Ok(RuntimeValue::Unit),
-        FlowSignal::Return(value) => Ok(value),
-        FlowSignal::Break => Err("break escaped the top-level routine".to_string()),
-        FlowSignal::Continue => Err("continue escaped the top-level routine".to_string()),
-    }
+    execution_result
+}
+
+fn execute_routine_with_state(
+    plan: &RuntimePackagePlan,
+    routine_index: usize,
+    type_args: Vec<String>,
+    args: Vec<RuntimeValue>,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
+) -> Result<RuntimeValue, String> {
+    Ok(
+        execute_routine_call_with_state(plan, routine_index, type_args, args, state, host, false)?
+            .value,
+    )
 }
 
 #[cfg(test)]
@@ -6891,18 +11620,31 @@ fn execute_routine(
 }
 
 pub fn execute_main(plan: &RuntimePackagePlan, host: &mut dyn RuntimeHost) -> Result<i32, String> {
+    for requirement in &plan.runtime_requirements {
+        if !host.supports_runtime_requirement(requirement) {
+            return Err(format!(
+                "runtime host does not support required capability `{requirement}`"
+            ));
+        }
+    }
     let entry = plan
         .main_entrypoint()
         .ok_or_else(|| format!("package `{}` has no main entrypoint", plan.package_name))?;
     let mut state = RuntimeExecutionState::default();
-    let value = execute_routine_with_state(
+    if state.next_scheduler_thread_id <= 0 {
+        state.next_scheduler_thread_id = 1;
+    }
+    state.current_thread_id = 0;
+    let value = execute_routine_call_with_state(
         plan,
         entry.routine_index,
         Vec::new(),
         Vec::new(),
         &mut state,
         host,
-    )?;
+        true,
+    )?
+    .value;
     match value {
         RuntimeValue::Int(value) => i32::try_from(value)
             .map_err(|_| format!("main return value `{value}` does not fit in i32")),
@@ -6912,6 +11654,9 @@ pub fn execute_main(plan: &RuntimePackagePlan, host: &mut dyn RuntimeHost) -> Re
         | RuntimeValue::Pair(_, _)
         | RuntimeValue::Array(_)
         | RuntimeValue::List(_)
+        | RuntimeValue::Map(_)
+        | RuntimeValue::Range { .. }
+        | RuntimeValue::Ref(_)
         | RuntimeValue::Opaque(_)
         | RuntimeValue::Record { .. }
         | RuntimeValue::Variant { .. } => {
@@ -6921,1685 +11666,4 @@ pub fn execute_main(plan: &RuntimePackagePlan, host: &mut dyn RuntimeHost) -> Re
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{
-        BufferedEvent, BufferedFrameInput, BufferedHost, RuntimeHost, RuntimeOpaqueValue,
-        RuntimeValue, execute_main, execute_routine, load_package_plan, plan_from_artifact,
-        resolve_routine_index,
-    };
-    use arcana_aot::{
-        AOT_INTERNAL_FORMAT, AotEntrypointArtifact, AotPackageArtifact, AotPackageModuleArtifact,
-        AotRoutineArtifact, render_package_artifact,
-    };
-    use arcana_frontend::{
-        check_workspace_graph, compute_member_fingerprints_for_checked_workspace,
-    };
-    use arcana_package::{execute_build, load_workspace_graph, plan_build, plan_workspace};
-    use std::fs;
-    use std::path::{Path, PathBuf};
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    fn temp_artifact_path(label: &str) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time should advance")
-            .as_nanos();
-        std::env::temp_dir().join(format!("arcana_runtime_{label}_{nanos}.toml"))
-    }
-
-    fn temp_workspace_dir(label: &str) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time should advance")
-            .as_nanos();
-        repo_root()
-            .join("target")
-            .join(format!("arcana_runtime_{label}_{nanos}"))
-    }
-
-    fn repo_root() -> PathBuf {
-        let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        crate_dir
-            .parent()
-            .and_then(Path::parent)
-            .expect("workspace root should exist")
-            .to_path_buf()
-    }
-
-    fn write_file(path: &Path, text: &str) {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).expect("parent directories should be created");
-        }
-        fs::write(path, text).expect("file should write");
-    }
-
-    fn synthetic_window_canvas_host(fixture_root: &Path) -> BufferedHost {
-        let cwd = fixture_root.to_string_lossy().replace('\\', "/");
-        BufferedHost {
-            cwd: cwd.clone(),
-            sandbox_root: cwd,
-            monotonic_now_ms: 100,
-            monotonic_step_ms: 5,
-            next_frame_events: vec![
-                BufferedEvent {
-                    kind: 3,
-                    a: 1,
-                    b: 0,
-                },
-                BufferedEvent {
-                    kind: 4,
-                    a: 65,
-                    b: 0,
-                },
-            ],
-            next_frame_input: BufferedFrameInput {
-                key_down: vec![65],
-                key_pressed: vec![65],
-                mouse_pos: (40, 50),
-                mouse_in_window: true,
-                ..BufferedFrameInput::default()
-            },
-            ..BufferedHost::default()
-        }
-    }
-
-    fn synthetic_audio_host(fixture_root: &Path) -> BufferedHost {
-        let cwd = fixture_root.to_string_lossy().replace('\\', "/");
-        BufferedHost {
-            cwd: cwd.clone(),
-            sandbox_root: cwd,
-            ..BufferedHost::default()
-        }
-    }
-
-    fn write_host_core_workspace(destination: &Path) {
-        write_file(
-            &destination.join("book.toml"),
-            "name = \"runtime_host_core\"\nkind = \"app\"\n",
-        );
-        write_file(
-            &destination.join("src").join("shelf.arc"),
-            concat!(
-                "import std.collections.list\n",
-                "import std.fs\n",
-                "import std.io\n",
-                "import std.path\n",
-                "import std.text\n",
-                "use std.result.Result\n",
-                "\n",
-                "fn list_arc_files(root: Str) -> List[Str]:\n",
-                "    let mut pending = std.collections.list.new[Str] :: :: call\n",
-                "    let mut files = std.collections.list.new[Str] :: :: call\n",
-                "    pending :: root :: push\n",
-                "    while (pending :: :: len) > 0:\n",
-                "        let path = pending :: :: pop\n",
-                "        if std.fs.is_dir :: path :: call:\n",
-                "            let mut entries = match (std.fs.list_dir :: path :: call):\n",
-                "                Result.Ok(found) => found\n",
-                "                Result.Err(_) => std.collections.list.new[Str] :: :: call\n",
-                "            while (entries :: :: len) > 0:\n",
-                "                pending :: (entries :: :: pop) :: push\n",
-                "            continue\n",
-                "        if (std.path.ext :: path :: call) != \"arc\":\n",
-                "            continue\n",
-                "        files :: path :: push\n",
-                "    return files\n",
-                "\n",
-                "fn read_text_or_empty(path: Str) -> Str:\n",
-                "    return match (std.fs.read_text :: path :: call):\n",
-                "        Result.Ok(text) => text\n",
-                "        Result.Err(_) => \"\"\n",
-                "\n",
-                "fn main() -> Int:\n",
-                "    let root = std.path.cwd :: :: call\n",
-                "    let mut files = list_arc_files :: root :: call\n",
-                "    let mut count = 0\n",
-                "    let mut checksum = 0\n",
-                "    while (files :: :: len) > 0:\n",
-                "        let file = files :: :: pop\n",
-                "        let text = read_text_or_empty :: file :: call\n",
-                "        let size = std.text.len_bytes :: text :: call\n",
-                "        std.io.print[Str] :: file :: call\n",
-                "        count += 1\n",
-                "        checksum = ((checksum * 131) + size + 7) % 2147483647\n",
-                "    let report_dir = std.path.join :: root, \".arcana\" :: call\n",
-                "    let logs_dir = std.path.join :: report_dir, \"logs\" :: call\n",
-                "    let report_path = std.path.join :: logs_dir, \"host_core_report.txt\" :: call\n",
-                "    std.fs.mkdir_all :: logs_dir :: call\n",
-                "    std.fs.write_text :: report_path, \"Arcana Runtime Host Core v1\\n\" :: call\n",
-                "    std.io.print[Int] :: count :: call\n",
-                "    std.io.print[Int] :: checksum :: call\n",
-                "    return 0\n",
-            ),
-        );
-        write_file(
-            &destination.join("src").join("types.arc"),
-            "// test types\n",
-        );
-    }
-
-    fn sample_return_artifact() -> AotPackageArtifact {
-        AotPackageArtifact {
-            format: AOT_INTERNAL_FORMAT,
-            package_name: "hello".to_string(),
-            root_module_id: "hello".to_string(),
-            direct_deps: vec!["std".to_string()],
-            module_count: 1,
-            dependency_edge_count: 1,
-            dependency_rows: vec!["source=hello:import:std.io:".to_string()],
-            exported_surface_rows: vec!["module=hello:export:fn:fn main() -> Int:".to_string()],
-            runtime_requirements: vec!["std.io".to_string()],
-            entrypoints: vec![AotEntrypointArtifact {
-                module_id: "hello".to_string(),
-                symbol_name: "main".to_string(),
-                symbol_kind: "fn".to_string(),
-                is_async: false,
-                exported: true,
-            }],
-            routines: vec![AotRoutineArtifact {
-                module_id: "hello".to_string(),
-                symbol_name: "main".to_string(),
-                symbol_kind: "fn".to_string(),
-                exported: true,
-                is_async: false,
-                type_param_rows: Vec::new(),
-                behavior_attr_rows: Vec::new(),
-                param_rows: Vec::new(),
-                signature_row: "fn main() -> Int:".to_string(),
-                intrinsic_impl: None,
-                foreword_rows: Vec::new(),
-                rollup_rows: Vec::new(),
-                statement_rows: vec![
-                    "stmt(core=return(int(7)),forewords=[],rollups=[])".to_string(),
-                ],
-            }],
-            modules: vec![AotPackageModuleArtifact {
-                module_id: "hello".to_string(),
-                symbol_count: 1,
-                item_count: 2,
-                line_count: 2,
-                non_empty_line_count: 2,
-                directive_rows: vec!["module=hello:import:std.io:".to_string()],
-                lang_item_rows: Vec::new(),
-                exported_surface_rows: vec!["module=hello:export:fn:fn main() -> Int:".to_string()],
-            }],
-        }
-    }
-
-    fn sample_print_artifact() -> AotPackageArtifact {
-        AotPackageArtifact {
-            format: AOT_INTERNAL_FORMAT,
-            package_name: "hello".to_string(),
-            root_module_id: "hello".to_string(),
-            direct_deps: vec!["std".to_string()],
-            module_count: 1,
-            dependency_edge_count: 2,
-            dependency_rows: vec![
-                "source=hello:import:std.io:".to_string(),
-                "source=hello:use:std.io:io".to_string(),
-            ],
-            exported_surface_rows: vec![],
-            runtime_requirements: vec!["std.io".to_string()],
-            entrypoints: vec![AotEntrypointArtifact {
-                module_id: "hello".to_string(),
-                symbol_name: "main".to_string(),
-                symbol_kind: "fn".to_string(),
-                is_async: false,
-                exported: false,
-            }],
-            routines: vec![AotRoutineArtifact {
-                module_id: "hello".to_string(),
-                symbol_name: "main".to_string(),
-                symbol_kind: "fn".to_string(),
-                exported: false,
-                is_async: false,
-                type_param_rows: Vec::new(),
-                behavior_attr_rows: Vec::new(),
-                param_rows: Vec::new(),
-                signature_row: "fn main():".to_string(),
-                intrinsic_impl: None,
-                foreword_rows: Vec::new(),
-                rollup_rows: Vec::new(),
-                statement_rows: vec![
-                    "stmt(core=expr(phrase(subject=generic(expr=member(path(io), print),types=[Str]),args=[str(\"\\\"hello, arcana\\\"\")],qualifier=call,attached=[])),forewords=[],rollups=[])".to_string(),
-                ],
-            }],
-            modules: vec![AotPackageModuleArtifact {
-                module_id: "hello".to_string(),
-                symbol_count: 1,
-                item_count: 4,
-                line_count: 4,
-                non_empty_line_count: 4,
-                directive_rows: vec![
-                    "module=hello:import:std.io:".to_string(),
-                    "module=hello:use:std.io:io".to_string(),
-                ],
-                lang_item_rows: Vec::new(),
-                exported_surface_rows: Vec::new(),
-            }],
-        }
-    }
-
-    #[test]
-    fn plan_from_artifact_links_entrypoints_to_routines() {
-        let plan =
-            plan_from_artifact(&sample_return_artifact()).expect("runtime plan should build");
-        assert_eq!(plan.entrypoints.len(), 1);
-        assert_eq!(plan.routines.len(), 1);
-        assert_eq!(plan.entrypoints[0].routine_index, 0);
-        assert_eq!(
-            plan.main_entrypoint()
-                .map(|entry| entry.symbol_name.as_str()),
-            Some("main")
-        );
-    }
-
-    #[test]
-    fn load_package_plan_reads_rendered_backend_artifact() {
-        let path = temp_artifact_path("load");
-        let rendered = format!(
-            "member = \"hello\"\nkind = \"app\"\nfingerprint = \"fp\"\napi_fingerprint = \"api\"\n{}",
-            render_package_artifact(&sample_return_artifact())
-        );
-        fs::write(&path, rendered).expect("artifact should write");
-        let plan = load_package_plan(&path).expect("runtime plan should load");
-        assert_eq!(plan.package_name, "hello");
-        assert_eq!(plan.runtime_requirements, vec!["std.io".to_string()]);
-        let _ = fs::remove_file(path);
-    }
-
-    #[test]
-    fn execute_main_returns_exit_code() {
-        let plan =
-            plan_from_artifact(&sample_return_artifact()).expect("runtime plan should build");
-        let mut host = BufferedHost::default();
-        let code = execute_main(&plan, &mut host).expect("runtime should execute");
-        assert_eq!(code, 7);
-        assert!(host.stdout.is_empty());
-    }
-
-    #[test]
-    fn execute_main_prints_hello() {
-        let plan = plan_from_artifact(&sample_print_artifact()).expect("runtime plan should build");
-        let mut host = BufferedHost::default();
-        let code = execute_main(&plan, &mut host).expect("runtime should execute");
-        assert_eq!(code, 0);
-        assert_eq!(host.stdout, vec!["hello, arcana".to_string()]);
-    }
-
-    #[test]
-    fn execute_main_runs_counter_style_workspace_artifact() {
-        let dir = temp_workspace_dir("counter");
-        write_file(
-            &dir.join("book.toml"),
-            "name = \"runtime_counter\"\nkind = \"app\"\n",
-        );
-        write_file(
-            &dir.join("src").join("shelf.arc"),
-            concat!(
-                "import std.io\n",
-                "use std.io as io\n",
-                "fn main() -> Int:\n",
-                "    let mut i = 0\n",
-                "    while i < 3:\n",
-                "        io.print[Int] :: i :: call\n",
-                "        i += 1\n",
-                "    return 0\n",
-            ),
-        );
-        write_file(&dir.join("src").join("types.arc"), "// test types\n");
-
-        let graph = load_workspace_graph(&dir).expect("workspace graph should load");
-        let checked = check_workspace_graph(&graph).expect("workspace should check");
-        let fingerprints = compute_member_fingerprints_for_checked_workspace(&graph, &checked)
-            .expect("fingerprints should compute");
-        let order = plan_workspace(&graph).expect("workspace order should plan");
-        let statuses =
-            plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-        execute_build(&graph, &statuses).expect("build should execute");
-
-        let artifact_path = graph.root_dir.join(
-            &statuses
-                .iter()
-                .find(|status| status.member == "runtime_counter")
-                .expect("app artifact status should exist")
-                .artifact_rel_path,
-        );
-        let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
-        let mut host = BufferedHost::default();
-        let code = execute_main(&plan, &mut host).expect("runtime should execute");
-
-        assert_eq!(code, 0);
-        assert_eq!(
-            host.stdout,
-            vec!["0".to_string(), "1".to_string(), "2".to_string()]
-        );
-
-        let _ = fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn execute_main_runs_routine_calls_with_std_args() {
-        let dir = temp_workspace_dir("args");
-        write_file(
-            &dir.join("book.toml"),
-            "name = \"runtime_args\"\nkind = \"app\"\n",
-        );
-        write_file(
-            &dir.join("src").join("shelf.arc"),
-            concat!(
-                "import std.args\n",
-                "import std.io\n",
-                "fn add_one(value: Int) -> Int:\n",
-                "    return value + 1\n",
-                "fn main() -> Int:\n",
-                "    let argc = std.args.count :: :: call\n",
-                "    let total = add_one :: argc :: call\n",
-                "    std.io.print[Int] :: total :: call\n",
-                "    if argc > 0:\n",
-                "        let first = std.args.get :: 0 :: call\n",
-                "        std.io.print[Str] :: first :: call\n",
-                "    return 0\n",
-            ),
-        );
-        write_file(&dir.join("src").join("types.arc"), "// test types\n");
-
-        let graph = load_workspace_graph(&dir).expect("workspace graph should load");
-        let checked = check_workspace_graph(&graph).expect("workspace should check");
-        let fingerprints = compute_member_fingerprints_for_checked_workspace(&graph, &checked)
-            .expect("fingerprints should compute");
-        let order = plan_workspace(&graph).expect("workspace order should plan");
-        let statuses =
-            plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-        execute_build(&graph, &statuses).expect("build should execute");
-
-        let artifact_path = graph.root_dir.join(
-            &statuses
-                .iter()
-                .find(|status| status.member == "runtime_args")
-                .expect("app artifact status should exist")
-                .artifact_rel_path,
-        );
-        let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
-        let mut host = BufferedHost {
-            args: vec!["alpha.arc".to_string(), "beta.arc".to_string()],
-            ..BufferedHost::default()
-        };
-        let code = execute_main(&plan, &mut host).expect("runtime should execute");
-
-        assert_eq!(code, 0);
-        assert_eq!(host.stdout, vec!["3".to_string(), "alpha.arc".to_string()]);
-
-        let _ = fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn execute_main_runs_linked_std_text_routine() {
-        let dir = temp_workspace_dir("std_text");
-        write_file(
-            &dir.join("book.toml"),
-            "name = \"runtime_std_text\"\nkind = \"app\"\n",
-        );
-        write_file(
-            &dir.join("src").join("shelf.arc"),
-            concat!(
-                "import std.io\n",
-                "import std.text\n",
-                "fn main() -> Int:\n",
-                "    std.io.print[Int] :: (std.text.find :: \"abc\", 0, \"b\" :: call) :: call\n",
-                "    return 0\n",
-            ),
-        );
-        write_file(&dir.join("src").join("types.arc"), "// test types\n");
-
-        let graph = load_workspace_graph(&dir).expect("workspace graph should load");
-        let checked = check_workspace_graph(&graph).expect("workspace should check");
-        let fingerprints = compute_member_fingerprints_for_checked_workspace(&graph, &checked)
-            .expect("fingerprints should compute");
-        let order = plan_workspace(&graph).expect("workspace order should plan");
-        let statuses =
-            plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-        execute_build(&graph, &statuses).expect("build should execute");
-
-        let artifact_path = graph.root_dir.join(
-            &statuses
-                .iter()
-                .find(|status| status.member == "runtime_std_text")
-                .expect("app artifact status should exist")
-                .artifact_rel_path,
-        );
-        let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
-        let mut host = BufferedHost::default();
-        let code = execute_main(&plan, &mut host).expect("runtime should execute");
-
-        assert_eq!(code, 0);
-        assert_eq!(host.stdout, vec!["1".to_string()]);
-
-        let _ = fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn execute_main_runs_linked_std_array_routines() {
-        let dir = temp_workspace_dir("std_array");
-        write_file(
-            &dir.join("book.toml"),
-            "name = \"runtime_std_array\"\nkind = \"app\"\n",
-        );
-        write_file(
-            &dir.join("src").join("shelf.arc"),
-            concat!(
-                "import std.collections.array\n",
-                "import std.collections.list\n",
-                "import std.io\n",
-                "fn main() -> Int:\n",
-                "    let mut values = std.collections.list.new[Int] :: :: call\n",
-                "    values :: 4 :: push\n",
-                "    values :: 9 :: push\n",
-                "    let arr = std.collections.array.from_list[Int] :: values :: call\n",
-                "    let mut sum = 0\n",
-                "    for value in arr:\n",
-                "        sum += value\n",
-                "    std.io.print[Int] :: (arr :: :: len) :: call\n",
-                "    std.io.print[Int] :: sum :: call\n",
-                "    return 0\n",
-            ),
-        );
-        write_file(&dir.join("src").join("types.arc"), "// test types\n");
-
-        let graph = load_workspace_graph(&dir).expect("workspace graph should load");
-        let checked = check_workspace_graph(&graph).expect("workspace should check");
-        let fingerprints = compute_member_fingerprints_for_checked_workspace(&graph, &checked)
-            .expect("fingerprints should compute");
-        let order = plan_workspace(&graph).expect("workspace order should plan");
-        let statuses =
-            plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-        execute_build(&graph, &statuses).expect("build should execute");
-
-        let artifact_path = graph.root_dir.join(
-            &statuses
-                .iter()
-                .find(|status| status.member == "runtime_std_array")
-                .expect("app artifact status should exist")
-                .artifact_rel_path,
-        );
-        let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
-        let mut host = BufferedHost::default();
-        let code = execute_main(&plan, &mut host).expect("runtime should execute");
-
-        assert_eq!(code, 0);
-        assert_eq!(host.stdout, vec!["2".to_string(), "13".to_string()]);
-
-        let _ = fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn execute_main_runs_linked_std_host_text_bytes_io_env_routines() {
-        let dir = temp_workspace_dir("std_host_misc");
-        write_file(
-            &dir.join("book.toml"),
-            "name = \"runtime_std_host_misc\"\nkind = \"app\"\n",
-        );
-        write_file(
-            &dir.join("src").join("shelf.arc"),
-            concat!(
-                "import std.bytes\n",
-                "import std.env\n",
-                "import std.io\n",
-                "import std.text\n",
-                "use std.result.Result\n",
-                "fn main() -> Int:\n",
-                "    let label = std.env.get_or :: \"ARCANA_LABEL\", \"unset\" :: call\n",
-                "    let input = match (std.io.read_line :: :: call):\n",
-                "        Result.Ok(value) => value\n",
-                "        Result.Err(err) => err\n",
-                "    let lines = std.text.split_lines :: \"alpha\\r\\nbeta\\n\" :: call\n",
-                "    let bytes = std.bytes.from_str_utf8 :: input :: call\n",
-                "    let mid = std.bytes.slice :: bytes, 1, 4 :: call\n",
-                "    std.io.flush_stdout :: :: call\n",
-                "    std.io.flush_stderr :: :: call\n",
-                "    std.io.print[Str] :: label :: call\n",
-                "    std.io.print[Bool] :: (std.text.starts_with :: input, \"he\" :: call) :: call\n",
-                "    std.io.print[Bool] :: (std.text.ends_with :: input, \"lo\" :: call) :: call\n",
-                "    std.io.print[Int] :: (lines :: :: len) :: call\n",
-                "    std.io.print[Str] :: (std.text.from_int :: (std.bytes.len :: bytes :: call) :: call) :: call\n",
-                "    std.io.print[Int] :: (std.bytes.at :: bytes, 1 :: call) :: call\n",
-                "    std.io.print[Str] :: (std.bytes.to_str_utf8 :: mid :: call) :: call\n",
-                "    std.io.print[Str] :: (std.bytes.sha256_hex :: bytes :: call) :: call\n",
-                "    return 0\n",
-            ),
-        );
-        write_file(&dir.join("src").join("types.arc"), "// test types\n");
-
-        let graph = load_workspace_graph(&dir).expect("workspace graph should load");
-        let checked = check_workspace_graph(&graph).expect("workspace should check");
-        let fingerprints = compute_member_fingerprints_for_checked_workspace(&graph, &checked)
-            .expect("fingerprints should compute");
-        let order = plan_workspace(&graph).expect("workspace order should plan");
-        let statuses =
-            plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-        execute_build(&graph, &statuses).expect("build should execute");
-
-        let artifact_path = graph.root_dir.join(
-            &statuses
-                .iter()
-                .find(|status| status.member == "runtime_std_host_misc")
-                .expect("app artifact status should exist")
-                .artifact_rel_path,
-        );
-        let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
-        let mut host = BufferedHost {
-            stdin: vec!["hello".to_string()],
-            env: std::collections::BTreeMap::from([(
-                "ARCANA_LABEL".to_string(),
-                "runtime".to_string(),
-            )]),
-            ..BufferedHost::default()
-        };
-        let code = execute_main(&plan, &mut host).expect("runtime should execute");
-
-        assert_eq!(code, 0);
-        assert_eq!(host.stdout_flushes, 1);
-        assert_eq!(host.stderr_flushes, 1);
-        assert_eq!(
-            host.stdout,
-            vec![
-                "runtime".to_string(),
-                "true".to_string(),
-                "true".to_string(),
-                "2".to_string(),
-                "5".to_string(),
-                "101".to_string(),
-                "ell".to_string(),
-                "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824".to_string(),
-            ]
-        );
-
-        let _ = fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn execute_main_runs_linked_std_fs_bytes_routines() {
-        let dir = temp_workspace_dir("std_fs_bytes");
-        write_file(
-            &dir.join("book.toml"),
-            "name = \"runtime_std_fs_bytes\"\nkind = \"app\"\n",
-        );
-        write_file(
-            &dir.join("src").join("shelf.arc"),
-            concat!(
-                "import std.bytes\n",
-                "import std.fs\n",
-                "import std.io\n",
-                "import std.path\n",
-                "use std.result.Result\n",
-                "fn unwrap_unit(result: Result[Unit, Str]) -> Bool:\n",
-                "    return match result:\n",
-                "        Result.Ok(_) => true\n",
-                "        Result.Err(_) => false\n",
-                "fn unwrap_bytes(result: Result[Array[Int], Str]) -> Array[Int]:\n",
-                "    return match result:\n",
-                "        Result.Ok(value) => value\n",
-                "        Result.Err(_) => std.bytes.from_str_utf8 :: \"\" :: call\n",
-                "fn unwrap_int(result: Result[Int, Str]) -> Int:\n",
-                "    return match result:\n",
-                "        Result.Ok(value) => value\n",
-                "        Result.Err(_) => -1\n",
-                "fn main() -> Int:\n",
-                "    let root = std.path.cwd :: :: call\n",
-                "    let data_dir = std.path.join :: root, \"data\" :: call\n",
-                "    let nested_dir = std.path.join :: data_dir, \"nested\" :: call\n",
-                "    let empty_dir = std.path.join :: root, \"empty\" :: call\n",
-                "    let source = std.path.join :: data_dir, \"payload.bin\" :: call\n",
-                "    let copied = std.path.join :: nested_dir, \"copied.bin\" :: call\n",
-                "    let moved = std.path.join :: root, \"moved.bin\" :: call\n",
-                "    if not (unwrap_unit :: (std.fs.create_dir :: empty_dir :: call) :: call):\n",
-                "        return 1\n",
-                "    if not (unwrap_unit :: (std.fs.remove_dir :: empty_dir :: call) :: call):\n",
-                "        return 2\n",
-                "    if not (unwrap_unit :: (std.fs.create_dir :: data_dir :: call) :: call):\n",
-                "        return 3\n",
-                "    if not (unwrap_unit :: (std.fs.mkdir_all :: nested_dir :: call) :: call):\n",
-                "        return 4\n",
-                "    let payload = std.bytes.from_str_utf8 :: \"arc\" :: call\n",
-                "    if not (unwrap_unit :: (std.fs.write_bytes :: source, payload :: call) :: call):\n",
-                "        return 5\n",
-                "    if not (unwrap_unit :: (std.fs.copy_file :: source, copied :: call) :: call):\n",
-                "        return 6\n",
-                "    if not (unwrap_unit :: (std.fs.rename :: copied, moved :: call) :: call):\n",
-                "        return 7\n",
-                "    let read_back = unwrap_bytes :: (std.fs.read_bytes :: moved :: call) :: call\n",
-                "    let size = unwrap_int :: (std.fs.file_size :: moved :: call) :: call\n",
-                "    let modified = unwrap_int :: (std.fs.modified_unix_ms :: moved :: call) :: call\n",
-                "    std.io.print[Bool] :: (std.fs.exists :: source :: call) :: call\n",
-                "    std.io.print[Str] :: (std.bytes.to_str_utf8 :: read_back :: call) :: call\n",
-                "    std.io.print[Int] :: size :: call\n",
-                "    std.io.print[Bool] :: (modified > 0) :: call\n",
-                "    if not (unwrap_unit :: (std.fs.remove_file :: source :: call) :: call):\n",
-                "        return 8\n",
-                "    if not (unwrap_unit :: (std.fs.remove_file :: moved :: call) :: call):\n",
-                "        return 9\n",
-                "    if not (unwrap_unit :: (std.fs.remove_dir_all :: data_dir :: call) :: call):\n",
-                "        return 10\n",
-                "    std.io.print[Bool] :: (std.fs.exists :: data_dir :: call) :: call\n",
-                "    return 0\n",
-            ),
-        );
-        write_file(&dir.join("src").join("types.arc"), "// test types\n");
-
-        let graph = load_workspace_graph(&dir).expect("workspace graph should load");
-        let checked = check_workspace_graph(&graph).expect("workspace should check");
-        let fingerprints = compute_member_fingerprints_for_checked_workspace(&graph, &checked)
-            .expect("fingerprints should compute");
-        let order = plan_workspace(&graph).expect("workspace order should plan");
-        let statuses =
-            plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-        execute_build(&graph, &statuses).expect("build should execute");
-
-        let artifact_path = graph.root_dir.join(
-            &statuses
-                .iter()
-                .find(|status| status.member == "runtime_std_fs_bytes")
-                .expect("app artifact status should exist")
-                .artifact_rel_path,
-        );
-        let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
-        let cwd = dir.join("fixture").to_string_lossy().replace('\\', "/");
-        fs::create_dir_all(dir.join("fixture")).expect("fixture root should exist");
-        let mut host = BufferedHost {
-            cwd: cwd.clone(),
-            sandbox_root: cwd,
-            ..BufferedHost::default()
-        };
-        let code = execute_main(&plan, &mut host).expect("runtime should execute");
-
-        assert_eq!(code, 0);
-        assert_eq!(
-            host.stdout,
-            vec![
-                "true".to_string(),
-                "arc".to_string(),
-                "3".to_string(),
-                "true".to_string(),
-                "false".to_string(),
-            ]
-        );
-
-        let fixture_root = dir.join("fixture");
-        assert!(!fixture_root.join("data").exists());
-        assert!(!fixture_root.join("moved.bin").exists());
-        assert!(!fixture_root.join("empty").exists());
-
-        let _ = fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn execute_main_runs_linked_std_fs_stream_routines() {
-        let dir = temp_workspace_dir("std_fs_streams");
-        write_file(
-            &dir.join("book.toml"),
-            "name = \"runtime_std_fs_streams\"\nkind = \"app\"\n",
-        );
-        write_file(
-            &dir.join("src").join("shelf.arc"),
-            concat!(
-                "import std.bytes\n",
-                "import std.fs\n",
-                "use std.result.Result\n",
-                "fn write_and_close(take stream: std.fs.FileStream, read bytes: Array[Int]) -> Int:\n",
-                "    let mut stream = stream\n",
-                "    let wrote = match (std.fs.stream_write :: stream, bytes :: call):\n",
-                "        Result.Ok(count) => count\n",
-                "        Result.Err(_) => -1\n",
-                "    if wrote < 0:\n",
-                "        return 1\n",
-                "    if wrote != (std.bytes.len :: bytes :: call):\n",
-                "        return 2\n",
-                "    let close_result = std.fs.stream_close :: stream :: call\n",
-                "    if close_result :: :: is_err:\n",
-                "        return 3\n",
-                "    return 0\n",
-                "fn verify_read(take stream: std.fs.FileStream) -> Int:\n",
-                "    let mut stream = stream\n",
-                "    let empty = std.bytes.from_str_utf8 :: \"\" :: call\n",
-                "    let first_result = std.fs.stream_read :: stream, 5 :: call\n",
-                "    if first_result :: :: is_err:\n",
-                "        return 4\n",
-                "    let first = match first_result:\n",
-                "        Result.Ok(bytes) => bytes\n",
-                "        Result.Err(_) => empty\n",
-                "    if (std.bytes.to_str_utf8 :: first :: call) != \"hello\":\n",
-                "        return 5\n",
-                "    let before_eof_result = std.fs.stream_eof :: stream :: call\n",
-                "    if before_eof_result :: :: is_err:\n",
-                "        return 6\n",
-                "    let before_eof = match before_eof_result:\n",
-                "        Result.Ok(value) => value\n",
-                "        Result.Err(_) => false\n",
-                "    if before_eof:\n",
-                "        return 7\n",
-                "    let second_result = std.fs.stream_read :: stream, 5 :: call\n",
-                "    if second_result :: :: is_err:\n",
-                "        return 8\n",
-                "    let second = match second_result:\n",
-                "        Result.Ok(bytes) => bytes\n",
-                "        Result.Err(_) => empty\n",
-                "    if (std.bytes.to_str_utf8 :: second :: call) != \"!\":\n",
-                "        return 9\n",
-                "    let after_eof_result = std.fs.stream_eof :: stream :: call\n",
-                "    if after_eof_result :: :: is_err:\n",
-                "        return 10\n",
-                "    let after_eof = match after_eof_result:\n",
-                "        Result.Ok(value) => value\n",
-                "        Result.Err(_) => false\n",
-                "    if not after_eof:\n",
-                "        return 11\n",
-                "    let close_result = std.fs.stream_close :: stream :: call\n",
-                "    if close_result :: :: is_err:\n",
-                "        return 12\n",
-                "    return 0\n",
-                "fn main() -> Int:\n",
-                "    let hello = std.bytes.from_str_utf8 :: \"hello\" :: call\n",
-                "    let bang = std.bytes.from_str_utf8 :: \"!\" :: call\n",
-                "    let write_status = match (std.fs.stream_open_write :: \"notes.bin\", false :: call):\n",
-                "        Result.Ok(stream) => write_and_close :: stream, hello :: call\n",
-                "        Result.Err(_) => 20\n",
-                "    if write_status != 0:\n",
-                "        return 21\n",
-                "    let append_status = match (std.fs.stream_open_write :: \"notes.bin\", true :: call):\n",
-                "        Result.Ok(stream) => write_and_close :: stream, bang :: call\n",
-                "        Result.Err(_) => 22\n",
-                "    if append_status != 0:\n",
-                "        return 23\n",
-                "    let read_status = match (std.fs.stream_open_read :: \"notes.bin\" :: call):\n",
-                "        Result.Ok(stream) => verify_read :: stream :: call\n",
-                "        Result.Err(_) => 24\n",
-                "    if read_status != 0:\n",
-                "        return 25\n",
-                "    return 0\n",
-            ),
-        );
-        write_file(&dir.join("src").join("types.arc"), "// test types\n");
-
-        let graph = load_workspace_graph(&dir).expect("workspace graph should load");
-        let checked = check_workspace_graph(&graph).expect("workspace should check");
-        let fingerprints = compute_member_fingerprints_for_checked_workspace(&graph, &checked)
-            .expect("fingerprints should compute");
-        let order = plan_workspace(&graph).expect("workspace order should plan");
-        let statuses =
-            plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-        execute_build(&graph, &statuses).expect("build should execute");
-
-        let artifact_path = graph.root_dir.join(
-            &statuses
-                .iter()
-                .find(|status| status.member == "runtime_std_fs_streams")
-                .expect("app artifact status should exist")
-                .artifact_rel_path,
-        );
-        let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
-        let fixture_root = dir.join("fixture");
-        fs::create_dir_all(&fixture_root).expect("fixture root should exist");
-        let cwd = fixture_root.to_string_lossy().replace('\\', "/");
-        let mut host = BufferedHost {
-            cwd: cwd.clone(),
-            sandbox_root: cwd,
-            ..BufferedHost::default()
-        };
-        let code = execute_main(&plan, &mut host).expect("runtime should execute");
-
-        assert_eq!(code, 0);
-        assert_eq!(
-            fs::read_to_string(fixture_root.join("notes.bin")).expect("streamed file should exist"),
-            "hello!"
-        );
-
-        let _ = fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn execute_main_runs_local_record_constructor_and_impl_method() {
-        let dir = temp_workspace_dir("record_method");
-        write_file(
-            &dir.join("book.toml"),
-            "name = \"runtime_record_method\"\nkind = \"app\"\n",
-        );
-        write_file(
-            &dir.join("src").join("shelf.arc"),
-            concat!(
-                "import std.io\n",
-                "record Counter:\n",
-                "    value: Int\n",
-                "impl Counter:\n",
-                "    fn double(read self: Counter) -> Int:\n",
-                "        return self.value * 2\n",
-                "fn main() -> Int:\n",
-                "    let counter = Counter :: value = 7 :: call\n",
-                "    std.io.print[Int] :: counter.value :: call\n",
-                "    std.io.print[Int] :: (counter :: :: double) :: call\n",
-                "    return 0\n",
-            ),
-        );
-        write_file(&dir.join("src").join("types.arc"), "// test types\n");
-
-        let graph = load_workspace_graph(&dir).expect("workspace graph should load");
-        let checked = check_workspace_graph(&graph).expect("workspace should check");
-        let fingerprints = compute_member_fingerprints_for_checked_workspace(&graph, &checked)
-            .expect("fingerprints should compute");
-        let order = plan_workspace(&graph).expect("workspace order should plan");
-        let statuses =
-            plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-        execute_build(&graph, &statuses).expect("build should execute");
-
-        let artifact_path = graph.root_dir.join(
-            &statuses
-                .iter()
-                .find(|status| status.member == "runtime_record_method")
-                .expect("app artifact status should exist")
-                .artifact_rel_path,
-        );
-        let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
-        let mut host = BufferedHost::default();
-        let code = execute_main(&plan, &mut host).expect("runtime should execute");
-
-        assert_eq!(code, 0);
-        assert_eq!(host.stdout, vec!["7".to_string(), "14".to_string()]);
-
-        let _ = fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn execute_main_runs_linked_std_process_routines() {
-        let dir = temp_workspace_dir("std_process");
-        write_file(
-            &dir.join("book.toml"),
-            "name = \"runtime_std_process\"\nkind = \"app\"\n",
-        );
-        let (program, status_a, status_b, capture_a, capture_b) = if cfg!(windows) {
-            ("cmd", "/C", "exit 7", "/C", "echo hello")
-        } else {
-            ("sh", "-c", "exit 7", "-c", "printf hello")
-        };
-        write_file(
-            &dir.join("src").join("shelf.arc"),
-            &format!(
-                concat!(
-                    "import std.bytes\n",
-                    "import std.collections.list\n",
-                    "import std.io\n",
-                    "import std.process\n",
-                    "import std.text\n",
-                    "use std.result.Result\n",
-                    "fn status_args() -> List[Str]:\n",
-                    "    let mut args = std.collections.list.new[Str] :: :: call\n",
-                    "    args :: {status_a:?} :: push\n",
-                    "    args :: {status_b:?} :: push\n",
-                    "    return args\n",
-                    "fn capture_args() -> List[Str]:\n",
-                    "    let mut args = std.collections.list.new[Str] :: :: call\n",
-                    "    args :: {capture_a:?} :: push\n",
-                    "    args :: {capture_b:?} :: push\n",
-                    "    return args\n",
-                    "fn main() -> Int:\n",
-                    "    let status = match (std.process.exec_status :: {program:?}, (status_args :: :: call) :: call):\n",
-                    "        Result.Ok(value) => value\n",
-                    "        Result.Err(_) => -1\n",
-                    "    let capture_result = std.process.exec_capture :: {program:?}, (capture_args :: :: call) :: call\n",
-                    "    if capture_result :: :: is_err:\n",
-                    "        return 99\n",
-                    "    let empty = std.bytes.from_str_utf8 :: \"\" :: call\n",
-                    "    let capture = capture_result :: (std.process.ExecCapture :: status = 0, output = (empty, empty), utf8 = (true, true) :: call) :: unwrap_or\n",
-                    "    let text = match (capture :: :: stdout_text):\n",
-                    "        Result.Ok(value) => value\n",
-                    "        Result.Err(_) => \"\"\n",
-                    "    std.io.print[Int] :: status :: call\n",
-                    "    std.io.print[Bool] :: (capture :: :: success) :: call\n",
-                    "    std.io.print[Bool] :: (std.text.starts_with :: text, \"hello\" :: call) :: call\n",
-                    "    return 0\n",
-                ),
-                program = program,
-                status_a = status_a,
-                status_b = status_b,
-                capture_a = capture_a,
-                capture_b = capture_b,
-            ),
-        );
-        write_file(&dir.join("src").join("types.arc"), "// test types\n");
-
-        let graph = load_workspace_graph(&dir).expect("workspace graph should load");
-        let checked = check_workspace_graph(&graph).expect("workspace should check");
-        let fingerprints = compute_member_fingerprints_for_checked_workspace(&graph, &checked)
-            .expect("fingerprints should compute");
-        let order = plan_workspace(&graph).expect("workspace order should plan");
-        let statuses =
-            plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-        execute_build(&graph, &statuses).expect("build should execute");
-
-        let artifact_path = graph.root_dir.join(
-            &statuses
-                .iter()
-                .find(|status| status.member == "runtime_std_process")
-                .expect("app artifact status should exist")
-                .artifact_rel_path,
-        );
-        let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
-        let mut host = BufferedHost {
-            allow_process: true,
-            ..BufferedHost::default()
-        };
-        let code = execute_main(&plan, &mut host).expect("runtime should execute");
-
-        assert_eq!(code, 0);
-        assert_eq!(
-            host.stdout,
-            vec!["7".to_string(), "true".to_string(), "true".to_string()]
-        );
-
-        let _ = fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn execute_main_runs_linked_std_option_routines() {
-        let dir = temp_workspace_dir("std_option");
-        write_file(
-            &dir.join("book.toml"),
-            "name = \"runtime_std_option\"\nkind = \"app\"\n",
-        );
-        write_file(
-            &dir.join("src").join("shelf.arc"),
-            concat!(
-                "import std.option\n",
-                "import std.io\n",
-                "use std.option.Option\n",
-                "fn main() -> Int:\n",
-                "    let some = Option.Some[Int] :: 5 :: call\n",
-                "    let none = Option.None[Int] :: :: call\n",
-                "    std.io.print[Bool] :: (some :: :: is_some) :: call\n",
-                "    std.io.print[Bool] :: (none :: :: is_none) :: call\n",
-                "    std.io.print[Int] :: (some :: 0 :: unwrap_or) :: call\n",
-                "    std.io.print[Int] :: (none :: 9 :: unwrap_or) :: call\n",
-                "    return 0\n",
-            ),
-        );
-        write_file(&dir.join("src").join("types.arc"), "// test types\n");
-
-        let graph = load_workspace_graph(&dir).expect("workspace graph should load");
-        let checked = check_workspace_graph(&graph).expect("workspace should check");
-        let fingerprints = compute_member_fingerprints_for_checked_workspace(&graph, &checked)
-            .expect("fingerprints should compute");
-        let order = plan_workspace(&graph).expect("workspace order should plan");
-        let statuses =
-            plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-        execute_build(&graph, &statuses).expect("build should execute");
-
-        let artifact_path = graph.root_dir.join(
-            &statuses
-                .iter()
-                .find(|status| status.member == "runtime_std_option")
-                .expect("app artifact status should exist")
-                .artifact_rel_path,
-        );
-        let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
-        let mut host = BufferedHost::default();
-        let code = execute_main(&plan, &mut host).expect("runtime should execute");
-
-        assert_eq!(code, 0);
-        assert_eq!(
-            host.stdout,
-            vec![
-                "true".to_string(),
-                "true".to_string(),
-                "5".to_string(),
-                "9".to_string(),
-            ]
-        );
-
-        let _ = fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn execute_main_runs_linked_std_ecs_behavior_routines() {
-        let dir = temp_workspace_dir("std_ecs");
-        write_file(
-            &dir.join("book.toml"),
-            "name = \"runtime_std_ecs\"\nkind = \"app\"\n",
-        );
-        write_file(
-            &dir.join("src").join("shelf.arc"),
-            concat!(
-                "import std.behaviors\n",
-                "import std.ecs\n",
-                "import std.io\n",
-                "record Position:\n",
-                "    x: Int\n",
-                "    y: Int\n",
-                "behavior[phase=startup] fn boot() -> Int:\n",
-                "    std.ecs.set_component[Int] :: 7 :: call\n",
-                "    let entity = std.ecs.spawn :: :: call\n",
-                "    std.ecs.set_component_at[Position] :: entity, (Position :: x = 4, y = 5 :: call) :: call\n",
-                "    return 0\n",
-                "behavior[phase=update] fn tick() -> Int:\n",
-                "    if not (std.ecs.has_component[Int] :: :: call):\n",
-                "        return 10\n",
-                "    let current = std.ecs.get_component[Int] :: :: call\n",
-                "    std.ecs.set_component[Int] :: current + 1 :: call\n",
-                "    return 0\n",
-                "system[phase=update] fn cleanup() -> Int:\n",
-                "    if not (std.ecs.has_component_at[Position] :: 1 :: call):\n",
-                "        return 20\n",
-                "    let pos = std.ecs.get_component_at[Position] :: 1 :: call\n",
-                "    if pos.x != 4:\n",
-                "        return 21\n",
-                "    if pos.y != 5:\n",
-                "        return 22\n",
-                "    let current = std.ecs.get_component[Int] :: :: call\n",
-                "    std.ecs.set_component[Int] :: current + 10 :: call\n",
-                "    std.ecs.remove_component_at[Position] :: 1 :: call\n",
-                "    std.ecs.despawn :: 1 :: call\n",
-                "    return 0\n",
-                "behavior[phase=render] fn render_only() -> Int:\n",
-                "    std.ecs.set_component[Int] :: 999 :: call\n",
-                "    return 0\n",
-                "fn main() -> Int:\n",
-                "    if (std.ecs.step_startup :: :: call) != 0:\n",
-                "        return 1\n",
-                "    if (std.behaviors.step :: \"update\" :: call) != 0:\n",
-                "        return 2\n",
-                "    if (std.ecs.get_component[Int] :: :: call) != 18:\n",
-                "        return 3\n",
-                "    if std.ecs.has_component_at[Position] :: 1 :: call:\n",
-                "        return 4\n",
-                "    std.io.print[Int] :: (std.ecs.get_component[Int] :: :: call) :: call\n",
-                "    return 0\n",
-            ),
-        );
-        write_file(&dir.join("src").join("types.arc"), "// test types\n");
-
-        let graph = load_workspace_graph(&dir).expect("workspace graph should load");
-        let checked = check_workspace_graph(&graph).expect("workspace should check");
-        let fingerprints = compute_member_fingerprints_for_checked_workspace(&graph, &checked)
-            .expect("fingerprints should compute");
-        let order = plan_workspace(&graph).expect("workspace order should plan");
-        let statuses =
-            plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-        execute_build(&graph, &statuses).expect("build should execute");
-
-        let artifact_path = graph.root_dir.join(
-            &statuses
-                .iter()
-                .find(|status| status.member == "runtime_std_ecs")
-                .expect("app artifact status should exist")
-                .artifact_rel_path,
-        );
-        let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
-        let mut host = BufferedHost::default();
-        let code = execute_main(&plan, &mut host).expect("runtime should execute");
-
-        assert_eq!(code, 0);
-        assert_eq!(host.stdout, vec!["18".to_string()]);
-
-        let _ = fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn execute_main_runs_owned_app_facade_workspace() {
-        let dir = temp_workspace_dir("owned_app_facade");
-        let desktop_dep = repo_root()
-            .join("grimoires")
-            .join("owned")
-            .join("app")
-            .join("arcana-desktop")
-            .to_string_lossy()
-            .replace('\\', "/");
-        let audio_dep = repo_root()
-            .join("grimoires")
-            .join("owned")
-            .join("app")
-            .join("arcana-audio")
-            .to_string_lossy()
-            .replace('\\', "/");
-        write_file(
-            &dir.join("book.toml"),
-            &format!(
-                concat!(
-                    "name = \"runtime_owned_app_facade\"\n",
-                    "kind = \"app\"\n",
-                    "[deps]\n",
-                    "arcana_desktop = {desktop_dep:?}\n",
-                    "arcana_audio = {audio_dep:?}\n",
-                ),
-                desktop_dep = desktop_dep,
-                audio_dep = audio_dep,
-            ),
-        );
-        write_file(&dir.join("fixture").join("clip.wav"), "wave");
-        write_file(
-            &dir.join("src").join("shelf.arc"),
-            concat!(
-                "import arcana_audio.clip\n",
-                "import arcana_audio.output\n",
-                "import arcana_audio.playback\n",
-                "import arcana_desktop.events\n",
-                "import arcana_desktop.input\n",
-                "import arcana_desktop.window\n",
-                "import std.io\n",
-                "use std.result.Result\n",
-                "fn with_playback(take win: std.window.Window, take device: std.audio.AudioDevice, take playback: std.audio.AudioPlayback) -> Int:\n",
-                "    std.io.print[Bool] :: (arcana_audio.playback.playing :: playback :: call) :: call\n",
-                "    let stop = arcana_audio.playback.stop :: playback :: call\n",
-                "    if stop :: :: is_err:\n",
-                "        return 7\n",
-                "    let close_audio = arcana_audio.output.close :: device :: call\n",
-                "    if close_audio :: :: is_err:\n",
-                "        return 8\n",
-                "    let close_window = arcana_desktop.window.close :: win :: call\n",
-                "    if close_window :: :: is_err:\n",
-                "        return 9\n",
-                "    return 0\n",
-                "fn with_clip(take win: std.window.Window, take device: std.audio.AudioDevice, read clip: std.audio.AudioBuffer) -> Int:\n",
-                "    let mut device = device\n",
-                "    let info = arcana_audio.clip.info :: clip :: call\n",
-                "    if info.sample_rate_hz != 48000:\n",
-                "        return 5\n",
-                "    let playback_result = arcana_audio.playback.play :: device, clip :: call\n",
-                "    return match playback_result:\n",
-                "        Result.Ok(value) => with_playback :: win, device, value :: call\n",
-                "        Result.Err(_) => 6\n",
-                "fn with_device(take win: std.window.Window, take device: std.audio.AudioDevice) -> Int:\n",
-                "    let mut device = device\n",
-                "    let cfg = arcana_audio.output.default_output_config :: :: call\n",
-                "    arcana_audio.output.configure :: device, cfg :: call\n",
-                "    std.io.print[Int] :: (arcana_audio.output.sample_rate_hz :: device :: call) :: call\n",
-                "    return match (arcana_audio.clip.load_wav :: \"clip.wav\" :: call):\n",
-                "        Result.Ok(value) => with_clip :: win, device, value :: call\n",
-                "        Result.Err(_) => 4\n",
-                "fn with_window(take win: std.window.Window) -> Int:\n",
-                "    let mut win = win\n",
-                "    if not (arcana_desktop.window.alive :: win :: call):\n",
-                "        return 2\n",
-                "    let frame = arcana_desktop.events.pump :: win :: call\n",
-                "    let key = arcana_desktop.input.key_code :: \"A\" :: call\n",
-                "    std.io.print[Bool] :: (arcana_desktop.input.key_down :: frame, key :: call) :: call\n",
-                "    return match (arcana_audio.output.default_output :: :: call):\n",
-                "        Result.Ok(value) => with_device :: win, value :: call\n",
-                "        Result.Err(_) => 3\n",
-                "fn main() -> Int:\n",
-                "    return match (arcana_desktop.window.open :: \"Arcana\", 320, 200 :: call):\n",
-                "        Result.Ok(value) => with_window :: value :: call\n",
-                "        Result.Err(_) => 1\n",
-            ),
-        );
-        write_file(&dir.join("src").join("types.arc"), "// test types\n");
-
-        let graph = load_workspace_graph(&dir).expect("workspace graph should load");
-        let checked = check_workspace_graph(&graph).expect("workspace should check");
-        let fingerprints = compute_member_fingerprints_for_checked_workspace(&graph, &checked)
-            .expect("fingerprints should compute");
-        let order = plan_workspace(&graph).expect("workspace order should plan");
-        let statuses =
-            plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-        execute_build(&graph, &statuses).expect("build should execute");
-
-        let artifact_path = graph.root_dir.join(
-            &statuses
-                .iter()
-                .find(|status| status.member == "runtime_owned_app_facade")
-                .expect("app artifact status should exist")
-                .artifact_rel_path,
-        );
-        let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
-        let fixture_root = dir.join("fixture");
-        let mut host = synthetic_window_canvas_host(&fixture_root);
-        let code = execute_main(&plan, &mut host).expect("runtime should execute");
-
-        assert_eq!(code, 0);
-        assert_eq!(
-            host.stdout,
-            vec!["true".to_string(), "48000".to_string(), "true".to_string()]
-        );
-
-        let _ = fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn execute_main_runs_synthetic_audio_runtime() {
-        let dir = temp_workspace_dir("std_audio");
-        write_file(
-            &dir.join("book.toml"),
-            "name = \"runtime_std_audio\"\nkind = \"app\"\n",
-        );
-        write_file(&dir.join("fixture").join("clip.wav"), "wave");
-        write_file(
-            &dir.join("src").join("shelf.arc"),
-            concat!(
-                "import std.audio\n",
-                "use std.result.Result\n",
-                "fn use_playback(take device: std.audio.AudioDevice, take playback: std.audio.AudioPlayback) -> Int:\n",
-                "    let mut device = device\n",
-                "    let mut playback = playback\n",
-                "    if not (playback :: :: playing):\n",
-                "        return 9\n",
-                "    if playback :: :: paused:\n",
-                "        return 10\n",
-                "    if playback :: :: finished:\n",
-                "        return 11\n",
-                "    playback :: :: pause\n",
-                "    if not (playback :: :: paused):\n",
-                "        return 12\n",
-                "    playback :: :: resume\n",
-                "    playback :: 500 :: set_gain_milli\n",
-                "    playback :: true :: set_looping\n",
-                "    if not (playback :: :: looping):\n",
-                "        return 13\n",
-                "    if (playback :: :: position_frames) != 0:\n",
-                "        return 14\n",
-                "    let stop = playback :: :: stop\n",
-                "    if stop :: :: is_err:\n",
-                "        return 15\n",
-                "    let close = std.audio.output_close :: device :: call\n",
-                "    if close :: :: is_err:\n",
-                "        return 16\n",
-                "    return 0\n",
-                "fn use_clip(take device: std.audio.AudioDevice, read clip: std.audio.AudioBuffer) -> Int:\n",
-                "    let mut device = device\n",
-                "    if (std.audio.buffer_frames :: clip :: call) != 64:\n",
-                "        return 5\n",
-                "    if (std.audio.buffer_channels :: clip :: call) != 2:\n",
-                "        return 6\n",
-                "    if (std.audio.buffer_sample_rate_hz :: clip :: call) != 48000:\n",
-                "        return 7\n",
-                "    let playback_result = std.audio.play_buffer :: device, clip :: call\n",
-                "    return match playback_result:\n",
-                "        Result.Ok(value) => use_playback :: device, value :: call\n",
-                "        Result.Err(_) => 8\n",
-                "fn use_device(take device: std.audio.AudioDevice) -> Int:\n",
-                "    let mut device = device\n",
-                "    if (std.audio.output_sample_rate_hz :: device :: call) != 48000:\n",
-                "        return 2\n",
-                "    if (std.audio.output_channels :: device :: call) != 2:\n",
-                "        return 3\n",
-                "    std.audio.output_set_gain_milli :: device, 750 :: call\n",
-                "    return match (std.audio.buffer_load_wav :: \"clip.wav\" :: call):\n",
-                "        Result.Ok(value) => use_clip :: device, value :: call\n",
-                "        Result.Err(_) => 4\n",
-                "fn main() -> Int:\n",
-                "    return match (std.audio.default_output :: :: call):\n",
-                "        Result.Ok(value) => use_device :: value :: call\n",
-                "        Result.Err(_) => 1\n",
-            ),
-        );
-        write_file(&dir.join("src").join("types.arc"), "// test types\n");
-
-        let graph = load_workspace_graph(&dir).expect("workspace graph should load");
-        let checked = check_workspace_graph(&graph).expect("workspace should check");
-        let fingerprints = compute_member_fingerprints_for_checked_workspace(&graph, &checked)
-            .expect("fingerprints should compute");
-        let order = plan_workspace(&graph).expect("workspace order should plan");
-        let statuses =
-            plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-        execute_build(&graph, &statuses).expect("build should execute");
-
-        let artifact_path = graph.root_dir.join(
-            &statuses
-                .iter()
-                .find(|status| status.member == "runtime_std_audio")
-                .expect("app artifact status should exist")
-                .artifact_rel_path,
-        );
-        let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
-        let fixture_root = dir.join("fixture");
-        let mut host = synthetic_audio_host(&fixture_root);
-        let code = execute_main(&plan, &mut host).expect("runtime should execute");
-
-        assert_eq!(code, 0);
-        assert_eq!(
-            host.audio_log,
-            vec![
-                "default_output:0".to_string(),
-                "output_set_gain_milli:0,750".to_string(),
-                format!(
-                    "buffer_load_wav:{}/clip.wav",
-                    fixture_root.to_string_lossy().replace('\\', "/")
-                ),
-                format!(
-                    "play_buffer:0,0,{}/clip.wav",
-                    fixture_root.to_string_lossy().replace('\\', "/")
-                ),
-                "playback_pause:0".to_string(),
-                "playback_resume:0".to_string(),
-                "playback_set_gain_milli:0,500".to_string(),
-                "playback_set_looping:0,true".to_string(),
-                "playback_stop:0".to_string(),
-                "output_close:0".to_string(),
-            ]
-        );
-
-        let _ = fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn execute_main_runs_synthetic_window_canvas_events_runtime() {
-        let dir = temp_workspace_dir("std_window_canvas");
-        write_file(
-            &dir.join("book.toml"),
-            "name = \"runtime_window_canvas\"\nkind = \"app\"\n",
-        );
-        write_file(&dir.join("fixture").join("sprite.bin"), "sprite");
-        write_file(
-            &dir.join("src").join("shelf.arc"),
-            concat!(
-                "import std.canvas\n",
-                "import std.events\n",
-                "import std.input\n",
-                "import std.time\n",
-                "import std.window\n",
-                "use std.result.Result\n",
-                "fn draw_image(edit win: std.window.Window, read img: std.canvas.Image) -> Int:\n",
-                "    let size = std.canvas.image_size :: img :: call\n",
-                "    if size.0 != 16 or size.1 != 16:\n",
-                "        return 1\n",
-                "    std.canvas.blit :: win, img, 7 :: call\n",
-                "        y = 8\n",
-                "    std.canvas.blit_scaled :: win, img, 1 :: call\n",
-                "        y = 2\n",
-                "        w = 3\n",
-                "        h = 4\n",
-                "    std.canvas.blit_region :: win, img, 0 :: call\n",
-                "        sy = 0\n",
-                "        sw = 1\n",
-                "        sh = 1\n",
-                "        dx = 9\n",
-                "        dy = 10\n",
-                "        dw = 11\n",
-                "        dh = 12\n",
-                "    return 0\n",
-                "fn run(take win: std.window.Window) -> Int:\n",
-                "    let mut win = win\n",
-                "    if not (std.window.alive :: win :: call):\n",
-                "        return 2\n",
-                "    let size = std.window.size :: win :: call\n",
-                "    if size.0 != 320 or size.1 != 200:\n",
-                "        return 3\n",
-                "    std.window.set_title :: win, \"Renamed\" :: call\n",
-                "    std.window.set_topmost :: win, true :: call\n",
-                "    let color = std.canvas.rgb :: 10, 20, 30 :: call\n",
-                "    let rect = std.canvas.RectSpec :: pos = (1, 2), size = (3, 4), color = color :: call\n",
-                "    std.canvas.fill :: win, color :: call\n",
-                "    std.canvas.rect_draw :: win, rect :: call\n",
-                "    std.canvas.label :: win, 5, 6 :: call\n",
-                "        text = \"Arcana\"\n",
-                "        color = color\n",
-                "    let label_size = std.canvas.label_size :: \"Arcana\" :: call\n",
-                "    if label_size.0 <= 0:\n",
-                "        return 4\n",
-                "    let image_status = match (std.canvas.image_load :: \"sprite.bin\" :: call):\n",
-                "        Result.Ok(img) => draw_image :: win, img :: call\n",
-                "        Result.Err(_) => 5\n",
-                "    if image_status != 0:\n",
-                "        return 6\n",
-                "    std.canvas.present :: win :: call\n",
-                "    let start = std.time.monotonic_now_ms :: :: call\n",
-                "    std.time.sleep_ms :: 5 :: call\n",
-                "    let end = std.time.monotonic_now_ms :: :: call\n",
-                "    let delta = std.time.elapsed_ms :: start, end :: call\n",
-                "    if delta.value < 0:\n",
-                "        return 7\n",
-                "    let mut frame = std.events.pump :: win :: call\n",
-                "    if not (std.input.mouse_in_window :: frame :: call):\n",
-                "        return 8\n",
-                "    if (std.input.mouse_pos :: frame :: call).0 != 40:\n",
-                "        return 9\n",
-                "    let key = std.input.key_code :: \"A\" :: call\n",
-                "    if not (std.input.key_down :: frame, key :: call):\n",
-                "        return 10\n",
-                "    let first = std.events.poll :: frame :: call\n",
-                "    if first :: :: is_none:\n",
-                "        return 11\n",
-                "    let second = std.events.poll :: frame :: call\n",
-                "    if second :: :: is_none:\n",
-                "        return 12\n",
-                "    let none = std.events.poll :: frame :: call\n",
-                "    if not (none :: :: is_none):\n",
-                "        return 13\n",
-                "    let close = std.window.close :: win :: call\n",
-                "    if close :: :: is_err:\n",
-                "        return 14\n",
-                "    return 0\n",
-                "fn main() -> Int:\n",
-                "    return match (std.window.open :: \"Arcana\", 320, 200 :: call):\n",
-                "        Result.Ok(win) => run :: win :: call\n",
-                "        Result.Err(_) => 99\n",
-            ),
-        );
-        write_file(&dir.join("src").join("types.arc"), "// test types\n");
-
-        let graph = load_workspace_graph(&dir).expect("workspace graph should load");
-        let checked = check_workspace_graph(&graph).expect("workspace should check");
-        let fingerprints = compute_member_fingerprints_for_checked_workspace(&graph, &checked)
-            .expect("fingerprints should compute");
-        let order = plan_workspace(&graph).expect("workspace order should plan");
-        let statuses =
-            plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-        execute_build(&graph, &statuses).expect("build should execute");
-
-        let artifact_path = graph.root_dir.join(
-            &statuses
-                .iter()
-                .find(|status| status.member == "runtime_window_canvas")
-                .expect("app artifact status should exist")
-                .artifact_rel_path,
-        );
-        let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
-        let fixture_root = dir.join("fixture");
-        let decode_routine = resolve_routine_index(
-            &plan,
-            &plan.root_module_id,
-            &[
-                "std".to_string(),
-                "kernel".to_string(),
-                "events".to_string(),
-                "decode".to_string(),
-            ],
-        )
-        .expect("std.kernel.events.decode should exist");
-        let kernel_poll_routine = resolve_routine_index(
-            &plan,
-            &plan.root_module_id,
-            &[
-                "std".to_string(),
-                "kernel".to_string(),
-                "events".to_string(),
-                "poll".to_string(),
-            ],
-        )
-        .expect("std.kernel.events.poll should exist");
-        let lift_event_routine = resolve_routine_index(
-            &plan,
-            &plan.root_module_id,
-            &[
-                "std".to_string(),
-                "events".to_string(),
-                "lift_event".to_string(),
-            ],
-        )
-        .expect("std.events.lift_event should exist");
-        let poll_routine = resolve_routine_index(
-            &plan,
-            &plan.root_module_id,
-            &["std".to_string(), "events".to_string(), "poll".to_string()],
-        )
-        .expect("std.events.poll should exist");
-
-        let mut debug_host = synthetic_window_canvas_host(&fixture_root);
-        let decoded = execute_routine(
-            &plan,
-            decode_routine,
-            vec![
-                RuntimeValue::Int(3),
-                RuntimeValue::Int(1),
-                RuntimeValue::Int(0),
-            ],
-            &mut debug_host,
-        )
-        .expect("std.kernel.events.decode should execute");
-        assert_eq!(
-            decoded,
-            RuntimeValue::Variant {
-                name: "std.kernel.events.Event.WindowFocused".to_string(),
-                payload: vec![RuntimeValue::Bool(true)],
-            }
-        );
-
-        let debug_window = debug_host
-            .window_open("Arcana", 320, 200)
-            .expect("debug window should open");
-        let debug_frame = debug_host
-            .events_pump(debug_window)
-            .expect("debug frame should pump");
-        let kernel_polled = execute_routine(
-            &plan,
-            kernel_poll_routine,
-            vec![RuntimeValue::Opaque(RuntimeOpaqueValue::AppFrame(
-                debug_frame,
-            ))],
-            &mut debug_host,
-        )
-        .expect("std.kernel.events.poll should execute");
-        assert_eq!(
-            kernel_polled,
-            RuntimeValue::Variant {
-                name: "std.kernel.events.Event.WindowFocused".to_string(),
-                payload: vec![RuntimeValue::Bool(true)],
-            }
-        );
-        let lifted_direct = execute_routine(
-            &plan,
-            lift_event_routine,
-            vec![kernel_polled.clone()],
-            &mut debug_host,
-        )
-        .expect("std.events.lift_event should execute");
-        assert_eq!(
-            lifted_direct,
-            RuntimeValue::Variant {
-                name: "std.option.Option.Some".to_string(),
-                payload: vec![RuntimeValue::Variant {
-                    name: "AppEvent.WindowFocused".to_string(),
-                    payload: vec![RuntimeValue::Bool(true)],
-                }],
-            }
-        );
-
-        let mut debug_host = synthetic_window_canvas_host(&fixture_root);
-        let debug_window = debug_host
-            .window_open("Arcana", 320, 200)
-            .expect("debug window should open");
-        let debug_frame = debug_host
-            .events_pump(debug_window)
-            .expect("debug frame should pump");
-        let lifted = execute_routine(
-            &plan,
-            poll_routine,
-            vec![RuntimeValue::Opaque(RuntimeOpaqueValue::AppFrame(
-                debug_frame,
-            ))],
-            &mut debug_host,
-        )
-        .expect("std.events.poll should execute");
-        assert_eq!(
-            lifted,
-            RuntimeValue::Variant {
-                name: "std.option.Option.Some".to_string(),
-                payload: vec![RuntimeValue::Variant {
-                    name: "AppEvent.WindowFocused".to_string(),
-                    payload: vec![RuntimeValue::Bool(true)],
-                }],
-            }
-        );
-
-        let mut host = synthetic_window_canvas_host(&fixture_root);
-        let code = execute_main(&plan, &mut host).expect("runtime should execute");
-
-        assert_eq!(code, 0);
-        assert_eq!(host.sleep_log_ms, vec![5]);
-        assert_eq!(
-            host.canvas_log,
-            vec![
-                "fill:660510".to_string(),
-                "rect:1,2,3,4,660510".to_string(),
-                "label:5,6,Arcana,660510".to_string(),
-                format!(
-                    "blit:{}/sprite.bin,7,8",
-                    fixture_root.to_string_lossy().replace('\\', "/")
-                ),
-                format!(
-                    "blit_scaled:{}/sprite.bin,1,2,3,4",
-                    fixture_root.to_string_lossy().replace('\\', "/",)
-                ),
-                format!(
-                    "blit_region:{}/sprite.bin,0,0,1,1,9,10,11,12",
-                    fixture_root.to_string_lossy().replace('\\', "/",)
-                ),
-                "present".to_string(),
-            ]
-        );
-
-        let _ = fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn execute_main_runs_synthetic_host_core_workspace_artifact() {
-        let dir = temp_workspace_dir("host_tool");
-        write_host_core_workspace(&dir);
-
-        let fixture_root = dir.join("fixture");
-        write_file(&fixture_root.join("alpha.arc"), "alpha");
-        write_file(&fixture_root.join("notes.txt"), "skip me");
-
-        let graph = load_workspace_graph(&dir).expect("workspace graph should load");
-        let checked = check_workspace_graph(&graph).expect("workspace should check");
-        let fingerprints = compute_member_fingerprints_for_checked_workspace(&graph, &checked)
-            .expect("fingerprints should compute");
-        let order = plan_workspace(&graph).expect("workspace order should plan");
-        let statuses =
-            plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-        execute_build(&graph, &statuses).expect("build should execute");
-
-        let artifact_path = graph.root_dir.join(
-            &statuses
-                .iter()
-                .find(|status| status.member == "runtime_host_core")
-                .expect("app artifact status should exist")
-                .artifact_rel_path,
-        );
-        let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
-
-        let cwd = fixture_root.to_string_lossy().replace('\\', "/");
-        let mut host = BufferedHost {
-            cwd: cwd.clone(),
-            sandbox_root: cwd.clone(),
-            ..BufferedHost::default()
-        };
-        let code = execute_main(&plan, &mut host).expect("runtime should execute");
-
-        assert_eq!(code, 0);
-        assert_eq!(
-            host.stdout,
-            vec![
-                format!("{cwd}/alpha.arc"),
-                "1".to_string(),
-                "12".to_string(),
-            ]
-        );
-
-        let report_path = fixture_root
-            .join(".arcana")
-            .join("logs")
-            .join("host_core_report.txt");
-        assert_eq!(
-            fs::read_to_string(&report_path).expect("report should write"),
-            "Arcana Runtime Host Core v1\n"
-        );
-
-        let _ = fs::remove_dir_all(dir);
-    }
-}
+mod tests;

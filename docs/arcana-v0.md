@@ -227,9 +227,7 @@ Notes:
 - Integer overflow in `+ - * / %` and unary `-` is reported deterministically at runtime:
   `integer overflow in add|sub|mul|division|modulo|neg`.
 
-See `grimoires/reference/examples/operators_core`.
-See `grimoires/reference/examples/operators_bitwise`.
-See `grimoires/reference/examples/operators_concat_assign`.
+Historical note: the archived MeadowLang operator examples now live outside this repo. Current in-repo behavioral pressure comes from rewrite-owned `std/src`, `grimoires/owned/app/*`, conformance fixtures, and crate tests.
 
 ## Collections (v0.9)
 
@@ -262,10 +260,7 @@ Notes:
 - Generic calls use phrase style (`foo[T] :: ... :: call`), while `foo[T]` without a qualifier remains subscript syntax.
 - Pair tuples are the current selfhost baseline. Richer tuple expansion is intentionally deferred rather than rejected outright; see `docs/specs/tuples/tuples/v1-scope.md` and `docs/specs/tuples/tuples/deferred-roadmap.md`.
 
-See `grimoires/reference/examples/list_core`.
-See `grimoires/reference/examples/list_slice_range`.
-See `grimoires/reference/examples/list_index_compound`.
-See `grimoires/reference/examples/pair_try_pop`.
+Historical note: the archived MeadowLang collection examples now live outside this repo. Current in-repo behavioral pressure comes from rewrite-owned `std/src`, `grimoires/owned/app/*`, conformance fixtures, and crate tests.
 
 ## Collections Expansion (v0.10)
 
@@ -303,10 +298,7 @@ Notes:
 - Empty map literals are not supported yet; use `std.collections.map.new[K, V]()`.
 - Array literals are not part of v0.10 (use constructors).
 
-See `grimoires/reference/examples/array_core`.
-See `grimoires/reference/examples/map_core`.
-See `grimoires/reference/examples/for_collections`.
-See `grimoires/reference/examples/map_index_compound`.
+Historical note: archived MeadowLang array/map/`for` examples now live outside this repo. Current in-repo behavioral pressure comes from rewrite-owned `std/src`, `grimoires/owned/app/*`, conformance fixtures, and crate tests.
 
 ## Library-Ready Language Additions (v0.13, current subset)
 
@@ -338,10 +330,7 @@ Notes:
 - Or-pattern binding capture (`A(x) | B(x)`) is not supported yet.
 - Trait dispatch remains static/monomorphized (no trait objects/dynamic dispatch).
 
-See `grimoires/reference/examples/plan13_box_generic`.
-See `grimoires/reference/examples/plan13_generics_match`.
-See `grimoires/reference/examples/plan13_result_generic`.
-See `grimoires/reference/examples/trait_v2_iter_ecs`.
+Historical note: the archived MeadowLang generic/trait proof examples now live outside this repo. Current in-repo behavioral pressure comes from rewrite-owned `std/src`, `grimoires/owned/app/*`, conformance fixtures, and crate tests.
 
 ## Iterator + ECS Trait Proof Slice (v0.27)
 
@@ -363,7 +352,7 @@ It does not freeze general ECS query syntax; broad query authoring remains outsi
 
 A std-style shelf layout now works in Grimoires using `impl` extension methods over kernel collection intrinsics.
 
-See `grimoires/reference/examples/grimoire_std_methods_app` for:
+Current in-repo reference corpus for this direction lives primarily under `std/src` and `grimoires/owned/app/*`; the broader MeadowLang examples are now archived outside the repo. Key shelf-first surfaces include:
 
 - `std.result` / `std.option` user enums
 - `std.collections.list` extension methods (`len`, `push`, `pop`, `try_pop_or`)
@@ -463,14 +452,7 @@ Notes:
   - `borrow_read` / `borrow_edit` for `Arena`, `FrameArena`, and `PoolArena`.
 - `reset`/`remove` are compile-time rejected when live allocator borrows would be invalidated.
 
-See:
-
-- `grimoires/reference/examples/arena_ast_builder`
-- `grimoires/reference/examples/arena_reset_cycle`
-- `grimoires/reference/examples/arena_id_safety`
-- `grimoires/reference/examples/frame_scratch_cycle`
-- `grimoires/reference/examples/pool_reuse_cycle`
-- `grimoires/reference/examples/memory_phrase_frame_pool`
+Historical note: the broader MeadowLang memory examples now live outside this repo. Current in-repo behavioral pressure comes from rewrite-owned `std/src`, conformance fixtures, and crate tests.
 
 ## Ownership And Lifetimes (v0.32)
 
@@ -629,11 +611,7 @@ Metadata blocks:
 - standalone chain attachment blocks are currently validated as `name = expr` only
 - metadata payloads are parsed/validated in v1; full contract aggregation and scheduler enforcement beyond explicit chain-presence checks are later typed/runtime work
 
-See:
-
-- `grimoires/reference/examples/chain_forward_pipeline`
-- `grimoires/reference/examples/chain_header_attached`
-- `grimoires/reference/examples/chain_styles_matrix`
+Historical note: the broader MeadowLang chain examples now live outside this repo. Current in-repo behavioral pressure comes from rewrite-owned `std/src`, conformance fixtures, and crate tests.
 
 ## Current Implementation Limits (Not Frozen Language Law)
 
@@ -785,23 +763,7 @@ Workspace/build notes:
 - Grimoire `[deps]` path dependencies are import-resolvable in compile/check/run flows (`import <dep>.*`).
 - Build/cache artifact layout is a toolchain detail and is not frozen here; current build artifacts are internal backend-contract output, not a public execution or bytecode format.
 
-See:
-
-- `grimoires/reference/examples/window_hello`
-- `grimoires/reference/examples/window_quads`
-- `grimoires/reference/examples/input_tester`
-- `grimoires/reference/examples/window_image_viewer`
-- `grimoires/reference/examples/window_controls`
-- `grimoires/reference/examples/events_poll_demo`
-- `grimoires/reference/examples/grimoire_ecs_mini_game`
-- `grimoires/reference/examples/arcana_showcase`
-- `grimoires/reference/examples/life_lab`
-- `grimoires/reference/examples/grimoire_counter_app`
-- `grimoires/reference/examples/grimoire_window_app`
-- `grimoires/reference/examples/grimoire_ui_lib`
-- `grimoires/reference/examples/grimoire_ecs_schedule`
-- `grimoires/reference/app/winspell`
-- `grimoires/reference/app/spell-events`
+Current in-repo app/showcase behavioral pressure comes from rewrite-owned `grimoires/owned/app/*`, `std/src`, conformance fixtures, and crate runtime tests. The broader MeadowLang showcase/app corpus is archived outside this repo.
 
 ## Concurrency / IO Surface (v0.17)
 
@@ -838,18 +800,7 @@ Implemented surface:
 - `behavior[phase=..., affinity=...] fn ...`
 - `"startup" | "fixed_update" | "update" | "render" :: :: std.behaviors.step`
 
-Examples:
-
-- `grimoires/reference/examples/async_weave`
-- `grimoires/reference/examples/async_main`
-- `grimoires/reference/examples/split_join`
-- `grimoires/reference/examples/behavior_phases`
-- `grimoires/reference/examples/channel_ping`
-- `grimoires/reference/examples/channel_async`
-- `grimoires/reference/examples/async_channel`
-- `grimoires/reference/examples/mutex_counter`
-- `grimoires/reference/examples/atomic_counter`
-- `grimoires/reference/examples/grimoire_behavior_app`
+Historical note: the broader MeadowLang concurrency/behavior examples now live outside this repo. Current in-repo behavioral pressure comes from rewrite-owned `std/src`, conformance fixtures, and crate tests.
 
 Current behavior:
 
@@ -978,7 +929,7 @@ Policy:
   - `stream_eof(read stream) -> Result[Bool, Str]`
   - `stream_close(take stream) -> Result[Unit, Str]`
 
-Host-tool bootstrap example:
+Host-tool/bootstrap note:
 
-- `grimoires/reference/examples/selfhost_host_tool_mvp`
-- `grimoires/reference/examples/selfhost_frontend_mvp` (Arcana frontend/typecheck MVP verification path)
+- The broader MeadowLang host/frontend bootstrap examples are now archived outside this repo.
+- Current in-repo behavioral pressure comes from rewrite-owned `std/src`, `grimoires/owned/app/*`, conformance fixtures, and crate tests.

@@ -20,8 +20,8 @@ use arcana_syntax::{
     is_builtin_boundary_unsafe_type_name, is_builtin_type_name,
 };
 use surface::{
-    ResolvedSymbolRef, SurfaceSymbolUse, collect_surface_refs, lookup_symbol_path,
-    split_simple_path, surface_use_name, symbol_matches_surface_use,
+    ResolvedSymbolRef, SurfaceSymbolUse, canonicalize_surface_text, collect_surface_refs,
+    lookup_symbol_path, split_simple_path, surface_use_name, symbol_matches_surface_use,
 };
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -1237,6 +1237,7 @@ fn validate_expr_borrow_flow_inner(
         HirExpr::MemoryPhrase {
             arena,
             init_args,
+            constructor,
             attached,
             ..
         } => {
@@ -1271,6 +1272,18 @@ fn validate_expr_borrow_flow_inner(
                     }
                 }
             }
+            validate_expr_borrow_flow_inner(
+                workspace,
+                resolved_module,
+                type_scope,
+                module_path,
+                scope,
+                constructor,
+                span,
+                state,
+                false,
+                diagnostics,
+            );
             for attachment in attached {
                 match attachment {
                     HirHeaderAttachment::Named { value, span, .. }
@@ -1649,6 +1662,7 @@ fn collect_expr_local_borrows(
         HirExpr::MemoryPhrase {
             arena,
             init_args,
+            constructor,
             attached,
             ..
         } => {
@@ -1661,6 +1675,7 @@ fn collect_expr_local_borrows(
                     }
                 }
             }
+            collect_expr_local_borrows(constructor, scope, borrows);
             for attachment in attached {
                 match attachment {
                     HirHeaderAttachment::Named { value, .. }
@@ -1836,6 +1851,7 @@ fn note_expr_moves(
         HirExpr::MemoryPhrase {
             arena,
             init_args,
+            constructor,
             attached,
             ..
         } => {
@@ -1848,6 +1864,14 @@ fn note_expr_moves(
                     }
                 }
             }
+            note_expr_moves(
+                workspace,
+                resolved_module,
+                type_scope,
+                scope,
+                constructor,
+                state,
+            );
             for attachment in attached {
                 match attachment {
                     HirHeaderAttachment::Named { value, .. }
@@ -1934,6 +1958,7 @@ fn collect_returned_local_borrows(
         HirExpr::MemoryPhrase {
             arena,
             init_args,
+            constructor,
             attached,
             ..
         } => {
@@ -1946,6 +1971,7 @@ fn collect_returned_local_borrows(
                     }
                 }
             }
+            collect_returned_local_borrows(constructor, scope, roots);
             for attachment in attached {
                 match attachment {
                     HirHeaderAttachment::Named { value, .. }
@@ -2440,15 +2466,13 @@ fn validate_symbol_surface_types(
         }
     }
     if let Some(where_clause) = &symbol.where_clause {
-        validate_type_surface_text(
+        validate_where_clause_semantics(
             workspace,
             resolved_module,
             module_path,
             &scope,
             where_clause,
             symbol.span,
-            "where clause",
-            SurfaceSymbolUse::TypeLike,
             diagnostics,
         );
     }
@@ -2589,6 +2613,15 @@ fn validate_impl_surface_types(
             );
         }
     }
+    validate_impl_trait_where_requirements(
+        workspace,
+        resolved_workspace,
+        resolved_module,
+        module_path,
+        impl_decl,
+        &scope,
+        diagnostics,
+    );
     for method in &impl_decl.methods {
         validate_symbol_surface_types(
             workspace,
@@ -3607,7 +3640,17 @@ fn validate_expr_semantics(
                     diagnostics,
                 );
             }
-            if let Some(path) = split_simple_path(constructor) {
+            validate_expr_semantics(
+                workspace,
+                resolved_module,
+                module_path,
+                type_scope,
+                scope,
+                constructor,
+                span,
+                diagnostics,
+            );
+            if let Some(path) = flatten_callable_expr_path(constructor) {
                 validate_value_path_segments(
                     workspace,
                     resolved_module,
@@ -3615,7 +3658,7 @@ fn validate_expr_semantics(
                     scope,
                     &path,
                     span,
-                    &format!("memory constructor `{constructor}`"),
+                    "memory constructor",
                     diagnostics,
                 );
             }
@@ -4498,6 +4541,502 @@ fn validate_type_surface_text(
                     surface_use_name(path_use)
                 ),
             });
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ParsedWherePredicate {
+    TraitBound { text: String },
+    ProjectionEq { projection: String, value: String },
+    LifetimeOutlives { longer: String, shorter: String },
+    TypeOutlives { ty: String, lifetime: String },
+}
+
+fn split_top_level_surface_items(text: &str, delimiter: char) -> Vec<String> {
+    let mut items = Vec::new();
+    let mut depth = 0usize;
+    let mut current = String::new();
+    let mut in_string = false;
+    let mut escape = false;
+    for ch in text.chars() {
+        if in_string {
+            current.push(ch);
+            if escape {
+                escape = false;
+            } else if ch == '\\' {
+                escape = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => {
+                in_string = true;
+                current.push(ch);
+            }
+            '[' | '(' => {
+                depth += 1;
+                current.push(ch);
+            }
+            ']' | ')' => {
+                depth = depth.saturating_sub(1);
+                current.push(ch);
+            }
+            _ if ch == delimiter && depth == 0 => {
+                if !current.trim().is_empty() {
+                    items.push(current.trim().to_string());
+                }
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    if !current.trim().is_empty() {
+        items.push(current.trim().to_string());
+    }
+    items
+}
+
+fn find_top_level_surface_char(text: &str, wanted: char) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escape = false;
+    for (index, ch) in text.char_indices() {
+        if in_string {
+            if escape {
+                escape = false;
+            } else if ch == '\\' {
+                escape = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '[' | '(' => depth += 1,
+            ']' | ')' => depth = depth.saturating_sub(1),
+            _ if ch == wanted && depth == 0 => return Some(index),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn parse_where_predicates(text: &str) -> Result<Vec<ParsedWherePredicate>, String> {
+    let mut predicates = Vec::new();
+    for item in split_top_level_surface_items(text, ',') {
+        if let Some(index) = find_top_level_surface_char(&item, '=') {
+            let projection = item[..index].trim();
+            let value = item[index + 1..].trim();
+            if projection.is_empty() || value.is_empty() {
+                return Err(format!("malformed projection-equality predicate `{item}`"));
+            }
+            predicates.push(ParsedWherePredicate::ProjectionEq {
+                projection: projection.to_string(),
+                value: value.to_string(),
+            });
+            continue;
+        }
+        if let Some(index) = find_top_level_surface_char(&item, ':') {
+            let left = item[..index].trim();
+            let right = item[index + 1..].trim();
+            if left.starts_with('\'') && right.starts_with('\'') {
+                predicates.push(ParsedWherePredicate::LifetimeOutlives {
+                    longer: left.to_string(),
+                    shorter: right.to_string(),
+                });
+                continue;
+            }
+            if right.starts_with('\'') {
+                predicates.push(ParsedWherePredicate::TypeOutlives {
+                    ty: left.to_string(),
+                    lifetime: right.to_string(),
+                });
+                continue;
+            }
+            return Err(format!("unsupported where predicate `{item}`"));
+        }
+        predicates.push(ParsedWherePredicate::TraitBound { text: item });
+    }
+    Ok(predicates)
+}
+
+fn parse_projection_eq_left(text: &str) -> Option<(&str, &str)> {
+    let mut depth = 0usize;
+    let mut split_index = None;
+    for (index, ch) in text.char_indices() {
+        match ch {
+            '[' | '(' => depth += 1,
+            ']' | ')' => depth = depth.saturating_sub(1),
+            '.' if depth == 0 => split_index = Some(index),
+            _ => {}
+        }
+    }
+    let index = split_index?;
+    let base = text[..index].trim();
+    let assoc = text[index + 1..].trim();
+    if base.is_empty() || assoc.is_empty() || !is_identifier_text(assoc) {
+        return None;
+    }
+    Some((base, assoc))
+}
+
+fn resolve_trait_symbol_from_surface<'a>(
+    workspace: &'a HirWorkspaceSummary,
+    resolved_module: &'a HirResolvedModule,
+    text: &str,
+) -> Option<ResolvedSymbolRef<'a>> {
+    if let Some((base, _)) = parse_surface_trait_application(text) {
+        if let Some(path) = split_simple_path(&base) {
+            let resolved = lookup_symbol_path(workspace, resolved_module, &path)?;
+            return (resolved.symbol.kind == HirSymbolKind::Trait).then_some(resolved);
+        }
+    }
+    let refs = collect_surface_refs(text);
+    let path = refs.paths.first()?;
+    let resolved = lookup_symbol_path(workspace, resolved_module, path)?;
+    (resolved.symbol.kind == HirSymbolKind::Trait).then_some(resolved)
+}
+
+fn parse_surface_trait_application(text: &str) -> Option<(String, Vec<String>)> {
+    let trimmed = text.trim();
+    if let Some(path) = split_simple_path(trimmed) {
+        return Some((path.join("."), Vec::new()));
+    }
+    let mut depth = 0usize;
+    let mut open = None;
+    for (index, ch) in trimmed.char_indices() {
+        match ch {
+            '[' if depth == 0 => {
+                open = Some(index);
+                break;
+            }
+            '[' | '(' => depth += 1,
+            ']' | ')' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    let open = open?;
+    if !trimmed.ends_with(']') || open == 0 {
+        return None;
+    }
+    let base = trimmed[..open].trim();
+    let split_path = split_simple_path(base)?;
+    let args = split_top_level_surface_items(&trimmed[open + 1..trimmed.len() - 1], ',');
+    Some((split_path.join("."), args))
+}
+
+fn substitute_surface_type_names(text: &str, replacements: &BTreeMap<String, String>) -> String {
+    let chars = text.chars().collect::<Vec<_>>();
+    let mut out = String::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        let ch = chars[index];
+        if ch == '\'' {
+            out.push(ch);
+            index += 1;
+            while index < chars.len()
+                && (chars[index] == '_' || chars[index].is_ascii_alphanumeric())
+            {
+                out.push(chars[index]);
+                index += 1;
+            }
+            continue;
+        }
+        if ch == '_' || ch.is_ascii_alphabetic() {
+            let start = index;
+            index += 1;
+            while index < chars.len()
+                && (chars[index] == '_' || chars[index].is_ascii_alphanumeric())
+            {
+                index += 1;
+            }
+            let ident = chars[start..index].iter().collect::<String>();
+            out.push_str(replacements.get(&ident).unwrap_or(&ident));
+            continue;
+        }
+        out.push(ch);
+        index += 1;
+    }
+    out
+}
+
+fn workspace_has_trait_impl(
+    workspace: &HirWorkspaceSummary,
+    resolved_workspace: &HirResolvedWorkspace,
+    expected_trait_path: &str,
+    expected_target_type: &str,
+) -> bool {
+    for package in workspace.packages.values() {
+        let Some(resolved_package) = resolved_workspace.package(&package.summary.package_name)
+        else {
+            continue;
+        };
+        for module in &package.summary.modules {
+            let Some(resolved_module) = resolved_package.module(&module.module_id) else {
+                continue;
+            };
+            for impl_decl in &module.impls {
+                let Some(trait_path) = &impl_decl.trait_path else {
+                    continue;
+                };
+                let scope = TypeScope::default()
+                    .with_params(&impl_decl.type_params)
+                    .with_assoc_types(
+                        impl_decl
+                            .assoc_types
+                            .iter()
+                            .map(|assoc_type| assoc_type.name.clone()),
+                    )
+                    .with_self();
+                let canonical_trait =
+                    canonicalize_surface_text(workspace, resolved_module, &scope, trait_path);
+                let canonical_target = canonicalize_surface_text(
+                    workspace,
+                    resolved_module,
+                    &scope,
+                    &impl_decl.target_type,
+                );
+                if canonical_trait == expected_trait_path
+                    && canonical_target == expected_target_type
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn validate_impl_trait_where_requirements(
+    workspace: &HirWorkspaceSummary,
+    resolved_workspace: &HirResolvedWorkspace,
+    resolved_module: &HirResolvedModule,
+    module_path: &Path,
+    impl_decl: &HirImplDecl,
+    scope: &TypeScope,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let Some(trait_path) = &impl_decl.trait_path else {
+        return;
+    };
+    let Some(trait_symbol_ref) =
+        resolve_trait_symbol_from_surface(workspace, resolved_module, trait_path)
+    else {
+        return;
+    };
+    let Some(where_clause) = &trait_symbol_ref.symbol.where_clause else {
+        return;
+    };
+    let Some((_base, actual_args)) = parse_surface_trait_application(trait_path) else {
+        return;
+    };
+    let mut replacements = BTreeMap::new();
+    replacements.insert("Self".to_string(), impl_decl.target_type.clone());
+    for (formal, actual) in trait_symbol_ref
+        .symbol
+        .type_params
+        .iter()
+        .zip(actual_args.iter())
+    {
+        replacements.insert(formal.clone(), actual.clone());
+    }
+    let predicates = match parse_where_predicates(where_clause) {
+        Ok(predicates) => predicates,
+        Err(message) => {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: impl_decl.span.line,
+                column: impl_decl.span.column,
+                message: format!("invalid trait where-clause contract on impl target: {message}"),
+            });
+            return;
+        }
+    };
+    for predicate in predicates {
+        if let ParsedWherePredicate::TraitBound { text } = predicate {
+            let instantiated = substitute_surface_type_names(&text, &replacements);
+            validate_where_clause_semantics(
+                workspace,
+                resolved_module,
+                module_path,
+                scope,
+                &instantiated,
+                impl_decl.span,
+                diagnostics,
+            );
+            let Some((_required_base, required_args)) =
+                parse_surface_trait_application(&instantiated)
+            else {
+                continue;
+            };
+            let expected_trait =
+                canonicalize_surface_text(workspace, resolved_module, scope, &instantiated);
+            let expected_target = canonicalize_surface_text(
+                workspace,
+                resolved_module,
+                scope,
+                required_args
+                    .first()
+                    .map(String::as_str)
+                    .unwrap_or(&impl_decl.target_type),
+            );
+            let has_impl = workspace_has_trait_impl(
+                workspace,
+                resolved_workspace,
+                &expected_trait,
+                &expected_target,
+            );
+            if !has_impl {
+                diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: impl_decl.span.line,
+                    column: impl_decl.span.column,
+                    message: format!(
+                        "impl requires satisfying where-bound `{instantiated}` for target `{}`",
+                        impl_decl.target_type
+                    ),
+                });
+            }
+        }
+    }
+}
+
+fn validate_where_clause_semantics(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    module_path: &Path,
+    scope: &TypeScope,
+    text: &str,
+    span: Span,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let predicates = match parse_where_predicates(text) {
+        Ok(predicates) => predicates,
+        Err(message) => {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: span.line,
+                column: span.column,
+                message,
+            });
+            return;
+        }
+    };
+    for predicate in predicates {
+        match predicate {
+            ParsedWherePredicate::TraitBound { text } => validate_type_surface_text(
+                workspace,
+                resolved_module,
+                module_path,
+                scope,
+                &text,
+                span,
+                &format!("where predicate `{text}`"),
+                SurfaceSymbolUse::Trait,
+                diagnostics,
+            ),
+            ParsedWherePredicate::ProjectionEq { projection, value } => {
+                let Some((base, assoc)) = parse_projection_eq_left(&projection) else {
+                    diagnostics.push(Diagnostic {
+                        path: module_path.to_path_buf(),
+                        line: span.line,
+                        column: span.column,
+                        message: format!(
+                            "projection-equality predicate `{projection}` must use `<trait-like>.Assoc` on the left"
+                        ),
+                    });
+                    continue;
+                };
+                validate_type_surface_text(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    scope,
+                    base,
+                    span,
+                    &format!("projection base `{projection}`"),
+                    SurfaceSymbolUse::Trait,
+                    diagnostics,
+                );
+                if let Some(trait_symbol_ref) =
+                    resolve_trait_symbol_from_surface(workspace, resolved_module, base)
+                {
+                    match &trait_symbol_ref.symbol.body {
+                        HirSymbolBody::Trait { assoc_types, .. } => {
+                            if !assoc_types.iter().any(|item| item.name == assoc) {
+                                diagnostics.push(Diagnostic {
+                                    path: module_path.to_path_buf(),
+                                    line: span.line,
+                                    column: span.column,
+                                    message: format!(
+                                        "projection-equality predicate `{projection}` references unknown associated type `{assoc}`"
+                                    ),
+                                });
+                            }
+                        }
+                        _ => diagnostics.push(Diagnostic {
+                            path: module_path.to_path_buf(),
+                            line: span.line,
+                            column: span.column,
+                            message: format!(
+                                "projection-equality predicate `{projection}` does not resolve to a trait with associated types"
+                            ),
+                        }),
+                    }
+                }
+                validate_type_surface_text(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    scope,
+                    &value,
+                    span,
+                    &format!("projection equality value `{value}`"),
+                    SurfaceSymbolUse::TypeLike,
+                    diagnostics,
+                );
+            }
+            ParsedWherePredicate::LifetimeOutlives { longer, shorter } => {
+                for lifetime in [&longer, &shorter] {
+                    if !scope.lifetime_declared(lifetime) {
+                        diagnostics.push(Diagnostic {
+                            path: module_path.to_path_buf(),
+                            line: span.line,
+                            column: span.column,
+                            message: format!(
+                                "undeclared lifetime `{lifetime}` in where predicate `{longer}: {shorter}`"
+                            ),
+                        });
+                    }
+                }
+            }
+            ParsedWherePredicate::TypeOutlives { ty, lifetime } => {
+                validate_type_surface_text(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    scope,
+                    &ty,
+                    span,
+                    &format!("type-outlives predicate `{ty}: {lifetime}`"),
+                    SurfaceSymbolUse::TypeLike,
+                    diagnostics,
+                );
+                if !scope.lifetime_declared(&lifetime) {
+                    diagnostics.push(Diagnostic {
+                        path: module_path.to_path_buf(),
+                        line: span.line,
+                        column: span.column,
+                        message: format!(
+                            "undeclared lifetime `{lifetime}` in where predicate `{ty}: {lifetime}`"
+                        ),
+                    });
+                }
+            }
         }
     }
 }
@@ -5497,6 +6036,233 @@ mod tests {
             err.contains("return lifetime `'a` must be tied to an input parameter"),
             "{err}"
         );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_accepts_structured_where_predicates() {
+        let root = make_temp_package(
+            "typed_where_ok",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    "trait Iterator[I]:\n    type Item\nfn main['a, I, U, where Iterator[I], Iterator[I].Item = U, U: 'a]() -> Int:\n    return 0\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let summary = check_path(&root).expect("structured where predicates should check");
+        assert_eq!(summary.package_count, 1);
+        assert!(summary.module_count >= 2);
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_non_trait_where_predicates() {
+        let root = make_temp_package(
+            "typed_where_non_trait",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    "record NotTrait:\n    value: Int\nfn main[T, where NotTrait]() -> Int:\n    return 0\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("non-trait where predicate should fail");
+        assert!(err.contains("does not resolve to a valid trait"), "{err}");
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_malformed_projection_equality_where_predicates() {
+        let root = make_temp_package(
+            "typed_where_bad_projection",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    "trait Iterator[I]:\n    type Item\nfn main[I, U, where Iterator[I] = U]() -> Int:\n    return 0\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("bad projection equality should fail");
+        assert!(
+            err.contains("projection-equality predicate `Iterator[I]` must use `<trait-like>.Assoc` on the left"),
+            "{err}"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_undeclared_outlives_where_lifetimes() {
+        let root = make_temp_package(
+            "typed_where_bad_outlives",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    "fn main['a, T, where T: 'b]() -> Int:\n    return 0\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("undeclared outlives lifetime should fail");
+        assert!(
+            err.contains("undeclared lifetime `'b` in where predicate `T: 'b`"),
+            "{err}"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_projection_equality_unknown_assoc_types() {
+        let root = make_temp_package(
+            "typed_where_unknown_assoc",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    "trait Iterator[I]:\n    type Item\nfn main[I, U, where Iterator[I].Missing = U]() -> Int:\n    return 0\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err =
+            check_path(&root).expect_err("projection equality with unknown assoc type should fail");
+        assert!(
+            err.contains("references unknown associated type `Missing`"),
+            "{err}"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_accepts_projection_equality_where_predicates() {
+        let root = make_temp_package(
+            "typed_where_projection_ok",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    "trait Iterator[I]:\n    type Item\nfn main[I, U, where Iterator[I].Item = U]() -> Int:\n    return 0\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        check_path(&root).expect("projection equality with known assoc type should check");
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_accepts_declared_outlives_where_predicates() {
+        let root = make_temp_package(
+            "typed_where_outlives_ok",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    "fn main['a, 'b, T, where 'a: 'b, T: 'a]() -> Int:\n    return 0\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        check_path(&root).expect("declared outlives predicates should check");
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_impls_missing_trait_where_requirements() {
+        let root = make_temp_package(
+            "typed_where_missing_impl_req",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    concat!(
+                        "trait Eq[T]:\n",
+                        "    fn ok(read self: T) -> Int:\n",
+                        "        return 0\n",
+                        "trait Ord[T, where Eq[T]]:\n",
+                        "    fn cmp(read self: T) -> Int:\n",
+                        "        return 0\n",
+                        "impl Ord[Int] for Int:\n",
+                        "    fn cmp(read self: Int) -> Int:\n",
+                        "        return 0\n",
+                        "fn main() -> Int:\n",
+                        "    return 0\n",
+                    ),
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("missing required trait impl should fail");
+        assert!(
+            err.contains("impl requires satisfying where-bound `Eq[Int]`"),
+            "{err}"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_accepts_impls_with_trait_where_requirements_satisfied() {
+        let root = make_temp_package(
+            "typed_where_impl_req_ok",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    concat!(
+                        "trait Eq[T]:\n",
+                        "    fn ok(read self: T) -> Int:\n",
+                        "        return 0\n",
+                        "trait Ord[T, where Eq[T]]:\n",
+                        "    fn cmp(read self: T) -> Int:\n",
+                        "        return 0\n",
+                        "impl Eq[Int] for Int:\n",
+                        "    fn ok(read self: Int) -> Int:\n",
+                        "        return 0\n",
+                        "impl Ord[Int] for Int:\n",
+                        "    fn cmp(read self: Int) -> Int:\n",
+                        "        return 0\n",
+                        "fn main() -> Int:\n",
+                        "    return 0\n",
+                    ),
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        check_path(&root).expect("satisfied trait where requirements should check");
 
         fs::remove_dir_all(root).expect("cleanup should succeed");
     }

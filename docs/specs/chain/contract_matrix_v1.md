@@ -1,5 +1,11 @@
 # Chain Contract Matrix v1
 
+Status: `reference-only`
+
+Historical carryover note:
+- This Meadow-era matrix is kept for audit context.
+- Current rewrite authority for chain surface now lives in `docs/specs/chain/v1-scope.md` and `docs/specs/concurrency/concurrency/v1-scope.md`.
+
 ## Scope
 - Plan: `PLAN46.md`
 - Date: 2026-03-03

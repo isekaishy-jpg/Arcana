@@ -34,6 +34,7 @@ This document defines how Arcana spec files are interpreted during the rewrite.
 - If a contract question materially affects parser shape, typed HIR, IR, or selfhost grimoires, it should not remain implicit.
 - Imported MeadowLang planning docs do not define current rewrite architecture unless they are explicitly listed here as frozen, approved, reserved, or deferred authority.
 - Reference-only material should live under `docs/reference/` whenever practical so historical context is not mixed into the active spec tree.
+- When a rewrite-era `v1-scope.md` replaces an older Meadow-era planning/spec file, the rewrite-era scope is the active authority and the older file becomes historical reference unless it is explicitly re-promoted here.
 - `std` is rewrite-owned first-party surface. Archived historical MeadowLang corpus and generated snapshots do not define rewrite layering, backend architecture, or public package surface except where current scope docs explicitly ratify them.
 - Architecture/selfhost-progress reviews must privilege approved docs plus `crates/*`; issues found only in archived historical material or generated snapshots must be labeled as transitional/corpus drift unless a current scope explicitly makes them authoritative.
 - The broad MeadowLang reference corpus is archived outside the repo and is not part of the default development loop.
@@ -46,15 +47,21 @@ This document defines how Arcana spec files are interpreted during the rewrite.
 - `conformance/selfhost_language_matrix.toml`
 
 `approved-pre-selfhost`
+- `docs/specs/access-modes/access-modes/v1-scope.md`
+- `docs/specs/qualified-phrases/qualified-phrases/v1-scope.md`
+- `docs/specs/collections/collections/v1-scope.md`
+- `docs/specs/where/where/v1-scope.md`
+- `docs/specs/concurrency/concurrency/v1-scope.md`
+- `docs/specs/resources/resources/v1-scope.md`
 - `docs/specs/std/std/v1-scope.md`
 - `docs/specs/std/std/v1-status.md`
 - `docs/specs/grimoires/grimoires/v1-scope.md`
 - `docs/specs/grimoires/grimoires/v1-status.md`
 - `docs/specs/selfhost-host/selfhost-host/v1-scope.md`
 - `docs/specs/selfhost-host/selfhost-host/app-substrate-v1-scope.md`
-- `docs/specs/memory/memory/generic-memory-spec.md`
+- `docs/specs/memory/memory/v1-scope.md`
 - `docs/specs/forewords/forewords/v1-scope.md`
-- `docs/specs/chain/contract_matrix_v1.md`
+- `docs/specs/chain/v1-scope.md`
 - `docs/specs/page-rollups/page-rollups/v1-scope.md`
 - `docs/specs/tuples/tuples/v1-scope.md`
 - `docs/specs/backend/anybox-policy.md`
@@ -63,12 +70,17 @@ This document defines how Arcana spec files are interpreted during the rewrite.
 - `docs/specs/callables/callables/v1-status.md`
 
 `reference-only`
+- `docs/reference/audits/milestone_6_7_findings_closure_matrix_v1.md`
 - `docs/reference/backend/ir-backend-roadmap.md`
 - `docs/reference/chain/chain_adoption_audit_v1.md`
 - `docs/reference/forewords/generic-foreword-spec.md`
+- `docs/reference/language/current-coding-practice-draft.md`
+- `docs/reference/language/rewrite-language-audit-sheet.md`
 - `docs/reference/memory/v2-scope.md`
 - `docs/reference/selfhost-host/generic-host-spec.md`
 - `docs/reference/audits/meadow_language_behavior_audit_v1.md`
+- `docs/specs/memory/memory/generic-memory-spec.md`
+- `docs/specs/chain/contract_matrix_v1.md`
 
 `authoritative-deferred-ledger`
 - `docs/specs/backend/deferred-roadmap.md`
@@ -82,6 +94,7 @@ This document defines how Arcana spec files are interpreted during the rewrite.
 ## Immediate Rewrite Guidance
 
 - Page rollups are a pre-selfhost contract, not a post-selfhost cleanup idea.
+- Rewrite-era scopes for access modes, qualified phrases, collections/ranges, `where`, concurrency, resources, memory, and chain surface now supersede stale Meadow-era planning notes where they overlap.
 - Chain surface should stay explicit as style qualifier plus introducer family plus connector-directed edges.
 - Pair-tuple rules must be explicit before selfhost because the imported corpus already depends on them heavily.
 - Pair-only tuples are the current baseline, not a statement that generalized tuples are off the table forever.

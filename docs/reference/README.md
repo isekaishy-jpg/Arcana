@@ -14,3 +14,10 @@ Reference material belongs here when it is:
 - a generic future-direction note that is not the active contract
 
 If a reference doc still contains useful deferred direction, that direction must be copied into an authoritative deferred ledger before rewrite work relies on it.
+
+Useful current reference docs:
+- `docs/reference/audits/milestone_6_7_findings_closure_matrix_v1.md`
+- `docs/reference/language/rewrite-language-audit-sheet.md`
+- `docs/reference/language/current-coding-practice-draft.md`
+
+For a fuller working language inventory, use `docs/reference/language/rewrite-language-audit-sheet.md` first.

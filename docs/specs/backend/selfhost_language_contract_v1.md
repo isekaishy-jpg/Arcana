@@ -25,3 +25,4 @@ Status values:
 Notes:
 - This contract tracks language/runtime surface used by canonical selfhost check/compile/build conformance.
 - Semantic determinism is enforced by the existing selfhost parity and bootstrap guards.
+- The archived broad MeadowLang corpus now lives outside this repo; matrix targets must therefore use current in-repo rewrite-owned paths rather than dead historical `grimoires/reference/*` paths.

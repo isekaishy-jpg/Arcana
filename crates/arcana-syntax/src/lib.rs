@@ -333,7 +333,7 @@ pub enum Expr {
         family: String,
         arena: Box<Expr>,
         init_args: Vec<PhraseArg>,
-        constructor: String,
+        constructor: Box<Expr>,
         attached: Vec<HeaderAttachment>,
     },
     GenericApply {
@@ -2528,11 +2528,16 @@ fn parse_memory_phrase(text: &str) -> Result<Option<Expr>, String> {
         Some(args) => args,
         None => return Ok(None),
     };
+    let constructor_expr = parse_expression_core(constructor).map_err(|_| {
+        format!(
+            "invalid memory phrase constructor `{constructor}`; expected path or path[type_args]"
+        )
+    })?;
     Ok(Some(Expr::MemoryPhrase {
         family: family.to_string(),
         arena: Box::new(arena),
         init_args,
-        constructor: constructor.to_string(),
+        constructor: Box::new(constructor_expr),
         attached: Vec::new(),
     }))
 }
@@ -4645,8 +4650,8 @@ fn validate_expr_phrase_contract(
             }
             if !is_memory_constructor_like(constructor) {
                 return Err(format!(
-                    "{}:{}: invalid memory phrase constructor `{}`; expected path or path[type_args]",
-                    span.line, span.column, constructor
+                    "{}:{}: invalid memory phrase constructor; expected path or path[type_args]",
+                    span.line, span.column
                 ));
             }
             if !attached.is_empty() {
@@ -4758,15 +4763,19 @@ fn classify_qualified_phrase_qualifier(qualifier: &str) -> Option<QualifiedPhras
     }
 }
 
-fn is_memory_constructor_like(text: &str) -> bool {
-    let trimmed = text.trim();
-    if is_path_like(trimmed) {
-        return true;
+fn is_memory_constructor_path_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::Path { .. } => true,
+        Expr::MemberAccess { expr, .. } => is_memory_constructor_path_expr(expr),
+        _ => false,
     }
-    let Some((base, inside)) = split_trailing_bracket_suffix(trimmed) else {
-        return false;
-    };
-    is_path_like(base.trim()) && parse_generic_arg_texts(inside).is_some()
+}
+
+fn is_memory_constructor_like(expr: &Expr) -> bool {
+    match expr {
+        Expr::GenericApply { expr, .. } => is_memory_constructor_path_expr(expr),
+        _ => is_memory_constructor_path_expr(expr),
+    }
 }
 
 fn validate_header_attachment_phrase_contract(
@@ -6113,7 +6122,10 @@ mod tests {
                 ..
             } => {
                 assert_eq!(family, "arena");
-                assert_eq!(constructor, "Item");
+                match constructor.as_ref() {
+                    Expr::Path { segments } => assert_eq!(segments, &vec!["Item".to_string()]),
+                    other => panic!("expected constructor path, got {other:?}"),
+                }
             }
             other => panic!("expected memory phrase, got {other:?}"),
         }
@@ -7010,7 +7022,12 @@ mod tests {
                     },
             } => {
                 assert_eq!(family, "arena");
-                assert_eq!(constructor, "make_node");
+                match constructor.as_ref() {
+                    Expr::Path { segments } => {
+                        assert_eq!(segments, &vec!["make_node".to_string()])
+                    }
+                    other => panic!("expected constructor path, got {other:?}"),
+                }
                 assert_eq!(attached.len(), 2);
                 assert!(matches!(
                     &attached[0],

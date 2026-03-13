@@ -117,8 +117,8 @@ classification: bootstrap-required
 why: memory phrases and arena/frame/pool ownership model are part of the carried baseline
 consumers: memory examples, showcase core, compiler/runtime paths that rely on arena-style ownership
 current_source: mixed
-still_needs_rebuild: preserve typed ownership contract while runtime/backend support is rebuilt
-update_note: memory APIs are first-party direction, but future allocator families still go through explicit scope/deferred docs
+still_needs_rebuild: preserve typed ownership contract while keeping any broader allocator or borrow/resource-model expansion behind explicit scope updates now that the current arena/frame/pool plus borrow lane runs on the rewrite backend
+update_note: arena/frame/pool core, executable memory phrases, and current borrow_read/borrow_edit write-through behavior now run on the rewrite backend through an explicit runtime reference/place lane; future allocator families or richer borrow/resource extensions still go through explicit scope/deferred docs
 promotion_condition: rewrite-owned runtime fully supports approved memory surface and ownership rules
 
 id: STD-CONCURRENT
@@ -126,8 +126,8 @@ classification: bootstrap-required
 why: async/weave/split/channel/mutex/atomic runtime surface is already part of the frozen matrix
 consumers: async examples, behavior examples, showcase demos
 current_source: mixed
-still_needs_rebuild: align runtime implementation with the rewrite backend without widening concurrency API surface
-update_note: keep concurrency low-level; do not fold framework-level job systems into `std.concurrent`
+still_needs_rebuild: harden scheduler/worker semantics beyond the current deterministic eager task/thread lane without widening concurrency API surface
+update_note: keep concurrency low-level; do not fold framework-level job systems into `std.concurrent`, and treat task/thread/channel/mutex/atomic runtime support as the rebuilt floor rather than the final scheduler design
 promotion_condition: rewrite-owned runtime satisfies current async/concurrency examples and matrix coverage
 
 id: STD-ECS-BEHAVIORS

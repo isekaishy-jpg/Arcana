@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use arcana_ir::{IrEntrypoint, IrModule, IrPackage, IrPackageModule, IrRoutine};
 
-pub const AOT_INTERNAL_FORMAT: &str = "arcana-aot-v1";
+pub const AOT_INTERNAL_FORMAT: &str = "arcana-aot-v2";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AotArtifact {
@@ -247,16 +247,12 @@ where
 {
     routines
         .iter()
-        .flat_map(|routine| {
+        .enumerate()
+        .flat_map(|(routine_index, routine)| {
             select(routine)
                 .iter()
                 .enumerate()
-                .map(|(index, row)| {
-                    format!(
-                        "{}:{}:{index}:{row}",
-                        routine.module_id, routine.symbol_name
-                    )
-                })
+                .map(|(index, row)| format!("{routine_index}:{index}:{row}"))
                 .collect::<Vec<_>>()
         })
         .collect()
@@ -300,9 +296,10 @@ pub fn render_package_artifact(artifact: &AotPackageArtifact) -> String {
     let routine_rows = artifact
         .routines
         .iter()
-        .map(|routine| {
+        .enumerate()
+        .map(|(routine_index, routine)| {
             format!(
-                "{}:{}:{}:async={}:exported={}:intrinsic={}:signature={}",
+                "{routine_index}:{}:{}:{}:async={}:exported={}:intrinsic={}:signature={}",
                 routine.module_id,
                 routine.symbol_kind,
                 routine.symbol_name,
@@ -446,19 +443,25 @@ pub fn parse_package_artifact(text: &str) -> Result<AotPackageArtifact, String> 
 
     let routine_rows = require_string_array(&table, "routine_rows")?;
     let mut routines = Vec::new();
-    let mut routine_indexes = BTreeMap::new();
     for row in routine_rows {
-        let parts = split_row_n(&row, 7)?;
-        let module_id = parts[0].to_string();
-        let symbol_name = parts[2].to_string();
+        let parts = split_row_n(&row, 8)?;
+        let routine_index = parse_prefixed_usize(parts[0], "")?;
+        if routine_index != routines.len() {
+            return Err(format!(
+                "backend routine rows out of order; expected index {}, got {routine_index}",
+                routines.len()
+            ));
+        }
+        let module_id = parts[1].to_string();
+        let symbol_name = parts[3].to_string();
         let routine = AotRoutineArtifact {
             module_id: module_id.clone(),
-            symbol_kind: parts[1].to_string(),
+            symbol_kind: parts[2].to_string(),
             symbol_name: symbol_name.clone(),
-            is_async: parse_prefixed_bool(parts[3], "async=")?,
-            exported: parse_prefixed_bool(parts[4], "exported=")?,
+            is_async: parse_prefixed_bool(parts[4], "async=")?,
+            exported: parse_prefixed_bool(parts[5], "exported=")?,
             intrinsic_impl: {
-                let value = parts[5]
+                let value = parts[6]
                     .strip_prefix("intrinsic=")
                     .ok_or_else(|| format!("malformed backend intrinsic row `{row}`"))?;
                 if value.is_empty() {
@@ -470,7 +473,7 @@ pub fn parse_package_artifact(text: &str) -> Result<AotPackageArtifact, String> 
             type_param_rows: Vec::new(),
             behavior_attr_rows: Vec::new(),
             param_rows: Vec::new(),
-            signature_row: parts[6]
+            signature_row: parts[7]
                 .strip_prefix("signature=")
                 .ok_or_else(|| format!("malformed backend signature row `{row}`"))?
                 .to_string(),
@@ -478,95 +481,58 @@ pub fn parse_package_artifact(text: &str) -> Result<AotPackageArtifact, String> 
             rollup_rows: Vec::new(),
             statement_rows: Vec::new(),
         };
-        routine_indexes.insert((module_id, symbol_name), routines.len());
         routines.push(routine);
     }
 
     for row in require_string_array(&table, "routine_type_param_rows")? {
-        let parts = split_row_n(&row, 4)?;
-        let routine_index = *routine_indexes
-            .get(&(parts[0].to_string(), parts[1].to_string()))
-            .ok_or_else(|| {
-                format!(
-                    "unknown routine `{}:{}` in backend artifact",
-                    parts[0], parts[1]
-                )
-            })?;
-        routines[routine_index]
-            .type_param_rows
-            .push(parts[3].to_string());
+        let parts = split_row_n(&row, 3)?;
+        let routine_index = parse_prefixed_usize(parts[0], "")?;
+        let routine = routines.get_mut(routine_index).ok_or_else(|| {
+            format!("unknown routine index `{routine_index}` in backend artifact")
+        })?;
+        routine.type_param_rows.push(parts[2].to_string());
     }
 
     for row in require_string_array(&table, "routine_behavior_attr_rows")? {
-        let parts = split_row_n(&row, 4)?;
-        let routine_index = *routine_indexes
-            .get(&(parts[0].to_string(), parts[1].to_string()))
-            .ok_or_else(|| {
-                format!(
-                    "unknown routine `{}:{}` in backend artifact",
-                    parts[0], parts[1]
-                )
-            })?;
-        routines[routine_index]
-            .behavior_attr_rows
-            .push(parts[3].to_string());
+        let parts = split_row_n(&row, 3)?;
+        let routine_index = parse_prefixed_usize(parts[0], "")?;
+        let routine = routines.get_mut(routine_index).ok_or_else(|| {
+            format!("unknown routine index `{routine_index}` in backend artifact")
+        })?;
+        routine.behavior_attr_rows.push(parts[2].to_string());
     }
 
     for row in require_string_array(&table, "routine_param_rows")? {
-        let parts = split_row_n(&row, 4)?;
-        let routine_index = *routine_indexes
-            .get(&(parts[0].to_string(), parts[1].to_string()))
-            .ok_or_else(|| {
-                format!(
-                    "unknown routine `{}:{}` in backend artifact",
-                    parts[0], parts[1]
-                )
-            })?;
-        routines[routine_index]
-            .param_rows
-            .push(parts[3].to_string());
+        let parts = split_row_n(&row, 3)?;
+        let routine_index = parse_prefixed_usize(parts[0], "")?;
+        let routine = routines.get_mut(routine_index).ok_or_else(|| {
+            format!("unknown routine index `{routine_index}` in backend artifact")
+        })?;
+        routine.param_rows.push(parts[2].to_string());
     }
     for row in require_string_array(&table, "routine_foreword_rows")? {
-        let parts = split_row_n(&row, 4)?;
-        let routine_index = *routine_indexes
-            .get(&(parts[0].to_string(), parts[1].to_string()))
-            .ok_or_else(|| {
-                format!(
-                    "unknown routine `{}:{}` in backend artifact",
-                    parts[0], parts[1]
-                )
-            })?;
-        routines[routine_index]
-            .foreword_rows
-            .push(parts[3].to_string());
+        let parts = split_row_n(&row, 3)?;
+        let routine_index = parse_prefixed_usize(parts[0], "")?;
+        let routine = routines.get_mut(routine_index).ok_or_else(|| {
+            format!("unknown routine index `{routine_index}` in backend artifact")
+        })?;
+        routine.foreword_rows.push(parts[2].to_string());
     }
     for row in require_string_array(&table, "routine_rollup_rows")? {
-        let parts = split_row_n(&row, 4)?;
-        let routine_index = *routine_indexes
-            .get(&(parts[0].to_string(), parts[1].to_string()))
-            .ok_or_else(|| {
-                format!(
-                    "unknown routine `{}:{}` in backend artifact",
-                    parts[0], parts[1]
-                )
-            })?;
-        routines[routine_index]
-            .rollup_rows
-            .push(parts[3].to_string());
+        let parts = split_row_n(&row, 3)?;
+        let routine_index = parse_prefixed_usize(parts[0], "")?;
+        let routine = routines.get_mut(routine_index).ok_or_else(|| {
+            format!("unknown routine index `{routine_index}` in backend artifact")
+        })?;
+        routine.rollup_rows.push(parts[2].to_string());
     }
     for row in require_string_array(&table, "statement_rows")? {
-        let parts = split_row_n(&row, 4)?;
-        let routine_index = *routine_indexes
-            .get(&(parts[0].to_string(), parts[1].to_string()))
-            .ok_or_else(|| {
-                format!(
-                    "unknown routine `{}:{}` in backend artifact",
-                    parts[0], parts[1]
-                )
-            })?;
-        routines[routine_index]
-            .statement_rows
-            .push(parts[3].to_string());
+        let parts = split_row_n(&row, 3)?;
+        let routine_index = parse_prefixed_usize(parts[0], "")?;
+        let routine = routines.get_mut(routine_index).ok_or_else(|| {
+            format!("unknown routine index `{routine_index}` in backend artifact")
+        })?;
+        routine.statement_rows.push(parts[2].to_string());
     }
 
     Ok(AotPackageArtifact {
@@ -726,6 +692,80 @@ mod tests {
 
         let rendered = render_package_artifact(&artifact);
         let parsed = parse_package_artifact(&rendered).expect("artifact should roundtrip");
+        assert_eq!(parsed, artifact);
+    }
+
+    #[test]
+    fn render_and_parse_package_preserves_overloaded_routines() {
+        let artifact = AotPackageArtifact {
+            format: AOT_INTERNAL_FORMAT,
+            package_name: "std".to_string(),
+            root_module_id: "std.concurrent".to_string(),
+            direct_deps: Vec::new(),
+            module_count: 1,
+            dependency_edge_count: 0,
+            dependency_rows: Vec::new(),
+            exported_surface_rows: Vec::new(),
+            runtime_requirements: vec!["std.concurrent".to_string()],
+            entrypoints: Vec::new(),
+            routines: vec![
+                AotRoutineArtifact {
+                    module_id: "std.concurrent".to_string(),
+                    symbol_name: "load".to_string(),
+                    symbol_kind: "fn".to_string(),
+                    exported: false,
+                    is_async: false,
+                    type_param_rows: Vec::new(),
+                    behavior_attr_rows: Vec::new(),
+                    param_rows: vec!["mode=read:name=self:ty=AtomicInt".to_string()],
+                    signature_row: "fn load(read self: AtomicInt) -> Int:".to_string(),
+                    intrinsic_impl: None,
+                    foreword_rows: Vec::new(),
+                    rollup_rows: Vec::new(),
+                    statement_rows: vec![
+                        "stmt(core=return(int(0)),forewords=[],rollups=[])".to_string(),
+                    ],
+                },
+                AotRoutineArtifact {
+                    module_id: "std.concurrent".to_string(),
+                    symbol_name: "load".to_string(),
+                    symbol_kind: "fn".to_string(),
+                    exported: false,
+                    is_async: false,
+                    type_param_rows: Vec::new(),
+                    behavior_attr_rows: Vec::new(),
+                    param_rows: vec!["mode=read:name=self:ty=AtomicBool".to_string()],
+                    signature_row: "fn load(read self: AtomicBool) -> Bool:".to_string(),
+                    intrinsic_impl: None,
+                    foreword_rows: Vec::new(),
+                    rollup_rows: Vec::new(),
+                    statement_rows: vec![
+                        "stmt(core=return(bool(false)),forewords=[],rollups=[])".to_string(),
+                    ],
+                },
+            ],
+            modules: vec![AotPackageModuleArtifact {
+                module_id: "std.concurrent".to_string(),
+                symbol_count: 2,
+                item_count: 2,
+                line_count: 2,
+                non_empty_line_count: 2,
+                directive_rows: Vec::new(),
+                lang_item_rows: Vec::new(),
+                exported_surface_rows: Vec::new(),
+            }],
+        };
+
+        let rendered = render_package_artifact(&artifact);
+        let parsed = parse_package_artifact(&rendered).expect("artifact should roundtrip");
+        assert_eq!(
+            parsed.routines[0].param_rows,
+            vec!["mode=read:name=self:ty=AtomicInt".to_string()]
+        );
+        assert_eq!(
+            parsed.routines[1].param_rows,
+            vec!["mode=read:name=self:ty=AtomicBool".to_string()]
+        );
         assert_eq!(parsed, artifact);
     }
 }
