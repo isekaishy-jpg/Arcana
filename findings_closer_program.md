@@ -1,5 +1,7 @@
 ## Findings Closure Program Before Milestone 8
 
+Status: `completed`
+
 ### Summary
 Use [milestone_6_7_review_findings.md](c:/Users/Weaver/Documents/GitHub/Arcana/tmp/milestone_6_7_review_findings.md) as the source checklist and close every item to a terminal state before returning to AOT work. Terminal means exactly one of: fixed in implementation, fixed by explicit contract/spec clarification, intentionally narrowed with updated authority docs, or removed as stale/invalid. No finding stays ambiguous or “known debt”.
 

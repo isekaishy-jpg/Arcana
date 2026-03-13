@@ -26,9 +26,10 @@ This scope freezes the current qualified-phrase contract for the rewrite.
   - any attachment metadata that survives validation
 - Runtime must execute the lowered result.
 - Runtime must not reconstruct dotted-path identity from dynamic receiver shape as the source of truth.
-- Bare-method qualifiers use receiver-type-directed method resolution in the current bootstrap runtime lane.
-- That bare-method lookup must execute linked routines or approved intrinsic seams rather than executor-owned public-std qualifier shims.
-- Native/backend hardening may replace the bootstrap lookup mechanism later without changing the public source surface.
+- Bare-method qualifiers over concrete receiver methods must carry resolved callable identity through lowering.
+- When multiple runtime routines share the same callable path, lowered executable rows must also carry exact concrete routine identity for that bare-method call instead of leaving runtime to re-disambiguate from receiver shape.
+- Trait-bound or otherwise generic bare-method calls may remain receiver-directed dynamic dispatch in the current runtime lane when lowering cannot know a concrete impl routine ahead of execution.
+- Bare-method execution must route through linked routines or approved intrinsic seams rather than executor-owned public-std qualifier shims.
 
 ## Dotted Qualifiers
 

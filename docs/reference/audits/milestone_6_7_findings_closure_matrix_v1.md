@@ -3,6 +3,7 @@
 Status: `reference-only`
 
 This is the working closure ledger for `tmp/milestone_6_7_review_findings.md`.
+All findings are now at terminal status.
 
 Terminal closure types:
 - `implementation`
@@ -104,8 +105,8 @@ This file is keyed by finding number and groups each finding under the supersedi
 - `45`: closed by adding explicit phrase qualifier kinds to IR rows and a runtime named-path execution lane that preserves dotted qualifier callable identity, including module-alias heads like `texts.starts_with`.
 - `13`: closed by removing the remaining executor-owned collection qualifier fast paths; `len`, `push`, `pop`, and `try_pop_or` now execute through linked std methods, with regression coverage for direct collection method calls.
 - `10`: closed by making `execute_main` validate `plan.runtime_requirements` against host-reported support instead of treating the requirement list as informational only. Buffered host tests now prove missing capabilities are rejected.
-- `4`: closed. The executor no longer carries public `Option`/`Result` or collection qualifier behavior directly, and the remaining bare-method resolution path is now explicitly ratified as receiver-type-directed bootstrap runtime lookup rather than an accidental public-std shim boundary violation.
-- `12`: closed. Named-path qualifiers now preserve lowered callable identity end to end, and the current qualified-phrase scope explicitly separates that contract from the bootstrap bare-method lookup path used for receiver-directed method calls.
+- `4`: closed. The executor no longer carries public `Option`/`Result` or collection qualifier behavior directly, and concrete bare-method qualifiers now carry lowered callable identity plus exact routine identity where needed instead of leaving runtime to reconstruct the call target from receiver shape.
+- `12`: closed. Named-path qualifiers preserve lowered callable identity end to end, and bare-method lowering now distinguishes concrete resolved routine identity from the smaller dynamic-dispatch case that remains for trait-bound generic methods.
 - `42`: closed by routing memory-phrase constructor execution through the shared apply path with attachment support instead of rejecting attached memory arguments at runtime.
 - `41`: closed by promoting memory-phrase constructors from carried text to real lowered expressions across syntax, HIR, IR, and runtime. The executor now consumes the lowered constructor expression directly instead of reparsing bootstrap text at execution time.
 
@@ -120,7 +121,7 @@ This file is keyed by finding number and groups each finding under the supersedi
 - `17`: closed on the same implementation slice. Attached-entry forewords and page-rollup-bearing executable forms now survive plan loading and execute with explicit cleanup behavior instead of remaining parser/runtime-only metadata.
 - `48`: closed by implementing runtime `AwaitApply` execution. `task_expr :: :: >>` now awaits task/thread handles directly, and call-with-args `:: >>` now executes and awaits in the current runtime lane.
 - `43`: closed by introducing an explicit evaluator return signal for expression-level try-propagation and wiring `expr :: :: ?` as a real runtime qualifier. Linked rewrite-owned `std.result` routines now prove both the success path and early `Result.Err(...)` propagation.
-- `39`: closed. Qualified phrases now execute explicit `>`, `>>`, `?`, named-path, and bare-method qualifier kinds in the runtime lane, and the approved qualified-phrase scope now distinguishes preserved callable identity for dotted/direct call forms from the current bootstrap bare-method lookup contract.
+- `39`: closed. Qualified phrases now execute explicit `>`, `>>`, `?`, named-path, and bare-method qualifier kinds in the runtime lane, with concrete bare methods carrying exact lowered callable/routine identity and only trait-bound generic methods retaining dynamic receiver-directed dispatch.
 - `22`: closed by clarifying the approved tuple scope. Pair tuples remain current, but tuple-specific `match` patterns are explicitly outside the rewrite v1 baseline.
 - `28`: closed by the same tuple-scope narrowing. Meadow-era tuple patterns are treated as intentionally out of baseline until a redesign reintroduces them explicitly.
 - `33`: closed as intentional narrowing rather than an accidental regression. The approved tuple scope now says the older broader tuple/match wording is not the operative rewrite contract.

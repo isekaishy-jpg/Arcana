@@ -6,8 +6,9 @@ use arcana_aot::{AOT_INTERNAL_FORMAT, compile_package, render_package_artifact};
 use arcana_hir::{
     HirWorkspacePackage, HirWorkspaceSummary, build_package_layout, build_package_summary,
     build_workspace_package, build_workspace_summary, derive_source_module_path, lower_module_text,
+    resolve_workspace,
 };
-use arcana_ir::lower_workspace_package;
+use arcana_ir::lower_workspace_package_with_resolution;
 use pathdiff::diff_paths;
 
 pub type PackageResult<T> = Result<T, String>;
@@ -584,13 +585,25 @@ pub fn plan_build(
 pub fn execute_build(graph: &WorkspaceGraph, statuses: &[BuildStatus]) -> PackageResult<PathBuf> {
     let cache_root = graph.root_dir.join(CACHE_DIR);
     let workspace = load_workspace_hir_from_graph(&graph.root_dir, graph)?;
+    let resolved_workspace = resolve_workspace(&workspace).map_err(|errors| {
+        errors
+            .into_iter()
+            .map(|error| {
+                format!(
+                    "{}:{}:{}: {}",
+                    error.source_module_id, error.span.line, error.span.column, error.message
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    })?;
     let lowered_packages = workspace
         .packages
         .values()
         .map(|package| {
             (
                 package.summary.package_name.clone(),
-                lower_workspace_package(package),
+                lower_workspace_package_with_resolution(&workspace, &resolved_workspace, package),
             )
         })
         .collect::<BTreeMap<_, _>>();
@@ -1472,6 +1485,53 @@ mod tests {
         assert!(artifact.contains("0:core:fn:shared_value:async=false:exported=true"));
         assert!(artifact.contains("0:0:stmt(core=return(int(0)),forewords=[],rollups=[])"));
         assert!(artifact.contains("core:symbols=1:items=4:lines=3:non_empty_lines=3"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn built_artifact_carries_resolved_bare_method_identity() {
+        let dir = temp_dir("artifact_bare_method_identity");
+        write_file(
+            &dir.join("book.toml"),
+            "name = \"ws\"\nkind = \"app\"\n[workspace]\nmembers = [\"app\", \"std\"]\n",
+        );
+        write_grimoire(
+            &dir.join("app"),
+            GrimoireKind::App,
+            "app",
+            &[("std", "../std")],
+        );
+        write_grimoire(&dir.join("std"), GrimoireKind::Lib, "std", &[]);
+        write_file(&dir.join("std/src/book.arc"), "import collections.list\n");
+        write_file(
+            &dir.join("std/src/collections.arc"),
+            "import collections.list\n",
+        );
+        write_file(
+            &dir.join("std/src/collections/list.arc"),
+            "impl List[T]:\n    fn len(read self: List[T]) -> Int:\n        return 0\n",
+        );
+        write_file(
+            &dir.join("app/src/shelf.arc"),
+            "import std.collections.list\nfn main() -> Int:\n    let xs = [1]\n    return xs :: :: len\n",
+        );
+
+        let graph = load_workspace_graph(&dir).expect("load graph");
+        let order = plan_workspace(&graph).expect("plan");
+        let fingerprints = fake_member_fingerprints(&graph);
+        let statuses = plan_build(&graph, &order, &fingerprints, None).expect("plan");
+        execute_build(&graph, &statuses).expect("execute");
+
+        let app = statuses
+            .iter()
+            .find(|status| status.member == "app")
+            .expect("app status");
+        let artifact = fs::read_to_string(graph.root_dir.join(&app.artifact_rel_path))
+            .expect("artifact should exist");
+        assert!(
+            artifact.contains("qualifier=len,resolved=std.collections.list.len"),
+            "expected lowered bare-method identity in artifact: {artifact}"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -2344,6 +2344,8 @@ enum ParsedExpr {
         args: Vec<ParsedPhraseArg>,
         qualifier_kind: ParsedPhraseQualifierKind,
         qualifier: String,
+        resolved_callable: Option<Vec<String>>,
+        resolved_signature: Option<String>,
         attached: Vec<ParsedHeaderAttachment>,
     },
     Await {
@@ -2574,6 +2576,7 @@ fn runtime_eval_message(signal: RuntimeEvalSignal) -> String {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct RuntimeExecutionState {
     next_local_handle: u64,
+    call_stack: Vec<String>,
     rollup_frames: Vec<RuntimeRollupFrame>,
     next_entity_id: i64,
     live_entities: BTreeSet<i64>,
@@ -2600,6 +2603,8 @@ struct RuntimeExecutionState {
     next_atomic_bool_handle: u64,
     atomic_bools: BTreeMap<RuntimeAtomicBoolHandle, bool>,
 }
+
+const RUNTIME_MAX_CALL_DEPTH: usize = 256;
 
 type RuntimeTypeBindings = BTreeMap<String, String>;
 
@@ -2651,6 +2656,7 @@ struct RuntimeRollupFrame {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RuntimeDeferredCall {
     callable: Vec<String>,
+    resolved_signature: Option<String>,
     current_module_id: String,
     type_args: Vec<String>,
     call_args: Vec<RuntimeCallArg>,
@@ -3697,6 +3703,14 @@ fn parse_expr(text: &str) -> Result<ParsedExpr, String> {
             Some(kind) => parse_phrase_qualifier_kind(kind)?,
             None => classify_phrase_qualifier_kind(&qualifier)?,
         };
+        let resolved_callable = fields
+            .get("resolved")
+            .map(|text| parse_runtime_symbol_path(text))
+            .transpose()?;
+        let resolved_signature = fields
+            .get("resolved_signature")
+            .map(|text| parse_runtime_string_field(text, "phrase resolved_signature"))
+            .transpose()?;
         return Ok(ParsedExpr::Phrase {
             subject: Box::new(parse_expr(
                 fields
@@ -3706,10 +3720,46 @@ fn parse_expr(text: &str) -> Result<ParsedExpr, String> {
             args,
             qualifier_kind,
             qualifier,
+            resolved_callable,
+            resolved_signature,
             attached,
         });
     }
     Err(format!("unsupported runtime expression `{text}`"))
+}
+
+fn parse_runtime_symbol_path(text: &str) -> Result<Vec<String>, String> {
+    let path = text
+        .split('.')
+        .map(str::trim)
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    if path.is_empty()
+        || path
+            .iter()
+            .any(|segment| !is_simple_runtime_identifier(segment))
+    {
+        return Err(format!("unsupported runtime symbol path `{text}`"));
+    }
+    Ok(path)
+}
+
+fn parse_runtime_string_field(text: &str, context: &str) -> Result<String, String> {
+    match parse_expr(text)? {
+        ParsedExpr::Str(value) => Ok(value),
+        other => Err(format!(
+            "{context} expected string literal field, got `{other:?}`"
+        )),
+    }
+}
+
+fn is_simple_runtime_identifier(text: &str) -> bool {
+    let mut chars = text.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 fn parse_phrase_qualifier_kind(text: &str) -> Result<ParsedPhraseQualifierKind, String> {
@@ -3727,14 +3777,8 @@ fn parse_phrase_qualifier_kind(text: &str) -> Result<ParsedPhraseQualifierKind, 
 }
 
 fn is_simple_runtime_path(text: &str) -> bool {
-    text.split('.').all(|segment| {
-        let mut chars = segment.chars();
-        let Some(first) = chars.next() else {
-            return false;
-        };
-        (first == '_' || first.is_ascii_alphabetic())
-            && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
-    })
+    text.split('.')
+        .all(|segment| is_simple_runtime_identifier(segment))
 }
 
 fn classify_phrase_qualifier_kind(text: &str) -> Result<ParsedPhraseQualifierKind, String> {
@@ -4186,6 +4230,28 @@ fn runtime_variant_enum_name(variant_name: &str) -> String {
     } else {
         variant_name.to_string()
     }
+}
+
+fn push_runtime_call_frame(
+    state: &mut RuntimeExecutionState,
+    module_id: &str,
+    symbol_name: &str,
+) -> Result<(), String> {
+    let frame = format!("{module_id}.{symbol_name}");
+    if state.call_stack.len() >= RUNTIME_MAX_CALL_DEPTH {
+        let mut trace = state.call_stack.clone();
+        trace.push(frame);
+        return Err(format!(
+            "runtime call depth exceeded {RUNTIME_MAX_CALL_DEPTH}; trace: {}",
+            trace.join(" -> ")
+        ));
+    }
+    state.call_stack.push(frame);
+    Ok(())
+}
+
+fn pop_runtime_call_frame(state: &mut RuntimeExecutionState) {
+    let _ = state.call_stack.pop();
 }
 
 fn resolve_routine_index(
@@ -5925,146 +5991,6 @@ fn opaque_type_name(value: &RuntimeOpaqueValue) -> &'static str {
     }
 }
 
-fn guessed_runtime_method_callable_path(
-    receiver: &RuntimeValue,
-    qualifier: &str,
-) -> Option<Vec<String>> {
-    match receiver {
-        RuntimeValue::List(_) => Some(vec![
-            "std".to_string(),
-            "collections".to_string(),
-            "list".to_string(),
-            qualifier.to_string(),
-        ]),
-        RuntimeValue::Array(_) => Some(vec![
-            "std".to_string(),
-            "collections".to_string(),
-            "array".to_string(),
-            qualifier.to_string(),
-        ]),
-        RuntimeValue::Map(_) => Some(vec![
-            "std".to_string(),
-            "collections".to_string(),
-            "map".to_string(),
-            qualifier.to_string(),
-        ]),
-        RuntimeValue::Record { name, .. } => {
-            let mut segments = name.split('.').map(ToString::to_string).collect::<Vec<_>>();
-            if segments.len() > 1 {
-                segments.pop();
-                segments.push(qualifier.to_string());
-                Some(segments)
-            } else {
-                Some(vec![qualifier.to_string()])
-            }
-        }
-        RuntimeValue::Opaque(value) => {
-            let mut segments = opaque_type_name(value)
-                .split('.')
-                .map(ToString::to_string)
-                .collect::<Vec<_>>();
-            if segments.len() > 1 {
-                segments.pop();
-                segments.push(qualifier.to_string());
-                Some(segments)
-            } else {
-                Some(vec![qualifier.to_string()])
-            }
-        }
-        RuntimeValue::Variant { name, .. } => {
-            let mut segments = name.split('.').map(ToString::to_string).collect::<Vec<_>>();
-            if segments.len() >= 2 {
-                segments.pop();
-                segments.pop();
-                segments.push(qualifier.to_string());
-                Some(segments)
-            } else {
-                Some(vec![qualifier.to_string()])
-            }
-        }
-        _ => None,
-    }
-}
-
-fn resolve_runtime_method_callable_path(
-    plan: &RuntimePackagePlan,
-    current_module_id: &str,
-    receiver: &RuntimeValue,
-    qualifier: &str,
-    state: &RuntimeExecutionState,
-) -> Option<Vec<String>> {
-    if let Some(callable) = guessed_runtime_method_callable_path(receiver, qualifier) {
-        if resolve_routine_index(plan, current_module_id, &callable).is_some()
-            || resolve_runtime_intrinsic_path(&callable).is_some()
-        {
-            return Some(callable);
-        }
-    }
-
-    let receiver_root = runtime_value_type_root(receiver)?;
-    let mut matches = plan
-        .routines
-        .iter()
-        .filter(|routine| {
-            routine.symbol_name == qualifier
-                && routine
-                    .params
-                    .first()
-                    .map(|param| runtime_type_root_name(&param.ty) == receiver_root)
-                    .unwrap_or(false)
-        })
-        .map(|routine| {
-            let mut path = routine
-                .module_id
-                .split('.')
-                .map(ToString::to_string)
-                .collect::<Vec<_>>();
-            path.push(routine.symbol_name.clone());
-            path
-        })
-        .collect::<Vec<_>>();
-
-    matches.sort();
-    matches.dedup();
-
-    if matches.len() == 1 {
-        return matches.into_iter().next();
-    }
-
-    let receiver_type = runtime_value_type_name(receiver, state)?;
-    let narrowed = plan
-        .routines
-        .iter()
-        .filter(|routine| {
-            routine.symbol_name == qualifier
-                && routine
-                    .params
-                    .first()
-                    .map(|param| {
-                        runtime_type_root_name(&param.ty) == receiver_root
-                            && (param.ty == receiver_type
-                                || runtime_type_root_name(&param.ty)
-                                    == runtime_type_root_name(&receiver_type))
-                    })
-                    .unwrap_or(false)
-        })
-        .map(|routine| {
-            let mut path = routine
-                .module_id
-                .split('.')
-                .map(ToString::to_string)
-                .collect::<Vec<_>>();
-            path.push(routine.symbol_name.clone());
-            path
-        })
-        .collect::<Vec<_>>();
-    if narrowed.len() == 1 {
-        return narrowed.into_iter().next();
-    }
-
-    None
-}
-
 fn runtime_receiver_type_args(
     receiver: &RuntimeValue,
     state: &RuntimeExecutionState,
@@ -6126,40 +6052,6 @@ fn runtime_value_type_root(receiver: &RuntimeValue) -> Option<String> {
         RuntimeValue::Variant { name, .. } => {
             Some(runtime_type_root_name(&runtime_variant_enum_name(name)))
         }
-        RuntimeValue::Unit => Some("Unit".to_string()),
-    }
-}
-
-fn runtime_value_type_name(
-    receiver: &RuntimeValue,
-    state: &RuntimeExecutionState,
-) -> Option<String> {
-    match receiver {
-        RuntimeValue::Int(_) => Some("Int".to_string()),
-        RuntimeValue::Bool(_) => Some("Bool".to_string()),
-        RuntimeValue::Str(_) => Some("Str".to_string()),
-        RuntimeValue::Pair(_, _) => Some("Pair".to_string()),
-        RuntimeValue::Array(_) => Some("Array".to_string()),
-        RuntimeValue::List(_) => Some("List".to_string()),
-        RuntimeValue::Map(_) => Some("Map".to_string()),
-        RuntimeValue::Range { .. } => Some("RangeInt".to_string()),
-        RuntimeValue::Ref(_) => Some("Ref".to_string()),
-        RuntimeValue::Opaque(_) => {
-            let mut type_name = opaque_type_name(match receiver {
-                RuntimeValue::Opaque(value) => value,
-                _ => unreachable!(),
-            })
-            .to_string();
-            let type_args = runtime_receiver_type_args(receiver, state);
-            if !type_args.is_empty() {
-                type_name.push('[');
-                type_name.push_str(&type_args.join(", "));
-                type_name.push(']');
-            }
-            Some(type_name)
-        }
-        RuntimeValue::Record { name, .. } => Some(name.clone()),
-        RuntimeValue::Variant { name, .. } => Some(runtime_variant_enum_name(name)),
         RuntimeValue::Unit => Some("Unit".to_string()),
     }
 }
@@ -6785,8 +6677,9 @@ fn eval_runtime_slice_value(
     state: &RuntimeExecutionState,
 ) -> Result<RuntimeValue, String> {
     let base = read_runtime_value_if_ref(base, scopes, state)?;
-    let values = match base {
-        RuntimeValue::List(values) | RuntimeValue::Array(values) => values,
+    let (values, slice_kind) = match base {
+        RuntimeValue::List(values) => (values, "list"),
+        RuntimeValue::Array(values) => (values, "array"),
         other => {
             return Err(format!(
                 "runtime slice expects List or Array, got `{other:?}`"
@@ -6831,7 +6724,12 @@ fn eval_runtime_slice_value(
             "slice start `{start}` must be less than or equal to end `{end}`"
         ));
     }
-    Ok(RuntimeValue::List(values[start..end].to_vec()))
+    let sliced = values[start..end].to_vec();
+    Ok(match slice_kind {
+        "list" => RuntimeValue::List(sliced),
+        "array" => RuntimeValue::Array(sliced),
+        _ => unreachable!("validated runtime slice carrier kind"),
+    })
 }
 
 fn eval_optional_runtime_int_expr(
@@ -7062,10 +6960,33 @@ fn resolve_routine_index_for_call(
     current_module_id: &str,
     callable: &[String],
     call_args: &[RuntimeCallArg],
+    resolved_signature: Option<&str>,
 ) -> Result<Option<usize>, String> {
     let candidates = resolve_routine_candidate_indices(plan, current_module_id, callable);
     if candidates.is_empty() {
         return Ok(None);
+    }
+    if let Some(signature) = resolved_signature {
+        let filtered = candidates
+            .into_iter()
+            .filter(|index| {
+                plan.routines
+                    .get(*index)
+                    .map(|routine| routine.signature_row == signature)
+                    .unwrap_or(false)
+            })
+            .collect::<Vec<_>>();
+        return match filtered.as_slice() {
+            [] => Err(format!(
+                "runtime call `{}` has no overload matching lowered signature `{signature}`",
+                callable.join(".")
+            )),
+            [index] => Ok(Some(*index)),
+            _ => Err(format!(
+                "runtime call `{}` remains ambiguous for lowered signature `{signature}`",
+                callable.join(".")
+            )),
+        };
     }
     if candidates.len() == 1 {
         return Ok(candidates.into_iter().next());
@@ -7134,6 +7055,7 @@ fn resolve_rollup_handler_callable_path(
 
 fn execute_call_by_path(
     callable: &[String],
+    resolved_signature: Option<&str>,
     current_module_id: &str,
     type_args: Vec<String>,
     call_args: Vec<RuntimeCallArg>,
@@ -7143,9 +7065,13 @@ fn execute_call_by_path(
     host: &mut dyn RuntimeHost,
     allow_async: bool,
 ) -> Result<RuntimeValue, String> {
-    if let Some(routine_index) =
-        resolve_routine_index_for_call(plan, current_module_id, callable, &call_args)?
-    {
+    if let Some(routine_index) = resolve_routine_index_for_call(
+        plan,
+        current_module_id,
+        callable,
+        &call_args,
+        resolved_signature,
+    )? {
         let routine = plan
             .routines
             .get(routine_index)
@@ -7255,6 +7181,7 @@ fn execute_runtime_apply_phrase(
     )?;
     Ok(execute_call_by_path(
         &callable,
+        None,
         current_module_id,
         type_args,
         call_args,
@@ -7271,6 +7198,8 @@ fn execute_runtime_method_call(
     args: &[ParsedPhraseArg],
     attached: &[ParsedHeaderAttachment],
     qualifier: &str,
+    resolved_callable: Option<&[String]>,
+    resolved_signature: Option<&str>,
     plan: &RuntimePackagePlan,
     current_module_id: &str,
     scopes: &mut Vec<RuntimeScope>,
@@ -7289,11 +7218,13 @@ fn execute_runtime_method_call(
         state,
         host,
     )?;
-    let Some(callable) =
-        resolve_runtime_method_callable_path(plan, current_module_id, &receiver, qualifier, state)
-    else {
-        return Err(format!("unsupported runtime qualifier `{qualifier}`").into());
-    };
+    let callable = resolved_callable
+        .ok_or_else(|| {
+            format!(
+                "runtime bare-method qualifier `{qualifier}` is missing lowered callable identity"
+            )
+        })?
+        .to_vec();
     let type_args = runtime_receiver_type_args(&receiver, state);
     let mut call_args = vec![RuntimeCallArg {
         name: None,
@@ -7313,6 +7244,7 @@ fn execute_runtime_method_call(
     )?);
     Ok(execute_call_by_path(
         &callable,
+        resolved_signature,
         current_module_id,
         type_args,
         call_args,
@@ -7370,6 +7302,7 @@ fn execute_runtime_named_qualifier_call(
     )?);
     Ok(execute_call_by_path(
         &callable,
+        None,
         current_module_id,
         type_args,
         call_args,
@@ -7386,6 +7319,8 @@ fn eval_qualifier(
     args: &[ParsedPhraseArg],
     attached: &[ParsedHeaderAttachment],
     qualifier: &str,
+    resolved_callable: Option<&[String]>,
+    resolved_signature: Option<&str>,
     plan: &RuntimePackagePlan,
     current_module_id: &str,
     scopes: &mut Vec<RuntimeScope>,
@@ -7399,6 +7334,8 @@ fn eval_qualifier(
         args,
         attached,
         qualifier,
+        resolved_callable,
+        resolved_signature,
         plan,
         current_module_id,
         scopes,
@@ -9703,7 +9640,7 @@ fn reject_edit_chain_stage_call(
     plan: &RuntimePackagePlan,
 ) -> RuntimeEvalResult<()> {
     if let Some(routine_index) =
-        resolve_routine_index_for_call(plan, current_module_id, callable, call_args)?
+        resolve_routine_index_for_call(plan, current_module_id, callable, call_args, None)?
     {
         let routine = plan
             .routines
@@ -9760,6 +9697,7 @@ fn execute_runtime_chain_stage(
     reject_edit_chain_stage_call(&callable, current_module_id, &call_args, plan)?;
     Ok(execute_call_by_path(
         &callable,
+        None,
         current_module_id,
         type_args,
         call_args,
@@ -9796,7 +9734,7 @@ fn spawn_runtime_chain_stage(
     )?;
     reject_edit_chain_stage_call(&callable, current_module_id, &call_args, plan)?;
     if let Some(routine_index) =
-        resolve_routine_index_for_call(plan, current_module_id, &callable, &call_args)?
+        resolve_routine_index_for_call(plan, current_module_id, &callable, &call_args, None)?
     {
         let routine = plan
             .routines
@@ -9816,6 +9754,7 @@ fn spawn_runtime_chain_stage(
     };
     let pending = RuntimePendingState::Pending(RuntimeDeferredWork::Call(RuntimeDeferredCall {
         callable,
+        resolved_signature: None,
         current_module_id: current_module_id.to_string(),
         type_args: type_args.clone(),
         call_args,
@@ -9933,9 +9872,15 @@ fn eval_runtime_chain_expr(
                 )
                 .ok()
                 .and_then(|(callable, _, call_args)| {
-                    resolve_routine_index_for_call(plan, current_module_id, &callable, &call_args)
-                        .ok()
-                        .flatten()
+                    resolve_routine_index_for_call(
+                        plan,
+                        current_module_id,
+                        &callable,
+                        &call_args,
+                        None,
+                    )
+                    .ok()
+                    .flatten()
                 })
                 .and_then(|routine_index| plan.routines.get(routine_index))
                 .map(|routine| routine.is_async)
@@ -9990,6 +9935,7 @@ fn execute_deferred_work(
         RuntimeDeferredWork::Call(pending) => {
             let RuntimeDeferredCall {
                 callable,
+                resolved_signature,
                 current_module_id,
                 type_args,
                 call_args,
@@ -10001,6 +9947,7 @@ fn execute_deferred_work(
             state.current_thread_id = thread_id;
             let result = execute_call_by_path(
                 &callable,
+                resolved_signature.as_deref(),
                 &current_module_id,
                 type_args,
                 call_args,
@@ -10130,6 +10077,8 @@ fn capture_spawned_phrase_call(
     attached: &[ParsedHeaderAttachment],
     qualifier_kind: ParsedPhraseQualifierKind,
     qualifier: &str,
+    resolved_callable: Option<&[String]>,
+    resolved_signature: Option<&str>,
     plan: &RuntimePackagePlan,
     current_module_id: &str,
     scopes: &mut Vec<RuntimeScope>,
@@ -10138,7 +10087,7 @@ fn capture_spawned_phrase_call(
     state: &mut RuntimeExecutionState,
     host: &mut dyn RuntimeHost,
 ) -> RuntimeEvalResult<Option<RuntimeValue>> {
-    let (callable, type_args, call_args) = match qualifier_kind {
+    let (callable, type_args, call_args, call_signature) = match qualifier_kind {
         ParsedPhraseQualifierKind::Call | ParsedPhraseQualifierKind::Apply => {
             if qualifier != "call" && qualifier_kind == ParsedPhraseQualifierKind::Call {
                 return Ok(None);
@@ -10158,7 +10107,7 @@ fn capture_spawned_phrase_call(
                 state,
                 host,
             )?;
-            (callable, type_args, call_args)
+            (callable, type_args, call_args, None)
         }
         ParsedPhraseQualifierKind::NamedPath => {
             let receiver = eval_expr(
@@ -10196,7 +10145,7 @@ fn capture_spawned_phrase_call(
                 state,
                 host,
             )?);
-            (callable, type_args, call_args)
+            (callable, type_args, call_args, None)
         }
         ParsedPhraseQualifierKind::BareMethod => {
             let receiver = eval_expr(
@@ -10209,14 +10158,13 @@ fn capture_spawned_phrase_call(
                 state,
                 host,
             )?;
-            let callable = resolve_runtime_method_callable_path(
-                plan,
-                current_module_id,
-                &receiver,
-                qualifier,
-                state,
-            )
-            .ok_or_else(|| format!("unsupported runtime qualifier `{qualifier}`"))?;
+            let callable = resolved_callable
+                .ok_or_else(|| {
+                    format!(
+                        "runtime bare-method qualifier `{qualifier}` is missing lowered callable identity"
+                    )
+                })?
+                .to_vec();
             let type_args = runtime_receiver_type_args(&receiver, state);
             let mut call_args = vec![RuntimeCallArg {
                 name: None,
@@ -10234,14 +10182,23 @@ fn capture_spawned_phrase_call(
                 state,
                 host,
             )?);
-            (callable, type_args, call_args)
+            (
+                callable,
+                type_args,
+                call_args,
+                resolved_signature.map(ToString::to_string),
+            )
         }
         ParsedPhraseQualifierKind::Try | ParsedPhraseQualifierKind::AwaitApply => return Ok(None),
     };
 
-    if let Some(routine_index) =
-        resolve_routine_index_for_call(plan, current_module_id, &callable, &call_args)?
-    {
+    if let Some(routine_index) = resolve_routine_index_for_call(
+        plan,
+        current_module_id,
+        &callable,
+        &call_args,
+        call_signature.as_deref(),
+    )? {
         let routine = plan
             .routines
             .get(routine_index)
@@ -10277,6 +10234,7 @@ fn capture_spawned_phrase_call(
     };
     let pending = RuntimePendingState::Pending(RuntimeDeferredWork::Call(RuntimeDeferredCall {
         callable,
+        resolved_signature: call_signature,
         current_module_id: current_module_id.to_string(),
         type_args: type_args.clone(),
         call_args,
@@ -10373,6 +10331,8 @@ fn eval_spawn_expr(
         args,
         qualifier_kind,
         qualifier,
+        resolved_callable,
+        resolved_signature,
         attached,
     } = expr
     {
@@ -10383,6 +10343,8 @@ fn eval_spawn_expr(
             attached,
             *qualifier_kind,
             qualifier,
+            resolved_callable.as_deref(),
+            resolved_signature.as_deref(),
             plan,
             current_module_id,
             scopes,
@@ -10813,6 +10775,8 @@ fn eval_expr(
             args,
             qualifier_kind,
             qualifier,
+            resolved_callable,
+            resolved_signature,
             attached,
         } => match qualifier_kind {
             ParsedPhraseQualifierKind::Call => execute_runtime_apply_phrase(
@@ -10846,6 +10810,8 @@ fn eval_expr(
                 args,
                 attached,
                 qualifier,
+                resolved_callable.as_deref(),
+                resolved_signature.as_deref(),
                 plan,
                 current_module_id,
                 scopes,
@@ -11059,6 +11025,7 @@ fn execute_page_rollups(
             resolve_rollup_handler_callable_path(plan, current_module_id, &rollup.handler_path);
         let _ = execute_call_by_path(
             &callable,
+            None,
             current_module_id,
             Vec::new(),
             vec![RuntimeCallArg {
@@ -11429,168 +11396,181 @@ fn execute_routine_call_with_state(
         .routines
         .get(routine_index)
         .ok_or_else(|| format!("invalid routine index `{routine_index}`"))?;
-    if let Some(intrinsic_impl) = &routine.intrinsic_impl {
-        let intrinsic = resolve_runtime_intrinsic_impl(intrinsic_impl).ok_or_else(|| {
-            format!(
-                "unsupported runtime intrinsic `{intrinsic_impl}` for `{}`",
-                routine.symbol_name
-            )
-        })?;
-        let value = execute_runtime_intrinsic(intrinsic, &type_args, &mut args, plan, state, host)?;
-        return Ok(RoutineExecutionOutcome {
-            value,
-            final_args: args,
-        });
-    }
-    if routine.is_async && !allow_async {
-        return Err(format!(
-            "async routine `{}` is not executable in the current runtime lane",
-            routine.symbol_name
-        ));
-    }
-    if args.len() != routine.params.len() {
-        return Err(format!(
-            "routine `{}` expected {} arguments, got {}",
-            routine.symbol_name,
-            routine.params.len(),
-            args.len()
-        ));
-    }
-    if !routine.type_params.is_empty()
-        && !type_args.is_empty()
-        && type_args.len() != routine.type_params.len()
-    {
-        return Err(format!(
-            "routine `{}` expected {} type arguments, got {}",
-            routine.symbol_name,
-            routine.type_params.len(),
-            type_args.len()
-        ));
-    }
-    let aliases = plan
-        .module_aliases
-        .get(&routine.module_id)
-        .cloned()
-        .unwrap_or_default();
-    let resolved_type_args = if type_args.is_empty() {
-        routine.type_params.clone()
-    } else {
-        type_args
-    };
-    let type_bindings = routine
-        .type_params
-        .iter()
-        .cloned()
-        .zip(resolved_type_args)
-        .collect::<RuntimeTypeBindings>();
-    let entered_async_context = routine.is_async;
-    if entered_async_context {
-        state.async_context_depth += 1;
-    }
+    push_runtime_call_frame(state, &routine.module_id, &routine.symbol_name)?;
     let execution_result = (|| -> Result<RoutineExecutionOutcome, String> {
-        let mut initial_scope = RuntimeScope::default();
-        push_runtime_rollup_frame(state, &routine.rollups, &[]);
-        for (param, value) in routine.params.iter().zip(args) {
-            insert_runtime_local(
-                state,
-                &mut initial_scope,
-                param.name.clone(),
-                param.mode.as_deref() == Some("edit"),
+        if let Some(intrinsic_impl) = &routine.intrinsic_impl {
+            let intrinsic = resolve_runtime_intrinsic_impl(intrinsic_impl).ok_or_else(|| {
+                format!(
+                    "unsupported runtime intrinsic `{intrinsic_impl}` for `{}`",
+                    routine.symbol_name
+                )
+            })?;
+            let value =
+                execute_runtime_intrinsic(intrinsic, &type_args, &mut args, plan, state, host)?;
+            return Ok(RoutineExecutionOutcome {
                 value,
-            );
+                final_args: args,
+            });
         }
-        let mut scopes = Vec::new();
-        scopes.push(initial_scope);
-        let result = execute_statements(
-            &routine.statements,
-            &mut scopes,
-            plan,
-            &routine.module_id,
-            &aliases,
-            &type_bindings,
-            state,
-            host,
-        );
-        let defer_result = run_scope_defers(
-            plan,
-            &routine.module_id,
-            &mut scopes,
-            &aliases,
-            &type_bindings,
-            state,
-            host,
-        );
-        let routine_rollup_frame = pop_runtime_rollup_frame(state);
-        let final_scope = scopes
-            .pop()
-            .ok_or_else(|| "runtime scope stack is empty".to_string())?;
-        match defer_result {
-            Ok(()) => {}
-            Err(RuntimeEvalSignal::Message(message)) => return Err(message),
-            Err(RuntimeEvalSignal::Return(value)) => {
-                if let Some(frame) = routine_rollup_frame {
+        if routine.is_async && !allow_async {
+            return Err(format!(
+                "async routine `{}` is not executable in the current runtime lane",
+                routine.symbol_name
+            ));
+        }
+        if args.len() != routine.params.len() {
+            return Err(format!(
+                "routine `{}` expected {} arguments, got {}",
+                routine.symbol_name,
+                routine.params.len(),
+                args.len()
+            ));
+        }
+        if !routine.type_params.is_empty()
+            && !type_args.is_empty()
+            && type_args.len() != routine.type_params.len()
+        {
+            return Err(format!(
+                "routine `{}` expected {} type arguments, got {}",
+                routine.symbol_name,
+                routine.type_params.len(),
+                type_args.len()
+            ));
+        }
+        let aliases = plan
+            .module_aliases
+            .get(&routine.module_id)
+            .cloned()
+            .unwrap_or_default();
+        let resolved_type_args = if type_args.is_empty() {
+            routine.type_params.clone()
+        } else {
+            type_args
+        };
+        let type_bindings = routine
+            .type_params
+            .iter()
+            .cloned()
+            .zip(resolved_type_args)
+            .collect::<RuntimeTypeBindings>();
+        let entered_async_context = routine.is_async;
+        if entered_async_context {
+            state.async_context_depth += 1;
+        }
+        let outcome = (|| -> Result<RoutineExecutionOutcome, String> {
+            let mut initial_scope = RuntimeScope::default();
+            push_runtime_rollup_frame(state, &routine.rollups, &[]);
+            for (param, value) in routine.params.iter().zip(args) {
+                insert_runtime_local(
+                    state,
+                    &mut initial_scope,
+                    param.name.clone(),
+                    param.mode.as_deref() == Some("edit"),
+                    value,
+                );
+            }
+            let mut scopes = Vec::new();
+            scopes.push(initial_scope);
+            let result = execute_statements(
+                &routine.statements,
+                &mut scopes,
+                plan,
+                &routine.module_id,
+                &aliases,
+                &type_bindings,
+                state,
+                host,
+            );
+            let defer_result = run_scope_defers(
+                plan,
+                &routine.module_id,
+                &mut scopes,
+                &aliases,
+                &type_bindings,
+                state,
+                host,
+            );
+            let routine_rollup_frame = pop_runtime_rollup_frame(state);
+            let final_scope = scopes
+                .pop()
+                .ok_or_else(|| "runtime scope stack is empty".to_string())?;
+            match defer_result {
+                Ok(()) => {}
+                Err(RuntimeEvalSignal::Message(message)) => return Err(message),
+                Err(RuntimeEvalSignal::Return(value)) => {
+                    if let Some(frame) = routine_rollup_frame {
+                        execute_page_rollups(
+                            frame,
+                            plan,
+                            &routine.module_id,
+                            &mut scopes,
+                            state,
+                            host,
+                        )
+                        .map_err(runtime_eval_message)?;
+                    }
+                    let final_args = routine
+                        .params
+                        .iter()
+                        .map(|param| {
+                            final_scope
+                                .locals
+                                .get(&param.name)
+                                .map(|local| local.value.clone())
+                                .ok_or_else(|| {
+                                    format!(
+                                        "runtime routine `{}` lost bound parameter `{}`",
+                                        routine.symbol_name, param.name
+                                    )
+                                })
+                        })
+                        .collect::<Result<Vec<_>, String>>()?;
+                    return Ok(RoutineExecutionOutcome { value, final_args });
+                }
+            }
+            if let Some(frame) = routine_rollup_frame {
+                if !matches!(result, Err(RuntimeEvalSignal::Message(_))) {
                     execute_page_rollups(frame, plan, &routine.module_id, &mut scopes, state, host)
                         .map_err(runtime_eval_message)?;
                 }
-                let final_args = routine
-                    .params
-                    .iter()
-                    .map(|param| {
-                        final_scope
-                            .locals
-                            .get(&param.name)
-                            .map(|local| local.value.clone())
-                            .ok_or_else(|| {
-                                format!(
-                                    "runtime routine `{}` lost bound parameter `{}`",
-                                    routine.symbol_name, param.name
-                                )
-                            })
-                    })
-                    .collect::<Result<Vec<_>, String>>()?;
-                return Ok(RoutineExecutionOutcome { value, final_args });
             }
+            let result = match result {
+                Ok(signal) => signal,
+                Err(RuntimeEvalSignal::Message(message)) => return Err(message),
+                Err(RuntimeEvalSignal::Return(value)) => FlowSignal::Return(value),
+            };
+            let value = match result {
+                FlowSignal::Next => RuntimeValue::Unit,
+                FlowSignal::Return(value) => value,
+                FlowSignal::Break => return Err("break escaped the top-level routine".to_string()),
+                FlowSignal::Continue => {
+                    return Err("continue escaped the top-level routine".to_string());
+                }
+            };
+            let final_args = routine
+                .params
+                .iter()
+                .map(|param| {
+                    final_scope
+                        .locals
+                        .get(&param.name)
+                        .map(|local| local.value.clone())
+                        .ok_or_else(|| {
+                            format!(
+                                "runtime routine `{}` lost bound parameter `{}`",
+                                routine.symbol_name, param.name
+                            )
+                        })
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok(RoutineExecutionOutcome { value, final_args })
+        })();
+        if entered_async_context {
+            state.async_context_depth = state.async_context_depth.saturating_sub(1);
         }
-        if let Some(frame) = routine_rollup_frame {
-            if !matches!(result, Err(RuntimeEvalSignal::Message(_))) {
-                execute_page_rollups(frame, plan, &routine.module_id, &mut scopes, state, host)
-                    .map_err(runtime_eval_message)?;
-            }
-        }
-        let result = match result {
-            Ok(signal) => signal,
-            Err(RuntimeEvalSignal::Message(message)) => return Err(message),
-            Err(RuntimeEvalSignal::Return(value)) => FlowSignal::Return(value),
-        };
-        let value = match result {
-            FlowSignal::Next => RuntimeValue::Unit,
-            FlowSignal::Return(value) => value,
-            FlowSignal::Break => return Err("break escaped the top-level routine".to_string()),
-            FlowSignal::Continue => {
-                return Err("continue escaped the top-level routine".to_string());
-            }
-        };
-        let final_args = routine
-            .params
-            .iter()
-            .map(|param| {
-                final_scope
-                    .locals
-                    .get(&param.name)
-                    .map(|local| local.value.clone())
-                    .ok_or_else(|| {
-                        format!(
-                            "runtime routine `{}` lost bound parameter `{}`",
-                            routine.symbol_name, param.name
-                        )
-                    })
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-        Ok(RoutineExecutionOutcome { value, final_args })
+        outcome
     })();
-    if entered_async_context {
-        state.async_context_depth = state.async_context_depth.saturating_sub(1);
-    }
+    pop_runtime_call_frame(state);
     execution_result
 }
 

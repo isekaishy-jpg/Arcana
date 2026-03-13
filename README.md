@@ -28,7 +28,7 @@ Arcana is a Rust-first rewrite of the frozen Arcana language and tooling stack. 
 - `arcana check` now also enforces recursive boundary-safe typing for carried Lua/SQL boundary contracts across nested record/enum surfaces
 - Lua/SQL boundary-varietal compile-time contracts now have example and negative conformance coverage, and the carried first-class ECS direction is documented without freezing generalized ECS query authoring into the selfhost baseline
 - Impl header generic/lifetime params now survive syntax/HIR lowering, so inherited `T`/`'a` scope is available to later frontend work
-- Next compiler debt is the Milestone 6/7 findings-closure program in `docs/reference/audits/milestone_6_7_findings_closure_matrix_v1.md`, then native AOT artifact emission, follow-on backend hardening around scheduler/resource semantics beyond the current proven std-runtime lane, and pre-selfhost tooling work for `arcana test` and `arcana format`
+- Next compiler debt is native AOT artifact emission, followed by backend hardening around richer scheduler/resource semantics beyond the current proven std-runtime lane, and pre-selfhost tooling work for `arcana test` and `arcana format`
 - Seed-imported frozen docs, conformance fixtures, and historical MeadowLang corpus were used to bootstrap the rewrite; the broad reference tree is now archived outside this repo
 - Meadow-vs-Arcana language-behavior audit captured in `docs/reference/audits/meadow_language_behavior_audit_v1.md`
 - Current rewrite authority comes from `PLAN.md`, `docs/rewrite-roadmap.md`, the active scope docs under `docs/specs/`, and `crates/*`; archived MeadowLang corpus is migration context only, while `std` is rewrite-owned first-party surface
