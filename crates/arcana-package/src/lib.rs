@@ -1209,6 +1209,7 @@ fn escape_toml(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arcana_aot::parse_package_artifact;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_dir(name: &str) -> PathBuf {
@@ -1451,7 +1452,13 @@ mod tests {
         );
         write_file(
             &dir.join("core/src/types.arc"),
-            "export record Counter:\n    value: Int\n",
+            concat!(
+                "export record Counter:\n",
+                "    value: Int\n",
+                "impl Counter:\n",
+                "    fn next(read self: Counter) -> Int:\n",
+                "        return self.value + 1\n",
+            ),
         );
         let graph = load_workspace_graph(&dir).expect("load graph");
         let order = plan_workspace(&graph).expect("plan");
@@ -1465,28 +1472,61 @@ mod tests {
             .expect("core status");
         let artifact = fs::read_to_string(graph.root_dir.join(&core.artifact_rel_path))
             .expect("artifact should exist");
-        assert!(artifact.contains("format = \"arcana-aot-v3\""));
-        assert!(artifact.contains("package = \"core\""));
-        assert!(artifact.contains("root_module = \"core\""));
-        assert!(artifact.contains("module_count = 2"));
-        assert!(artifact.contains("dependency_edge_count = 1"));
-        assert!(artifact.contains("direct_deps = []"));
-        assert!(artifact.contains("dependency_rows = ["));
-        assert!(artifact.contains("runtime_requirements = []"));
-        assert!(artifact.contains("entrypoint_rows = []"));
-        assert!(artifact.contains("routine_rows = ["));
-        assert!(artifact.contains("statement_rows = ["));
-        assert!(artifact.contains("module=core:export:fn:fn shared_value() -> Int:"));
-        assert!(artifact.contains("module=core:reexport:types"));
+        let parsed = parse_package_artifact(&artifact).expect("artifact should parse");
+        assert_eq!(parsed.format, AOT_INTERNAL_FORMAT);
+        assert_eq!(parsed.package_name, "core");
+        assert_eq!(parsed.root_module_id, "core");
+        assert_eq!(parsed.module_count, 2);
+        assert_eq!(parsed.dependency_edge_count, 1);
+        assert!(parsed.direct_deps.is_empty());
         assert!(
-            artifact.contains("module=core.types:export:record:record Counter:\\\\nvalue: Int")
+            parsed
+                .dependency_rows
+                .iter()
+                .any(|row| row.contains("types"))
         );
-        assert!(artifact.contains("module_rows = ["));
+        assert!(parsed.runtime_requirements.is_empty());
+        assert!(parsed.entrypoints.is_empty());
+        assert_eq!(parsed.routines.len(), 2);
         assert!(
-            artifact.contains("0:core:key=core#sym-0:fn:shared_value:async=false:exported=true")
+            parsed
+                .routines
+                .iter()
+                .any(|routine| routine.symbol_name == "shared_value")
         );
-        assert!(artifact.contains("0:0:stmt(core=return(int(0)),forewords=[],rollups=[])"));
-        assert!(artifact.contains("core:symbols=1:items=4:lines=3:non_empty_lines=3"));
+        assert!(
+            parsed
+                .exported_surface_rows
+                .iter()
+                .any(|row| row == "module=core:export:fn:fn shared_value() -> Int:")
+        );
+        assert!(
+            parsed
+                .exported_surface_rows
+                .iter()
+                .any(|row| row == "module=core:reexport:types")
+        );
+        assert!(
+            parsed
+                .exported_surface_rows
+                .iter()
+                .any(|row| row == "module=core.types:export:record:record Counter:\\nvalue: Int")
+        );
+        assert!(
+            parsed.exported_surface_rows.iter().any(|row| row
+                == "module=core.types:impl:target=Counter:trait=:methods=[fn:fn next(read self: Counter) -> Int:]"),
+            "expected public impl surface rows in artifact: {artifact}"
+        );
+        assert_eq!(parsed.modules[0].module_id, "core");
+        assert_eq!(parsed.modules[0].symbol_count, 1);
+        assert_eq!(parsed.modules[0].line_count, 3);
+        assert_eq!(parsed.routines[0].routine_key, "core#sym-0");
+        assert_eq!(
+            parsed.routines[0].statements,
+            vec![arcana_ir::ExecStmt::ReturnValue {
+                value: arcana_ir::ExecExpr::Int(0),
+            }]
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1530,12 +1570,20 @@ mod tests {
             .expect("app status");
         let artifact = fs::read_to_string(graph.root_dir.join(&app.artifact_rel_path))
             .expect("artifact should exist");
+        let parsed = parse_package_artifact(&artifact).expect("artifact should parse");
+        let main = parsed
+            .routines
+            .iter()
+            .find(|routine| routine.symbol_name == "main")
+            .expect("main routine should exist");
+        let lowered = format!("{:?}", main.statements);
         assert!(
-            artifact.contains("qualifier=len,resolved=std.collections.list.len"),
+            lowered
+                .contains("resolved_callable: Some([\"std\", \"collections\", \"list\", \"len\"])"),
             "expected lowered bare-method identity in artifact: {artifact}"
         );
         assert!(
-            artifact.contains("resolved_routine=str(\\\"std.collections.list#impl-0-method-0\\\")"),
+            lowered.contains("resolved_routine: Some(\"std.collections.list#impl-0-method-0\")"),
             "expected lowered bare-method routine identity in artifact: {artifact}"
         );
         let _ = fs::remove_dir_all(&dir);

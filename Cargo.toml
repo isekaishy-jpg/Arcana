@@ -26,5 +26,6 @@ arcana-package = { path = "crates/arcana-package" }
 arcana-runtime = { path = "crates/arcana-runtime" }
 arcana-syntax = { path = "crates/arcana-syntax" }
 pathdiff = "0.2"
+serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
 toml = "0.8"

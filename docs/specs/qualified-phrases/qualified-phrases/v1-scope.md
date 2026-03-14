@@ -27,6 +27,7 @@ This scope freezes the current qualified-phrase contract for the rewrite.
 - Runtime must execute the lowered result.
 - Runtime must not reconstruct dotted-path identity from dynamic receiver shape as the source of truth.
 - Bare-method qualifiers over concrete receiver methods must carry resolved callable identity through lowering.
+- Impl methods on public receiver types are part of the public bare-method surface by default; cross-package bare-method use does not require a separate `export` marker on each impl method.
 - When multiple runtime routines share the same callable path, lowered executable rows must also carry exact concrete routine identity for that bare-method call instead of leaving runtime to re-disambiguate from receiver shape.
 - Trait-bound or otherwise generic bare-method calls may remain receiver-directed dynamic dispatch in the current runtime lane when lowering cannot know a concrete impl routine ahead of execution.
 - Bare-method execution must route through linked routines or approved intrinsic seams rather than executor-owned public-std qualifier shims.

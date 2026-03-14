@@ -1,4 +1,14 @@
 pub mod freeze;
+mod lookup;
+
+pub use lookup::{
+    current_workspace_package_for_module, impl_target_is_public_from_package,
+    lookup_method_candidates_for_type, lookup_symbol_path, visible_method_package_names_for_module,
+    visible_package_root_for_module,
+};
+pub(crate) use lookup::{
+    lookup_symbol_path_in_module_context, visible_symbol_refs_in_module_for_package,
+};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -8,7 +18,8 @@ use arcana_syntax::{
     OpaqueBoundaryPolicy as ParsedOpaqueBoundaryPolicy,
     OpaqueOwnershipPolicy as ParsedOpaqueOwnershipPolicy,
     OpaqueTypePolicy as ParsedOpaqueTypePolicy, ParamMode as ParsedParamMode, ParsedModule, Span,
-    StatementKind as ParsedStatementKind, SymbolKind as ParsedSymbolKind, parse_module,
+    StatementKind as ParsedStatementKind, SymbolKind as ParsedSymbolKind, builtin_type_info,
+    parse_module,
 };
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -548,11 +559,11 @@ impl HirModuleSummary {
             .count()
     }
 
-    pub fn exported_surface_rows(&self) -> Vec<String> {
-        self.api_fingerprint_rows()
+    pub fn summary_surface_rows(&self) -> Vec<String> {
+        self.summary_api_fingerprint_rows()
     }
 
-    pub fn api_fingerprint_rows(&self) -> Vec<String> {
+    pub fn summary_api_fingerprint_rows(&self) -> Vec<String> {
         let mut rows = self
             .directives
             .iter()
@@ -626,14 +637,14 @@ impl HirPackageSummary {
         self.modules.len()
     }
 
-    pub fn exported_surface_rows(&self) -> Vec<String> {
-        self.api_fingerprint_rows()
+    pub fn summary_surface_rows(&self) -> Vec<String> {
+        self.summary_api_fingerprint_rows()
     }
 
-    pub fn api_fingerprint_rows(&self) -> Vec<String> {
+    pub fn summary_api_fingerprint_rows(&self) -> Vec<String> {
         let mut rows = Vec::new();
         for module in &self.modules {
-            for row in module.api_fingerprint_rows() {
+            for row in module.summary_api_fingerprint_rows() {
                 rows.push(format!("module={}:{}", module.module_id, row));
             }
         }
@@ -838,67 +849,712 @@ pub fn routine_key_for_impl_method(
     format!("{module_id}#impl-{impl_index}-method-{method_index}")
 }
 
-pub fn lookup_method_candidates_for_type<'a>(
-    workspace: &'a HirWorkspaceSummary,
-    type_text: &str,
-    method_name: &str,
-) -> Vec<HirMethodCandidate<'a>> {
-    let wanted = erase_type_generics_for_method_lookup(type_text);
-    let matches_target = |target: &str| {
-        let target = erase_type_generics_for_method_lookup(target);
-        target == wanted
-            || target.ends_with(&format!(".{wanted}"))
-            || wanted.ends_with(&format!(".{target}"))
+fn canonicalize_method_lookup_base(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    text: &str,
+) -> String {
+    split_simple_path(text)
+        .and_then(|path| lookup_symbol_path(workspace, resolved_module, &path))
+        .map(|symbol_ref| format!("{}.{}", symbol_ref.module_id, symbol_ref.symbol.name))
+        .or_else(|| canonical_ambient_type_root(text).map(str::to_string))
+        .unwrap_or_else(|| text.trim().to_string())
+}
+
+fn canonical_ambient_type_root(text: &str) -> Option<&'static str> {
+    match text.trim() {
+        "List" => Some("std.collections.list.List"),
+        "Array" => Some("std.collections.array.Array"),
+        "Map" => Some("std.collections.map.Map"),
+        "Set" => Some("std.collections.set.Set"),
+        "Option" => Some("std.option.Option"),
+        "Result" => Some("std.result.Result"),
+        "Arena" => Some("std.memory.Arena"),
+        "ArenaId" => Some("std.memory.ArenaId"),
+        "FrameArena" => Some("std.memory.FrameArena"),
+        "FrameId" => Some("std.memory.FrameId"),
+        "PoolArena" => Some("std.memory.PoolArena"),
+        "PoolId" => Some("std.memory.PoolId"),
+        "Task" => Some("std.concurrent.Task"),
+        "Thread" => Some("std.concurrent.Thread"),
+        "Channel" => Some("std.concurrent.Channel"),
+        "Mutex" => Some("std.concurrent.Mutex"),
+        "AtomicInt" => Some("std.concurrent.AtomicInt"),
+        "AtomicBool" => Some("std.concurrent.AtomicBool"),
+        _ => None,
+    }
+}
+
+fn canonicalize_method_lookup_base_in_module(
+    workspace: &HirWorkspaceSummary,
+    package: &HirWorkspacePackage,
+    module: &HirModuleSummary,
+    text: &str,
+) -> String {
+    split_simple_path(text)
+        .and_then(|path| lookup_symbol_path_in_module_context(workspace, package, module, &path))
+        .map(|symbol_ref| format!("{}.{}", symbol_ref.module_id, symbol_ref.symbol.name))
+        .or_else(|| canonical_ambient_type_root(text).map(str::to_string))
+        .unwrap_or_else(|| text.trim().to_string())
+}
+
+fn canonicalize_method_lookup_type_text_in_module(
+    workspace: &HirWorkspaceSummary,
+    package: &HirWorkspacePackage,
+    module: &HirModuleSummary,
+    text: &str,
+) -> String {
+    let trimmed = text.trim();
+    if let Some(rest) = trimmed.strip_prefix("&mut") {
+        return format!(
+            "&mut {}",
+            canonicalize_method_lookup_type_text_in_module(workspace, package, module, rest)
+        );
+    }
+    if let Some(rest) = trimmed.strip_prefix('&') {
+        return format!(
+            "& {}",
+            canonicalize_method_lookup_type_text_in_module(workspace, package, module, rest)
+        );
+    }
+    if let Some((base, args)) = parse_surface_type_application(trimmed) {
+        let base = canonicalize_method_lookup_base_in_module(workspace, package, module, &base);
+        if args.is_empty() {
+            return base;
+        }
+        let args = args
+            .into_iter()
+            .map(|arg| {
+                canonicalize_method_lookup_type_text_in_module(workspace, package, module, &arg)
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        return format!("{base}[{args}]");
+    }
+    canonicalize_method_lookup_base_in_module(workspace, package, module, trimmed)
+}
+
+fn canonicalize_method_lookup_type_text(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    text: &str,
+) -> String {
+    let trimmed = text.trim();
+    if let Some(rest) = trimmed.strip_prefix("&mut") {
+        return format!(
+            "&mut {}",
+            canonicalize_method_lookup_type_text(workspace, resolved_module, rest)
+        );
+    }
+    if let Some(rest) = trimmed.strip_prefix('&') {
+        return format!(
+            "& {}",
+            canonicalize_method_lookup_type_text(workspace, resolved_module, rest)
+        );
+    }
+    if let Some((base, args)) = parse_surface_type_application(trimmed) {
+        let base = canonicalize_method_lookup_base(workspace, resolved_module, &base);
+        if args.is_empty() {
+            return base;
+        }
+        let args = args
+            .into_iter()
+            .map(|arg| canonicalize_method_lookup_type_text(workspace, resolved_module, &arg))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return format!("{base}[{args}]");
+    }
+    canonicalize_method_lookup_base(workspace, resolved_module, trimmed)
+}
+
+fn is_simple_type_placeholder(text: &str) -> bool {
+    let mut chars = text.chars();
+    let Some(first) = chars.next() else {
+        return false;
     };
-    let mut candidates = Vec::new();
-    let mut seen_routines = BTreeSet::new();
-    for package in workspace.packages.values() {
-        for module in &package.summary.modules {
-            for (impl_index, impl_decl) in module.impls.iter().enumerate() {
-                if !matches_target(&impl_decl.target_type) {
-                    continue;
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+        && builtin_type_info(text).is_none()
+}
+
+fn method_target_type_matches(
+    declared: &str,
+    actual: &str,
+    substitutions: &mut BTreeMap<String, String>,
+) -> bool {
+    let declared = strip_reference_prefix(declared);
+    let actual = strip_reference_prefix(actual);
+    if declared == actual {
+        return true;
+    }
+    if is_simple_type_placeholder(declared) {
+        if let Some(existing) = substitutions.get(declared) {
+            return existing == actual;
+        }
+        substitutions.insert(declared.to_string(), actual.to_string());
+        return true;
+    }
+    match (
+        parse_surface_type_application(declared),
+        parse_surface_type_application(actual),
+    ) {
+        (Some((decl_base, decl_args)), Some((actual_base, actual_args))) => {
+            if decl_base != actual_base || decl_args.len() != actual_args.len() {
+                return false;
+            }
+            decl_args
+                .iter()
+                .zip(actual_args.iter())
+                .all(|(decl_arg, actual_arg)| {
+                    method_target_type_matches(decl_arg, actual_arg, substitutions)
+                })
+        }
+        _ => declared == actual,
+    }
+}
+
+pub trait HirLocalTypeLookup {
+    fn contains_local(&self, name: &str) -> bool;
+    fn type_text_of(&self, name: &str) -> Option<&str>;
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct HirResolvedSymbolRef<'a> {
+    pub package_name: &'a str,
+    pub module_id: &'a str,
+    pub symbol_index: usize,
+    pub symbol: &'a HirSymbol,
+}
+
+fn hir_is_ident_start(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphabetic()
+}
+
+fn hir_is_ident_continue(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphanumeric()
+}
+
+fn split_simple_path(text: &str) -> Option<Vec<String>> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let mut segments = Vec::new();
+    for segment in trimmed.split('.') {
+        let segment = segment.trim();
+        if segment.is_empty() {
+            return None;
+        }
+        let mut chars = segment.chars();
+        let first = chars.next()?;
+        if !hir_is_ident_start(first) || !chars.all(hir_is_ident_continue) {
+            return None;
+        }
+        segments.push(segment.to_string());
+    }
+
+    (!segments.is_empty()).then_some(segments)
+}
+
+fn split_top_level_surface_items(text: &str, separator: char) -> Vec<String> {
+    let mut items = Vec::new();
+    let mut current = String::new();
+    let mut square_depth = 0usize;
+    let mut paren_depth = 0usize;
+    for ch in text.chars() {
+        match ch {
+            '[' => {
+                square_depth += 1;
+                current.push(ch);
+            }
+            ']' => {
+                square_depth = square_depth.saturating_sub(1);
+                current.push(ch);
+            }
+            '(' => {
+                paren_depth += 1;
+                current.push(ch);
+            }
+            ')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+                current.push(ch);
+            }
+            _ if ch == separator && square_depth == 0 && paren_depth == 0 => {
+                let item = current.trim();
+                if !item.is_empty() {
+                    items.push(item.to_string());
                 }
-                for (method_index, method) in impl_decl.methods.iter().enumerate() {
-                    if method.name != method_name {
-                        continue;
-                    }
-                    let routine_key =
-                        routine_key_for_impl_method(&module.module_id, impl_index, method_index);
-                    if !seen_routines.insert(routine_key.clone()) {
-                        continue;
-                    }
-                    candidates.push(HirMethodCandidate {
-                        module_id: &module.module_id,
-                        symbol: method,
-                        declared_receiver_type: &impl_decl.target_type,
-                        routine_key,
-                    });
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    let tail = current.trim();
+    if !tail.is_empty() {
+        items.push(tail.to_string());
+    }
+    items
+}
+
+fn strip_reference_prefix(text: &str) -> &str {
+    let trimmed = text.trim_start();
+    if let Some(rest) = trimmed.strip_prefix("&mut") {
+        return rest.trim_start();
+    }
+    if let Some(rest) = trimmed.strip_prefix('&') {
+        return rest.trim_start();
+    }
+    trimmed
+}
+
+fn parse_surface_type_application(text: &str) -> Option<(String, Vec<String>)> {
+    let trimmed = text.trim();
+    if let Some(path) = split_simple_path(trimmed) {
+        return Some((path.join("."), Vec::new()));
+    }
+    let mut depth = 0usize;
+    let mut open = None;
+    for (index, ch) in trimmed.char_indices() {
+        match ch {
+            '[' if depth == 0 => {
+                open = Some(index);
+                break;
+            }
+            '[' | '(' => depth += 1,
+            ']' | ')' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    let open = open?;
+    if !trimmed.ends_with(']') || open == 0 {
+        return None;
+    }
+    let base = trimmed[..open].trim();
+    let path = split_simple_path(base)?;
+    let args = split_top_level_surface_items(&trimmed[open + 1..trimmed.len() - 1], ',');
+    Some((path.join("."), args))
+}
+
+fn substitute_type_params(text: &str, substitutions: &BTreeMap<String, String>) -> String {
+    let chars = text.chars().collect::<Vec<_>>();
+    let mut out = String::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        let ch = chars[index];
+        if ch == '\'' {
+            out.push(ch);
+            index += 1;
+            while index < chars.len() {
+                let current = chars[index];
+                out.push(current);
+                index += 1;
+                if !(current == '_' || current.is_ascii_alphanumeric()) {
+                    break;
                 }
             }
-            for (symbol_index, symbol) in module.symbols.iter().enumerate() {
-                if symbol.name != method_name || !matches!(symbol.kind, HirSymbolKind::Fn) {
-                    continue;
+            continue;
+        }
+        if ch == '_' || ch.is_ascii_alphabetic() {
+            let start = index;
+            index += 1;
+            while index < chars.len()
+                && (chars[index] == '_' || chars[index].is_ascii_alphanumeric())
+            {
+                index += 1;
+            }
+            let ident = chars[start..index].iter().collect::<String>();
+            if let Some(replacement) = substitutions.get(&ident) {
+                out.push_str(replacement);
+            } else {
+                out.push_str(&ident);
+            }
+            continue;
+        }
+        out.push(ch);
+        index += 1;
+    }
+    out
+}
+
+fn build_receiver_type_substitutions(
+    actual_type: &str,
+    declared_type: &str,
+) -> BTreeMap<String, String> {
+    let mut substitutions = BTreeMap::new();
+    let Some((_, actual_args)) =
+        parse_surface_type_application(strip_reference_prefix(actual_type))
+    else {
+        return substitutions;
+    };
+    let Some((_, declared_args)) =
+        parse_surface_type_application(strip_reference_prefix(declared_type))
+    else {
+        return substitutions;
+    };
+    for (formal, actual) in declared_args.into_iter().zip(actual_args.into_iter()) {
+        substitutions.insert(formal, actual);
+    }
+    substitutions
+}
+
+fn substitute_surface_type_params(text: &str, substitutions: &BTreeMap<String, String>) -> String {
+    let chars = text.chars().collect::<Vec<_>>();
+    let mut out = String::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        let ch = chars[index];
+        if ch == '\'' {
+            out.push(ch);
+            index += 1;
+            while index < chars.len() {
+                let current = chars[index];
+                out.push(current);
+                index += 1;
+                if !(current == '_' || current.is_ascii_alphanumeric()) {
+                    break;
                 }
-                let Some(self_param) = symbol.params.first() else {
-                    continue;
-                };
-                if self_param.name != "self" || !matches_target(&self_param.ty) {
-                    continue;
-                }
-                let routine_key = routine_key_for_symbol(&module.module_id, symbol_index);
-                if !seen_routines.insert(routine_key.clone()) {
-                    continue;
-                }
-                candidates.push(HirMethodCandidate {
-                    module_id: &module.module_id,
-                    symbol,
-                    declared_receiver_type: &self_param.ty,
-                    routine_key,
-                });
+            }
+            continue;
+        }
+        if ch == '_' || ch.is_ascii_alphabetic() {
+            let start = index;
+            index += 1;
+            while index < chars.len()
+                && (chars[index] == '_' || chars[index].is_ascii_alphanumeric())
+            {
+                index += 1;
+            }
+            let ident = chars[start..index].iter().collect::<String>();
+            if let Some(replacement) = substitutions.get(&ident) {
+                out.push_str(replacement);
+            } else {
+                out.push_str(&ident);
+            }
+            continue;
+        }
+        out.push(ch);
+        index += 1;
+    }
+    out
+}
+
+fn flatten_member_expr_path(expr: &HirExpr) -> Option<Vec<String>> {
+    match expr {
+        HirExpr::Path { segments } => Some(segments.clone()),
+        HirExpr::MemberAccess { expr, member } => {
+            let mut path = flatten_member_expr_path(expr)?;
+            path.push(member.clone());
+            Some(path)
+        }
+        _ => None,
+    }
+}
+
+fn flatten_callable_expr_path(expr: &HirExpr) -> Option<Vec<String>> {
+    match expr {
+        HirExpr::GenericApply { expr, .. } => flatten_callable_expr_path(expr),
+        _ => flatten_member_expr_path(expr),
+    }
+}
+
+fn extract_expr_generic_type_args(expr: &HirExpr) -> Vec<String> {
+    match expr {
+        HirExpr::GenericApply { expr, type_args } => {
+            let mut inherited = extract_expr_generic_type_args(expr);
+            inherited.extend(type_args.iter().cloned());
+            inherited
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn symbol_return_type_text(
+    workspace: &HirWorkspaceSummary,
+    symbol_ref: HirResolvedSymbolRef<'_>,
+) -> Option<String> {
+    if let Some(return_type) = &symbol_ref.symbol.return_type {
+        let package = workspace.package(symbol_ref.package_name)?;
+        let module = package.module(symbol_ref.module_id)?;
+        return Some(canonicalize_method_lookup_type_text_in_module(
+            workspace,
+            package,
+            module,
+            return_type,
+        ));
+    }
+    None.or_else(|| {
+        matches!(
+            symbol_ref.symbol.kind,
+            HirSymbolKind::Record | HirSymbolKind::Enum | HirSymbolKind::OpaqueType
+        )
+        .then(|| format!("{}.{}", symbol_ref.module_id, symbol_ref.symbol.name))
+    })
+}
+
+fn symbol_call_return_type_text(
+    workspace: &HirWorkspaceSummary,
+    symbol_ref: HirResolvedSymbolRef<'_>,
+    generic_args: &[String],
+) -> Option<String> {
+    if matches!(
+        symbol_ref.symbol.kind,
+        HirSymbolKind::Record | HirSymbolKind::Enum | HirSymbolKind::OpaqueType
+    ) {
+        let base = format!("{}.{}", symbol_ref.module_id, symbol_ref.symbol.name);
+        if generic_args.is_empty() {
+            return Some(base);
+        }
+        return Some(format!("{base}[{}]", generic_args.join(", ")));
+    }
+    if let Some(return_type) = symbol_return_type_text(workspace, symbol_ref) {
+        if generic_args.is_empty() || symbol_ref.symbol.type_params.is_empty() {
+            return Some(return_type);
+        }
+        let substitutions = symbol_ref
+            .symbol
+            .type_params
+            .iter()
+            .cloned()
+            .zip(generic_args.iter().cloned())
+            .collect::<BTreeMap<_, _>>();
+        return Some(substitute_surface_type_params(&return_type, &substitutions));
+    }
+    None
+}
+
+fn infer_call_target_return_type<L: HirLocalTypeLookup>(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    locals: &L,
+    subject: &HirExpr,
+) -> Option<String> {
+    let path = flatten_callable_expr_path(subject)?;
+    let generic_args = extract_expr_generic_type_args(subject)
+        .into_iter()
+        .map(|arg| canonicalize_method_lookup_type_text(workspace, resolved_module, &arg))
+        .collect::<Vec<_>>();
+    if let Some(symbol_ref) = lookup_symbol_path(workspace, resolved_module, &path) {
+        return symbol_call_return_type_text(workspace, symbol_ref, &generic_args);
+    }
+    if path.len() >= 2 {
+        let enum_path = path[..path.len() - 1].to_vec();
+        if let Some(enum_ref) = lookup_symbol_path(workspace, resolved_module, &enum_path) {
+            if matches!(enum_ref.symbol.kind, HirSymbolKind::Enum) {
+                return symbol_call_return_type_text(workspace, enum_ref, &generic_args);
             }
         }
     }
-    candidates
+    let _ = locals;
+    None
+}
+
+fn infer_member_access_type<L: HirLocalTypeLookup>(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    locals: &L,
+    expr: &HirExpr,
+    member: &str,
+) -> Option<String> {
+    let base_ty = infer_receiver_expr_type_text(workspace, resolved_module, locals, expr)?;
+    let (base, _) = parse_surface_type_application(strip_reference_prefix(&base_ty))?;
+    let path = split_simple_path(&base)?;
+    let symbol_ref = lookup_symbol_path(workspace, resolved_module, &path)?;
+    match &symbol_ref.symbol.body {
+        HirSymbolBody::Record { fields } => fields
+            .iter()
+            .find(|field| field.name == member)
+            .map(|field| field.ty.clone()),
+        _ => None,
+    }
+}
+
+fn infer_index_type_text<L: HirLocalTypeLookup>(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    locals: &L,
+    expr: &HirExpr,
+) -> Option<String> {
+    let base_ty = infer_receiver_expr_type_text(workspace, resolved_module, locals, expr)?;
+    let (base, args) = parse_surface_type_application(strip_reference_prefix(&base_ty))?;
+    match base.as_str() {
+        "List" | "Array" => args.first().cloned(),
+        "Map" => args.get(1).cloned(),
+        _ => None,
+    }
+}
+
+fn infer_slice_type_text<L: HirLocalTypeLookup>(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    locals: &L,
+    expr: &HirExpr,
+) -> Option<String> {
+    let base_ty = infer_receiver_expr_type_text(workspace, resolved_module, locals, expr)?;
+    let (base, args) = parse_surface_type_application(strip_reference_prefix(&base_ty))?;
+    match base.as_str() {
+        "List" => Some(format!(
+            "List[{}]",
+            args.first().cloned().unwrap_or_else(|| "_".to_string())
+        )),
+        "Array" => Some(format!(
+            "Array[{}]",
+            args.first().cloned().unwrap_or_else(|| "_".to_string())
+        )),
+        _ => Some(base_ty),
+    }
+}
+
+pub fn infer_receiver_expr_type_text<L: HirLocalTypeLookup>(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    locals: &L,
+    expr: &HirExpr,
+) -> Option<String> {
+    match expr {
+        HirExpr::BoolLiteral { .. } => Some("Bool".to_string()),
+        HirExpr::IntLiteral { .. } => Some("Int".to_string()),
+        HirExpr::StrLiteral { .. } => Some("Str".to_string()),
+        HirExpr::CollectionLiteral { .. } => Some("List[_]".to_string()),
+        HirExpr::Range { .. } => Some("RangeInt".to_string()),
+        HirExpr::Path { segments }
+            if segments.len() == 1 && locals.contains_local(&segments[0]) =>
+        {
+            locals.type_text_of(&segments[0]).map(ToOwned::to_owned)
+        }
+        HirExpr::Path { segments } => {
+            let symbol_ref = lookup_symbol_path(workspace, resolved_module, segments)?;
+            symbol_return_type_text(workspace, symbol_ref)
+        }
+        HirExpr::Unary { op, expr }
+            if matches!(op, HirUnaryOp::BorrowRead | HirUnaryOp::BorrowMut) =>
+        {
+            infer_receiver_expr_type_text(workspace, resolved_module, locals, expr)
+                .map(|text| format!("& {text}"))
+        }
+        HirExpr::Unary {
+            op: HirUnaryOp::Weave,
+            expr,
+        } => infer_receiver_expr_type_text(workspace, resolved_module, locals, expr)
+            .map(|text| format!("std.concurrent.Task[{text}]")),
+        HirExpr::Unary {
+            op: HirUnaryOp::Split,
+            expr,
+        } => infer_receiver_expr_type_text(workspace, resolved_module, locals, expr)
+            .map(|text| format!("std.concurrent.Thread[{text}]")),
+        HirExpr::Unary {
+            op: HirUnaryOp::Deref,
+            expr,
+        } => infer_receiver_expr_type_text(workspace, resolved_module, locals, expr).map(|text| {
+            let stripped = strip_reference_prefix(&text);
+            if stripped == text.trim() {
+                text
+            } else {
+                stripped.to_string()
+            }
+        }),
+        HirExpr::GenericApply { expr, .. } => {
+            infer_receiver_expr_type_text(workspace, resolved_module, locals, expr)
+        }
+        HirExpr::QualifiedPhrase {
+            subject, qualifier, ..
+        } if qualifier == "call" => {
+            infer_call_target_return_type(workspace, resolved_module, locals, subject)
+        }
+        HirExpr::QualifiedPhrase { qualifier, .. } if qualifier.contains('.') => {
+            let path = split_simple_path(qualifier)?;
+            lookup_symbol_path(workspace, resolved_module, &path)
+                .and_then(|symbol_ref| symbol_return_type_text(workspace, symbol_ref))
+        }
+        HirExpr::QualifiedPhrase {
+            subject, qualifier, ..
+        } if split_simple_path(qualifier).is_some() => {
+            let subject_ty =
+                infer_receiver_expr_type_text(workspace, resolved_module, locals, subject)?;
+            let candidates = lookup_method_candidates_for_type(
+                workspace,
+                resolved_module,
+                &subject_ty,
+                qualifier,
+            );
+            match candidates.as_slice() {
+                [candidate] => candidate.symbol.return_type.as_ref().map(|text| {
+                    let substitutions = build_receiver_type_substitutions(
+                        &subject_ty,
+                        candidate.declared_receiver_type,
+                    );
+                    substitute_type_params(text, &substitutions)
+                }),
+                _ => None,
+            }
+        }
+        HirExpr::MemberAccess { expr, member } => {
+            infer_member_access_type(workspace, resolved_module, locals, expr, member)
+        }
+        HirExpr::Index { expr, .. } => {
+            infer_index_type_text(workspace, resolved_module, locals, expr)
+        }
+        HirExpr::Slice { expr, .. } => {
+            infer_slice_type_text(workspace, resolved_module, locals, expr)
+        }
+        HirExpr::Match { arms, .. } => {
+            let inferred = arms
+                .iter()
+                .filter_map(|arm| {
+                    infer_receiver_expr_type_text(workspace, resolved_module, locals, &arm.value)
+                })
+                .collect::<Vec<_>>();
+            let first = inferred.first()?.clone();
+            inferred
+                .iter()
+                .all(|candidate| candidate == &first)
+                .then_some(first)
+        }
+        HirExpr::Await { expr } => {
+            let awaited = infer_receiver_expr_type_text(workspace, resolved_module, locals, expr)?;
+            let (base, args) = parse_surface_type_application(strip_reference_prefix(&awaited))?;
+            match base.as_str() {
+                "std.concurrent.Task" | "std.concurrent.Thread" | "Task" | "Thread" => {
+                    args.first().cloned()
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+pub fn match_name_resolves_to_zero_payload_variant<L: HirLocalTypeLookup>(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    locals: &L,
+    subject: &HirExpr,
+    name: &str,
+) -> bool {
+    if name.contains('.') {
+        return false;
+    }
+    let Some(subject_type) =
+        infer_receiver_expr_type_text(workspace, resolved_module, locals, subject)
+    else {
+        return false;
+    };
+    let stripped = strip_reference_prefix(&subject_type);
+    let base = parse_surface_type_application(stripped)
+        .map(|(base, _)| base)
+        .unwrap_or_else(|| stripped.trim().to_string());
+    let Some(path) = split_simple_path(&base) else {
+        return false;
+    };
+    let Some(symbol_ref) = lookup_symbol_path(workspace, resolved_module, &path) else {
+        return false;
+    };
+    let HirSymbolBody::Enum { variants } = &symbol_ref.symbol.body else {
+        return false;
+    };
+    variants
+        .iter()
+        .any(|variant| variant.name == name && variant.payload.is_none())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1964,21 +2620,21 @@ fn resolve_use_target(
         }
 
         let symbol_name = &suffix[0];
-        let resolved_package = workspace
-            .package(&package_name)
-            .ok_or_else(|| format!("resolved package `{package_name}` is not loaded"))?;
-        let resolved_module = resolved_package
-            .module(&module_id)
-            .ok_or_else(|| format!("resolved module `{module_id}` is not loaded"))?;
-        let symbol_count = resolved_module.symbol_count(symbol_name);
-        if symbol_count == 1 {
+        let visible_symbols = visible_symbol_refs_in_module_for_package(
+            workspace,
+            &package.summary.package_name,
+            &package_name,
+            &module_id,
+            symbol_name,
+        );
+        if visible_symbols.len() == 1 {
             return Ok(ResolvedUseTarget::Symbol {
                 package_name,
                 module_id,
                 symbol_name: symbol_name.clone(),
             });
         }
-        if symbol_count > 1 {
+        if visible_symbols.len() > 1 {
             return Err(format!(
                 "symbol `{symbol_name}` is defined multiple times in module `{module_id}`"
             ));
@@ -2327,20 +2983,6 @@ pub fn derive_source_module_path(
         relative_segments: components,
         module_id: module_segments.join("."),
     })
-}
-
-fn erase_type_generics_for_method_lookup(text: &str) -> String {
-    let mut out = String::new();
-    let mut depth = 0usize;
-    for ch in text.chars() {
-        match ch {
-            '[' => depth += 1,
-            ']' => depth = depth.saturating_sub(1),
-            _ if depth == 0 && !ch.is_whitespace() => out.push(ch),
-            _ => {}
-        }
-    }
-    out
 }
 
 fn lower_directive_kind(kind: &ParsedDirectiveKind) -> HirDirectiveKind {
@@ -2818,7 +3460,8 @@ mod tests {
         HirHeaderAttachment, HirMatchPattern, HirPhraseArg, HirStatement, HirStatementKind,
         HirSymbolBody, HirSymbolKind, HirUnaryOp, build_package_layout, build_package_summary,
         build_workspace_package, build_workspace_summary, derive_source_module_path,
-        lower_module_text, resolve_workspace,
+        lookup_method_candidates_for_type, lookup_symbol_path, lower_module_text,
+        resolve_workspace,
     };
 
     fn expr_is_path(expr: &HirExpr, name: &str) -> bool {
@@ -2886,7 +3529,7 @@ mod tests {
             HirStatementKind::Return { .. }
         ));
         assert_eq!(
-            module.exported_surface_rows(),
+            module.summary_surface_rows(),
             vec![
                 "export:fn:fn print() -> Int:".to_string(),
                 "reexport:std.result".to_string(),
@@ -2918,7 +3561,7 @@ mod tests {
         assert_eq!(tick.behavior_attrs[0].name, "phase");
         assert_eq!(tick.behavior_attrs[0].value, "update");
         assert_eq!(
-            module.exported_surface_rows(),
+            module.summary_surface_rows(),
             vec!["export:fn:async fn worker[T, where std.iter.Iterator[T]](read it: T, count: Int) -> Int:".to_string()]
         );
         assert_eq!(module.impls.len(), 1);
@@ -3305,7 +3948,7 @@ mod tests {
             other => panic!("expected trait body, got {other:?}"),
         }
         assert_eq!(
-            module.exported_surface_rows(),
+            module.summary_surface_rows(),
             vec![
                 "export:enum:enum Result[T]:\\nOk(Int)\\nErr(Str)".to_string(),
                 "export:record:record Counter:\\nvalue: Int".to_string(),
@@ -3972,7 +4615,7 @@ mod tests {
             "winspell.window"
         );
         assert_eq!(
-            package.exported_surface_rows(),
+            package.summary_surface_rows(),
             vec![
                 "module=winspell:export:fn:fn open() -> Int:".to_string(),
                 "module=winspell:reexport:winspell.window".to_string(),
@@ -4351,6 +4994,364 @@ mod tests {
                 .expect("alias should resolve")
                 .local_name,
             "io"
+        );
+    }
+
+    #[test]
+    fn lookup_method_candidates_ignore_receiver_shaped_free_functions() {
+        let app_summary = build_package_summary(
+            "app",
+            vec![
+                lower_module_text(
+                    "app",
+                    "import app.types\nuse app.types.Counter\nfn main() -> Int:\n    let counter = Counter :: value = 1 :: call\n    return counter :: :: tap\n",
+                )
+                .expect("app should lower"),
+                lower_module_text("app.types", "export record Counter:\n    value: Int\n")
+                    .expect("types should lower"),
+                lower_module_text(
+                    "app.helpers",
+                    "import app.types\nuse app.types.Counter\nfn tap(read self: Counter) -> Int:\n    return self.value + 1\n",
+                )
+                .expect("helpers should lower"),
+            ],
+        );
+        let app_layout = build_package_layout(
+            &app_summary,
+            BTreeMap::from([
+                (
+                    "app".to_string(),
+                    Path::new("C:/repo/app/src/shelf.arc").to_path_buf(),
+                ),
+                (
+                    "app.types".to_string(),
+                    Path::new("C:/repo/app/src/types.arc").to_path_buf(),
+                ),
+                (
+                    "app.helpers".to_string(),
+                    Path::new("C:/repo/app/src/helpers.arc").to_path_buf(),
+                ),
+            ]),
+            BTreeMap::new(),
+        )
+        .expect("app layout should build");
+        let app_package = build_workspace_package(
+            Path::new("C:/repo/app").to_path_buf(),
+            BTreeSet::new(),
+            app_summary,
+            app_layout,
+        )
+        .expect("app package should build");
+
+        let workspace = build_workspace_summary(vec![app_package]).expect("workspace builds");
+        let resolved = resolve_workspace(&workspace).expect("workspace should resolve");
+        let resolved_module = resolved
+            .package("app")
+            .and_then(|package| package.module("app"))
+            .expect("resolved app module should exist");
+
+        let candidates =
+            lookup_method_candidates_for_type(&workspace, resolved_module, "Counter", "tap");
+        assert!(
+            candidates.is_empty(),
+            "receiver-shaped free function should not appear as method candidate"
+        );
+    }
+
+    #[test]
+    fn lookup_symbol_path_hides_private_dependency_symbols() {
+        let app_summary = build_package_summary(
+            "app",
+            vec![
+                lower_module_text(
+                    "app",
+                    "import core\nfn main() -> Int:\n    return core.shared :: :: call\n",
+                )
+                .expect("app should lower"),
+            ],
+        );
+        let app_layout = build_package_layout(
+            &app_summary,
+            BTreeMap::from([(
+                "app".to_string(),
+                Path::new("C:/repo/app/src/shelf.arc").to_path_buf(),
+            )]),
+            BTreeMap::new(),
+        )
+        .expect("app layout should build");
+        let app_package = build_workspace_package(
+            Path::new("C:/repo/app").to_path_buf(),
+            BTreeSet::from(["core".to_string()]),
+            app_summary,
+            app_layout,
+        )
+        .expect("app package should build");
+
+        let core_summary =
+            build_package_summary(
+                "core",
+                vec![lower_module_text(
+                "core",
+                "export fn shared() -> Int:\n    return 1\nfn hidden() -> Int:\n    return 0\n",
+            )
+            .expect("core should lower")],
+            );
+        let core_layout = build_package_layout(
+            &core_summary,
+            BTreeMap::from([(
+                "core".to_string(),
+                Path::new("C:/repo/core/src/book.arc").to_path_buf(),
+            )]),
+            BTreeMap::new(),
+        )
+        .expect("core layout should build");
+        let core_package = build_workspace_package(
+            Path::new("C:/repo/core").to_path_buf(),
+            BTreeSet::new(),
+            core_summary,
+            core_layout,
+        )
+        .expect("core package should build");
+
+        let workspace =
+            build_workspace_summary(vec![app_package, core_package]).expect("workspace builds");
+        let resolved = resolve_workspace(&workspace).expect("workspace should resolve");
+        let resolved_module = resolved
+            .package("app")
+            .and_then(|package| package.module("app"))
+            .expect("resolved app module should exist");
+
+        assert!(
+            lookup_symbol_path(
+                &workspace,
+                resolved_module,
+                &["core".to_string(), "shared".to_string()]
+            )
+            .is_some()
+        );
+        assert!(
+            lookup_symbol_path(
+                &workspace,
+                resolved_module,
+                &["core".to_string(), "hidden".to_string()]
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn resolve_workspace_rejects_private_dependency_symbol_use() {
+        let app_summary = build_package_summary(
+            "app",
+            vec![
+                lower_module_text(
+                    "app",
+                    "use core.hidden\nfn main() -> Int:\n    return hidden :: :: call\n",
+                )
+                .expect("app should lower"),
+            ],
+        );
+        let app_layout = build_package_layout(
+            &app_summary,
+            BTreeMap::from([(
+                "app".to_string(),
+                Path::new("C:/repo/app/src/shelf.arc").to_path_buf(),
+            )]),
+            BTreeMap::new(),
+        )
+        .expect("app layout should build");
+        let app_package = build_workspace_package(
+            Path::new("C:/repo/app").to_path_buf(),
+            BTreeSet::from(["core".to_string()]),
+            app_summary,
+            app_layout,
+        )
+        .expect("app package should build");
+
+        let core_summary =
+            build_package_summary(
+                "core",
+                vec![lower_module_text(
+                "core",
+                "export fn shared() -> Int:\n    return 1\nfn hidden() -> Int:\n    return 0\n",
+            )
+            .expect("core should lower")],
+            );
+        let core_layout = build_package_layout(
+            &core_summary,
+            BTreeMap::from([(
+                "core".to_string(),
+                Path::new("C:/repo/core/src/book.arc").to_path_buf(),
+            )]),
+            BTreeMap::new(),
+        )
+        .expect("core layout should build");
+        let core_package = build_workspace_package(
+            Path::new("C:/repo/core").to_path_buf(),
+            BTreeSet::new(),
+            core_summary,
+            core_layout,
+        )
+        .expect("core package should build");
+
+        let workspace =
+            build_workspace_summary(vec![app_package, core_package]).expect("workspace builds");
+        let errors = resolve_workspace(&workspace).expect_err("resolution should fail");
+        assert!(
+            errors[0]
+                .message
+                .contains("unresolved symbol `hidden` in module `core`"),
+            "unexpected message: {}",
+            errors[0].message
+        );
+    }
+
+    #[test]
+    fn lookup_method_candidates_allow_public_dependency_impl_methods_without_export_keyword() {
+        let app_summary = build_package_summary(
+            "app",
+            vec![
+                lower_module_text(
+                    "app",
+                    "import core.types\nuse core.types.Counter\nfn main() -> Int:\n    let counter = Counter :: value = 1 :: call\n    return counter :: :: tap\n",
+                )
+                .expect("app should lower"),
+            ],
+        );
+        let app_layout = build_package_layout(
+            &app_summary,
+            BTreeMap::from([(
+                "app".to_string(),
+                Path::new("C:/repo/app/src/shelf.arc").to_path_buf(),
+            )]),
+            BTreeMap::new(),
+        )
+        .expect("app layout should build");
+        let app_package = build_workspace_package(
+            Path::new("C:/repo/app").to_path_buf(),
+            BTreeSet::from(["core".to_string()]),
+            app_summary,
+            app_layout,
+        )
+        .expect("app package should build");
+
+        let core_summary = build_package_summary(
+            "core",
+            vec![
+                lower_module_text("core", "").expect("core root should lower"),
+                lower_module_text("core.types", "export record Counter:\n    value: Int\n")
+                    .expect("types should lower"),
+                lower_module_text(
+                    "core.helpers",
+                    "import core.types\nuse core.types.Counter\nimpl Counter:\n    fn tap(read self: Counter) -> Int:\n        return self.value + 1\n",
+                )
+                .expect("helpers should lower"),
+            ],
+        );
+        let core_layout = build_package_layout(
+            &core_summary,
+            BTreeMap::from([
+                (
+                    "core".to_string(),
+                    Path::new("C:/repo/core/src/book.arc").to_path_buf(),
+                ),
+                (
+                    "core.types".to_string(),
+                    Path::new("C:/repo/core/src/types.arc").to_path_buf(),
+                ),
+                (
+                    "core.helpers".to_string(),
+                    Path::new("C:/repo/core/src/helpers.arc").to_path_buf(),
+                ),
+            ]),
+            BTreeMap::new(),
+        )
+        .expect("core layout should build");
+        let core_package = build_workspace_package(
+            Path::new("C:/repo/core").to_path_buf(),
+            BTreeSet::new(),
+            core_summary,
+            core_layout,
+        )
+        .expect("core package should build");
+
+        let workspace =
+            build_workspace_summary(vec![app_package, core_package]).expect("workspace builds");
+        let resolved = resolve_workspace(&workspace).expect("workspace should resolve");
+        let resolved_module = resolved
+            .package("app")
+            .and_then(|package| package.module("app"))
+            .expect("resolved app module should exist");
+
+        let candidates =
+            lookup_method_candidates_for_type(&workspace, resolved_module, "Counter", "tap");
+        assert_eq!(candidates.len(), 1);
+    }
+
+    #[test]
+    fn lookup_method_candidates_ignore_private_dependency_receiver_types() {
+        let app_summary = build_package_summary(
+            "app",
+            vec![
+                lower_module_text("app", "fn main() -> Int:\n    return 0\n")
+                    .expect("app should lower"),
+            ],
+        );
+        let app_layout = build_package_layout(
+            &app_summary,
+            BTreeMap::from([(
+                "app".to_string(),
+                Path::new("C:/repo/app/src/shelf.arc").to_path_buf(),
+            )]),
+            BTreeMap::new(),
+        )
+        .expect("app layout should build");
+        let app_package = build_workspace_package(
+            Path::new("C:/repo/app").to_path_buf(),
+            BTreeSet::from(["core".to_string()]),
+            app_summary,
+            app_layout,
+        )
+        .expect("app package should build");
+
+        let core_summary = build_package_summary(
+            "core",
+            vec![lower_module_text(
+                "core",
+                "record Hidden:\n    value: Int\nimpl Hidden:\n    fn tap(read self: Hidden) -> Int:\n        return self.value + 1\n",
+            )
+            .expect("core should lower")],
+        );
+        let core_layout = build_package_layout(
+            &core_summary,
+            BTreeMap::from([(
+                "core".to_string(),
+                Path::new("C:/repo/core/src/book.arc").to_path_buf(),
+            )]),
+            BTreeMap::new(),
+        )
+        .expect("core layout should build");
+        let core_package = build_workspace_package(
+            Path::new("C:/repo/core").to_path_buf(),
+            BTreeSet::new(),
+            core_summary,
+            core_layout,
+        )
+        .expect("core package should build");
+
+        let workspace =
+            build_workspace_summary(vec![app_package, core_package]).expect("workspace builds");
+        let resolved = resolve_workspace(&workspace).expect("workspace should resolve");
+        let resolved_module = resolved
+            .package("app")
+            .and_then(|package| package.module("app"))
+            .expect("resolved app module should exist");
+
+        let candidates =
+            lookup_method_candidates_for_type(&workspace, resolved_module, "core.Hidden", "tap");
+        assert!(
+            candidates.is_empty(),
+            "private dependency receiver type should not contribute method candidates"
         );
     }
 

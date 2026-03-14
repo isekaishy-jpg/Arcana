@@ -8,7 +8,7 @@ Rules:
 - Every `std` surface change must update this ledger or `docs/specs/std/std/v1-scope.md` in the same patch.
 - Transitional carried modules must include an update note that states what still needs to change before they can be treated as rewrite-owned.
 - This ledger may classify or track `std`; it may not expand `std` surface by itself.
-- Family entries cover their narrow wrapper/root modules unless noted otherwise. For example, collection-family status covers `std.collections.*` plus the thin `std.list` / `std.array` method wrappers.
+- Family entries cover their narrow wrapper/root modules unless noted otherwise. For example, collection-family status covers `std.collections.*` plus the thin `std.list` / `std.array` compatibility wrapper modules.
 - The current ledger is intended to support a pre-selfhost freeze of std shape: unless Milestone 6/runtime work or owned-grimoire development proves a real blocker, std should now move by implementation and verification rather than by repeated architectural redesign.
 
 ## Bootstrap-Required

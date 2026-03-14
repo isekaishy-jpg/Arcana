@@ -268,20 +268,24 @@ fn push_unique_name(edit names: List[Str], read name: Str, read duplicate_label:
     return Result.Ok[Unit, Str] :: :: call
 
 fn add_root_entry(edit root: std.config.ConfigSection, read pair: (Str, Str)) -> Result[Unit, Str]:
-    if root.values :: pair.0 :: has:
-        return Result.Err[Unit, Str] :: ("duplicate config key `" + pair.0 + "`") :: call
-    root.values :: pair.0, pair.1 :: set
-    root.order :: pair.0 :: push
+    let key = pair.0
+    let value = pair.1
+    if root.values :: key :: has:
+        return Result.Err[Unit, Str] :: ("duplicate config key `" + key + "`") :: call
+    root.values :: key, value :: set
+    root.order :: key :: push
     return Result.Ok[Unit, Str] :: :: call
 
 fn add_section_entry(edit sections: Map[Str, std.config.ConfigSection], read section_name: Str, read pair: (Str, Str)) -> Result[Unit, Str]:
     if not (sections :: section_name :: has):
         return Result.Err[Unit, Str] :: ("missing section `[" + section_name + "]`") :: call
     let mut section = sections :: section_name :: get
-    if section.values :: pair.0 :: has:
-        return Result.Err[Unit, Str] :: ("duplicate config key `" + pair.0 + "` in `[" + section_name + "]`") :: call
-    section.values :: pair.0, pair.1 :: set
-    section.order :: pair.0 :: push
+    let key = pair.0
+    let value = pair.1
+    if section.values :: key :: has:
+        return Result.Err[Unit, Str] :: ("duplicate config key `" + key + "` in `[" + section_name + "]`") :: call
+    section.values :: key, value :: set
+    section.order :: key :: push
     sections :: section_name, section :: set
     return Result.Ok[Unit, Str] :: :: call
 

@@ -7,10 +7,13 @@ mod surface;
 
 use arcana_hir::{
     HirAssignTarget, HirBinaryOp, HirChainStep, HirExpr, HirHeaderAttachment, HirImplDecl,
-    HirMatchPattern, HirModule, HirModuleSummary, HirResolvedModule, HirResolvedTarget,
-    HirResolvedWorkspace, HirStatement, HirStatementKind, HirSymbol, HirSymbolBody, HirSymbolKind,
-    HirUnaryOp, HirWorkspacePackage, HirWorkspaceSummary, lookup_method_candidates_for_type,
-    lower_module_text, resolve_workspace,
+    HirLocalTypeLookup, HirMatchPattern, HirModule, HirModuleSummary, HirResolvedModule,
+    HirResolvedTarget, HirResolvedWorkspace, HirStatement, HirStatementKind, HirSymbol,
+    HirSymbolBody, HirSymbolKind, HirUnaryOp, HirWorkspacePackage, HirWorkspaceSummary,
+    current_workspace_package_for_module, impl_target_is_public_from_package,
+    infer_receiver_expr_type_text, lookup_method_candidates_for_type, lower_module_text,
+    match_name_resolves_to_zero_payload_variant, resolve_workspace,
+    visible_method_package_names_for_module, visible_package_root_for_module,
 };
 use arcana_package::{
     MemberFingerprints, WorkspaceGraph, load_workspace_hir as load_package_workspace_hir,
@@ -210,6 +213,16 @@ impl ValueScope {
 
     fn type_text_of(&self, name: &str) -> Option<&str> {
         self.type_texts.get(name).map(String::as_str)
+    }
+}
+
+impl HirLocalTypeLookup for ValueScope {
+    fn contains_local(&self, name: &str) -> bool {
+        ValueScope::contains(self, name)
+    }
+
+    fn type_text_of(&self, name: &str) -> Option<&str> {
+        ValueScope::type_text_of(self, name)
     }
 }
 
@@ -516,47 +529,11 @@ fn infer_type_ownership(
 fn infer_expr_type_text(
     workspace: &HirWorkspaceSummary,
     resolved_module: &HirResolvedModule,
-    type_scope: &TypeScope,
+    _type_scope: &TypeScope,
     scope: &ValueScope,
     expr: &HirExpr,
 ) -> Option<String> {
-    match expr {
-        HirExpr::BoolLiteral { .. } => Some("Bool".to_string()),
-        HirExpr::IntLiteral { .. } => Some("Int".to_string()),
-        HirExpr::StrLiteral { .. } => Some("Str".to_string()),
-        HirExpr::Path { segments } if segments.len() == 1 && scope.contains(&segments[0]) => {
-            scope.type_text_of(&segments[0]).map(ToOwned::to_owned)
-        }
-        HirExpr::Unary { op, expr }
-            if matches!(op, HirUnaryOp::BorrowRead | HirUnaryOp::BorrowMut) =>
-        {
-            infer_expr_type_text(workspace, resolved_module, type_scope, scope, expr)
-                .map(|text| format!("& {text}"))
-        }
-        HirExpr::GenericApply { expr, .. } => {
-            infer_expr_type_text(workspace, resolved_module, type_scope, scope, expr)
-        }
-        HirExpr::QualifiedPhrase {
-            subject, qualifier, ..
-        } => resolve_qualified_phrase_target_symbol(
-            workspace,
-            resolved_module,
-            type_scope,
-            scope,
-            subject,
-            qualifier,
-        )
-        .and_then(|symbol| {
-            symbol.return_type.clone().or_else(|| match symbol.kind {
-                HirSymbolKind::Record | HirSymbolKind::Enum => Some(symbol.name.clone()),
-                _ => None,
-            })
-        }),
-        HirExpr::MemberAccess { expr, .. } => {
-            infer_expr_type_text(workspace, resolved_module, type_scope, scope, expr)
-        }
-        _ => None,
-    }
+    infer_receiver_expr_type_text(workspace, resolved_module, scope, expr)
 }
 
 fn infer_expr_ownership(
@@ -620,13 +597,15 @@ fn format_bare_method_ambiguity(
 
 fn lookup_method_symbol_for_type<'a>(
     workspace: &'a HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
     type_text: &str,
     method_name: &str,
 ) -> Result<Option<&'a HirSymbol>, String> {
-    let candidates = lookup_method_candidates_for_type(workspace, type_text, method_name)
-        .into_iter()
-        .map(|candidate| candidate.symbol)
-        .collect::<Vec<_>>();
+    let candidates =
+        lookup_method_candidates_for_type(workspace, resolved_module, type_text, method_name)
+            .into_iter()
+            .map(|candidate| candidate.symbol)
+            .collect::<Vec<_>>();
     match candidates.as_slice() {
         [] => Ok(None),
         [symbol] => Ok(Some(*symbol)),
@@ -641,7 +620,7 @@ fn lookup_method_symbol_for_type<'a>(
 fn resolve_qualified_phrase_target_symbol<'a>(
     workspace: &'a HirWorkspaceSummary,
     resolved_module: &'a HirResolvedModule,
-    type_scope: &TypeScope,
+    _type_scope: &TypeScope,
     scope: &ValueScope,
     subject: &HirExpr,
     qualifier: &str,
@@ -659,9 +638,8 @@ fn resolve_qualified_phrase_target_symbol<'a>(
     }
 
     if is_identifier_text(qualifier) {
-        let subject_ty =
-            infer_expr_type_text(workspace, resolved_module, type_scope, scope, subject)?;
-        return lookup_method_symbol_for_type(workspace, &subject_ty, qualifier)
+        let subject_ty = infer_receiver_expr_type_text(workspace, resolved_module, scope, subject)?;
+        return lookup_method_symbol_for_type(workspace, resolved_module, &subject_ty, qualifier)
             .ok()
             .flatten();
     }
@@ -707,7 +685,7 @@ fn collect_qualified_phrase_param_exprs<'a>(
 fn validate_bare_method_resolution(
     workspace: &HirWorkspaceSummary,
     resolved_module: &HirResolvedModule,
-    type_scope: &TypeScope,
+    _type_scope: &TypeScope,
     scope: &ValueScope,
     module_path: &Path,
     subject: &HirExpr,
@@ -719,11 +697,13 @@ fn validate_bare_method_resolution(
         return;
     }
     let Some(subject_ty) =
-        infer_expr_type_text(workspace, resolved_module, type_scope, scope, subject)
+        infer_receiver_expr_type_text(workspace, resolved_module, scope, subject)
     else {
         return;
     };
-    if let Err(message) = lookup_method_symbol_for_type(workspace, &subject_ty, qualifier) {
+    if let Err(message) =
+        lookup_method_symbol_for_type(workspace, resolved_module, &subject_ty, qualifier)
+    {
         diagnostics.push(Diagnostic {
             path: module_path.to_path_buf(),
             line: span.line,
@@ -3610,7 +3590,13 @@ fn validate_expr_semantics(
             for arm in arms {
                 let mut arm_scope = scope.clone();
                 for pattern in &arm.patterns {
-                    validate_match_pattern_semantics(pattern, &mut arm_scope);
+                    validate_match_pattern_semantics(
+                        workspace,
+                        resolved_module,
+                        Some(subject),
+                        pattern,
+                        &mut arm_scope,
+                    );
                 }
                 validate_expr_semantics(
                     workspace,
@@ -4247,12 +4233,29 @@ fn validate_header_attachment_semantics(
     }
 }
 
-fn validate_match_pattern_semantics(pattern: &HirMatchPattern, scope: &mut ValueScope) {
+fn validate_match_pattern_semantics(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    subject: Option<&HirExpr>,
+    pattern: &HirMatchPattern,
+    scope: &mut ValueScope,
+) {
     match pattern {
         HirMatchPattern::Wildcard | HirMatchPattern::Literal { .. } => {}
         HirMatchPattern::Name { text } => {
             let is_binding = match split_simple_path(text) {
-                Some(path) => path.len() == 1,
+                Some(path) => {
+                    path.len() == 1
+                        && !subject.is_some_and(|subject| {
+                            match_name_resolves_to_zero_payload_variant(
+                                workspace,
+                                resolved_module,
+                                scope,
+                                subject,
+                                text.trim(),
+                            )
+                        })
+                }
                 None => true,
             };
             if is_binding {
@@ -4261,7 +4264,7 @@ fn validate_match_pattern_semantics(pattern: &HirMatchPattern, scope: &mut Value
         }
         HirMatchPattern::Variant { args, .. } => {
             for arg in args {
-                validate_match_pattern_semantics(arg, scope);
+                validate_match_pattern_semantics(workspace, resolved_module, None, arg, scope);
             }
         }
     }
@@ -4307,11 +4310,9 @@ fn value_path_exists(
             return true;
         }
     }
-    let Some(package) = workspace.package(&path[0]) else {
-        let Some(package_name) = resolved_module.module_id.split('.').next() else {
-            return false;
-        };
-        let Some(package) = workspace.package(package_name) else {
+    let Some(package) = visible_package_root_for_module(workspace, resolved_module, &path[0])
+    else {
+        let Some(package) = current_workspace_package_for_module(workspace, resolved_module) else {
             return false;
         };
         return package_path_exists(package, path);
@@ -4448,13 +4449,10 @@ fn should_resolve_member_path_as_namespace(
             }
         };
     }
-    if workspace.package(&path[0]).is_some() {
+    if visible_package_root_for_module(workspace, resolved_module, &path[0]).is_some() {
         return true;
     }
-    let Some(package_name) = resolved_module.module_id.split('.').next() else {
-        return false;
-    };
-    let Some(package) = workspace.package(package_name) else {
+    let Some(package) = current_workspace_package_for_module(workspace, resolved_module) else {
         return false;
     };
     package
@@ -4805,19 +4803,39 @@ fn substitute_surface_type_names(text: &str, replacements: &BTreeMap<String, Str
 fn workspace_has_trait_impl(
     workspace: &HirWorkspaceSummary,
     resolved_workspace: &HirResolvedWorkspace,
+    resolved_module: &HirResolvedModule,
     expected_trait_path: &str,
     expected_target_type: &str,
 ) -> bool {
+    let visible_packages = visible_method_package_names_for_module(workspace, resolved_module);
+    let current_package_name = current_workspace_package_for_module(workspace, resolved_module)
+        .map(|package| package.summary.package_name.as_str());
     for package in workspace.packages.values() {
+        if !visible_packages.contains(&package.summary.package_name) {
+            continue;
+        }
         let Some(resolved_package) = resolved_workspace.package(&package.summary.package_name)
         else {
             continue;
         };
+        let foreign_package = current_package_name
+            .map(|name| name != package.summary.package_name)
+            .unwrap_or(false);
         for module in &package.summary.modules {
             let Some(resolved_module) = resolved_package.module(&module.module_id) else {
                 continue;
             };
             for impl_decl in &module.impls {
+                if foreign_package
+                    && !impl_target_is_public_from_package(
+                        workspace,
+                        package,
+                        module,
+                        &impl_decl.target_type,
+                    )
+                {
+                    continue;
+                }
                 let Some(trait_path) = &impl_decl.trait_path else {
                     continue;
                 };
@@ -4925,6 +4943,7 @@ fn validate_impl_trait_where_requirements(
             let has_impl = workspace_has_trait_impl(
                 workspace,
                 resolved_workspace,
+                resolved_module,
                 &expected_trait,
                 &expected_target,
             );
@@ -5513,6 +5532,108 @@ mod tests {
         assert_eq!(second_statuses[0].disposition, BuildDisposition::Built);
         assert_eq!(second_statuses[1].member, "app");
         assert_eq!(second_statuses[1].disposition, BuildDisposition::CacheHit);
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_workspace_rejects_private_dependency_symbol_use() {
+        let root = make_temp_workspace(
+            "private_dependency_symbol_use",
+            &["app", "core"],
+            &[
+                (
+                    "app/book.toml",
+                    "name = \"app\"\nkind = \"app\"\n\n[deps]\ncore = { path = \"../core\" }\n",
+                ),
+                (
+                    "app/src/shelf.arc",
+                    "use core.hidden\nfn main() -> Int:\n    return hidden :: :: call\n",
+                ),
+                ("app/src/types.arc", ""),
+                ("core/book.toml", "name = \"core\"\nkind = \"lib\"\n"),
+                (
+                    "core/src/book.arc",
+                    "export fn shared() -> Int:\n    return 1\nfn hidden() -> Int:\n    return 0\n",
+                ),
+                ("core/src/types.arc", ""),
+            ],
+        );
+
+        let graph = load_workspace_graph(&root).expect("load graph");
+        let err = match check_workspace_graph(&graph) {
+            Ok(_) => panic!("workspace should not check"),
+            Err(err) => err,
+        };
+        assert!(
+            err.contains("unresolved symbol `hidden` in module `core`"),
+            "unexpected error: {err}"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_workspace_rejects_trait_where_impls_satisfied_only_by_unrelated_members() {
+        let root = make_temp_workspace(
+            "where_impl_visibility_scope",
+            &["app", "core", "stray"],
+            &[
+                (
+                    "app/book.toml",
+                    "name = \"app\"\nkind = \"app\"\n\n[deps]\ncore = { path = \"../core\" }\n",
+                ),
+                (
+                    "app/src/shelf.arc",
+                    concat!(
+                        "use core.Ord\n",
+                        "impl Ord[Int] for Int:\n",
+                        "    fn cmp(read self: Int) -> Int:\n",
+                        "        return 0\n",
+                        "fn main() -> Int:\n",
+                        "    return 0\n",
+                    ),
+                ),
+                ("app/src/types.arc", ""),
+                ("core/book.toml", "name = \"core\"\nkind = \"lib\"\n"),
+                (
+                    "core/src/book.arc",
+                    concat!(
+                        "export trait Eq[T]:\n",
+                        "    fn ok(read self: T) -> Int:\n",
+                        "        return 0\n",
+                        "export trait Ord[T, where Eq[T]]:\n",
+                        "    fn cmp(read self: T) -> Int:\n",
+                        "        return 0\n",
+                    ),
+                ),
+                ("core/src/types.arc", ""),
+                (
+                    "stray/book.toml",
+                    "name = \"stray\"\nkind = \"lib\"\n\n[deps]\ncore = { path = \"../core\" }\n",
+                ),
+                (
+                    "stray/src/book.arc",
+                    concat!(
+                        "use core.Eq\n",
+                        "impl Eq[Int] for Int:\n",
+                        "    fn ok(read self: Int) -> Int:\n",
+                        "        return 0\n",
+                    ),
+                ),
+                ("stray/src/types.arc", ""),
+            ],
+        );
+
+        let graph = load_workspace_graph(&root).expect("load graph");
+        let err = match check_workspace_graph(&graph) {
+            Ok(_) => panic!("workspace should not check"),
+            Err(err) => err,
+        };
+        assert!(
+            err.contains("impl requires satisfying where-bound `Eq[Int]`"),
+            "unexpected error: {err}"
+        );
 
         fs::remove_dir_all(root).expect("cleanup should succeed");
     }
@@ -6348,9 +6469,57 @@ mod tests {
 
         let err = check_path(&root).expect_err("ambiguous concrete bare method should fail");
         assert!(
-            err.contains("bare-method qualifier `tap` on `Counter` is ambiguous"),
+            err.contains("bare-method qualifier `tap` on `ambiguous_bare_method_concrete.types.Counter` is ambiguous"),
             "{err}"
         );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_ignores_unrelated_workspace_methods_for_bare_resolution() {
+        let root = make_temp_workspace(
+            "unrelated_bare_method_scope",
+            &["app", "core", "extra"],
+            &[
+                (
+                    "app/book.toml",
+                    "name = \"app\"\nkind = \"app\"\n\n[deps]\ncore = { path = \"../core\" }\n",
+                ),
+                (
+                    "app/src/shelf.arc",
+                    concat!(
+                        "import core.types\n",
+                        "use core.types.Counter\n",
+                        "fn main() -> Int:\n",
+                        "    let counter = Counter :: value = 1 :: call\n",
+                        "    return counter :: :: tap\n",
+                    ),
+                ),
+                ("app/src/types.arc", ""),
+                ("core/book.toml", "name = \"core\"\nkind = \"lib\"\n"),
+                (
+                    "core/src/book.arc",
+                    "import types\nuse types.Counter\nimpl Counter:\n    fn tap(read self: Counter) -> Int:\n        return self.value + 1\n",
+                ),
+                (
+                    "core/src/types.arc",
+                    "export record Counter:\n    value: Int\n",
+                ),
+                ("extra/book.toml", "name = \"extra\"\nkind = \"lib\"\n"),
+                (
+                    "extra/src/book.arc",
+                    "import types\nuse types.Counter\nimpl Counter:\n    fn tap(read self: Counter) -> Int:\n        return self.value + 99\n",
+                ),
+                (
+                    "extra/src/types.arc",
+                    "export record Counter:\n    value: Int\n",
+                ),
+            ],
+        );
+
+        check_path(&root.join("app"))
+            .expect("unrelated workspace package should not affect bare methods");
 
         fs::remove_dir_all(root).expect("cleanup should succeed");
     }

@@ -1,15 +1,26 @@
+mod executable;
+
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use arcana_hir::{
     HirAssignOp, HirAssignTarget, HirBinaryOp, HirChainConnector, HirChainIntroducer, HirChainStep,
-    HirDirectiveKind, HirExpr, HirForewordApp, HirForewordArg, HirHeaderAttachment, HirMatchArm,
-    HirMatchPattern, HirModule, HirModuleDependency, HirModuleSummary, HirPackageSummary,
-    HirPageRollup, HirPhraseArg, HirResolvedModule, HirResolvedTarget, HirResolvedWorkspace,
+    HirDirectiveKind, HirExpr, HirForewordApp, HirForewordArg, HirHeaderAttachment,
+    HirLocalTypeLookup, HirMatchPattern, HirModule, HirModuleDependency, HirModuleSummary,
+    HirPackageSummary, HirPageRollup, HirPhraseArg, HirResolvedModule, HirResolvedWorkspace,
     HirStatement, HirStatementKind, HirSymbol, HirSymbolBody, HirSymbolKind, HirUnaryOp,
-    HirWorkspacePackage, HirWorkspaceSummary, lookup_method_candidates_for_type,
-    routine_key_for_impl_method, routine_key_for_symbol,
+    HirWorkspacePackage, HirWorkspaceSummary, impl_target_is_public_from_package,
+    infer_receiver_expr_type_text, lookup_method_candidates_for_type, lookup_symbol_path,
+    match_name_resolves_to_zero_payload_variant, routine_key_for_impl_method,
+    routine_key_for_symbol,
+};
+
+pub use executable::{
+    ExecAssignOp, ExecAssignTarget, ExecBinaryOp, ExecChainConnector, ExecChainIntroducer,
+    ExecChainStep, ExecDynamicDispatch, ExecExpr, ExecHeaderAttachment, ExecMatchArm,
+    ExecMatchPattern, ExecPageRollup, ExecPhraseArg, ExecPhraseQualifierKind, ExecStmt,
+    ExecUnaryOp,
 };
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -52,9 +63,11 @@ pub struct IrRoutine {
     pub param_rows: Vec<String>,
     pub signature_row: String,
     pub intrinsic_impl: Option<String>,
+    pub impl_target_type: Option<String>,
+    pub impl_trait_path: Option<Vec<String>>,
     pub foreword_rows: Vec<String>,
-    pub rollup_rows: Vec<String>,
-    pub statement_rows: Vec<String>,
+    pub rollups: Vec<ExecPageRollup>,
+    pub statements: Vec<ExecStmt>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -96,6 +109,16 @@ impl LowerValueScope {
     }
 }
 
+impl HirLocalTypeLookup for LowerValueScope {
+    fn contains_local(&self, name: &str) -> bool {
+        LowerValueScope::contains(self, name)
+    }
+
+    fn type_text_of(&self, name: &str) -> Option<&str> {
+        LowerValueScope::type_text_of(self, name)
+    }
+}
+
 #[derive(Clone, Debug)]
 struct ResolvedRenderScope<'a> {
     workspace: &'a HirWorkspaceSummary,
@@ -133,12 +156,6 @@ impl<'a> ResolvedRenderScope<'a> {
             Err(errors.join("\n"))
         }
     }
-}
-
-#[derive(Clone, Debug)]
-struct IrResolvedSymbolRef<'a> {
-    module_id: String,
-    symbol: &'a HirSymbol,
 }
 
 pub fn lower_hir(module: &HirModule) -> IrModule {
@@ -183,6 +200,46 @@ fn render_dependency_row(edge: &HirModuleDependency) -> String {
     )
 }
 
+fn encode_surface_text(text: &str) -> String {
+    text.replace('\\', "\\\\").replace('\n', "\\n")
+}
+
+fn render_impl_surface_row(impl_decl: &arcana_hir::HirImplDecl) -> String {
+    let methods = impl_decl
+        .methods
+        .iter()
+        .map(|method| {
+            format!(
+                "{}:{}",
+                method.kind.as_str(),
+                encode_surface_text(&method.surface_text)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "impl:target={}:trait={}:methods=[{}]",
+        encode_surface_text(&impl_decl.target_type),
+        encode_surface_text(impl_decl.trait_path.as_deref().unwrap_or("")),
+        methods
+    )
+}
+
+fn resolved_module_exported_surface_rows(
+    workspace: &HirWorkspaceSummary,
+    package: &HirWorkspacePackage,
+    module: &HirModuleSummary,
+) -> Vec<String> {
+    let mut rows = module.summary_surface_rows();
+    rows.extend(module.impls.iter().filter_map(|impl_decl| {
+        impl_target_is_public_from_package(workspace, package, module, &impl_decl.target_type)
+            .then(|| render_impl_surface_row(impl_decl))
+    }));
+    rows.sort();
+    rows.dedup();
+    rows
+}
+
 fn runtime_requirement_for_path(path: &[String]) -> Option<String> {
     let first = path.first()?;
     if first != "std" {
@@ -203,6 +260,41 @@ fn quote_text(text: &str) -> String {
         .replace('\n', "\\n")
 }
 
+fn decode_row_string(text: &str) -> Result<String, String> {
+    let inner = text
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .ok_or_else(|| format!("malformed source string literal `{text}`"))?;
+    let mut out = String::new();
+    let mut chars = inner.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            let Some(next) = chars.next() else {
+                return Err("unterminated escape in source string".to_string());
+            };
+            match next {
+                '\\' => out.push('\\'),
+                '"' => out.push('"'),
+                'n' => out.push('\n'),
+                't' => out.push('\t'),
+                other => out.push(other),
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    Ok(out)
+}
+
+fn decode_source_string_literal(text: &str) -> Result<String, String> {
+    let source = decode_row_string(text)?;
+    if source.starts_with('"') && source.ends_with('"') && source.len() >= 2 {
+        decode_row_string(&source)
+    } else {
+        Ok(source)
+    }
+}
+
 fn render_foreword_arg(arg: &HirForewordArg) -> String {
     match &arg.name {
         Some(name) => format!("{name}=\"{}\"", quote_text(&arg.value)),
@@ -220,92 +312,6 @@ fn render_foreword_row(app: &HirForewordApp) -> String {
             .collect::<Vec<_>>()
             .join(",")
     )
-}
-
-fn render_rollup_row(rollup: &HirPageRollup) -> String {
-    format!(
-        "{}:{}:{}",
-        rollup.kind.as_str(),
-        rollup.subject,
-        rollup.handler_path.join(".")
-    )
-}
-
-fn render_phrase_arg(arg: &HirPhraseArg) -> String {
-    match arg {
-        HirPhraseArg::Positional(expr) => render_expr(expr),
-        HirPhraseArg::Named { name, value } => format!("{name}={}", render_expr(value)),
-    }
-}
-
-fn render_phrase_qualifier_kind(qualifier: &str) -> &'static str {
-    match qualifier.trim() {
-        "call" => "call",
-        "?" => "try",
-        ">" => "apply",
-        ">>" => "await_apply",
-        other if other.contains('.') => "named_path",
-        _ => "bare_method",
-    }
-}
-
-fn render_chain_connector(connector: HirChainConnector) -> &'static str {
-    match connector {
-        HirChainConnector::Forward => "=>",
-        HirChainConnector::Reverse => "<=",
-    }
-}
-
-fn render_chain_introducer(introducer: HirChainIntroducer) -> &'static str {
-    match introducer {
-        HirChainIntroducer::Forward => "forward",
-        HirChainIntroducer::Reverse => "reverse",
-    }
-}
-
-fn render_chain_step(step: &HirChainStep) -> String {
-    let incoming = step.incoming.map(render_chain_connector).unwrap_or("start");
-    let bind_args = step
-        .bind_args
-        .iter()
-        .map(render_expr)
-        .collect::<Vec<_>>()
-        .join(",");
-    format!(
-        "step({incoming},stage={},bind=[{bind_args}],text=\"{}\")",
-        render_expr(&step.stage),
-        quote_text(&step.text)
-    )
-}
-
-fn render_header_attachment(attachment: &HirHeaderAttachment) -> String {
-    match attachment {
-        HirHeaderAttachment::Named {
-            name,
-            value,
-            forewords,
-            ..
-        } => format!(
-            "named({name}={},forewords=[{}])",
-            render_expr(value),
-            forewords
-                .iter()
-                .map(render_foreword_row)
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
-        HirHeaderAttachment::Chain {
-            expr, forewords, ..
-        } => format!(
-            "chain({},forewords=[{}])",
-            render_expr(expr),
-            forewords
-                .iter()
-                .map(render_foreword_row)
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
-    }
 }
 
 fn is_identifier_text(text: &str) -> bool {
@@ -432,6 +438,13 @@ fn parse_surface_type_application(text: &str) -> Option<(String, Vec<String>)> {
     Some((path.join("."), args))
 }
 
+fn canonical_impl_trait_path(path: &str) -> Vec<String> {
+    let base = parse_surface_type_application(path)
+        .map(|(base, _)| base)
+        .unwrap_or_else(|| path.to_string());
+    base.split('.').map(ToString::to_string).collect()
+}
+
 fn flatten_member_expr_path(expr: &HirExpr) -> Option<Vec<String>> {
     match expr {
         HirExpr::Path { segments } => Some(segments.clone()),
@@ -451,7 +464,7 @@ fn flatten_callable_expr_path(expr: &HirExpr) -> Option<Vec<String>> {
     }
 }
 
-fn resolved_symbol_path(symbol_ref: IrResolvedSymbolRef<'_>) -> Vec<String> {
+fn resolved_symbol_path(symbol_ref: arcana_hir::HirResolvedSymbolRef<'_>) -> Vec<String> {
     let mut path = symbol_ref
         .module_id
         .split('.')
@@ -461,94 +474,8 @@ fn resolved_symbol_path(symbol_ref: IrResolvedSymbolRef<'_>) -> Vec<String> {
     path
 }
 
-fn lookup_symbol_in_module<'a>(
-    workspace: &'a HirWorkspaceSummary,
-    package_name: &str,
-    module_id: &str,
-    symbol_name: &str,
-) -> Option<IrResolvedSymbolRef<'a>> {
-    let module = workspace.package(package_name)?.module(module_id)?;
-    let symbol = module
-        .symbols
-        .iter()
-        .find(|symbol| symbol.name == symbol_name)?;
-    Some(IrResolvedSymbolRef {
-        module_id: module.module_id.clone(),
-        symbol,
-    })
-}
-
-fn lookup_symbol_from_package_path<'a>(
-    workspace: &'a HirWorkspaceSummary,
-    package_name: &str,
-    path: &[String],
-) -> Option<IrResolvedSymbolRef<'a>> {
-    if path.len() < 2 {
-        return None;
-    }
-    let package = workspace.package(package_name)?;
-    for split in (1..path.len()).rev() {
-        let module_id = path[..split].join(".");
-        let symbol_name = &path[split];
-        if package.module(&module_id).is_some() {
-            return lookup_symbol_in_module(workspace, package_name, &module_id, symbol_name);
-        }
-    }
-    None
-}
-
-fn lookup_symbol_path<'a>(
-    workspace: &'a HirWorkspaceSummary,
-    resolved_module: &'a HirResolvedModule,
-    path: &[String],
-) -> Option<IrResolvedSymbolRef<'a>> {
-    let first = path.first()?;
-    if let Some(binding) = resolved_module.bindings.get(first) {
-        return match &binding.target {
-            HirResolvedTarget::Module {
-                package_name,
-                module_id,
-            } => {
-                if path.len() == 1 {
-                    None
-                } else {
-                    let mut qualified = module_id
-                        .split('.')
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>();
-                    qualified.extend(path[1..].iter().cloned());
-                    lookup_symbol_from_package_path(workspace, package_name, &qualified)
-                }
-            }
-            HirResolvedTarget::Symbol {
-                package_name,
-                module_id,
-                symbol_name,
-            } => (path.len() == 1).then(|| {
-                lookup_symbol_in_module(workspace, package_name, module_id, symbol_name)
-            })?,
-        };
-    }
-
-    if workspace.package(first).is_some() {
-        return lookup_symbol_from_package_path(workspace, first, path);
-    }
-
-    let package_name = resolved_module.module_id.split('.').next()?;
-    let package = workspace.package(package_name)?;
-    for split in (1..path.len()).rev() {
-        let relative = &path[..split];
-        let symbol_name = &path[split];
-        if let Some(module) = package.resolve_relative_module(relative) {
-            return lookup_symbol_in_module(
-                workspace,
-                package_name,
-                &module.module_id,
-                symbol_name,
-            );
-        }
-    }
-    None
+fn resolved_symbol_routine_key(symbol_ref: &arcana_hir::HirResolvedSymbolRef<'_>) -> String {
+    routine_key_for_symbol(symbol_ref.module_id, symbol_ref.symbol_index)
 }
 
 fn format_method_ambiguity(
@@ -571,145 +498,41 @@ fn format_method_ambiguity(
     )
 }
 
-fn lookup_method_path_for_type(
-    workspace: &HirWorkspaceSummary,
-    type_text: &str,
-    method_name: &str,
-) -> Result<Option<Vec<String>>, String> {
-    match lookup_method_resolution_for_type(workspace, type_text, method_name)? {
-        Some(resolved) => {
-            let mut path = resolved
-                .module_id
-                .split('.')
-                .map(ToString::to_string)
-                .collect::<Vec<_>>();
-            path.push(resolved.method.name.clone());
-            Ok(Some(path))
-        }
-        None => Ok(None),
-    }
-}
-
 #[derive(Clone, Debug)]
 struct ResolvedMethod<'a> {
     module_id: String,
     method: &'a HirSymbol,
-    substitutions: BTreeMap<String, String>,
     routine_key: String,
+    trait_path: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug)]
 struct ResolvedPhraseTarget {
     path: Vec<String>,
     routine_key: Option<String>,
-}
-
-fn substitute_type_params(text: &str, substitutions: &BTreeMap<String, String>) -> String {
-    let chars = text.chars().collect::<Vec<_>>();
-    let mut out = String::new();
-    let mut index = 0usize;
-    while index < chars.len() {
-        let ch = chars[index];
-        if ch == '\'' {
-            out.push(ch);
-            index += 1;
-            while index < chars.len() {
-                let current = chars[index];
-                out.push(current);
-                index += 1;
-                if !(current == '_' || current.is_ascii_alphanumeric()) {
-                    break;
-                }
-            }
-            continue;
-        }
-        if ch == '_' || ch.is_ascii_alphabetic() {
-            let start = index;
-            index += 1;
-            while index < chars.len()
-                && (chars[index] == '_' || chars[index].is_ascii_alphanumeric())
-            {
-                index += 1;
-            }
-            let ident = chars[start..index].iter().collect::<String>();
-            if let Some(replacement) = substitutions.get(&ident) {
-                out.push_str(replacement);
-            } else {
-                out.push_str(&ident);
-            }
-            continue;
-        }
-        out.push(ch);
-        index += 1;
-    }
-    out
-}
-
-fn build_impl_type_substitutions(
-    impl_target: &str,
-    concrete_type: &str,
-) -> BTreeMap<String, String> {
-    let Some((_, target_args)) = parse_surface_type_application(impl_target) else {
-        return BTreeMap::new();
-    };
-    let Some((_, concrete_args)) = parse_surface_type_application(concrete_type) else {
-        return BTreeMap::new();
-    };
-    target_args
-        .into_iter()
-        .zip(concrete_args)
-        .filter_map(|(name, value)| is_identifier_text(&name).then_some((name, value)))
-        .collect()
+    dynamic_dispatch: Option<ExecDynamicDispatch>,
 }
 
 fn lookup_method_resolution_for_type<'a>(
+    scope: &'a ResolvedRenderScope<'a>,
     workspace: &'a HirWorkspaceSummary,
     type_text: &str,
     method_name: &str,
 ) -> Result<Option<ResolvedMethod<'a>>, String> {
-    let candidates = lookup_method_candidates_for_type(workspace, type_text, method_name)
-        .into_iter()
-        .map(|candidate| ResolvedMethod {
-            module_id: candidate.module_id.to_string(),
-            method: candidate.symbol,
-            substitutions: build_impl_type_substitutions(
-                candidate.declared_receiver_type,
-                type_text,
-            ),
-            routine_key: candidate.routine_key,
-        })
-        .collect::<Vec<_>>();
-    match candidates.as_slice() {
-        [] => Ok(None),
-        [resolved] => Ok(Some(resolved.clone())),
-        _ => Err(format_method_ambiguity(type_text, method_name, &candidates)),
-    }
-}
-
-fn lookup_trait_method_path_from_where_clause(
-    scope: &ResolvedRenderScope<'_>,
-    type_text: &str,
-    method_name: &str,
-) -> Result<Option<Vec<String>>, String> {
     let candidates =
-        lookup_trait_method_resolution_from_where_clause(scope, type_text, method_name)?
+        lookup_method_candidates_for_type(workspace, scope.resolved_module, type_text, method_name)
             .into_iter()
-            .map(|resolved| {
-                let mut path = resolved
-                    .module_id
-                    .split('.')
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>();
-                path.push(method_name.to_string());
-                path
+            .map(|candidate| ResolvedMethod {
+                module_id: candidate.module_id.to_string(),
+                method: candidate.symbol,
+                routine_key: candidate.routine_key,
+                trait_path: None,
             })
             .collect::<Vec<_>>();
     match candidates.as_slice() {
         [] => Ok(None),
-        [path] => Ok(Some(path.clone())),
-        _ => Err(format!(
-            "bare-method qualifier `{method_name}` on `{type_text}` is ambiguous across trait bounds"
-        )),
+        [resolved] => Ok(Some(resolved.clone())),
+        _ => Err(format_method_ambiguity(type_text, method_name, &candidates)),
     }
 }
 
@@ -749,225 +572,14 @@ fn lookup_trait_method_resolution_from_where_clause<'a>(
         };
         if let Some(method) = methods.iter().find(|method| method.name == method_name) {
             candidates.push(ResolvedMethod {
-                module_id: symbol_ref.module_id.clone(),
+                module_id: symbol_ref.module_id.to_string(),
                 method,
-                substitutions: BTreeMap::new(),
                 routine_key: String::new(),
+                trait_path: Some(trait_path),
             });
         }
     }
     Ok(candidates)
-}
-
-fn render_unary_op(op: HirUnaryOp) -> &'static str {
-    match op {
-        HirUnaryOp::Neg => "-",
-        HirUnaryOp::Not => "not",
-        HirUnaryOp::BitNot => "~",
-        HirUnaryOp::BorrowRead => "&",
-        HirUnaryOp::BorrowMut => "&mut",
-        HirUnaryOp::Deref => "*",
-        HirUnaryOp::Weave => "weave",
-        HirUnaryOp::Split => "split",
-    }
-}
-
-fn render_binary_op(op: HirBinaryOp) -> &'static str {
-    match op {
-        HirBinaryOp::Or => "or",
-        HirBinaryOp::And => "and",
-        HirBinaryOp::EqEq => "==",
-        HirBinaryOp::NotEq => "!=",
-        HirBinaryOp::Lt => "<",
-        HirBinaryOp::LtEq => "<=",
-        HirBinaryOp::Gt => ">",
-        HirBinaryOp::GtEq => ">=",
-        HirBinaryOp::BitOr => "|",
-        HirBinaryOp::BitXor => "^",
-        HirBinaryOp::BitAnd => "&",
-        HirBinaryOp::Shl => "<<",
-        HirBinaryOp::Shr => "shr",
-        HirBinaryOp::Add => "+",
-        HirBinaryOp::Sub => "-",
-        HirBinaryOp::Mul => "*",
-        HirBinaryOp::Div => "/",
-        HirBinaryOp::Mod => "%",
-    }
-}
-
-fn render_match_pattern(pattern: &HirMatchPattern) -> String {
-    match pattern {
-        HirMatchPattern::Wildcard => "_".to_string(),
-        HirMatchPattern::Literal { text } => format!("lit(\"{}\")", quote_text(text)),
-        HirMatchPattern::Name { text } => format!("name({text})"),
-        HirMatchPattern::Variant { path, args } => format!(
-            "variant({path},[{}])",
-            args.iter()
-                .map(render_match_pattern)
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
-    }
-}
-
-fn render_match_arm(arm: &HirMatchArm) -> String {
-    format!(
-        "arm(patterns=[{}],value={})",
-        arm.patterns
-            .iter()
-            .map(render_match_pattern)
-            .collect::<Vec<_>>()
-            .join("|"),
-        render_expr(&arm.value)
-    )
-}
-
-fn render_expr(expr: &HirExpr) -> String {
-    match expr {
-        HirExpr::Path { segments } => format!("path({})", segments.join(".")),
-        HirExpr::BoolLiteral { value } => format!("bool({value})"),
-        HirExpr::IntLiteral { text } => format!("int({text})"),
-        HirExpr::StrLiteral { text } => format!("str(\"{}\")", quote_text(text)),
-        HirExpr::Pair { left, right } => {
-            format!("pair({}, {})", render_expr(left), render_expr(right))
-        }
-        HirExpr::CollectionLiteral { items } => format!(
-            "collection([{}])",
-            items.iter().map(render_expr).collect::<Vec<_>>().join(",")
-        ),
-        HirExpr::Match { subject, arms } => format!(
-            "match(subject={},arms=[{}])",
-            render_expr(subject),
-            arms.iter()
-                .map(render_match_arm)
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
-        HirExpr::Chain {
-            style,
-            introducer,
-            steps,
-        } => format!(
-            "chain(style={style},introducer={},steps=[{}])",
-            render_chain_introducer(*introducer),
-            steps
-                .iter()
-                .map(render_chain_step)
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
-        HirExpr::MemoryPhrase {
-            family,
-            arena,
-            init_args,
-            constructor,
-            attached,
-        } => format!(
-            "memory(family={family},arena={},init=[{}],ctor={},attached=[{}])",
-            render_expr(arena),
-            init_args
-                .iter()
-                .map(render_phrase_arg)
-                .collect::<Vec<_>>()
-                .join(","),
-            render_expr(constructor),
-            attached
-                .iter()
-                .map(render_header_attachment)
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
-        HirExpr::GenericApply { expr, type_args } => format!(
-            "generic(expr={},types=[{}])",
-            render_expr(expr),
-            type_args.join(",")
-        ),
-        HirExpr::QualifiedPhrase {
-            subject,
-            args,
-            qualifier,
-            attached,
-        } => format!(
-            "phrase(subject={},args=[{}],kind={},qualifier={qualifier},attached=[{}])",
-            render_expr(subject),
-            args.iter()
-                .map(render_phrase_arg)
-                .collect::<Vec<_>>()
-                .join(","),
-            render_phrase_qualifier_kind(qualifier),
-            attached
-                .iter()
-                .map(render_header_attachment)
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
-        HirExpr::Await { expr } => format!("await({})", render_expr(expr)),
-        HirExpr::Unary { op, expr } => {
-            format!("unary({}, {})", render_unary_op(*op), render_expr(expr))
-        }
-        HirExpr::Binary { left, op, right } => format!(
-            "binary({}, {}, {})",
-            render_expr(left),
-            render_binary_op(*op),
-            render_expr(right)
-        ),
-        HirExpr::MemberAccess { expr, member } => {
-            format!("member({}, {member})", render_expr(expr))
-        }
-        HirExpr::Index { expr, index } => {
-            format!("index({}, {})", render_expr(expr), render_expr(index))
-        }
-        HirExpr::Slice {
-            expr,
-            start,
-            end,
-            inclusive_end,
-        } => format!(
-            "slice(expr={},start={},end={},inclusive={inclusive_end})",
-            render_expr(expr),
-            start
-                .as_ref()
-                .map(|expr| render_expr(expr))
-                .unwrap_or_else(|| "none".to_string()),
-            end.as_ref()
-                .map(|expr| render_expr(expr))
-                .unwrap_or_else(|| "none".to_string())
-        ),
-        HirExpr::Range {
-            start,
-            end,
-            inclusive_end,
-        } => format!(
-            "range(start={},end={},inclusive={inclusive_end})",
-            start
-                .as_ref()
-                .map(|expr| render_expr(expr))
-                .unwrap_or_else(|| "none".to_string()),
-            end.as_ref()
-                .map(|expr| render_expr(expr))
-                .unwrap_or_else(|| "none".to_string())
-        ),
-    }
-}
-
-fn render_assign_target(target: &HirAssignTarget) -> String {
-    match target {
-        HirAssignTarget::Name { text } => format!("name({text})"),
-        HirAssignTarget::MemberAccess { target, member } => {
-            format!("member({}, {member})", render_assign_target(target))
-        }
-        HirAssignTarget::Index { target, index } => {
-            format!(
-                "index({}, {})",
-                render_assign_target(target),
-                render_expr(index)
-            )
-        }
-    }
-}
-
-fn render_assign_op(op: HirAssignOp) -> &'static str {
-    op.as_str()
 }
 
 fn render_param_row(symbol: &HirSymbol) -> Vec<String> {
@@ -1001,144 +613,6 @@ fn render_behavior_attr_rows(symbol: &HirSymbol) -> Vec<String> {
         .collect()
 }
 
-fn render_statement(statement: &HirStatement) -> String {
-    let forewords = statement
-        .forewords
-        .iter()
-        .map(render_foreword_row)
-        .collect::<Vec<_>>()
-        .join(",");
-    let rollups = statement
-        .rollups
-        .iter()
-        .map(render_rollup_row)
-        .collect::<Vec<_>>()
-        .join(",");
-    let core = match &statement.kind {
-        HirStatementKind::Let {
-            mutable,
-            name,
-            value,
-        } => format!(
-            "let(mutable={mutable},name={name},value={})",
-            render_expr(value)
-        ),
-        HirStatementKind::Return { value } => format!(
-            "return({})",
-            value
-                .as_ref()
-                .map(render_expr)
-                .unwrap_or_else(|| "none".to_string())
-        ),
-        HirStatementKind::If {
-            condition,
-            then_branch,
-            else_branch,
-        } => format!(
-            "if(cond={},then=[{}],else=[{}])",
-            render_expr(condition),
-            then_branch
-                .iter()
-                .map(render_statement)
-                .collect::<Vec<_>>()
-                .join(","),
-            else_branch
-                .as_ref()
-                .map(|branch| branch
-                    .iter()
-                    .map(render_statement)
-                    .collect::<Vec<_>>()
-                    .join(","))
-                .unwrap_or_default()
-        ),
-        HirStatementKind::While { condition, body } => format!(
-            "while(cond={},body=[{}])",
-            render_expr(condition),
-            body.iter()
-                .map(render_statement)
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
-        HirStatementKind::For {
-            binding,
-            iterable,
-            body,
-        } => format!(
-            "for(binding={binding},iterable={},body=[{}])",
-            render_expr(iterable),
-            body.iter()
-                .map(render_statement)
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
-        HirStatementKind::Defer { expr } => format!("defer({})", render_expr(expr)),
-        HirStatementKind::Break => "break".to_string(),
-        HirStatementKind::Continue => "continue".to_string(),
-        HirStatementKind::Assign { target, op, value } => format!(
-            "assign(target={},op={},value={})",
-            render_assign_target(target),
-            render_assign_op(*op),
-            render_expr(value)
-        ),
-        HirStatementKind::Expr { expr } => format!("expr({})", render_expr(expr)),
-    };
-    format!("stmt(core={core},forewords=[{forewords}],rollups=[{rollups}])")
-}
-
-fn symbol_return_type_text(symbol_ref: IrResolvedSymbolRef<'_>) -> Option<String> {
-    symbol_ref.symbol.return_type.clone().or_else(|| {
-        matches!(
-            symbol_ref.symbol.kind,
-            HirSymbolKind::Record | HirSymbolKind::Enum | HirSymbolKind::OpaqueType
-        )
-        .then(|| resolved_symbol_path(symbol_ref).join("."))
-    })
-}
-
-fn infer_member_access_type(
-    scope: &ResolvedRenderScope<'_>,
-    expr: &HirExpr,
-    member: &str,
-) -> Option<String> {
-    let base_ty = infer_expr_type_text(scope, expr)?;
-    let (base, _) = parse_surface_type_application(strip_reference_prefix(&base_ty))?;
-    let path = split_simple_path(&base)?;
-    let symbol_ref = lookup_symbol_path(scope.workspace, scope.resolved_module, &path)?;
-    match &symbol_ref.symbol.body {
-        HirSymbolBody::Record { fields } => fields
-            .iter()
-            .find(|field| field.name == member)
-            .map(|field| field.ty.clone()),
-        _ => None,
-    }
-}
-
-fn infer_index_type_text(scope: &ResolvedRenderScope<'_>, expr: &HirExpr) -> Option<String> {
-    let base_ty = infer_expr_type_text(scope, expr)?;
-    let (base, args) = parse_surface_type_application(strip_reference_prefix(&base_ty))?;
-    match base.as_str() {
-        "List" | "Array" => args.first().cloned(),
-        "Map" => args.get(1).cloned(),
-        _ => None,
-    }
-}
-
-fn infer_slice_type_text(scope: &ResolvedRenderScope<'_>, expr: &HirExpr) -> Option<String> {
-    let base_ty = infer_expr_type_text(scope, expr)?;
-    let (base, args) = parse_surface_type_application(strip_reference_prefix(&base_ty))?;
-    match base.as_str() {
-        "List" => Some(format!(
-            "List[{}]",
-            args.first().cloned().unwrap_or_else(|| "_".to_string())
-        )),
-        "Array" => Some(format!(
-            "Array[{}]",
-            args.first().cloned().unwrap_or_else(|| "_".to_string())
-        )),
-        _ => Some(base_ty),
-    }
-}
-
 fn infer_iterable_binding_type_text(
     scope: &ResolvedRenderScope<'_>,
     iterable: &HirExpr,
@@ -1160,39 +634,29 @@ fn resolve_qualified_phrase_target_path(
     scope: &ResolvedRenderScope<'_>,
     subject: &HirExpr,
     qualifier: &str,
-) -> Option<Vec<String>> {
+) -> Option<ResolvedPhraseTarget> {
     if qualifier == "call" {
         let path = flatten_callable_expr_path(subject)?;
-        return lookup_symbol_path(scope.workspace, scope.resolved_module, &path)
-            .map(resolved_symbol_path);
+        return lookup_symbol_path(scope.workspace, scope.resolved_module, &path).map(|resolved| {
+            let routine_key = resolved_symbol_routine_key(&resolved);
+            ResolvedPhraseTarget {
+                path: resolved_symbol_path(resolved),
+                routine_key: Some(routine_key),
+                dynamic_dispatch: None,
+            }
+        });
     }
 
     if let Some(path) = split_simple_path(qualifier).filter(|path| path.len() > 1) {
         if let Some(resolved) = lookup_symbol_path(scope.workspace, scope.resolved_module, &path) {
-            return Some(resolved_symbol_path(resolved));
+            let routine_key = resolved_symbol_routine_key(&resolved);
+            return Some(ResolvedPhraseTarget {
+                path: resolved_symbol_path(resolved),
+                routine_key: Some(routine_key),
+                dynamic_dispatch: None,
+            });
         }
     }
-
-    if is_identifier_text(qualifier) {
-        let subject_ty = infer_expr_type_text(scope, subject)?;
-        return match lookup_method_path_for_type(scope.workspace, &subject_ty, qualifier) {
-            Ok(Some(path)) => Some(path),
-            Ok(None) => {
-                match lookup_trait_method_path_from_where_clause(scope, &subject_ty, qualifier) {
-                    Ok(path) => path,
-                    Err(message) => {
-                        scope.note_error(message);
-                        None
-                    }
-                }
-            }
-            Err(message) => {
-                scope.note_error(message);
-                None
-            }
-        };
-    }
-
     None
 }
 
@@ -1201,8 +665,13 @@ fn resolve_bare_method_target(
     subject: &HirExpr,
     qualifier: &str,
 ) -> Option<ResolvedPhraseTarget> {
-    let subject_ty = infer_expr_type_text(scope, subject)?;
-    match lookup_method_resolution_for_type(scope.workspace, &subject_ty, qualifier) {
+    let subject_ty = infer_receiver_expr_type_text(
+        scope.workspace,
+        scope.resolved_module,
+        &scope.value_scope,
+        subject,
+    )?;
+    match lookup_method_resolution_for_type(scope, scope.workspace, &subject_ty, qualifier) {
         Ok(Some(resolved)) => {
             let mut path = resolved
                 .module_id
@@ -1213,6 +682,7 @@ fn resolve_bare_method_target(
             return Some(ResolvedPhraseTarget {
                 path,
                 routine_key: Some(resolved.routine_key),
+                dynamic_dispatch: None,
             });
         }
         Ok(None) => {}
@@ -1239,6 +709,9 @@ fn resolve_bare_method_target(
             Some(ResolvedPhraseTarget {
                 path,
                 routine_key: None,
+                dynamic_dispatch: resolved
+                    .trait_path
+                    .map(|trait_path| ExecDynamicDispatch::TraitMethod { trait_path }),
             })
         }
         Err(message) => {
@@ -1248,466 +721,671 @@ fn resolve_bare_method_target(
     }
 }
 
-fn infer_call_target_return_type(
-    scope: &ResolvedRenderScope<'_>,
-    subject: &HirExpr,
-) -> Option<String> {
-    let path = flatten_callable_expr_path(subject)?;
-    if let Some(symbol_ref) = lookup_symbol_path(scope.workspace, scope.resolved_module, &path) {
-        return symbol_return_type_text(symbol_ref);
-    }
-    if path.len() >= 2 {
-        let enum_path = path[..path.len() - 1].to_vec();
-        if let Some(enum_ref) =
-            lookup_symbol_path(scope.workspace, scope.resolved_module, &enum_path)
-        {
-            if matches!(enum_ref.symbol.kind, HirSymbolKind::Enum) {
-                return symbol_return_type_text(enum_ref);
-            }
-        }
-    }
-    None
-}
-
 fn infer_expr_type_text(scope: &ResolvedRenderScope<'_>, expr: &HirExpr) -> Option<String> {
+    if let Some(inferred) = infer_receiver_expr_type_text(
+        scope.workspace,
+        scope.resolved_module,
+        &scope.value_scope,
+        expr,
+    ) {
+        return Some(inferred);
+    }
     match expr {
-        HirExpr::BoolLiteral { .. } => Some("Bool".to_string()),
-        HirExpr::IntLiteral { .. } => Some("Int".to_string()),
-        HirExpr::StrLiteral { .. } => Some("Str".to_string()),
-        HirExpr::CollectionLiteral { .. } => Some("List[_]".to_string()),
-        HirExpr::Range { .. } => Some("RangeInt".to_string()),
-        HirExpr::Path { segments }
-            if segments.len() == 1 && scope.value_scope.contains(&segments[0]) =>
-        {
-            scope
-                .value_scope
-                .type_text_of(&segments[0])
-                .map(ToOwned::to_owned)
-        }
-        HirExpr::Path { segments } => {
-            let symbol_ref = lookup_symbol_path(scope.workspace, scope.resolved_module, segments)?;
-            symbol_return_type_text(symbol_ref)
-        }
-        HirExpr::Unary { op, expr }
-            if matches!(op, HirUnaryOp::BorrowRead | HirUnaryOp::BorrowMut) =>
-        {
-            infer_expr_type_text(scope, expr).map(|text| format!("& {text}"))
-        }
-        HirExpr::Unary {
-            op: HirUnaryOp::Weave,
-            expr,
-        } => infer_expr_type_text(scope, expr).map(|text| format!("std.concurrent.Task[{text}]")),
-        HirExpr::Unary {
-            op: HirUnaryOp::Split,
-            expr,
-        } => infer_expr_type_text(scope, expr).map(|text| format!("std.concurrent.Thread[{text}]")),
-        HirExpr::Unary {
-            op: HirUnaryOp::Deref,
-            expr,
-        } => infer_expr_type_text(scope, expr).map(|text| {
-            let stripped = strip_reference_prefix(&text);
-            if stripped == text.trim() {
-                text
-            } else {
-                stripped.to_string()
-            }
-        }),
-        HirExpr::GenericApply { expr, .. } => infer_expr_type_text(scope, expr),
-        HirExpr::QualifiedPhrase {
-            subject, qualifier, ..
-        } if qualifier == "call" => infer_call_target_return_type(scope, subject),
-        HirExpr::QualifiedPhrase { qualifier, .. } if qualifier.contains('.') => {
-            let path = split_simple_path(qualifier)?;
-            lookup_symbol_path(scope.workspace, scope.resolved_module, &path)
-                .and_then(symbol_return_type_text)
-        }
-        HirExpr::QualifiedPhrase {
-            subject, qualifier, ..
-        } if is_identifier_text(qualifier) => {
-            let subject_ty = infer_expr_type_text(scope, subject)?;
-            match lookup_method_resolution_for_type(scope.workspace, &subject_ty, qualifier) {
-                Ok(Some(resolved)) => resolved
-                    .method
-                    .return_type
-                    .as_ref()
-                    .map(|text| substitute_type_params(text, &resolved.substitutions)),
-                Ok(None) => match lookup_trait_method_resolution_from_where_clause(
-                    scope,
-                    &subject_ty,
-                    qualifier,
-                ) {
-                    Ok(candidates) => {
-                        if candidates.len() > 1 {
-                            scope.note_error(format!(
-                                "bare-method qualifier `{qualifier}` on `{subject_ty}` is ambiguous across trait bounds"
-                            ));
-                            None
-                        } else {
-                            candidates.into_iter().next().and_then(|resolved| {
-                                resolved.method.return_type.as_ref().map(ToOwned::to_owned)
-                            })
-                        }
-                    }
-                    Err(message) => {
-                        scope.note_error(message);
-                        None
-                    }
-                },
-                Err(message) => {
-                    scope.note_error(message);
-                    None
-                }
-            }
-        }
-        HirExpr::MemberAccess { expr, member } => infer_member_access_type(scope, expr, member),
-        HirExpr::Index { expr, .. } => infer_index_type_text(scope, expr),
-        HirExpr::Slice { expr, .. } => infer_slice_type_text(scope, expr),
-        HirExpr::Match { arms, .. } => {
-            let inferred = arms
-                .iter()
-                .filter_map(|arm| infer_expr_type_text(scope, &arm.value))
-                .collect::<Vec<_>>();
-            let first = inferred.first()?.clone();
-            inferred
-                .iter()
-                .all(|candidate| candidate == &first)
-                .then_some(first)
-        }
-        HirExpr::Await { expr } => {
-            let awaited = infer_expr_type_text(scope, expr)?;
-            let (base, args) = parse_surface_type_application(strip_reference_prefix(&awaited))?;
-            match base.as_str() {
-                "std.concurrent.Task" | "std.concurrent.Thread" | "Task" | "Thread" => {
-                    args.first().cloned()
-                }
-                _ => None,
-            }
-        }
+        HirExpr::Pair { left, right } => Some(format!(
+            "Pair[{}, {}]",
+            infer_expr_type_text(scope, left)?,
+            infer_expr_type_text(scope, right)?
+        )),
         _ => None,
     }
 }
 
-fn render_phrase_arg_resolved(arg: &HirPhraseArg, scope: &ResolvedRenderScope<'_>) -> String {
-    match arg {
-        HirPhraseArg::Positional(expr) => render_expr_resolved(expr, scope),
-        HirPhraseArg::Named { name, value } => {
-            format!("{name}={}", render_expr_resolved(value, scope))
-        }
+fn lower_rollup(rollup: &HirPageRollup) -> ExecPageRollup {
+    ExecPageRollup {
+        kind: rollup.kind.as_str().to_string(),
+        subject: rollup.subject.clone(),
+        handler_path: rollup.handler_path.clone(),
     }
 }
 
-fn render_chain_step_resolved(step: &HirChainStep, scope: &ResolvedRenderScope<'_>) -> String {
-    let incoming = step.incoming.map(render_chain_connector).unwrap_or("start");
-    let bind_args = step
-        .bind_args
-        .iter()
-        .map(|expr| render_expr_resolved(expr, scope))
-        .collect::<Vec<_>>()
-        .join(",");
-    format!(
-        "step({incoming},stage={},bind=[{bind_args}],text=\"{}\")",
-        render_expr_resolved(&step.stage, scope),
-        quote_text(&step.text)
-    )
+fn lower_phrase_qualifier_kind(qualifier: &str) -> ExecPhraseQualifierKind {
+    match qualifier.trim() {
+        "call" => ExecPhraseQualifierKind::Call,
+        "?" => ExecPhraseQualifierKind::Try,
+        ">" => ExecPhraseQualifierKind::Apply,
+        ">>" => ExecPhraseQualifierKind::AwaitApply,
+        other if other.contains('.') => ExecPhraseQualifierKind::NamedPath,
+        _ => ExecPhraseQualifierKind::BareMethod,
+    }
 }
 
-fn render_header_attachment_resolved(
+fn lower_chain_connector(connector: HirChainConnector) -> ExecChainConnector {
+    match connector {
+        HirChainConnector::Forward => ExecChainConnector::Forward,
+        HirChainConnector::Reverse => ExecChainConnector::Reverse,
+    }
+}
+
+fn lower_chain_introducer(introducer: HirChainIntroducer) -> ExecChainIntroducer {
+    match introducer {
+        HirChainIntroducer::Forward => ExecChainIntroducer::Forward,
+        HirChainIntroducer::Reverse => ExecChainIntroducer::Reverse,
+    }
+}
+
+fn lower_unary_op(op: HirUnaryOp) -> ExecUnaryOp {
+    match op {
+        HirUnaryOp::Neg => ExecUnaryOp::Neg,
+        HirUnaryOp::Not => ExecUnaryOp::Not,
+        HirUnaryOp::BitNot => ExecUnaryOp::BitNot,
+        HirUnaryOp::BorrowRead => ExecUnaryOp::BorrowRead,
+        HirUnaryOp::BorrowMut => ExecUnaryOp::BorrowMut,
+        HirUnaryOp::Deref => ExecUnaryOp::Deref,
+        HirUnaryOp::Weave => ExecUnaryOp::Weave,
+        HirUnaryOp::Split => ExecUnaryOp::Split,
+    }
+}
+
+fn lower_binary_op(op: HirBinaryOp) -> ExecBinaryOp {
+    match op {
+        HirBinaryOp::Or => ExecBinaryOp::Or,
+        HirBinaryOp::And => ExecBinaryOp::And,
+        HirBinaryOp::EqEq => ExecBinaryOp::EqEq,
+        HirBinaryOp::NotEq => ExecBinaryOp::NotEq,
+        HirBinaryOp::Lt => ExecBinaryOp::Lt,
+        HirBinaryOp::LtEq => ExecBinaryOp::LtEq,
+        HirBinaryOp::Gt => ExecBinaryOp::Gt,
+        HirBinaryOp::GtEq => ExecBinaryOp::GtEq,
+        HirBinaryOp::BitOr => ExecBinaryOp::BitOr,
+        HirBinaryOp::BitXor => ExecBinaryOp::BitXor,
+        HirBinaryOp::BitAnd => ExecBinaryOp::BitAnd,
+        HirBinaryOp::Shl => ExecBinaryOp::Shl,
+        HirBinaryOp::Shr => ExecBinaryOp::Shr,
+        HirBinaryOp::Add => ExecBinaryOp::Add,
+        HirBinaryOp::Sub => ExecBinaryOp::Sub,
+        HirBinaryOp::Mul => ExecBinaryOp::Mul,
+        HirBinaryOp::Div => ExecBinaryOp::Div,
+        HirBinaryOp::Mod => ExecBinaryOp::Mod,
+    }
+}
+
+fn lower_assign_op(op: HirAssignOp) -> ExecAssignOp {
+    match op {
+        HirAssignOp::Assign => ExecAssignOp::Assign,
+        HirAssignOp::AddAssign => ExecAssignOp::AddAssign,
+        HirAssignOp::SubAssign => ExecAssignOp::SubAssign,
+        HirAssignOp::MulAssign => ExecAssignOp::MulAssign,
+        HirAssignOp::DivAssign => ExecAssignOp::DivAssign,
+        HirAssignOp::ModAssign => ExecAssignOp::ModAssign,
+        HirAssignOp::BitAndAssign => ExecAssignOp::BitAndAssign,
+        HirAssignOp::BitOrAssign => ExecAssignOp::BitOrAssign,
+        HirAssignOp::BitXorAssign => ExecAssignOp::BitXorAssign,
+        HirAssignOp::ShlAssign => ExecAssignOp::ShlAssign,
+        HirAssignOp::ShrAssign => ExecAssignOp::ShrAssign,
+    }
+}
+
+fn lower_match_pattern_exec(pattern: &HirMatchPattern) -> ExecMatchPattern {
+    match pattern {
+        HirMatchPattern::Wildcard => ExecMatchPattern::Wildcard,
+        HirMatchPattern::Literal { text } => ExecMatchPattern::Literal(text.clone()),
+        HirMatchPattern::Name { text } => {
+            if text.contains('.') {
+                return ExecMatchPattern::Variant {
+                    path: text.clone(),
+                    args: Vec::new(),
+                };
+            }
+            ExecMatchPattern::Name(text.clone())
+        }
+        HirMatchPattern::Variant { path, args } => ExecMatchPattern::Variant {
+            path: path.clone(),
+            args: args.iter().map(lower_match_pattern_exec).collect(),
+        },
+    }
+}
+
+fn lower_subject_match_pattern_exec_resolved(
+    pattern: &HirMatchPattern,
+    subject: &HirExpr,
+    scope: &ResolvedRenderScope<'_>,
+) -> ExecMatchPattern {
+    match pattern {
+        HirMatchPattern::Wildcard => ExecMatchPattern::Wildcard,
+        HirMatchPattern::Literal { text } => ExecMatchPattern::Literal(text.clone()),
+        HirMatchPattern::Name { text } => {
+            if text.contains('.')
+                || match_name_resolves_to_zero_payload_variant(
+                    scope.workspace,
+                    scope.resolved_module,
+                    &scope.value_scope,
+                    subject,
+                    text,
+                )
+            {
+                return ExecMatchPattern::Variant {
+                    path: text.clone(),
+                    args: Vec::new(),
+                };
+            }
+            ExecMatchPattern::Name(text.clone())
+        }
+        HirMatchPattern::Variant { path, args } => ExecMatchPattern::Variant {
+            path: path.clone(),
+            args: args.iter().map(lower_match_pattern_exec).collect(),
+        },
+    }
+}
+
+fn lower_phrase_arg_exec(arg: &HirPhraseArg) -> ExecPhraseArg {
+    match arg {
+        HirPhraseArg::Positional(expr) => ExecPhraseArg {
+            name: None,
+            value: lower_exec_expr(expr),
+        },
+        HirPhraseArg::Named { name, value } => ExecPhraseArg {
+            name: Some(name.clone()),
+            value: lower_exec_expr(value),
+        },
+    }
+}
+
+fn lower_phrase_arg_exec_resolved(
+    arg: &HirPhraseArg,
+    scope: &ResolvedRenderScope<'_>,
+) -> ExecPhraseArg {
+    match arg {
+        HirPhraseArg::Positional(expr) => ExecPhraseArg {
+            name: None,
+            value: lower_exec_expr_resolved(expr, scope),
+        },
+        HirPhraseArg::Named { name, value } => ExecPhraseArg {
+            name: Some(name.clone()),
+            value: lower_exec_expr_resolved(value, scope),
+        },
+    }
+}
+
+fn lower_header_attachment_exec(attachment: &HirHeaderAttachment) -> ExecHeaderAttachment {
+    match attachment {
+        HirHeaderAttachment::Named { name, value, .. } => ExecHeaderAttachment::Named {
+            name: name.clone(),
+            value: lower_exec_expr(value),
+        },
+        HirHeaderAttachment::Chain { expr, .. } => ExecHeaderAttachment::Chain {
+            expr: lower_exec_expr(expr),
+        },
+    }
+}
+
+fn lower_header_attachment_exec_resolved(
     attachment: &HirHeaderAttachment,
     scope: &ResolvedRenderScope<'_>,
-) -> String {
+) -> ExecHeaderAttachment {
     match attachment {
-        HirHeaderAttachment::Named {
-            name,
-            value,
-            forewords,
-            ..
-        } => format!(
-            "named({name}={},forewords=[{}])",
-            render_expr_resolved(value, scope),
-            forewords
-                .iter()
-                .map(render_foreword_row)
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
-        HirHeaderAttachment::Chain {
-            expr, forewords, ..
-        } => format!(
-            "chain({},forewords=[{}])",
-            render_expr_resolved(expr, scope),
-            forewords
-                .iter()
-                .map(render_foreword_row)
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
+        HirHeaderAttachment::Named { name, value, .. } => ExecHeaderAttachment::Named {
+            name: name.clone(),
+            value: lower_exec_expr_resolved(value, scope),
+        },
+        HirHeaderAttachment::Chain { expr, .. } => ExecHeaderAttachment::Chain {
+            expr: lower_exec_expr_resolved(expr, scope),
+        },
     }
 }
 
-fn render_match_arm_resolved(arm: &HirMatchArm, scope: &ResolvedRenderScope<'_>) -> String {
-    format!(
-        "arm(patterns=[{}],value={})",
-        arm.patterns
-            .iter()
-            .map(render_match_pattern)
-            .collect::<Vec<_>>()
-            .join("|"),
-        render_expr_resolved(&arm.value, scope)
-    )
+fn lower_chain_step_exec(step: &HirChainStep) -> ExecChainStep {
+    ExecChainStep {
+        incoming: step.incoming.map(lower_chain_connector),
+        stage: lower_exec_expr(&step.stage),
+        bind_args: step.bind_args.iter().map(lower_exec_expr).collect(),
+        text: step.text.clone(),
+    }
 }
 
-fn render_assign_target_resolved(
+fn lower_chain_step_exec_resolved(
+    step: &HirChainStep,
+    scope: &ResolvedRenderScope<'_>,
+) -> ExecChainStep {
+    ExecChainStep {
+        incoming: step.incoming.map(lower_chain_connector),
+        stage: lower_exec_expr_resolved(&step.stage, scope),
+        bind_args: step
+            .bind_args
+            .iter()
+            .map(|expr| lower_exec_expr_resolved(expr, scope))
+            .collect(),
+        text: step.text.clone(),
+    }
+}
+
+fn lower_assign_target_exec(target: &HirAssignTarget) -> ExecAssignTarget {
+    match target {
+        HirAssignTarget::Name { text } => ExecAssignTarget::Name(text.clone()),
+        HirAssignTarget::MemberAccess { target, member } => ExecAssignTarget::Member {
+            target: Box::new(lower_assign_target_exec(target)),
+            member: member.clone(),
+        },
+        HirAssignTarget::Index { target, index } => ExecAssignTarget::Index {
+            target: Box::new(lower_assign_target_exec(target)),
+            index: lower_exec_expr(index),
+        },
+    }
+}
+
+fn lower_assign_target_exec_resolved(
     target: &HirAssignTarget,
     scope: &ResolvedRenderScope<'_>,
-) -> String {
+) -> ExecAssignTarget {
     match target {
-        HirAssignTarget::Name { text } => format!("name({text})"),
-        HirAssignTarget::MemberAccess { target, member } => {
-            format!(
-                "member({}, {member})",
-                render_assign_target_resolved(target, scope)
-            )
-        }
-        HirAssignTarget::Index { target, index } => format!(
-            "index({}, {})",
-            render_assign_target_resolved(target, scope),
-            render_expr_resolved(index, scope)
-        ),
+        HirAssignTarget::Name { text } => ExecAssignTarget::Name(text.clone()),
+        HirAssignTarget::MemberAccess { target, member } => ExecAssignTarget::Member {
+            target: Box::new(lower_assign_target_exec_resolved(target, scope)),
+            member: member.clone(),
+        },
+        HirAssignTarget::Index { target, index } => ExecAssignTarget::Index {
+            target: Box::new(lower_assign_target_exec_resolved(target, scope)),
+            index: lower_exec_expr_resolved(index, scope),
+        },
     }
 }
 
-fn render_expr_resolved(expr: &HirExpr, scope: &ResolvedRenderScope<'_>) -> String {
+fn lower_exec_expr(expr: &HirExpr) -> ExecExpr {
     match expr {
-        HirExpr::Path { segments } => format!("path({})", segments.join(".")),
-        HirExpr::BoolLiteral { value } => format!("bool({value})"),
-        HirExpr::IntLiteral { text } => format!("int({text})"),
-        HirExpr::StrLiteral { text } => format!("str(\"{}\")", quote_text(text)),
-        HirExpr::Pair { left, right } => format!(
-            "pair({}, {})",
-            render_expr_resolved(left, scope),
-            render_expr_resolved(right, scope)
-        ),
-        HirExpr::CollectionLiteral { items } => format!(
-            "collection([{}])",
-            items
+        HirExpr::Path { segments } => ExecExpr::Path(segments.clone()),
+        HirExpr::BoolLiteral { value } => ExecExpr::Bool(*value),
+        HirExpr::IntLiteral { text } => ExecExpr::Int(text.parse().unwrap_or_default()),
+        HirExpr::StrLiteral { text } => {
+            ExecExpr::Str(decode_source_string_literal(text).unwrap_or_else(|_| text.clone()))
+        }
+        HirExpr::Pair { left, right } => ExecExpr::Pair {
+            left: Box::new(lower_exec_expr(left)),
+            right: Box::new(lower_exec_expr(right)),
+        },
+        HirExpr::CollectionLiteral { items } => ExecExpr::Collection {
+            items: items.iter().map(lower_exec_expr).collect(),
+        },
+        HirExpr::Match { subject, arms } => ExecExpr::Match {
+            subject: Box::new(lower_exec_expr(subject)),
+            arms: arms
                 .iter()
-                .map(|item| render_expr_resolved(item, scope))
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
-        HirExpr::Match { subject, arms } => format!(
-            "match(subject={},arms=[{}])",
-            render_expr_resolved(subject, scope),
-            arms.iter()
-                .map(|arm| render_match_arm_resolved(arm, scope))
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
+                .map(|arm| ExecMatchArm {
+                    patterns: arm.patterns.iter().map(lower_match_pattern_exec).collect(),
+                    value: lower_exec_expr(&arm.value),
+                })
+                .collect(),
+        },
         HirExpr::Chain {
             style,
             introducer,
             steps,
-        } => format!(
-            "chain(style={style},introducer={},steps=[{}])",
-            render_chain_introducer(*introducer),
-            steps
-                .iter()
-                .map(|step| render_chain_step_resolved(step, scope))
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
+        } => ExecExpr::Chain {
+            style: style.clone(),
+            introducer: lower_chain_introducer(*introducer),
+            steps: steps.iter().map(lower_chain_step_exec).collect(),
+        },
         HirExpr::MemoryPhrase {
             family,
             arena,
             init_args,
             constructor,
             attached,
-        } => format!(
-            "memory(family={family},arena={},init=[{}],ctor={},attached=[{}])",
-            render_expr_resolved(arena, scope),
-            init_args
+        } => ExecExpr::MemoryPhrase {
+            family: family.clone(),
+            arena: Box::new(lower_exec_expr(arena)),
+            init_args: init_args.iter().map(lower_phrase_arg_exec).collect(),
+            constructor: Box::new(lower_exec_expr(constructor)),
+            attached: attached.iter().map(lower_header_attachment_exec).collect(),
+        },
+        HirExpr::GenericApply { expr, type_args } => ExecExpr::Generic {
+            expr: Box::new(lower_exec_expr(expr)),
+            type_args: type_args.clone(),
+        },
+        HirExpr::QualifiedPhrase {
+            subject,
+            args,
+            qualifier,
+            attached,
+        } => ExecExpr::Phrase {
+            subject: Box::new(lower_exec_expr(subject)),
+            args: args.iter().map(lower_phrase_arg_exec).collect(),
+            qualifier_kind: lower_phrase_qualifier_kind(qualifier),
+            qualifier: qualifier.clone(),
+            resolved_callable: None,
+            resolved_routine: None,
+            dynamic_dispatch: None,
+            attached: attached.iter().map(lower_header_attachment_exec).collect(),
+        },
+        HirExpr::Await { expr } => ExecExpr::Await {
+            expr: Box::new(lower_exec_expr(expr)),
+        },
+        HirExpr::Unary { op, expr } => ExecExpr::Unary {
+            op: lower_unary_op(*op),
+            expr: Box::new(lower_exec_expr(expr)),
+        },
+        HirExpr::Binary { left, op, right } => ExecExpr::Binary {
+            left: Box::new(lower_exec_expr(left)),
+            op: lower_binary_op(*op),
+            right: Box::new(lower_exec_expr(right)),
+        },
+        HirExpr::MemberAccess { expr, member } => ExecExpr::Member {
+            expr: Box::new(lower_exec_expr(expr)),
+            member: member.clone(),
+        },
+        HirExpr::Index { expr, index } => ExecExpr::Index {
+            expr: Box::new(lower_exec_expr(expr)),
+            index: Box::new(lower_exec_expr(index)),
+        },
+        HirExpr::Slice {
+            expr,
+            start,
+            end,
+            inclusive_end,
+        } => ExecExpr::Slice {
+            expr: Box::new(lower_exec_expr(expr)),
+            start: start.as_ref().map(|expr| Box::new(lower_exec_expr(expr))),
+            end: end.as_ref().map(|expr| Box::new(lower_exec_expr(expr))),
+            inclusive_end: *inclusive_end,
+        },
+        HirExpr::Range {
+            start,
+            end,
+            inclusive_end,
+        } => ExecExpr::Range {
+            start: start.as_ref().map(|expr| Box::new(lower_exec_expr(expr))),
+            end: end.as_ref().map(|expr| Box::new(lower_exec_expr(expr))),
+            inclusive_end: *inclusive_end,
+        },
+    }
+}
+
+fn lower_exec_expr_resolved(expr: &HirExpr, scope: &ResolvedRenderScope<'_>) -> ExecExpr {
+    match expr {
+        HirExpr::Path { segments } => ExecExpr::Path(segments.clone()),
+        HirExpr::BoolLiteral { value } => ExecExpr::Bool(*value),
+        HirExpr::IntLiteral { text } => ExecExpr::Int(text.parse().unwrap_or_default()),
+        HirExpr::StrLiteral { text } => {
+            ExecExpr::Str(decode_source_string_literal(text).unwrap_or_else(|_| text.clone()))
+        }
+        HirExpr::Pair { left, right } => ExecExpr::Pair {
+            left: Box::new(lower_exec_expr_resolved(left, scope)),
+            right: Box::new(lower_exec_expr_resolved(right, scope)),
+        },
+        HirExpr::CollectionLiteral { items } => ExecExpr::Collection {
+            items: items
                 .iter()
-                .map(|arg| render_phrase_arg_resolved(arg, scope))
-                .collect::<Vec<_>>()
-                .join(","),
-            render_expr_resolved(constructor, scope),
-            attached
+                .map(|item| lower_exec_expr_resolved(item, scope))
+                .collect(),
+        },
+        HirExpr::Match { subject, arms } => ExecExpr::Match {
+            subject: Box::new(lower_exec_expr_resolved(subject, scope)),
+            arms: arms
                 .iter()
-                .map(|attachment| render_header_attachment_resolved(attachment, scope))
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
-        HirExpr::GenericApply { expr, type_args } => format!(
-            "generic(expr={},types=[{}])",
-            render_expr_resolved(expr, scope),
-            type_args.join(",")
-        ),
+                .map(|arm| ExecMatchArm {
+                    patterns: arm
+                        .patterns
+                        .iter()
+                        .map(|pattern| {
+                            lower_subject_match_pattern_exec_resolved(pattern, subject, scope)
+                        })
+                        .collect(),
+                    value: lower_exec_expr_resolved(&arm.value, scope),
+                })
+                .collect(),
+        },
+        HirExpr::Chain {
+            style,
+            introducer,
+            steps,
+        } => ExecExpr::Chain {
+            style: style.clone(),
+            introducer: lower_chain_introducer(*introducer),
+            steps: steps
+                .iter()
+                .map(|step| lower_chain_step_exec_resolved(step, scope))
+                .collect(),
+        },
+        HirExpr::MemoryPhrase {
+            family,
+            arena,
+            init_args,
+            constructor,
+            attached,
+        } => ExecExpr::MemoryPhrase {
+            family: family.clone(),
+            arena: Box::new(lower_exec_expr_resolved(arena, scope)),
+            init_args: init_args
+                .iter()
+                .map(|arg| lower_phrase_arg_exec_resolved(arg, scope))
+                .collect(),
+            constructor: Box::new(lower_exec_expr_resolved(constructor, scope)),
+            attached: attached
+                .iter()
+                .map(|attachment| lower_header_attachment_exec_resolved(attachment, scope))
+                .collect(),
+        },
+        HirExpr::GenericApply { expr, type_args } => ExecExpr::Generic {
+            expr: Box::new(lower_exec_expr_resolved(expr, scope)),
+            type_args: type_args.clone(),
+        },
         HirExpr::QualifiedPhrase {
             subject,
             args,
             qualifier,
             attached,
         } => {
-            let resolved = match render_phrase_qualifier_kind(qualifier) {
-                "bare_method" => resolve_bare_method_target(scope, subject, qualifier)
-                    .map(|target| {
-                        let mut rendered = format!(",resolved={}", target.path.join("."));
-                        if let Some(routine_key) = target.routine_key {
-                            rendered.push_str(&format!(
-                                ",resolved_routine=str(\"{}\")",
-                                quote_text(&routine_key)
-                            ));
-                        }
-                        rendered
-                    })
-                    .unwrap_or_default(),
-                "named_path" => resolve_qualified_phrase_target_path(scope, subject, qualifier)
-                    .map(|path| format!(",resolved={}", path.join(".")))
-                    .unwrap_or_default(),
-                _ => String::new(),
+            let qualifier_kind = lower_phrase_qualifier_kind(qualifier);
+            let resolved = match qualifier_kind {
+                ExecPhraseQualifierKind::Call | ExecPhraseQualifierKind::NamedPath => {
+                    resolve_qualified_phrase_target_path(scope, subject, qualifier)
+                }
+                ExecPhraseQualifierKind::BareMethod => {
+                    resolve_bare_method_target(scope, subject, qualifier)
+                }
+                _ => None,
             };
-            format!(
-                "phrase(subject={},args=[{}],kind={},qualifier={qualifier}{resolved},attached=[{}])",
-                render_expr_resolved(subject, scope),
-                args.iter()
-                    .map(|arg| render_phrase_arg_resolved(arg, scope))
-                    .collect::<Vec<_>>()
-                    .join(","),
-                render_phrase_qualifier_kind(qualifier),
-                attached
+            ExecExpr::Phrase {
+                subject: Box::new(lower_exec_expr_resolved(subject, scope)),
+                args: args
                     .iter()
-                    .map(|attachment| render_header_attachment_resolved(attachment, scope))
-                    .collect::<Vec<_>>()
-                    .join(",")
-            )
+                    .map(|arg| lower_phrase_arg_exec_resolved(arg, scope))
+                    .collect(),
+                qualifier_kind,
+                qualifier: qualifier.clone(),
+                resolved_callable: resolved.as_ref().map(|target| target.path.clone()),
+                resolved_routine: resolved
+                    .as_ref()
+                    .and_then(|target| target.routine_key.clone()),
+                dynamic_dispatch: resolved.and_then(|target| target.dynamic_dispatch),
+                attached: attached
+                    .iter()
+                    .map(|attachment| lower_header_attachment_exec_resolved(attachment, scope))
+                    .collect(),
+            }
         }
-        HirExpr::Await { expr } => format!("await({})", render_expr_resolved(expr, scope)),
-        HirExpr::Unary { op, expr } => format!(
-            "unary({}, {})",
-            render_unary_op(*op),
-            render_expr_resolved(expr, scope)
-        ),
-        HirExpr::Binary { left, op, right } => format!(
-            "binary({}, {}, {})",
-            render_expr_resolved(left, scope),
-            render_binary_op(*op),
-            render_expr_resolved(right, scope)
-        ),
-        HirExpr::MemberAccess { expr, member } => {
-            format!("member({}, {member})", render_expr_resolved(expr, scope))
-        }
-        HirExpr::Index { expr, index } => format!(
-            "index({}, {})",
-            render_expr_resolved(expr, scope),
-            render_expr_resolved(index, scope)
-        ),
+        HirExpr::Await { expr } => ExecExpr::Await {
+            expr: Box::new(lower_exec_expr_resolved(expr, scope)),
+        },
+        HirExpr::Unary { op, expr } => ExecExpr::Unary {
+            op: lower_unary_op(*op),
+            expr: Box::new(lower_exec_expr_resolved(expr, scope)),
+        },
+        HirExpr::Binary { left, op, right } => ExecExpr::Binary {
+            left: Box::new(lower_exec_expr_resolved(left, scope)),
+            op: lower_binary_op(*op),
+            right: Box::new(lower_exec_expr_resolved(right, scope)),
+        },
+        HirExpr::MemberAccess { expr, member } => ExecExpr::Member {
+            expr: Box::new(lower_exec_expr_resolved(expr, scope)),
+            member: member.clone(),
+        },
+        HirExpr::Index { expr, index } => ExecExpr::Index {
+            expr: Box::new(lower_exec_expr_resolved(expr, scope)),
+            index: Box::new(lower_exec_expr_resolved(index, scope)),
+        },
         HirExpr::Slice {
             expr,
             start,
             end,
             inclusive_end,
-        } => format!(
-            "slice(expr={},start={},end={},inclusive={inclusive_end})",
-            render_expr_resolved(expr, scope),
-            start
+        } => ExecExpr::Slice {
+            expr: Box::new(lower_exec_expr_resolved(expr, scope)),
+            start: start
                 .as_ref()
-                .map(|expr| render_expr_resolved(expr, scope))
-                .unwrap_or_else(|| "none".to_string()),
-            end.as_ref()
-                .map(|expr| render_expr_resolved(expr, scope))
-                .unwrap_or_else(|| "none".to_string())
-        ),
+                .map(|expr| Box::new(lower_exec_expr_resolved(expr, scope))),
+            end: end
+                .as_ref()
+                .map(|expr| Box::new(lower_exec_expr_resolved(expr, scope))),
+            inclusive_end: *inclusive_end,
+        },
         HirExpr::Range {
             start,
             end,
             inclusive_end,
-        } => format!(
-            "range(start={},end={},inclusive={inclusive_end})",
-            start
+        } => ExecExpr::Range {
+            start: start
                 .as_ref()
-                .map(|expr| render_expr_resolved(expr, scope))
-                .unwrap_or_else(|| "none".to_string()),
-            end.as_ref()
-                .map(|expr| render_expr_resolved(expr, scope))
-                .unwrap_or_else(|| "none".to_string())
-        ),
+                .map(|expr| Box::new(lower_exec_expr_resolved(expr, scope))),
+            end: end
+                .as_ref()
+                .map(|expr| Box::new(lower_exec_expr_resolved(expr, scope))),
+            inclusive_end: *inclusive_end,
+        },
     }
 }
 
-fn render_statement_block_resolved(
+fn lower_exec_stmt_block(statements: &[HirStatement]) -> Vec<ExecStmt> {
+    statements.iter().map(lower_exec_stmt).collect()
+}
+
+fn lower_exec_stmt(statement: &HirStatement) -> ExecStmt {
+    match &statement.kind {
+        HirStatementKind::Let {
+            mutable,
+            name,
+            value,
+        } => ExecStmt::Let {
+            mutable: *mutable,
+            name: name.clone(),
+            value: lower_exec_expr(value),
+        },
+        HirStatementKind::Expr { expr } => ExecStmt::Expr {
+            expr: lower_exec_expr(expr),
+            rollups: statement.rollups.iter().map(lower_rollup).collect(),
+        },
+        HirStatementKind::Return { value } => match value.as_ref() {
+            Some(value) => ExecStmt::ReturnValue {
+                value: lower_exec_expr(value),
+            },
+            None => ExecStmt::ReturnVoid,
+        },
+        HirStatementKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => ExecStmt::If {
+            condition: lower_exec_expr(condition),
+            then_branch: lower_exec_stmt_block(then_branch),
+            else_branch: else_branch
+                .as_ref()
+                .map(|branch| branch.iter().map(lower_exec_stmt).collect())
+                .unwrap_or_default(),
+            rollups: statement.rollups.iter().map(lower_rollup).collect(),
+        },
+        HirStatementKind::While { condition, body } => ExecStmt::While {
+            condition: lower_exec_expr(condition),
+            body: lower_exec_stmt_block(body),
+            rollups: statement.rollups.iter().map(lower_rollup).collect(),
+        },
+        HirStatementKind::For {
+            binding,
+            iterable,
+            body,
+        } => ExecStmt::For {
+            binding: binding.clone(),
+            iterable: lower_exec_expr(iterable),
+            body: lower_exec_stmt_block(body),
+            rollups: statement.rollups.iter().map(lower_rollup).collect(),
+        },
+        HirStatementKind::Defer { expr } => ExecStmt::Defer(lower_exec_expr(expr)),
+        HirStatementKind::Break => ExecStmt::Break,
+        HirStatementKind::Continue => ExecStmt::Continue,
+        HirStatementKind::Assign { target, op, value } => ExecStmt::Assign {
+            target: lower_assign_target_exec(target),
+            op: lower_assign_op(*op),
+            value: lower_exec_expr(value),
+        },
+    }
+}
+
+fn lower_exec_stmt_block_resolved(
     statements: &[HirStatement],
     scope: &mut ResolvedRenderScope<'_>,
-) -> Vec<String> {
+) -> Vec<ExecStmt> {
     statements
         .iter()
-        .map(|statement| render_statement_resolved(statement, scope))
+        .map(|statement| lower_exec_stmt_resolved(statement, scope))
         .collect()
 }
 
-fn render_statement_resolved(
+fn lower_exec_stmt_resolved(
     statement: &HirStatement,
     scope: &mut ResolvedRenderScope<'_>,
-) -> String {
-    let forewords = statement
-        .forewords
-        .iter()
-        .map(render_foreword_row)
-        .collect::<Vec<_>>()
-        .join(",");
-    let rollups = statement
-        .rollups
-        .iter()
-        .map(render_rollup_row)
-        .collect::<Vec<_>>()
-        .join(",");
-    let core = match &statement.kind {
+) -> ExecStmt {
+    match &statement.kind {
         HirStatementKind::Let {
             mutable,
             name,
             value,
         } => {
-            let rendered = format!(
-                "let(mutable={mutable},name={name},value={})",
-                render_expr_resolved(value, scope)
-            );
+            let lowered = ExecStmt::Let {
+                mutable: *mutable,
+                name: name.clone(),
+                value: lower_exec_expr_resolved(value, scope),
+            };
             if let Some(type_text) = infer_expr_type_text(scope, value) {
                 scope.value_scope.insert(name.clone(), type_text);
             }
-            rendered
+            lowered
         }
-        HirStatementKind::Return { value } => format!(
-            "return({})",
-            value
-                .as_ref()
-                .map(|value| render_expr_resolved(value, scope))
-                .unwrap_or_else(|| "none".to_string())
-        ),
+        HirStatementKind::Expr { expr } => ExecStmt::Expr {
+            expr: lower_exec_expr_resolved(expr, scope),
+            rollups: statement.rollups.iter().map(lower_rollup).collect(),
+        },
+        HirStatementKind::Return { value } => match value.as_ref() {
+            Some(value) => ExecStmt::ReturnValue {
+                value: lower_exec_expr_resolved(value, scope),
+            },
+            None => ExecStmt::ReturnVoid,
+        },
         HirStatementKind::If {
             condition,
             then_branch,
             else_branch,
         } => {
             let mut then_scope = scope.clone();
-            let then_rows = render_statement_block_resolved(then_branch, &mut then_scope);
-            let else_rows = else_branch.as_ref().map(|branch| {
-                let mut else_scope = scope.clone();
-                render_statement_block_resolved(branch, &mut else_scope).join(",")
-            });
-            format!(
-                "if(cond={},then=[{}],else=[{}])",
-                render_expr_resolved(condition, scope),
-                then_rows.join(","),
-                else_rows.unwrap_or_default()
-            )
+            let then_branch = lower_exec_stmt_block_resolved(then_branch, &mut then_scope);
+            let else_branch = else_branch
+                .as_ref()
+                .map(|branch| {
+                    let mut else_scope = scope.clone();
+                    lower_exec_stmt_block_resolved(branch, &mut else_scope)
+                })
+                .unwrap_or_default();
+            ExecStmt::If {
+                condition: lower_exec_expr_resolved(condition, scope),
+                then_branch,
+                else_branch,
+                rollups: statement.rollups.iter().map(lower_rollup).collect(),
+            }
         }
         HirStatementKind::While { condition, body } => {
             let mut body_scope = scope.clone();
-            let body_rows = render_statement_block_resolved(body, &mut body_scope);
-            format!(
-                "while(cond={},body=[{}])",
-                render_expr_resolved(condition, scope),
-                body_rows.join(",")
-            )
+            let body = lower_exec_stmt_block_resolved(body, &mut body_scope);
+            ExecStmt::While {
+                condition: lower_exec_expr_resolved(condition, scope),
+                body,
+                rollups: statement.rollups.iter().map(lower_rollup).collect(),
+            }
         }
         HirStatementKind::For {
             binding,
@@ -1718,23 +1396,23 @@ fn render_statement_resolved(
             if let Some(type_text) = infer_iterable_binding_type_text(scope, iterable) {
                 body_scope.value_scope.insert(binding.clone(), type_text);
             }
-            let body_rows = render_statement_block_resolved(body, &mut body_scope);
-            format!(
-                "for(binding={binding},iterable={},body=[{}])",
-                render_expr_resolved(iterable, scope),
-                body_rows.join(",")
-            )
+            let body = lower_exec_stmt_block_resolved(body, &mut body_scope);
+            ExecStmt::For {
+                binding: binding.clone(),
+                iterable: lower_exec_expr_resolved(iterable, scope),
+                body,
+                rollups: statement.rollups.iter().map(lower_rollup).collect(),
+            }
         }
-        HirStatementKind::Defer { expr } => format!("defer({})", render_expr_resolved(expr, scope)),
-        HirStatementKind::Break => "break".to_string(),
-        HirStatementKind::Continue => "continue".to_string(),
+        HirStatementKind::Defer { expr } => ExecStmt::Defer(lower_exec_expr_resolved(expr, scope)),
+        HirStatementKind::Break => ExecStmt::Break,
+        HirStatementKind::Continue => ExecStmt::Continue,
         HirStatementKind::Assign { target, op, value } => {
-            let rendered = format!(
-                "assign(target={},op={},value={})",
-                render_assign_target_resolved(target, scope),
-                render_assign_op(*op),
-                render_expr_resolved(value, scope)
-            );
+            let lowered = ExecStmt::Assign {
+                target: lower_assign_target_exec_resolved(target, scope),
+                op: lower_assign_op(*op),
+                value: lower_exec_expr_resolved(value, scope),
+            };
             if matches!(op, HirAssignOp::Assign) {
                 if let HirAssignTarget::Name { text } = target {
                     if let Some(type_text) = infer_expr_type_text(scope, value) {
@@ -1742,11 +1420,9 @@ fn render_statement_resolved(
                     }
                 }
             }
-            rendered
+            lowered
         }
-        HirStatementKind::Expr { expr } => format!("expr({})", render_expr_resolved(expr, scope)),
-    };
-    format!("stmt(core={core},forewords=[{forewords}],rollups=[{rollups}])")
+    }
 }
 
 fn is_routine_symbol(symbol: &HirSymbol) -> bool {
@@ -1756,7 +1432,12 @@ fn is_routine_symbol(symbol: &HirSymbol) -> bool {
     )
 }
 
-fn lower_routine(module_id: &str, routine_key: String, symbol: &HirSymbol) -> IrRoutine {
+fn lower_routine(
+    module_id: &str,
+    routine_key: String,
+    symbol: &HirSymbol,
+    impl_decl: Option<&arcana_hir::HirImplDecl>,
+) -> IrRoutine {
     IrRoutine {
         module_id: module_id.to_string(),
         routine_key,
@@ -1769,9 +1450,15 @@ fn lower_routine(module_id: &str, routine_key: String, symbol: &HirSymbol) -> Ir
         param_rows: render_param_row(symbol),
         signature_row: symbol.surface_text.clone(),
         intrinsic_impl: symbol.intrinsic_impl.clone(),
+        impl_target_type: impl_decl.map(|decl| decl.target_type.clone()),
+        impl_trait_path: impl_decl.and_then(|decl| {
+            decl.trait_path
+                .as_ref()
+                .map(|path| canonical_impl_trait_path(path))
+        }),
         foreword_rows: symbol.forewords.iter().map(render_foreword_row).collect(),
-        rollup_rows: symbol.rollups.iter().map(render_rollup_row).collect(),
-        statement_rows: symbol.statements.iter().map(render_statement).collect(),
+        rollups: symbol.rollups.iter().map(lower_rollup).collect(),
+        statements: lower_exec_stmt_block(&symbol.statements),
     }
 }
 
@@ -1781,6 +1468,7 @@ fn lower_routine_resolved(
     module_id: &str,
     routine_key: String,
     symbol: &HirSymbol,
+    impl_decl: Option<&arcana_hir::HirImplDecl>,
 ) -> Result<IrRoutine, String> {
     let mut scope = ResolvedRenderScope::new(
         workspace,
@@ -1805,15 +1493,21 @@ fn lower_routine_resolved(
         param_rows: render_param_row(symbol),
         signature_row: symbol.surface_text.clone(),
         intrinsic_impl: symbol.intrinsic_impl.clone(),
+        impl_target_type: impl_decl.map(|decl| decl.target_type.clone()),
+        impl_trait_path: impl_decl.and_then(|decl| {
+            decl.trait_path
+                .as_ref()
+                .map(|path| canonical_impl_trait_path(path))
+        }),
         foreword_rows: symbol.forewords.iter().map(render_foreword_row).collect(),
-        rollup_rows: symbol.rollups.iter().map(render_rollup_row).collect(),
-        statement_rows: render_statement_block_resolved(&symbol.statements, &mut scope),
+        rollups: symbol.rollups.iter().map(lower_rollup).collect(),
+        statements: lower_exec_stmt_block_resolved(&symbol.statements, &mut scope),
     };
     scope.finish()?;
     Ok(routine)
 }
 
-pub fn lower_package(package: &HirPackageSummary) -> IrPackage {
+fn lower_package(package: &HirPackageSummary) -> IrPackage {
     let modules = package
         .modules
         .iter()
@@ -1842,7 +1536,7 @@ pub fn lower_package(package: &HirPackageSummary) -> IrPackage {
                     .iter()
                     .map(|item| render_lang_item_row(&module.module_id, &item.name, &item.target))
                     .collect(),
-                exported_surface_rows: module.exported_surface_rows(),
+                exported_surface_rows: module.summary_surface_rows(),
             }
         })
         .collect::<Vec<_>>();
@@ -1896,6 +1590,7 @@ pub fn lower_package(package: &HirPackageSummary) -> IrPackage {
                             &module.module_id,
                             routine_key_for_symbol(&module.module_id, symbol_index),
                             symbol,
+                            None,
                         )
                     })
                     .collect::<Vec<_>>();
@@ -1915,6 +1610,7 @@ pub fn lower_package(package: &HirPackageSummary) -> IrPackage {
                                         method_index,
                                     ),
                                     symbol,
+                                    Some(impl_decl),
                                 )
                             })
                     },
@@ -1930,14 +1626,15 @@ pub fn lower_package(package: &HirPackageSummary) -> IrPackage {
         modules,
         dependency_edge_count: package.dependency_edges.len(),
         dependency_rows,
-        exported_surface_rows: package.exported_surface_rows(),
+        exported_surface_rows: package.summary_surface_rows(),
         runtime_requirements,
         entrypoints,
         routines,
     }
 }
 
-pub fn lower_workspace_package(package: &HirWorkspacePackage) -> IrPackage {
+#[cfg(test)]
+fn lower_workspace_package(package: &HirWorkspacePackage) -> IrPackage {
     let mut lowered = lower_package(&package.summary);
     lowered.direct_deps = package.direct_deps.iter().cloned().collect();
     lowered
@@ -1973,6 +1670,7 @@ pub fn lower_workspace_package_with_resolution(
                         &module.module_id,
                         routine_key_for_symbol(&module.module_id, symbol_index),
                         symbol,
+                        None,
                     )
                 })
                 .collect::<Result<Vec<_>, String>>()?;
@@ -1998,6 +1696,7 @@ pub fn lower_workspace_package_with_resolution(
                                         method_index,
                                     ),
                                     symbol,
+                                    Some(impl_decl),
                                 )
                             })
                     })
@@ -2009,13 +1708,43 @@ pub fn lower_workspace_package_with_resolution(
         .into_iter()
         .flatten()
         .collect();
+    let module_surface_rows = package
+        .summary
+        .modules
+        .iter()
+        .map(|module| {
+            let rows = resolved_package
+                .module(&module.module_id)
+                .map(|_| resolved_module_exported_surface_rows(workspace, package, module))
+                .unwrap_or_else(|| module.summary_surface_rows());
+            (module.module_id.clone(), rows)
+        })
+        .collect::<BTreeMap<_, _>>();
+    for module in &mut lowered.modules {
+        if let Some(rows) = module_surface_rows.get(&module.module_id) {
+            module.exported_surface_rows = rows.clone();
+        }
+    }
+    lowered.exported_surface_rows = package
+        .summary
+        .modules
+        .iter()
+        .flat_map(|module| {
+            module_surface_rows
+                .get(&module.module_id)
+                .into_iter()
+                .flatten()
+                .map(|row| format!("module={}:{}", module.module_id, row))
+                .collect::<Vec<_>>()
+        })
+        .collect();
     Ok(lowered)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        IrModule, lower_hir, lower_package, lower_workspace_package,
+        ExecExpr, ExecStmt, IrModule, lower_hir, lower_package, lower_workspace_package,
         lower_workspace_package_with_resolution,
     };
     use arcana_hir::{
@@ -2073,8 +1802,10 @@ mod tests {
         assert_eq!(ir.routines[0].symbol_name, "open");
         assert!(ir.routines[0].param_rows.is_empty());
         assert_eq!(
-            ir.routines[0].statement_rows,
-            vec!["stmt(core=return(int(0)),forewords=[],rollups=[])".to_string()]
+            ir.routines[0].statements,
+            vec![ExecStmt::ReturnValue {
+                value: ExecExpr::Int(0),
+            }]
         );
         assert!(
             ir.dependency_rows
@@ -2201,17 +1932,221 @@ mod tests {
             .iter()
             .find(|routine| routine.symbol_name == "main")
             .expect("main routine should exist");
+        let lowered = format!("{:?}", main.statements);
         assert!(
-            main.statement_rows.iter().any(|row| row
-                .contains("kind=bare_method,qualifier=len,resolved=std.collections.list.len")),
-            "expected resolved bare-method callable path in lowered statements: {:?}",
-            main.statement_rows
+            lowered
+                .contains("resolved_callable: Some([\"std\", \"collections\", \"list\", \"len\"])"),
+            "expected resolved bare-method callable path in lowered statements: {lowered}",
         );
         assert!(
-            main.statement_rows.iter().any(|row| row
-                .contains("resolved_routine=str(\"std.collections.list#impl-0-method-0\")")),
-            "expected resolved bare-method routine identity in lowered statements: {:?}",
-            main.statement_rows
+            lowered.contains("resolved_routine: Some(\"std.collections.list#impl-0-method-0\")"),
+            "expected resolved bare-method routine identity in lowered statements: {lowered}",
+        );
+    }
+
+    #[test]
+    fn lower_workspace_package_with_resolution_resolves_bare_methods_on_generic_enum_values() {
+        let std_summary = build_package_summary(
+            "std",
+            vec![
+                lower_module_text(
+                    "std.result",
+                    concat!(
+                        "export enum Result[T, E]:\n",
+                        "    Ok(T)\n",
+                        "    Err(E)\n",
+                        "impl[T, E] Result[T, E]:\n",
+                        "    fn is_ok(read self: Result[T, E]) -> Bool:\n",
+                        "        return true\n",
+                        "    fn unwrap_or(read self: Result[T, E], take fallback: T) -> T:\n",
+                        "        return fallback\n",
+                    ),
+                )
+                .expect("std result module should lower"),
+            ],
+        );
+        let std_layout = build_package_layout(
+            &std_summary,
+            BTreeMap::from([(
+                "std.result".to_string(),
+                Path::new("C:/repo/std/src/result.arc").to_path_buf(),
+            )]),
+            BTreeMap::new(),
+        )
+        .expect("std layout should build");
+        let std_workspace = build_workspace_package(
+            Path::new("C:/repo/std").to_path_buf(),
+            BTreeSet::new(),
+            std_summary,
+            std_layout,
+        )
+        .expect("std workspace should build");
+
+        let app_summary = build_package_summary(
+            "app",
+            vec![
+                lower_module_text(
+                    "app",
+                    concat!(
+                        "import std.result\n",
+                        "use std.result.Result\n",
+                        "fn main() -> Int:\n",
+                        "    let ok = Result.Ok[Int, Str] :: 7 :: call\n",
+                        "    let check = ok :: :: is_ok\n",
+                        "    return ok :: 13 :: unwrap_or\n",
+                    ),
+                )
+                .expect("app module should lower"),
+            ],
+        );
+        let app_layout = build_package_layout(
+            &app_summary,
+            BTreeMap::from([(
+                "app".to_string(),
+                Path::new("C:/repo/app/src/shelf.arc").to_path_buf(),
+            )]),
+            BTreeMap::new(),
+        )
+        .expect("app layout should build");
+        let app_workspace = build_workspace_package(
+            Path::new("C:/repo/app").to_path_buf(),
+            BTreeSet::from(["std".to_string()]),
+            app_summary,
+            app_layout,
+        )
+        .expect("app workspace should build");
+
+        let workspace = build_workspace_summary(vec![std_workspace, app_workspace])
+            .expect("workspace should build");
+        let resolved = resolve_workspace(&workspace).expect("workspace should resolve");
+        let package = workspace.package("app").expect("app package should exist");
+
+        let ir = lower_workspace_package_with_resolution(&workspace, &resolved, package)
+            .expect("workspace lowering should succeed");
+        let main = ir
+            .routines
+            .iter()
+            .find(|routine| routine.symbol_name == "main")
+            .expect("main routine should exist");
+        let lowered = format!("{:?}", main.statements);
+        assert!(
+            lowered.contains("qualifier: \"is_ok\"")
+                && lowered.contains("resolved_callable: Some([\"std\", \"result\", \"is_ok\"])")
+                && lowered.contains("resolved_routine: Some(\"std.result#impl-0-method-0\")"),
+            "expected resolved Result.is_ok bare method in lowered statements: {lowered}",
+        );
+        assert!(
+            lowered.contains("qualifier: \"unwrap_or\"")
+                && lowered
+                    .contains("resolved_callable: Some([\"std\", \"result\", \"unwrap_or\"])")
+                && lowered.contains("resolved_routine: Some(\"std.result#impl-0-method-1\")"),
+            "expected resolved Result.unwrap_or bare method in lowered statements: {lowered}",
+        );
+    }
+
+    #[test]
+    fn lower_workspace_package_with_resolution_resolves_bare_methods_on_spawn_handles() {
+        let std_summary = build_package_summary(
+            "std",
+            vec![
+                lower_module_text(
+                    "std.concurrent",
+                    concat!(
+                        "impl[T] Task[T]:\n",
+                        "    fn done(read self: Task[T]) -> Bool:\n",
+                        "        return false\n",
+                        "    fn join(read self: Task[T]) -> T:\n",
+                        "        return 0\n",
+                        "impl[T] Thread[T]:\n",
+                        "    fn done(read self: Thread[T]) -> Bool:\n",
+                        "        return false\n",
+                        "    fn join(read self: Thread[T]) -> T:\n",
+                        "        return 0\n",
+                    ),
+                )
+                .expect("std concurrent module should lower"),
+            ],
+        );
+        let std_layout = build_package_layout(
+            &std_summary,
+            BTreeMap::from([(
+                "std.concurrent".to_string(),
+                Path::new("C:/repo/std/src/concurrent.arc").to_path_buf(),
+            )]),
+            BTreeMap::new(),
+        )
+        .expect("std layout should build");
+        let std_workspace = build_workspace_package(
+            Path::new("C:/repo/std").to_path_buf(),
+            BTreeSet::new(),
+            std_summary,
+            std_layout,
+        )
+        .expect("std workspace should build");
+
+        let app_summary = build_package_summary(
+            "app",
+            vec![
+                lower_module_text(
+                    "app",
+                    concat!(
+                        "fn worker() -> Int:\n",
+                        "    return 1\n",
+                        "fn helper() -> Int:\n",
+                        "    return 2\n",
+                        "fn main() -> Int:\n",
+                        "    let task = weave worker :: :: call\n",
+                        "    let thread = split helper :: :: call\n",
+                        "    if task :: :: done:\n",
+                        "        return thread :: :: join\n",
+                        "    return task :: :: join\n",
+                    ),
+                )
+                .expect("app module should lower"),
+            ],
+        );
+        let app_layout = build_package_layout(
+            &app_summary,
+            BTreeMap::from([(
+                "app".to_string(),
+                Path::new("C:/repo/app/src/shelf.arc").to_path_buf(),
+            )]),
+            BTreeMap::new(),
+        )
+        .expect("app layout should build");
+        let app_workspace = build_workspace_package(
+            Path::new("C:/repo/app").to_path_buf(),
+            BTreeSet::from(["std".to_string()]),
+            app_summary,
+            app_layout,
+        )
+        .expect("app workspace should build");
+
+        let workspace = build_workspace_summary(vec![std_workspace, app_workspace])
+            .expect("workspace should build");
+        let resolved = resolve_workspace(&workspace).expect("workspace should resolve");
+        let package = workspace.package("app").expect("app package should exist");
+
+        let ir = lower_workspace_package_with_resolution(&workspace, &resolved, package)
+            .expect("workspace lowering should succeed");
+        let main = ir
+            .routines
+            .iter()
+            .find(|routine| routine.symbol_name == "main")
+            .expect("main routine should exist");
+        let lowered = format!("{:?}", main.statements);
+        assert!(
+            lowered.contains("qualifier: \"done\"")
+                && lowered.contains("resolved_callable: Some([\"std\", \"concurrent\", \"done\"])"),
+            "expected resolved Task.done bare method on spawned handle: {lowered}",
+        );
+        assert!(
+            lowered.contains("qualifier: \"join\"")
+                && lowered.contains("resolved_callable: Some([\"std\", \"concurrent\", \"join\"])")
+                && (lowered.contains("resolved_routine: Some(\"std.concurrent#impl-1-method-1\")")
+                    || lowered
+                        .contains("resolved_routine: Some(\"std.concurrent#impl-0-method-1\")")),
+            "expected resolved join bare method on spawned handle: {lowered}",
         );
     }
 

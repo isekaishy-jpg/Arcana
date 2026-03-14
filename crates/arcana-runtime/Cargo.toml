@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 arcana-aot.workspace = true
+arcana-ir.workspace = true
 pathdiff.workspace = true
 sha2.workspace = true
 

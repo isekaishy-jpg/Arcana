@@ -1,6 +1,6 @@
 use arcana_hir::{
-    HirModuleSummary, HirResolvedModule, HirResolvedTarget, HirSymbol, HirSymbolKind,
-    HirWorkspacePackage, HirWorkspaceSummary,
+    HirResolvedModule, HirResolvedSymbolRef, HirSymbolKind, HirWorkspacePackage,
+    HirWorkspaceSummary,
 };
 use arcana_syntax::is_builtin_type_name;
 
@@ -18,10 +18,14 @@ pub(crate) struct SurfaceRefs {
     pub(crate) lifetimes: Vec<String>,
 }
 
-pub(crate) struct ResolvedSymbolRef<'a> {
-    pub(crate) package_name: &'a str,
-    pub(crate) module_id: &'a str,
-    pub(crate) symbol: &'a HirSymbol,
+pub(crate) type ResolvedSymbolRef<'a> = HirResolvedSymbolRef<'a>;
+
+pub(crate) fn lookup_symbol_path<'a>(
+    workspace: &'a HirWorkspaceSummary,
+    module: &'a HirResolvedModule,
+    path: &[String],
+) -> Option<ResolvedSymbolRef<'a>> {
+    arcana_hir::lookup_symbol_path(workspace, module, path)
 }
 
 enum ParsedSurfaceToken {
@@ -33,35 +37,6 @@ enum ParsedSurfaceToken {
 struct ParsedSurface {
     tokens: Vec<ParsedSurfaceToken>,
     refs: SurfaceRefs,
-}
-
-pub(crate) fn lookup_symbol_path<'a>(
-    workspace: &'a HirWorkspaceSummary,
-    module: &'a HirResolvedModule,
-    path: &[String],
-) -> Option<ResolvedSymbolRef<'a>> {
-    if path.is_empty() {
-        return None;
-    }
-    if path.len() == 1 {
-        return module
-            .bindings
-            .get(&path[0])
-            .and_then(|binding| lookup_target_symbol_tail(workspace, &binding.target, &[]));
-    }
-
-    let first = &path[0];
-    if let Some(binding) = module.bindings.get(first) {
-        return lookup_target_symbol_tail(workspace, &binding.target, &path[1..]);
-    }
-
-    if let Some(package) = workspace.package(first) {
-        return lookup_package_symbol_path(package, &path[1..]);
-    }
-
-    let package_name = module.module_id.split('.').next()?;
-    let package = workspace.package(package_name)?;
-    lookup_package_symbol_path(package, path)
 }
 
 pub(crate) fn symbol_matches_surface_use(
@@ -182,110 +157,6 @@ pub(crate) fn surface_text_is_public(
         }
     }
     true
-}
-
-fn lookup_target_symbol_tail<'a>(
-    workspace: &'a HirWorkspaceSummary,
-    target: &'a HirResolvedTarget,
-    tail: &[String],
-) -> Option<ResolvedSymbolRef<'a>> {
-    match target {
-        HirResolvedTarget::Symbol {
-            package_name,
-            module_id,
-            symbol_name,
-        } => {
-            if !tail.is_empty() {
-                return None;
-            }
-            let package = workspace.package(package_name)?;
-            let module = package.module(module_id)?;
-            let symbol = module
-                .symbols
-                .iter()
-                .find(|symbol| symbol.name == *symbol_name)?;
-            Some(ResolvedSymbolRef {
-                package_name,
-                module_id,
-                symbol,
-            })
-        }
-        HirResolvedTarget::Module {
-            package_name,
-            module_id,
-        } => {
-            let package = workspace.package(package_name)?;
-            let module = package.module(module_id)?;
-            lookup_module_symbol_path(package, module, tail)
-        }
-    }
-}
-
-fn lookup_package_symbol_path<'a>(
-    package: &'a HirWorkspacePackage,
-    path: &[String],
-) -> Option<ResolvedSymbolRef<'a>> {
-    if path.is_empty() {
-        return None;
-    }
-    let (symbol_name, module_path) = path.split_last()?;
-    if symbol_name.is_empty() {
-        return None;
-    }
-    let module = if module_path.is_empty() {
-        package.module(&package.summary.package_name)
-    } else {
-        package.resolve_relative_module(module_path)
-    }?;
-    let symbol = module
-        .symbols
-        .iter()
-        .find(|symbol| symbol.name == *symbol_name)?;
-    Some(ResolvedSymbolRef {
-        package_name: &package.summary.package_name,
-        module_id: &module.module_id,
-        symbol,
-    })
-}
-
-fn lookup_module_symbol_path<'a>(
-    package: &'a HirWorkspacePackage,
-    module: &'a HirModuleSummary,
-    path: &[String],
-) -> Option<ResolvedSymbolRef<'a>> {
-    if path.is_empty() {
-        return None;
-    }
-    if path.len() == 1 {
-        let symbol = module
-            .symbols
-            .iter()
-            .find(|symbol| symbol.name == path[0])?;
-        return Some(ResolvedSymbolRef {
-            package_name: &package.summary.package_name,
-            module_id: &module.module_id,
-            symbol,
-        });
-    }
-    let (symbol_name, module_tail) = path.split_last()?;
-    let base_relative = module
-        .module_id
-        .split('.')
-        .skip(1)
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    let mut target_relative = base_relative;
-    target_relative.extend_from_slice(module_tail);
-    let target_module = package.resolve_relative_module(&target_relative)?;
-    let symbol = target_module
-        .symbols
-        .iter()
-        .find(|symbol| symbol.name == *symbol_name)?;
-    Some(ResolvedSymbolRef {
-        package_name: &package.summary.package_name,
-        module_id: &target_module.module_id,
-        symbol,
-    })
 }
 
 fn parse_surface_text(text: &str) -> ParsedSurface {

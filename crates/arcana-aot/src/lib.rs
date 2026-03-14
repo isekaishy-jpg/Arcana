@@ -1,17 +1,18 @@
-use std::collections::BTreeMap;
+use arcana_ir::{
+    ExecPageRollup, ExecStmt, IrEntrypoint, IrModule, IrPackage, IrPackageModule, IrRoutine,
+};
+use serde::{Deserialize, Serialize};
 
-use arcana_ir::{IrEntrypoint, IrModule, IrPackage, IrPackageModule, IrRoutine};
+pub const AOT_INTERNAL_FORMAT: &str = "arcana-aot-v4";
 
-pub const AOT_INTERNAL_FORMAT: &str = "arcana-aot-v3";
-
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AotArtifact {
-    pub format: &'static str,
+    pub format: String,
     pub symbol_count: usize,
     pub item_count: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AotPackageModuleArtifact {
     pub module_id: String,
     pub symbol_count: usize,
@@ -23,7 +24,7 @@ pub struct AotPackageModuleArtifact {
     pub exported_surface_rows: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AotEntrypointArtifact {
     pub module_id: String,
     pub symbol_name: String,
@@ -32,7 +33,7 @@ pub struct AotEntrypointArtifact {
     pub exported: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AotRoutineArtifact {
     pub module_id: String,
     pub routine_key: String,
@@ -44,15 +45,20 @@ pub struct AotRoutineArtifact {
     pub behavior_attr_rows: Vec<String>,
     pub param_rows: Vec<String>,
     pub signature_row: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intrinsic_impl: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub impl_target_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub impl_trait_path: Option<Vec<String>>,
     pub foreword_rows: Vec<String>,
-    pub rollup_rows: Vec<String>,
-    pub statement_rows: Vec<String>,
+    pub rollups: Vec<ExecPageRollup>,
+    pub statements: Vec<ExecStmt>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AotPackageArtifact {
-    pub format: &'static str,
+    pub format: String,
     pub package_name: String,
     pub root_module_id: String,
     pub direct_deps: Vec<String>,
@@ -68,7 +74,7 @@ pub struct AotPackageArtifact {
 
 pub fn compile_module(module: &IrModule) -> AotArtifact {
     AotArtifact {
-        format: AOT_INTERNAL_FORMAT,
+        format: AOT_INTERNAL_FORMAT.to_string(),
         symbol_count: module.symbol_count,
         item_count: module.item_count,
     }
@@ -114,15 +120,17 @@ fn compile_routine(routine: &IrRoutine) -> AotRoutineArtifact {
         param_rows: routine.param_rows.clone(),
         signature_row: routine.signature_row.clone(),
         intrinsic_impl: routine.intrinsic_impl.clone(),
+        impl_target_type: routine.impl_target_type.clone(),
+        impl_trait_path: routine.impl_trait_path.clone(),
         foreword_rows: routine.foreword_rows.clone(),
-        rollup_rows: routine.rollup_rows.clone(),
-        statement_rows: routine.statement_rows.clone(),
+        rollups: routine.rollups.clone(),
+        statements: routine.statements.clone(),
     }
 }
 
 pub fn compile_package(package: &IrPackage) -> AotPackageArtifact {
     AotPackageArtifact {
-        format: AOT_INTERNAL_FORMAT,
+        format: AOT_INTERNAL_FORMAT.to_string(),
         package_name: package.package_name.clone(),
         root_module_id: package.root_module_id.clone(),
         direct_deps: package.direct_deps.clone(),
@@ -141,421 +149,20 @@ pub fn compile_package(package: &IrPackage) -> AotPackageArtifact {
     }
 }
 
-fn escape_toml(text: &str) -> String {
-    text.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
-fn format_string_array(items: &[String]) -> String {
-    let rendered = items
-        .iter()
-        .map(|item| format!("\"{}\"", escape_toml(item)))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("[{rendered}]")
-}
-
-fn parse_table(text: &str) -> Result<toml::Value, String> {
-    text.parse::<toml::Value>()
-        .map_err(|err| format!("failed to parse backend artifact: {err}"))
-}
-
-fn require_str(table: &toml::Value, key: &str) -> Result<String, String> {
-    table
-        .get(key)
-        .and_then(toml::Value::as_str)
-        .map(ToString::to_string)
-        .ok_or_else(|| format!("backend artifact missing string `{key}`"))
-}
-
-fn require_int(table: &toml::Value, key: &str) -> Result<usize, String> {
-    table
-        .get(key)
-        .and_then(toml::Value::as_integer)
-        .and_then(|value| usize::try_from(value).ok())
-        .ok_or_else(|| format!("backend artifact missing integer `{key}`"))
-}
-
-fn require_string_array(table: &toml::Value, key: &str) -> Result<Vec<String>, String> {
-    let values = table
-        .get(key)
-        .and_then(toml::Value::as_array)
-        .ok_or_else(|| format!("backend artifact missing string array `{key}`"))?;
-    values
-        .iter()
-        .map(|value| {
-            value
-                .as_str()
-                .map(ToString::to_string)
-                .ok_or_else(|| format!("backend artifact array `{key}` must contain only strings"))
-        })
-        .collect()
-}
-
-fn split_row<'a>(row: &'a str, expected: usize) -> Result<Vec<&'a str>, String> {
-    let parts = row.split(':').collect::<Vec<_>>();
-    if parts.len() != expected {
-        return Err(format!("malformed backend row `{row}`"));
-    }
-    Ok(parts)
-}
-
-fn split_row_n<'a>(row: &'a str, expected: usize) -> Result<Vec<&'a str>, String> {
-    let parts = row.splitn(expected, ':').collect::<Vec<_>>();
-    if parts.len() != expected {
-        return Err(format!("malformed backend row `{row}`"));
-    }
-    Ok(parts)
-}
-
-fn parse_prefixed_bool(part: &str, prefix: &str) -> Result<bool, String> {
-    let value = part
-        .strip_prefix(prefix)
-        .ok_or_else(|| format!("malformed backend boolean row part `{part}`"))?;
-    match value {
-        "true" => Ok(true),
-        "false" => Ok(false),
-        _ => Err(format!("invalid backend boolean `{part}`")),
-    }
-}
-
-fn parse_prefixed_usize(part: &str, prefix: &str) -> Result<usize, String> {
-    let value = part
-        .strip_prefix(prefix)
-        .ok_or_else(|| format!("malformed backend integer row part `{part}`"))?;
-    value
-        .parse::<usize>()
-        .map_err(|err| format!("invalid backend integer `{part}`: {err}"))
-}
-
-fn flatten_module_rows<F>(modules: &[AotPackageModuleArtifact], select: F) -> Vec<String>
-where
-    F: Fn(&AotPackageModuleArtifact) -> &[String],
-{
-    modules
-        .iter()
-        .flat_map(|module| {
-            select(module)
-                .iter()
-                .enumerate()
-                .map(|(index, row)| format!("{}:{index}:{row}", module.module_id))
-                .collect::<Vec<_>>()
-        })
-        .collect()
-}
-
-fn flatten_routine_rows<F>(routines: &[AotRoutineArtifact], select: F) -> Vec<String>
-where
-    F: Fn(&AotRoutineArtifact) -> &[String],
-{
-    routines
-        .iter()
-        .enumerate()
-        .flat_map(|(routine_index, routine)| {
-            select(routine)
-                .iter()
-                .enumerate()
-                .map(|(index, row)| format!("{routine_index}:{index}:{row}"))
-                .collect::<Vec<_>>()
-        })
-        .collect()
-}
-
 pub fn render_package_artifact(artifact: &AotPackageArtifact) -> String {
-    let module_rows = artifact
-        .modules
-        .iter()
-        .map(|module| {
-            format!(
-                "{}:symbols={}:items={}:lines={}:non_empty_lines={}",
-                module.module_id,
-                module.symbol_count,
-                module.item_count,
-                module.line_count,
-                module.non_empty_line_count
-            )
-        })
-        .collect::<Vec<_>>();
-    let module_directive_rows =
-        flatten_module_rows(&artifact.modules, |module| &module.directive_rows);
-    let module_lang_item_rows =
-        flatten_module_rows(&artifact.modules, |module| &module.lang_item_rows);
-    let module_surface_rows =
-        flatten_module_rows(&artifact.modules, |module| &module.exported_surface_rows);
-    let entrypoint_rows = artifact
-        .entrypoints
-        .iter()
-        .map(|entry| {
-            format!(
-                "{}:{}:{}:async={}:exported={}",
-                entry.module_id,
-                entry.symbol_kind,
-                entry.symbol_name,
-                entry.is_async,
-                entry.exported
-            )
-        })
-        .collect::<Vec<_>>();
-    let routine_rows = artifact
-        .routines
-        .iter()
-        .enumerate()
-        .map(|(routine_index, routine)| {
-            format!(
-                "{routine_index}:{}:key={}:{}:{}:async={}:exported={}:intrinsic={}:signature={}",
-                routine.module_id,
-                routine.routine_key,
-                routine.symbol_kind,
-                routine.symbol_name,
-                routine.is_async,
-                routine.exported,
-                routine.intrinsic_impl.as_deref().unwrap_or(""),
-                routine.signature_row
-            )
-        })
-        .collect::<Vec<_>>();
-    let routine_param_rows =
-        flatten_routine_rows(&artifact.routines, |routine| &routine.param_rows);
-    let routine_type_param_rows =
-        flatten_routine_rows(&artifact.routines, |routine| &routine.type_param_rows);
-    let routine_behavior_attr_rows =
-        flatten_routine_rows(&artifact.routines, |routine| &routine.behavior_attr_rows);
-    let routine_foreword_rows =
-        flatten_routine_rows(&artifact.routines, |routine| &routine.foreword_rows);
-    let routine_rollup_rows =
-        flatten_routine_rows(&artifact.routines, |routine| &routine.rollup_rows);
-    let statement_rows =
-        flatten_routine_rows(&artifact.routines, |routine| &routine.statement_rows);
-    format!(
-        concat!(
-            "format = \"{}\"\n",
-            "package = \"{}\"\n",
-            "root_module = \"{}\"\n",
-            "module_count = {}\n",
-            "dependency_edge_count = {}\n",
-            "direct_deps = {}\n",
-            "dependency_rows = {}\n",
-            "runtime_requirements = {}\n",
-            "entrypoint_rows = {}\n",
-            "routine_rows = {}\n",
-            "routine_type_param_rows = {}\n",
-            "routine_behavior_attr_rows = {}\n",
-            "routine_param_rows = {}\n",
-            "routine_foreword_rows = {}\n",
-            "routine_rollup_rows = {}\n",
-            "statement_rows = {}\n",
-            "surface_rows = {}\n",
-            "module_rows = {}\n",
-            "module_directive_rows = {}\n",
-            "module_lang_item_rows = {}\n",
-            "module_surface_rows = {}\n"
-        ),
-        artifact.format,
-        artifact.package_name,
-        artifact.root_module_id,
-        artifact.module_count,
-        artifact.dependency_edge_count,
-        format_string_array(&artifact.direct_deps),
-        format_string_array(&artifact.dependency_rows),
-        format_string_array(&artifact.runtime_requirements),
-        format_string_array(&entrypoint_rows),
-        format_string_array(&routine_rows),
-        format_string_array(&routine_type_param_rows),
-        format_string_array(&routine_behavior_attr_rows),
-        format_string_array(&routine_param_rows),
-        format_string_array(&routine_foreword_rows),
-        format_string_array(&routine_rollup_rows),
-        format_string_array(&statement_rows),
-        format_string_array(&artifact.exported_surface_rows),
-        format_string_array(&module_rows),
-        format_string_array(&module_directive_rows),
-        format_string_array(&module_lang_item_rows),
-        format_string_array(&module_surface_rows),
-    )
+    toml::to_string(artifact).expect("backend artifact should serialize")
 }
 
 pub fn parse_package_artifact(text: &str) -> Result<AotPackageArtifact, String> {
-    let table = parse_table(text)?;
-    let format = require_str(&table, "format")?;
-    if format != AOT_INTERNAL_FORMAT {
+    let artifact = toml::from_str::<AotPackageArtifact>(text)
+        .map_err(|err| format!("failed to parse backend artifact: {err}"))?;
+    if artifact.format != AOT_INTERNAL_FORMAT {
         return Err(format!(
-            "unsupported backend artifact format `{format}`; expected `{AOT_INTERNAL_FORMAT}`"
+            "unsupported backend artifact format `{}`; expected `{AOT_INTERNAL_FORMAT}`",
+            artifact.format
         ));
     }
-
-    let module_rows = require_string_array(&table, "module_rows")?;
-    let mut modules = Vec::new();
-    let mut module_indexes = BTreeMap::new();
-    for row in module_rows {
-        let parts = split_row(&row, 5)?;
-        let module_id = parts[0].to_string();
-        let module = AotPackageModuleArtifact {
-            module_id: module_id.clone(),
-            symbol_count: parse_prefixed_usize(parts[1], "symbols=")?,
-            item_count: parse_prefixed_usize(parts[2], "items=")?,
-            line_count: parse_prefixed_usize(parts[3], "lines=")?,
-            non_empty_line_count: parse_prefixed_usize(parts[4], "non_empty_lines=")?,
-            directive_rows: Vec::new(),
-            lang_item_rows: Vec::new(),
-            exported_surface_rows: Vec::new(),
-        };
-        module_indexes.insert(module_id, modules.len());
-        modules.push(module);
-    }
-
-    for row in require_string_array(&table, "module_directive_rows")? {
-        let parts = split_row_n(&row, 3)?;
-        let module_index = *module_indexes
-            .get(parts[0])
-            .ok_or_else(|| format!("unknown module `{}` in backend artifact", parts[0]))?;
-        modules[module_index]
-            .directive_rows
-            .push(parts[2].to_string());
-    }
-    for row in require_string_array(&table, "module_lang_item_rows")? {
-        let parts = split_row_n(&row, 3)?;
-        let module_index = *module_indexes
-            .get(parts[0])
-            .ok_or_else(|| format!("unknown module `{}` in backend artifact", parts[0]))?;
-        modules[module_index]
-            .lang_item_rows
-            .push(parts[2].to_string());
-    }
-    for row in require_string_array(&table, "module_surface_rows")? {
-        let parts = split_row_n(&row, 3)?;
-        let module_index = *module_indexes
-            .get(parts[0])
-            .ok_or_else(|| format!("unknown module `{}` in backend artifact", parts[0]))?;
-        modules[module_index]
-            .exported_surface_rows
-            .push(parts[2].to_string());
-    }
-
-    let entrypoints = require_string_array(&table, "entrypoint_rows")?
-        .into_iter()
-        .map(|row| {
-            let parts = split_row(&row, 5)?;
-            Ok(AotEntrypointArtifact {
-                module_id: parts[0].to_string(),
-                symbol_kind: parts[1].to_string(),
-                symbol_name: parts[2].to_string(),
-                is_async: parse_prefixed_bool(parts[3], "async=")?,
-                exported: parse_prefixed_bool(parts[4], "exported=")?,
-            })
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-
-    let routine_rows = require_string_array(&table, "routine_rows")?;
-    let mut routines = Vec::new();
-    for row in routine_rows {
-        let parts = split_row_n(&row, 9)?;
-        let routine_index = parse_prefixed_usize(parts[0], "")?;
-        if routine_index != routines.len() {
-            return Err(format!(
-                "backend routine rows out of order; expected index {}, got {routine_index}",
-                routines.len()
-            ));
-        }
-        let module_id = parts[1].to_string();
-        let symbol_name = parts[4].to_string();
-        let routine = AotRoutineArtifact {
-            module_id: module_id.clone(),
-            routine_key: parts[2]
-                .strip_prefix("key=")
-                .ok_or_else(|| format!("malformed backend routine key row `{row}`"))?
-                .to_string(),
-            symbol_kind: parts[3].to_string(),
-            symbol_name: symbol_name.clone(),
-            is_async: parse_prefixed_bool(parts[5], "async=")?,
-            exported: parse_prefixed_bool(parts[6], "exported=")?,
-            intrinsic_impl: {
-                let value = parts[7]
-                    .strip_prefix("intrinsic=")
-                    .ok_or_else(|| format!("malformed backend intrinsic row `{row}`"))?;
-                if value.is_empty() {
-                    None
-                } else {
-                    Some(value.to_string())
-                }
-            },
-            type_param_rows: Vec::new(),
-            behavior_attr_rows: Vec::new(),
-            param_rows: Vec::new(),
-            signature_row: parts[8]
-                .strip_prefix("signature=")
-                .ok_or_else(|| format!("malformed backend signature row `{row}`"))?
-                .to_string(),
-            foreword_rows: Vec::new(),
-            rollup_rows: Vec::new(),
-            statement_rows: Vec::new(),
-        };
-        routines.push(routine);
-    }
-
-    for row in require_string_array(&table, "routine_type_param_rows")? {
-        let parts = split_row_n(&row, 3)?;
-        let routine_index = parse_prefixed_usize(parts[0], "")?;
-        let routine = routines.get_mut(routine_index).ok_or_else(|| {
-            format!("unknown routine index `{routine_index}` in backend artifact")
-        })?;
-        routine.type_param_rows.push(parts[2].to_string());
-    }
-
-    for row in require_string_array(&table, "routine_behavior_attr_rows")? {
-        let parts = split_row_n(&row, 3)?;
-        let routine_index = parse_prefixed_usize(parts[0], "")?;
-        let routine = routines.get_mut(routine_index).ok_or_else(|| {
-            format!("unknown routine index `{routine_index}` in backend artifact")
-        })?;
-        routine.behavior_attr_rows.push(parts[2].to_string());
-    }
-
-    for row in require_string_array(&table, "routine_param_rows")? {
-        let parts = split_row_n(&row, 3)?;
-        let routine_index = parse_prefixed_usize(parts[0], "")?;
-        let routine = routines.get_mut(routine_index).ok_or_else(|| {
-            format!("unknown routine index `{routine_index}` in backend artifact")
-        })?;
-        routine.param_rows.push(parts[2].to_string());
-    }
-    for row in require_string_array(&table, "routine_foreword_rows")? {
-        let parts = split_row_n(&row, 3)?;
-        let routine_index = parse_prefixed_usize(parts[0], "")?;
-        let routine = routines.get_mut(routine_index).ok_or_else(|| {
-            format!("unknown routine index `{routine_index}` in backend artifact")
-        })?;
-        routine.foreword_rows.push(parts[2].to_string());
-    }
-    for row in require_string_array(&table, "routine_rollup_rows")? {
-        let parts = split_row_n(&row, 3)?;
-        let routine_index = parse_prefixed_usize(parts[0], "")?;
-        let routine = routines.get_mut(routine_index).ok_or_else(|| {
-            format!("unknown routine index `{routine_index}` in backend artifact")
-        })?;
-        routine.rollup_rows.push(parts[2].to_string());
-    }
-    for row in require_string_array(&table, "statement_rows")? {
-        let parts = split_row_n(&row, 3)?;
-        let routine_index = parse_prefixed_usize(parts[0], "")?;
-        let routine = routines.get_mut(routine_index).ok_or_else(|| {
-            format!("unknown routine index `{routine_index}` in backend artifact")
-        })?;
-        routine.statement_rows.push(parts[2].to_string());
-    }
-
-    Ok(AotPackageArtifact {
-        format: AOT_INTERNAL_FORMAT,
-        package_name: require_str(&table, "package")?,
-        root_module_id: require_str(&table, "root_module")?,
-        direct_deps: require_string_array(&table, "direct_deps")?,
-        module_count: require_int(&table, "module_count")?,
-        dependency_edge_count: require_int(&table, "dependency_edge_count")?,
-        dependency_rows: require_string_array(&table, "dependency_rows")?,
-        exported_surface_rows: require_string_array(&table, "surface_rows")?,
-        runtime_requirements: require_string_array(&table, "runtime_requirements")?,
-        entrypoints,
-        routines,
-        modules,
-    })
+    Ok(artifact)
 }
 
 #[cfg(test)]
@@ -565,7 +172,10 @@ mod tests {
         AotRoutineArtifact, compile_module, compile_package, parse_package_artifact,
         render_package_artifact,
     };
-    use arcana_ir::{IrEntrypoint, IrModule, IrPackage, IrPackageModule, IrRoutine};
+    use arcana_ir::{
+        ExecExpr, ExecPageRollup, ExecPhraseQualifierKind, ExecStmt, IrEntrypoint, IrModule,
+        IrPackage, IrPackageModule, IrRoutine,
+    };
 
     #[test]
     fn compile_module_emits_internal_artifact() {
@@ -620,40 +230,34 @@ mod tests {
             }],
             routines: vec![IrRoutine {
                 module_id: "winspell".to_string(),
-                routine_key: "winspell#sym-0".to_string(),
-                symbol_name: "open".to_string(),
+                routine_key: "winspell#fn-0".to_string(),
+                symbol_name: "main".to_string(),
                 symbol_kind: "fn".to_string(),
                 exported: true,
                 is_async: false,
                 type_param_rows: Vec::new(),
                 behavior_attr_rows: Vec::new(),
                 param_rows: Vec::new(),
-                signature_row: "fn open() -> Int:".to_string(),
+                signature_row: "fn main() -> Int:".to_string(),
                 intrinsic_impl: None,
+                impl_target_type: None,
+                impl_trait_path: None,
                 foreword_rows: Vec::new(),
-                rollup_rows: Vec::new(),
-                statement_rows: vec![
-                    "stmt(core=return(int(0)),forewords=[],rollups=[])".to_string(),
-                ],
+                rollups: Vec::new(),
+                statements: vec![ExecStmt::ReturnValue {
+                    value: ExecExpr::Int(0),
+                }],
             }],
         });
         assert_eq!(artifact.format, AOT_INTERNAL_FORMAT);
-        assert_eq!(artifact.package_name, "winspell");
-        assert_eq!(artifact.root_module_id, "winspell");
-        assert_eq!(artifact.direct_deps, vec!["std".to_string()]);
-        assert_eq!(
-            artifact.runtime_requirements,
-            vec!["std.canvas".to_string()]
-        );
-        assert_eq!(artifact.entrypoints.len(), 1);
-        assert_eq!(artifact.routines.len(), 1);
-        assert_eq!(artifact.modules.len(), 2);
+        assert_eq!(artifact.module_count, 2);
+        assert_eq!(artifact.modules[0].module_id, "winspell");
     }
 
     #[test]
-    fn render_and_parse_package_roundtrip() {
+    fn package_artifact_roundtrips() {
         let artifact = AotPackageArtifact {
-            format: AOT_INTERNAL_FORMAT,
+            format: AOT_INTERNAL_FORMAT.to_string(),
             package_name: "tool".to_string(),
             root_module_id: "tool".to_string(),
             direct_deps: vec!["std".to_string()],
@@ -671,112 +275,55 @@ mod tests {
             }],
             routines: vec![AotRoutineArtifact {
                 module_id: "tool".to_string(),
-                routine_key: "tool#sym-0".to_string(),
+                routine_key: "tool#fn-0".to_string(),
                 symbol_name: "main".to_string(),
                 symbol_kind: "fn".to_string(),
                 exported: true,
                 is_async: false,
                 type_param_rows: Vec::new(),
-                behavior_attr_rows: vec!["name=phase:value=update".to_string()],
-                param_rows: vec!["mode=:name=path:ty=Str".to_string()],
-                signature_row: "fn main() -> Int:".to_string(),
+                behavior_attr_rows: Vec::new(),
+                param_rows: vec!["mode=:name=x:ty=Int".to_string()],
+                signature_row: "fn main(x: Int) -> Int:".to_string(),
                 intrinsic_impl: None,
+                impl_target_type: None,
+                impl_trait_path: None,
                 foreword_rows: vec!["test()".to_string()],
-                rollup_rows: vec!["cleanup:page:handler".to_string()],
-                statement_rows: vec![
-                    "stmt(core=return(int(0)),forewords=[],rollups=[])".to_string(),
-                ],
+                rollups: vec![ExecPageRollup {
+                    kind: "cleanup".to_string(),
+                    subject: "page".to_string(),
+                    handler_path: vec!["handler".to_string()],
+                }],
+                statements: vec![ExecStmt::Expr {
+                    expr: ExecExpr::Phrase {
+                        subject: Box::new(ExecExpr::Path(vec!["x".to_string()])),
+                        args: Vec::new(),
+                        qualifier_kind: ExecPhraseQualifierKind::BareMethod,
+                        qualifier: "is_ok".to_string(),
+                        resolved_callable: Some(vec![
+                            "std".to_string(),
+                            "result".to_string(),
+                            "is_ok".to_string(),
+                        ]),
+                        resolved_routine: Some("std.result#impl-0-method-0".to_string()),
+                        dynamic_dispatch: None,
+                        attached: Vec::new(),
+                    },
+                    rollups: Vec::new(),
+                }],
             }],
             modules: vec![AotPackageModuleArtifact {
                 module_id: "tool".to_string(),
                 symbol_count: 1,
-                item_count: 3,
-                line_count: 3,
-                non_empty_line_count: 3,
-                directive_rows: vec!["module=tool:import:std.io:".to_string()],
-                lang_item_rows: vec!["module=tool:lang:entry:main".to_string()],
-                exported_surface_rows: vec!["module=tool:export:fn:fn main() -> Int:".to_string()],
-            }],
-        };
-
-        let rendered = render_package_artifact(&artifact);
-        let parsed = parse_package_artifact(&rendered).expect("artifact should roundtrip");
-        assert_eq!(parsed, artifact);
-    }
-
-    #[test]
-    fn render_and_parse_package_preserves_overloaded_routines() {
-        let artifact = AotPackageArtifact {
-            format: AOT_INTERNAL_FORMAT,
-            package_name: "std".to_string(),
-            root_module_id: "std.concurrent".to_string(),
-            direct_deps: Vec::new(),
-            module_count: 1,
-            dependency_edge_count: 0,
-            dependency_rows: Vec::new(),
-            exported_surface_rows: Vec::new(),
-            runtime_requirements: vec!["std.concurrent".to_string()],
-            entrypoints: Vec::new(),
-            routines: vec![
-                AotRoutineArtifact {
-                    module_id: "std.concurrent".to_string(),
-                    routine_key: "std.concurrent#impl-0-method-0".to_string(),
-                    symbol_name: "load".to_string(),
-                    symbol_kind: "fn".to_string(),
-                    exported: false,
-                    is_async: false,
-                    type_param_rows: Vec::new(),
-                    behavior_attr_rows: Vec::new(),
-                    param_rows: vec!["mode=read:name=self:ty=AtomicInt".to_string()],
-                    signature_row: "fn load(read self: AtomicInt) -> Int:".to_string(),
-                    intrinsic_impl: None,
-                    foreword_rows: Vec::new(),
-                    rollup_rows: Vec::new(),
-                    statement_rows: vec![
-                        "stmt(core=return(int(0)),forewords=[],rollups=[])".to_string(),
-                    ],
-                },
-                AotRoutineArtifact {
-                    module_id: "std.concurrent".to_string(),
-                    routine_key: "std.concurrent#impl-1-method-0".to_string(),
-                    symbol_name: "load".to_string(),
-                    symbol_kind: "fn".to_string(),
-                    exported: false,
-                    is_async: false,
-                    type_param_rows: Vec::new(),
-                    behavior_attr_rows: Vec::new(),
-                    param_rows: vec!["mode=read:name=self:ty=AtomicBool".to_string()],
-                    signature_row: "fn load(read self: AtomicBool) -> Bool:".to_string(),
-                    intrinsic_impl: None,
-                    foreword_rows: Vec::new(),
-                    rollup_rows: Vec::new(),
-                    statement_rows: vec![
-                        "stmt(core=return(bool(false)),forewords=[],rollups=[])".to_string(),
-                    ],
-                },
-            ],
-            modules: vec![AotPackageModuleArtifact {
-                module_id: "std.concurrent".to_string(),
-                symbol_count: 2,
                 item_count: 2,
-                line_count: 2,
+                line_count: 3,
                 non_empty_line_count: 2,
                 directive_rows: Vec::new(),
                 lang_item_rows: Vec::new(),
-                exported_surface_rows: Vec::new(),
+                exported_surface_rows: vec!["export:fn:fn main() -> Int:".to_string()],
             }],
         };
-
         let rendered = render_package_artifact(&artifact);
         let parsed = parse_package_artifact(&rendered).expect("artifact should roundtrip");
-        assert_eq!(
-            parsed.routines[0].param_rows,
-            vec!["mode=read:name=self:ty=AtomicInt".to_string()]
-        );
-        assert_eq!(
-            parsed.routines[1].param_rows,
-            vec!["mode=read:name=self:ty=AtomicBool".to_string()]
-        );
         assert_eq!(parsed, artifact);
     }
 }

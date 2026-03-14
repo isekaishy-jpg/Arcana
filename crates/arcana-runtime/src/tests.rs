@@ -1,8 +1,9 @@
 use super::{
     BufferedEvent, BufferedFrameInput, BufferedHost, ParsedExpr, ParsedPageRollup, ParsedPhraseArg,
-    ParsedPhraseQualifierKind, ParsedStmt, RuntimeCallArg, RuntimeEntrypointPlan, RuntimeHost,
-    RuntimeOpaqueValue, RuntimePackagePlan, RuntimeParamPlan, RuntimeRoutinePlan, RuntimeValue,
-    execute_main, execute_routine, load_package_plan, plan_from_artifact, resolve_routine_index,
+    ParsedPhraseQualifierKind, ParsedStmt, RuntimeCallArg, RuntimeEntrypointPlan,
+    RuntimeExecutionState, RuntimeHost, RuntimeOpaqueValue, RuntimePackagePlan, RuntimeParamPlan,
+    RuntimeRoutinePlan, RuntimeValue, execute_main, execute_routine, insert_runtime_channel,
+    load_package_plan, parse_rollup_row, parse_stmt, plan_from_artifact, resolve_routine_index,
     resolve_routine_index_for_call,
 };
 use arcana_aot::{
@@ -157,7 +158,7 @@ fn write_host_core_workspace(destination: &Path) {
 
 fn sample_return_artifact() -> AotPackageArtifact {
     AotPackageArtifact {
-        format: AOT_INTERNAL_FORMAT,
+        format: AOT_INTERNAL_FORMAT.to_string(),
         package_name: "hello".to_string(),
         root_module_id: "hello".to_string(),
         direct_deps: vec!["std".to_string()],
@@ -185,9 +186,14 @@ fn sample_return_artifact() -> AotPackageArtifact {
             param_rows: Vec::new(),
             signature_row: "fn main() -> Int:".to_string(),
             intrinsic_impl: None,
+            impl_target_type: None,
+            impl_trait_path: None,
             foreword_rows: Vec::new(),
-            rollup_rows: Vec::new(),
-            statement_rows: vec!["stmt(core=return(int(7)),forewords=[],rollups=[])".to_string()],
+            rollups: Vec::new(),
+            statements: vec![
+                parse_stmt("stmt(core=return(int(7)),forewords=[],rollups=[])")
+                    .expect("statement should parse"),
+            ],
         }],
         modules: vec![AotPackageModuleArtifact {
             module_id: "hello".to_string(),
@@ -204,7 +210,7 @@ fn sample_return_artifact() -> AotPackageArtifact {
 
 fn sample_print_artifact() -> AotPackageArtifact {
     AotPackageArtifact {
-            format: AOT_INTERNAL_FORMAT,
+            format: AOT_INTERNAL_FORMAT.to_string(),
             package_name: "hello".to_string(),
             root_module_id: "hello".to_string(),
             direct_deps: vec!["std".to_string()],
@@ -235,11 +241,12 @@ fn sample_print_artifact() -> AotPackageArtifact {
                 param_rows: Vec::new(),
                 signature_row: "fn main():".to_string(),
                 intrinsic_impl: None,
+                impl_target_type: None,
+                impl_trait_path: None,
                 foreword_rows: Vec::new(),
-                rollup_rows: Vec::new(),
-                statement_rows: vec![
-                    "stmt(core=expr(phrase(subject=generic(expr=member(path(io), print),types=[Str]),args=[str(\"\\\"hello, arcana\\\"\")],qualifier=call,attached=[])),forewords=[],rollups=[])".to_string(),
-                ],
+                rollups: Vec::new(),
+                statements: vec![parse_stmt("stmt(core=expr(phrase(subject=generic(expr=member(path(io), print),types=[Str]),args=[str(\"\\\"hello, arcana\\\"\")],qualifier=call,attached=[])),forewords=[],rollups=[])")
+                    .expect("statement should parse")],
             }],
             modules: vec![AotPackageModuleArtifact {
                 module_id: "hello".to_string(),
@@ -259,7 +266,7 @@ fn sample_print_artifact() -> AotPackageArtifact {
 
 fn sample_stmt_metadata_artifact() -> AotPackageArtifact {
     AotPackageArtifact {
-            format: AOT_INTERNAL_FORMAT,
+            format: AOT_INTERNAL_FORMAT.to_string(),
             package_name: "metadata".to_string(),
             root_module_id: "metadata".to_string(),
             direct_deps: Vec::new(),
@@ -287,11 +294,15 @@ fn sample_stmt_metadata_artifact() -> AotPackageArtifact {
                 param_rows: Vec::new(),
                 signature_row: "fn main() -> Int:".to_string(),
                 intrinsic_impl: None,
+                impl_target_type: None,
+                impl_trait_path: None,
                 foreword_rows: vec!["test()".to_string()],
-                rollup_rows: vec!["cleanup:scope:metadata.cleanup".to_string()],
-                statement_rows: vec![
-                    "stmt(core=return(int(0)),forewords=[only(os=\"windows\")],rollups=[cleanup:scope:metadata.cleanup])".to_string(),
-                ],
+                rollups: vec![parse_rollup_row("cleanup:scope:metadata.cleanup")
+                    .expect("rollup should parse")],
+                statements: vec![parse_stmt(
+                    "stmt(core=return(int(0)),forewords=[only(os=\"windows\")],rollups=[cleanup:scope:metadata.cleanup])",
+                )
+                .expect("statement should parse")],
             }],
             modules: vec![AotPackageModuleArtifact {
                 module_id: "metadata".to_string(),
@@ -310,7 +321,7 @@ fn sample_stmt_metadata_artifact() -> AotPackageArtifact {
 
 fn sample_attachment_foreword_artifact() -> AotPackageArtifact {
     AotPackageArtifact {
-            format: AOT_INTERNAL_FORMAT,
+            format: AOT_INTERNAL_FORMAT.to_string(),
             package_name: "attachment".to_string(),
             root_module_id: "attachment".to_string(),
             direct_deps: vec!["std".to_string()],
@@ -340,13 +351,25 @@ fn sample_attachment_foreword_artifact() -> AotPackageArtifact {
                 param_rows: Vec::new(),
                 signature_row: "fn main() -> Int:".to_string(),
                 intrinsic_impl: None,
+                impl_target_type: None,
+                impl_trait_path: None,
                 foreword_rows: Vec::new(),
-                rollup_rows: Vec::new(),
-                statement_rows: vec![
-                    "stmt(core=let(mutable=true,name=xs,value=collection([int(1)])),forewords=[],rollups=[])".to_string(),
-                    "stmt(core=expr(phrase(subject=path(std.kernel.collections.list_push),args=[path(xs)],kind=call,qualifier=call,attached=[chain(int(2),forewords=[inline()])])),forewords=[],rollups=[])".to_string(),
-                    "stmt(core=expr(phrase(subject=generic(expr=path(std.io.print),types=[Int]),args=[phrase(subject=path(std.kernel.collections.list_len),args=[path(xs)],kind=call,qualifier=call,attached=[])],kind=call,qualifier=call,attached=[])),forewords=[],rollups=[])".to_string(),
-                    "stmt(core=return(int(0)),forewords=[],rollups=[])".to_string(),
+                rollups: Vec::new(),
+                statements: vec![
+                    parse_stmt(
+                        "stmt(core=let(mutable=true,name=xs,value=collection([int(1)])),forewords=[],rollups=[])",
+                    )
+                    .expect("statement should parse"),
+                    parse_stmt(
+                        "stmt(core=expr(phrase(subject=path(std.kernel.collections.list_push),args=[path(xs)],kind=call,qualifier=call,attached=[chain(int(2),forewords=[inline()])])),forewords=[],rollups=[])",
+                    )
+                    .expect("statement should parse"),
+                    parse_stmt(
+                        "stmt(core=expr(phrase(subject=generic(expr=path(std.io.print),types=[Int]),args=[phrase(subject=path(std.kernel.collections.list_len),args=[path(xs)],kind=call,qualifier=call,attached=[])],kind=call,qualifier=call,attached=[])),forewords=[],rollups=[])",
+                    )
+                    .expect("statement should parse"),
+                    parse_stmt("stmt(core=return(int(0)),forewords=[],rollups=[])")
+                        .expect("statement should parse"),
                 ],
             }],
             modules: vec![AotPackageModuleArtifact {
@@ -417,8 +440,9 @@ fn resolve_routine_index_for_call_prefers_lowered_routine_identity() {
                 }],
                 signature_row: "fn load(read self: AtomicInt) -> Int:".to_string(),
                 intrinsic_impl: None,
+                impl_target_type: None,
+                impl_trait_path: None,
                 foreword_rows: Vec::new(),
-                rollup_rows: Vec::new(),
                 rollups: Vec::new(),
                 statements: Vec::new(),
             },
@@ -438,8 +462,9 @@ fn resolve_routine_index_for_call_prefers_lowered_routine_identity() {
                 }],
                 signature_row: "fn load(read self: AtomicBool) -> Bool:".to_string(),
                 intrinsic_impl: None,
+                impl_target_type: None,
+                impl_trait_path: None,
                 foreword_rows: Vec::new(),
-                rollup_rows: Vec::new(),
                 rollups: Vec::new(),
                 statements: Vec::new(),
             },
@@ -456,9 +481,91 @@ fn resolve_routine_index_for_call_prefers_lowered_routine_identity() {
             source_expr: ParsedExpr::Bool(true),
         }],
         Some("ops#impl-0-method-0"),
-        Some("fn load(read self: AtomicBool) -> Bool:"),
+        None,
+        false,
+        None,
     )
     .expect("lowered routine identity should resolve")
+    .expect("call should resolve");
+
+    assert_eq!(index, 0);
+}
+
+#[test]
+fn runtime_dynamic_bare_method_fallback_matches_receiver_type_args() {
+    let plan = RuntimePackagePlan {
+        package_name: "ops".to_string(),
+        root_module_id: "ops".to_string(),
+        direct_deps: Vec::new(),
+        runtime_requirements: Vec::new(),
+        module_aliases: BTreeMap::new(),
+        entrypoints: Vec::new(),
+        routines: vec![
+            RuntimeRoutinePlan {
+                module_id: "ops".to_string(),
+                routine_key: "ops#impl-0-method-0".to_string(),
+                symbol_name: "send".to_string(),
+                symbol_kind: "fn".to_string(),
+                exported: false,
+                is_async: false,
+                type_params: vec!["T".to_string()],
+                behavior_attrs: BTreeMap::new(),
+                params: vec![RuntimeParamPlan {
+                    mode: Some("read".to_string()),
+                    name: "self".to_string(),
+                    ty: "std.concurrent.Channel[T]".to_string(),
+                }],
+                signature_row: "fn send(read self: std.concurrent.Channel[T]) -> Int:".to_string(),
+                intrinsic_impl: None,
+                impl_target_type: None,
+                impl_trait_path: None,
+                foreword_rows: Vec::new(),
+                rollups: Vec::new(),
+                statements: Vec::new(),
+            },
+            RuntimeRoutinePlan {
+                module_id: "ops".to_string(),
+                routine_key: "ops#impl-1-method-0".to_string(),
+                symbol_name: "send".to_string(),
+                symbol_kind: "fn".to_string(),
+                exported: false,
+                is_async: false,
+                type_params: Vec::new(),
+                behavior_attrs: BTreeMap::new(),
+                params: vec![RuntimeParamPlan {
+                    mode: Some("read".to_string()),
+                    name: "self".to_string(),
+                    ty: "std.concurrent.Channel[Bool]".to_string(),
+                }],
+                signature_row: "fn send(read self: std.concurrent.Channel[Bool]) -> Int:"
+                    .to_string(),
+                intrinsic_impl: None,
+                impl_target_type: None,
+                impl_trait_path: None,
+                foreword_rows: Vec::new(),
+                rollups: Vec::new(),
+                statements: Vec::new(),
+            },
+        ],
+    };
+    let mut state = RuntimeExecutionState::default();
+    let channel = insert_runtime_channel(&mut state, &["Int".to_string()], 0);
+
+    let index = resolve_routine_index_for_call(
+        &plan,
+        "ops",
+        &["ops".to_string(), "send".to_string()],
+        &[RuntimeCallArg {
+            name: None,
+            value: RuntimeValue::Opaque(RuntimeOpaqueValue::Channel(channel)),
+            source_expr: ParsedExpr::Path(vec!["chan".to_string()]),
+        }],
+        None,
+        None,
+        true,
+        Some(&state),
+    )
+    .expect("dynamic bare method should resolve")
     .expect("call should resolve");
 
     assert_eq!(index, 0);
@@ -620,8 +727,9 @@ fn execute_main_manual_routine_rollups_run_after_defers() {
                 }],
                 signature_row: "fn run(read seed: Int) -> Result[Int, Str]:".to_string(),
                 intrinsic_impl: None,
+                impl_target_type: None,
+                impl_trait_path: None,
                 foreword_rows: Vec::new(),
-                rollup_rows: vec!["cleanup:seed:std.io.print".to_string()],
                 rollups: vec![ParsedPageRollup {
                     kind: "cleanup".to_string(),
                     subject: "seed".to_string(),
@@ -642,7 +750,7 @@ fn execute_main_manual_routine_rollups_run_after_defers() {
                         qualifier: "call".to_string(),
                         resolved_callable: None,
                         resolved_routine: None,
-                        resolved_signature: None,
+                        dynamic_dispatch: None,
                         attached: Vec::new(),
                     }),
                     ParsedStmt::Expr {
@@ -660,7 +768,7 @@ fn execute_main_manual_routine_rollups_run_after_defers() {
                                 qualifier: "call".to_string(),
                                 resolved_callable: None,
                                 resolved_routine: None,
-                                resolved_signature: None,
+                                dynamic_dispatch: None,
                                 attached: Vec::new(),
                             }),
                             args: Vec::new(),
@@ -668,7 +776,7 @@ fn execute_main_manual_routine_rollups_run_after_defers() {
                             qualifier: "?".to_string(),
                             resolved_callable: None,
                             resolved_routine: None,
-                            resolved_signature: None,
+                            dynamic_dispatch: None,
                             attached: Vec::new(),
                         },
                         rollups: Vec::new(),
@@ -687,8 +795,9 @@ fn execute_main_manual_routine_rollups_run_after_defers() {
                 params: Vec::new(),
                 signature_row: "fn main() -> Int:".to_string(),
                 intrinsic_impl: None,
+                impl_target_type: None,
+                impl_trait_path: None,
                 foreword_rows: Vec::new(),
-                rollup_rows: Vec::new(),
                 rollups: Vec::new(),
                 statements: vec![
                     ParsedStmt::Expr {
@@ -702,12 +811,14 @@ fn execute_main_manual_routine_rollups_run_after_defers() {
                             qualifier: "call".to_string(),
                             resolved_callable: None,
                             resolved_routine: None,
-                            resolved_signature: None,
+                            dynamic_dispatch: None,
                             attached: Vec::new(),
                         },
                         rollups: Vec::new(),
                     },
-                    ParsedStmt::Return(Some(ParsedExpr::Int(0))),
+                    ParsedStmt::ReturnValue {
+                        value: ParsedExpr::Int(0),
+                    },
                 ],
             },
         ],
@@ -2643,6 +2754,95 @@ fn execute_main_runs_try_qualifier_routines() {
 }
 
 #[test]
+fn execute_main_matches_zero_payload_variant_names() {
+    let dir = temp_workspace_dir("match_zero_payload_variant");
+    write_file(
+        &dir.join("book.toml"),
+        "name = \"runtime_match_zero_payload_variant\"\nkind = \"app\"\n",
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "enum Maybe:\n",
+            "    None\n",
+            "    Some(Int)\n",
+            "fn main() -> Int:\n",
+            "    let value = Maybe.None :: :: call\n",
+            "    return match value:\n",
+            "        None => 7\n",
+            "        Some(_) => 0\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let graph = load_workspace_graph(&dir).expect("workspace graph should load");
+    let checked = check_workspace_graph(&graph).expect("workspace should check");
+    let fingerprints = compute_member_fingerprints_for_checked_workspace(&graph, &checked)
+        .expect("fingerprints should compute");
+    let order = plan_workspace(&graph).expect("workspace order should plan");
+    let statuses =
+        plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
+    execute_build(&graph, &statuses).expect("build should execute");
+
+    let artifact_path = graph.root_dir.join(
+        &statuses
+            .iter()
+            .find(|status| status.member == "runtime_match_zero_payload_variant")
+            .expect("app artifact status should exist")
+            .artifact_rel_path,
+    );
+    let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
+    let mut host = BufferedHost::default();
+    let code = execute_main(&plan, &mut host).expect("runtime should execute");
+
+    assert_eq!(code, 7);
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn execute_main_preserves_uppercase_match_bindings() {
+    let dir = temp_workspace_dir("match_uppercase_binding");
+    write_file(
+        &dir.join("book.toml"),
+        "name = \"runtime_match_uppercase_binding\"\nkind = \"app\"\n",
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "fn main() -> Int:\n",
+            "    return match 7:\n",
+            "        Value => Value\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let graph = load_workspace_graph(&dir).expect("workspace graph should load");
+    let checked = check_workspace_graph(&graph).expect("workspace should check");
+    let fingerprints = compute_member_fingerprints_for_checked_workspace(&graph, &checked)
+        .expect("fingerprints should compute");
+    let order = plan_workspace(&graph).expect("workspace order should plan");
+    let statuses =
+        plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
+    execute_build(&graph, &statuses).expect("build should execute");
+
+    let artifact_path = graph.root_dir.join(
+        &statuses
+            .iter()
+            .find(|status| status.member == "runtime_match_uppercase_binding")
+            .expect("app artifact status should exist")
+            .artifact_rel_path,
+    );
+    let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
+    let mut host = BufferedHost::default();
+    let code = execute_main(&plan, &mut host).expect("runtime should execute");
+
+    assert_eq!(code, 7);
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn execute_main_rejects_try_qualifier_arguments() {
     let plan = RuntimePackagePlan {
         package_name: "try_args_runtime".to_string(),
@@ -2670,8 +2870,9 @@ fn execute_main_rejects_try_qualifier_arguments() {
             params: Vec::new(),
             signature_row: "fn main() -> Int:".to_string(),
             intrinsic_impl: None,
+            impl_target_type: None,
+            impl_trait_path: None,
             foreword_rows: Vec::new(),
-            rollup_rows: Vec::new(),
             rollups: Vec::new(),
             statements: vec![
                 ParsedStmt::Let {
@@ -2690,7 +2891,7 @@ fn execute_main_rejects_try_qualifier_arguments() {
                         qualifier: "call".to_string(),
                         resolved_callable: None,
                         resolved_routine: None,
-                        resolved_signature: None,
+                        dynamic_dispatch: None,
                         attached: Vec::new(),
                     },
                 },
@@ -2705,12 +2906,14 @@ fn execute_main_rejects_try_qualifier_arguments() {
                         qualifier: "?".to_string(),
                         resolved_callable: None,
                         resolved_routine: None,
-                        resolved_signature: None,
+                        dynamic_dispatch: None,
                         attached: Vec::new(),
                     },
                     rollups: Vec::new(),
                 },
-                ParsedStmt::Return(Some(ParsedExpr::Int(0))),
+                ParsedStmt::ReturnValue {
+                    value: ParsedExpr::Int(0),
+                },
             ],
         }],
     };
@@ -2989,10 +3192,13 @@ fn execute_main_rejects_use_after_take_move() {
                 }],
                 signature_row: "fn consume(take value: Str) -> Int:".to_string(),
                 intrinsic_impl: None,
+                impl_target_type: None,
+                impl_trait_path: None,
                 foreword_rows: Vec::new(),
-                rollup_rows: Vec::new(),
                 rollups: Vec::new(),
-                statements: vec![ParsedStmt::Return(Some(ParsedExpr::Int(1)))],
+                statements: vec![ParsedStmt::ReturnValue {
+                    value: ParsedExpr::Int(1),
+                }],
             },
             RuntimeRoutinePlan {
                 module_id: "take_move_runtime".to_string(),
@@ -3010,10 +3216,13 @@ fn execute_main_rejects_use_after_take_move() {
                 }],
                 signature_row: "fn reuse(read value: Str) -> Int:".to_string(),
                 intrinsic_impl: None,
+                impl_target_type: None,
+                impl_trait_path: None,
                 foreword_rows: Vec::new(),
-                rollup_rows: Vec::new(),
                 rollups: Vec::new(),
-                statements: vec![ParsedStmt::Return(Some(ParsedExpr::Int(0)))],
+                statements: vec![ParsedStmt::ReturnValue {
+                    value: ParsedExpr::Int(0),
+                }],
             },
             RuntimeRoutinePlan {
                 module_id: "take_move_runtime".to_string(),
@@ -3027,8 +3236,9 @@ fn execute_main_rejects_use_after_take_move() {
                 params: Vec::new(),
                 signature_row: "fn main() -> Int:".to_string(),
                 intrinsic_impl: None,
+                impl_target_type: None,
+                impl_trait_path: None,
                 foreword_rows: Vec::new(),
-                rollup_rows: Vec::new(),
                 rollups: Vec::new(),
                 statements: vec![
                     ParsedStmt::Let {
@@ -3047,24 +3257,26 @@ fn execute_main_rejects_use_after_take_move() {
                             qualifier: "call".to_string(),
                             resolved_callable: None,
                             resolved_routine: None,
-                            resolved_signature: None,
+                            dynamic_dispatch: None,
                             attached: Vec::new(),
                         },
                         rollups: Vec::new(),
                     },
-                    ParsedStmt::Return(Some(ParsedExpr::Phrase {
-                        subject: Box::new(ParsedExpr::Path(vec!["reuse".to_string()])),
-                        args: vec![ParsedPhraseArg {
-                            name: None,
-                            value: ParsedExpr::Path(vec!["s".to_string()]),
-                        }],
-                        qualifier_kind: ParsedPhraseQualifierKind::Call,
-                        qualifier: "call".to_string(),
-                        resolved_callable: None,
-                        resolved_routine: None,
-                        resolved_signature: None,
-                        attached: Vec::new(),
-                    })),
+                    ParsedStmt::ReturnValue {
+                        value: ParsedExpr::Phrase {
+                            subject: Box::new(ParsedExpr::Path(vec!["reuse".to_string()])),
+                            args: vec![ParsedPhraseArg {
+                                name: None,
+                                value: ParsedExpr::Path(vec!["s".to_string()]),
+                            }],
+                            qualifier_kind: ParsedPhraseQualifierKind::Call,
+                            qualifier: "call".to_string(),
+                            resolved_callable: None,
+                            resolved_routine: None,
+                            dynamic_dispatch: None,
+                            attached: Vec::new(),
+                        },
+                    },
                 ],
             },
         ],
@@ -3103,8 +3315,9 @@ fn execute_main_rejects_direct_intrinsic_take_fallback_reuse() {
             params: Vec::new(),
             signature_row: "fn main() -> Int:".to_string(),
             intrinsic_impl: None,
+            impl_target_type: None,
+            impl_trait_path: None,
             foreword_rows: Vec::new(),
-            rollup_rows: Vec::new(),
             rollups: Vec::new(),
             statements: vec![
                 ParsedStmt::Let {
@@ -3130,29 +3343,31 @@ fn execute_main_rejects_direct_intrinsic_take_fallback_reuse() {
                         qualifier: "call".to_string(),
                         resolved_callable: None,
                         resolved_routine: None,
-                        resolved_signature: None,
+                        dynamic_dispatch: None,
                         attached: Vec::new(),
                     },
                     rollups: Vec::new(),
                 },
-                ParsedStmt::Return(Some(ParsedExpr::Phrase {
-                    subject: Box::new(ParsedExpr::Path(vec![
-                        "std".to_string(),
-                        "kernel".to_string(),
-                        "collections".to_string(),
-                        "list_len".to_string(),
-                    ])),
-                    args: vec![ParsedPhraseArg {
-                        name: None,
-                        value: ParsedExpr::Path(vec!["xs".to_string()]),
-                    }],
-                    qualifier_kind: ParsedPhraseQualifierKind::Call,
-                    qualifier: "call".to_string(),
-                    resolved_callable: None,
-                    resolved_routine: None,
-                    resolved_signature: None,
-                    attached: Vec::new(),
-                })),
+                ParsedStmt::ReturnValue {
+                    value: ParsedExpr::Phrase {
+                        subject: Box::new(ParsedExpr::Path(vec![
+                            "std".to_string(),
+                            "kernel".to_string(),
+                            "collections".to_string(),
+                            "list_len".to_string(),
+                        ])),
+                        args: vec![ParsedPhraseArg {
+                            name: None,
+                            value: ParsedExpr::Path(vec!["xs".to_string()]),
+                        }],
+                        qualifier_kind: ParsedPhraseQualifierKind::Call,
+                        qualifier: "call".to_string(),
+                        resolved_callable: None,
+                        resolved_routine: None,
+                        dynamic_dispatch: None,
+                        attached: Vec::new(),
+                    },
+                },
             ],
         }],
     };

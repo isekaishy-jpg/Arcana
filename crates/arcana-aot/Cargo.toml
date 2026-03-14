@@ -5,4 +5,5 @@ edition.workspace = true
 
 [dependencies]
 arcana-ir.workspace = true
+serde.workspace = true
 toml.workspace = true

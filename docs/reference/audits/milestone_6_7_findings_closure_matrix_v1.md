@@ -2,7 +2,7 @@
 
 Status: `reference-only`
 
-This is the working closure ledger for `tmp/milestone_6_7_review_findings.md`.
+This is the working closure ledger for the Milestone 6/7 review findings.
 All findings are now at terminal status.
 
 Terminal closure types:

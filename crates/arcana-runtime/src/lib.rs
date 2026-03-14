@@ -6,6 +6,16 @@ use std::path::{Component, Path, PathBuf};
 use arcana_aot::{
     AotEntrypointArtifact, AotPackageArtifact, AotRoutineArtifact, parse_package_artifact,
 };
+use arcana_ir::{
+    ExecAssignOp as ParsedAssignOp, ExecAssignTarget as ParsedAssignTarget,
+    ExecBinaryOp as ParsedBinaryOp, ExecChainConnector as ParsedChainConnector,
+    ExecChainIntroducer as ParsedChainIntroducer, ExecChainStep as ParsedChainStep,
+    ExecDynamicDispatch as ParsedDynamicDispatch, ExecExpr as ParsedExpr,
+    ExecHeaderAttachment as ParsedHeaderAttachment, ExecMatchArm as ParsedMatchArm,
+    ExecMatchPattern as ParsedMatchPattern, ExecPageRollup as ParsedPageRollup,
+    ExecPhraseArg as ParsedPhraseArg, ExecPhraseQualifierKind as ParsedPhraseQualifierKind,
+    ExecStmt as ParsedStmt, ExecUnaryOp as ParsedUnaryOp,
+};
 use pathdiff::diff_paths;
 use sha2::{Digest, Sha256};
 
@@ -29,8 +39,9 @@ pub struct RuntimeRoutinePlan {
     pub params: Vec<RuntimeParamPlan>,
     pub signature_row: String,
     pub intrinsic_impl: Option<String>,
+    pub impl_target_type: Option<String>,
+    pub impl_trait_path: Option<Vec<String>>,
     pub foreword_rows: Vec<String>,
-    pub rollup_rows: Vec<String>,
     rollups: Vec<ParsedPageRollup>,
     statements: Vec<ParsedStmt>,
 }
@@ -2289,111 +2300,6 @@ enum RuntimeValue {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum ParsedExpr {
-    Int(i64),
-    Bool(bool),
-    Str(String),
-    Path(Vec<String>),
-    Pair {
-        left: Box<ParsedExpr>,
-        right: Box<ParsedExpr>,
-    },
-    Collection {
-        items: Vec<ParsedExpr>,
-    },
-    Match {
-        subject: Box<ParsedExpr>,
-        arms: Vec<ParsedMatchArm>,
-    },
-    Chain {
-        style: String,
-        introducer: ParsedChainIntroducer,
-        steps: Vec<ParsedChainStep>,
-    },
-    MemoryPhrase {
-        family: String,
-        arena: Box<ParsedExpr>,
-        init_args: Vec<ParsedPhraseArg>,
-        constructor: Box<ParsedExpr>,
-        attached: Vec<ParsedHeaderAttachment>,
-    },
-    Member {
-        expr: Box<ParsedExpr>,
-        member: String,
-    },
-    Index {
-        expr: Box<ParsedExpr>,
-        index: Box<ParsedExpr>,
-    },
-    Slice {
-        expr: Box<ParsedExpr>,
-        start: Option<Box<ParsedExpr>>,
-        end: Option<Box<ParsedExpr>>,
-        inclusive_end: bool,
-    },
-    Range {
-        start: Option<Box<ParsedExpr>>,
-        end: Option<Box<ParsedExpr>>,
-        inclusive_end: bool,
-    },
-    Generic {
-        expr: Box<ParsedExpr>,
-        type_args: Vec<String>,
-    },
-    Phrase {
-        subject: Box<ParsedExpr>,
-        args: Vec<ParsedPhraseArg>,
-        qualifier_kind: ParsedPhraseQualifierKind,
-        qualifier: String,
-        resolved_callable: Option<Vec<String>>,
-        resolved_routine: Option<String>,
-        resolved_signature: Option<String>,
-        attached: Vec<ParsedHeaderAttachment>,
-    },
-    Await {
-        expr: Box<ParsedExpr>,
-    },
-    Unary {
-        op: ParsedUnaryOp,
-        expr: Box<ParsedExpr>,
-    },
-    Binary {
-        left: Box<ParsedExpr>,
-        op: ParsedBinaryOp,
-        right: Box<ParsedExpr>,
-    },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ParsedPhraseQualifierKind {
-    Call,
-    Try,
-    Apply,
-    AwaitApply,
-    BareMethod,
-    NamedPath,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ParsedMatchArm {
-    patterns: Vec<ParsedMatchPattern>,
-    value: ParsedExpr,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ParsedPageRollup {
-    kind: String,
-    subject: String,
-    handler_path: Vec<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ParsedPhraseArg {
-    name: Option<String>,
-    value: ParsedExpr,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 struct RuntimeCallArg {
     name: Option<String>,
     value: RuntimeValue,
@@ -2410,124 +2316,6 @@ struct BoundRuntimeArg {
 struct RoutineExecutionOutcome {
     value: RuntimeValue,
     final_args: Vec<RuntimeValue>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum ParsedHeaderAttachment {
-    Named { name: String, value: ParsedExpr },
-    Chain { expr: ParsedExpr },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum ParsedMatchPattern {
-    Wildcard,
-    Name(String),
-    Literal(String),
-    Variant {
-        path: String,
-        args: Vec<ParsedMatchPattern>,
-    },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum ParsedStmt {
-    Let {
-        mutable: bool,
-        name: String,
-        value: ParsedExpr,
-    },
-    Expr {
-        expr: ParsedExpr,
-        rollups: Vec<ParsedPageRollup>,
-    },
-    Return(Option<ParsedExpr>),
-    If {
-        condition: ParsedExpr,
-        then_branch: Vec<ParsedStmt>,
-        else_branch: Vec<ParsedStmt>,
-        rollups: Vec<ParsedPageRollup>,
-    },
-    While {
-        condition: ParsedExpr,
-        body: Vec<ParsedStmt>,
-        rollups: Vec<ParsedPageRollup>,
-    },
-    For {
-        binding: String,
-        iterable: ParsedExpr,
-        body: Vec<ParsedStmt>,
-        rollups: Vec<ParsedPageRollup>,
-    },
-    Defer(ParsedExpr),
-    Break,
-    Continue,
-    Assign {
-        target: ParsedAssignTarget,
-        op: ParsedAssignOp,
-        value: ParsedExpr,
-    },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ParsedUnaryOp {
-    Neg,
-    Not,
-    BitNot,
-    BorrowRead,
-    BorrowMut,
-    Deref,
-    Weave,
-    Split,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ParsedBinaryOp {
-    Or,
-    And,
-    EqEq,
-    NotEq,
-    Lt,
-    LtEq,
-    Gt,
-    GtEq,
-    BitOr,
-    BitXor,
-    BitAnd,
-    Shl,
-    Shr,
-    Add,
-    Sub,
-    Mul,
-    Div,
-    Mod,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum ParsedAssignTarget {
-    Name(String),
-    Member {
-        target: Box<ParsedAssignTarget>,
-        member: String,
-    },
-    Index {
-        target: Box<ParsedAssignTarget>,
-        index: ParsedExpr,
-    },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ParsedAssignOp {
-    Assign,
-    AddAssign,
-    SubAssign,
-    MulAssign,
-    DivAssign,
-    ModAssign,
-    BitAndAssign,
-    BitOrAssign,
-    BitXorAssign,
-    ShlAssign,
-    ShrAssign,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2659,7 +2447,7 @@ struct RuntimeRollupFrame {
 struct RuntimeDeferredCall {
     callable: Vec<String>,
     resolved_routine: Option<String>,
-    resolved_signature: Option<String>,
+    dynamic_dispatch: Option<ParsedDynamicDispatch>,
     current_module_id: String,
     type_args: Vec<String>,
     call_args: Vec<RuntimeCallArg>,
@@ -2703,26 +2491,6 @@ struct RuntimeTaskState {
 struct RuntimeThreadState {
     type_args: Vec<String>,
     state: RuntimePendingState,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ParsedChainConnector {
-    Forward,
-    Reverse,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ParsedChainIntroducer {
-    Forward,
-    Reverse,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ParsedChainStep {
-    incoming: Option<ParsedChainConnector>,
-    stage: ParsedExpr,
-    bind_args: Vec<ParsedExpr>,
-    text: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2949,16 +2717,6 @@ fn lower_routine(routine: &AotRoutineArtifact) -> Result<RuntimeRoutinePlan, Str
         .iter()
         .map(|row| parse_behavior_attr_row(row))
         .collect::<Result<BTreeMap<_, _>, String>>()?;
-    let rollups = routine
-        .rollup_rows
-        .iter()
-        .map(|row| parse_rollup_row(row))
-        .collect::<Result<Vec<_>, String>>()?;
-    let statements = routine
-        .statement_rows
-        .iter()
-        .map(|row| parse_stmt(row))
-        .collect::<Result<Vec<_>, String>>()?;
     Ok(RuntimeRoutinePlan {
         module_id: routine.module_id.clone(),
         routine_key: routine.routine_key.clone(),
@@ -2971,10 +2729,11 @@ fn lower_routine(routine: &AotRoutineArtifact) -> Result<RuntimeRoutinePlan, Str
         params,
         signature_row: routine.signature_row.clone(),
         intrinsic_impl: routine.intrinsic_impl.clone(),
+        impl_target_type: routine.impl_target_type.clone(),
+        impl_trait_path: routine.impl_trait_path.clone(),
         foreword_rows: routine.foreword_rows.clone(),
-        rollup_rows: routine.rollup_rows.clone(),
-        rollups,
-        statements,
+        rollups: routine.rollups.clone(),
+        statements: routine.statements.clone(),
     })
 }
 
@@ -3093,85 +2852,6 @@ fn strip_prefix_suffix<'a>(text: &'a str, prefix: &str, suffix: &str) -> Result<
     Ok(inner)
 }
 
-fn split_top_level(text: &str) -> Vec<String> {
-    split_top_level_with_delim(text, ',')
-}
-
-fn split_top_level_with_delim(text: &str, delimiter: char) -> Vec<String> {
-    let mut parts = Vec::new();
-    let mut current = String::new();
-    let mut paren_depth = 0usize;
-    let mut bracket_depth = 0usize;
-    let mut in_string = false;
-    let mut escaped = false;
-
-    for ch in text.chars() {
-        if in_string {
-            current.push(ch);
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == '"' {
-                in_string = false;
-            }
-            continue;
-        }
-
-        match ch {
-            '"' => {
-                in_string = true;
-                current.push(ch);
-            }
-            '(' => {
-                paren_depth += 1;
-                current.push(ch);
-            }
-            ')' => {
-                paren_depth = paren_depth.saturating_sub(1);
-                current.push(ch);
-            }
-            '[' => {
-                bracket_depth += 1;
-                current.push(ch);
-            }
-            ']' => {
-                bracket_depth = bracket_depth.saturating_sub(1);
-                current.push(ch);
-            }
-            ch if ch == delimiter && paren_depth == 0 && bracket_depth == 0 => {
-                parts.push(current.trim().to_string());
-                current.clear();
-            }
-            _ => current.push(ch),
-        }
-    }
-
-    if !current.trim().is_empty() {
-        parts.push(current.trim().to_string());
-    }
-    parts
-}
-
-fn parse_named_fields(text: &str) -> Result<BTreeMap<String, String>, String> {
-    let mut fields = BTreeMap::new();
-    for part in split_top_level(text) {
-        let Some((name, value)) = part.split_once('=') else {
-            return Err(format!("expected named field in `{part}`"));
-        };
-        fields.insert(name.trim().to_string(), value.trim().to_string());
-    }
-    Ok(fields)
-}
-
-fn parse_list(text: &str) -> Result<Vec<String>, String> {
-    let inner = strip_prefix_suffix(text, "[", "]")?;
-    if inner.trim().is_empty() {
-        return Ok(Vec::new());
-    }
-    Ok(split_top_level(inner))
-}
-
 fn parse_param_row(text: &str) -> Result<RuntimeParamPlan, String> {
     let parts = text.splitn(3, ':').collect::<Vec<_>>();
     if parts.len() != 3 {
@@ -3217,143 +2897,6 @@ fn parse_behavior_attr_row(text: &str) -> Result<(String, String), String> {
     Ok((name.to_string(), value.to_string()))
 }
 
-fn parse_rollup_row(text: &str) -> Result<ParsedPageRollup, String> {
-    let parts = text.splitn(3, ':').collect::<Vec<_>>();
-    if parts.len() != 3 {
-        return Err(format!("malformed runtime rollup row `{text}`"));
-    }
-    let kind = parts[0].trim();
-    let subject = parts[1].trim();
-    let handler = parts[2].trim();
-    if kind != "cleanup" {
-        return Err(format!("unsupported runtime rollup kind `{kind}`"));
-    }
-    if subject.is_empty() {
-        return Err(format!("runtime rollup row missing subject in `{text}`"));
-    }
-    if handler.is_empty() {
-        return Err(format!(
-            "runtime rollup row missing handler path in `{text}`"
-        ));
-    }
-    Ok(ParsedPageRollup {
-        kind: kind.to_string(),
-        subject: subject.to_string(),
-        handler_path: handler.split('.').map(ToString::to_string).collect(),
-    })
-}
-
-fn parse_chain_connector(text: &str) -> Result<Option<ParsedChainConnector>, String> {
-    match text.trim() {
-        "start" => Ok(None),
-        "=>" => Ok(Some(ParsedChainConnector::Forward)),
-        "<=" => Ok(Some(ParsedChainConnector::Reverse)),
-        other => Err(format!("unsupported runtime chain connector `{other}`")),
-    }
-}
-
-fn parse_chain_introducer(text: &str) -> Result<ParsedChainIntroducer, String> {
-    match text.trim() {
-        "forward" => Ok(ParsedChainIntroducer::Forward),
-        "reverse" => Ok(ParsedChainIntroducer::Reverse),
-        other => Err(format!("unsupported runtime chain introducer `{other}`")),
-    }
-}
-
-fn parse_chain_step(text: &str) -> Result<ParsedChainStep, String> {
-    let inner = strip_prefix_suffix(text, "step(", ")")?;
-    let parts = split_top_level(inner);
-    if parts.len() != 4 {
-        return Err(format!("malformed runtime chain step `{text}`"));
-    }
-    let incoming = parse_chain_connector(&parts[0])?;
-    let fields = parse_named_fields(&parts[1..].join(","))?;
-    let stage = parse_expr(
-        fields
-            .get("stage")
-            .ok_or_else(|| format!("runtime chain step missing stage in `{text}`"))?,
-    )?;
-    let bind_args = parse_list(
-        fields
-            .get("bind")
-            .ok_or_else(|| format!("runtime chain step missing bind args in `{text}`"))?,
-    )?
-    .into_iter()
-    .map(|item| parse_expr(&item))
-    .collect::<Result<Vec<_>, String>>()?;
-    let text_value = decode_row_string(
-        fields
-            .get("text")
-            .ok_or_else(|| format!("runtime chain step missing text in `{text}`"))?,
-    )?;
-    Ok(ParsedChainStep {
-        incoming,
-        stage,
-        bind_args,
-        text: text_value,
-    })
-}
-
-fn parse_match_pattern(text: &str) -> Result<ParsedMatchPattern, String> {
-    if text == "_" {
-        return Ok(ParsedMatchPattern::Wildcard);
-    }
-    if text.starts_with("name(") && text.ends_with(')') {
-        let name = strip_prefix_suffix(text, "name(", ")")?;
-        if name.contains('.') {
-            return Ok(ParsedMatchPattern::Variant {
-                path: name.to_string(),
-                args: Vec::new(),
-            });
-        }
-        return Ok(ParsedMatchPattern::Name(name.to_string()));
-    }
-    if text.starts_with("lit(\"") && text.ends_with("\")") {
-        return Ok(ParsedMatchPattern::Literal(decode_row_string(&format!(
-            "\"{}\"",
-            strip_prefix_suffix(text, "lit(\"", "\")")?
-        ))?));
-    }
-    if text.starts_with("variant(") && text.ends_with(')') {
-        let inner = strip_prefix_suffix(text, "variant(", ")")?;
-        let parts = split_top_level(inner);
-        if parts.len() != 2 {
-            return Err(format!("malformed runtime match variant `{text}`"));
-        }
-        let args = parse_list(&parts[1])?
-            .into_iter()
-            .map(|item| parse_match_pattern(&item))
-            .collect::<Result<Vec<_>, String>>()?;
-        return Ok(ParsedMatchPattern::Variant {
-            path: parts[0].to_string(),
-            args,
-        });
-    }
-    Err(format!("unsupported runtime match pattern `{text}`"))
-}
-
-fn parse_match_arm(text: &str) -> Result<ParsedMatchArm, String> {
-    let fields = parse_named_fields(strip_prefix_suffix(text, "arm(", ")")?)?;
-    let patterns_src = fields
-        .get("patterns")
-        .ok_or_else(|| format!("runtime arm missing patterns in `{text}`"))?;
-    let patterns_inner = strip_prefix_suffix(patterns_src, "[", "]")?;
-    let patterns = if patterns_inner.trim().is_empty() {
-        Vec::new()
-    } else {
-        split_top_level_with_delim(patterns_inner, '|')
-            .into_iter()
-            .map(|item| parse_match_pattern(&item))
-            .collect::<Result<Vec<_>, String>>()?
-    };
-    let value = parse_expr(
-        fields
-            .get("value")
-            .ok_or_else(|| format!("runtime arm missing value in `{text}`"))?,
-    )?;
-    Ok(ParsedMatchArm { patterns, value })
-}
-
 fn decode_row_string(text: &str) -> Result<String, String> {
     let inner = strip_prefix_suffix(text, "\"", "\"")?;
     let mut out = String::new();
@@ -3384,704 +2927,6 @@ fn decode_source_string_literal(text: &str) -> Result<String, String> {
     } else {
         Ok(source)
     }
-}
-
-fn parse_unary_op(text: &str) -> Result<ParsedUnaryOp, String> {
-    match text {
-        "-" => Ok(ParsedUnaryOp::Neg),
-        "not" => Ok(ParsedUnaryOp::Not),
-        "~" => Ok(ParsedUnaryOp::BitNot),
-        "&" => Ok(ParsedUnaryOp::BorrowRead),
-        "&mut" => Ok(ParsedUnaryOp::BorrowMut),
-        "*" => Ok(ParsedUnaryOp::Deref),
-        "weave" => Ok(ParsedUnaryOp::Weave),
-        "split" => Ok(ParsedUnaryOp::Split),
-        _ => Err(format!("unsupported runtime unary op `{text}`")),
-    }
-}
-
-fn parse_binary_op(text: &str) -> Result<ParsedBinaryOp, String> {
-    match text {
-        "or" => Ok(ParsedBinaryOp::Or),
-        "and" => Ok(ParsedBinaryOp::And),
-        "==" => Ok(ParsedBinaryOp::EqEq),
-        "!=" => Ok(ParsedBinaryOp::NotEq),
-        "<" => Ok(ParsedBinaryOp::Lt),
-        "<=" => Ok(ParsedBinaryOp::LtEq),
-        ">" => Ok(ParsedBinaryOp::Gt),
-        ">=" => Ok(ParsedBinaryOp::GtEq),
-        "|" => Ok(ParsedBinaryOp::BitOr),
-        "^" => Ok(ParsedBinaryOp::BitXor),
-        "&" => Ok(ParsedBinaryOp::BitAnd),
-        "<<" => Ok(ParsedBinaryOp::Shl),
-        "shr" => Ok(ParsedBinaryOp::Shr),
-        "+" => Ok(ParsedBinaryOp::Add),
-        "-" => Ok(ParsedBinaryOp::Sub),
-        "*" => Ok(ParsedBinaryOp::Mul),
-        "/" => Ok(ParsedBinaryOp::Div),
-        "%" => Ok(ParsedBinaryOp::Mod),
-        _ => Err(format!("unsupported runtime binary op `{text}`")),
-    }
-}
-
-fn parse_assign_op(text: &str) -> Result<ParsedAssignOp, String> {
-    match text {
-        "=" => Ok(ParsedAssignOp::Assign),
-        "+=" => Ok(ParsedAssignOp::AddAssign),
-        "-=" => Ok(ParsedAssignOp::SubAssign),
-        "*=" => Ok(ParsedAssignOp::MulAssign),
-        "/=" => Ok(ParsedAssignOp::DivAssign),
-        "%=" => Ok(ParsedAssignOp::ModAssign),
-        "&=" => Ok(ParsedAssignOp::BitAndAssign),
-        "|=" => Ok(ParsedAssignOp::BitOrAssign),
-        "^=" => Ok(ParsedAssignOp::BitXorAssign),
-        "<<=" => Ok(ParsedAssignOp::ShlAssign),
-        "shr=" => Ok(ParsedAssignOp::ShrAssign),
-        _ => Err(format!("unsupported runtime assign op `{text}`")),
-    }
-}
-
-fn parse_expr(text: &str) -> Result<ParsedExpr, String> {
-    if let Some(inner) = text
-        .strip_prefix("int(")
-        .and_then(|value| value.strip_suffix(')'))
-    {
-        return inner
-            .parse::<i64>()
-            .map(ParsedExpr::Int)
-            .map_err(|err| format!("invalid runtime int `{inner}`: {err}"));
-    }
-    if let Some(inner) = text
-        .strip_prefix("bool(")
-        .and_then(|value| value.strip_suffix(')'))
-    {
-        return match inner {
-            "true" => Ok(ParsedExpr::Bool(true)),
-            "false" => Ok(ParsedExpr::Bool(false)),
-            _ => Err(format!("invalid runtime bool `{inner}`")),
-        };
-    }
-    if text.starts_with("str(") && text.ends_with(')') {
-        return Ok(ParsedExpr::Str(decode_source_string_literal(
-            strip_prefix_suffix(text, "str(", ")")?,
-        )?));
-    }
-    if text.starts_with("pair(") && text.ends_with(')') {
-        let inner = strip_prefix_suffix(text, "pair(", ")")?;
-        let parts = split_top_level(inner);
-        if parts.len() != 2 {
-            return Err(format!("malformed pair expression `{text}`"));
-        }
-        return Ok(ParsedExpr::Pair {
-            left: Box::new(parse_expr(&parts[0])?),
-            right: Box::new(parse_expr(&parts[1])?),
-        });
-    }
-    if text.starts_with("collection(") && text.ends_with(')') {
-        let items = parse_list(strip_prefix_suffix(text, "collection(", ")")?)?
-            .into_iter()
-            .map(|item| parse_expr(&item))
-            .collect::<Result<Vec<_>, String>>()?;
-        return Ok(ParsedExpr::Collection { items });
-    }
-    if text.starts_with("match(") && text.ends_with(')') {
-        let fields = parse_named_fields(strip_prefix_suffix(text, "match(", ")")?)?;
-        let arms = parse_list(
-            fields
-                .get("arms")
-                .ok_or_else(|| format!("match expression missing arms in `{text}`"))?,
-        )?
-        .into_iter()
-        .map(|item| parse_match_arm(&item))
-        .collect::<Result<Vec<_>, String>>()?;
-        return Ok(ParsedExpr::Match {
-            subject: Box::new(parse_expr(fields.get("subject").ok_or_else(|| {
-                format!("match expression missing subject in `{text}`")
-            })?)?),
-            arms,
-        });
-    }
-    if text.starts_with("chain(") && text.ends_with(')') {
-        let fields = parse_named_fields(strip_prefix_suffix(text, "chain(", ")")?)?;
-        let style = fields
-            .get("style")
-            .ok_or_else(|| format!("chain expression missing style in `{text}`"))?
-            .to_string();
-        let introducer = parse_chain_introducer(
-            fields
-                .get("introducer")
-                .ok_or_else(|| format!("chain expression missing introducer in `{text}`"))?,
-        )?;
-        let steps = parse_list(
-            fields
-                .get("steps")
-                .ok_or_else(|| format!("chain expression missing steps in `{text}`"))?,
-        )?
-        .into_iter()
-        .map(|item| parse_chain_step(&item))
-        .collect::<Result<Vec<_>, String>>()?;
-        return Ok(ParsedExpr::Chain {
-            style,
-            introducer,
-            steps,
-        });
-    }
-    if text.starts_with("await(") && text.ends_with(')') {
-        return Ok(ParsedExpr::Await {
-            expr: Box::new(parse_expr(strip_prefix_suffix(text, "await(", ")")?)?),
-        });
-    }
-    if text.starts_with("memory(") && text.ends_with(')') {
-        let fields = parse_named_fields(strip_prefix_suffix(text, "memory(", ")")?)?;
-        let init_args = parse_list(
-            fields
-                .get("init")
-                .ok_or_else(|| format!("memory phrase missing init args in `{text}`"))?,
-        )?
-        .into_iter()
-        .map(|item| parse_phrase_arg(&item))
-        .collect::<Result<Vec<_>, String>>()?;
-        let attached = parse_list(
-            fields
-                .get("attached")
-                .ok_or_else(|| format!("memory phrase missing attached args in `{text}`"))?,
-        )?
-        .into_iter()
-        .map(|item| parse_header_attachment(&item))
-        .collect::<Result<Vec<_>, String>>()?;
-        return Ok(ParsedExpr::MemoryPhrase {
-            family: fields
-                .get("family")
-                .ok_or_else(|| format!("memory phrase missing family in `{text}`"))?
-                .to_string(),
-            arena: Box::new(parse_expr(
-                fields
-                    .get("arena")
-                    .ok_or_else(|| format!("memory phrase missing arena in `{text}`"))?,
-            )?),
-            init_args,
-            constructor: Box::new(parse_expr(
-                fields
-                    .get("ctor")
-                    .ok_or_else(|| format!("memory phrase missing constructor in `{text}`"))?,
-            )?),
-            attached,
-        });
-    }
-    if text.starts_with("path(") && text.ends_with(')') {
-        let inner = strip_prefix_suffix(text, "path(", ")")?;
-        if inner.is_empty() {
-            return Err("empty path in runtime row".to_string());
-        }
-        return Ok(ParsedExpr::Path(
-            inner.split('.').map(ToString::to_string).collect(),
-        ));
-    }
-    if text.starts_with("member(") && text.ends_with(')') {
-        let inner = strip_prefix_suffix(text, "member(", ")")?;
-        let parts = split_top_level(inner);
-        if parts.len() != 2 {
-            return Err(format!("malformed member expression `{text}`"));
-        }
-        return Ok(ParsedExpr::Member {
-            expr: Box::new(parse_expr(&parts[0])?),
-            member: parts[1].to_string(),
-        });
-    }
-    if text.starts_with("index(") && text.ends_with(')') {
-        let inner = strip_prefix_suffix(text, "index(", ")")?;
-        let parts = split_top_level(inner);
-        if parts.len() != 2 {
-            return Err(format!("malformed index expression `{text}`"));
-        }
-        return Ok(ParsedExpr::Index {
-            expr: Box::new(parse_expr(&parts[0])?),
-            index: Box::new(parse_expr(&parts[1])?),
-        });
-    }
-    if text.starts_with("slice(") && text.ends_with(')') {
-        let fields = parse_named_fields(strip_prefix_suffix(text, "slice(", ")")?)?;
-        return Ok(ParsedExpr::Slice {
-            expr: Box::new(parse_expr(fields.get("expr").ok_or_else(|| {
-                format!("slice expression missing expr in `{text}`")
-            })?)?),
-            start: parse_optional_runtime_expr(
-                fields
-                    .get("start")
-                    .ok_or_else(|| format!("slice expression missing start in `{text}`"))?,
-            )?,
-            end: parse_optional_runtime_expr(
-                fields
-                    .get("end")
-                    .ok_or_else(|| format!("slice expression missing end in `{text}`"))?,
-            )?,
-            inclusive_end: parse_runtime_bool_keyword(
-                fields
-                    .get("inclusive")
-                    .ok_or_else(|| format!("slice expression missing inclusive in `{text}`"))?,
-                "slice inclusive",
-            )?,
-        });
-    }
-    if text.starts_with("range(") && text.ends_with(')') {
-        let fields = parse_named_fields(strip_prefix_suffix(text, "range(", ")")?)?;
-        return Ok(ParsedExpr::Range {
-            start: parse_optional_runtime_expr(
-                fields
-                    .get("start")
-                    .ok_or_else(|| format!("range expression missing start in `{text}`"))?,
-            )?,
-            end: parse_optional_runtime_expr(
-                fields
-                    .get("end")
-                    .ok_or_else(|| format!("range expression missing end in `{text}`"))?,
-            )?,
-            inclusive_end: parse_runtime_bool_keyword(
-                fields
-                    .get("inclusive")
-                    .ok_or_else(|| format!("range expression missing inclusive in `{text}`"))?,
-                "range inclusive",
-            )?,
-        });
-    }
-    if text.starts_with("unary(") && text.ends_with(')') {
-        let inner = strip_prefix_suffix(text, "unary(", ")")?;
-        let parts = split_top_level(inner);
-        if parts.len() != 2 {
-            return Err(format!("malformed unary expression `{text}`"));
-        }
-        return Ok(ParsedExpr::Unary {
-            op: parse_unary_op(&parts[0])?,
-            expr: Box::new(parse_expr(&parts[1])?),
-        });
-    }
-    if text.starts_with("binary(") && text.ends_with(')') {
-        let inner = strip_prefix_suffix(text, "binary(", ")")?;
-        let parts = split_top_level(inner);
-        if parts.len() != 3 {
-            return Err(format!("malformed binary expression `{text}`"));
-        }
-        return Ok(ParsedExpr::Binary {
-            left: Box::new(parse_expr(&parts[0])?),
-            op: parse_binary_op(&parts[1])?,
-            right: Box::new(parse_expr(&parts[2])?),
-        });
-    }
-    if text.starts_with("generic(") && text.ends_with(')') {
-        let fields = parse_named_fields(strip_prefix_suffix(text, "generic(", ")")?)?;
-        let type_args = parse_list(
-            fields
-                .get("types")
-                .ok_or_else(|| format!("generic expression missing types in `{text}`"))?,
-        )?;
-        return Ok(ParsedExpr::Generic {
-            expr: Box::new(parse_expr(fields.get("expr").ok_or_else(|| {
-                format!("generic expression missing expr in `{text}`")
-            })?)?),
-            type_args,
-        });
-    }
-    if text.starts_with("phrase(") && text.ends_with(')') {
-        let fields = parse_named_fields(strip_prefix_suffix(text, "phrase(", ")")?)?;
-        let args = parse_list(
-            fields
-                .get("args")
-                .ok_or_else(|| format!("phrase missing args in `{text}`"))?,
-        )?
-        .into_iter()
-        .map(|item| parse_phrase_arg(&item))
-        .collect::<Result<Vec<_>, String>>()?;
-        let attached = parse_list(
-            fields
-                .get("attached")
-                .ok_or_else(|| format!("phrase missing attached in `{text}`"))?,
-        )?
-        .into_iter()
-        .map(|item| parse_header_attachment(&item))
-        .collect::<Result<Vec<_>, String>>()?;
-        let qualifier = fields
-            .get("qualifier")
-            .ok_or_else(|| format!("phrase missing qualifier in `{text}`"))?
-            .to_string();
-        let qualifier_kind = match fields.get("kind") {
-            Some(kind) => parse_phrase_qualifier_kind(kind)?,
-            None => classify_phrase_qualifier_kind(&qualifier)?,
-        };
-        let resolved_callable = fields
-            .get("resolved")
-            .map(|text| parse_runtime_symbol_path(text))
-            .transpose()?;
-        let resolved_routine = fields
-            .get("resolved_routine")
-            .map(|text| parse_runtime_string_field(text, "phrase resolved_routine"))
-            .transpose()?;
-        let resolved_signature = fields
-            .get("resolved_signature")
-            .map(|text| parse_runtime_string_field(text, "phrase resolved_signature"))
-            .transpose()?;
-        return Ok(ParsedExpr::Phrase {
-            subject: Box::new(parse_expr(
-                fields
-                    .get("subject")
-                    .ok_or_else(|| format!("phrase missing subject in `{text}`"))?,
-            )?),
-            args,
-            qualifier_kind,
-            qualifier,
-            resolved_callable,
-            resolved_routine,
-            resolved_signature,
-            attached,
-        });
-    }
-    Err(format!("unsupported runtime expression `{text}`"))
-}
-
-fn parse_runtime_symbol_path(text: &str) -> Result<Vec<String>, String> {
-    let path = text
-        .split('.')
-        .map(str::trim)
-        .map(ToString::to_string)
-        .collect::<Vec<_>>();
-    if path.is_empty()
-        || path
-            .iter()
-            .any(|segment| !is_simple_runtime_identifier(segment))
-    {
-        return Err(format!("unsupported runtime symbol path `{text}`"));
-    }
-    Ok(path)
-}
-
-fn parse_runtime_string_field(text: &str, context: &str) -> Result<String, String> {
-    match parse_expr(text)? {
-        ParsedExpr::Str(value) => Ok(value),
-        other => Err(format!(
-            "{context} expected string literal field, got `{other:?}`"
-        )),
-    }
-}
-
-fn is_simple_runtime_identifier(text: &str) -> bool {
-    let mut chars = text.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    (first == '_' || first.is_ascii_alphabetic())
-        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
-}
-
-fn parse_phrase_qualifier_kind(text: &str) -> Result<ParsedPhraseQualifierKind, String> {
-    match text.trim() {
-        "call" => Ok(ParsedPhraseQualifierKind::Call),
-        "try" => Ok(ParsedPhraseQualifierKind::Try),
-        "apply" => Ok(ParsedPhraseQualifierKind::Apply),
-        "await_apply" => Ok(ParsedPhraseQualifierKind::AwaitApply),
-        "bare_method" => Ok(ParsedPhraseQualifierKind::BareMethod),
-        "named_path" => Ok(ParsedPhraseQualifierKind::NamedPath),
-        other => Err(format!(
-            "unsupported runtime phrase qualifier kind `{other}`"
-        )),
-    }
-}
-
-fn is_simple_runtime_path(text: &str) -> bool {
-    text.split('.')
-        .all(|segment| is_simple_runtime_identifier(segment))
-}
-
-fn classify_phrase_qualifier_kind(text: &str) -> Result<ParsedPhraseQualifierKind, String> {
-    match text.trim() {
-        "call" => Ok(ParsedPhraseQualifierKind::Call),
-        "?" => Ok(ParsedPhraseQualifierKind::Try),
-        ">" => Ok(ParsedPhraseQualifierKind::Apply),
-        ">>" => Ok(ParsedPhraseQualifierKind::AwaitApply),
-        other if is_simple_runtime_path(other) && other.contains('.') => {
-            Ok(ParsedPhraseQualifierKind::NamedPath)
-        }
-        other if is_simple_runtime_path(other) => Ok(ParsedPhraseQualifierKind::BareMethod),
-        other => Err(format!("unsupported runtime phrase qualifier `{other}`")),
-    }
-}
-
-fn parse_runtime_bool_keyword(text: &str, context: &str) -> Result<bool, String> {
-    match text.trim() {
-        "true" => Ok(true),
-        "false" => Ok(false),
-        other => Err(format!("invalid runtime bool `{other}` in {context}")),
-    }
-}
-
-fn parse_optional_runtime_expr(text: &str) -> Result<Option<Box<ParsedExpr>>, String> {
-    if text.trim() == "none" {
-        Ok(None)
-    } else {
-        Ok(Some(Box::new(parse_expr(text)?)))
-    }
-}
-
-fn parse_phrase_arg(text: &str) -> Result<ParsedPhraseArg, String> {
-    if let Some((name, value)) = split_top_level_assignment(text) {
-        return Ok(ParsedPhraseArg {
-            name: Some(name.to_string()),
-            value: parse_expr(value)?,
-        });
-    }
-    Ok(ParsedPhraseArg {
-        name: None,
-        value: parse_expr(text)?,
-    })
-}
-
-fn parse_header_attachment(text: &str) -> Result<ParsedHeaderAttachment, String> {
-    if text.starts_with("named(") && text.ends_with(')') {
-        let fields = parse_named_fields(strip_prefix_suffix(text, "named(", ")")?)?;
-        let named_fields = fields
-            .into_iter()
-            .filter(|(name, _)| name != "forewords")
-            .collect::<Vec<_>>();
-        if named_fields.len() != 1 {
-            return Err(format!(
-                "named attachment must contain exactly one value in `{text}`"
-            ));
-        }
-        let (name, value) = named_fields
-            .into_iter()
-            .next()
-            .ok_or_else(|| format!("named attachment is empty in `{text}`"))?;
-        return Ok(ParsedHeaderAttachment::Named {
-            name,
-            value: parse_expr(&value)?,
-        });
-    }
-    if text.starts_with("chain(") && text.ends_with(')') {
-        let parts = split_top_level(strip_prefix_suffix(text, "chain(", ")")?);
-        if parts.len() != 2 {
-            return Err(format!("malformed chain attachment `{text}`"));
-        }
-        let _ = split_top_level_assignment(&parts[1])
-            .ok_or_else(|| format!("chain attachment missing forewords in `{text}`"))?;
-        return Ok(ParsedHeaderAttachment::Chain {
-            expr: parse_expr(&parts[0])?,
-        });
-    }
-    Err(format!("unsupported runtime attachment `{text}`"))
-}
-
-fn split_top_level_assignment(text: &str) -> Option<(&str, &str)> {
-    let mut depth = 0;
-    let mut in_string = false;
-    let mut escape = false;
-    for (index, ch) in text.char_indices() {
-        if in_string {
-            if escape {
-                escape = false;
-            } else if ch == '\\' {
-                escape = true;
-            } else if ch == '"' {
-                in_string = false;
-            }
-            continue;
-        }
-        match ch {
-            '"' => in_string = true,
-            '(' | '[' => depth += 1,
-            ')' | ']' => depth -= 1,
-            '=' if depth == 0 => return Some((&text[..index], &text[index + 1..])),
-            _ => {}
-        }
-    }
-    None
-}
-
-fn parse_assign_target(text: &str) -> Result<ParsedAssignTarget, String> {
-    if text.starts_with("name(") && text.ends_with(')') {
-        return Ok(ParsedAssignTarget::Name(
-            strip_prefix_suffix(text, "name(", ")")?.to_string(),
-        ));
-    }
-    if text.starts_with("member(") && text.ends_with(')') {
-        let inner = strip_prefix_suffix(text, "member(", ")")?;
-        let parts = split_top_level(inner);
-        if parts.len() != 2 {
-            return Err(format!("malformed runtime assign target `{text}`"));
-        }
-        return Ok(ParsedAssignTarget::Member {
-            target: Box::new(parse_assign_target(&parts[0])?),
-            member: parts[1].to_string(),
-        });
-    }
-    if text.starts_with("index(") && text.ends_with(')') {
-        let inner = strip_prefix_suffix(text, "index(", ")")?;
-        let parts = split_top_level(inner);
-        if parts.len() != 2 {
-            return Err(format!("malformed runtime assign target `{text}`"));
-        }
-        return Ok(ParsedAssignTarget::Index {
-            target: Box::new(parse_assign_target(&parts[0])?),
-            index: parse_expr(&parts[1])?,
-        });
-    }
-    Err(format!("unsupported runtime assign target `{text}`"))
-}
-
-fn parse_stmt(text: &str) -> Result<ParsedStmt, String> {
-    let fields = parse_named_fields(strip_prefix_suffix(text, "stmt(", ")")?)?;
-    let _forewords = parse_list(
-        fields
-            .get("forewords")
-            .ok_or_else(|| format!("runtime stmt missing forewords in `{text}`"))?,
-    )?;
-    let rollups = parse_list(
-        fields
-            .get("rollups")
-            .ok_or_else(|| format!("runtime stmt missing rollups in `{text}`"))?,
-    )?
-    .into_iter()
-    .map(|row| parse_rollup_row(&row))
-    .collect::<Result<Vec<_>, String>>()?;
-    let core = fields
-        .get("core")
-        .ok_or_else(|| format!("runtime stmt missing core in `{text}`"))?;
-    if core.starts_with("let(") && core.ends_with(')') {
-        let let_fields = parse_named_fields(strip_prefix_suffix(core, "let(", ")")?)?;
-        let mutable = match let_fields
-            .get("mutable")
-            .map(String::as_str)
-            .ok_or_else(|| format!("runtime let missing mutable in `{text}`"))?
-        {
-            "true" => true,
-            "false" => false,
-            other => return Err(format!("invalid runtime let mutable `{other}`")),
-        };
-        return Ok(ParsedStmt::Let {
-            mutable,
-            name: let_fields
-                .get("name")
-                .ok_or_else(|| format!("runtime let missing name in `{text}`"))?
-                .to_string(),
-            value: parse_expr(
-                let_fields
-                    .get("value")
-                    .ok_or_else(|| format!("runtime let missing value in `{text}`"))?,
-            )?,
-        });
-    }
-    if core.starts_with("expr(") && core.ends_with(')') {
-        return Ok(ParsedStmt::Expr {
-            expr: parse_expr(strip_prefix_suffix(core, "expr(", ")")?)?,
-            rollups,
-        });
-    }
-    if core.starts_with("return(") && core.ends_with(')') {
-        let inner = strip_prefix_suffix(core, "return(", ")")?;
-        return Ok(ParsedStmt::Return(if inner == "none" {
-            None
-        } else {
-            Some(parse_expr(inner)?)
-        }));
-    }
-    if core.starts_with("if(") && core.ends_with(')') {
-        let if_fields = parse_named_fields(strip_prefix_suffix(core, "if(", ")")?)?;
-        return Ok(ParsedStmt::If {
-            condition: parse_expr(
-                if_fields
-                    .get("cond")
-                    .ok_or_else(|| format!("runtime if missing cond in `{text}`"))?,
-            )?,
-            then_branch: parse_list(
-                if_fields
-                    .get("then")
-                    .ok_or_else(|| format!("runtime if missing then in `{text}`"))?,
-            )?
-            .into_iter()
-            .map(|item| parse_stmt(&item))
-            .collect::<Result<Vec<_>, String>>()?,
-            else_branch: parse_list(
-                if_fields
-                    .get("else")
-                    .ok_or_else(|| format!("runtime if missing else in `{text}`"))?,
-            )?
-            .into_iter()
-            .map(|item| parse_stmt(&item))
-            .collect::<Result<Vec<_>, String>>()?,
-            rollups,
-        });
-    }
-    if core.starts_with("while(") && core.ends_with(')') {
-        let while_fields = parse_named_fields(strip_prefix_suffix(core, "while(", ")")?)?;
-        return Ok(ParsedStmt::While {
-            condition: parse_expr(
-                while_fields
-                    .get("cond")
-                    .ok_or_else(|| format!("runtime while missing cond in `{text}`"))?,
-            )?,
-            body: parse_list(
-                while_fields
-                    .get("body")
-                    .ok_or_else(|| format!("runtime while missing body in `{text}`"))?,
-            )?
-            .into_iter()
-            .map(|item| parse_stmt(&item))
-            .collect::<Result<Vec<_>, String>>()?,
-            rollups,
-        });
-    }
-    if core.starts_with("for(") && core.ends_with(')') {
-        let for_fields = parse_named_fields(strip_prefix_suffix(core, "for(", ")")?)?;
-        return Ok(ParsedStmt::For {
-            binding: for_fields
-                .get("binding")
-                .ok_or_else(|| format!("runtime for missing binding in `{text}`"))?
-                .to_string(),
-            iterable: parse_expr(
-                for_fields
-                    .get("iterable")
-                    .ok_or_else(|| format!("runtime for missing iterable in `{text}`"))?,
-            )?,
-            body: parse_list(
-                for_fields
-                    .get("body")
-                    .ok_or_else(|| format!("runtime for missing body in `{text}`"))?,
-            )?
-            .into_iter()
-            .map(|item| parse_stmt(&item))
-            .collect::<Result<Vec<_>, String>>()?,
-            rollups,
-        });
-    }
-    if core.starts_with("defer(") && core.ends_with(')') {
-        return Ok(ParsedStmt::Defer(parse_expr(strip_prefix_suffix(
-            core, "defer(", ")",
-        )?)?));
-    }
-    if core == "break" {
-        return Ok(ParsedStmt::Break);
-    }
-    if core == "continue" {
-        return Ok(ParsedStmt::Continue);
-    }
-    if core.starts_with("assign(") && core.ends_with(')') {
-        let assign_fields = parse_named_fields(strip_prefix_suffix(core, "assign(", ")")?)?;
-        return Ok(ParsedStmt::Assign {
-            target: parse_assign_target(
-                assign_fields
-                    .get("target")
-                    .ok_or_else(|| format!("runtime assign missing target in `{text}`"))?,
-            )?,
-            op: parse_assign_op(
-                assign_fields
-                    .get("op")
-                    .ok_or_else(|| format!("runtime assign missing op in `{text}`"))?,
-            )?,
-            value: parse_expr(
-                assign_fields
-                    .get("value")
-                    .ok_or_else(|| format!("runtime assign missing value in `{text}`"))?,
-            )?,
-        });
-    }
-    Err(format!("unsupported runtime statement `{core}`"))
 }
 
 fn resolve_callable_path(
@@ -4219,6 +3064,31 @@ fn parse_runtime_value_type_args(type_name: &str) -> Vec<String> {
     split_runtime_type_args(&type_name[start + 1..type_name.len() - 1])
 }
 
+fn strip_runtime_reference_prefix(text: &str) -> &str {
+    let trimmed = text.trim_start();
+    if let Some(rest) = trimmed.strip_prefix("&mut") {
+        return rest.trim_start();
+    }
+    if let Some(rest) = trimmed.strip_prefix('&') {
+        return rest.trim_start();
+    }
+    trimmed
+}
+
+fn parse_runtime_type_application(type_name: &str) -> Option<(String, Vec<String>)> {
+    let trimmed = strip_runtime_reference_prefix(type_name).trim();
+    let Some(start) = trimmed.find('[') else {
+        return Some((trimmed.to_string(), Vec::new()));
+    };
+    if !trimmed.ends_with(']') {
+        return None;
+    }
+    Some((
+        trimmed[..start].trim().to_string(),
+        split_runtime_type_args(&trimmed[start + 1..trimmed.len() - 1]),
+    ))
+}
+
 fn runtime_type_root_name(type_name: &str) -> String {
     let base = type_name
         .split_once('[')
@@ -4226,6 +3096,41 @@ fn runtime_type_root_name(type_name: &str) -> String {
         .unwrap_or(type_name)
         .trim();
     base.rsplit('.').next().unwrap_or(base).to_string()
+}
+
+fn runtime_type_name_matches(expected: &str, actual: &str) -> bool {
+    expected == actual
+        || expected.ends_with(&format!(".{actual}"))
+        || actual.ends_with(&format!(".{expected}"))
+}
+
+fn runtime_declared_type_matches_actual(
+    declared_type: &str,
+    actual_type: &str,
+    type_params: &BTreeSet<String>,
+) -> bool {
+    let Some((declared_base, declared_args)) = parse_runtime_type_application(declared_type) else {
+        return false;
+    };
+    let Some((actual_base, actual_args)) = parse_runtime_type_application(actual_type) else {
+        return false;
+    };
+    if !runtime_type_name_matches(&declared_base, &actual_base) {
+        return false;
+    }
+    if declared_args.len() != actual_args.len() {
+        return declared_args.is_empty() && actual_args.is_empty();
+    }
+    declared_args
+        .iter()
+        .zip(actual_args.iter())
+        .all(|(declared_arg, actual_arg)| {
+            let trimmed = declared_arg.trim();
+            if type_params.contains(trimmed) {
+                return true;
+            }
+            runtime_declared_type_matches_actual(trimmed, actual_arg, type_params)
+        })
 }
 
 fn runtime_variant_enum_name(variant_name: &str) -> String {
@@ -4311,6 +3216,22 @@ fn resolve_routine_candidate_indices(
         .enumerate()
         .filter_map(|(index, routine)| {
             (routine.module_id == module_id && routine.symbol_name == symbol_name).then_some(index)
+        })
+        .collect()
+}
+
+fn resolve_dynamic_method_candidate_indices(
+    plan: &RuntimePackagePlan,
+    method_name: &str,
+    trait_path: &[String],
+) -> Vec<usize> {
+    plan.routines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, routine)| {
+            (routine.symbol_name == method_name
+                && routine.impl_trait_path.as_deref() == Some(trait_path))
+            .then_some(index)
         })
         .collect()
 }
@@ -6045,6 +4966,54 @@ fn runtime_receiver_type_args(
     }
 }
 
+fn runtime_value_type_text(
+    receiver: &RuntimeValue,
+    state: &RuntimeExecutionState,
+) -> Option<String> {
+    match receiver {
+        RuntimeValue::Record { name, .. } => Some(name.clone()),
+        RuntimeValue::Opaque(RuntimeOpaqueValue::Channel(_)) => {
+            let type_args = runtime_receiver_type_args(receiver, state);
+            Some(if type_args.is_empty() {
+                opaque_type_name(match receiver {
+                    RuntimeValue::Opaque(value) => value,
+                    _ => unreachable!(),
+                })
+                .to_string()
+            } else {
+                format!(
+                    "{}[{}]",
+                    opaque_type_name(match receiver {
+                        RuntimeValue::Opaque(value) => value,
+                        _ => unreachable!(),
+                    }),
+                    type_args.join(", ")
+                )
+            })
+        }
+        RuntimeValue::Opaque(RuntimeOpaqueValue::Mutex(_))
+        | RuntimeValue::Opaque(RuntimeOpaqueValue::Arena(_))
+        | RuntimeValue::Opaque(RuntimeOpaqueValue::FrameArena(_))
+        | RuntimeValue::Opaque(RuntimeOpaqueValue::PoolArena(_))
+        | RuntimeValue::Opaque(RuntimeOpaqueValue::Task(_))
+        | RuntimeValue::Opaque(RuntimeOpaqueValue::Thread(_)) => {
+            let type_args = runtime_receiver_type_args(receiver, state);
+            let opaque_name = match receiver {
+                RuntimeValue::Opaque(value) => opaque_type_name(value),
+                _ => unreachable!(),
+            };
+            Some(if type_args.is_empty() {
+                opaque_name.to_string()
+            } else {
+                format!("{opaque_name}[{}]", type_args.join(", "))
+            })
+        }
+        RuntimeValue::Opaque(value) => Some(opaque_type_name(value).to_string()),
+        RuntimeValue::Variant { name, .. } => Some(runtime_variant_enum_name(name)),
+        _ => runtime_value_type_root(receiver),
+    }
+}
+
 fn runtime_value_type_root(receiver: &RuntimeValue) -> Option<String> {
     match receiver {
         RuntimeValue::Int(_) => Some("Int".to_string()),
@@ -6970,9 +5939,19 @@ fn resolve_routine_index_for_call(
     callable: &[String],
     call_args: &[RuntimeCallArg],
     resolved_routine: Option<&str>,
-    resolved_signature: Option<&str>,
+    dynamic_dispatch: Option<&ParsedDynamicDispatch>,
+    allow_receiver_root_fallback: bool,
+    state: Option<&RuntimeExecutionState>,
 ) -> Result<Option<usize>, String> {
-    let candidates = resolve_routine_candidate_indices(plan, current_module_id, callable);
+    let candidates = match dynamic_dispatch {
+        Some(ParsedDynamicDispatch::TraitMethod { trait_path }) => {
+            let Some(method_name) = callable.last() else {
+                return Ok(None);
+            };
+            resolve_dynamic_method_candidate_indices(plan, method_name, trait_path)
+        }
+        None => resolve_routine_candidate_indices(plan, current_module_id, callable),
+    };
     if candidates.is_empty() {
         return Ok(None);
     }
@@ -6998,34 +5977,26 @@ fn resolve_routine_index_for_call(
             )),
         };
     }
-    if let Some(signature) = resolved_signature {
-        let filtered = candidates
-            .into_iter()
-            .filter(|index| {
-                plan.routines
-                    .get(*index)
-                    .map(|routine| routine.signature_row == signature)
-                    .unwrap_or(false)
-            })
-            .collect::<Vec<_>>();
-        return match filtered.as_slice() {
-            [] => Err(format!(
-                "runtime call `{}` has no overload matching lowered signature `{signature}`",
-                callable.join(".")
-            )),
-            [index] => Ok(Some(*index)),
-            _ => Err(format!(
-                "runtime call `{}` remains ambiguous for lowered signature `{signature}`",
-                callable.join(".")
-            )),
-        };
-    }
-    if candidates.len() == 1 {
+    if dynamic_dispatch.is_none() && candidates.len() == 1 {
         return Ok(candidates.into_iter().next());
     }
-    let Some(receiver_root) = call_args
-        .first()
-        .and_then(|arg| runtime_value_type_root(&arg.value))
+    if !allow_receiver_root_fallback && dynamic_dispatch.is_none() {
+        return Err(format!(
+            "runtime call `{}` is ambiguous without lowered routine identity",
+            callable.join(".")
+        ));
+    }
+    let Some(receiver) = call_args.first().map(|arg| &arg.value) else {
+        return Err(format!(
+            "runtime call `{}` is ambiguous with no receiver type information",
+            callable.join(".")
+        ));
+    };
+    let receiver_type_text = state.and_then(|state| runtime_value_type_text(receiver, state));
+    let Some(receiver_root) = receiver_type_text
+        .as_deref()
+        .map(runtime_type_root_name)
+        .or_else(|| runtime_value_type_root(receiver))
     else {
         return Err(format!(
             "runtime call `{}` is ambiguous with no receiver type information",
@@ -7037,8 +6008,22 @@ fn resolve_routine_index_for_call(
         .filter(|index| {
             plan.routines
                 .get(*index)
-                .and_then(|routine| routine.params.first())
-                .map(|param| runtime_type_root_name(&param.ty) == receiver_root)
+                .map(|routine| {
+                    let declared = routine
+                        .impl_target_type
+                        .as_deref()
+                        .or_else(|| routine.params.first().map(|param| param.ty.as_str()));
+                    let Some(declared) = declared else {
+                        return false;
+                    };
+                    let type_params = routine.type_params.iter().cloned().collect::<BTreeSet<_>>();
+                    receiver_type_text
+                        .as_deref()
+                        .map(|actual| {
+                            runtime_declared_type_matches_actual(declared, actual, &type_params)
+                        })
+                        .unwrap_or_else(|| runtime_type_root_name(declared) == receiver_root)
+                })
                 .unwrap_or(false)
         })
         .collect::<Vec<_>>();
@@ -7088,10 +6073,11 @@ fn resolve_rollup_handler_callable_path(
 fn execute_call_by_path(
     callable: &[String],
     resolved_routine: Option<&str>,
-    resolved_signature: Option<&str>,
+    dynamic_dispatch: Option<&ParsedDynamicDispatch>,
     current_module_id: &str,
     type_args: Vec<String>,
     call_args: Vec<RuntimeCallArg>,
+    allow_receiver_root_fallback: bool,
     plan: &RuntimePackagePlan,
     scopes: &mut Vec<RuntimeScope>,
     state: &mut RuntimeExecutionState,
@@ -7104,7 +6090,9 @@ fn execute_call_by_path(
         callable,
         &call_args,
         resolved_routine,
-        resolved_signature,
+        dynamic_dispatch,
+        allow_receiver_root_fallback,
+        Some(state),
     )? {
         let routine = plan
             .routines
@@ -7156,6 +6144,8 @@ fn execute_runtime_apply_phrase(
     subject: &ParsedExpr,
     args: &[ParsedPhraseArg],
     attached: &[ParsedHeaderAttachment],
+    resolved_callable: Option<&[String]>,
+    resolved_routine: Option<&str>,
     plan: &RuntimePackagePlan,
     current_module_id: &str,
     scopes: &mut Vec<RuntimeScope>,
@@ -7165,7 +6155,9 @@ fn execute_runtime_apply_phrase(
     host: &mut dyn RuntimeHost,
     allow_async: bool,
 ) -> RuntimeEvalResult<RuntimeValue> {
-    let callable = resolve_callable_path(subject, aliases)
+    let callable = resolved_callable
+        .map(|path| path.to_vec())
+        .or_else(|| resolve_callable_path(subject, aliases))
         .ok_or_else(|| format!("unsupported runtime callable `{subject:?}`"))?;
     let type_args = resolve_runtime_type_args(&extract_generic_type_args(subject), type_bindings);
     if resolve_routine_index(plan, current_module_id, &callable).is_none()
@@ -7215,11 +6207,12 @@ fn execute_runtime_apply_phrase(
     )?;
     Ok(execute_call_by_path(
         &callable,
-        None,
+        resolved_routine,
         None,
         current_module_id,
         type_args,
         call_args,
+        false,
         plan,
         scopes,
         state,
@@ -7235,7 +6228,7 @@ fn execute_runtime_method_call(
     qualifier: &str,
     resolved_callable: Option<&[String]>,
     resolved_routine: Option<&str>,
-    resolved_signature: Option<&str>,
+    dynamic_dispatch: Option<&ParsedDynamicDispatch>,
     plan: &RuntimePackagePlan,
     current_module_id: &str,
     scopes: &mut Vec<RuntimeScope>,
@@ -7281,10 +6274,11 @@ fn execute_runtime_method_call(
     Ok(execute_call_by_path(
         &callable,
         resolved_routine,
-        resolved_signature,
+        dynamic_dispatch,
         current_module_id,
         type_args,
         call_args,
+        resolved_routine.is_none(),
         plan,
         scopes,
         state,
@@ -7344,6 +6338,7 @@ fn execute_runtime_named_qualifier_call(
         current_module_id,
         type_args,
         call_args,
+        false,
         plan,
         scopes,
         state,
@@ -7359,7 +6354,7 @@ fn eval_qualifier(
     qualifier: &str,
     resolved_callable: Option<&[String]>,
     resolved_routine: Option<&str>,
-    resolved_signature: Option<&str>,
+    dynamic_dispatch: Option<&ParsedDynamicDispatch>,
     plan: &RuntimePackagePlan,
     current_module_id: &str,
     scopes: &mut Vec<RuntimeScope>,
@@ -7375,7 +6370,7 @@ fn eval_qualifier(
         qualifier,
         resolved_callable,
         resolved_routine,
-        resolved_signature,
+        dynamic_dispatch,
         plan,
         current_module_id,
         scopes,
@@ -9679,9 +8674,16 @@ fn reject_edit_chain_stage_call(
     call_args: &[RuntimeCallArg],
     plan: &RuntimePackagePlan,
 ) -> RuntimeEvalResult<()> {
-    if let Some(routine_index) =
-        resolve_routine_index_for_call(plan, current_module_id, callable, call_args, None, None)?
-    {
+    if let Some(routine_index) = resolve_routine_index_for_call(
+        plan,
+        current_module_id,
+        callable,
+        call_args,
+        None,
+        None,
+        false,
+        None,
+    )? {
         let routine = plan
             .routines
             .get(routine_index)
@@ -9742,6 +8744,7 @@ fn execute_runtime_chain_stage(
         current_module_id,
         type_args,
         call_args,
+        false,
         plan,
         scopes,
         state,
@@ -9774,9 +8777,16 @@ fn spawn_runtime_chain_stage(
         host,
     )?;
     reject_edit_chain_stage_call(&callable, current_module_id, &call_args, plan)?;
-    if let Some(routine_index) =
-        resolve_routine_index_for_call(plan, current_module_id, &callable, &call_args, None, None)?
-    {
+    if let Some(routine_index) = resolve_routine_index_for_call(
+        plan,
+        current_module_id,
+        &callable,
+        &call_args,
+        None,
+        None,
+        false,
+        None,
+    )? {
         let routine = plan
             .routines
             .get(routine_index)
@@ -9796,7 +8806,7 @@ fn spawn_runtime_chain_stage(
     let pending = RuntimePendingState::Pending(RuntimeDeferredWork::Call(RuntimeDeferredCall {
         callable,
         resolved_routine: None,
-        resolved_signature: None,
+        dynamic_dispatch: None,
         current_module_id: current_module_id.to_string(),
         type_args: type_args.clone(),
         call_args,
@@ -9921,6 +8931,8 @@ fn eval_runtime_chain_expr(
                         &call_args,
                         None,
                         None,
+                        false,
+                        None,
                     )
                     .ok()
                     .flatten()
@@ -9979,7 +8991,7 @@ fn execute_deferred_work(
             let RuntimeDeferredCall {
                 callable,
                 resolved_routine,
-                resolved_signature,
+                dynamic_dispatch,
                 current_module_id,
                 type_args,
                 call_args,
@@ -9992,10 +9004,11 @@ fn execute_deferred_work(
             let result = execute_call_by_path(
                 &callable,
                 resolved_routine.as_deref(),
-                resolved_signature.as_deref(),
+                dynamic_dispatch.as_ref(),
                 &current_module_id,
                 type_args,
                 call_args,
+                false,
                 plan,
                 &mut scopes,
                 state,
@@ -10124,7 +9137,7 @@ fn capture_spawned_phrase_call(
     qualifier: &str,
     resolved_callable: Option<&[String]>,
     resolved_routine: Option<&str>,
-    resolved_signature: Option<&str>,
+    dynamic_dispatch: Option<&ParsedDynamicDispatch>,
     plan: &RuntimePackagePlan,
     current_module_id: &str,
     scopes: &mut Vec<RuntimeScope>,
@@ -10133,12 +9146,15 @@ fn capture_spawned_phrase_call(
     state: &mut RuntimeExecutionState,
     host: &mut dyn RuntimeHost,
 ) -> RuntimeEvalResult<Option<RuntimeValue>> {
-    let (callable, type_args, call_args, call_routine, call_signature) = match qualifier_kind {
+    let (callable, type_args, call_args, call_routine, call_dynamic_dispatch) = match qualifier_kind
+    {
         ParsedPhraseQualifierKind::Call | ParsedPhraseQualifierKind::Apply => {
             if qualifier != "call" && qualifier_kind == ParsedPhraseQualifierKind::Call {
                 return Ok(None);
             }
-            let callable = resolve_callable_path(subject, aliases)
+            let callable = resolved_callable
+                .map(|path| path.to_vec())
+                .or_else(|| resolve_callable_path(subject, aliases))
                 .ok_or_else(|| format!("unsupported runtime callable `{subject:?}`"))?;
             let type_args =
                 resolve_runtime_type_args(&extract_generic_type_args(subject), type_bindings);
@@ -10153,7 +9169,13 @@ fn capture_spawned_phrase_call(
                 state,
                 host,
             )?;
-            (callable, type_args, call_args, None, None)
+            (
+                callable,
+                type_args,
+                call_args,
+                resolved_routine.map(ToString::to_string),
+                None,
+            )
         }
         ParsedPhraseQualifierKind::NamedPath => {
             let receiver = eval_expr(
@@ -10233,7 +9255,7 @@ fn capture_spawned_phrase_call(
                 type_args,
                 call_args,
                 resolved_routine.map(ToString::to_string),
-                resolved_signature.map(ToString::to_string),
+                dynamic_dispatch.cloned(),
             )
         }
         ParsedPhraseQualifierKind::Try | ParsedPhraseQualifierKind::AwaitApply => return Ok(None),
@@ -10245,7 +9267,9 @@ fn capture_spawned_phrase_call(
         &callable,
         &call_args,
         call_routine.as_deref(),
-        call_signature.as_deref(),
+        call_dynamic_dispatch.as_ref(),
+        call_routine.is_none() && qualifier_kind == ParsedPhraseQualifierKind::BareMethod,
+        Some(state),
     )? {
         let routine = plan
             .routines
@@ -10283,7 +9307,7 @@ fn capture_spawned_phrase_call(
     let pending = RuntimePendingState::Pending(RuntimeDeferredWork::Call(RuntimeDeferredCall {
         callable,
         resolved_routine: call_routine,
-        resolved_signature: call_signature,
+        dynamic_dispatch: call_dynamic_dispatch,
         current_module_id: current_module_id.to_string(),
         type_args: type_args.clone(),
         call_args,
@@ -10382,7 +9406,7 @@ fn eval_spawn_expr(
         qualifier,
         resolved_callable,
         resolved_routine,
-        resolved_signature,
+        dynamic_dispatch,
         attached,
     } = expr
     {
@@ -10395,7 +9419,7 @@ fn eval_spawn_expr(
             qualifier,
             resolved_callable.as_deref(),
             resolved_routine.as_deref(),
-            resolved_signature.as_deref(),
+            dynamic_dispatch.as_ref(),
             plan,
             current_module_id,
             scopes,
@@ -10828,13 +9852,15 @@ fn eval_expr(
             qualifier,
             resolved_callable,
             resolved_routine,
-            resolved_signature,
+            dynamic_dispatch,
             attached,
         } => match qualifier_kind {
             ParsedPhraseQualifierKind::Call => execute_runtime_apply_phrase(
                 subject,
                 args,
                 attached,
+                resolved_callable.as_deref(),
+                resolved_routine.as_deref(),
                 plan,
                 current_module_id,
                 scopes,
@@ -10864,7 +9890,7 @@ fn eval_expr(
                 qualifier,
                 resolved_callable.as_deref(),
                 resolved_routine.as_deref(),
-                resolved_signature.as_deref(),
+                dynamic_dispatch.as_ref(),
                 plan,
                 current_module_id,
                 scopes,
@@ -10889,6 +9915,8 @@ fn eval_expr(
                 subject,
                 args,
                 attached,
+                resolved_callable.as_deref(),
+                None,
                 plan,
                 current_module_id,
                 scopes,
@@ -10920,6 +9948,8 @@ fn eval_expr(
                     subject,
                     args,
                     attached,
+                    None,
+                    None,
                     plan,
                     current_module_id,
                     scopes,
@@ -10959,6 +9989,8 @@ fn eval_expr(
                 constructor,
                 init_args,
                 attached,
+                None,
+                None,
                 plan,
                 current_module_id,
                 scopes,
@@ -11087,6 +10119,7 @@ fn execute_page_rollups(
                 value: subject_value,
                 source_expr: ParsedExpr::Path(vec![rollup.subject.clone()]),
             }],
+            false,
             plan,
             scopes,
             state,
@@ -11217,8 +10250,9 @@ fn execute_statements(
                 )?;
                 FlowSignal::Next
             }
-            ParsedStmt::Return(expr) => FlowSignal::Return(match expr {
-                Some(expr) => eval_expr(
+            ParsedStmt::ReturnVoid => FlowSignal::Return(RuntimeValue::Unit),
+            ParsedStmt::ReturnValue { value } => FlowSignal::Return(match value {
+                expr => eval_expr(
                     expr,
                     plan,
                     current_module_id,
@@ -11228,7 +10262,6 @@ fn execute_statements(
                     state,
                     host,
                 )?,
-                None => RuntimeValue::Unit,
             }),
             ParsedStmt::If {
                 condition,
@@ -11699,5 +10732,9 @@ pub fn execute_main(plan: &RuntimePackagePlan, host: &mut dyn RuntimeHost) -> Re
     }
 }
 
+#[cfg(test)]
+mod test_parse;
+#[cfg(test)]
+pub(crate) use test_parse::{parse_rollup_row, parse_stmt};
 #[cfg(test)]
 mod tests;

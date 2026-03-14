@@ -9,28 +9,47 @@ export fn new[K]() -> Set[K]:
     let entries = std.collections.map.new[K, Bool] :: :: call
     return std.collections.set.Set[K] :: entries = entries :: call
 
-export fn len[K](read self: Set[K]) -> Int:
-    return std.kernel.collections.map_len :: self.entries :: call
+impl[K] Set[K]:
+    fn len(read self: Set[K]) -> Int:
+        return std.kernel.collections.map_len :: self.entries :: call
 
-export fn is_empty[K](read self: Set[K]) -> Bool:
-    return (std.collections.set.len :: self :: call) == 0
+    fn is_empty(read self: Set[K]) -> Bool:
+        return (self :: :: len) == 0
 
-export fn has[K](read self: Set[K], key: K) -> Bool:
-    return std.kernel.collections.map_has :: self.entries, key :: call
+    fn has(read self: Set[K], key: K) -> Bool:
+        return std.kernel.collections.map_has :: self.entries, key :: call
 
-export fn insert[K](edit self: Set[K], key: K) -> Bool:
-    let mut entries = self.entries
-    if std.kernel.collections.map_has :: entries, key :: call:
-        return false
-    std.kernel.collections.map_set :: entries, key, true :: call
-    self.entries = entries
-    return true
+    fn insert(edit self: Set[K], key: K) -> Bool:
+        let mut entries = self.entries
+        if std.kernel.collections.map_has :: entries, key :: call:
+            return false
+        std.kernel.collections.map_set :: entries, key, true :: call
+        self.entries = entries
+        return true
 
-export fn remove[K](edit self: Set[K], key: K) -> Bool:
-    let mut entries = self.entries
-    let removed = std.kernel.collections.map_remove :: entries, key :: call
-    self.entries = entries
-    return removed
+    fn remove(edit self: Set[K], key: K) -> Bool:
+        let mut entries = self.entries
+        let removed = std.kernel.collections.map_remove :: entries, key :: call
+        self.entries = entries
+        return removed
 
-export fn items[K](read self: Set[K]) -> List[K]:
-    return std.collections.map.keys[K, Bool] :: self.entries :: call
+    fn items(read self: Set[K]) -> List[K]:
+        return std.collections.map.keys[K, Bool] :: self.entries :: call
+
+export fn len[K](read set: Set[K]) -> Int:
+    return set :: :: len
+
+export fn is_empty[K](read set: Set[K]) -> Bool:
+    return set :: :: is_empty
+
+export fn has[K](read set: Set[K], key: K) -> Bool:
+    return set :: key :: has
+
+export fn insert[K](edit set: Set[K], key: K) -> Bool:
+    return set :: key :: insert
+
+export fn remove[K](edit set: Set[K], key: K) -> Bool:
+    return set :: key :: remove
+
+export fn items[K](read set: Set[K]) -> List[K]:
+    return set :: :: items

@@ -3,7 +3,7 @@
 Status: `completed`
 
 ### Summary
-Use [milestone_6_7_review_findings.md](c:/Users/Weaver/Documents/GitHub/Arcana/tmp/milestone_6_7_review_findings.md) as the source checklist and close every item to a terminal state before returning to AOT work. Terminal means exactly one of: fixed in implementation, fixed by explicit contract/spec clarification, intentionally narrowed with updated authority docs, or removed as stale/invalid. No finding stays ambiguous or “known debt”.
+Use [milestone_6_7_findings_closure_matrix_v1.md](c:/Users/Weaver/Documents/GitHub/Arcana/docs/reference/audits/milestone_6_7_findings_closure_matrix_v1.md) as the source checklist and closure ledger before returning to AOT work. Terminal means exactly one of: fixed in implementation, fixed by explicit contract/spec clarification, intentionally narrowed with updated authority docs, or removed as stale/invalid. No finding stays ambiguous or “known debt”.
 
 The program should run in six ordered tranches. First focus is executable backend contract closure, because it supersedes the largest downstream symptom cluster and makes later scheduler/AOT work cleaner instead of compounding the current heuristic runtime shape.
 
