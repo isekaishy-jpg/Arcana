@@ -5153,6 +5153,48 @@ mod tests {
     }
 
     #[test]
+    fn check_path_accepts_workspace_root_package_with_members_and_deps() {
+        let root = make_temp_workspace(
+            "workspace_root_package",
+            &["app"],
+            &[
+                (
+                    "src/shelf.arc",
+                    "import core\nfn main() -> Int:\n    return core.value :: :: call\n",
+                ),
+                ("src/types.arc", ""),
+                ("app/book.toml", "name = \"app\"\nkind = \"app\"\n"),
+                ("app/src/shelf.arc", "fn main() -> Int:\n    return 0\n"),
+                ("app/src/types.arc", ""),
+                ("core/book.toml", "name = \"core\"\nkind = \"lib\"\n"),
+                (
+                    "core/src/book.arc",
+                    "export fn value() -> Int:\n    return 7\n",
+                ),
+                ("core/src/types.arc", ""),
+            ],
+        );
+        fs::write(
+            root.join("book.toml"),
+            concat!(
+                "name = \"workspace\"\n",
+                "kind = \"app\"\n",
+                "[workspace]\n",
+                "members = [\"app\"]\n",
+                "[deps]\n",
+                "core = { path = \"core\" }\n",
+            ),
+        )
+        .expect("workspace manifest should be writable");
+
+        let summary = check_path(&root).expect("workspace root package should check");
+        assert_eq!(summary.package_count, 3);
+        assert_eq!(summary.module_count, 6);
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
     fn check_sources_rejects_tuple_contract_fixtures() {
         let repo_root = repo_root();
         for (fixture, expected) in [

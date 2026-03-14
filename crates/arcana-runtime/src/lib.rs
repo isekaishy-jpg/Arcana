@@ -2884,17 +2884,32 @@ fn parse_type_param_row(text: &str) -> Result<String, String> {
 }
 
 fn parse_behavior_attr_row(text: &str) -> Result<(String, String), String> {
-    let parts = text.split(':').collect::<Vec<_>>();
-    if parts.len() != 2 {
-        return Err(format!("malformed runtime behavior attr row `{text}`"));
-    }
-    let name = parts[0]
+    let payload = text
         .strip_prefix("name=")
         .ok_or_else(|| format!("runtime behavior attr row missing name in `{text}`"))?;
-    let value = parts[1]
-        .strip_prefix("value=")
-        .ok_or_else(|| format!("runtime behavior attr row missing value in `{text}`"))?;
-    Ok((name.to_string(), value.to_string()))
+    let Some((name, value)) = payload.split_once(":value=") else {
+        return Err(format!("malformed runtime behavior attr row `{text}`"));
+    };
+    let decode_part = |part: &str| {
+        if part.starts_with('"') {
+            decode_row_string(part)
+        } else {
+            Ok(part.to_string())
+        }
+    };
+    let name = decode_part(name)?;
+    let value = decode_part(value)?;
+    if name.is_empty() {
+        return Err(format!(
+            "runtime behavior attr row missing name in `{text}`"
+        ));
+    }
+    if value.is_empty() {
+        return Err(format!(
+            "runtime behavior attr row missing value in `{text}`"
+        ));
+    }
+    Ok((name, value))
 }
 
 fn decode_row_string(text: &str) -> Result<String, String> {

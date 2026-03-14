@@ -609,7 +609,13 @@ fn render_behavior_attr_rows(symbol: &HirSymbol) -> Vec<String> {
     symbol
         .behavior_attrs
         .iter()
-        .map(|attr| format!("name={}:value={}", attr.name, attr.value))
+        .map(|attr| {
+            format!(
+                "name=\"{}\":value=\"{}\"",
+                quote_text(&attr.name),
+                quote_text(&attr.value)
+            )
+        })
         .collect()
 }
 

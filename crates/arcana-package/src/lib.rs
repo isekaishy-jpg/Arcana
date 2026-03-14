@@ -2,7 +2,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use arcana_aot::{AOT_INTERNAL_FORMAT, compile_package, render_package_artifact};
+use arcana_aot::{
+    AOT_INTERNAL_FORMAT, AotPackageArtifact, compile_package, render_package_artifact,
+};
 use arcana_hir::{
     HirWorkspacePackage, HirWorkspaceSummary, build_package_layout, build_package_summary,
     build_workspace_package, build_workspace_summary, derive_source_module_path, lower_module_text,
@@ -203,15 +205,14 @@ pub fn load_workspace_graph(root_dir: &Path) -> PackageResult<WorkspaceGraph> {
     let root_manifest = parse_manifest(&root_manifest_path)?;
     let root_name = root_manifest.name.clone();
 
-    let seed_paths = if root_manifest.workspace_members.is_empty() {
-        vec![root_dir.clone()]
-    } else {
-        root_manifest
-            .workspace_members
-            .iter()
-            .map(|rel| canonicalize_dir(&root_dir.join(rel)))
-            .collect::<PackageResult<Vec<_>>>()?
-    };
+    let mut seed_paths = root_manifest
+        .workspace_members
+        .iter()
+        .map(|rel| canonicalize_dir(&root_dir.join(rel)))
+        .collect::<PackageResult<Vec<_>>>()?;
+    if seed_paths.is_empty() || has_root_module(&root_dir, &root_manifest.kind) {
+        seed_paths.push(root_dir.clone());
+    }
 
     let mut queue = VecDeque::from(seed_paths);
     let mut pending_by_dir = BTreeMap::<PathBuf, PendingMember>::new();
@@ -547,6 +548,7 @@ pub fn plan_build(
         let api_fingerprint = member_fingerprints.api.clone();
         let artifact_rel_path = artifact_rel_path(name, &fingerprint, &member.kind);
         let existing = existing_lock.and_then(|lock| lock.members.get(name));
+        let format = AOT_INTERNAL_FORMAT.to_string();
         let artifact_abs_path = graph.root_dir.join(&artifact_rel_path);
         let fingerprint_changed = existing
             .map(|entry| entry.fingerprint != fingerprint)
@@ -554,15 +556,16 @@ pub fn plan_build(
         let api_fingerprint_changed = existing
             .map(|entry| entry.api_fingerprint != api_fingerprint)
             .unwrap_or(true);
+        let format_changed = existing.map(|entry| entry.format != format).unwrap_or(true);
         let upstream_api_changed = member
             .deps
             .iter()
             .any(|dep| api_changed.get(dep).copied().unwrap_or(false));
-        let artifact_missing = !artifact_abs_path.is_file();
         let built = fingerprint_changed
             || api_fingerprint_changed
             || upstream_api_changed
-            || artifact_missing;
+            || format_changed
+            || !cached_artifact_matches_format(&artifact_abs_path, &format);
         api_changed.insert(name.clone(), api_fingerprint_changed);
         statuses.push(BuildStatus {
             member: name.clone(),
@@ -575,7 +578,7 @@ pub fn plan_build(
             api_fingerprint,
             artifact_rel_path,
             kind: member.kind.clone(),
-            format: AOT_INTERNAL_FORMAT.to_string(),
+            format,
         });
     }
 
@@ -1174,7 +1177,12 @@ fn relative_from_root(path: &Path, root: &Path) -> PackageResult<String> {
             path.display()
         )
     })?;
-    Ok(rel.to_string_lossy().replace('\\', "/"))
+    let rendered = rel.to_string_lossy().replace('\\', "/");
+    if rendered.is_empty() {
+        Ok(".".to_string())
+    } else {
+        Ok(rendered)
+    }
 }
 
 fn artifact_rel_path(name: &str, fingerprint: &str, kind: &GrimoireKind) -> String {
@@ -1191,6 +1199,16 @@ fn artifact_rel_path(name: &str, fingerprint: &str, kind: &GrimoireKind) -> Stri
 
 fn sanitize_fingerprint(text: &str) -> String {
     text.replace(':', "_")
+}
+
+fn cached_artifact_matches_format(path: &Path, expected_format: &str) -> bool {
+    let Ok(text) = fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(artifact) = toml::from_str::<AotPackageArtifact>(&text) else {
+        return false;
+    };
+    artifact.format == expected_format
 }
 
 fn format_string_array(items: &[String]) -> String {
@@ -1316,6 +1334,50 @@ mod tests {
     }
 
     #[test]
+    fn load_workspace_graph_includes_root_package_when_present() {
+        let dir = temp_dir("graph_root_member");
+        write_file(
+            &dir.join("book.toml"),
+            concat!(
+                "name = \"workspace\"\n",
+                "kind = \"app\"\n",
+                "[workspace]\n",
+                "members = [\"app\"]\n",
+                "[deps]\n",
+                "core = { path = \"core\" }\n",
+            ),
+        );
+        write_file(
+            &dir.join("src").join("shelf.arc"),
+            "import core\nfn main() -> Int:\n    return core.value :: :: call\n",
+        );
+        write_file(&dir.join("src").join("types.arc"), "// root types\n");
+        write_grimoire(&dir.join("app"), GrimoireKind::App, "app", &[]);
+        write_grimoire(&dir.join("core"), GrimoireKind::Lib, "core", &[]);
+        write_file(
+            &dir.join("core/src/book.arc"),
+            "export fn value() -> Int:\n    return 7\n",
+        );
+
+        let graph = load_workspace_graph(&dir).expect("load graph");
+        assert_eq!(
+            graph
+                .members
+                .iter()
+                .map(|member| member.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["app", "core", "workspace"]
+        );
+        let root = graph
+            .member("workspace")
+            .expect("root package should be in workspace graph");
+        assert_eq!(root.rel_dir, ".");
+        assert_eq!(root.deps, vec!["core".to_string()]);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn load_workspace_hir_includes_root_package_and_implicit_std() {
         let dir = temp_dir("workspace_hir");
         write_file(
@@ -1435,6 +1497,89 @@ mod tests {
                 .iter()
                 .all(|status| status.disposition == BuildDisposition::CacheHit)
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn build_workspace_includes_root_package_in_lockfile() {
+        let dir = temp_dir("root_build");
+        write_file(
+            &dir.join("book.toml"),
+            "name = \"workspace\"\nkind = \"app\"\n[workspace]\nmembers = [\"app\"]\n",
+        );
+        write_file(
+            &dir.join("src").join("shelf.arc"),
+            "fn main() -> Int:\n    return 0\n",
+        );
+        write_file(&dir.join("src").join("types.arc"), "// root types\n");
+        write_grimoire(&dir.join("app"), GrimoireKind::App, "app", &[]);
+
+        let graph = load_workspace_graph(&dir).expect("load graph");
+        let order = plan_workspace(&graph).expect("plan");
+        assert_eq!(order, vec!["app".to_string(), "workspace".to_string()]);
+
+        let fingerprints = fake_member_fingerprints(&graph);
+        let statuses = plan_build(&graph, &order, &fingerprints, None).expect("build plan");
+        execute_build(&graph, &statuses).expect("execute build");
+        let lock_path = write_lockfile(&graph, &order, &statuses).expect("write lockfile");
+        let lock = read_lockfile(&lock_path)
+            .expect("read lockfile")
+            .expect("lockfile should exist");
+        let root = lock
+            .members
+            .get("workspace")
+            .expect("root package should be written to lockfile");
+        assert_eq!(root.path, ".");
+        assert!(dir.join(&root.artifact).is_file());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn invalid_cached_artifact_format_triggers_rebuild() {
+        let dir = temp_dir("invalid_artifact_format");
+        write_file(&dir.join("book.toml"), "name = \"app\"\nkind = \"app\"\n");
+        write_file(
+            &dir.join("src").join("shelf.arc"),
+            "fn main() -> Int:\n    return 0\n",
+        );
+        write_file(&dir.join("src").join("types.arc"), "// types\n");
+
+        let graph = load_workspace_graph(&dir).expect("load graph");
+        let order = plan_workspace(&graph).expect("plan");
+        let first_fingerprints = fake_member_fingerprints(&graph);
+        let first_statuses = plan_build(&graph, &order, &first_fingerprints, None).expect("plan");
+        execute_build(&graph, &first_statuses).expect("execute build");
+        let lock_path = write_lockfile(&graph, &order, &first_statuses).expect("lockfile");
+        let existing = read_lockfile(&lock_path)
+            .expect("read lock")
+            .expect("lock exists");
+
+        let status = first_statuses
+            .iter()
+            .find(|status| status.member == "app")
+            .expect("app status should exist");
+        let artifact_path = graph.root_dir.join(&status.artifact_rel_path);
+        let stale = fs::read_to_string(&artifact_path).expect("artifact should exist");
+        fs::write(
+            &artifact_path,
+            stale.replace(
+                &format!("format = \"{AOT_INTERNAL_FORMAT}\""),
+                "format = \"arcana-aot-v3\"",
+            ),
+        )
+        .expect("artifact should be rewritten");
+
+        let second_statuses =
+            plan_build(&graph, &order, &first_fingerprints, Some(&existing)).expect("plan");
+        assert_eq!(second_statuses[0].member, "app");
+        assert_eq!(second_statuses[0].disposition, BuildDisposition::Built);
+
+        execute_build(&graph, &second_statuses).expect("rebuild should refresh artifact");
+        let refreshed = fs::read_to_string(&artifact_path).expect("artifact should exist");
+        let parsed = parse_package_artifact(&refreshed).expect("artifact should parse");
+        assert_eq!(parsed.format, AOT_INTERNAL_FORMAT);
+
         let _ = fs::remove_dir_all(&dir);
     }
 

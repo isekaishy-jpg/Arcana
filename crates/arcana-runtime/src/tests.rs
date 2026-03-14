@@ -415,6 +415,54 @@ fn load_package_plan_reads_rendered_backend_artifact() {
 }
 
 #[test]
+fn load_package_plan_accepts_behavior_attr_values_with_colons() {
+    let dir = temp_workspace_dir("behavior_attr_colons");
+    write_file(
+        &dir.join("book.toml"),
+        "name = \"runtime_behavior_attr\"\nkind = \"app\"\n",
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "behavior[phase=update:late] fn tick():\n",
+            "    return 0\n",
+            "fn main() -> Int:\n",
+            "    return 0\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let graph = load_workspace_graph(&dir).expect("workspace graph should load");
+    let checked = check_workspace_graph(&graph).expect("workspace should check");
+    let fingerprints = compute_member_fingerprints_for_checked_workspace(&graph, &checked)
+        .expect("fingerprints should compute");
+    let order = plan_workspace(&graph).expect("workspace order should plan");
+    let statuses =
+        plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
+    execute_build(&graph, &statuses).expect("build should execute");
+
+    let artifact_path = graph.root_dir.join(
+        &statuses
+            .iter()
+            .find(|status| status.member == "runtime_behavior_attr")
+            .expect("app artifact status should exist")
+            .artifact_rel_path,
+    );
+    let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
+    let tick = plan
+        .routines
+        .iter()
+        .find(|routine| routine.symbol_name == "tick")
+        .expect("behavior routine should be present");
+    assert_eq!(
+        tick.behavior_attrs.get("phase").map(String::as_str),
+        Some("update:late")
+    );
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn resolve_routine_index_for_call_prefers_lowered_routine_identity() {
     let plan = RuntimePackagePlan {
         package_name: "ops".to_string(),
