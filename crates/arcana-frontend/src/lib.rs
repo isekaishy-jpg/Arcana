@@ -9,7 +9,8 @@ use arcana_hir::{
     HirAssignTarget, HirBinaryOp, HirChainStep, HirExpr, HirHeaderAttachment, HirImplDecl,
     HirMatchPattern, HirModule, HirModuleSummary, HirResolvedModule, HirResolvedTarget,
     HirResolvedWorkspace, HirStatement, HirStatementKind, HirSymbol, HirSymbolBody, HirSymbolKind,
-    HirUnaryOp, HirWorkspacePackage, HirWorkspaceSummary, lower_module_text, resolve_workspace,
+    HirUnaryOp, HirWorkspacePackage, HirWorkspaceSummary, lookup_method_candidates_for_type,
+    lower_module_text, resolve_workspace,
 };
 use arcana_package::{
     MemberFingerprints, WorkspaceGraph, load_workspace_hir as load_package_workspace_hir,
@@ -602,44 +603,39 @@ fn flatten_callable_expr_path(expr: &HirExpr) -> Option<Vec<String>> {
     }
 }
 
-fn erase_type_generics(text: &str) -> String {
-    let mut out = String::new();
-    let mut depth = 0usize;
-    for ch in text.chars() {
-        match ch {
-            '[' => depth += 1,
-            ']' => depth = depth.saturating_sub(1),
-            _ if depth == 0 && !ch.is_whitespace() => out.push(ch),
-            _ => {}
-        }
-    }
-    out
+fn format_bare_method_ambiguity(
+    type_text: &str,
+    method_name: &str,
+    symbols: &[&HirSymbol],
+) -> String {
+    let rendered = symbols
+        .iter()
+        .map(|symbol| symbol.surface_text.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "bare-method qualifier `{method_name}` on `{type_text}` is ambiguous; candidates: {rendered}"
+    )
 }
 
 fn lookup_method_symbol_for_type<'a>(
     workspace: &'a HirWorkspaceSummary,
     type_text: &str,
     method_name: &str,
-) -> Option<&'a HirSymbol> {
-    let wanted = erase_type_generics(type_text);
-    for package in workspace.packages.values() {
-        for module in &package.summary.modules {
-            for impl_decl in &module.impls {
-                let target = erase_type_generics(&impl_decl.target_type);
-                if target != wanted {
-                    continue;
-                }
-                if let Some(method) = impl_decl
-                    .methods
-                    .iter()
-                    .find(|method| method.name == method_name)
-                {
-                    return Some(method);
-                }
-            }
-        }
+) -> Result<Option<&'a HirSymbol>, String> {
+    let candidates = lookup_method_candidates_for_type(workspace, type_text, method_name)
+        .into_iter()
+        .map(|candidate| candidate.symbol)
+        .collect::<Vec<_>>();
+    match candidates.as_slice() {
+        [] => Ok(None),
+        [symbol] => Ok(Some(*symbol)),
+        _ => Err(format_bare_method_ambiguity(
+            type_text,
+            method_name,
+            &candidates,
+        )),
     }
-    None
 }
 
 fn resolve_qualified_phrase_target_symbol<'a>(
@@ -665,7 +661,9 @@ fn resolve_qualified_phrase_target_symbol<'a>(
     if is_identifier_text(qualifier) {
         let subject_ty =
             infer_expr_type_text(workspace, resolved_module, type_scope, scope, subject)?;
-        return lookup_method_symbol_for_type(workspace, &subject_ty, qualifier);
+        return lookup_method_symbol_for_type(workspace, &subject_ty, qualifier)
+            .ok()
+            .flatten();
     }
 
     None
@@ -704,6 +702,35 @@ fn collect_qualified_phrase_param_exprs<'a>(
     }
 
     bindings
+}
+
+fn validate_bare_method_resolution(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    type_scope: &TypeScope,
+    scope: &ValueScope,
+    module_path: &Path,
+    subject: &HirExpr,
+    qualifier: &str,
+    span: Span,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if !is_identifier_text(qualifier) || qualifier == "call" {
+        return;
+    }
+    let Some(subject_ty) =
+        infer_expr_type_text(workspace, resolved_module, type_scope, scope, subject)
+    else {
+        return;
+    };
+    if let Err(message) = lookup_method_symbol_for_type(workspace, &subject_ty, qualifier) {
+        diagnostics.push(Diagnostic {
+            path: module_path.to_path_buf(),
+            line: span.line,
+            column: span.column,
+            message,
+        });
+    }
 }
 
 fn validate_borrow_operand_place(
@@ -3716,6 +3743,17 @@ fn validate_expr_semantics(
                 span,
                 diagnostics,
             );
+            validate_bare_method_resolution(
+                workspace,
+                resolved_module,
+                type_scope,
+                scope,
+                module_path,
+                subject,
+                qualifier,
+                span,
+                diagnostics,
+            );
             for arg in args {
                 validate_phrase_arg_semantics(
                     workspace,
@@ -6263,6 +6301,56 @@ mod tests {
         );
 
         check_path(&root).expect("satisfied trait where requirements should check");
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_ambiguous_concrete_bare_methods() {
+        let root = make_temp_package(
+            "ambiguous_bare_method_concrete",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    concat!(
+                        "import types\n",
+                        "use types.Counter\n",
+                        "fn main() -> Int:\n",
+                        "    let counter = Counter :: value = 1 :: call\n",
+                        "    return counter :: :: tap\n",
+                    ),
+                ),
+                ("src/types.arc", "export record Counter:\n    value: Int\n"),
+                (
+                    "src/left.arc",
+                    concat!(
+                        "import types\n",
+                        "use types.Counter\n",
+                        "impl Counter:\n",
+                        "    fn tap(read self: Counter) -> Int:\n",
+                        "        return self.value + 1\n",
+                    ),
+                ),
+                (
+                    "src/right.arc",
+                    concat!(
+                        "import types\n",
+                        "use types.Counter\n",
+                        "impl Counter:\n",
+                        "    fn tap(read self: Counter) -> Int:\n",
+                        "        return self.value + 2\n",
+                    ),
+                ),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("ambiguous concrete bare method should fail");
+        assert!(
+            err.contains("bare-method qualifier `tap` on `Counter` is ambiguous"),
+            "{err}"
+        );
 
         fs::remove_dir_all(root).expect("cleanup should succeed");
     }

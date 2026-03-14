@@ -601,12 +601,12 @@ pub fn execute_build(graph: &WorkspaceGraph, statuses: &[BuildStatus]) -> Packag
         .packages
         .values()
         .map(|package| {
-            (
+            Ok((
                 package.summary.package_name.clone(),
-                lower_workspace_package_with_resolution(&workspace, &resolved_workspace, package),
-            )
+                lower_workspace_package_with_resolution(&workspace, &resolved_workspace, package)?,
+            ))
         })
-        .collect::<BTreeMap<_, _>>();
+        .collect::<PackageResult<BTreeMap<_, _>>>()?;
     fs::create_dir_all(cache_root.join(LOGS_DIR)).map_err(|e| {
         format!(
             "failed to create cache logs directory `{}`: {e}",
@@ -1465,7 +1465,7 @@ mod tests {
             .expect("core status");
         let artifact = fs::read_to_string(graph.root_dir.join(&core.artifact_rel_path))
             .expect("artifact should exist");
-        assert!(artifact.contains("format = \"arcana-aot-v2\""));
+        assert!(artifact.contains("format = \"arcana-aot-v3\""));
         assert!(artifact.contains("package = \"core\""));
         assert!(artifact.contains("root_module = \"core\""));
         assert!(artifact.contains("module_count = 2"));
@@ -1482,7 +1482,9 @@ mod tests {
             artifact.contains("module=core.types:export:record:record Counter:\\\\nvalue: Int")
         );
         assert!(artifact.contains("module_rows = ["));
-        assert!(artifact.contains("0:core:fn:shared_value:async=false:exported=true"));
+        assert!(
+            artifact.contains("0:core:key=core#sym-0:fn:shared_value:async=false:exported=true")
+        );
         assert!(artifact.contains("0:0:stmt(core=return(int(0)),forewords=[],rollups=[])"));
         assert!(artifact.contains("core:symbols=1:items=4:lines=3:non_empty_lines=3"));
         let _ = fs::remove_dir_all(&dir);
@@ -1532,6 +1534,63 @@ mod tests {
             artifact.contains("qualifier=len,resolved=std.collections.list.len"),
             "expected lowered bare-method identity in artifact: {artifact}"
         );
+        assert!(
+            artifact.contains("resolved_routine=str(\\\"std.collections.list#impl-0-method-0\\\")"),
+            "expected lowered bare-method routine identity in artifact: {artifact}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn execute_build_rejects_ambiguous_concrete_bare_methods() {
+        let dir = temp_dir("ambiguous_bare_method_build");
+        write_file(&dir.join("book.toml"), "name = \"app\"\nkind = \"app\"\n");
+        write_file(
+            &dir.join("src/shelf.arc"),
+            concat!(
+                "import types\n",
+                "use types.Counter\n",
+                "fn main() -> Int:\n",
+                "    let counter = Counter :: value = 1 :: call\n",
+                "    return counter :: :: tap\n",
+            ),
+        );
+        write_file(
+            &dir.join("src/types.arc"),
+            "export record Counter:\n    value: Int\n",
+        );
+        write_file(
+            &dir.join("src/left.arc"),
+            concat!(
+                "import types\n",
+                "use types.Counter\n",
+                "impl Counter:\n",
+                "    fn tap(read self: Counter) -> Int:\n",
+                "        return self.value + 1\n",
+            ),
+        );
+        write_file(
+            &dir.join("src/right.arc"),
+            concat!(
+                "import types\n",
+                "use types.Counter\n",
+                "impl Counter:\n",
+                "    fn tap(read self: Counter) -> Int:\n",
+                "        return self.value + 2\n",
+            ),
+        );
+
+        let graph = load_workspace_graph(&dir).expect("load graph");
+        let order = plan_workspace(&graph).expect("plan");
+        let fingerprints = fake_member_fingerprints(&graph);
+        let statuses = plan_build(&graph, &order, &fingerprints, None).expect("plan");
+        let err = execute_build(&graph, &statuses)
+            .expect_err("ambiguous concrete bare method should fail build");
+        assert!(
+            err.contains("bare-method qualifier `tap` on `app.types.Counter` is ambiguous"),
+            "{err}"
+        );
+
         let _ = fs::remove_dir_all(&dir);
     }
 

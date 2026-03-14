@@ -1,4 +1,6 @@
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
 
 use arcana_hir::{
     HirAssignOp, HirAssignTarget, HirBinaryOp, HirChainConnector, HirChainIntroducer, HirChainStep,
@@ -6,7 +8,8 @@ use arcana_hir::{
     HirMatchPattern, HirModule, HirModuleDependency, HirModuleSummary, HirPackageSummary,
     HirPageRollup, HirPhraseArg, HirResolvedModule, HirResolvedTarget, HirResolvedWorkspace,
     HirStatement, HirStatementKind, HirSymbol, HirSymbolBody, HirSymbolKind, HirUnaryOp,
-    HirWorkspacePackage, HirWorkspaceSummary,
+    HirWorkspacePackage, HirWorkspaceSummary, lookup_method_candidates_for_type,
+    routine_key_for_impl_method, routine_key_for_symbol,
 };
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -39,6 +42,7 @@ pub struct IrEntrypoint {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IrRoutine {
     pub module_id: String,
+    pub routine_key: String,
     pub symbol_name: String,
     pub symbol_kind: String,
     pub exported: bool,
@@ -98,6 +102,7 @@ struct ResolvedRenderScope<'a> {
     resolved_module: &'a HirResolvedModule,
     current_where_clause: Option<&'a str>,
     value_scope: LowerValueScope,
+    errors: Rc<RefCell<Vec<String>>>,
 }
 
 impl<'a> ResolvedRenderScope<'a> {
@@ -112,6 +117,20 @@ impl<'a> ResolvedRenderScope<'a> {
             resolved_module,
             current_where_clause,
             value_scope: LowerValueScope::default(),
+            errors: Rc::new(RefCell::new(Vec::new())),
+        }
+    }
+
+    fn note_error(&self, message: impl Into<String>) {
+        self.errors.borrow_mut().push(message.into());
+    }
+
+    fn finish(self) -> Result<(), String> {
+        let errors = self.errors.borrow();
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("\n"))
         }
     }
 }
@@ -532,62 +551,43 @@ fn lookup_symbol_path<'a>(
     None
 }
 
+fn format_method_ambiguity(
+    type_text: &str,
+    method_name: &str,
+    candidates: &[ResolvedMethod<'_>],
+) -> String {
+    let rendered = candidates
+        .iter()
+        .map(|candidate| {
+            format!(
+                "{} [{}]",
+                candidate.method.surface_text, candidate.routine_key
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "bare-method qualifier `{method_name}` on `{type_text}` is ambiguous; candidates: {rendered}"
+    )
+}
+
 fn lookup_method_path_for_type(
     workspace: &HirWorkspaceSummary,
     type_text: &str,
     method_name: &str,
-) -> Option<Vec<String>> {
-    let wanted = erase_type_generics(type_text);
-    let matches_target = |target: &str| {
-        let target = erase_type_generics(target);
-        target == wanted
-            || target.ends_with(&format!(".{wanted}"))
-            || wanted.ends_with(&format!(".{target}"))
-    };
-    for package in workspace.packages.values() {
-        for module in &package.summary.modules {
-            for impl_decl in &module.impls {
-                if !matches_target(&impl_decl.target_type) {
-                    continue;
-                }
-                if let Some(method) = impl_decl
-                    .methods
-                    .iter()
-                    .find(|method| method.name == method_name)
-                {
-                    let mut path = module
-                        .module_id
-                        .split('.')
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>();
-                    path.push(method.name.clone());
-                    return Some(path);
-                }
-            }
-            for symbol in &module.symbols {
-                if symbol.name != method_name {
-                    continue;
-                }
-                if !matches!(symbol.kind, HirSymbolKind::Fn) {
-                    continue;
-                }
-                let Some(self_param) = symbol.params.first() else {
-                    continue;
-                };
-                if self_param.name != "self" || !matches_target(&self_param.ty) {
-                    continue;
-                }
-                let mut path = module
-                    .module_id
-                    .split('.')
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>();
-                path.push(symbol.name.clone());
-                return Some(path);
-            }
+) -> Result<Option<Vec<String>>, String> {
+    match lookup_method_resolution_for_type(workspace, type_text, method_name)? {
+        Some(resolved) => {
+            let mut path = resolved
+                .module_id
+                .split('.')
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            path.push(resolved.method.name.clone());
+            Ok(Some(path))
         }
+        None => Ok(None),
     }
-    None
 }
 
 #[derive(Clone, Debug)]
@@ -595,12 +595,13 @@ struct ResolvedMethod<'a> {
     module_id: String,
     method: &'a HirSymbol,
     substitutions: BTreeMap<String, String>,
+    routine_key: String,
 }
 
 #[derive(Clone, Debug)]
 struct ResolvedPhraseTarget {
     path: Vec<String>,
-    signature_row: Option<String>,
+    routine_key: Option<String>,
 }
 
 fn substitute_type_params(text: &str, substitutions: &BTreeMap<String, String>) -> String {
@@ -665,107 +666,66 @@ fn lookup_method_resolution_for_type<'a>(
     workspace: &'a HirWorkspaceSummary,
     type_text: &str,
     method_name: &str,
-) -> Option<ResolvedMethod<'a>> {
-    let wanted = erase_type_generics(type_text);
-    let matches_target = |target: &str| {
-        let target = erase_type_generics(target);
-        target == wanted
-            || target.ends_with(&format!(".{wanted}"))
-            || wanted.ends_with(&format!(".{target}"))
-    };
-    for package in workspace.packages.values() {
-        for module in &package.summary.modules {
-            for impl_decl in &module.impls {
-                if !matches_target(&impl_decl.target_type) {
-                    continue;
-                }
-                if let Some(method) = impl_decl
-                    .methods
-                    .iter()
-                    .find(|method| method.name == method_name)
-                {
-                    return Some(ResolvedMethod {
-                        module_id: module.module_id.clone(),
-                        method,
-                        substitutions: build_impl_type_substitutions(
-                            &impl_decl.target_type,
-                            type_text,
-                        ),
-                    });
-                }
-            }
-            for symbol in &module.symbols {
-                if symbol.name != method_name {
-                    continue;
-                }
-                if !matches!(symbol.kind, HirSymbolKind::Fn) {
-                    continue;
-                }
-                let Some(self_param) = symbol.params.first() else {
-                    continue;
-                };
-                if self_param.name != "self" || !matches_target(&self_param.ty) {
-                    continue;
-                }
-                return Some(ResolvedMethod {
-                    module_id: module.module_id.clone(),
-                    method: symbol,
-                    substitutions: build_impl_type_substitutions(&self_param.ty, type_text),
-                });
-            }
-        }
+) -> Result<Option<ResolvedMethod<'a>>, String> {
+    let candidates = lookup_method_candidates_for_type(workspace, type_text, method_name)
+        .into_iter()
+        .map(|candidate| ResolvedMethod {
+            module_id: candidate.module_id.to_string(),
+            method: candidate.symbol,
+            substitutions: build_impl_type_substitutions(
+                candidate.declared_receiver_type,
+                type_text,
+            ),
+            routine_key: candidate.routine_key,
+        })
+        .collect::<Vec<_>>();
+    match candidates.as_slice() {
+        [] => Ok(None),
+        [resolved] => Ok(Some(resolved.clone())),
+        _ => Err(format_method_ambiguity(type_text, method_name, &candidates)),
     }
-    None
 }
 
 fn lookup_trait_method_path_from_where_clause(
     scope: &ResolvedRenderScope<'_>,
     type_text: &str,
     method_name: &str,
-) -> Option<Vec<String>> {
-    let wanted = erase_type_generics(strip_reference_prefix(type_text));
-    if !is_identifier_text(&wanted) {
-        return None;
+) -> Result<Option<Vec<String>>, String> {
+    let candidates =
+        lookup_trait_method_resolution_from_where_clause(scope, type_text, method_name)?
+            .into_iter()
+            .map(|resolved| {
+                let mut path = resolved
+                    .module_id
+                    .split('.')
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>();
+                path.push(method_name.to_string());
+                path
+            })
+            .collect::<Vec<_>>();
+    match candidates.as_slice() {
+        [] => Ok(None),
+        [path] => Ok(Some(path.clone())),
+        _ => Err(format!(
+            "bare-method qualifier `{method_name}` on `{type_text}` is ambiguous across trait bounds"
+        )),
     }
-    let where_clause = scope.current_where_clause?;
-    for predicate in split_top_level_surface_items(where_clause, ',') {
-        let Some((trait_base, args)) = parse_surface_type_application(&predicate) else {
-            continue;
-        };
-        if !args
-            .iter()
-            .any(|arg| erase_type_generics(strip_reference_prefix(arg)) == wanted)
-        {
-            continue;
-        }
-        let trait_path = split_simple_path(&trait_base)?;
-        let symbol_ref = lookup_symbol_path(scope.workspace, scope.resolved_module, &trait_path)?;
-        let HirSymbolBody::Trait { methods, .. } = &symbol_ref.symbol.body else {
-            continue;
-        };
-        if methods.iter().any(|method| method.name == method_name) {
-            let mut path = symbol_ref
-                .module_id
-                .split('.')
-                .map(ToString::to_string)
-                .collect::<Vec<_>>();
-            path.push(method_name.to_string());
-            return Some(path);
-        }
-    }
-    None
 }
 
 fn lookup_trait_method_resolution_from_where_clause<'a>(
     scope: &'a ResolvedRenderScope<'a>,
     type_text: &str,
     method_name: &str,
-) -> Option<ResolvedMethod<'a>> {
+) -> Result<Vec<ResolvedMethod<'a>>, String> {
     let wanted = erase_type_generics(strip_reference_prefix(type_text));
     if !is_identifier_text(&wanted) {
-        return None;
+        return Ok(Vec::new());
     }
-    let where_clause = scope.current_where_clause?;
+    let Some(where_clause) = scope.current_where_clause else {
+        return Ok(Vec::new());
+    };
+    let mut candidates = Vec::new();
     for predicate in split_top_level_surface_items(where_clause, ',') {
         let Some((trait_base, args)) = parse_surface_type_application(&predicate) else {
             continue;
@@ -776,20 +736,27 @@ fn lookup_trait_method_resolution_from_where_clause<'a>(
         {
             continue;
         }
-        let trait_path = split_simple_path(&trait_base)?;
-        let symbol_ref = lookup_symbol_path(scope.workspace, scope.resolved_module, &trait_path)?;
+        let Some(trait_path) = split_simple_path(&trait_base) else {
+            continue;
+        };
+        let Some(symbol_ref) =
+            lookup_symbol_path(scope.workspace, scope.resolved_module, &trait_path)
+        else {
+            continue;
+        };
         let HirSymbolBody::Trait { methods, .. } = &symbol_ref.symbol.body else {
             continue;
         };
         if let Some(method) = methods.iter().find(|method| method.name == method_name) {
-            return Some(ResolvedMethod {
+            candidates.push(ResolvedMethod {
                 module_id: symbol_ref.module_id.clone(),
                 method,
                 substitutions: BTreeMap::new(),
+                routine_key: String::new(),
             });
         }
     }
-    None
+    Ok(candidates)
 }
 
 fn render_unary_op(op: HirUnaryOp) -> &'static str {
@@ -1208,8 +1175,22 @@ fn resolve_qualified_phrase_target_path(
 
     if is_identifier_text(qualifier) {
         let subject_ty = infer_expr_type_text(scope, subject)?;
-        return lookup_method_path_for_type(scope.workspace, &subject_ty, qualifier)
-            .or_else(|| lookup_trait_method_path_from_where_clause(scope, &subject_ty, qualifier));
+        return match lookup_method_path_for_type(scope.workspace, &subject_ty, qualifier) {
+            Ok(Some(path)) => Some(path),
+            Ok(None) => {
+                match lookup_trait_method_path_from_where_clause(scope, &subject_ty, qualifier) {
+                    Ok(path) => path,
+                    Err(message) => {
+                        scope.note_error(message);
+                        None
+                    }
+                }
+            }
+            Err(message) => {
+                scope.note_error(message);
+                None
+            }
+        };
     }
 
     None
@@ -1221,31 +1202,50 @@ fn resolve_bare_method_target(
     qualifier: &str,
 ) -> Option<ResolvedPhraseTarget> {
     let subject_ty = infer_expr_type_text(scope, subject)?;
-    if let Some(resolved) =
-        lookup_method_resolution_for_type(scope.workspace, &subject_ty, qualifier)
-    {
-        let mut path = resolved
-            .module_id
-            .split('.')
-            .map(ToString::to_string)
-            .collect::<Vec<_>>();
-        path.push(resolved.method.name.clone());
-        return Some(ResolvedPhraseTarget {
-            path,
-            signature_row: Some(resolved.method.surface_text.clone()),
-        });
+    match lookup_method_resolution_for_type(scope.workspace, &subject_ty, qualifier) {
+        Ok(Some(resolved)) => {
+            let mut path = resolved
+                .module_id
+                .split('.')
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            path.push(resolved.method.name.clone());
+            return Some(ResolvedPhraseTarget {
+                path,
+                routine_key: Some(resolved.routine_key),
+            });
+        }
+        Ok(None) => {}
+        Err(message) => {
+            scope.note_error(message);
+            return None;
+        }
     }
-    let resolved = lookup_trait_method_resolution_from_where_clause(scope, &subject_ty, qualifier)?;
-    let mut path = resolved
-        .module_id
-        .split('.')
-        .map(ToString::to_string)
-        .collect::<Vec<_>>();
-    path.push(resolved.method.name.clone());
-    Some(ResolvedPhraseTarget {
-        path,
-        signature_row: None,
-    })
+    match lookup_trait_method_resolution_from_where_clause(scope, &subject_ty, qualifier) {
+        Ok(candidates) => {
+            if candidates.len() > 1 {
+                scope.note_error(format!(
+                    "bare-method qualifier `{qualifier}` on `{subject_ty}` is ambiguous across trait bounds"
+                ));
+                return None;
+            }
+            let resolved = candidates.into_iter().next()?;
+            let mut path = resolved
+                .module_id
+                .split('.')
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            path.push(resolved.method.name.clone());
+            Some(ResolvedPhraseTarget {
+                path,
+                routine_key: None,
+            })
+        }
+        Err(message) => {
+            scope.note_error(message);
+            None
+        }
+    }
 }
 
 fn infer_call_target_return_type(
@@ -1325,17 +1325,39 @@ fn infer_expr_type_text(scope: &ResolvedRenderScope<'_>, expr: &HirExpr) -> Opti
             subject, qualifier, ..
         } if is_identifier_text(qualifier) => {
             let subject_ty = infer_expr_type_text(scope, subject)?;
-            lookup_method_resolution_for_type(scope.workspace, &subject_ty, qualifier)
-                .or_else(|| {
-                    lookup_trait_method_resolution_from_where_clause(scope, &subject_ty, qualifier)
-                })
-                .and_then(|resolved| {
-                    resolved
-                        .method
-                        .return_type
-                        .as_ref()
-                        .map(|text| substitute_type_params(text, &resolved.substitutions))
-                })
+            match lookup_method_resolution_for_type(scope.workspace, &subject_ty, qualifier) {
+                Ok(Some(resolved)) => resolved
+                    .method
+                    .return_type
+                    .as_ref()
+                    .map(|text| substitute_type_params(text, &resolved.substitutions)),
+                Ok(None) => match lookup_trait_method_resolution_from_where_clause(
+                    scope,
+                    &subject_ty,
+                    qualifier,
+                ) {
+                    Ok(candidates) => {
+                        if candidates.len() > 1 {
+                            scope.note_error(format!(
+                                "bare-method qualifier `{qualifier}` on `{subject_ty}` is ambiguous across trait bounds"
+                            ));
+                            None
+                        } else {
+                            candidates.into_iter().next().and_then(|resolved| {
+                                resolved.method.return_type.as_ref().map(ToOwned::to_owned)
+                            })
+                        }
+                    }
+                    Err(message) => {
+                        scope.note_error(message);
+                        None
+                    }
+                },
+                Err(message) => {
+                    scope.note_error(message);
+                    None
+                }
+            }
         }
         HirExpr::MemberAccess { expr, member } => infer_member_access_type(scope, expr, member),
         HirExpr::Index { expr, .. } => infer_index_type_text(scope, expr),
@@ -1530,10 +1552,10 @@ fn render_expr_resolved(expr: &HirExpr, scope: &ResolvedRenderScope<'_>) -> Stri
                 "bare_method" => resolve_bare_method_target(scope, subject, qualifier)
                     .map(|target| {
                         let mut rendered = format!(",resolved={}", target.path.join("."));
-                        if let Some(signature_row) = target.signature_row {
+                        if let Some(routine_key) = target.routine_key {
                             rendered.push_str(&format!(
-                                ",resolved_signature=str(\"{}\")",
-                                quote_text(&signature_row)
+                                ",resolved_routine=str(\"{}\")",
+                                quote_text(&routine_key)
                             ));
                         }
                         rendered
@@ -1734,9 +1756,10 @@ fn is_routine_symbol(symbol: &HirSymbol) -> bool {
     )
 }
 
-fn lower_routine(module_id: &str, symbol: &HirSymbol) -> IrRoutine {
+fn lower_routine(module_id: &str, routine_key: String, symbol: &HirSymbol) -> IrRoutine {
     IrRoutine {
         module_id: module_id.to_string(),
+        routine_key,
         symbol_name: symbol.name.clone(),
         symbol_kind: symbol.kind.as_str().to_string(),
         exported: symbol.exported,
@@ -1756,8 +1779,9 @@ fn lower_routine_resolved(
     workspace: &HirWorkspaceSummary,
     resolved_module: &HirResolvedModule,
     module_id: &str,
+    routine_key: String,
     symbol: &HirSymbol,
-) -> IrRoutine {
+) -> Result<IrRoutine, String> {
     let mut scope = ResolvedRenderScope::new(
         workspace,
         resolved_module,
@@ -1769,8 +1793,9 @@ fn lower_routine_resolved(
             .value_scope
             .insert(param.name.clone(), param.ty.clone());
     }
-    IrRoutine {
+    let routine = IrRoutine {
         module_id: module_id.to_string(),
+        routine_key,
         symbol_name: symbol.name.clone(),
         symbol_kind: symbol.kind.as_str().to_string(),
         exported: symbol.exported,
@@ -1783,7 +1808,9 @@ fn lower_routine_resolved(
         foreword_rows: symbol.forewords.iter().map(render_foreword_row).collect(),
         rollup_rows: symbol.rollups.iter().map(render_rollup_row).collect(),
         statement_rows: render_statement_block_resolved(&symbol.statements, &mut scope),
-    }
+    };
+    scope.finish()?;
+    Ok(routine)
 }
 
 pub fn lower_package(package: &HirPackageSummary) -> IrPackage {
@@ -1854,27 +1881,47 @@ pub fn lower_package(package: &HirPackageSummary) -> IrPackage {
             })
         })
         .collect::<Vec<_>>();
-    let routines = package
-        .modules
-        .iter()
-        .flat_map(|module| {
-            let mut routines = module
-                .symbols
-                .iter()
-                .filter(|symbol| is_routine_symbol(symbol))
-                .map(|symbol| lower_routine(&module.module_id, symbol))
-                .collect::<Vec<_>>();
-            routines.extend(
-                module
-                    .impls
+    let routines =
+        package
+            .modules
+            .iter()
+            .flat_map(|module| {
+                let mut routines = module
+                    .symbols
                     .iter()
-                    .flat_map(|impl_decl| impl_decl.methods.iter())
-                    .filter(|symbol| is_routine_symbol(symbol))
-                    .map(|symbol| lower_routine(&module.module_id, symbol)),
-            );
-            routines
-        })
-        .collect::<Vec<_>>();
+                    .enumerate()
+                    .filter(|(_, symbol)| is_routine_symbol(symbol))
+                    .map(|(symbol_index, symbol)| {
+                        lower_routine(
+                            &module.module_id,
+                            routine_key_for_symbol(&module.module_id, symbol_index),
+                            symbol,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                routines.extend(module.impls.iter().enumerate().flat_map(
+                    |(impl_index, impl_decl)| {
+                        impl_decl
+                            .methods
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, symbol)| is_routine_symbol(symbol))
+                            .map(move |(method_index, symbol)| {
+                                lower_routine(
+                                    &module.module_id,
+                                    routine_key_for_impl_method(
+                                        &module.module_id,
+                                        impl_index,
+                                        method_index,
+                                    ),
+                                    symbol,
+                                )
+                            })
+                    },
+                ));
+                routines
+            })
+            .collect::<Vec<_>>();
 
     IrPackage {
         package_name: package.package_name.clone(),
@@ -1900,47 +1947,69 @@ pub fn lower_workspace_package_with_resolution(
     workspace: &HirWorkspaceSummary,
     resolved_workspace: &HirResolvedWorkspace,
     package: &HirWorkspacePackage,
-) -> IrPackage {
+) -> Result<IrPackage, String> {
     let mut lowered = lower_package(&package.summary);
     lowered.direct_deps = package.direct_deps.iter().cloned().collect();
     let Some(resolved_package) = resolved_workspace.package(&package.summary.package_name) else {
-        return lowered;
+        return Ok(lowered);
     };
     lowered.routines = package
         .summary
         .modules
         .iter()
-        .flat_map(|module| {
+        .map(|module| {
             let Some(resolved_module) = resolved_package.module(&module.module_id) else {
-                return Vec::new();
+                return Ok(Vec::new());
             };
             let mut routines = module
                 .symbols
                 .iter()
-                .filter(|symbol| is_routine_symbol(symbol))
-                .map(|symbol| {
-                    lower_routine_resolved(workspace, resolved_module, &module.module_id, symbol)
+                .enumerate()
+                .filter(|(_, symbol)| is_routine_symbol(symbol))
+                .map(|(symbol_index, symbol)| {
+                    lower_routine_resolved(
+                        workspace,
+                        resolved_module,
+                        &module.module_id,
+                        routine_key_for_symbol(&module.module_id, symbol_index),
+                        symbol,
+                    )
                 })
-                .collect::<Vec<_>>();
+                .collect::<Result<Vec<_>, String>>()?;
             routines.extend(
                 module
                     .impls
                     .iter()
-                    .flat_map(|impl_decl| impl_decl.methods.iter())
-                    .filter(|symbol| is_routine_symbol(symbol))
-                    .map(|symbol| {
-                        lower_routine_resolved(
-                            workspace,
-                            resolved_module,
-                            &module.module_id,
-                            symbol,
-                        )
-                    }),
+                    .enumerate()
+                    .flat_map(|(impl_index, impl_decl)| {
+                        impl_decl
+                            .methods
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, symbol)| is_routine_symbol(symbol))
+                            .map(move |(method_index, symbol)| {
+                                lower_routine_resolved(
+                                    workspace,
+                                    resolved_module,
+                                    &module.module_id,
+                                    routine_key_for_impl_method(
+                                        &module.module_id,
+                                        impl_index,
+                                        method_index,
+                                    ),
+                                    symbol,
+                                )
+                            })
+                    })
+                    .collect::<Result<Vec<_>, String>>()?,
             );
-            routines
+            Ok(routines)
         })
+        .collect::<Result<Vec<_>, String>>()?
+        .into_iter()
+        .flatten()
         .collect();
-    lowered
+    Ok(lowered)
 }
 
 #[cfg(test)]
@@ -2125,7 +2194,8 @@ mod tests {
         let resolved = resolve_workspace(&workspace).expect("workspace should resolve");
         let package = workspace.package("app").expect("app package should exist");
 
-        let ir = lower_workspace_package_with_resolution(&workspace, &resolved, package);
+        let ir = lower_workspace_package_with_resolution(&workspace, &resolved, package)
+            .expect("workspace lowering should succeed");
         let main = ir
             .routines
             .iter()
@@ -2136,6 +2206,66 @@ mod tests {
                 .contains("kind=bare_method,qualifier=len,resolved=std.collections.list.len")),
             "expected resolved bare-method callable path in lowered statements: {:?}",
             main.statement_rows
+        );
+        assert!(
+            main.statement_rows.iter().any(|row| row
+                .contains("resolved_routine=str(\"std.collections.list#impl-0-method-0\")")),
+            "expected resolved bare-method routine identity in lowered statements: {:?}",
+            main.statement_rows
+        );
+    }
+
+    #[test]
+    fn lower_workspace_package_with_resolution_rejects_ambiguous_concrete_bare_methods() {
+        let app_summary = build_package_summary(
+            "app",
+            vec![
+                lower_module_text(
+                    "app",
+                    concat!(
+                        "record Counter:\n",
+                        "    value: Int\n",
+                        "impl Counter:\n",
+                        "    fn tap(read self: Counter) -> Int:\n",
+                        "        return self.value + 1\n",
+                        "impl Counter:\n",
+                        "    fn tap(read self: Counter) -> Int:\n",
+                        "        return self.value + 2\n",
+                        "fn main() -> Int:\n",
+                        "    let counter = Counter :: value = 1 :: call\n",
+                        "    return counter :: :: tap\n",
+                    ),
+                )
+                .expect("module should lower"),
+            ],
+        );
+        let app_layout = build_package_layout(
+            &app_summary,
+            BTreeMap::from([(
+                "app".to_string(),
+                Path::new("C:/repo/app/src/shelf.arc").to_path_buf(),
+            )]),
+            BTreeMap::new(),
+        )
+        .expect("app layout should build");
+        let app_workspace = build_workspace_package(
+            Path::new("C:/repo/app").to_path_buf(),
+            BTreeSet::new(),
+            app_summary,
+            app_layout,
+        )
+        .expect("app workspace should build");
+
+        let workspace =
+            build_workspace_summary(vec![app_workspace]).expect("workspace should build");
+        let resolved = resolve_workspace(&workspace).expect("workspace should resolve");
+        let package = workspace.package("app").expect("app package should exist");
+
+        let err = lower_workspace_package_with_resolution(&workspace, &resolved, package)
+            .expect_err("ambiguous concrete bare method should fail lowering");
+        assert!(
+            err.contains("bare-method qualifier `tap` on `app.Counter` is ambiguous"),
+            "{err}"
         );
     }
 }

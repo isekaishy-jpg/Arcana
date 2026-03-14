@@ -19,6 +19,7 @@ pub struct RuntimeParamPlan {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeRoutinePlan {
     pub module_id: String,
+    pub routine_key: String,
     pub symbol_name: String,
     pub symbol_kind: String,
     pub exported: bool,
@@ -2345,6 +2346,7 @@ enum ParsedExpr {
         qualifier_kind: ParsedPhraseQualifierKind,
         qualifier: String,
         resolved_callable: Option<Vec<String>>,
+        resolved_routine: Option<String>,
         resolved_signature: Option<String>,
         attached: Vec<ParsedHeaderAttachment>,
     },
@@ -2656,6 +2658,7 @@ struct RuntimeRollupFrame {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RuntimeDeferredCall {
     callable: Vec<String>,
+    resolved_routine: Option<String>,
     resolved_signature: Option<String>,
     current_module_id: String,
     type_args: Vec<String>,
@@ -2958,6 +2961,7 @@ fn lower_routine(routine: &AotRoutineArtifact) -> Result<RuntimeRoutinePlan, Str
         .collect::<Result<Vec<_>, String>>()?;
     Ok(RuntimeRoutinePlan {
         module_id: routine.module_id.clone(),
+        routine_key: routine.routine_key.clone(),
         symbol_name: routine.symbol_name.clone(),
         symbol_kind: routine.symbol_kind.clone(),
         exported: routine.exported,
@@ -3707,6 +3711,10 @@ fn parse_expr(text: &str) -> Result<ParsedExpr, String> {
             .get("resolved")
             .map(|text| parse_runtime_symbol_path(text))
             .transpose()?;
+        let resolved_routine = fields
+            .get("resolved_routine")
+            .map(|text| parse_runtime_string_field(text, "phrase resolved_routine"))
+            .transpose()?;
         let resolved_signature = fields
             .get("resolved_signature")
             .map(|text| parse_runtime_string_field(text, "phrase resolved_signature"))
@@ -3721,6 +3729,7 @@ fn parse_expr(text: &str) -> Result<ParsedExpr, String> {
             qualifier_kind,
             qualifier,
             resolved_callable,
+            resolved_routine,
             resolved_signature,
             attached,
         });
@@ -6960,11 +6969,34 @@ fn resolve_routine_index_for_call(
     current_module_id: &str,
     callable: &[String],
     call_args: &[RuntimeCallArg],
+    resolved_routine: Option<&str>,
     resolved_signature: Option<&str>,
 ) -> Result<Option<usize>, String> {
     let candidates = resolve_routine_candidate_indices(plan, current_module_id, callable);
     if candidates.is_empty() {
         return Ok(None);
+    }
+    if let Some(routine_key) = resolved_routine {
+        let filtered = candidates
+            .into_iter()
+            .filter(|index| {
+                plan.routines
+                    .get(*index)
+                    .map(|routine| routine.routine_key == routine_key)
+                    .unwrap_or(false)
+            })
+            .collect::<Vec<_>>();
+        return match filtered.as_slice() {
+            [] => Err(format!(
+                "runtime call `{}` has no overload matching lowered routine `{routine_key}`",
+                callable.join(".")
+            )),
+            [index] => Ok(Some(*index)),
+            _ => Err(format!(
+                "runtime call `{}` remains ambiguous for lowered routine `{routine_key}`",
+                callable.join(".")
+            )),
+        };
     }
     if let Some(signature) = resolved_signature {
         let filtered = candidates
@@ -7055,6 +7087,7 @@ fn resolve_rollup_handler_callable_path(
 
 fn execute_call_by_path(
     callable: &[String],
+    resolved_routine: Option<&str>,
     resolved_signature: Option<&str>,
     current_module_id: &str,
     type_args: Vec<String>,
@@ -7070,6 +7103,7 @@ fn execute_call_by_path(
         current_module_id,
         callable,
         &call_args,
+        resolved_routine,
         resolved_signature,
     )? {
         let routine = plan
@@ -7182,6 +7216,7 @@ fn execute_runtime_apply_phrase(
     Ok(execute_call_by_path(
         &callable,
         None,
+        None,
         current_module_id,
         type_args,
         call_args,
@@ -7199,6 +7234,7 @@ fn execute_runtime_method_call(
     attached: &[ParsedHeaderAttachment],
     qualifier: &str,
     resolved_callable: Option<&[String]>,
+    resolved_routine: Option<&str>,
     resolved_signature: Option<&str>,
     plan: &RuntimePackagePlan,
     current_module_id: &str,
@@ -7244,6 +7280,7 @@ fn execute_runtime_method_call(
     )?);
     Ok(execute_call_by_path(
         &callable,
+        resolved_routine,
         resolved_signature,
         current_module_id,
         type_args,
@@ -7303,6 +7340,7 @@ fn execute_runtime_named_qualifier_call(
     Ok(execute_call_by_path(
         &callable,
         None,
+        None,
         current_module_id,
         type_args,
         call_args,
@@ -7320,6 +7358,7 @@ fn eval_qualifier(
     attached: &[ParsedHeaderAttachment],
     qualifier: &str,
     resolved_callable: Option<&[String]>,
+    resolved_routine: Option<&str>,
     resolved_signature: Option<&str>,
     plan: &RuntimePackagePlan,
     current_module_id: &str,
@@ -7335,6 +7374,7 @@ fn eval_qualifier(
         attached,
         qualifier,
         resolved_callable,
+        resolved_routine,
         resolved_signature,
         plan,
         current_module_id,
@@ -9640,7 +9680,7 @@ fn reject_edit_chain_stage_call(
     plan: &RuntimePackagePlan,
 ) -> RuntimeEvalResult<()> {
     if let Some(routine_index) =
-        resolve_routine_index_for_call(plan, current_module_id, callable, call_args, None)?
+        resolve_routine_index_for_call(plan, current_module_id, callable, call_args, None, None)?
     {
         let routine = plan
             .routines
@@ -9698,6 +9738,7 @@ fn execute_runtime_chain_stage(
     Ok(execute_call_by_path(
         &callable,
         None,
+        None,
         current_module_id,
         type_args,
         call_args,
@@ -9734,7 +9775,7 @@ fn spawn_runtime_chain_stage(
     )?;
     reject_edit_chain_stage_call(&callable, current_module_id, &call_args, plan)?;
     if let Some(routine_index) =
-        resolve_routine_index_for_call(plan, current_module_id, &callable, &call_args, None)?
+        resolve_routine_index_for_call(plan, current_module_id, &callable, &call_args, None, None)?
     {
         let routine = plan
             .routines
@@ -9754,6 +9795,7 @@ fn spawn_runtime_chain_stage(
     };
     let pending = RuntimePendingState::Pending(RuntimeDeferredWork::Call(RuntimeDeferredCall {
         callable,
+        resolved_routine: None,
         resolved_signature: None,
         current_module_id: current_module_id.to_string(),
         type_args: type_args.clone(),
@@ -9878,6 +9920,7 @@ fn eval_runtime_chain_expr(
                         &callable,
                         &call_args,
                         None,
+                        None,
                     )
                     .ok()
                     .flatten()
@@ -9935,6 +9978,7 @@ fn execute_deferred_work(
         RuntimeDeferredWork::Call(pending) => {
             let RuntimeDeferredCall {
                 callable,
+                resolved_routine,
                 resolved_signature,
                 current_module_id,
                 type_args,
@@ -9947,6 +9991,7 @@ fn execute_deferred_work(
             state.current_thread_id = thread_id;
             let result = execute_call_by_path(
                 &callable,
+                resolved_routine.as_deref(),
                 resolved_signature.as_deref(),
                 &current_module_id,
                 type_args,
@@ -10078,6 +10123,7 @@ fn capture_spawned_phrase_call(
     qualifier_kind: ParsedPhraseQualifierKind,
     qualifier: &str,
     resolved_callable: Option<&[String]>,
+    resolved_routine: Option<&str>,
     resolved_signature: Option<&str>,
     plan: &RuntimePackagePlan,
     current_module_id: &str,
@@ -10087,7 +10133,7 @@ fn capture_spawned_phrase_call(
     state: &mut RuntimeExecutionState,
     host: &mut dyn RuntimeHost,
 ) -> RuntimeEvalResult<Option<RuntimeValue>> {
-    let (callable, type_args, call_args, call_signature) = match qualifier_kind {
+    let (callable, type_args, call_args, call_routine, call_signature) = match qualifier_kind {
         ParsedPhraseQualifierKind::Call | ParsedPhraseQualifierKind::Apply => {
             if qualifier != "call" && qualifier_kind == ParsedPhraseQualifierKind::Call {
                 return Ok(None);
@@ -10107,7 +10153,7 @@ fn capture_spawned_phrase_call(
                 state,
                 host,
             )?;
-            (callable, type_args, call_args, None)
+            (callable, type_args, call_args, None, None)
         }
         ParsedPhraseQualifierKind::NamedPath => {
             let receiver = eval_expr(
@@ -10145,7 +10191,7 @@ fn capture_spawned_phrase_call(
                 state,
                 host,
             )?);
-            (callable, type_args, call_args, None)
+            (callable, type_args, call_args, None, None)
         }
         ParsedPhraseQualifierKind::BareMethod => {
             let receiver = eval_expr(
@@ -10186,6 +10232,7 @@ fn capture_spawned_phrase_call(
                 callable,
                 type_args,
                 call_args,
+                resolved_routine.map(ToString::to_string),
                 resolved_signature.map(ToString::to_string),
             )
         }
@@ -10197,6 +10244,7 @@ fn capture_spawned_phrase_call(
         current_module_id,
         &callable,
         &call_args,
+        call_routine.as_deref(),
         call_signature.as_deref(),
     )? {
         let routine = plan
@@ -10234,6 +10282,7 @@ fn capture_spawned_phrase_call(
     };
     let pending = RuntimePendingState::Pending(RuntimeDeferredWork::Call(RuntimeDeferredCall {
         callable,
+        resolved_routine: call_routine,
         resolved_signature: call_signature,
         current_module_id: current_module_id.to_string(),
         type_args: type_args.clone(),
@@ -10332,6 +10381,7 @@ fn eval_spawn_expr(
         qualifier_kind,
         qualifier,
         resolved_callable,
+        resolved_routine,
         resolved_signature,
         attached,
     } = expr
@@ -10344,6 +10394,7 @@ fn eval_spawn_expr(
             *qualifier_kind,
             qualifier,
             resolved_callable.as_deref(),
+            resolved_routine.as_deref(),
             resolved_signature.as_deref(),
             plan,
             current_module_id,
@@ -10776,6 +10827,7 @@ fn eval_expr(
             qualifier_kind,
             qualifier,
             resolved_callable,
+            resolved_routine,
             resolved_signature,
             attached,
         } => match qualifier_kind {
@@ -10811,6 +10863,7 @@ fn eval_expr(
                 attached,
                 qualifier,
                 resolved_callable.as_deref(),
+                resolved_routine.as_deref(),
                 resolved_signature.as_deref(),
                 plan,
                 current_module_id,
@@ -11025,6 +11078,7 @@ fn execute_page_rollups(
             resolve_rollup_handler_callable_path(plan, current_module_id, &rollup.handler_path);
         let _ = execute_call_by_path(
             &callable,
+            None,
             None,
             current_module_id,
             Vec::new(),

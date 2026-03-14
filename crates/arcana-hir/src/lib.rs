@@ -818,6 +818,89 @@ impl HirResolvedWorkspace {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct HirMethodCandidate<'a> {
+    pub module_id: &'a str,
+    pub symbol: &'a HirSymbol,
+    pub declared_receiver_type: &'a str,
+    pub routine_key: String,
+}
+
+pub fn routine_key_for_symbol(module_id: &str, symbol_index: usize) -> String {
+    format!("{module_id}#sym-{symbol_index}")
+}
+
+pub fn routine_key_for_impl_method(
+    module_id: &str,
+    impl_index: usize,
+    method_index: usize,
+) -> String {
+    format!("{module_id}#impl-{impl_index}-method-{method_index}")
+}
+
+pub fn lookup_method_candidates_for_type<'a>(
+    workspace: &'a HirWorkspaceSummary,
+    type_text: &str,
+    method_name: &str,
+) -> Vec<HirMethodCandidate<'a>> {
+    let wanted = erase_type_generics_for_method_lookup(type_text);
+    let matches_target = |target: &str| {
+        let target = erase_type_generics_for_method_lookup(target);
+        target == wanted
+            || target.ends_with(&format!(".{wanted}"))
+            || wanted.ends_with(&format!(".{target}"))
+    };
+    let mut candidates = Vec::new();
+    let mut seen_routines = BTreeSet::new();
+    for package in workspace.packages.values() {
+        for module in &package.summary.modules {
+            for (impl_index, impl_decl) in module.impls.iter().enumerate() {
+                if !matches_target(&impl_decl.target_type) {
+                    continue;
+                }
+                for (method_index, method) in impl_decl.methods.iter().enumerate() {
+                    if method.name != method_name {
+                        continue;
+                    }
+                    let routine_key =
+                        routine_key_for_impl_method(&module.module_id, impl_index, method_index);
+                    if !seen_routines.insert(routine_key.clone()) {
+                        continue;
+                    }
+                    candidates.push(HirMethodCandidate {
+                        module_id: &module.module_id,
+                        symbol: method,
+                        declared_receiver_type: &impl_decl.target_type,
+                        routine_key,
+                    });
+                }
+            }
+            for (symbol_index, symbol) in module.symbols.iter().enumerate() {
+                if symbol.name != method_name || !matches!(symbol.kind, HirSymbolKind::Fn) {
+                    continue;
+                }
+                let Some(self_param) = symbol.params.first() else {
+                    continue;
+                };
+                if self_param.name != "self" || !matches_target(&self_param.ty) {
+                    continue;
+                }
+                let routine_key = routine_key_for_symbol(&module.module_id, symbol_index);
+                if !seen_routines.insert(routine_key.clone()) {
+                    continue;
+                }
+                candidates.push(HirMethodCandidate {
+                    module_id: &module.module_id,
+                    symbol,
+                    declared_receiver_type: &self_param.ty,
+                    routine_key,
+                });
+            }
+        }
+    }
+    candidates
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HirResolutionError {
     pub package_name: String,
@@ -2244,6 +2327,20 @@ pub fn derive_source_module_path(
         relative_segments: components,
         module_id: module_segments.join("."),
     })
+}
+
+fn erase_type_generics_for_method_lookup(text: &str) -> String {
+    let mut out = String::new();
+    let mut depth = 0usize;
+    for ch in text.chars() {
+        match ch {
+            '[' => depth += 1,
+            ']' => depth = depth.saturating_sub(1),
+            _ if depth == 0 && !ch.is_whitespace() => out.push(ch),
+            _ => {}
+        }
+    }
+    out
 }
 
 fn lower_directive_kind(kind: &ParsedDirectiveKind) -> HirDirectiveKind {

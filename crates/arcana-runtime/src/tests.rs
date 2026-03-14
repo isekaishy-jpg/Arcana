@@ -1,8 +1,9 @@
 use super::{
     BufferedEvent, BufferedFrameInput, BufferedHost, ParsedExpr, ParsedPageRollup, ParsedPhraseArg,
-    ParsedPhraseQualifierKind, ParsedStmt, RuntimeEntrypointPlan, RuntimeHost, RuntimeOpaqueValue,
-    RuntimePackagePlan, RuntimeParamPlan, RuntimeRoutinePlan, RuntimeValue, execute_main,
-    execute_routine, load_package_plan, plan_from_artifact, resolve_routine_index,
+    ParsedPhraseQualifierKind, ParsedStmt, RuntimeCallArg, RuntimeEntrypointPlan, RuntimeHost,
+    RuntimeOpaqueValue, RuntimePackagePlan, RuntimeParamPlan, RuntimeRoutinePlan, RuntimeValue,
+    execute_main, execute_routine, load_package_plan, plan_from_artifact, resolve_routine_index,
+    resolve_routine_index_for_call,
 };
 use arcana_aot::{
     AOT_INTERNAL_FORMAT, AotEntrypointArtifact, AotPackageArtifact, AotPackageModuleArtifact,
@@ -174,6 +175,7 @@ fn sample_return_artifact() -> AotPackageArtifact {
         }],
         routines: vec![AotRoutineArtifact {
             module_id: "hello".to_string(),
+            routine_key: "hello#sym-0".to_string(),
             symbol_name: "main".to_string(),
             symbol_kind: "fn".to_string(),
             exported: true,
@@ -223,6 +225,7 @@ fn sample_print_artifact() -> AotPackageArtifact {
             }],
             routines: vec![AotRoutineArtifact {
                 module_id: "hello".to_string(),
+                routine_key: "hello#sym-0".to_string(),
                 symbol_name: "main".to_string(),
                 symbol_kind: "fn".to_string(),
                 exported: false,
@@ -274,6 +277,7 @@ fn sample_stmt_metadata_artifact() -> AotPackageArtifact {
             }],
             routines: vec![AotRoutineArtifact {
                 module_id: "metadata".to_string(),
+                routine_key: "metadata#sym-0".to_string(),
                 symbol_name: "main".to_string(),
                 symbol_kind: "fn".to_string(),
                 exported: true,
@@ -326,6 +330,7 @@ fn sample_attachment_foreword_artifact() -> AotPackageArtifact {
             }],
             routines: vec![AotRoutineArtifact {
                 module_id: "attachment".to_string(),
+                routine_key: "attachment#sym-0".to_string(),
                 symbol_name: "main".to_string(),
                 symbol_kind: "fn".to_string(),
                 exported: true,
@@ -384,6 +389,79 @@ fn load_package_plan_reads_rendered_backend_artifact() {
     assert_eq!(plan.package_name, "hello");
     assert_eq!(plan.runtime_requirements, vec!["std.io".to_string()]);
     let _ = fs::remove_file(path);
+}
+
+#[test]
+fn resolve_routine_index_for_call_prefers_lowered_routine_identity() {
+    let plan = RuntimePackagePlan {
+        package_name: "ops".to_string(),
+        root_module_id: "ops".to_string(),
+        direct_deps: Vec::new(),
+        runtime_requirements: Vec::new(),
+        module_aliases: BTreeMap::new(),
+        entrypoints: Vec::new(),
+        routines: vec![
+            RuntimeRoutinePlan {
+                module_id: "ops".to_string(),
+                routine_key: "ops#impl-0-method-0".to_string(),
+                symbol_name: "load".to_string(),
+                symbol_kind: "fn".to_string(),
+                exported: false,
+                is_async: false,
+                type_params: Vec::new(),
+                behavior_attrs: BTreeMap::new(),
+                params: vec![RuntimeParamPlan {
+                    mode: Some("read".to_string()),
+                    name: "self".to_string(),
+                    ty: "AtomicInt".to_string(),
+                }],
+                signature_row: "fn load(read self: AtomicInt) -> Int:".to_string(),
+                intrinsic_impl: None,
+                foreword_rows: Vec::new(),
+                rollup_rows: Vec::new(),
+                rollups: Vec::new(),
+                statements: Vec::new(),
+            },
+            RuntimeRoutinePlan {
+                module_id: "ops".to_string(),
+                routine_key: "ops#impl-1-method-0".to_string(),
+                symbol_name: "load".to_string(),
+                symbol_kind: "fn".to_string(),
+                exported: false,
+                is_async: false,
+                type_params: Vec::new(),
+                behavior_attrs: BTreeMap::new(),
+                params: vec![RuntimeParamPlan {
+                    mode: Some("read".to_string()),
+                    name: "self".to_string(),
+                    ty: "AtomicBool".to_string(),
+                }],
+                signature_row: "fn load(read self: AtomicBool) -> Bool:".to_string(),
+                intrinsic_impl: None,
+                foreword_rows: Vec::new(),
+                rollup_rows: Vec::new(),
+                rollups: Vec::new(),
+                statements: Vec::new(),
+            },
+        ],
+    };
+
+    let index = resolve_routine_index_for_call(
+        &plan,
+        "ops",
+        &["ops".to_string(), "load".to_string()],
+        &[RuntimeCallArg {
+            name: None,
+            value: RuntimeValue::Bool(true),
+            source_expr: ParsedExpr::Bool(true),
+        }],
+        Some("ops#impl-0-method-0"),
+        Some("fn load(read self: AtomicBool) -> Bool:"),
+    )
+    .expect("lowered routine identity should resolve")
+    .expect("call should resolve");
+
+    assert_eq!(index, 0);
 }
 
 #[test]
@@ -528,6 +606,7 @@ fn execute_main_manual_routine_rollups_run_after_defers() {
         routines: vec![
             RuntimeRoutinePlan {
                 module_id: "manual_routine_rollups".to_string(),
+                routine_key: "manual_routine_rollups#sym-0".to_string(),
                 symbol_name: "run".to_string(),
                 symbol_kind: "fn".to_string(),
                 exported: false,
@@ -562,6 +641,7 @@ fn execute_main_manual_routine_rollups_run_after_defers() {
                         qualifier_kind: ParsedPhraseQualifierKind::Call,
                         qualifier: "call".to_string(),
                         resolved_callable: None,
+                        resolved_routine: None,
                         resolved_signature: None,
                         attached: Vec::new(),
                     }),
@@ -579,6 +659,7 @@ fn execute_main_manual_routine_rollups_run_after_defers() {
                                 qualifier_kind: ParsedPhraseQualifierKind::Call,
                                 qualifier: "call".to_string(),
                                 resolved_callable: None,
+                                resolved_routine: None,
                                 resolved_signature: None,
                                 attached: Vec::new(),
                             }),
@@ -586,6 +667,7 @@ fn execute_main_manual_routine_rollups_run_after_defers() {
                             qualifier_kind: ParsedPhraseQualifierKind::Try,
                             qualifier: "?".to_string(),
                             resolved_callable: None,
+                            resolved_routine: None,
                             resolved_signature: None,
                             attached: Vec::new(),
                         },
@@ -595,6 +677,7 @@ fn execute_main_manual_routine_rollups_run_after_defers() {
             },
             RuntimeRoutinePlan {
                 module_id: "manual_routine_rollups".to_string(),
+                routine_key: "manual_routine_rollups#sym-1".to_string(),
                 symbol_name: "main".to_string(),
                 symbol_kind: "fn".to_string(),
                 exported: true,
@@ -618,6 +701,7 @@ fn execute_main_manual_routine_rollups_run_after_defers() {
                             qualifier_kind: ParsedPhraseQualifierKind::Call,
                             qualifier: "call".to_string(),
                             resolved_callable: None,
+                            resolved_routine: None,
                             resolved_signature: None,
                             attached: Vec::new(),
                         },
@@ -2576,6 +2660,7 @@ fn execute_main_rejects_try_qualifier_arguments() {
         }],
         routines: vec![RuntimeRoutinePlan {
             module_id: "try_args_runtime".to_string(),
+            routine_key: "try_args_runtime#sym-0".to_string(),
             symbol_name: "main".to_string(),
             symbol_kind: "fn".to_string(),
             exported: true,
@@ -2604,6 +2689,7 @@ fn execute_main_rejects_try_qualifier_arguments() {
                         qualifier_kind: ParsedPhraseQualifierKind::Call,
                         qualifier: "call".to_string(),
                         resolved_callable: None,
+                        resolved_routine: None,
                         resolved_signature: None,
                         attached: Vec::new(),
                     },
@@ -2618,6 +2704,7 @@ fn execute_main_rejects_try_qualifier_arguments() {
                         qualifier_kind: ParsedPhraseQualifierKind::Try,
                         qualifier: "?".to_string(),
                         resolved_callable: None,
+                        resolved_routine: None,
                         resolved_signature: None,
                         attached: Vec::new(),
                     },
@@ -2888,6 +2975,7 @@ fn execute_main_rejects_use_after_take_move() {
         routines: vec![
             RuntimeRoutinePlan {
                 module_id: "take_move_runtime".to_string(),
+                routine_key: "take_move_runtime#sym-0".to_string(),
                 symbol_name: "consume".to_string(),
                 symbol_kind: "fn".to_string(),
                 exported: false,
@@ -2908,6 +2996,7 @@ fn execute_main_rejects_use_after_take_move() {
             },
             RuntimeRoutinePlan {
                 module_id: "take_move_runtime".to_string(),
+                routine_key: "take_move_runtime#sym-1".to_string(),
                 symbol_name: "reuse".to_string(),
                 symbol_kind: "fn".to_string(),
                 exported: false,
@@ -2928,6 +3017,7 @@ fn execute_main_rejects_use_after_take_move() {
             },
             RuntimeRoutinePlan {
                 module_id: "take_move_runtime".to_string(),
+                routine_key: "take_move_runtime#sym-2".to_string(),
                 symbol_name: "main".to_string(),
                 symbol_kind: "fn".to_string(),
                 exported: true,
@@ -2956,6 +3046,7 @@ fn execute_main_rejects_use_after_take_move() {
                             qualifier_kind: ParsedPhraseQualifierKind::Call,
                             qualifier: "call".to_string(),
                             resolved_callable: None,
+                            resolved_routine: None,
                             resolved_signature: None,
                             attached: Vec::new(),
                         },
@@ -2970,6 +3061,7 @@ fn execute_main_rejects_use_after_take_move() {
                         qualifier_kind: ParsedPhraseQualifierKind::Call,
                         qualifier: "call".to_string(),
                         resolved_callable: None,
+                        resolved_routine: None,
                         resolved_signature: None,
                         attached: Vec::new(),
                     })),
@@ -3001,6 +3093,7 @@ fn execute_main_rejects_direct_intrinsic_take_fallback_reuse() {
         }],
         routines: vec![RuntimeRoutinePlan {
             module_id: "take_intrinsic_runtime".to_string(),
+            routine_key: "take_intrinsic_runtime#sym-0".to_string(),
             symbol_name: "main".to_string(),
             symbol_kind: "fn".to_string(),
             exported: true,
@@ -3036,6 +3129,7 @@ fn execute_main_rejects_direct_intrinsic_take_fallback_reuse() {
                         qualifier_kind: ParsedPhraseQualifierKind::Call,
                         qualifier: "call".to_string(),
                         resolved_callable: None,
+                        resolved_routine: None,
                         resolved_signature: None,
                         attached: Vec::new(),
                     },
@@ -3055,6 +3149,7 @@ fn execute_main_rejects_direct_intrinsic_take_fallback_reuse() {
                     qualifier_kind: ParsedPhraseQualifierKind::Call,
                     qualifier: "call".to_string(),
                     resolved_callable: None,
+                    resolved_routine: None,
                     resolved_signature: None,
                     attached: Vec::new(),
                 })),

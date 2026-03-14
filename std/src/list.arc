@@ -1,11 +1,10 @@
 import std.collections.list
 
-impl[T] List[T]:
-    fn len(read self: List[T]) -> Int:
-        return std.collections.list.len :: self :: call
+export fn len[T](read values: List[T]) -> Int:
+    return std.collections.list.len :: values :: call
 
-    fn push(edit self: List[T], take value: T):
-        std.collections.list.push :: self, value :: call
+export fn push[T](edit values: List[T], take value: T):
+    std.collections.list.push :: values, value :: call
 
-    fn pop_or(edit self: List[T], take fallback: T) -> (Bool, T):
-        return std.collections.list.try_pop_or :: self, fallback :: call
+export fn pop_or[T](edit values: List[T], take fallback: T) -> (Bool, T):
+    return std.collections.list.try_pop_or :: values, fallback :: call

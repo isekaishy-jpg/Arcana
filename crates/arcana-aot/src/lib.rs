@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use arcana_ir::{IrEntrypoint, IrModule, IrPackage, IrPackageModule, IrRoutine};
 
-pub const AOT_INTERNAL_FORMAT: &str = "arcana-aot-v2";
+pub const AOT_INTERNAL_FORMAT: &str = "arcana-aot-v3";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AotArtifact {
@@ -35,6 +35,7 @@ pub struct AotEntrypointArtifact {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AotRoutineArtifact {
     pub module_id: String,
+    pub routine_key: String,
     pub symbol_name: String,
     pub symbol_kind: String,
     pub exported: bool,
@@ -103,6 +104,7 @@ fn compile_entrypoint(entrypoint: &IrEntrypoint) -> AotEntrypointArtifact {
 fn compile_routine(routine: &IrRoutine) -> AotRoutineArtifact {
     AotRoutineArtifact {
         module_id: routine.module_id.clone(),
+        routine_key: routine.routine_key.clone(),
         symbol_name: routine.symbol_name.clone(),
         symbol_kind: routine.symbol_kind.clone(),
         exported: routine.exported,
@@ -299,8 +301,9 @@ pub fn render_package_artifact(artifact: &AotPackageArtifact) -> String {
         .enumerate()
         .map(|(routine_index, routine)| {
             format!(
-                "{routine_index}:{}:{}:{}:async={}:exported={}:intrinsic={}:signature={}",
+                "{routine_index}:{}:key={}:{}:{}:async={}:exported={}:intrinsic={}:signature={}",
                 routine.module_id,
+                routine.routine_key,
                 routine.symbol_kind,
                 routine.symbol_name,
                 routine.is_async,
@@ -444,7 +447,7 @@ pub fn parse_package_artifact(text: &str) -> Result<AotPackageArtifact, String> 
     let routine_rows = require_string_array(&table, "routine_rows")?;
     let mut routines = Vec::new();
     for row in routine_rows {
-        let parts = split_row_n(&row, 8)?;
+        let parts = split_row_n(&row, 9)?;
         let routine_index = parse_prefixed_usize(parts[0], "")?;
         if routine_index != routines.len() {
             return Err(format!(
@@ -453,15 +456,19 @@ pub fn parse_package_artifact(text: &str) -> Result<AotPackageArtifact, String> 
             ));
         }
         let module_id = parts[1].to_string();
-        let symbol_name = parts[3].to_string();
+        let symbol_name = parts[4].to_string();
         let routine = AotRoutineArtifact {
             module_id: module_id.clone(),
-            symbol_kind: parts[2].to_string(),
+            routine_key: parts[2]
+                .strip_prefix("key=")
+                .ok_or_else(|| format!("malformed backend routine key row `{row}`"))?
+                .to_string(),
+            symbol_kind: parts[3].to_string(),
             symbol_name: symbol_name.clone(),
-            is_async: parse_prefixed_bool(parts[4], "async=")?,
-            exported: parse_prefixed_bool(parts[5], "exported=")?,
+            is_async: parse_prefixed_bool(parts[5], "async=")?,
+            exported: parse_prefixed_bool(parts[6], "exported=")?,
             intrinsic_impl: {
-                let value = parts[6]
+                let value = parts[7]
                     .strip_prefix("intrinsic=")
                     .ok_or_else(|| format!("malformed backend intrinsic row `{row}`"))?;
                 if value.is_empty() {
@@ -473,7 +480,7 @@ pub fn parse_package_artifact(text: &str) -> Result<AotPackageArtifact, String> 
             type_param_rows: Vec::new(),
             behavior_attr_rows: Vec::new(),
             param_rows: Vec::new(),
-            signature_row: parts[7]
+            signature_row: parts[8]
                 .strip_prefix("signature=")
                 .ok_or_else(|| format!("malformed backend signature row `{row}`"))?
                 .to_string(),
@@ -613,6 +620,7 @@ mod tests {
             }],
             routines: vec![IrRoutine {
                 module_id: "winspell".to_string(),
+                routine_key: "winspell#sym-0".to_string(),
                 symbol_name: "open".to_string(),
                 symbol_kind: "fn".to_string(),
                 exported: true,
@@ -663,6 +671,7 @@ mod tests {
             }],
             routines: vec![AotRoutineArtifact {
                 module_id: "tool".to_string(),
+                routine_key: "tool#sym-0".to_string(),
                 symbol_name: "main".to_string(),
                 symbol_kind: "fn".to_string(),
                 exported: true,
@@ -711,6 +720,7 @@ mod tests {
             routines: vec![
                 AotRoutineArtifact {
                     module_id: "std.concurrent".to_string(),
+                    routine_key: "std.concurrent#impl-0-method-0".to_string(),
                     symbol_name: "load".to_string(),
                     symbol_kind: "fn".to_string(),
                     exported: false,
@@ -728,6 +738,7 @@ mod tests {
                 },
                 AotRoutineArtifact {
                     module_id: "std.concurrent".to_string(),
+                    routine_key: "std.concurrent#impl-1-method-0".to_string(),
                     symbol_name: "load".to_string(),
                     symbol_kind: "fn".to_string(),
                     exported: false,
