@@ -81,8 +81,8 @@ classification: bootstrap-required
 why: package manifest and lockfile parsing support for bootstrap tooling
 consumers: package/build bootstrap path, future selfhost manifest readers
 current_source: rewrite-owned
-still_needs_rebuild: keep the Arcana-specific wrapper aligned with the active v1 lockfile contract without turning it back into a second generic parser stack
-update_note: `std.manifest` now sits above `std.config` instead of carrying its own general parser helpers; keep it Arcana-specific and explicit, target `Arcana.lock` v1 plus `book.toml`, expose explicit manifest fields and lookup helpers rather than parser state, require the active lockfile core fields/sections such as `workspace`, `[paths]`, `[deps]`, `[fingerprints]`, `[api_fingerprints]`, `[artifacts]`, `[kinds]`, and `[formats]`, and revisit only if manifest parsing moves entirely behind the Rust driver before selfhost
+still_needs_rebuild: keep the Arcana-specific wrapper aligned with the active v2 lockfile contract while preserving explicit legacy v1 compatibility and without turning it back into a second generic parser stack
+update_note: `std.manifest` now sits above `std.config` instead of carrying its own general parser helpers; keep it Arcana-specific and explicit, target `Arcana.lock` v2 plus `book.toml` while retaining `parse_lock_v1` as legacy compatibility, expose explicit manifest fields and lookup helpers rather than parser state, require the active lockfile core fields/sections such as `workspace`, `[paths]`, `[deps]`, `[kinds]`, and `[builds."<member>"."<target>"]`, and revisit only if manifest parsing moves entirely behind the Rust driver before selfhost
 promotion_condition: either rewrite-owned Arcana tooling still needs public manifest parsing or the module is relocated out of public `std`
 
 id: STD-RESULT-OPTION

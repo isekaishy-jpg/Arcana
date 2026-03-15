@@ -5,6 +5,7 @@ use std::path::{Component, Path, PathBuf};
 
 use arcana_aot::{
     AotEntrypointArtifact, AotPackageArtifact, AotRoutineArtifact, parse_package_artifact,
+    validate_package_artifact,
 };
 use arcana_ir::{
     ExecAssignOp as ParsedAssignOp, ExecAssignTarget as ParsedAssignTarget,
@@ -2754,6 +2755,7 @@ fn lower_entrypoint(
         .find(|(_, routine)| {
             routine.module_id == entrypoint.module_id
                 && routine.symbol_name == entrypoint.symbol_name
+                && routine.symbol_kind == entrypoint.symbol_kind
         })
         .ok_or_else(|| {
             format!(
@@ -2826,6 +2828,7 @@ fn build_module_aliases(
 }
 
 pub fn plan_from_artifact(artifact: &AotPackageArtifact) -> Result<RuntimePackagePlan, String> {
+    validate_package_artifact(artifact)?;
     let routines = artifact
         .routines
         .iter()
@@ -10856,18 +10859,10 @@ fn execute_routine_with_state(
     )
 }
 
-#[cfg(test)]
-fn execute_routine(
+pub fn validate_runtime_requirements_supported(
     plan: &RuntimePackagePlan,
-    routine_index: usize,
-    args: Vec<RuntimeValue>,
     host: &mut dyn RuntimeHost,
-) -> Result<RuntimeValue, String> {
-    let mut state = RuntimeExecutionState::default();
-    execute_routine_with_state(plan, routine_index, Vec::new(), args, &mut state, host)
-}
-
-pub fn execute_main(plan: &RuntimePackagePlan, host: &mut dyn RuntimeHost) -> Result<i32, String> {
+) -> Result<(), String> {
     for requirement in &plan.runtime_requirements {
         if !host.supports_runtime_requirement(requirement) {
             return Err(format!(
@@ -10875,6 +10870,23 @@ pub fn execute_main(plan: &RuntimePackagePlan, host: &mut dyn RuntimeHost) -> Re
             ));
         }
     }
+    Ok(())
+}
+
+#[cfg(test)]
+fn execute_routine(
+    plan: &RuntimePackagePlan,
+    routine_index: usize,
+    args: Vec<RuntimeValue>,
+    host: &mut dyn RuntimeHost,
+) -> Result<RuntimeValue, String> {
+    validate_runtime_requirements_supported(plan, host)?;
+    let mut state = RuntimeExecutionState::default();
+    execute_routine_with_state(plan, routine_index, Vec::new(), args, &mut state, host)
+}
+
+pub fn execute_main(plan: &RuntimePackagePlan, host: &mut dyn RuntimeHost) -> Result<i32, String> {
+    validate_runtime_requirements_supported(plan, host)?;
     let entry = plan
         .main_entrypoint()
         .ok_or_else(|| format!("package `{}` has no main entrypoint", plan.package_name))?;

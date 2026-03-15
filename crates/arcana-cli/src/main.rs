@@ -3,8 +3,9 @@ use std::path::PathBuf;
 
 use arcana_frontend::{check_path, check_workspace_graph};
 use arcana_package::{
-    BuildDisposition, execute_build, load_workspace_graph, plan_build, plan_workspace,
-    prepare_build_from_workspace, read_lockfile, render_build_summary, write_lockfile,
+    BuildDisposition, BuildTarget, execute_build, load_workspace_graph, parse_build_target,
+    plan_build_for_target, plan_workspace, prepare_build_from_workspace, read_lockfile,
+    render_build_summary, write_lockfile,
 };
 
 fn main() {
@@ -41,15 +42,39 @@ fn real_main() -> Result<i32, String> {
         }
         "build" => {
             let Some(path) = args.next() else {
-                return Err("usage: arcana build <workspace-dir> [--plan]".to_string());
+                return Err(
+                    "usage: arcana build <workspace-dir> [--plan] [--target <target>]".to_string(),
+                );
             };
+            let mut plan_only = false;
+            let mut target = BuildTarget::internal_aot();
             let rest = args.collect::<Vec<_>>();
-            let plan_only = match rest.as_slice() {
-                [] => false,
-                [flag] if flag == "--plan" => true,
-                _ => return Err("usage: arcana build <workspace-dir> [--plan]".to_string()),
-            };
-            run_build(PathBuf::from(path), plan_only)
+            let mut index = 0;
+            while index < rest.len() {
+                match rest[index].as_str() {
+                    "--plan" => {
+                        plan_only = true;
+                        index += 1;
+                    }
+                    "--target" => {
+                        let Some(value) = rest.get(index + 1) else {
+                            return Err(
+                                "usage: arcana build <workspace-dir> [--plan] [--target <target>]"
+                                    .to_string(),
+                            );
+                        };
+                        target = parse_build_target(value)?;
+                        index += 2;
+                    }
+                    _ => {
+                        return Err(
+                            "usage: arcana build <workspace-dir> [--plan] [--target <target>]"
+                                .to_string(),
+                        );
+                    }
+                }
+            }
+            run_build(PathBuf::from(path), plan_only, target)
         }
         other => Err(format!("unknown command `{other}`")),
     }
@@ -68,12 +93,12 @@ fn run_check(path: PathBuf) -> Result<i32, String> {
     Ok(0)
 }
 
-fn run_build(workspace_dir: PathBuf, plan_only: bool) -> Result<i32, String> {
+fn run_build(workspace_dir: PathBuf, plan_only: bool, target: BuildTarget) -> Result<i32, String> {
     let graph = load_workspace_graph(&workspace_dir)?;
     let order = plan_workspace(&graph)?;
     if plan_only {
         for member in order {
-            println!("{member}");
+            println!("{member} {target}");
         }
         return Ok(0);
     }
@@ -83,18 +108,20 @@ fn run_build(workspace_dir: PathBuf, plan_only: bool) -> Result<i32, String> {
     let prepared = prepare_build_from_workspace(&graph, workspace, resolved_workspace)?;
     let lock_path = graph.root_dir.join("Arcana.lock");
     let existing_lock = read_lockfile(&lock_path)?;
-    let statuses = plan_build(&graph, &order, &prepared, existing_lock.as_ref())?;
+    let statuses =
+        plan_build_for_target(&graph, &order, &prepared, existing_lock.as_ref(), target)?;
     execute_build(&graph, &prepared, &statuses)?;
     write_lockfile(&graph, &order, &statuses)?;
 
     for status in &statuses {
         println!(
-            "{} {} {}",
+            "{} {} {} {}",
             match status.disposition() {
                 BuildDisposition::Built => "built",
                 BuildDisposition::CacheHit => "cache_hit",
             },
             status.member(),
+            status.target(),
             status.fingerprint()
         );
     }
@@ -105,5 +132,6 @@ fn run_build(workspace_dir: PathBuf, plan_only: bool) -> Result<i32, String> {
 fn print_help() {
     println!("arcana");
     println!("  arcana check <path>");
-    println!("  arcana build <workspace-dir> [--plan]");
+    println!("  arcana build <workspace-dir> [--plan] [--target <target>]");
+    println!("    targets: internal-aot");
 }

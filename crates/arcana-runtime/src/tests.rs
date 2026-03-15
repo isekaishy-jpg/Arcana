@@ -12,7 +12,7 @@ use arcana_aot::{
 };
 use arcana_frontend::{check_workspace_graph, compute_member_fingerprints_for_checked_workspace};
 use arcana_package::{execute_build, load_workspace_graph, plan_workspace, prepare_build};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -242,7 +242,7 @@ fn sample_return_artifact() -> AotPackageArtifact {
             non_empty_line_count: 2,
             directive_rows: vec!["module=hello:import:std.io:".to_string()],
             lang_item_rows: Vec::new(),
-            exported_surface_rows: vec!["module=hello:export:fn:fn main() -> Int:".to_string()],
+            exported_surface_rows: vec!["export:fn:fn main() -> Int:".to_string()],
         }],
     }
 }
@@ -372,9 +372,7 @@ fn sample_stmt_metadata_artifact() -> AotPackageArtifact {
                 non_empty_line_count: 1,
                 directive_rows: Vec::new(),
                 lang_item_rows: Vec::new(),
-                exported_surface_rows: vec![
-                    "module=metadata:export:fn:fn main() -> Int:".to_string(),
-                ],
+                exported_surface_rows: vec!["export:fn:fn main() -> Int:".to_string()],
             }],
         }
 }
@@ -440,9 +438,7 @@ fn sample_attachment_foreword_artifact() -> AotPackageArtifact {
                 non_empty_line_count: 4,
                 directive_rows: Vec::new(),
                 lang_item_rows: Vec::new(),
-                exported_surface_rows: vec![
-                    "module=attachment:export:fn:fn main() -> Int:".to_string(),
-                ],
+                exported_surface_rows: vec!["export:fn:fn main() -> Int:".to_string()],
             }],
         }
 }
@@ -601,6 +597,18 @@ fn plan_from_artifact_rejects_rollup_handler_outside_module_scope() {
     let err = plan_from_artifact(&artifact).expect_err("out-of-scope rollup handler should fail");
     assert!(
         err.contains("runtime rollup handler `cleanup` does not resolve to a callable path"),
+        "{err}"
+    );
+}
+
+#[test]
+fn plan_from_artifact_rejects_inconsistent_module_count() {
+    let mut artifact = sample_return_artifact();
+    artifact.module_count = 2;
+
+    let err = plan_from_artifact(&artifact).expect_err("inconsistent module count should fail");
+    assert!(
+        err.contains("module_count=2 does not match modules.len()=1"),
         "{err}"
     );
 }
@@ -788,6 +796,22 @@ fn execute_main_rejects_missing_runtime_requirement() {
         ..BufferedHost::default()
     };
     let err = execute_main(&plan, &mut host).expect_err("runtime should reject missing io");
+    assert!(
+        err.contains("std.io"),
+        "expected std.io capability error, got {err}"
+    );
+}
+
+#[test]
+fn execute_routine_rejects_missing_runtime_requirement() {
+    let plan = plan_from_artifact(&sample_return_artifact()).expect("runtime plan should build");
+    let mut host = BufferedHost {
+        supported_runtime_requirements: Some(BTreeSet::new()),
+        ..BufferedHost::default()
+    };
+
+    let err = execute_routine(&plan, 0, Vec::new(), &mut host)
+        .expect_err("runtime should reject missing io");
     assert!(
         err.contains("std.io"),
         "expected std.io capability error, got {err}"
@@ -1472,21 +1496,37 @@ fn execute_main_runs_linked_std_manifest_routines() {
             "    let members = book_manifest :: :: workspace_members\n",
             "    std.io.print[Int] :: ((members :: (std.collections.list.new[Str] :: :: call) :: unwrap_or) :: :: len) :: call\n",
             "    std.io.print[Str] :: ((book_manifest :: \"foo\" :: dep_path) :: \"missing\" :: unwrap_or) :: call\n",
-            "    let lock = \"version = 1\\nworkspace = \\\"demo\\\"\\norder = [\\\"game\\\", \\\"tools\\\"]\\n[deps]\\ngame = [\\\"foo\\\", \\\"bar\\\"]\\n[paths]\\ngame = \\\"grimoires/owned/app/game\\\"\\n[fingerprints]\\ngame = \\\"fp1\\\"\\n[api_fingerprints]\\ngame = \\\"api1\\\"\\n[artifacts]\\ngame = \\\"build/app.artifact.toml\\\"\\n[kinds]\\ngame = \\\"app\\\"\\n[formats]\\ngame = \\\"arcana-aot-v2\\\"\\n\"\n",
-            "    let parsed_lock = std.manifest.parse_lock_v1 :: lock :: call\n",
-            "    if parsed_lock :: :: is_err:\n",
-            "        std.io.print[Str] :: (parsed_lock :: \"lock parse error\" :: unwrap_or) :: call\n",
+            "    let lock_v1 = \"version = 1\\nworkspace = \\\"demo\\\"\\norder = [\\\"game\\\", \\\"tools\\\"]\\n[deps]\\ngame = [\\\"foo\\\", \\\"bar\\\"]\\n[paths]\\ngame = \\\"grimoires/owned/app/game\\\"\\n[fingerprints]\\ngame = \\\"fp1\\\"\\n[api_fingerprints]\\ngame = \\\"api1\\\"\\n[artifacts]\\ngame = \\\"build/app.artifact.toml\\\"\\n[kinds]\\ngame = \\\"app\\\"\\n[formats]\\ngame = \\\"arcana-aot-v2\\\"\\n\"\n",
+            "    let parsed_lock_v1 = std.manifest.parse_lock_v1 :: lock_v1 :: call\n",
+            "    if parsed_lock_v1 :: :: is_err:\n",
+            "        std.io.print[Str] :: \"lock v1 parse error\" :: call\n",
             "        return 1\n",
             "    let empty_metadata = std.manifest.LockMetadata :: version = 0, workspace = \"\", ordered_members = (std.collections.list.new[Str] :: :: call) :: call\n",
             "    let empty_deps = std.manifest.LockDependencyTables :: dependency_lists = (std.collections.list.new[std.manifest.NameList] :: :: call), path_entries = (std.collections.list.new[std.manifest.NameValue] :: :: call), fingerprint_entries = (std.collections.list.new[std.manifest.NameValue] :: :: call) :: call\n",
             "    let empty_lookup = std.manifest.LockLookupTables :: dependencies = empty_deps, api_fingerprint_entries = (std.collections.list.new[std.manifest.NameValue] :: :: call) :: call\n",
             "    let empty_output = std.manifest.LockOutputTables :: artifact_entries = (std.collections.list.new[std.manifest.NameValue] :: :: call), kind_entries = (std.collections.list.new[std.manifest.NameValue] :: :: call), format_entries = (std.collections.list.new[std.manifest.NameValue] :: :: call) :: call\n",
-            "    let lock_manifest = parsed_lock :: (std.manifest.LockManifestV1 :: metadata = empty_metadata, lookup_tables = empty_lookup, output_tables = empty_output :: call) :: unwrap_or\n",
-            "    let deps = lock_manifest :: \"game\" :: deps_for\n",
+            "    let lock_manifest_v1 = parsed_lock_v1 :: (std.manifest.LockManifestV1 :: metadata = empty_metadata, lookup_tables = empty_lookup, output_tables = empty_output :: call) :: unwrap_or\n",
+            "    let deps = lock_manifest_v1 :: \"game\" :: deps_for\n",
             "    std.io.print[Int] :: ((deps :: (std.collections.list.new[Str] :: :: call) :: unwrap_or) :: :: len) :: call\n",
-            "    std.io.print[Str] :: ((lock_manifest :: \"game\" :: path_for) :: \"missing\" :: unwrap_or) :: call\n",
-            "    std.io.print[Str] :: ((lock_manifest :: \"game\" :: kind_for) :: \"missing\" :: unwrap_or) :: call\n",
-            "    std.io.print[Str] :: ((lock_manifest :: \"game\" :: format_for) :: \"missing\" :: unwrap_or) :: call\n",
+            "    std.io.print[Str] :: ((lock_manifest_v1 :: \"game\" :: path_for) :: \"missing\" :: unwrap_or) :: call\n",
+            "    std.io.print[Str] :: ((lock_manifest_v1 :: \"game\" :: kind_for) :: \"missing\" :: unwrap_or) :: call\n",
+            "    std.io.print[Str] :: ((lock_manifest_v1 :: \"game\" :: format_for) :: \"missing\" :: unwrap_or) :: call\n",
+            "    let lock_v2 = \"version = 2\\nworkspace = \\\"demo\\\"\\norder = [\\\"game\\\", \\\"tools\\\"]\\n[paths]\\ngame = \\\"grimoires/owned/app/game\\\"\\ntools = \\\"grimoires/owned/app/tools\\\"\\n[deps]\\ngame = [\\\"foo\\\", \\\"bar\\\"]\\ntools = []\\n[kinds]\\ngame = \\\"app\\\"\\ntools = \\\"lib\\\"\\n[builds]\\n\\n[builds.\\\"game\\\".\\\"internal-aot\\\"]\\nfingerprint = \\\"fp2\\\"\\napi_fingerprint = \\\"api2\\\"\\nartifact = \\\".arcana/artifacts/game/internal-aot/app.artifact.toml\\\"\\nartifact_hash = \\\"hash2\\\"\\nformat = \\\"arcana-aot-v4\\\"\\ntoolchain = \\\"toolchain-1\\\"\\n\\n[builds.\\\"tools\\\".\\\"internal-aot\\\"]\\nfingerprint = \\\"fp3\\\"\\napi_fingerprint = \\\"api3\\\"\\nartifact = \\\".arcana/artifacts/tools/internal-aot/lib.artifact.toml\\\"\\nartifact_hash = \\\"hash3\\\"\\nformat = \\\"arcana-aot-v4\\\"\\ntoolchain = \\\"toolchain-1\\\"\\n\"\n",
+            "    let parsed_lock_v2 = std.manifest.parse_lock :: lock_v2 :: call\n",
+            "    if parsed_lock_v2 :: :: is_err:\n",
+            "        std.io.print[Str] :: \"lock v2 parse error\" :: call\n",
+            "        return 1\n",
+            "    let empty_members = std.manifest.LockMemberTables :: dependency_lists = (std.collections.list.new[std.manifest.NameList] :: :: call), path_entries = (std.collections.list.new[std.manifest.NameValue] :: :: call), kind_entries = (std.collections.list.new[std.manifest.NameValue] :: :: call) :: call\n",
+            "    let empty_builds = std.manifest.LockBuildTables :: build_entries = (std.collections.list.new[std.manifest.LockBuildEntry] :: :: call) :: call\n",
+            "    let lock_manifest_v2 = parsed_lock_v2 :: (std.manifest.LockManifestV2 :: metadata = empty_metadata, member_tables = empty_members, build_tables = empty_builds :: call) :: unwrap_or\n",
+            "    let targets = lock_manifest_v2 :: \"game\" :: targets_for\n",
+            "    std.io.print[Int] :: ((targets :: (std.collections.list.new[Str] :: :: call) :: unwrap_or) :: :: len) :: call\n",
+            "    std.io.print[Str] :: ((lock_manifest_v2 :: \"game\" :: path_for) :: \"missing\" :: unwrap_or) :: call\n",
+            "    std.io.print[Str] :: ((lock_manifest_v2 :: \"game\" :: kind_for) :: \"missing\" :: unwrap_or) :: call\n",
+            "    std.io.print[Str] :: ((lock_manifest_v2 :: \"game\", \"internal-aot\" :: artifact_for) :: \"missing\" :: unwrap_or) :: call\n",
+            "    std.io.print[Str] :: ((lock_manifest_v2 :: \"game\", \"internal-aot\" :: artifact_hash_for) :: \"missing\" :: unwrap_or) :: call\n",
+            "    std.io.print[Str] :: ((lock_manifest_v2 :: \"game\", \"internal-aot\" :: format_for) :: \"missing\" :: unwrap_or) :: call\n",
+            "    std.io.print[Str] :: ((lock_manifest_v2 :: \"game\", \"internal-aot\" :: toolchain_for) :: \"missing\" :: unwrap_or) :: call\n",
             "    return 0\n",
         ),
     );
@@ -1522,6 +1562,13 @@ fn execute_main_runs_linked_std_manifest_routines() {
             "grimoires/owned/app/game".to_string(),
             "app".to_string(),
             "arcana-aot-v2".to_string(),
+            "1".to_string(),
+            "grimoires/owned/app/game".to_string(),
+            "app".to_string(),
+            ".arcana/artifacts/game/internal-aot/app.artifact.toml".to_string(),
+            "hash2".to_string(),
+            "arcana-aot-v4".to_string(),
+            "toolchain-1".to_string(),
         ]
     );
 

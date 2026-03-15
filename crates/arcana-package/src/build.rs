@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::PathBuf;
 
-use arcana_aot::{AOT_INTERNAL_FORMAT, compile_package};
+use arcana_aot::compile_package;
 use arcana_hir::{HirResolvedWorkspace, HirWorkspaceSummary, resolve_workspace};
 use arcana_ir::{
     IrPackage, RuntimeRequirementRoots, derive_runtime_requirements_with_roots,
@@ -11,14 +11,14 @@ use arcana_ir::{
 
 use crate::build_identity::{
     artifact_body_hash, artifact_body_hash_for_path, cached_artifact_matches_status,
-    current_build_toolchain, render_cached_artifact,
+    current_build_toolchain_for_target, render_cached_artifact,
 };
 use crate::fingerprint::{
     WorkspaceFingerprints, compute_workspace_fingerprints, package_uses_implicit_std,
 };
 use crate::{
-    ARTIFACT_DIR, CACHE_DIR, GrimoireKind, LOCKFILE_VERSION, LOGS_DIR, Lockfile, PackageResult,
-    WorkspaceGraph,
+    ARTIFACT_DIR, BuildTarget, CACHE_DIR, GrimoireKind, LOCKFILE_VERSION, LOGS_DIR,
+    LockTargetEntry, Lockfile, PackageResult, WorkspaceGraph,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -35,6 +35,7 @@ pub struct BuildStatus {
     pub(crate) fingerprint_set_id: String,
     pub(crate) fingerprint: String,
     pub(crate) api_fingerprint: String,
+    pub(crate) target: BuildTarget,
     pub(crate) artifact_rel_path: String,
     pub(crate) kind: GrimoireKind,
     pub(crate) format: String,
@@ -54,6 +55,10 @@ impl BuildStatus {
         &self.fingerprint
     }
 
+    pub fn target(&self) -> &BuildTarget {
+        &self.target
+    }
+
     pub fn artifact_rel_path(&self) -> &str {
         &self.artifact_rel_path
     }
@@ -63,7 +68,6 @@ impl BuildStatus {
 pub struct PreparedBuild {
     pub(crate) snapshot_id: String,
     pub(crate) fingerprint_set_id: String,
-    pub(crate) toolchain: String,
     pub(crate) fingerprints: WorkspaceFingerprints,
     pub(crate) workspace: HirWorkspaceSummary,
     pub(crate) lowered_packages: BTreeMap<String, IrPackage>,
@@ -105,24 +109,22 @@ pub fn prepare_build_from_workspace(
     Ok(PreparedBuild {
         snapshot_id: fingerprints.snapshot_id().to_string(),
         fingerprint_set_id: fingerprints.identity(),
-        toolchain: current_build_toolchain()?,
         fingerprints,
         workspace,
         lowered_packages,
     })
 }
 
-pub fn plan_build(
+pub fn plan_build_for_target(
     graph: &WorkspaceGraph,
     order: &[String],
     prepared: &PreparedBuild,
     existing_lock: Option<&Lockfile>,
+    target: BuildTarget,
 ) -> PackageResult<Vec<BuildStatus>> {
+    let planned_toolchain = current_build_toolchain_for_target(&target)?;
     let mut statuses = Vec::new();
     let mut upstream_built = HashMap::<String, bool>::new();
-    let toolchain_changed = existing_lock
-        .map(|lock| lock.toolchain != prepared.toolchain.as_str())
-        .unwrap_or(true);
 
     for name in order {
         let member = graph
@@ -134,9 +136,14 @@ pub fn plan_build(
             .ok_or_else(|| format!("missing fingerprint for member `{name}`"))?;
         let fingerprint = member_fingerprints.source().to_string();
         let api_fingerprint = member_fingerprints.api().to_string();
-        let artifact_rel_path = artifact_rel_path(name, &fingerprint, &member.kind);
-        let existing = existing_lock.and_then(|lock| lock.members.get(name));
-        let format = AOT_INTERNAL_FORMAT.to_string();
+        let artifact_rel_path = artifact_rel_path(name, &fingerprint, &member.kind, &target)?;
+        let existing = existing_lock
+            .and_then(|lock| lock.members.get(name))
+            .and_then(|member| member.target(&target));
+        let format = target
+            .format()
+            .ok_or_else(|| format!("unsupported build target `{target}`"))?
+            .to_string();
         let artifact_abs_path = graph.root_dir.join(&artifact_rel_path);
         let fingerprint_changed = existing
             .map(|entry| entry.fingerprint != fingerprint)
@@ -145,6 +152,9 @@ pub fn plan_build(
             .map(|entry| entry.api_fingerprint != api_fingerprint)
             .unwrap_or(true);
         let format_changed = existing.map(|entry| entry.format != format).unwrap_or(true);
+        let toolchain_changed = existing
+            .map(|entry| entry.toolchain != planned_toolchain)
+            .unwrap_or(true);
         let dependency_built = member
             .deps
             .iter()
@@ -160,8 +170,9 @@ pub fn plan_build(
                 &member.kind,
                 &fingerprint,
                 &api_fingerprint,
+                &target,
                 &format,
-                &prepared.toolchain,
+                &planned_toolchain,
                 existing
                     .map(|entry| entry.artifact_hash.as_str())
                     .unwrap_or(""),
@@ -178,14 +189,30 @@ pub fn plan_build(
             fingerprint_set_id: prepared.fingerprint_set_id.clone(),
             fingerprint,
             api_fingerprint,
+            target: target.clone(),
             artifact_rel_path,
             kind: member.kind.clone(),
             format,
-            toolchain: prepared.toolchain.clone(),
+            toolchain: planned_toolchain.clone(),
         });
     }
 
     Ok(statuses)
+}
+
+pub fn plan_build(
+    graph: &WorkspaceGraph,
+    order: &[String],
+    prepared: &PreparedBuild,
+    existing_lock: Option<&Lockfile>,
+) -> PackageResult<Vec<BuildStatus>> {
+    plan_build_for_target(
+        graph,
+        order,
+        prepared,
+        existing_lock,
+        BuildTarget::internal_aot(),
+    )
 }
 
 pub fn execute_build(
@@ -228,11 +255,12 @@ pub fn execute_build(
                     .ok_or_else(|| format!("missing lowered linked package `{name}`"))
             })
             .collect::<PackageResult<Vec<_>>>()?;
-        let artifact = compile_package(&link_ir_packages(
+        let artifact = compile_artifact_for_target(
+            &status.target,
             &member.kind,
             root_package,
             linked_packages,
-        ));
+        )?;
         if artifact.format != status.format {
             return Err(format!(
                 "artifact format mismatch for `{}`: planner={}, compiler={}",
@@ -256,6 +284,7 @@ pub fn execute_build(
                 &status.kind,
                 &status.fingerprint,
                 &status.api_fingerprint,
+                &status.target,
                 &status.toolchain,
                 &artifact,
                 &artifact_hash,
@@ -285,7 +314,8 @@ pub fn write_lockfile(
     statuses: &[BuildStatus],
 ) -> PackageResult<PathBuf> {
     let lock_path = graph.root_dir.join("Arcana.lock");
-    let rendered = render_lockfile(graph, order, statuses)?;
+    let existing_lock = crate::read_lockfile(&lock_path)?;
+    let rendered = render_lockfile(graph, order, statuses, existing_lock.as_ref())?;
     fs::write(&lock_path, rendered)
         .map_err(|e| format!("failed to write `{}`: {e}", lock_path.display()))?;
     Ok(lock_path)
@@ -295,21 +325,15 @@ pub fn render_lockfile(
     graph: &WorkspaceGraph,
     order: &[String],
     statuses: &[BuildStatus],
+    existing_lock: Option<&Lockfile>,
 ) -> PackageResult<String> {
-    let toolchain = lockfile_toolchain(statuses)?;
     let mut out = String::new();
     out.push_str(&format!("version = {LOCKFILE_VERSION}\n"));
     out.push_str(&format!(
         "workspace = \"{}\"\n",
         escape_toml(&graph.root_name)
     ));
-    out.push_str(&format!("toolchain = \"{}\"\n", escape_toml(&toolchain)));
     out.push_str(&format!("order = {}\n\n", format_string_array(order)));
-
-    let status_map = statuses
-        .iter()
-        .map(|status| (status.member.clone(), status))
-        .collect::<HashMap<_, _>>();
 
     let mut names = graph
         .members
@@ -346,92 +370,105 @@ pub fn render_lockfile(
 
     out.push_str("[kinds]\n");
     for name in &names {
-        let status = status_map
-            .get(name)
-            .ok_or_else(|| format!("missing build status for `{name}`"))?;
+        let member = graph
+            .member(name)
+            .ok_or_else(|| format!("missing workspace member `{name}`"))?;
         out.push_str(&format!(
             "\"{}\" = \"{}\"\n",
             escape_toml(name),
-            status.kind.as_str()
+            member.kind.as_str()
         ));
     }
     out.push('\n');
 
-    out.push_str("[formats]\n");
+    let merged_builds = merge_lock_build_entries(graph, &names, statuses, existing_lock)?;
+    out.push_str("[builds]\n\n");
     for name in &names {
-        let status = status_map
+        let builds = merged_builds
             .get(name)
-            .ok_or_else(|| format!("missing build status for `{name}`"))?;
-        out.push_str(&format!(
-            "\"{}\" = \"{}\"\n",
-            escape_toml(name),
-            escape_toml(&status.format)
-        ));
-    }
-    out.push('\n');
-
-    out.push_str("[fingerprints]\n");
-    for name in &names {
-        let status = status_map
-            .get(name)
-            .ok_or_else(|| format!("missing build status for `{name}`"))?;
-        out.push_str(&format!(
-            "\"{}\" = \"{}\"\n",
-            escape_toml(name),
-            escape_toml(&status.fingerprint)
-        ));
-    }
-    out.push('\n');
-
-    out.push_str("[api_fingerprints]\n");
-    for name in &names {
-        let status = status_map
-            .get(name)
-            .ok_or_else(|| format!("missing build status for `{name}`"))?;
-        out.push_str(&format!(
-            "\"{}\" = \"{}\"\n",
-            escape_toml(name),
-            escape_toml(&status.api_fingerprint)
-        ));
-    }
-    out.push('\n');
-
-    out.push_str("[artifacts]\n");
-    for name in &names {
-        let status = status_map
-            .get(name)
-            .ok_or_else(|| format!("missing build status for `{name}`"))?;
-        out.push_str(&format!(
-            "\"{}\" = \"{}\"\n",
-            escape_toml(name),
-            escape_toml(&status.artifact_rel_path)
-        ));
-    }
-    out.push('\n');
-
-    out.push_str("[artifact_hashes]\n");
-    for name in &names {
-        let status = status_map
-            .get(name)
-            .ok_or_else(|| format!("missing build status for `{name}`"))?;
-        let artifact_path = graph.root_dir.join(&status.artifact_rel_path);
-        let artifact_hash = artifact_body_hash_for_path(&artifact_path)?;
-        out.push_str(&format!(
-            "\"{}\" = \"{}\"\n",
-            escape_toml(name),
-            escape_toml(&artifact_hash)
-        ));
+            .ok_or_else(|| format!("missing build entries for `{name}`"))?;
+        for (target, entry) in builds {
+            out.push_str(&format!(
+                "[builds.\"{}\".\"{}\"]\n",
+                escape_toml(name),
+                escape_toml(target.key())
+            ));
+            out.push_str(&format!(
+                "fingerprint = \"{}\"\n",
+                escape_toml(&entry.fingerprint)
+            ));
+            out.push_str(&format!(
+                "api_fingerprint = \"{}\"\n",
+                escape_toml(&entry.api_fingerprint)
+            ));
+            out.push_str(&format!(
+                "artifact = \"{}\"\n",
+                escape_toml(&entry.artifact)
+            ));
+            out.push_str(&format!(
+                "artifact_hash = \"{}\"\n",
+                escape_toml(&entry.artifact_hash)
+            ));
+            out.push_str(&format!("format = \"{}\"\n", escape_toml(&entry.format)));
+            out.push_str(&format!(
+                "toolchain = \"{}\"\n\n",
+                escape_toml(&entry.toolchain)
+            ));
+        }
     }
 
     Ok(out)
+}
+
+fn merge_lock_build_entries(
+    graph: &WorkspaceGraph,
+    names: &[String],
+    statuses: &[BuildStatus],
+    existing_lock: Option<&Lockfile>,
+) -> PackageResult<BTreeMap<String, BTreeMap<BuildTarget, LockTargetEntry>>> {
+    let mut updates = HashMap::<(String, BuildTarget), LockTargetEntry>::new();
+    for status in statuses {
+        let artifact_path = graph.root_dir.join(&status.artifact_rel_path);
+        let artifact_hash = artifact_body_hash_for_path(&artifact_path)?;
+        updates.insert(
+            (status.member.clone(), status.target.clone()),
+            LockTargetEntry {
+                fingerprint: status.fingerprint.clone(),
+                api_fingerprint: status.api_fingerprint.clone(),
+                artifact: status.artifact_rel_path.clone(),
+                artifact_hash,
+                format: status.format.clone(),
+                toolchain: status.toolchain.clone(),
+            },
+        );
+    }
+
+    let mut merged = BTreeMap::new();
+    for name in names {
+        let mut entries = existing_lock
+            .and_then(|lock| lock.members.get(name))
+            .map(|member| member.targets.clone())
+            .unwrap_or_default();
+        for ((member_name, target), entry) in &updates {
+            if member_name == name {
+                entries.insert(target.clone(), entry.clone());
+            }
+        }
+        if entries.is_empty() {
+            return Err(format!("missing build entries for `{name}`"));
+        }
+        merged.insert(name.clone(), entries);
+    }
+    Ok(merged)
 }
 
 pub fn render_build_summary(statuses: &[BuildStatus], graph: &WorkspaceGraph) -> String {
     let mut out = String::from("summary-v1\n");
     for status in statuses {
         out.push_str(&format!(
-            "BUILD_STATUS member={} disposition={} fingerprint={}\n",
+            "BUILD_STATUS member={} target={} disposition={} fingerprint={}\n",
             status.member,
+            status.target(),
             match status.disposition {
                 BuildDisposition::Built => "built",
                 BuildDisposition::CacheHit => "cache_hit",
@@ -549,16 +586,34 @@ fn link_ir_packages(
     linked_package
 }
 
-fn artifact_rel_path(name: &str, fingerprint: &str, kind: &GrimoireKind) -> String {
-    let suffix = match kind {
-        GrimoireKind::App => "app.artifact.toml",
-        GrimoireKind::Lib => "lib.artifact.toml",
-    };
-    format!(
-        "{CACHE_DIR}/{ARTIFACT_DIR}/{name}/{}/{}",
+fn compile_artifact_for_target(
+    target: &BuildTarget,
+    root_kind: &GrimoireKind,
+    root: IrPackage,
+    linked_packages: Vec<IrPackage>,
+) -> PackageResult<arcana_aot::AotPackageArtifact> {
+    match target {
+        BuildTarget::InternalAot => Ok(compile_package(&link_ir_packages(
+            root_kind,
+            root,
+            linked_packages,
+        ))),
+        BuildTarget::Other(_) => Err(format!("unsupported build target `{target}`")),
+    }
+}
+
+fn artifact_rel_path(
+    name: &str,
+    fingerprint: &str,
+    kind: &GrimoireKind,
+    target: &BuildTarget,
+) -> PackageResult<String> {
+    Ok(format!(
+        "{CACHE_DIR}/{ARTIFACT_DIR}/{name}/{}/{}/{}",
+        target.key(),
         sanitize_fingerprint(fingerprint),
-        suffix
-    )
+        target.artifact_file_name(kind)?
+    ))
 }
 
 fn sanitize_fingerprint(text: &str) -> String {
@@ -569,13 +624,6 @@ fn validate_prepared_snapshot(
     prepared: &PreparedBuild,
     statuses: &[BuildStatus],
 ) -> PackageResult<()> {
-    let expected_toolchain = current_build_toolchain()?;
-    if prepared.toolchain != expected_toolchain {
-        return Err(format!(
-            "prepared build targets toolchain `{}` but current toolchain is `{expected_toolchain}`",
-            prepared.toolchain
-        ));
-    }
     for status in statuses {
         if status.snapshot_id != prepared.snapshot_id {
             return Err(format!(
@@ -589,21 +637,17 @@ fn validate_prepared_snapshot(
                 status.member, status.fingerprint_set_id, prepared.fingerprint_set_id
             ));
         }
-        if status.toolchain != prepared.toolchain {
+        let expected_toolchain = current_build_toolchain_for_target(&status.target)?;
+        if status.toolchain != expected_toolchain {
             return Err(format!(
-                "build status for `{}` targets toolchain `{}` but prepared build uses `{}`",
-                status.member, status.toolchain, prepared.toolchain
+                "build status for `{}` targets toolchain `{}` but current `{}` toolchain is `{expected_toolchain}`",
+                status.member,
+                status.toolchain,
+                status.target()
             ));
         }
     }
     Ok(())
-}
-
-fn lockfile_toolchain(statuses: &[BuildStatus]) -> PackageResult<String> {
-    match statuses.first() {
-        Some(status) => Ok(status.toolchain.clone()),
-        None => current_build_toolchain(),
-    }
 }
 
 fn format_string_array(items: &[String]) -> String {

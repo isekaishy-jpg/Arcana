@@ -134,19 +134,6 @@ fn collect_rollup_callee(
     if let Some(routine_key) = resolve_routine_key(package, current_module_id, &rollup.handler_path)
     {
         out.insert(routine_key);
-        return;
-    }
-    if rollup.handler_path.len() != 1 {
-        return;
-    }
-    let symbol_name = &rollup.handler_path[0];
-    let matches = package
-        .routines
-        .iter()
-        .filter(|routine| routine.symbol_name == *symbol_name)
-        .collect::<Vec<_>>();
-    if let [routine] = matches.as_slice() {
-        out.insert(routine.routine_key.clone());
     }
 }
 
@@ -436,8 +423,8 @@ mod tests {
         derive_runtime_requirements_with_roots,
     };
     use crate::{
-        ExecExpr, ExecPhraseQualifierKind, ExecStmt, IrEntrypoint, IrPackage, IrPackageModule,
-        IrRoutine,
+        ExecExpr, ExecPageRollup, ExecPhraseQualifierKind, ExecStmt, IrEntrypoint, IrPackage,
+        IrPackageModule, IrRoutine,
     };
 
     fn routine(
@@ -710,5 +697,93 @@ mod tests {
             ),
             vec!["std.kernel.io".to_string()]
         );
+    }
+
+    #[test]
+    fn rollup_handlers_do_not_use_global_unique_name_fallback() {
+        let package = IrPackage {
+            package_name: "app".to_string(),
+            root_module_id: "app".to_string(),
+            direct_deps: vec!["std".to_string()],
+            modules: vec![
+                IrPackageModule {
+                    module_id: "app".to_string(),
+                    symbol_count: 1,
+                    item_count: 1,
+                    line_count: 1,
+                    non_empty_line_count: 1,
+                    directive_rows: Vec::new(),
+                    lang_item_rows: Vec::new(),
+                    exported_surface_rows: Vec::new(),
+                },
+                IrPackageModule {
+                    module_id: "helpers".to_string(),
+                    symbol_count: 1,
+                    item_count: 1,
+                    line_count: 1,
+                    non_empty_line_count: 1,
+                    directive_rows: Vec::new(),
+                    lang_item_rows: Vec::new(),
+                    exported_surface_rows: Vec::new(),
+                },
+            ],
+            dependency_edge_count: 0,
+            dependency_rows: Vec::new(),
+            exported_surface_rows: Vec::new(),
+            runtime_requirements: Vec::new(),
+            entrypoints: vec![IrEntrypoint {
+                module_id: "app".to_string(),
+                symbol_name: "main".to_string(),
+                symbol_kind: "fn".to_string(),
+                is_async: false,
+                exported: true,
+            }],
+            routines: vec![
+                IrRoutine {
+                    module_id: "app".to_string(),
+                    routine_key: "app#fn-0".to_string(),
+                    symbol_name: "main".to_string(),
+                    symbol_kind: "fn".to_string(),
+                    exported: true,
+                    is_async: false,
+                    type_param_rows: Vec::new(),
+                    behavior_attr_rows: Vec::new(),
+                    param_rows: Vec::new(),
+                    signature_row: "fn main() -> Int:".to_string(),
+                    intrinsic_impl: None,
+                    impl_target_type: None,
+                    impl_trait_path: None,
+                    foreword_rows: Vec::new(),
+                    rollups: vec![ExecPageRollup {
+                        kind: "cleanup".to_string(),
+                        subject: "scope".to_string(),
+                        handler_path: vec!["cleanup".to_string()],
+                    }],
+                    statements: vec![ExecStmt::ReturnValue {
+                        value: ExecExpr::Int(0),
+                    }],
+                },
+                IrRoutine {
+                    module_id: "helpers".to_string(),
+                    routine_key: "helpers#fn-0".to_string(),
+                    symbol_name: "cleanup".to_string(),
+                    symbol_kind: "fn".to_string(),
+                    exported: false,
+                    is_async: false,
+                    type_param_rows: Vec::new(),
+                    behavior_attr_rows: Vec::new(),
+                    param_rows: vec!["mode=:name=scope:ty=Int".to_string()],
+                    signature_row: "fn cleanup(scope: Int) -> Int:".to_string(),
+                    intrinsic_impl: Some("IoPrint".to_string()),
+                    impl_target_type: None,
+                    impl_trait_path: None,
+                    foreword_rows: Vec::new(),
+                    rollups: Vec::new(),
+                    statements: Vec::new(),
+                },
+            ],
+        };
+
+        assert!(derive_runtime_requirements(&package).is_empty());
     }
 }

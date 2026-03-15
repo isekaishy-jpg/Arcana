@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-#[cfg(test)]
 use arcana_aot::AOT_INTERNAL_FORMAT;
 use arcana_hir::{
     HirWorkspacePackage, HirWorkspaceSummary, build_package_layout, build_package_summary,
@@ -17,18 +16,82 @@ mod fingerprint;
 pub type PackageResult<T> = Result<T, String>;
 
 pub use build::{
-    BuildDisposition, BuildStatus, PreparedBuild, execute_build, plan_build, prepare_build,
-    prepare_build_from_workspace, render_build_summary, render_lockfile, write_lockfile,
+    BuildDisposition, BuildStatus, PreparedBuild, execute_build, plan_build, plan_build_for_target,
+    prepare_build, prepare_build_from_workspace, render_build_summary, render_lockfile,
+    write_lockfile,
 };
 pub use fingerprint::{
     MemberFingerprints, WorkspaceFingerprints, compute_workspace_fingerprints,
     compute_workspace_snapshot_id,
 };
 
-pub(crate) const LOCKFILE_VERSION: i64 = 1;
+pub(crate) const LOCKFILE_VERSION: i64 = 2;
+pub(crate) const LEGACY_LOCKFILE_VERSION: i64 = 1;
 pub(crate) const CACHE_DIR: &str = ".arcana";
 pub(crate) const ARTIFACT_DIR: &str = "artifacts";
 pub(crate) const LOGS_DIR: &str = "logs";
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum BuildTarget {
+    InternalAot,
+    Other(String),
+}
+
+impl BuildTarget {
+    pub fn internal_aot() -> Self {
+        Self::InternalAot
+    }
+
+    pub fn key(&self) -> &str {
+        match self {
+            Self::InternalAot => "internal-aot",
+            Self::Other(other) => other,
+        }
+    }
+
+    fn from_storage_key(text: &str) -> Self {
+        match text {
+            "internal-aot" => Self::InternalAot,
+            other => Self::Other(other.to_string()),
+        }
+    }
+
+    pub fn format(&self) -> Option<&'static str> {
+        match self {
+            Self::InternalAot => Some(AOT_INTERNAL_FORMAT),
+            Self::Other(_) => None,
+        }
+    }
+
+    pub fn artifact_file_name(&self, kind: &GrimoireKind) -> PackageResult<&'static str> {
+        match (self, kind) {
+            (Self::InternalAot, GrimoireKind::App) => Ok("app.artifact.toml"),
+            (Self::InternalAot, GrimoireKind::Lib) => Ok("lib.artifact.toml"),
+            (Self::Other(_), _) => Err(format!("unsupported build target `{self}`")),
+        }
+    }
+}
+
+impl std::fmt::Display for BuildTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.key())
+    }
+}
+
+pub fn parse_build_target(text: &str) -> PackageResult<BuildTarget> {
+    match text {
+        "internal-aot" => Ok(BuildTarget::InternalAot),
+        other => Err(format!("unsupported build target `{other}`")),
+    }
+}
+
+fn infer_build_target_from_format(format: &str) -> Option<BuildTarget> {
+    match format {
+        AOT_INTERNAL_FORMAT => Some(BuildTarget::InternalAot),
+        other if other.starts_with("arcana-aot-") => Some(BuildTarget::InternalAot),
+        _ => None,
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GrimoireKind {
@@ -97,22 +160,33 @@ impl WorkspaceGraph {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LockMember {
-    pub path: String,
-    pub deps: Vec<String>,
+pub struct LockTargetEntry {
     pub fingerprint: String,
     pub api_fingerprint: String,
     pub artifact: String,
     pub artifact_hash: String,
-    pub kind: GrimoireKind,
     pub format: String,
+    pub toolchain: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LockMember {
+    pub path: String,
+    pub deps: Vec<String>,
+    pub kind: GrimoireKind,
+    pub targets: BTreeMap<BuildTarget, LockTargetEntry>,
+}
+
+impl LockMember {
+    pub fn target(&self, target: &BuildTarget) -> Option<&LockTargetEntry> {
+        self.targets.get(target)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Lockfile {
     pub version: i64,
     pub workspace: String,
-    pub toolchain: String,
     pub order: Vec<String>,
     pub members: BTreeMap<String, LockMember>,
 }
@@ -124,6 +198,13 @@ struct PendingMember {
     abs_dir: PathBuf,
     rel_dir: String,
     dep_bindings: Vec<(String, PathBuf)>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LockMemberBase {
+    path: String,
+    deps: Vec<String>,
+    kind: GrimoireKind,
 }
 
 pub fn parse_manifest(path: &Path) -> PackageResult<Manifest> {
@@ -408,36 +489,76 @@ pub fn read_lockfile(path: &Path) -> PackageResult<Option<Lockfile>> {
         .get("version")
         .and_then(toml::Value::as_integer)
         .ok_or_else(|| format!("missing `version` in `{}`", path.display()))?;
-    if version != LOCKFILE_VERSION {
-        return Err(format!(
-            "unsupported lockfile version `{version}` in `{}`; expected {LOCKFILE_VERSION}",
-            path.display()
-        ));
+    let lockfile = match version {
+        LOCKFILE_VERSION => read_lockfile_v2(table, path, version)?,
+        LEGACY_LOCKFILE_VERSION => read_lockfile_v1(table, path, version)?,
+        _ => {
+            return Err(format!(
+                "unsupported lockfile version `{version}` in `{}`; expected {LOCKFILE_VERSION} or {LEGACY_LOCKFILE_VERSION}",
+                path.display()
+            ));
+        }
+    };
+    Ok(Some(lockfile))
+}
+
+fn read_lockfile_v2(
+    table: &toml::value::Table,
+    path: &Path,
+    version: i64,
+) -> PackageResult<Lockfile> {
+    let workspace = read_lockfile_workspace(table, path)?;
+    let order = read_lockfile_order(table)?;
+    let base_members = read_lockfile_member_bases(table, path)?;
+    let builds = table
+        .get("builds")
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| format!("missing `[builds]` in `{}`", path.display()))?;
+
+    let mut members = BTreeMap::new();
+    for (name, base) in base_members {
+        let target_table = builds
+            .get(&name)
+            .and_then(toml::Value::as_table)
+            .ok_or_else(|| format!("missing `[builds.\"{name}\"]` in `{}`", path.display()))?;
+        let targets = read_lock_target_entries(name.as_str(), target_table)?;
+        if targets.is_empty() {
+            return Err(format!(
+                "lockfile member `{name}` must contain at least one target entry"
+            ));
+        }
+        members.insert(
+            name,
+            LockMember {
+                path: base.path,
+                deps: base.deps,
+                kind: base.kind,
+                targets,
+            },
+        );
     }
-    let workspace = table
-        .get("workspace")
-        .and_then(toml::Value::as_str)
-        .ok_or_else(|| format!("missing `workspace` in `{}`", path.display()))?
-        .to_string();
+
+    Ok(Lockfile {
+        version,
+        workspace,
+        order,
+        members,
+    })
+}
+
+fn read_lockfile_v1(
+    table: &toml::value::Table,
+    path: &Path,
+    version: i64,
+) -> PackageResult<Lockfile> {
+    let workspace = read_lockfile_workspace(table, path)?;
+    let order = read_lockfile_order(table)?;
+    let base_members = read_lockfile_member_bases(table, path)?;
     let toolchain = table
         .get("toolchain")
         .and_then(toml::Value::as_str)
         .unwrap_or("")
         .to_string();
-    let order = table
-        .get("order")
-        .map(parse_string_array)
-        .transpose()?
-        .unwrap_or_default();
-
-    let paths = table
-        .get("paths")
-        .and_then(toml::Value::as_table)
-        .ok_or_else(|| format!("missing `[paths]` in `{}`", path.display()))?;
-    let deps = table
-        .get("deps")
-        .and_then(toml::Value::as_table)
-        .ok_or_else(|| format!("missing `[deps]` in `{}`", path.display()))?;
     let fingerprints = table
         .get("fingerprints")
         .and_then(toml::Value::as_table)
@@ -450,15 +571,124 @@ pub fn read_lockfile(path: &Path) -> PackageResult<Option<Lockfile>> {
         .get("artifacts")
         .and_then(toml::Value::as_table)
         .ok_or_else(|| format!("missing `[artifacts]` in `{}`", path.display()))?;
+    let targets = table.get("targets").and_then(toml::Value::as_table);
     let artifact_hashes = table.get("artifact_hashes").and_then(toml::Value::as_table);
-    let kinds = table
-        .get("kinds")
-        .and_then(toml::Value::as_table)
-        .ok_or_else(|| format!("missing `[kinds]` in `{}`", path.display()))?;
     let formats = table
         .get("formats")
         .and_then(toml::Value::as_table)
         .ok_or_else(|| format!("missing `[formats]` in `{}`", path.display()))?;
+
+    let mut members = BTreeMap::new();
+    for (name, base) in base_members {
+        let fingerprint = fingerprints
+            .get(&name)
+            .and_then(toml::Value::as_str)
+            .ok_or_else(|| format!("missing fingerprint for `{name}`"))?
+            .to_string();
+        let api_fingerprint = api_fingerprints
+            .get(&name)
+            .and_then(toml::Value::as_str)
+            .ok_or_else(|| format!("missing api fingerprint for `{name}`"))?
+            .to_string();
+        let artifact = artifacts
+            .get(&name)
+            .and_then(toml::Value::as_str)
+            .ok_or_else(|| format!("missing artifact path for `{name}`"))?
+            .to_string();
+        let artifact_hash = match artifact_hashes {
+            Some(hashes) => hashes
+                .get(&name)
+                .and_then(toml::Value::as_str)
+                .ok_or_else(|| format!("missing artifact hash for `{name}`"))?
+                .to_string(),
+            None => String::new(),
+        };
+        let format = formats
+            .get(&name)
+            .and_then(toml::Value::as_str)
+            .ok_or_else(|| format!("missing format for `{name}`"))?
+            .to_string();
+        let (target, explicit_target) = match targets
+            .and_then(|target_rows| target_rows.get(&name))
+            .and_then(toml::Value::as_str)
+        {
+            Some(target) => (BuildTarget::from_storage_key(target), true),
+            None => (
+                infer_build_target_from_format(&format).ok_or_else(|| {
+                    format!(
+                        "missing target for `{name}` and unable to infer one from format `{format}`"
+                    )
+                })?,
+                false,
+            ),
+        };
+        if explicit_target {
+            validate_lock_target_format(&name, &target, &format)?;
+        }
+
+        let mut target_entries = BTreeMap::new();
+        target_entries.insert(
+            target,
+            LockTargetEntry {
+                fingerprint,
+                api_fingerprint,
+                artifact,
+                artifact_hash,
+                format,
+                toolchain: toolchain.clone(),
+            },
+        );
+        members.insert(
+            name,
+            LockMember {
+                path: base.path,
+                deps: base.deps,
+                kind: base.kind,
+                targets: target_entries,
+            },
+        );
+    }
+
+    Ok(Lockfile {
+        version,
+        workspace,
+        order,
+        members,
+    })
+}
+
+fn read_lockfile_workspace(table: &toml::value::Table, path: &Path) -> PackageResult<String> {
+    table
+        .get("workspace")
+        .and_then(toml::Value::as_str)
+        .map(ToString::to_string)
+        .ok_or_else(|| format!("missing `workspace` in `{}`", path.display()))
+}
+
+fn read_lockfile_order(table: &toml::value::Table) -> PackageResult<Vec<String>> {
+    table
+        .get("order")
+        .map(parse_string_array)
+        .transpose()
+        .map(|order| order.unwrap_or_default())
+}
+
+fn read_lockfile_member_bases(
+    table: &toml::value::Table,
+    path: &Path,
+) -> PackageResult<BTreeMap<String, LockMemberBase>> {
+    let paths = table
+        .get("paths")
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| format!("missing `[paths]` in `{}`", path.display()))?;
+    let deps = table
+        .get("deps")
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| format!("missing `[deps]` in `{}`", path.display()))?;
+    let kinds = table
+        .get("kinds")
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| format!("missing `[kinds]` in `{}`", path.display()))?;
 
     let mut members = BTreeMap::new();
     for (name, path_value) in paths {
@@ -471,29 +701,6 @@ pub fn read_lockfile(path: &Path) -> PackageResult<Option<Lockfile>> {
             .map(parse_string_array)
             .transpose()?
             .unwrap_or_default();
-        let fingerprint = fingerprints
-            .get(name)
-            .and_then(toml::Value::as_str)
-            .ok_or_else(|| format!("missing fingerprint for `{name}`"))?
-            .to_string();
-        let api_fingerprint = api_fingerprints
-            .get(name)
-            .and_then(toml::Value::as_str)
-            .ok_or_else(|| format!("missing api fingerprint for `{name}`"))?
-            .to_string();
-        let artifact = artifacts
-            .get(name)
-            .and_then(toml::Value::as_str)
-            .ok_or_else(|| format!("missing artifact path for `{name}`"))?
-            .to_string();
-        let artifact_hash = match artifact_hashes {
-            Some(hashes) => hashes
-                .get(name)
-                .and_then(toml::Value::as_str)
-                .ok_or_else(|| format!("missing artifact hash for `{name}`"))?
-                .to_string(),
-            None => String::new(),
-        };
         let kind = match kinds
             .get(name)
             .and_then(toml::Value::as_str)
@@ -503,33 +710,85 @@ pub fn read_lockfile(path: &Path) -> PackageResult<Option<Lockfile>> {
             "lib" => GrimoireKind::Lib,
             other => return Err(format!("unsupported kind `{other}` for `{name}`")),
         };
-        let format = formats
-            .get(name)
-            .and_then(toml::Value::as_str)
-            .ok_or_else(|| format!("missing format for `{name}`"))?
-            .to_string();
         members.insert(
             name.clone(),
-            LockMember {
+            LockMemberBase {
                 path,
                 deps: dep_list,
+                kind,
+            },
+        );
+    }
+    Ok(members)
+}
+
+fn read_lock_target_entries(
+    member_name: &str,
+    target_table: &toml::value::Table,
+) -> PackageResult<BTreeMap<BuildTarget, LockTargetEntry>> {
+    let mut targets = BTreeMap::new();
+    for (target_key, value) in target_table {
+        let build_table = value.as_table().ok_or_else(|| {
+            format!(
+                "lockfile build entry for `{member_name}` target `{target_key}` must be a table"
+            )
+        })?;
+        let target = BuildTarget::from_storage_key(target_key);
+        let fingerprint =
+            read_lock_target_field(member_name, target_key, build_table, "fingerprint")?;
+        let api_fingerprint =
+            read_lock_target_field(member_name, target_key, build_table, "api_fingerprint")?;
+        let artifact = read_lock_target_field(member_name, target_key, build_table, "artifact")?;
+        let artifact_hash =
+            read_lock_target_field(member_name, target_key, build_table, "artifact_hash")?;
+        let format = read_lock_target_field(member_name, target_key, build_table, "format")?;
+        let toolchain = read_lock_target_field(member_name, target_key, build_table, "toolchain")?;
+        validate_lock_target_format(member_name, &target, &format)?;
+        targets.insert(
+            target,
+            LockTargetEntry {
                 fingerprint,
                 api_fingerprint,
                 artifact,
                 artifact_hash,
-                kind,
                 format,
+                toolchain,
             },
         );
     }
+    Ok(targets)
+}
 
-    Ok(Some(Lockfile {
-        version,
-        workspace,
-        toolchain,
-        order,
-        members,
-    }))
+fn read_lock_target_field(
+    member_name: &str,
+    target_key: &str,
+    table: &toml::value::Table,
+    field: &str,
+) -> PackageResult<String> {
+    table
+        .get(field)
+        .and_then(toml::Value::as_str)
+        .map(ToString::to_string)
+        .ok_or_else(|| {
+            format!(
+                "lockfile build entry for `{member_name}` target `{target_key}` is missing `{field}`"
+            )
+        })
+}
+
+fn validate_lock_target_format(
+    member_name: &str,
+    target: &BuildTarget,
+    format: &str,
+) -> PackageResult<()> {
+    if let Some(expected) = target.format() {
+        if format != expected {
+            return Err(format!(
+                "lockfile format `{format}` does not match target `{target}` for `{member_name}`"
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub fn validate_path(path: &Path) -> PackageResult<()> {
@@ -812,6 +1071,7 @@ fn relative_from_root(path: &Path, root: &Path) -> PackageResult<String> {
 mod tests {
     use super::*;
     use arcana_aot::parse_package_artifact;
+    use sha2::{Digest, Sha256};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_dir(name: &str) -> PathBuf {
@@ -827,6 +1087,16 @@ mod tests {
             fs::create_dir_all(parent).expect("create parent");
         }
         fs::write(path, text).expect("write file");
+    }
+
+    fn cached_artifact_body_hash(text: &str) -> String {
+        let body_start = text
+            .find("format = \"")
+            .expect("cached artifact should contain a backend artifact body");
+        let mut hasher = Sha256::new();
+        hasher.update(b"arcana_aot_body_v1\n");
+        hasher.update(text[body_start..].as_bytes());
+        format!("sha256:{:x}", hasher.finalize())
     }
 
     fn write_grimoire(dir: &Path, kind: GrimoireKind, name: &str, deps: &[(&str, &str)]) {
@@ -1110,12 +1380,53 @@ mod tests {
         let order = plan_workspace(&graph).expect("plan");
         let (prepared, statuses) = plan_test_build(&graph, &order, None);
         execute_planned_build(&graph, &prepared, &statuses).expect("execute build");
-        let first = render_lockfile(&graph, &order, &statuses).expect("render");
-        let second = render_lockfile(&graph, &order, &statuses).expect("render");
+        let first = render_lockfile(&graph, &order, &statuses, None).expect("render");
+        let second = render_lockfile(&graph, &order, &statuses, None).expect("render");
         assert_eq!(first, second);
-        assert!(first.contains("version = 1"));
-        assert!(first.contains("[api_fingerprints]"));
-        assert!(first.contains("[artifact_hashes]"));
+        assert!(first.contains("version = 2"));
+        assert!(first.contains("[builds]"));
+        assert!(first.contains("internal-aot"));
+        assert!(first.contains("[builds.\"app\".\"internal-aot\"]"));
+        assert!(first.contains("artifact_hash"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_lockfile_infers_legacy_internal_aot_target() {
+        let dir = temp_dir("legacy_lock_target");
+        let lock_path = dir.join("Arcana.lock");
+        write_file(
+            &lock_path,
+            concat!(
+                "version = 1\n",
+                "workspace = \"ws\"\n",
+                "toolchain = \"binary-sha256:abc\"\n",
+                "order = [\"app\"]\n\n",
+                "[paths]\n",
+                "\"app\" = \"app\"\n\n",
+                "[deps]\n",
+                "\"app\" = []\n\n",
+                "[kinds]\n",
+                "\"app\" = \"app\"\n\n",
+                "[formats]\n",
+                "\"app\" = \"arcana-aot-v2\"\n\n",
+                "[fingerprints]\n",
+                "\"app\" = \"fp\"\n\n",
+                "[api_fingerprints]\n",
+                "\"app\" = \"api\"\n\n",
+                "[artifacts]\n",
+                "\"app\" = \".arcana/artifacts/app/internal-aot/fp/app.artifact.toml\"\n\n",
+                "[artifact_hashes]\n",
+                "\"app\" = \"sha256:deadbeef\"\n",
+            ),
+        );
+
+        let lock = read_lockfile(&lock_path)
+            .expect("legacy lockfile should parse")
+            .expect("lockfile should exist");
+        let app = lock.members.get("app").expect("app member should exist");
+        assert!(app.target(&BuildTarget::internal_aot()).is_some());
+
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1170,8 +1481,11 @@ mod tests {
             .get("workspace")
             .expect("root package should be written to lockfile");
         assert_eq!(root.path, ".");
-        assert!(!root.artifact_hash.is_empty());
-        assert!(dir.join(&root.artifact).is_file());
+        let target = root
+            .target(&BuildTarget::internal_aot())
+            .expect("root package should include the internal-aot artifact");
+        assert!(!target.artifact_hash.is_empty());
+        assert!(dir.join(&target.artifact).is_file());
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1285,6 +1599,52 @@ mod tests {
     }
 
     #[test]
+    fn malformed_cached_artifact_rows_trigger_rebuild_even_with_matching_hashes() {
+        let dir = temp_dir("invalid_artifact_rows");
+        write_file(&dir.join("book.toml"), "name = \"app\"\nkind = \"app\"\n");
+        write_file(
+            &dir.join("src").join("shelf.arc"),
+            "import std.io\nfn main() -> Int:\n    std.io.print :: 1 :: call\n    return 0\n",
+        );
+        write_file(&dir.join("src").join("types.arc"), "// types\n");
+        write_std_io_grimoire(&dir);
+
+        let graph = load_workspace_graph(&dir).expect("load graph");
+        let order = plan_workspace(&graph).expect("plan");
+        let (first_prepared, first_statuses) = plan_test_build(&graph, &order, None);
+        execute_planned_build(&graph, &first_prepared, &first_statuses).expect("execute build");
+        let lock_path = write_lockfile(&graph, &order, &first_statuses).expect("lockfile");
+        let existing = read_lockfile(&lock_path)
+            .expect("read lock")
+            .expect("lock exists");
+
+        let status = status(&first_statuses, "app");
+        let artifact_path = graph.root_dir.join(&status.artifact_rel_path);
+        let stale = fs::read_to_string(&artifact_path).expect("artifact should exist");
+        let old_hash = existing
+            .members
+            .get("app")
+            .and_then(|member| member.target(&BuildTarget::internal_aot()))
+            .map(|target| target.artifact_hash.clone())
+            .expect("lockfile should record the app artifact hash");
+        let malformed = stale.replace("module=app:import:std.io:", "module=app:import::");
+        let new_hash = cached_artifact_body_hash(&malformed);
+        let malformed = malformed.replace(&old_hash, &new_hash);
+        fs::write(&artifact_path, malformed).expect("artifact should be rewritten");
+        let stale_lock = fs::read_to_string(&lock_path).expect("lockfile should exist");
+        fs::write(&lock_path, stale_lock.replace(&old_hash, &new_hash))
+            .expect("lockfile should be rewritten");
+        let existing = read_lockfile(&lock_path)
+            .expect("read lock")
+            .expect("lock exists");
+
+        let (_, second_statuses) = plan_test_build(&graph, &order, Some(&existing));
+        assert_dispositions(&second_statuses, &[("app", BuildDisposition::Built)]);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn lockfile_toolchain_mismatch_triggers_rebuild() {
         let dir = temp_dir("toolchain_mismatch");
         write_file(&dir.join("book.toml"), "name = \"app\"\nkind = \"app\"\n");
@@ -1318,6 +1678,51 @@ mod tests {
 
         let (_, second_statuses) = plan_test_build(&graph, &order, Some(&existing));
         assert_dispositions(&second_statuses, &[("app", BuildDisposition::Built)]);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_lockfile_preserves_existing_foreign_target_entries() {
+        let dir = temp_dir("lockfile_target_preservation");
+        write_file(&dir.join("book.toml"), "name = \"app\"\nkind = \"app\"\n");
+        write_file(
+            &dir.join("src").join("shelf.arc"),
+            "fn main() -> Int:\n    return 0\n",
+        );
+        write_file(&dir.join("src").join("types.arc"), "// types\n");
+
+        let graph = load_workspace_graph(&dir).expect("load graph");
+        let order = plan_workspace(&graph).expect("plan");
+        let (first_prepared, first_statuses) = plan_test_build(&graph, &order, None);
+        execute_planned_build(&graph, &first_prepared, &first_statuses).expect("execute build");
+        let lock_path = write_lockfile(&graph, &order, &first_statuses).expect("lockfile");
+
+        let stale_lock = fs::read_to_string(&lock_path).expect("lockfile should exist");
+        fs::write(
+            &lock_path,
+            format!(
+                "{stale_lock}\n[builds.\"app\".\"future-exe\"]\n\
+fingerprint = \"future-fp\"\n\
+api_fingerprint = \"future-api\"\n\
+artifact = \".arcana/artifacts/app/future-exe/future-fp/app.exe\"\n\
+artifact_hash = \"sha256:future\"\n\
+format = \"arcana-native-exe-v1\"\n\
+toolchain = \"future-toolchain\"\n"
+            ),
+        )
+        .expect("lockfile should be rewritten");
+
+        let existing = read_lockfile(&lock_path)
+            .expect("read lock")
+            .expect("lock exists");
+        let (_, second_statuses) = plan_test_build(&graph, &order, Some(&existing));
+        assert_dispositions(&second_statuses, &[("app", BuildDisposition::CacheHit)]);
+        write_lockfile(&graph, &order, &second_statuses).expect("lockfile");
+
+        let rendered = fs::read_to_string(&lock_path).expect("lockfile should exist");
+        assert!(rendered.contains("[builds.\"app\".\"future-exe\"]"));
+        assert!(rendered.contains(".arcana/artifacts/app/future-exe/future-fp/app.exe"));
 
         let _ = fs::remove_dir_all(&dir);
     }
