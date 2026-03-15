@@ -709,6 +709,7 @@ impl HirPackageLayout {
 pub struct HirWorkspacePackage {
     pub root_dir: PathBuf,
     pub direct_deps: BTreeSet<String>,
+    pub direct_dep_packages: BTreeMap<String, String>,
     pub summary: HirPackageSummary,
     pub layout: HirPackageLayout,
 }
@@ -724,6 +725,21 @@ impl HirWorkspacePackage {
 
     pub fn resolve_relative_module(&self, path: &[String]) -> Option<&HirModuleSummary> {
         self.layout.resolve_relative_module(&self.summary, path)
+    }
+
+    pub fn dependency_package_name(&self, visible_name: &str) -> Option<&str> {
+        self.direct_dep_packages
+            .get(visible_name)
+            .map(String::as_str)
+    }
+
+    pub fn dependency_module_id(&self, path: &[String]) -> Option<String> {
+        let (visible_name, suffix) = path.split_first()?;
+        let dependency_name = self.dependency_package_name(visible_name)?;
+        let mut segments = Vec::with_capacity(path.len());
+        segments.push(dependency_name.to_string());
+        segments.extend(suffix.iter().cloned());
+        Some(segments.join("."))
     }
 }
 
@@ -2537,9 +2553,12 @@ fn resolve_module_target(
             });
     }
 
-    if package.direct_deps.contains(first) {
+    if let Some(dependency_name) = package.dependency_package_name(first) {
+        let dependency_module_id = package
+            .dependency_module_id(path)
+            .ok_or_else(|| format!("unresolved module `{key}`"))?;
         return workspace
-            .package(first)
+            .package(dependency_name)
             .ok_or_else(|| {
                 format!(
                     "dependency `{first}` is not loaded for `{}`",
@@ -2548,7 +2567,7 @@ fn resolve_module_target(
             })
             .and_then(|dependency| {
                 dependency
-                    .module(&key)
+                    .module(&dependency_module_id)
                     .map(|module| {
                         (
                             dependency.summary.package_name.clone(),
@@ -2648,7 +2667,7 @@ fn resolve_use_target(
         if workspace.package(first).is_some()
             && first != &package.summary.package_name
             && first != "std"
-            && !package.direct_deps.contains(first)
+            && package.dependency_package_name(first).is_none()
         {
             return Err(format!(
                 "package `{first}` is not a direct dependency of `{}`",
@@ -2754,6 +2773,19 @@ pub fn build_workspace_package(
     summary: HirPackageSummary,
     layout: HirPackageLayout,
 ) -> Result<HirWorkspacePackage, String> {
+    let direct_dep_packages = direct_deps
+        .iter()
+        .map(|name| (name.clone(), name.clone()))
+        .collect();
+    build_workspace_package_with_dep_packages(root_dir, direct_dep_packages, summary, layout)
+}
+
+pub fn build_workspace_package_with_dep_packages(
+    root_dir: PathBuf,
+    direct_dep_packages: BTreeMap<String, String>,
+    summary: HirPackageSummary,
+    layout: HirPackageLayout,
+) -> Result<HirWorkspacePackage, String> {
     if summary.modules.len() != layout.absolute_modules.len() {
         return Err(format!(
             "package `{}` has {} modules but layout indexes {}",
@@ -2763,9 +2795,11 @@ pub fn build_workspace_package(
         ));
     }
 
+    let direct_deps = direct_dep_packages.keys().cloned().collect();
     Ok(HirWorkspacePackage {
         root_dir,
         direct_deps,
+        direct_dep_packages,
         summary,
         layout,
     })
@@ -4761,6 +4795,80 @@ mod tests {
     }
 
     #[test]
+    fn resolve_workspace_supports_dependency_alias_bindings() {
+        let core_summary = build_package_summary(
+            "core",
+            vec![
+                lower_module_text("core", "export fn value() -> Int:\n    return 7\n")
+                    .expect("core should lower"),
+            ],
+        );
+        let core_layout = build_package_layout(
+            &core_summary,
+            BTreeMap::from([(
+                "core".to_string(),
+                Path::new("C:/repo/core/src/book.arc").to_path_buf(),
+            )]),
+            BTreeMap::new(),
+        )
+        .expect("core layout should build");
+        let core_package = build_workspace_package(
+            Path::new("C:/repo/core").to_path_buf(),
+            BTreeSet::new(),
+            core_summary,
+            core_layout,
+        )
+        .expect("core package should build");
+
+        let app_summary = build_package_summary(
+            "app",
+            vec![
+                lower_module_text(
+                    "app",
+                    "import util\nuse util.value\nfn main() -> Int:\n    return value :: :: call\n",
+                )
+                .expect("app should lower"),
+            ],
+        );
+        let app_layout = build_package_layout(
+            &app_summary,
+            BTreeMap::from([(
+                "app".to_string(),
+                Path::new("C:/repo/app/src/shelf.arc").to_path_buf(),
+            )]),
+            BTreeMap::new(),
+        )
+        .expect("app layout should build");
+        let app_package = super::build_workspace_package_with_dep_packages(
+            Path::new("C:/repo/app").to_path_buf(),
+            BTreeMap::from([("util".to_string(), "core".to_string())]),
+            app_summary,
+            app_layout,
+        )
+        .expect("app package should build");
+
+        let workspace =
+            build_workspace_summary(vec![app_package, core_package]).expect("workspace builds");
+        let resolved = resolve_workspace(&workspace).expect("resolution should succeed");
+        let root = resolved
+            .package("app")
+            .and_then(|package| package.module("app"))
+            .expect("app module should resolve");
+        assert_eq!(root.directives.len(), 2);
+        assert_eq!(
+            root.bindings
+                .get("value")
+                .expect("alias symbol should resolve")
+                .target,
+            super::HirResolvedTarget::Symbol {
+                package_name: "core".to_string(),
+                module_id: "core".to_string(),
+                symbol_name: "value".to_string(),
+            }
+        );
+    }
+
+    #[test]
     fn resolve_workspace_reports_invalid_dependencies() {
         let core_summary = build_package_summary(
             "core",
@@ -5230,6 +5338,88 @@ mod tests {
         let app_package = build_workspace_package(
             Path::new("C:/repo/app").to_path_buf(),
             BTreeSet::from(["core".to_string()]),
+            app_summary,
+            app_layout,
+        )
+        .expect("app package should build");
+
+        let core_summary = build_package_summary(
+            "core",
+            vec![
+                lower_module_text("core", "").expect("core root should lower"),
+                lower_module_text("core.types", "export record Counter:\n    value: Int\n")
+                    .expect("types should lower"),
+                lower_module_text(
+                    "core.helpers",
+                    "import core.types\nuse core.types.Counter\nimpl Counter:\n    fn tap(read self: Counter) -> Int:\n        return self.value + 1\n",
+                )
+                .expect("helpers should lower"),
+            ],
+        );
+        let core_layout = build_package_layout(
+            &core_summary,
+            BTreeMap::from([
+                (
+                    "core".to_string(),
+                    Path::new("C:/repo/core/src/book.arc").to_path_buf(),
+                ),
+                (
+                    "core.types".to_string(),
+                    Path::new("C:/repo/core/src/types.arc").to_path_buf(),
+                ),
+                (
+                    "core.helpers".to_string(),
+                    Path::new("C:/repo/core/src/helpers.arc").to_path_buf(),
+                ),
+            ]),
+            BTreeMap::new(),
+        )
+        .expect("core layout should build");
+        let core_package = build_workspace_package(
+            Path::new("C:/repo/core").to_path_buf(),
+            BTreeSet::new(),
+            core_summary,
+            core_layout,
+        )
+        .expect("core package should build");
+
+        let workspace =
+            build_workspace_summary(vec![app_package, core_package]).expect("workspace builds");
+        let resolved = resolve_workspace(&workspace).expect("workspace should resolve");
+        let resolved_module = resolved
+            .package("app")
+            .and_then(|package| package.module("app"))
+            .expect("resolved app module should exist");
+
+        let candidates =
+            lookup_method_candidates_for_type(&workspace, resolved_module, "Counter", "tap");
+        assert_eq!(candidates.len(), 1);
+    }
+
+    #[test]
+    fn lookup_method_candidates_allow_dependency_alias_impl_methods() {
+        let app_summary = build_package_summary(
+            "app",
+            vec![
+                lower_module_text(
+                    "app",
+                    "import util.types\nuse util.types.Counter\nfn main() -> Int:\n    let counter = Counter :: value = 1 :: call\n    return counter :: :: tap\n",
+                )
+                .expect("app should lower"),
+            ],
+        );
+        let app_layout = build_package_layout(
+            &app_summary,
+            BTreeMap::from([(
+                "app".to_string(),
+                Path::new("C:/repo/app/src/shelf.arc").to_path_buf(),
+            )]),
+            BTreeMap::new(),
+        )
+        .expect("app layout should build");
+        let app_package = super::build_workspace_package_with_dep_packages(
+            Path::new("C:/repo/app").to_path_buf(),
+            BTreeMap::from([("util".to_string(), "core".to_string())]),
             app_summary,
             app_layout,
         )

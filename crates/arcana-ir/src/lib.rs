@@ -1,8 +1,9 @@
 mod entrypoint;
 mod executable;
+mod runtime_requirements;
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use arcana_hir::{
@@ -21,6 +22,7 @@ pub use entrypoint::{
     runtime_main_return_type_from_signature, validate_runtime_main_entry_contract,
     validate_runtime_main_entry_symbol,
 };
+pub use runtime_requirements::derive_runtime_requirements;
 
 pub use executable::{
     ExecAssignOp, ExecAssignTarget, ExecBinaryOp, ExecChainConnector, ExecChainIntroducer,
@@ -244,20 +246,6 @@ fn resolved_module_exported_surface_rows(
     rows.sort();
     rows.dedup();
     rows
-}
-
-fn runtime_requirement_for_path(path: &[String]) -> Option<String> {
-    let first = path.first()?;
-    if first != "std" {
-        return None;
-    }
-    if path.len() >= 3 && path[1] == "kernel" {
-        return Some(format!("std.kernel.{}", path[2]));
-    }
-    if path.len() >= 2 {
-        return Some(format!("std.{}", path[1]));
-    }
-    Some("std".to_string())
 }
 
 fn quote_text(text: &str) -> String {
@@ -1557,13 +1545,6 @@ fn lower_package(package: &HirPackageSummary) -> IrPackage {
         .iter()
         .map(render_dependency_row)
         .collect::<Vec<_>>();
-    let runtime_requirements = package
-        .dependency_edges
-        .iter()
-        .filter_map(|edge| runtime_requirement_for_path(&edge.target_path))
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
     let entrypoints = package
         .modules
         .iter()
@@ -1633,7 +1614,7 @@ fn lower_package(package: &HirPackageSummary) -> IrPackage {
             })
             .collect::<Vec<_>>();
 
-    IrPackage {
+    let mut lowered = IrPackage {
         package_name: package.package_name.clone(),
         root_module_id: package.package_name.clone(),
         direct_deps: Vec::new(),
@@ -1641,10 +1622,12 @@ fn lower_package(package: &HirPackageSummary) -> IrPackage {
         dependency_edge_count: package.dependency_edges.len(),
         dependency_rows,
         exported_surface_rows: package.summary_surface_rows(),
-        runtime_requirements,
+        runtime_requirements: Vec::new(),
         entrypoints,
         routines,
-    }
+    };
+    lowered.runtime_requirements = derive_runtime_requirements(&lowered);
+    lowered
 }
 
 #[cfg(test)]
@@ -1752,6 +1735,7 @@ pub fn lower_workspace_package_with_resolution(
                 .collect::<Vec<_>>()
         })
         .collect();
+    lowered.runtime_requirements = derive_runtime_requirements(&lowered);
     Ok(lowered)
 }
 
@@ -1810,7 +1794,7 @@ mod tests {
                 "module=winspell:reexport:winspell.window".to_string(),
             ]
         );
-        assert_eq!(ir.runtime_requirements, vec!["std.canvas".to_string()]);
+        assert!(ir.runtime_requirements.is_empty());
         assert!(ir.entrypoints.is_empty());
         assert_eq!(ir.routines.len(), 1);
         assert_eq!(ir.routines[0].symbol_name, "open");

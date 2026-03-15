@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use arcana_aot::AOT_INTERNAL_FORMAT;
 use arcana_hir::{
     HirWorkspacePackage, HirWorkspaceSummary, build_package_layout, build_package_summary,
-    build_workspace_package, build_workspace_summary, derive_source_module_path, lower_module_text,
+    build_workspace_summary, derive_source_module_path, lower_module_text,
 };
 use pathdiff::diff_paths;
 
@@ -80,6 +80,7 @@ pub struct WorkspaceMember {
     pub rel_dir: String,
     pub abs_dir: PathBuf,
     pub deps: Vec<String>,
+    pub direct_dep_packages: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -122,7 +123,7 @@ struct PendingMember {
     kind: GrimoireKind,
     abs_dir: PathBuf,
     rel_dir: String,
-    dep_paths: Vec<PathBuf>,
+    dep_bindings: Vec<(String, PathBuf)>,
 }
 
 pub fn parse_manifest(path: &Path) -> PackageResult<Manifest> {
@@ -228,10 +229,10 @@ pub fn load_workspace_graph(root_dir: &Path) -> PackageResult<WorkspaceGraph> {
             }
         }
 
-        let mut dep_paths = Vec::new();
-        for dep in manifest.deps.values() {
+        let mut dep_bindings = Vec::new();
+        for (dep_name, dep) in &manifest.deps {
             let dep_dir = canonicalize_dir(&abs_dir.join(&dep.location))?;
-            dep_paths.push(dep_dir.clone());
+            dep_bindings.push((dep_name.clone(), dep_dir.clone()));
             queue.push_back(dep_dir);
         }
 
@@ -242,7 +243,7 @@ pub fn load_workspace_graph(root_dir: &Path) -> PackageResult<WorkspaceGraph> {
                 kind: manifest.kind,
                 abs_dir,
                 rel_dir,
-                dep_paths,
+                dep_bindings,
             },
         );
     }
@@ -250,27 +251,25 @@ pub fn load_workspace_graph(root_dir: &Path) -> PackageResult<WorkspaceGraph> {
     let mut members = pending_by_dir
         .values()
         .map(|member| {
-            let deps = member
-                .dep_paths
-                .iter()
-                .map(|path| {
-                    pending_by_dir
-                        .get(path)
-                        .map(|dep| dep.name.clone())
-                        .ok_or_else(|| {
-                            format!(
-                                "dependency at `{}` was not loaded into the workspace graph",
-                                path.display()
-                            )
-                        })
-                })
-                .collect::<PackageResult<Vec<_>>>()?;
+            let mut deps = BTreeSet::new();
+            let mut direct_dep_packages = BTreeMap::new();
+            for (dep_name, path) in &member.dep_bindings {
+                let dep = pending_by_dir.get(path).ok_or_else(|| {
+                    format!(
+                        "dependency at `{}` was not loaded into the workspace graph",
+                        path.display()
+                    )
+                })?;
+                deps.insert(dep.name.clone());
+                direct_dep_packages.insert(dep_name.clone(), dep.name.clone());
+            }
             Ok(WorkspaceMember {
                 name: member.name.clone(),
                 kind: member.kind.clone(),
                 rel_dir: member.rel_dir.clone(),
                 abs_dir: member.abs_dir.clone(),
-                deps,
+                deps: deps.into_iter().collect(),
+                direct_dep_packages,
             })
         })
         .collect::<PackageResult<Vec<_>>>()?;
@@ -302,11 +301,11 @@ pub fn load_workspace_hir_from_graph(
         .iter()
         .any(|member| member.abs_dir == root_dir);
     if !root_already_in_graph && has_root_module(&root_dir, &root_manifest.kind) {
-        packages.push(load_package_hir(
+        packages.push(load_package_hir_with_dep_packages(
             &root_dir,
             &root_manifest.name,
             &root_manifest.kind,
-            root_manifest.deps.keys().cloned().collect(),
+            resolve_manifest_dependency_packages(&root_dir, &root_manifest)?,
         )?);
     }
 
@@ -333,11 +332,11 @@ pub fn load_workspace_hir_from_graph(
 }
 
 pub fn load_member_hir_package(member: &WorkspaceMember) -> PackageResult<HirWorkspacePackage> {
-    load_package_hir(
+    load_package_hir_with_dep_packages(
         &member.abs_dir,
         &member.name,
         &member.kind,
-        member.deps.iter().cloned().collect(),
+        member.direct_dep_packages.clone(),
     )
 }
 
@@ -640,15 +639,28 @@ fn load_package_hir(
     kind: &GrimoireKind,
     direct_deps: BTreeSet<String>,
 ) -> PackageResult<HirWorkspacePackage> {
+    let direct_dep_packages = direct_deps
+        .into_iter()
+        .map(|dep| (dep.clone(), dep))
+        .collect();
+    load_package_hir_with_dep_packages(root_dir, name, kind, direct_dep_packages)
+}
+
+fn load_package_hir_with_dep_packages(
+    root_dir: &Path,
+    name: &str,
+    kind: &GrimoireKind,
+    direct_dep_packages: BTreeMap<String, String>,
+) -> PackageResult<HirWorkspacePackage> {
     let files = collect_arc_files(&root_dir.join("src"))?;
-    build_package_hir(root_dir, name, kind, direct_deps, &files)
+    build_package_hir(root_dir, name, kind, direct_dep_packages, &files)
 }
 
 fn build_package_hir(
     root_dir: &Path,
     name: &str,
     kind: &GrimoireKind,
-    direct_deps: BTreeSet<String>,
+    direct_dep_packages: BTreeMap<String, String>,
     files: &[PathBuf],
 ) -> PackageResult<HirWorkspacePackage> {
     let src_dir = root_dir.join("src");
@@ -698,7 +710,25 @@ fn build_package_hir(
 
     let summary = build_package_summary(name.to_string(), modules);
     let layout = build_package_layout(&summary, module_paths, relative_to_absolute)?;
-    build_workspace_package(root_dir.to_path_buf(), direct_deps, summary, layout)
+    arcana_hir::build_workspace_package_with_dep_packages(
+        root_dir.to_path_buf(),
+        direct_dep_packages,
+        summary,
+        layout,
+    )
+}
+
+fn resolve_manifest_dependency_packages(
+    root_dir: &Path,
+    manifest: &Manifest,
+) -> PackageResult<BTreeMap<String, String>> {
+    let mut direct_dep_packages = BTreeMap::new();
+    for (dep_name, dep) in &manifest.deps {
+        let dep_dir = canonicalize_dir(&root_dir.join(&dep.location))?;
+        let dep_manifest = parse_manifest(&dep_dir.join("book.toml"))?;
+        direct_dep_packages.insert(dep_name.clone(), dep_manifest.name);
+    }
+    Ok(direct_dep_packages)
 }
 
 fn collect_arc_files(dir: &Path) -> PackageResult<Vec<PathBuf>> {
@@ -935,6 +965,43 @@ mod tests {
             .expect("root package should be in workspace graph");
         assert_eq!(root.rel_dir, ".");
         assert_eq!(root.deps, vec!["core".to_string()]);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_workspace_graph_preserves_dependency_aliases() {
+        let dir = temp_dir("graph_dep_alias");
+        write_file(
+            &dir.join("book.toml"),
+            "name = \"ws\"\nkind = \"app\"\n[workspace]\nmembers = [\"app\"]\n",
+        );
+        write_file(
+            &dir.join("app/book.toml"),
+            "name = \"app\"\nkind = \"app\"\n[deps]\nutil = { path = \"../core\" }\n",
+        );
+        write_file(
+            &dir.join("app/src/shelf.arc"),
+            "import util\nfn main() -> Int:\n    return util.value :: :: call\n",
+        );
+        write_file(&dir.join("app/src/types.arc"), "// app types\n");
+        write_file(
+            &dir.join("core/book.toml"),
+            "name = \"core\"\nkind = \"lib\"\n",
+        );
+        write_file(
+            &dir.join("core/src/book.arc"),
+            "export fn value() -> Int:\n    return 7\n",
+        );
+        write_file(&dir.join("core/src/types.arc"), "// core types\n");
+
+        let graph = load_workspace_graph(&dir).expect("load graph");
+        let app = graph.member("app").expect("app should exist");
+        assert_eq!(app.deps, vec!["core".to_string()]);
+        assert_eq!(
+            app.direct_dep_packages.get("util"),
+            Some(&"core".to_string())
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1377,6 +1444,67 @@ mod tests {
             lowered.contains("resolved_routine: Some(\"std.collections.list#impl-0-method-0\")"),
             "expected lowered bare-method routine identity in artifact: {artifact}"
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn built_artifact_runtime_requirements_follow_reachable_intrinsics() {
+        let dir = temp_dir("artifact_runtime_requirements");
+        write_file(&dir.join("book.toml"), "name = \"app\"\nkind = \"app\"\n");
+        write_file(
+            &dir.join("src/shelf.arc"),
+            concat!(
+                "import std.text\n",
+                "fn main() -> Int:\n",
+                "    return std.text.len_bytes :: \"hi\" :: call\n",
+            ),
+        );
+        write_file(&dir.join("src/types.arc"), "// app types\n");
+        write_file(
+            &dir.join("std/book.toml"),
+            "name = \"std\"\nkind = \"lib\"\n",
+        );
+        write_file(&dir.join("std/src/book.arc"), "// std root\n");
+        write_file(&dir.join("std/src/types.arc"), "// std types\n");
+        write_file(
+            &dir.join("std/src/text.arc"),
+            concat!(
+                "import std.kernel.text\n",
+                "export fn len_bytes(read text: Str) -> Int:\n",
+                "    return std.kernel.text.text_len_bytes :: text :: call\n",
+            ),
+        );
+        write_file(
+            &dir.join("std/src/io.arc"),
+            concat!(
+                "import std.kernel.io\n",
+                "export fn print[T](read value: T):\n",
+                "    std.kernel.io.print[T] :: value :: call\n",
+            ),
+        );
+        write_file(
+            &dir.join("std/src/kernel/text.arc"),
+            "intrinsic fn text_len_bytes(text: Str) -> Int = HostTextLenBytes\n",
+        );
+        write_file(
+            &dir.join("std/src/kernel/io.arc"),
+            "intrinsic fn print[T](read value: T) = IoPrint\n",
+        );
+
+        let graph = load_workspace_graph(&dir).expect("load graph");
+        let order = plan_workspace(&graph).expect("plan");
+        let (prepared, statuses) = plan_test_build(&graph, &order, None);
+        execute_planned_build(&graph, &prepared, &statuses).expect("execute");
+
+        let app = status(&statuses, "app");
+        let artifact = fs::read_to_string(graph.root_dir.join(&app.artifact_rel_path))
+            .expect("artifact should exist");
+        let parsed = parse_package_artifact(&artifact).expect("artifact should parse");
+        assert_eq!(
+            parsed.runtime_requirements,
+            vec!["std.kernel.text".to_string()]
+        );
+
         let _ = fs::remove_dir_all(&dir);
     }
 

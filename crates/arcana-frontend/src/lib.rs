@@ -5229,6 +5229,80 @@ mod tests {
     }
 
     #[test]
+    fn check_path_accepts_dependency_alias_imports() {
+        let root = make_temp_workspace(
+            "dependency_alias_imports",
+            &["app", "core"],
+            &[
+                (
+                    "app/book.toml",
+                    "name = \"app\"\nkind = \"app\"\n\n[deps]\nutil = { path = \"../core\" }\n",
+                ),
+                (
+                    "app/src/shelf.arc",
+                    "import util\nfn main() -> Int:\n    return util.value :: :: call\n",
+                ),
+                ("app/src/types.arc", ""),
+                ("core/book.toml", "name = \"core\"\nkind = \"lib\"\n"),
+                (
+                    "core/src/book.arc",
+                    "export fn value() -> Int:\n    return 7\n",
+                ),
+                ("core/src/types.arc", ""),
+            ],
+        );
+
+        let summary = check_path(&root.join("app")).expect("dependency alias import should check");
+        assert_eq!(summary.package_count, 2);
+        assert!(summary.module_count >= 4);
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_accepts_workspace_root_dependency_alias_imports() {
+        let root = make_temp_workspace(
+            "workspace_root_dependency_aliases",
+            &["app"],
+            &[
+                (
+                    "src/shelf.arc",
+                    "import util\nfn main() -> Int:\n    return util.value :: :: call\n",
+                ),
+                ("src/types.arc", ""),
+                ("app/book.toml", "name = \"app\"\nkind = \"app\"\n"),
+                ("app/src/shelf.arc", "fn main() -> Int:\n    return 0\n"),
+                ("app/src/types.arc", ""),
+                ("core/book.toml", "name = \"core\"\nkind = \"lib\"\n"),
+                (
+                    "core/src/book.arc",
+                    "export fn value() -> Int:\n    return 7\n",
+                ),
+                ("core/src/types.arc", ""),
+            ],
+        );
+        fs::write(
+            root.join("book.toml"),
+            concat!(
+                "name = \"workspace\"\n",
+                "kind = \"app\"\n",
+                "[workspace]\n",
+                "members = [\"app\"]\n",
+                "[deps]\n",
+                "util = { path = \"core\" }\n",
+            ),
+        )
+        .expect("workspace manifest should be writable");
+
+        let summary =
+            check_path(&root).expect("workspace root dependency alias import should check");
+        assert_eq!(summary.package_count, 3);
+        assert_eq!(summary.module_count, 6);
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
     fn check_path_rejects_main_with_parameters() {
         let root = make_temp_package(
             "main_with_parameters",

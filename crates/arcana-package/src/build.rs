@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use arcana_aot::{AOT_INTERNAL_FORMAT, compile_package};
 use arcana_hir::{HirResolvedWorkspace, HirWorkspaceSummary, resolve_workspace};
-use arcana_ir::{IrPackage, lower_workspace_package_with_resolution};
+use arcana_ir::{IrPackage, derive_runtime_requirements, lower_workspace_package_with_resolution};
 
 use crate::build_identity::{
     artifact_body_hash, artifact_body_hash_for_path, cached_artifact_matches_status,
@@ -496,18 +496,12 @@ fn link_ir_packages(root: IrPackage, mut linked: Vec<IrPackage>) -> IrPackage {
         .iter()
         .cloned()
         .collect::<BTreeSet<_>>();
-    let mut runtime_requirements = root
-        .runtime_requirements
-        .iter()
-        .cloned()
-        .collect::<BTreeSet<_>>();
     let mut routines = root.routines.clone();
 
     for package in linked {
         modules.extend(package.modules);
         dependency_rows.extend(package.dependency_rows);
         exported_surface_rows.extend(package.exported_surface_rows);
-        runtime_requirements.extend(package.runtime_requirements);
         routines.extend(package.routines);
     }
 
@@ -519,7 +513,7 @@ fn link_ir_packages(root: IrPackage, mut linked: Vec<IrPackage>) -> IrPackage {
             .then_with(|| left.signature_row.cmp(&right.signature_row))
     });
 
-    IrPackage {
+    let mut linked_package = IrPackage {
         package_name: root.package_name,
         root_module_id: root.root_module_id,
         direct_deps: direct_deps.into_iter().collect(),
@@ -527,10 +521,12 @@ fn link_ir_packages(root: IrPackage, mut linked: Vec<IrPackage>) -> IrPackage {
         dependency_edge_count: dependency_rows.len(),
         dependency_rows: dependency_rows.into_iter().collect(),
         exported_surface_rows: exported_surface_rows.into_iter().collect(),
-        runtime_requirements: runtime_requirements.into_iter().collect(),
+        runtime_requirements: Vec::new(),
         entrypoints: root.entrypoints,
         routines,
-    }
+    };
+    linked_package.runtime_requirements = derive_runtime_requirements(&linked_package);
+    linked_package
 }
 
 fn artifact_rel_path(name: &str, fingerprint: &str, kind: &GrimoireKind) -> String {

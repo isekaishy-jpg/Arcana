@@ -38,10 +38,8 @@ pub fn visible_package_root_for_module<'a>(
         return workspace.package("std");
     }
     current_package
-        .direct_deps
-        .contains(root)
-        .then(|| workspace.package(root))
-        .flatten()
+        .dependency_package_name(root)
+        .and_then(|dependency_name| workspace.package(dependency_name))
 }
 
 pub fn visible_method_package_names_for_module(
@@ -57,7 +55,7 @@ pub fn visible_method_package_names_for_module(
     if workspace.package("std").is_some() {
         visible.insert("std".to_string());
     }
-    visible.extend(current_package.direct_deps.iter().cloned());
+    visible.extend(current_package.direct_dep_packages.values().cloned());
     visible
 }
 
@@ -349,8 +347,8 @@ pub(crate) fn lookup_symbol_path_in_module_context<'a>(
             )
         });
     }
-    if package.direct_deps.contains(first) {
-        return workspace.package(first).and_then(|dependency| {
+    if let Some(dependency_name) = package.dependency_package_name(first) {
+        return workspace.package(dependency_name).and_then(|dependency| {
             lookup_package_symbol_path_filtered(
                 workspace,
                 current_package_name,
