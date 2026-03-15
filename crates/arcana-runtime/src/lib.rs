@@ -2440,8 +2440,14 @@ struct RuntimePoolArenaState {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RuntimeRollupFrame {
     rollups: Vec<ParsedPageRollup>,
-    subjects: BTreeSet<String>,
-    active: BTreeMap<String, RuntimeValue>,
+    owner_scope_depth: usize,
+    subjects: BTreeMap<String, RuntimeTrackedRollupSubject>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeTrackedRollupSubject {
+    binding: Option<RuntimeLocalHandle>,
+    value: Option<RuntimeValue>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2830,7 +2836,7 @@ pub fn plan_from_artifact(artifact: &AotPackageArtifact) -> Result<RuntimePackag
         .iter()
         .map(|entrypoint| lower_entrypoint(entrypoint, &routines))
         .collect::<Result<Vec<_>, String>>()?;
-    Ok(RuntimePackagePlan {
+    let plan = RuntimePackagePlan {
         package_name: artifact.package_name.clone(),
         root_module_id: artifact.root_module_id.clone(),
         direct_deps: artifact.direct_deps.clone(),
@@ -2838,7 +2844,9 @@ pub fn plan_from_artifact(artifact: &AotPackageArtifact) -> Result<RuntimePackag
         module_aliases: build_module_aliases(artifact)?,
         entrypoints,
         routines,
-    })
+    };
+    validate_runtime_rollup_handlers(&plan)?;
+    Ok(plan)
 }
 
 pub fn load_package_plan(path: &Path) -> Result<RuntimePackagePlan, String> {
@@ -2850,6 +2858,86 @@ pub fn load_package_plan(path: &Path) -> Result<RuntimePackagePlan, String> {
     })?;
     let artifact = parse_package_artifact(&text)?;
     plan_from_artifact(&artifact)
+}
+
+fn validate_runtime_rollup_handlers(plan: &RuntimePackagePlan) -> Result<(), String> {
+    for routine in &plan.routines {
+        for rollup in &routine.rollups {
+            validate_runtime_rollup_handler_callable_path(
+                plan,
+                &routine.module_id,
+                &rollup.handler_path,
+            )?;
+        }
+        validate_runtime_rollup_handlers_in_statements(
+            plan,
+            &routine.module_id,
+            &routine.statements,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_runtime_rollup_handlers_in_statements(
+    plan: &RuntimePackagePlan,
+    current_module_id: &str,
+    statements: &[ParsedStmt],
+) -> Result<(), String> {
+    for statement in statements {
+        match statement {
+            ParsedStmt::Expr { rollups, .. } => {
+                for rollup in rollups {
+                    validate_runtime_rollup_handler_callable_path(
+                        plan,
+                        current_module_id,
+                        &rollup.handler_path,
+                    )?;
+                }
+            }
+            ParsedStmt::If {
+                then_branch,
+                else_branch,
+                rollups,
+                ..
+            } => {
+                for rollup in rollups {
+                    validate_runtime_rollup_handler_callable_path(
+                        plan,
+                        current_module_id,
+                        &rollup.handler_path,
+                    )?;
+                }
+                validate_runtime_rollup_handlers_in_statements(
+                    plan,
+                    current_module_id,
+                    then_branch,
+                )?;
+                validate_runtime_rollup_handlers_in_statements(
+                    plan,
+                    current_module_id,
+                    else_branch,
+                )?;
+            }
+            ParsedStmt::While { body, rollups, .. } | ParsedStmt::For { body, rollups, .. } => {
+                for rollup in rollups {
+                    validate_runtime_rollup_handler_callable_path(
+                        plan,
+                        current_module_id,
+                        &rollup.handler_path,
+                    )?;
+                }
+                validate_runtime_rollup_handlers_in_statements(plan, current_module_id, body)?;
+            }
+            ParsedStmt::Let { .. }
+            | ParsedStmt::ReturnVoid
+            | ParsedStmt::ReturnValue { .. }
+            | ParsedStmt::Defer(_)
+            | ParsedStmt::Break
+            | ParsedStmt::Continue
+            | ParsedStmt::Assign { .. } => {}
+        }
+    }
+    Ok(())
 }
 
 fn strip_prefix_suffix<'a>(text: &'a str, prefix: &str, suffix: &str) -> Result<&'a str, String> {
@@ -4017,17 +4105,20 @@ fn push_runtime_rollup_frame(
     let subjects = rollups
         .iter()
         .map(|rollup| rollup.subject.clone())
-        .collect::<BTreeSet<_>>();
-    let mut active = BTreeMap::new();
-    for subject in &subjects {
-        if let Ok(value) = read_runtime_local_value(scopes, subject) {
-            active.insert(subject.clone(), value);
-        }
-    }
+        .map(|subject| {
+            (
+                subject,
+                RuntimeTrackedRollupSubject {
+                    binding: None,
+                    value: None,
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     state.rollup_frames.push(RuntimeRollupFrame {
         rollups: rollups.to_vec(),
+        owner_scope_depth: scopes.len(),
         subjects,
-        active,
     });
 }
 
@@ -4035,29 +4126,49 @@ fn pop_runtime_rollup_frame(state: &mut RuntimeExecutionState) -> Option<Runtime
     state.rollup_frames.pop()
 }
 
-fn update_runtime_rollup_binding(
+fn activate_runtime_rollup_binding(
     state: &mut RuntimeExecutionState,
+    scope_depth: usize,
     name: &str,
+    handle: RuntimeLocalHandle,
     value: &RuntimeValue,
 ) {
     for frame in state.rollup_frames.iter_mut().rev() {
-        if frame.subjects.contains(name) {
-            frame.active.insert(name.to_string(), value.clone());
-            break;
+        if frame.owner_scope_depth != scope_depth {
+            continue;
+        }
+        if let Some(subject) = frame.subjects.get_mut(name) {
+            subject.binding = Some(handle);
+            subject.value = Some(value.clone());
+        }
+    }
+}
+
+fn update_runtime_rollup_binding_value(
+    state: &mut RuntimeExecutionState,
+    handle: RuntimeLocalHandle,
+    value: &RuntimeValue,
+) {
+    for frame in state.rollup_frames.iter_mut().rev() {
+        for subject in frame.subjects.values_mut() {
+            if subject.binding == Some(handle) {
+                subject.value = Some(value.clone());
+            }
         }
     }
 }
 
 fn insert_runtime_local(
     state: &mut RuntimeExecutionState,
+    scope_depth: usize,
     scope: &mut RuntimeScope,
     name: String,
     mutable: bool,
     value: RuntimeValue,
 ) {
-    update_runtime_rollup_binding(state, &name, &value);
     let handle = RuntimeLocalHandle(state.next_local_handle);
     state.next_local_handle += 1;
+    activate_runtime_rollup_binding(state, scope_depth, &name, handle, &value);
     scope.locals.insert(
         name,
         RuntimeLocal {
@@ -4240,6 +4351,7 @@ fn write_runtime_reference(
                 .ok_or_else(|| format!("runtime reference local `{}` is unresolved", local.0))?;
             runtime_local.moved = false;
             runtime_local.value = updated_root;
+            update_runtime_rollup_binding_value(state, *local, &runtime_local.value);
             Ok(())
         }
         RuntimeReferenceTarget::ArenaSlot { id, .. } => {
@@ -5793,7 +5905,7 @@ fn eval_match_expr(
             }
             let mut scope = RuntimeScope::default();
             for (name, value) in bindings {
-                insert_runtime_local(state, &mut scope, name, false, value);
+                insert_runtime_local(state, scopes.len(), &mut scope, name, false, value);
             }
             scopes.push(scope);
             let result = eval_expr(
@@ -6068,29 +6180,52 @@ fn resolve_rollup_handler_callable_path(
     current_module_id: &str,
     handler_path: &[String],
 ) -> Vec<String> {
-    if resolve_routine_index(plan, current_module_id, handler_path).is_some()
-        || resolve_runtime_intrinsic_path(handler_path).is_some()
+    let Some((first, suffix)) = handler_path.split_first() else {
+        return Vec::new();
+    };
+    if let Some(prefix) = plan
+        .module_aliases
+        .get(current_module_id)
+        .and_then(|aliases| aliases.get(first))
     {
-        return handler_path.to_vec();
-    }
-    if handler_path.len() == 1 {
-        let symbol_name = &handler_path[0];
-        let matches = plan
-            .routines
-            .iter()
-            .filter(|routine| routine.symbol_name == *symbol_name)
-            .collect::<Vec<_>>();
-        if let [routine] = matches.as_slice() {
-            let mut callable = routine
-                .module_id
-                .split('.')
-                .map(ToString::to_string)
-                .collect::<Vec<_>>();
-            callable.push(symbol_name.clone());
-            return callable;
-        }
+        let mut callable = prefix.clone();
+        callable.extend(suffix.iter().cloned());
+        return callable;
     }
     handler_path.to_vec()
+}
+
+fn validate_runtime_rollup_handler_callable_path(
+    plan: &RuntimePackagePlan,
+    current_module_id: &str,
+    handler_path: &[String],
+) -> Result<Vec<String>, String> {
+    let callable = resolve_rollup_handler_callable_path(plan, current_module_id, handler_path);
+    if let Some(routine_index) = resolve_routine_index(plan, current_module_id, &callable) {
+        let routine = plan.routines.get(routine_index).ok_or_else(|| {
+            format!(
+                "runtime rollup handler `{}` resolved to invalid routine index `{routine_index}`",
+                handler_path.join(".")
+            )
+        })?;
+        if routine.is_async {
+            return Err(format!(
+                "runtime rollup handler `{}` cannot be async in v1",
+                handler_path.join(".")
+            ));
+        }
+        if routine.params.len() != 1 {
+            return Err(format!(
+                "runtime rollup handler `{}` must accept exactly one parameter in v1",
+                handler_path.join(".")
+            ));
+        }
+        return Ok(callable);
+    }
+    Err(format!(
+        "runtime rollup handler `{}` does not resolve to a callable path",
+        handler_path.join(".")
+    ))
 }
 
 fn execute_call_by_path(
@@ -10126,11 +10261,18 @@ fn execute_page_rollups(
         if rollup.kind != "cleanup" {
             return Err(format!("unsupported runtime rollup kind `{}`", rollup.kind).into());
         }
-        let Some(subject_value) = frame.active.get(&rollup.subject).cloned() else {
+        let Some(subject_value) = frame
+            .subjects
+            .get(&rollup.subject)
+            .and_then(|subject| subject.value.clone())
+        else {
             continue;
         };
-        let callable =
-            resolve_rollup_handler_callable_path(plan, current_module_id, &rollup.handler_path);
+        let callable = validate_runtime_rollup_handler_callable_path(
+            plan,
+            current_module_id,
+            &rollup.handler_path,
+        )?;
         let _ = execute_call_by_path(
             &callable,
             None,
@@ -10240,10 +10382,18 @@ fn execute_statements(
                     state,
                     host,
                 )?;
+                let current_scope_depth = scopes.len().saturating_sub(1);
                 let current_scope = scopes
                     .last_mut()
                     .ok_or_else(|| "runtime scope stack is empty".to_string())?;
-                insert_runtime_local(state, current_scope, name.clone(), *mutable, value);
+                insert_runtime_local(
+                    state,
+                    current_scope_depth,
+                    current_scope,
+                    name.clone(),
+                    *mutable,
+                    value,
+                );
                 FlowSignal::Next
             }
             ParsedStmt::Expr { expr, rollups } => {
@@ -10410,7 +10560,14 @@ fn execute_statements(
                     let mut loop_signal = FlowSignal::Next;
                     for value in values {
                         let mut scope = RuntimeScope::default();
-                        insert_runtime_local(state, &mut scope, binding.clone(), false, value);
+                        insert_runtime_local(
+                            state,
+                            scopes.len(),
+                            &mut scope,
+                            binding.clone(),
+                            false,
+                            value,
+                        );
                         match execute_scoped_block(
                             body,
                             &[],
@@ -10573,6 +10730,7 @@ fn execute_routine_call_with_state(
             for (param, value) in routine.params.iter().zip(args) {
                 insert_runtime_local(
                     state,
+                    0,
                     &mut initial_scope,
                     param.name.clone(),
                     param.mode.as_deref() == Some("edit"),

@@ -3,7 +3,7 @@ mod executable;
 mod runtime_requirements;
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use arcana_hir::{
@@ -22,7 +22,9 @@ pub use entrypoint::{
     runtime_main_return_type_from_signature, validate_runtime_main_entry_contract,
     validate_runtime_main_entry_symbol,
 };
-pub use runtime_requirements::derive_runtime_requirements;
+pub use runtime_requirements::{
+    RuntimeRequirementRoots, derive_runtime_requirements, derive_runtime_requirements_with_roots,
+};
 
 pub use executable::{
     ExecAssignOp, ExecAssignTarget, ExecBinaryOp, ExecChainConnector, ExecChainIntroducer,
@@ -206,6 +208,43 @@ fn render_dependency_row(edge: &HirModuleDependency) -> String {
         edge.target_path.join("."),
         edge.alias.as_deref().unwrap_or("")
     )
+}
+
+fn canonical_dependency_path(package: &HirWorkspacePackage, path: &[String]) -> Vec<String> {
+    let Some((first, suffix)) = path.split_first() else {
+        return Vec::new();
+    };
+    let canonical_root = package
+        .dependency_package_name(first)
+        .unwrap_or(first)
+        .to_string();
+    let mut canonical = Vec::with_capacity(path.len());
+    canonical.push(canonical_root);
+    canonical.extend(suffix.iter().cloned());
+    canonical
+}
+
+fn render_resolved_dependency_row(
+    package: &HirWorkspacePackage,
+    edge: &HirModuleDependency,
+) -> String {
+    format!(
+        "source={}:{}:{}:{}",
+        edge.source_module_id,
+        edge.kind.as_str(),
+        canonical_dependency_path(package, &edge.target_path).join("."),
+        edge.alias.as_deref().unwrap_or("")
+    )
+}
+
+fn resolved_direct_deps(package: &HirWorkspacePackage) -> Vec<String> {
+    package
+        .direct_dep_packages
+        .values()
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 fn encode_surface_text(text: &str) -> String {
@@ -745,6 +784,29 @@ fn lower_rollup(rollup: &HirPageRollup) -> ExecPageRollup {
         kind: rollup.kind.as_str().to_string(),
         subject: rollup.subject.clone(),
         handler_path: rollup.handler_path.clone(),
+    }
+}
+
+fn lower_rollup_resolved(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    rollup: &HirPageRollup,
+) -> ExecPageRollup {
+    let handler_path = lookup_symbol_path(workspace, resolved_module, &rollup.handler_path)
+        .map(|symbol_ref| {
+            let mut path = symbol_ref
+                .module_id
+                .split('.')
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            path.push(symbol_ref.symbol.name.clone());
+            path
+        })
+        .unwrap_or_else(|| rollup.handler_path.clone());
+    ExecPageRollup {
+        kind: rollup.kind.as_str().to_string(),
+        subject: rollup.subject.clone(),
+        handler_path,
     }
 }
 
@@ -1349,7 +1411,11 @@ fn lower_exec_stmt_resolved(
         }
         HirStatementKind::Expr { expr } => ExecStmt::Expr {
             expr: lower_exec_expr_resolved(expr, scope),
-            rollups: statement.rollups.iter().map(lower_rollup).collect(),
+            rollups: statement
+                .rollups
+                .iter()
+                .map(|rollup| lower_rollup_resolved(scope.workspace, scope.resolved_module, rollup))
+                .collect(),
         },
         HirStatementKind::Return { value } => match value.as_ref() {
             Some(value) => ExecStmt::ReturnValue {
@@ -1375,7 +1441,13 @@ fn lower_exec_stmt_resolved(
                 condition: lower_exec_expr_resolved(condition, scope),
                 then_branch,
                 else_branch,
-                rollups: statement.rollups.iter().map(lower_rollup).collect(),
+                rollups: statement
+                    .rollups
+                    .iter()
+                    .map(|rollup| {
+                        lower_rollup_resolved(scope.workspace, scope.resolved_module, rollup)
+                    })
+                    .collect(),
             }
         }
         HirStatementKind::While { condition, body } => {
@@ -1384,7 +1456,13 @@ fn lower_exec_stmt_resolved(
             ExecStmt::While {
                 condition: lower_exec_expr_resolved(condition, scope),
                 body,
-                rollups: statement.rollups.iter().map(lower_rollup).collect(),
+                rollups: statement
+                    .rollups
+                    .iter()
+                    .map(|rollup| {
+                        lower_rollup_resolved(scope.workspace, scope.resolved_module, rollup)
+                    })
+                    .collect(),
             }
         }
         HirStatementKind::For {
@@ -1401,7 +1479,13 @@ fn lower_exec_stmt_resolved(
                 binding: binding.clone(),
                 iterable: lower_exec_expr_resolved(iterable, scope),
                 body,
-                rollups: statement.rollups.iter().map(lower_rollup).collect(),
+                rollups: statement
+                    .rollups
+                    .iter()
+                    .map(|rollup| {
+                        lower_rollup_resolved(scope.workspace, scope.resolved_module, rollup)
+                    })
+                    .collect(),
             }
         }
         HirStatementKind::Defer { expr } => ExecStmt::Defer(lower_exec_expr_resolved(expr, scope)),
@@ -1464,7 +1548,9 @@ fn lower_routine(
 
 fn lower_routine_resolved(
     workspace: &HirWorkspaceSummary,
+    package: &HirWorkspacePackage,
     resolved_module: &HirResolvedModule,
+    module: &HirModuleSummary,
     module_id: &str,
     routine_key: String,
     symbol: &HirSymbol,
@@ -1486,7 +1572,10 @@ fn lower_routine_resolved(
         routine_key,
         symbol_name: symbol.name.clone(),
         symbol_kind: symbol.kind.as_str().to_string(),
-        exported: symbol.exported,
+        exported: symbol.exported
+            || impl_decl.is_some_and(|decl| {
+                impl_target_is_public_from_package(workspace, package, module, &decl.target_type)
+            }),
         is_async: symbol.is_async,
         type_param_rows: render_type_param_rows(symbol),
         behavior_attr_rows: render_behavior_attr_rows(symbol),
@@ -1500,7 +1589,11 @@ fn lower_routine_resolved(
                 .map(|path| canonical_impl_trait_path(path))
         }),
         foreword_rows: symbol.forewords.iter().map(render_foreword_row).collect(),
-        rollups: symbol.rollups.iter().map(lower_rollup).collect(),
+        rollups: symbol
+            .rollups
+            .iter()
+            .map(|rollup| lower_rollup_resolved(workspace, resolved_module, rollup))
+            .collect(),
         statements: lower_exec_stmt_block_resolved(&symbol.statements, &mut scope),
     };
     scope.finish()?;
@@ -1643,7 +1736,14 @@ pub fn lower_workspace_package_with_resolution(
     package: &HirWorkspacePackage,
 ) -> Result<IrPackage, String> {
     let mut lowered = lower_package(&package.summary);
-    lowered.direct_deps = package.direct_deps.iter().cloned().collect();
+    lowered.direct_deps = resolved_direct_deps(package);
+    lowered.dependency_rows = package
+        .summary
+        .dependency_edges
+        .iter()
+        .map(|edge| render_resolved_dependency_row(package, edge))
+        .collect();
+    lowered.dependency_edge_count = lowered.dependency_rows.len();
     let Some(resolved_package) = resolved_workspace.package(&package.summary.package_name) else {
         return Ok(lowered);
     };
@@ -1663,7 +1763,9 @@ pub fn lower_workspace_package_with_resolution(
                 .map(|(symbol_index, symbol)| {
                     lower_routine_resolved(
                         workspace,
+                        package,
                         resolved_module,
+                        module,
                         &module.module_id,
                         routine_key_for_symbol(&module.module_id, symbol_index),
                         symbol,
@@ -1685,7 +1787,9 @@ pub fn lower_workspace_package_with_resolution(
                             .map(move |(method_index, symbol)| {
                                 lower_routine_resolved(
                                     workspace,
+                                    package,
                                     resolved_module,
+                                    module,
                                     &module.module_id,
                                     routine_key_for_impl_method(
                                         &module.module_id,
@@ -1747,7 +1851,8 @@ mod tests {
     };
     use arcana_hir::{
         HirModule, build_package_layout, build_package_summary, build_workspace_package,
-        build_workspace_summary, lower_module_text, resolve_workspace,
+        build_workspace_package_with_dep_packages, build_workspace_summary, lower_module_text,
+        resolve_workspace,
     };
     use std::collections::{BTreeMap, BTreeSet};
     use std::path::Path;
@@ -2200,5 +2305,195 @@ mod tests {
             err.contains("bare-method qualifier `tap` on `app.Counter` is ambiguous"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn lower_workspace_package_with_resolution_canonicalizes_dependency_alias_metadata() {
+        let core_summary = build_package_summary(
+            "core",
+            vec![
+                lower_module_text("core", "export fn value() -> Int:\n    return 7\n")
+                    .expect("core module should lower"),
+            ],
+        );
+        let core_layout = build_package_layout(
+            &core_summary,
+            BTreeMap::from([(
+                "core".to_string(),
+                Path::new("C:/repo/core/src/book.arc").to_path_buf(),
+            )]),
+            BTreeMap::new(),
+        )
+        .expect("core layout should build");
+        let core_workspace = build_workspace_package(
+            Path::new("C:/repo/core").to_path_buf(),
+            BTreeSet::new(),
+            core_summary,
+            core_layout,
+        )
+        .expect("core package should build");
+
+        let app_summary = build_package_summary(
+            "app",
+            vec![
+                lower_module_text(
+                    "app",
+                    "import util\nfn main() -> Int:\n    return util.value :: :: call\n",
+                )
+                .expect("app module should lower"),
+            ],
+        );
+        let app_layout = build_package_layout(
+            &app_summary,
+            BTreeMap::from([(
+                "app".to_string(),
+                Path::new("C:/repo/app/src/shelf.arc").to_path_buf(),
+            )]),
+            BTreeMap::new(),
+        )
+        .expect("app layout should build");
+        let app_workspace = build_workspace_package_with_dep_packages(
+            Path::new("C:/repo/app").to_path_buf(),
+            BTreeMap::from([("util".to_string(), "core".to_string())]),
+            app_summary,
+            app_layout,
+        )
+        .expect("app package should build");
+
+        let workspace =
+            build_workspace_summary(vec![app_workspace, core_workspace]).expect("workspace");
+        let resolved = resolve_workspace(&workspace).expect("workspace should resolve");
+        let package = workspace.package("app").expect("app package should exist");
+
+        let ir = lower_workspace_package_with_resolution(&workspace, &resolved, package)
+            .expect("workspace lowering should succeed");
+        assert_eq!(ir.direct_deps, vec!["core".to_string()]);
+        assert_eq!(
+            ir.dependency_rows,
+            vec!["source=app:import:core:".to_string()]
+        );
+    }
+
+    #[test]
+    fn lower_workspace_package_with_resolution_canonicalizes_rollup_handler_paths() {
+        let app_summary = build_package_summary(
+            "app",
+            vec![
+                lower_module_text(
+                    "app",
+                    concat!(
+                        "import app.handlers\n",
+                        "fn main() -> Int:\n",
+                        "    let value = 1\n",
+                        "    return 0\n",
+                        "[value, handlers.cleanup]#cleanup\n",
+                    ),
+                )
+                .expect("root module should lower"),
+                lower_module_text(
+                    "app.handlers",
+                    "export fn cleanup(value: Int) -> Int:\n    return value\n",
+                )
+                .expect("handler module should lower"),
+            ],
+        );
+        let app_layout = build_package_layout(
+            &app_summary,
+            BTreeMap::from([
+                (
+                    "app".to_string(),
+                    Path::new("C:/repo/app/src/shelf.arc").to_path_buf(),
+                ),
+                (
+                    "app.handlers".to_string(),
+                    Path::new("C:/repo/app/src/handlers.arc").to_path_buf(),
+                ),
+            ]),
+            BTreeMap::new(),
+        )
+        .expect("app layout should build");
+        let app_workspace = build_workspace_package(
+            Path::new("C:/repo/app").to_path_buf(),
+            BTreeSet::new(),
+            app_summary,
+            app_layout,
+        )
+        .expect("app workspace should build");
+
+        let workspace =
+            build_workspace_summary(vec![app_workspace]).expect("workspace should build");
+        let resolved = resolve_workspace(&workspace).expect("workspace should resolve");
+        let package = workspace.package("app").expect("app package should exist");
+
+        let ir = lower_workspace_package_with_resolution(&workspace, &resolved, package)
+            .expect("workspace lowering should succeed");
+        let main = ir
+            .routines
+            .iter()
+            .find(|routine| routine.symbol_name == "main")
+            .expect("main routine should exist");
+
+        assert_eq!(main.rollups.len(), 1);
+        assert_eq!(
+            main.rollups[0].handler_path,
+            vec![
+                "app".to_string(),
+                "handlers".to_string(),
+                "cleanup".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn lower_workspace_package_with_resolution_marks_public_impl_methods_exported() {
+        let core_summary = build_package_summary(
+            "core",
+            vec![
+                lower_module_text(
+                    "core",
+                    concat!(
+                        "export record Counter:\n",
+                        "    value: Int\n",
+                        "impl Counter:\n",
+                        "    fn announce(read self: Counter) -> Int:\n",
+                        "        return self.value\n",
+                    ),
+                )
+                .expect("core module should lower"),
+            ],
+        );
+        let core_layout = build_package_layout(
+            &core_summary,
+            BTreeMap::from([(
+                "core".to_string(),
+                Path::new("C:/repo/core/src/book.arc").to_path_buf(),
+            )]),
+            BTreeMap::new(),
+        )
+        .expect("core layout should build");
+        let core_workspace = build_workspace_package(
+            Path::new("C:/repo/core").to_path_buf(),
+            BTreeSet::new(),
+            core_summary,
+            core_layout,
+        )
+        .expect("core workspace should build");
+
+        let workspace =
+            build_workspace_summary(vec![core_workspace]).expect("workspace should build");
+        let resolved = resolve_workspace(&workspace).expect("workspace should resolve");
+        let package = workspace
+            .package("core")
+            .expect("core package should exist");
+
+        let ir = lower_workspace_package_with_resolution(&workspace, &resolved, package)
+            .expect("workspace lowering should succeed");
+        let announce = ir
+            .routines
+            .iter()
+            .find(|routine| routine.symbol_name == "announce")
+            .expect("impl method should lower");
+
+        assert!(announce.exported);
     }
 }

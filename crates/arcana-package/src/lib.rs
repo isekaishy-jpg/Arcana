@@ -846,6 +846,24 @@ mod tests {
         write_file(&dir.join("src/types.arc"), "// types\n");
     }
 
+    fn write_std_io_grimoire(dir: &Path) {
+        write_grimoire(&dir.join("std"), GrimoireKind::Lib, "std", &[]);
+        write_file(&dir.join("std/src/book.arc"), "// std root\n");
+        write_file(&dir.join("std/src/types.arc"), "// std types\n");
+        write_file(
+            &dir.join("std/src/io.arc"),
+            concat!(
+                "import std.kernel.io\n",
+                "export fn print[T](read value: T):\n",
+                "    std.kernel.io.print[T] :: value :: call\n",
+            ),
+        );
+        write_file(
+            &dir.join("std/src/kernel/io.arc"),
+            "intrinsic fn print[T](read value: T) = IoPrint\n",
+        );
+    }
+
     fn prepare_test_build(graph: &WorkspaceGraph) -> PreparedBuild {
         prepare_build(graph).expect("prepare build")
     }
@@ -1503,6 +1521,210 @@ mod tests {
         assert_eq!(
             parsed.runtime_requirements,
             vec!["std.kernel.text".to_string()]
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn built_artifact_canonicalizes_dependency_alias_metadata() {
+        let dir = temp_dir("artifact_dependency_alias_metadata");
+        write_file(
+            &dir.join("book.toml"),
+            "name = \"ws\"\nkind = \"app\"\n[workspace]\nmembers = [\"app\", \"core\"]\n",
+        );
+        write_grimoire(
+            &dir.join("app"),
+            GrimoireKind::App,
+            "app",
+            &[("util", "../core")],
+        );
+        write_grimoire(&dir.join("core"), GrimoireKind::Lib, "core", &[]);
+        write_file(
+            &dir.join("app/src/shelf.arc"),
+            "import util\nfn main() -> Int:\n    return util.value :: :: call\n",
+        );
+        write_file(
+            &dir.join("core/src/book.arc"),
+            "export fn value() -> Int:\n    return 7\n",
+        );
+
+        let graph = load_workspace_graph(&dir).expect("load graph");
+        let order = plan_workspace(&graph).expect("plan");
+        let (prepared, statuses) = plan_test_build(&graph, &order, None);
+        execute_planned_build(&graph, &prepared, &statuses).expect("execute");
+
+        let app = status(&statuses, "app");
+        let artifact = fs::read_to_string(graph.root_dir.join(app.artifact_rel_path()))
+            .expect("artifact should exist");
+        let parsed = parse_package_artifact(&artifact).expect("artifact should parse");
+        assert_eq!(parsed.direct_deps, vec!["core".to_string()]);
+        assert!(
+            parsed
+                .dependency_rows
+                .iter()
+                .any(|row| row == "source=app:import:core:"),
+            "expected canonical dependency rows in artifact: {artifact}"
+        );
+        assert!(
+            !parsed
+                .dependency_rows
+                .iter()
+                .any(|row| row.contains(":util") || row.contains(".util")),
+            "expected alias names to stay out of artifact dependency metadata: {artifact}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn built_lib_artifact_runtime_requirements_follow_exported_surface() {
+        let dir = temp_dir("lib_artifact_runtime_requirements");
+        write_file(&dir.join("book.toml"), "name = \"core\"\nkind = \"lib\"\n");
+        write_file(
+            &dir.join("src/book.arc"),
+            concat!(
+                "import std.io\n",
+                "export fn announce() -> Int:\n",
+                "    std.io.print[Int] :: 7 :: call\n",
+                "    return 7\n",
+            ),
+        );
+        write_file(&dir.join("src/types.arc"), "// core types\n");
+        write_grimoire(&dir.join("std"), GrimoireKind::Lib, "std", &[]);
+        write_file(&dir.join("std/src/book.arc"), "// std root\n");
+        write_file(&dir.join("std/src/types.arc"), "// std types\n");
+        write_file(
+            &dir.join("std/src/io.arc"),
+            concat!(
+                "import std.kernel.io\n",
+                "export fn print[T](read value: T):\n",
+                "    std.kernel.io.print[T] :: value :: call\n",
+            ),
+        );
+        write_file(
+            &dir.join("std/src/audio.arc"),
+            concat!(
+                "import std.kernel.audio\n",
+                "export fn default_output() -> Int:\n",
+                "    return std.kernel.audio.default_output :: :: call\n",
+            ),
+        );
+        write_file(
+            &dir.join("std/src/kernel/io.arc"),
+            "intrinsic fn print[T](read value: T) = IoPrint\n",
+        );
+        write_file(
+            &dir.join("std/src/kernel/audio.arc"),
+            "intrinsic fn default_output() -> Int = AudioDefaultOutputTry\n",
+        );
+
+        let graph = load_workspace_graph(&dir).expect("load graph");
+        let order = plan_workspace(&graph).expect("plan");
+        let (prepared, statuses) = plan_test_build(&graph, &order, None);
+        execute_planned_build(&graph, &prepared, &statuses).expect("execute");
+
+        let core = status(&statuses, "core");
+        let artifact = fs::read_to_string(graph.root_dir.join(core.artifact_rel_path()))
+            .expect("artifact should exist");
+        let parsed = parse_package_artifact(&artifact).expect("artifact should parse");
+        assert_eq!(
+            parsed.runtime_requirements,
+            vec!["std.kernel.io".to_string()]
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn built_lib_artifact_runtime_requirements_follow_exported_impl_surface() {
+        let dir = temp_dir("lib_artifact_impl_runtime_requirements");
+        write_file(&dir.join("book.toml"), "name = \"core\"\nkind = \"lib\"\n");
+        write_file(&dir.join("src/book.arc"), "reexport types\n");
+        write_file(
+            &dir.join("src/types.arc"),
+            concat!(
+                "import std.io\n",
+                "export record Counter:\n",
+                "    value: Int\n",
+                "impl Counter:\n",
+                "    fn announce(read self: Counter) -> Int:\n",
+                "        std.io.print[Int] :: self.value :: call\n",
+                "        return self.value\n",
+            ),
+        );
+        write_std_io_grimoire(&dir);
+
+        let graph = load_workspace_graph(&dir).expect("load graph");
+        let order = plan_workspace(&graph).expect("plan");
+        let (prepared, statuses) = plan_test_build(&graph, &order, None);
+        execute_planned_build(&graph, &prepared, &statuses).expect("execute");
+
+        let core = status(&statuses, "core");
+        let artifact = fs::read_to_string(graph.root_dir.join(core.artifact_rel_path()))
+            .expect("artifact should exist");
+        let parsed = parse_package_artifact(&artifact).expect("artifact should parse");
+        let announce = parsed
+            .routines
+            .iter()
+            .find(|routine| routine.symbol_name == "announce")
+            .expect("impl method should be present");
+
+        assert!(announce.exported);
+        assert_eq!(
+            parsed.runtime_requirements,
+            vec!["std.kernel.io".to_string()]
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn built_lib_artifact_surface_rows_exclude_dependency_exports() {
+        let dir = temp_dir("lib_artifact_surface_rows");
+        write_file(&dir.join("book.toml"), "name = \"core\"\nkind = \"lib\"\n");
+        write_file(
+            &dir.join("src/book.arc"),
+            concat!(
+                "import std.io\n",
+                "export fn announce() -> Int:\n",
+                "    std.io.print[Int] :: 7 :: call\n",
+                "    return 7\n",
+            ),
+        );
+        write_file(&dir.join("src/types.arc"), "// core types\n");
+        write_std_io_grimoire(&dir);
+
+        let graph = load_workspace_graph(&dir).expect("load graph");
+        let order = plan_workspace(&graph).expect("plan");
+        let (prepared, statuses) = plan_test_build(&graph, &order, None);
+        execute_planned_build(&graph, &prepared, &statuses).expect("execute");
+
+        let core = status(&statuses, "core");
+        let artifact = fs::read_to_string(graph.root_dir.join(core.artifact_rel_path()))
+            .expect("artifact should exist");
+        let parsed = parse_package_artifact(&artifact).expect("artifact should parse");
+
+        assert!(
+            parsed
+                .modules
+                .iter()
+                .any(|module| module.module_id == "std.io"),
+            "expected linked dependency modules to remain in artifact: {artifact}"
+        );
+        assert!(
+            parsed
+                .exported_surface_rows
+                .iter()
+                .any(|row| row == "module=core:export:fn:fn announce() -> Int:"),
+            "expected root package surface rows in artifact: {artifact}"
+        );
+        assert!(
+            !parsed
+                .exported_surface_rows
+                .iter()
+                .any(|row| row.starts_with("module=std")),
+            "dependency package exports should not leak into root artifact surface rows: {artifact}"
         );
 
         let _ = fs::remove_dir_all(&dir);

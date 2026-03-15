@@ -153,35 +153,42 @@ struct ValueScope {
     params: BTreeSet<String>,
     ownership: BTreeMap<String, OwnershipClass>,
     type_texts: BTreeMap<String, String>,
+    binding_ids: BTreeMap<String, u64>,
+    next_binding_id: u64,
 }
 
 impl ValueScope {
     fn with_symbol_params(&self, params: &[arcana_hir::HirParam]) -> Self {
         let mut next = self.clone();
         for param in params {
-            next.locals.insert(param.name.clone());
+            next.bind_local(
+                &param.name,
+                matches!(param.mode, Some(arcana_hir::HirParamMode::Edit)),
+            );
             next.params.insert(param.name.clone());
-            if matches!(param.mode, Some(arcana_hir::HirParamMode::Edit)) {
-                next.mutable_locals.insert(param.name.clone());
-            }
         }
         next
     }
 
     fn with_local(&self, name: &str, mutable: bool) -> Self {
         let mut next = self.clone();
-        next.locals.insert(name.to_string());
-        if mutable {
-            next.mutable_locals.insert(name.to_string());
-        }
+        next.bind_local(name, mutable);
         next
     }
 
     fn insert(&mut self, name: &str, mutable: bool) {
+        self.bind_local(name, mutable);
+    }
+
+    fn bind_local(&mut self, name: &str, mutable: bool) -> u64 {
         self.locals.insert(name.to_string());
         if mutable {
             self.mutable_locals.insert(name.to_string());
         }
+        let binding_id = self.next_binding_id;
+        self.next_binding_id += 1;
+        self.binding_ids.insert(name.to_string(), binding_id);
+        binding_id
     }
 
     fn insert_typed(
@@ -218,6 +225,10 @@ impl ValueScope {
 
     fn type_text_of(&self, name: &str) -> Option<&str> {
         self.type_texts.get(name).map(String::as_str)
+    }
+
+    fn binding_id_of(&self, name: &str) -> Option<u64> {
+        self.binding_ids.get(name).copied()
     }
 }
 
@@ -381,6 +392,7 @@ struct LocalBorrowState {
 struct BorrowFlowState {
     locals: BTreeMap<String, LocalBorrowState>,
     moved_locals: BTreeSet<String>,
+    active_cleanup_bindings: BTreeSet<u64>,
 }
 
 impl BorrowFlowState {
@@ -417,6 +429,14 @@ impl BorrowFlowState {
 
     fn note_moved(&mut self, name: &str) {
         self.moved_locals.insert(name.to_string());
+    }
+
+    fn has_active_cleanup_binding(&self, binding_id: u64) -> bool {
+        self.active_cleanup_bindings.contains(&binding_id)
+    }
+
+    fn activate_cleanup_binding(&mut self, binding_id: u64) {
+        self.active_cleanup_bindings.insert(binding_id);
     }
 
     fn clear_local(&mut self, name: &str) {
@@ -1051,6 +1071,16 @@ fn validate_call_param_mode_flow(
                         diagnostics,
                         format!("cannot move local `{name}` while it is borrowed"),
                     );
+                } else if scope
+                    .binding_id_of(name)
+                    .is_some_and(|binding_id| state.has_active_cleanup_binding(binding_id))
+                {
+                    push_type_contract_diagnostic(
+                        module_path,
+                        span,
+                        diagnostics,
+                        format!("cleanup subject `{name}` cannot be moved after activation"),
+                    );
                 } else {
                     state.note_moved(name);
                 }
@@ -1087,7 +1117,11 @@ fn note_qualified_phrase_moves(
         let Some(name) = expr_place_root_local(expr, scope) else {
             continue;
         };
-        if scope.ownership_of(name).is_move_only() {
+        if scope.ownership_of(name).is_move_only()
+            && !scope
+                .binding_id_of(name)
+                .is_some_and(|binding_id| state.has_active_cleanup_binding(binding_id))
+        {
             state.note_moved(name);
         }
     }
@@ -2906,6 +2940,7 @@ fn validate_symbol_value_semantics(
 ) {
     let type_scope = inherited_type_scope.with_params(&symbol.type_params);
     let mut scope = inherited_scope.with_symbol_params(&symbol.params);
+    let symbol_cleanup_subjects = collect_cleanup_subject_names(&symbol.rollups);
     for param in &symbol.params {
         let ownership = infer_type_ownership(workspace, resolved_module, &type_scope, &param.ty);
         scope.ownership.insert(param.name.clone(), ownership);
@@ -2914,6 +2949,11 @@ fn validate_symbol_value_semantics(
             .insert(param.name.clone(), param.ty.clone());
     }
     let mut borrow_state = BorrowFlowState::default();
+    for name in &symbol_cleanup_subjects {
+        if let Some(binding_id) = scope.binding_id_of(name) {
+            borrow_state.activate_cleanup_binding(binding_id);
+        }
+    }
     validate_rollup_handlers(
         workspace,
         resolved_module,
@@ -2929,6 +2969,7 @@ fn validate_symbol_value_semantics(
         &type_scope,
         &mut scope,
         &mut borrow_state,
+        &symbol_cleanup_subjects,
         diagnostics,
     );
 
@@ -2991,7 +3032,8 @@ fn validate_rollup_handlers(
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     for rollup in rollups {
-        if lookup_symbol_path(workspace, resolved_module, &rollup.handler_path).is_none() {
+        let Some(symbol_ref) = lookup_symbol_path(workspace, resolved_module, &rollup.handler_path)
+        else {
             diagnostics.push(Diagnostic {
                 path: module_path.to_path_buf(),
                 line: rollup.span.line,
@@ -3001,7 +3043,70 @@ fn validate_rollup_handlers(
                     rollup.handler_path.join(".")
                 ),
             });
+            continue;
+        };
+        if !matches!(
+            symbol_ref.symbol.kind,
+            arcana_hir::HirSymbolKind::Fn
+                | arcana_hir::HirSymbolKind::System
+                | arcana_hir::HirSymbolKind::Behavior
+                | arcana_hir::HirSymbolKind::Const
+        ) {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: rollup.span.line,
+                column: rollup.span.column,
+                message: format!(
+                    "page rollup handler `{}` must resolve to a callable symbol",
+                    rollup.handler_path.join(".")
+                ),
+            });
+            continue;
         }
+        if symbol_ref.symbol.is_async {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: rollup.span.line,
+                column: rollup.span.column,
+                message: format!(
+                    "page rollup handler `{}` cannot be async in v1",
+                    rollup.handler_path.join(".")
+                ),
+            });
+            continue;
+        }
+        if symbol_ref.symbol.params.len() != 1 {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: rollup.span.line,
+                column: rollup.span.column,
+                message: format!(
+                    "page rollup handler `{}` must accept exactly one parameter in v1",
+                    rollup.handler_path.join(".")
+                ),
+            });
+        }
+    }
+}
+
+fn collect_cleanup_subject_names(rollups: &[arcana_hir::HirPageRollup]) -> BTreeSet<String> {
+    rollups
+        .iter()
+        .map(|rollup| rollup.subject.clone())
+        .collect::<BTreeSet<_>>()
+}
+
+fn activate_current_cleanup_binding(
+    borrow_state: &mut BorrowFlowState,
+    scope: &ValueScope,
+    current_block_cleanup_subjects: &BTreeSet<String>,
+    name: &str,
+) {
+    if !current_block_cleanup_subjects.contains(name) {
+        return;
+    }
+    if let Some(binding_id) = scope.binding_id_of(name) {
+        borrow_state.activate_cleanup_binding(binding_id);
     }
 }
 
@@ -3013,6 +3118,7 @@ fn validate_statement_block_semantics(
     type_scope: &TypeScope,
     scope: &mut ValueScope,
     borrow_state: &mut BorrowFlowState,
+    current_block_cleanup_subjects: &BTreeSet<String>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     for statement in statements {
@@ -3065,6 +3171,12 @@ fn validate_statement_block_semantics(
                 let type_text =
                     infer_expr_type_text(workspace, resolved_module, type_scope, scope, value);
                 scope.insert_typed(name, *mutable, ownership, type_text);
+                activate_current_cleanup_binding(
+                    borrow_state,
+                    scope,
+                    current_block_cleanup_subjects,
+                    name,
+                );
             }
             HirStatementKind::Return { value } => {
                 if let Some(value) = value {
@@ -3103,6 +3215,7 @@ fn validate_statement_block_semantics(
                 then_branch,
                 else_branch,
             } => {
+                let nested_cleanup_subjects = collect_cleanup_subject_names(&statement.rollups);
                 validate_expr_semantics(
                     workspace,
                     resolved_module,
@@ -3150,6 +3263,7 @@ fn validate_statement_block_semantics(
                     type_scope,
                     &mut then_scope,
                     &mut then_borrows,
+                    &nested_cleanup_subjects,
                     diagnostics,
                 );
                 borrow_state.merge_moves_from(&then_borrows);
@@ -3164,12 +3278,14 @@ fn validate_statement_block_semantics(
                         type_scope,
                         &mut else_scope,
                         &mut else_borrows,
+                        &nested_cleanup_subjects,
                         diagnostics,
                     );
                     borrow_state.merge_moves_from(&else_borrows);
                 }
             }
             HirStatementKind::While { condition, body } => {
+                let nested_cleanup_subjects = collect_cleanup_subject_names(&statement.rollups);
                 validate_expr_semantics(
                     workspace,
                     resolved_module,
@@ -3217,6 +3333,7 @@ fn validate_statement_block_semantics(
                     type_scope,
                     &mut body_scope,
                     &mut body_borrows,
+                    &nested_cleanup_subjects,
                     diagnostics,
                 );
                 borrow_state.merge_moves_from(&body_borrows);
@@ -3255,8 +3372,15 @@ fn validate_statement_block_semantics(
                     iterable,
                     borrow_state,
                 );
+                let nested_cleanup_subjects = collect_cleanup_subject_names(&statement.rollups);
                 let mut body_scope = scope.with_local(binding, false);
                 let mut body_borrows = borrow_state.clone();
+                activate_current_cleanup_binding(
+                    &mut body_borrows,
+                    &body_scope,
+                    &nested_cleanup_subjects,
+                    binding,
+                );
                 validate_statement_block_semantics(
                     workspace,
                     resolved_module,
@@ -3265,6 +3389,7 @@ fn validate_statement_block_semantics(
                     type_scope,
                     &mut body_scope,
                     &mut body_borrows,
+                    &nested_cleanup_subjects,
                     diagnostics,
                 );
                 borrow_state.merge_moves_from(&body_borrows);
@@ -5303,6 +5428,40 @@ mod tests {
     }
 
     #[test]
+    fn check_workspace_graph_allows_local_modules_named_like_unrelated_members() {
+        let root = make_temp_workspace(
+            "workspace_local_module_shadowing_member",
+            &["app", "core"],
+            &[
+                ("app/book.toml", "name = \"app\"\nkind = \"app\"\n"),
+                (
+                    "app/src/shelf.arc",
+                    "import core\nfn main() -> Int:\n    return core.value :: :: call\n",
+                ),
+                (
+                    "app/src/core.arc",
+                    "export fn value() -> Int:\n    return 7\n",
+                ),
+                ("app/src/types.arc", ""),
+                ("core/book.toml", "name = \"core\"\nkind = \"lib\"\n"),
+                (
+                    "core/src/book.arc",
+                    "export fn value() -> Int:\n    return 0\n",
+                ),
+                ("core/src/types.arc", ""),
+            ],
+        );
+
+        let graph = load_workspace_graph(&root).expect("workspace graph should load");
+        let summary = check_workspace_graph(&graph)
+            .expect("workspace check should prefer app-local modules over unrelated members");
+        assert_eq!(summary.summary().package_count, 2);
+        assert!(summary.summary().module_count >= 5);
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
     fn check_path_rejects_main_with_parameters() {
         let root = make_temp_package(
             "main_with_parameters",
@@ -6032,6 +6191,102 @@ mod tests {
         let summary = check_path(&root).expect("page rollup package should check");
         assert_eq!(summary.package_count, 1);
         assert_eq!(summary.module_count, 2);
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_async_page_rollup_handler() {
+        let root = make_temp_package(
+            "page_rollup_async_handler",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    "async fn cleanup(value: Int):\n    return\nfn main() -> Int:\n    let value = 1\n    return 0\n[value, cleanup]#cleanup\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("async rollup handler should fail");
+        assert!(
+            err.contains("page rollup handler `cleanup` cannot be async in v1"),
+            "{err}"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_non_callable_page_rollup_handler() {
+        let root = make_temp_package(
+            "page_rollup_non_callable_handler",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    "record Cleaner:\n    id: Int\nfn main() -> Int:\n    let value = 1\n    return 0\n[value, Cleaner]#cleanup\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("non-callable rollup handler should fail");
+        assert!(
+            err.contains("page rollup handler `Cleaner` must resolve to a callable symbol"),
+            "{err}"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_wrong_arity_page_rollup_handler() {
+        let root = make_temp_package(
+            "page_rollup_wrong_arity_handler",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    "fn cleanup() -> Int:\n    return 0\nfn main() -> Int:\n    let value = 1\n    return 0\n[value, cleanup]#cleanup\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("wrong-arity rollup handler should fail");
+        assert!(
+            err.contains("page rollup handler `cleanup` must accept exactly one parameter in v1"),
+            "{err}"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_cleanup_subject_move_after_activation() {
+        let root = make_temp_package(
+            "page_rollup_moved_subject",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    "fn cleanup(value: Str):\n    return\nfn consume(take value: Str):\n    return\nfn main() -> Int:\n    let text = \"hi\"\n    consume :: text :: call\n    return 0\n[text, cleanup]#cleanup\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("moved cleanup subject should fail");
+        assert!(
+            err.contains("cleanup subject `text` cannot be moved after activation"),
+            "{err}"
+        );
 
         fs::remove_dir_all(root).expect("cleanup should succeed");
     }

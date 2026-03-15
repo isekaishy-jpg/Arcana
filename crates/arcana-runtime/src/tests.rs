@@ -70,6 +70,26 @@ fn write_file(path: &Path, text: &str) {
     fs::write(path, text).expect("file should write");
 }
 
+fn build_workspace_plan_for_member(dir: &Path, member: &str) -> RuntimePackagePlan {
+    let graph = load_workspace_graph(dir).expect("workspace graph should load");
+    let checked = check_workspace_graph(&graph).expect("workspace should check");
+    let fingerprints = compute_member_fingerprints_for_checked_workspace(&graph, &checked)
+        .expect("fingerprints should compute");
+    let order = plan_workspace(&graph).expect("workspace order should plan");
+    let statuses =
+        plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
+    execute_workspace_build(&graph, &fingerprints, &statuses);
+
+    let artifact_path = graph.root_dir.join(
+        &statuses
+            .iter()
+            .find(|status| status.member() == member)
+            .expect("artifact status should exist")
+            .artifact_rel_path(),
+    );
+    load_package_plan(&artifact_path).expect("runtime plan should load")
+}
+
 fn synthetic_window_canvas_host(fixture_root: &Path) -> BufferedHost {
     let cwd = fixture_root.to_string_lossy().replace('\\', "/");
     BufferedHost {
@@ -301,32 +321,53 @@ fn sample_stmt_metadata_artifact() -> AotPackageArtifact {
                 is_async: false,
                 exported: true,
             }],
-            routines: vec![AotRoutineArtifact {
-                module_id: "metadata".to_string(),
-                routine_key: "metadata#sym-0".to_string(),
-                symbol_name: "main".to_string(),
-                symbol_kind: "fn".to_string(),
-                exported: true,
-                is_async: false,
-                type_param_rows: Vec::new(),
-                behavior_attr_rows: Vec::new(),
-                param_rows: Vec::new(),
-                signature_row: "fn main() -> Int:".to_string(),
-                intrinsic_impl: None,
-                impl_target_type: None,
-                impl_trait_path: None,
-                foreword_rows: vec!["test()".to_string()],
-                rollups: vec![parse_rollup_row("cleanup:scope:metadata.cleanup")
-                    .expect("rollup should parse")],
-                statements: vec![parse_stmt(
-                    "stmt(core=return(int(0)),forewords=[only(os=\"windows\")],rollups=[cleanup:scope:metadata.cleanup])",
-                )
-                .expect("statement should parse")],
-            }],
+            routines: vec![
+                AotRoutineArtifact {
+                    module_id: "metadata".to_string(),
+                    routine_key: "metadata#sym-0".to_string(),
+                    symbol_name: "main".to_string(),
+                    symbol_kind: "fn".to_string(),
+                    exported: true,
+                    is_async: false,
+                    type_param_rows: Vec::new(),
+                    behavior_attr_rows: Vec::new(),
+                    param_rows: Vec::new(),
+                    signature_row: "fn main() -> Int:".to_string(),
+                    intrinsic_impl: None,
+                    impl_target_type: None,
+                    impl_trait_path: None,
+                    foreword_rows: vec!["test()".to_string()],
+                    rollups: vec![parse_rollup_row("cleanup:scope:metadata.cleanup")
+                        .expect("rollup should parse")],
+                    statements: vec![parse_stmt(
+                        "stmt(core=return(int(0)),forewords=[only(os=\"windows\")],rollups=[cleanup:scope:metadata.cleanup])",
+                    )
+                    .expect("statement should parse")],
+                },
+                AotRoutineArtifact {
+                    module_id: "metadata".to_string(),
+                    routine_key: "metadata#sym-1".to_string(),
+                    symbol_name: "cleanup".to_string(),
+                    symbol_kind: "fn".to_string(),
+                    exported: false,
+                    is_async: false,
+                    type_param_rows: Vec::new(),
+                    behavior_attr_rows: Vec::new(),
+                    param_rows: vec!["mode=:name=scope:ty=Int".to_string()],
+                    signature_row: "fn cleanup(scope: Int) -> Int:".to_string(),
+                    intrinsic_impl: None,
+                    impl_target_type: None,
+                    impl_trait_path: None,
+                    foreword_rows: Vec::new(),
+                    rollups: Vec::new(),
+                    statements: vec![parse_stmt("stmt(core=return(int(0)),forewords=[],rollups=[])")
+                        .expect("statement should parse")],
+                },
+            ],
             modules: vec![AotPackageModuleArtifact {
                 module_id: "metadata".to_string(),
-                symbol_count: 1,
-                item_count: 1,
+                symbol_count: 2,
+                item_count: 2,
                 line_count: 1,
                 non_empty_line_count: 1,
                 directive_rows: Vec::new(),
@@ -502,6 +543,64 @@ fn plan_from_artifact_rejects_main_with_non_runtime_return_type() {
     let err = plan_from_artifact(&artifact).expect_err("bool-returning main should fail");
     assert!(
         err.contains("main must return Int or Unit in the current runtime lane"),
+        "{err}"
+    );
+}
+
+#[test]
+fn plan_from_artifact_rejects_async_rollup_handler() {
+    let mut artifact = sample_stmt_metadata_artifact();
+    artifact.routines[1].is_async = true;
+    artifact.routines[1].signature_row = "async fn cleanup(scope: Int) -> Int:".to_string();
+
+    let err = plan_from_artifact(&artifact).expect_err("async rollup handler should fail");
+    assert!(
+        err.contains("runtime rollup handler `metadata.cleanup` cannot be async in v1"),
+        "{err}"
+    );
+}
+
+#[test]
+fn plan_from_artifact_rejects_wrong_arity_rollup_handler() {
+    let mut artifact = sample_stmt_metadata_artifact();
+    artifact.routines[1].param_rows.clear();
+    artifact.routines[1].signature_row = "fn cleanup() -> Int:".to_string();
+
+    let err = plan_from_artifact(&artifact).expect_err("wrong-arity rollup handler should fail");
+    assert!(
+        err.contains(
+            "runtime rollup handler `metadata.cleanup` must accept exactly one parameter in v1"
+        ),
+        "{err}"
+    );
+}
+
+#[test]
+fn plan_from_artifact_rejects_rollup_handler_outside_module_scope() {
+    let mut artifact = sample_stmt_metadata_artifact();
+    artifact.module_count = 2;
+    artifact.routines[0].rollups =
+        vec![parse_rollup_row("cleanup:scope:cleanup").expect("rollup should parse")];
+    artifact.routines[0].statements = vec![parse_stmt(
+        "stmt(core=return(int(0)),forewords=[only(os=\"windows\")],rollups=[cleanup:scope:cleanup])",
+    )
+    .expect("statement should parse")];
+    artifact.routines[1].module_id = "helpers".to_string();
+    artifact.modules[0].symbol_count = 1;
+    artifact.modules.push(AotPackageModuleArtifact {
+        module_id: "helpers".to_string(),
+        symbol_count: 1,
+        item_count: 1,
+        line_count: 1,
+        non_empty_line_count: 1,
+        directive_rows: Vec::new(),
+        lang_item_rows: Vec::new(),
+        exported_surface_rows: Vec::new(),
+    });
+
+    let err = plan_from_artifact(&artifact).expect_err("out-of-scope rollup handler should fail");
+    assert!(
+        err.contains("runtime rollup handler `cleanup` does not resolve to a callable path"),
         "{err}"
     );
 }
@@ -787,6 +886,77 @@ fn execute_main_runs_page_rollups_on_loop_exit_and_try_propagation() {
 }
 
 #[test]
+fn execute_main_page_rollups_preserve_outer_binding_under_shadowing() {
+    let dir = temp_workspace_dir("page_rollup_shadowing");
+    write_file(
+        &dir.join("book.toml"),
+        "name = \"runtime_page_rollup_shadowing\"\nkind = \"app\"\n",
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "import std.io\n",
+            "fn cleanup(value: Int) -> Int:\n",
+            "    std.io.print[Int] :: value :: call\n",
+            "    return 0\n",
+            "fn main() -> Int:\n",
+            "    let x = 1\n",
+            "    if true:\n",
+            "        let x = 2\n",
+            "    return 0\n",
+            "[x, cleanup]#cleanup\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let plan = build_workspace_plan_for_member(&dir, "runtime_page_rollup_shadowing");
+    let mut host = BufferedHost::default();
+    let code = execute_main(&plan, &mut host).expect("runtime should execute");
+
+    assert_eq!(code, 0);
+    assert_eq!(host.stdout, vec!["1".to_string()]);
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn execute_main_page_rollups_refresh_subject_value_after_mutation() {
+    let dir = temp_workspace_dir("page_rollup_mutation_refresh");
+    write_file(
+        &dir.join("book.toml"),
+        "name = \"runtime_page_rollup_mutation_refresh\"\nkind = \"app\"\n",
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "import std.io\n",
+            "use types.Counter\n",
+            "fn cleanup(counter: Counter) -> Int:\n",
+            "    std.io.print[Int] :: counter.value :: call\n",
+            "    return 0\n",
+            "fn main() -> Int:\n",
+            "    let mut counter = Counter :: value = 1 :: call\n",
+            "    counter.value = 2\n",
+            "    return 0\n",
+            "[counter, cleanup]#cleanup\n",
+        ),
+    );
+    write_file(
+        &dir.join("src").join("types.arc"),
+        "export record Counter:\n    value: Int\n",
+    );
+
+    let plan = build_workspace_plan_for_member(&dir, "runtime_page_rollup_mutation_refresh");
+    let mut host = BufferedHost::default();
+    let code = execute_main(&plan, &mut host).expect("runtime should execute");
+
+    assert_eq!(code, 0);
+    assert_eq!(host.stdout, vec!["2".to_string()]);
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn execute_main_manual_routine_rollups_run_after_defers() {
     let plan = RuntimePackagePlan {
         package_name: "manual_routine_rollups".to_string(),
@@ -912,6 +1082,28 @@ fn execute_main_manual_routine_rollups_run_after_defers() {
                         value: ParsedExpr::Int(0),
                     },
                 ],
+            },
+            RuntimeRoutinePlan {
+                module_id: "std.io".to_string(),
+                routine_key: "std.io#sym-0".to_string(),
+                symbol_name: "print".to_string(),
+                symbol_kind: "fn".to_string(),
+                exported: true,
+                is_async: false,
+                type_params: vec!["T".to_string()],
+                behavior_attrs: BTreeMap::new(),
+                params: vec![RuntimeParamPlan {
+                    mode: Some("read".to_string()),
+                    name: "value".to_string(),
+                    ty: "T".to_string(),
+                }],
+                signature_row: "fn print[T](read value: T):".to_string(),
+                intrinsic_impl: Some("IoPrint".to_string()),
+                impl_target_type: None,
+                impl_trait_path: None,
+                foreword_rows: Vec::new(),
+                rollups: Vec::new(),
+                statements: Vec::new(),
             },
         ],
     };

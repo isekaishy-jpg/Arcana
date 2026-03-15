@@ -5,8 +5,21 @@ use crate::{
     IrEntrypoint, IrPackage, IrRoutine,
 };
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuntimeRequirementRoots {
+    Entrypoints,
+    ExportedRootPackageRoutines,
+}
+
 pub fn derive_runtime_requirements(package: &IrPackage) -> Vec<String> {
-    let reachable = reachable_routine_keys(package);
+    derive_runtime_requirements_with_roots(package, RuntimeRequirementRoots::Entrypoints)
+}
+
+pub fn derive_runtime_requirements_with_roots(
+    package: &IrPackage,
+    roots: RuntimeRequirementRoots,
+) -> Vec<String> {
+    let reachable = reachable_routine_keys(package, roots);
     let routines_by_key = package
         .routines
         .iter()
@@ -29,9 +42,9 @@ pub fn derive_runtime_requirements(package: &IrPackage) -> Vec<String> {
     requirements.into_iter().collect()
 }
 
-fn reachable_routine_keys(package: &IrPackage) -> BTreeSet<String> {
+fn reachable_routine_keys(package: &IrPackage, roots: RuntimeRequirementRoots) -> BTreeSet<String> {
     let mut reachable = BTreeSet::new();
-    let mut pending = entrypoint_routine_keys(package)
+    let mut pending = root_routine_keys(package, roots)
         .into_iter()
         .collect::<VecDeque<_>>();
     let routines_by_key = package
@@ -59,11 +72,36 @@ fn reachable_routine_keys(package: &IrPackage) -> BTreeSet<String> {
     reachable
 }
 
+fn root_routine_keys(package: &IrPackage, roots: RuntimeRequirementRoots) -> Vec<String> {
+    match roots {
+        RuntimeRequirementRoots::Entrypoints => entrypoint_routine_keys(package),
+        RuntimeRequirementRoots::ExportedRootPackageRoutines => {
+            exported_root_package_routine_keys(package)
+        }
+    }
+}
+
 fn entrypoint_routine_keys(package: &IrPackage) -> Vec<String> {
     package
         .entrypoints
         .iter()
         .filter_map(|entrypoint| find_entrypoint_routine_key(package, entrypoint))
+        .collect()
+}
+
+fn routine_belongs_to_root_package(package: &IrPackage, routine: &IrRoutine) -> bool {
+    routine.module_id == package.root_module_id
+        || routine
+            .module_id
+            .starts_with(&(package.root_module_id.clone() + "."))
+}
+
+fn exported_root_package_routine_keys(package: &IrPackage) -> Vec<String> {
+    package
+        .routines
+        .iter()
+        .filter(|routine| routine.exported && routine_belongs_to_root_package(package, routine))
+        .map(|routine| routine.routine_key.clone())
         .collect()
 }
 
@@ -393,7 +431,10 @@ fn runtime_requirement_for_intrinsic_impl(intrinsic_impl: &str) -> Option<&'stat
 
 #[cfg(test)]
 mod tests {
-    use super::derive_runtime_requirements;
+    use super::{
+        RuntimeRequirementRoots, derive_runtime_requirements,
+        derive_runtime_requirements_with_roots,
+    };
     use crate::{
         ExecExpr, ExecPhraseQualifierKind, ExecStmt, IrEntrypoint, IrPackage, IrPackageModule,
         IrRoutine,
@@ -565,6 +606,109 @@ mod tests {
         assert_eq!(
             derive_runtime_requirements(&package),
             vec!["std.kernel.fs".to_string()]
+        );
+    }
+
+    #[test]
+    fn derives_exported_library_requirements_without_entrypoints() {
+        let package = IrPackage {
+            package_name: "core".to_string(),
+            root_module_id: "core".to_string(),
+            direct_deps: vec!["std".to_string()],
+            modules: vec![IrPackageModule {
+                module_id: "core".to_string(),
+                symbol_count: 1,
+                item_count: 1,
+                line_count: 1,
+                non_empty_line_count: 1,
+                directive_rows: Vec::new(),
+                lang_item_rows: Vec::new(),
+                exported_surface_rows: Vec::new(),
+            }],
+            dependency_edge_count: 0,
+            dependency_rows: Vec::new(),
+            exported_surface_rows: Vec::new(),
+            runtime_requirements: Vec::new(),
+            entrypoints: Vec::new(),
+            routines: vec![
+                routine(
+                    "core",
+                    "core#sym-0",
+                    "announce",
+                    None,
+                    vec![call("std.io#sym-0", &["std", "io", "print"])],
+                ),
+                routine(
+                    "std.io",
+                    "std.io#sym-0",
+                    "print",
+                    Some("IoPrint"),
+                    Vec::new(),
+                ),
+            ],
+        };
+
+        assert_eq!(
+            derive_runtime_requirements_with_roots(
+                &package,
+                RuntimeRequirementRoots::ExportedRootPackageRoutines
+            ),
+            vec!["std.kernel.io".to_string()]
+        );
+    }
+
+    #[test]
+    fn exported_library_roots_ignore_unrelated_dependency_exports() {
+        let package = IrPackage {
+            package_name: "core".to_string(),
+            root_module_id: "core".to_string(),
+            direct_deps: vec!["std".to_string()],
+            modules: vec![IrPackageModule {
+                module_id: "core".to_string(),
+                symbol_count: 1,
+                item_count: 1,
+                line_count: 1,
+                non_empty_line_count: 1,
+                directive_rows: Vec::new(),
+                lang_item_rows: Vec::new(),
+                exported_surface_rows: Vec::new(),
+            }],
+            dependency_edge_count: 0,
+            dependency_rows: Vec::new(),
+            exported_surface_rows: Vec::new(),
+            runtime_requirements: Vec::new(),
+            entrypoints: Vec::new(),
+            routines: vec![
+                routine(
+                    "core",
+                    "core#sym-0",
+                    "announce",
+                    None,
+                    vec![call("std.io#sym-0", &["std", "io", "print"])],
+                ),
+                routine(
+                    "std.io",
+                    "std.io#sym-0",
+                    "print",
+                    Some("IoPrint"),
+                    Vec::new(),
+                ),
+                routine(
+                    "std.audio",
+                    "std.audio#sym-0",
+                    "default_output",
+                    Some("AudioDefaultOutputTry"),
+                    Vec::new(),
+                ),
+            ],
+        };
+
+        assert_eq!(
+            derive_runtime_requirements_with_roots(
+                &package,
+                RuntimeRequirementRoots::ExportedRootPackageRoutines
+            ),
+            vec!["std.kernel.io".to_string()]
         );
     }
 }

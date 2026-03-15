@@ -4,7 +4,10 @@ use std::path::PathBuf;
 
 use arcana_aot::{AOT_INTERNAL_FORMAT, compile_package};
 use arcana_hir::{HirResolvedWorkspace, HirWorkspaceSummary, resolve_workspace};
-use arcana_ir::{IrPackage, derive_runtime_requirements, lower_workspace_package_with_resolution};
+use arcana_ir::{
+    IrPackage, RuntimeRequirementRoots, derive_runtime_requirements_with_roots,
+    lower_workspace_package_with_resolution,
+};
 
 use crate::build_identity::{
     artifact_body_hash, artifact_body_hash_for_path, cached_artifact_matches_status,
@@ -225,7 +228,11 @@ pub fn execute_build(
                     .ok_or_else(|| format!("missing lowered linked package `{name}`"))
             })
             .collect::<PackageResult<Vec<_>>>()?;
-        let artifact = compile_package(&link_ir_packages(root_package, linked_packages));
+        let artifact = compile_package(&link_ir_packages(
+            &member.kind,
+            root_package,
+            linked_packages,
+        ));
         if artifact.format != status.format {
             return Err(format!(
                 "artifact format mismatch for `{}`: planner={}, compiler={}",
@@ -477,7 +484,18 @@ fn collect_transitive_member_names(
     Ok(visited)
 }
 
-fn link_ir_packages(root: IrPackage, mut linked: Vec<IrPackage>) -> IrPackage {
+fn runtime_requirement_roots_for_kind(kind: &GrimoireKind) -> RuntimeRequirementRoots {
+    match kind {
+        GrimoireKind::App => RuntimeRequirementRoots::Entrypoints,
+        GrimoireKind::Lib => RuntimeRequirementRoots::ExportedRootPackageRoutines,
+    }
+}
+
+fn link_ir_packages(
+    root_kind: &GrimoireKind,
+    root: IrPackage,
+    mut linked: Vec<IrPackage>,
+) -> IrPackage {
     linked.sort_by(|left, right| left.package_name.cmp(&right.package_name));
 
     let mut direct_deps = root.direct_deps.iter().cloned().collect::<BTreeSet<_>>();
@@ -491,7 +509,7 @@ fn link_ir_packages(root: IrPackage, mut linked: Vec<IrPackage>) -> IrPackage {
         .iter()
         .cloned()
         .collect::<BTreeSet<_>>();
-    let mut exported_surface_rows = root
+    let exported_surface_rows = root
         .exported_surface_rows
         .iter()
         .cloned()
@@ -501,7 +519,6 @@ fn link_ir_packages(root: IrPackage, mut linked: Vec<IrPackage>) -> IrPackage {
     for package in linked {
         modules.extend(package.modules);
         dependency_rows.extend(package.dependency_rows);
-        exported_surface_rows.extend(package.exported_surface_rows);
         routines.extend(package.routines);
     }
 
@@ -525,7 +542,10 @@ fn link_ir_packages(root: IrPackage, mut linked: Vec<IrPackage>) -> IrPackage {
         entrypoints: root.entrypoints,
         routines,
     };
-    linked_package.runtime_requirements = derive_runtime_requirements(&linked_package);
+    linked_package.runtime_requirements = derive_runtime_requirements_with_roots(
+        &linked_package,
+        runtime_requirement_roots_for_kind(root_kind),
+    );
     linked_package
 }
 

@@ -2578,6 +2578,13 @@ fn resolve_module_target(
             });
     }
 
+    if let Some(module) = package.resolve_relative_module(path) {
+        return Ok((
+            package.summary.package_name.clone(),
+            module.module_id.clone(),
+        ));
+    }
+
     if workspace.package(first).is_some() {
         return Err(format!(
             "package `{first}` is not a direct dependency of `{}`",
@@ -2585,15 +2592,7 @@ fn resolve_module_target(
         ));
     }
 
-    package
-        .resolve_relative_module(path)
-        .map(|module| {
-            (
-                package.summary.package_name.clone(),
-                module.module_id.clone(),
-            )
-        })
-        .ok_or_else(|| format!("unresolved module `{key}`"))
+    Err(format!("unresolved module `{key}`"))
 }
 
 enum ResolvedUseTarget {
