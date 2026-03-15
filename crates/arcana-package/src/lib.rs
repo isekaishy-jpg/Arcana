@@ -11,12 +11,18 @@ use arcana_hir::{
 use pathdiff::diff_paths;
 
 mod build;
+mod build_identity;
+mod fingerprint;
 
 pub type PackageResult<T> = Result<T, String>;
 
 pub use build::{
     BuildDisposition, BuildStatus, PreparedBuild, execute_build, plan_build, prepare_build,
     prepare_build_from_workspace, render_build_summary, render_lockfile, write_lockfile,
+};
+pub use fingerprint::{
+    MemberFingerprints, WorkspaceFingerprints, compute_workspace_fingerprints,
+    compute_workspace_snapshot_id,
 };
 
 pub(crate) const LOCKFILE_VERSION: i64 = 1;
@@ -105,14 +111,9 @@ pub struct LockMember {
 pub struct Lockfile {
     pub version: i64,
     pub workspace: String,
+    pub toolchain: String,
     pub order: Vec<String>,
     pub members: BTreeMap<String, LockMember>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MemberFingerprints {
-    pub source: String,
-    pub api: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -419,6 +420,11 @@ pub fn read_lockfile(path: &Path) -> PackageResult<Option<Lockfile>> {
         .and_then(toml::Value::as_str)
         .ok_or_else(|| format!("missing `workspace` in `{}`", path.display()))?
         .to_string();
+    let toolchain = table
+        .get("toolchain")
+        .and_then(toml::Value::as_str)
+        .unwrap_or("")
+        .to_string();
     let order = table
         .get("order")
         .map(parse_string_array)
@@ -521,6 +527,7 @@ pub fn read_lockfile(path: &Path) -> PackageResult<Option<Lockfile>> {
     Ok(Some(Lockfile {
         version,
         workspace,
+        toolchain,
         order,
         members,
     }))
@@ -809,48 +816,48 @@ mod tests {
         write_file(&dir.join("src/types.arc"), "// types\n");
     }
 
-    fn fake_member_fingerprints(graph: &WorkspaceGraph) -> HashMap<String, MemberFingerprints> {
-        graph
-            .members
+    fn prepare_test_build(graph: &WorkspaceGraph) -> PreparedBuild {
+        prepare_build(graph).expect("prepare build")
+    }
+
+    fn plan_test_build(
+        graph: &WorkspaceGraph,
+        order: &[String],
+        existing_lock: Option<&Lockfile>,
+    ) -> (PreparedBuild, Vec<BuildStatus>) {
+        let prepared = prepare_test_build(graph);
+        let statuses = plan_build(graph, order, &prepared, existing_lock).expect("build plan");
+        (prepared, statuses)
+    }
+
+    fn status<'a>(statuses: &'a [BuildStatus], member: &str) -> &'a BuildStatus {
+        statuses
             .iter()
-            .map(|member| {
-                (
-                    member.name.clone(),
-                    MemberFingerprints {
-                        source: format!("test-source:{}", member.name),
-                        api: format!("test-api:{}", member.name),
-                    },
-                )
-            })
+            .find(|status| status.member == member)
+            .expect("status should exist")
+    }
+
+    fn disposition_map(statuses: &[BuildStatus]) -> BTreeMap<String, BuildDisposition> {
+        statuses
+            .iter()
+            .map(|status| (status.member.clone(), status.disposition))
             .collect()
     }
 
-    fn mutate_member_fingerprint(
-        fingerprints: &HashMap<String, MemberFingerprints>,
-        member: &str,
-        source_suffix: Option<&str>,
-        api_suffix: Option<&str>,
-    ) -> HashMap<String, MemberFingerprints> {
-        let mut next = fingerprints.clone();
-        let fingerprint = next
-            .get_mut(member)
-            .expect("member fingerprint should exist");
-        if let Some(source_suffix) = source_suffix {
-            fingerprint.source.push(':');
-            fingerprint.source.push_str(source_suffix);
-        }
-        if let Some(api_suffix) = api_suffix {
-            fingerprint.api.push(':');
-            fingerprint.api.push_str(api_suffix);
-        }
-        next
+    fn assert_dispositions(statuses: &[BuildStatus], expected: &[(&str, BuildDisposition)]) {
+        let actual = disposition_map(statuses);
+        let expected = expected
+            .iter()
+            .map(|(member, disposition)| ((*member).to_string(), *disposition))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(actual, expected);
     }
 
     fn execute_planned_build(
         graph: &WorkspaceGraph,
+        prepared: &PreparedBuild,
         statuses: &[BuildStatus],
     ) -> PackageResult<PathBuf> {
-        let prepared = prepare_build(graph)?;
         execute_build(graph, &prepared, statuses)
     }
 
@@ -1016,9 +1023,8 @@ mod tests {
         write_grimoire(&dir.join("core"), GrimoireKind::Lib, "core", &[]);
         let graph = load_workspace_graph(&dir).expect("load graph");
         let order = plan_workspace(&graph).expect("plan");
-        let fingerprints = fake_member_fingerprints(&graph);
-        let statuses = plan_build(&graph, &order, &fingerprints, None).expect("build plan");
-        execute_planned_build(&graph, &statuses).expect("execute build");
+        let (prepared, statuses) = plan_test_build(&graph, &order, None);
+        execute_planned_build(&graph, &prepared, &statuses).expect("execute build");
         let first = render_lockfile(&graph, &order, &statuses).expect("render");
         let second = render_lockfile(&graph, &order, &statuses).expect("render");
         assert_eq!(first, second);
@@ -1038,22 +1044,15 @@ mod tests {
         write_grimoire(&dir.join("app"), GrimoireKind::App, "app", &[]);
         let graph = load_workspace_graph(&dir).expect("load graph");
         let order = plan_workspace(&graph).expect("plan");
-        let first_fingerprints = fake_member_fingerprints(&graph);
-        let first_statuses = plan_build(&graph, &order, &first_fingerprints, None).expect("plan");
-        execute_planned_build(&graph, &first_statuses).expect("execute build");
+        let (first_prepared, first_statuses) = plan_test_build(&graph, &order, None);
+        execute_planned_build(&graph, &first_prepared, &first_statuses).expect("execute build");
         let lock_path = write_lockfile(&graph, &order, &first_statuses).expect("lockfile");
         let existing = read_lockfile(&lock_path)
             .expect("read lock")
             .expect("lock exists");
 
-        let second_fingerprints = first_fingerprints.clone();
-        let second_statuses =
-            plan_build(&graph, &order, &second_fingerprints, Some(&existing)).expect("plan");
-        assert!(
-            second_statuses
-                .iter()
-                .all(|status| status.disposition == BuildDisposition::CacheHit)
-        );
+        let (_, second_statuses) = plan_test_build(&graph, &order, Some(&existing));
+        assert_dispositions(&second_statuses, &[("app", BuildDisposition::CacheHit)]);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1075,9 +1074,8 @@ mod tests {
         let order = plan_workspace(&graph).expect("plan");
         assert_eq!(order, vec!["app".to_string(), "workspace".to_string()]);
 
-        let fingerprints = fake_member_fingerprints(&graph);
-        let statuses = plan_build(&graph, &order, &fingerprints, None).expect("build plan");
-        execute_planned_build(&graph, &statuses).expect("execute build");
+        let (prepared, statuses) = plan_test_build(&graph, &order, None);
+        execute_planned_build(&graph, &prepared, &statuses).expect("execute build");
         let lock_path = write_lockfile(&graph, &order, &statuses).expect("write lockfile");
         let lock = read_lockfile(&lock_path)
             .expect("read lockfile")
@@ -1105,18 +1103,14 @@ mod tests {
 
         let graph = load_workspace_graph(&dir).expect("load graph");
         let order = plan_workspace(&graph).expect("plan");
-        let first_fingerprints = fake_member_fingerprints(&graph);
-        let first_statuses = plan_build(&graph, &order, &first_fingerprints, None).expect("plan");
-        execute_planned_build(&graph, &first_statuses).expect("execute build");
+        let (first_prepared, first_statuses) = plan_test_build(&graph, &order, None);
+        execute_planned_build(&graph, &first_prepared, &first_statuses).expect("execute build");
         let lock_path = write_lockfile(&graph, &order, &first_statuses).expect("lockfile");
         let existing = read_lockfile(&lock_path)
             .expect("read lock")
             .expect("lock exists");
 
-        let status = first_statuses
-            .iter()
-            .find(|status| status.member == "app")
-            .expect("app status should exist");
+        let status = status(&first_statuses, "app");
         let artifact_path = graph.root_dir.join(&status.artifact_rel_path);
         let stale = fs::read_to_string(&artifact_path).expect("artifact should exist");
         fs::write(
@@ -1128,12 +1122,11 @@ mod tests {
         )
         .expect("artifact should be rewritten");
 
-        let second_statuses =
-            plan_build(&graph, &order, &first_fingerprints, Some(&existing)).expect("plan");
-        assert_eq!(second_statuses[0].member, "app");
-        assert_eq!(second_statuses[0].disposition, BuildDisposition::Built);
+        let (second_prepared, second_statuses) = plan_test_build(&graph, &order, Some(&existing));
+        assert_dispositions(&second_statuses, &[("app", BuildDisposition::Built)]);
 
-        execute_planned_build(&graph, &second_statuses).expect("rebuild should refresh artifact");
+        execute_planned_build(&graph, &second_prepared, &second_statuses)
+            .expect("rebuild should refresh artifact");
         let refreshed = fs::read_to_string(&artifact_path).expect("artifact should exist");
         let parsed = parse_package_artifact(&refreshed).expect("artifact should parse");
         assert_eq!(parsed.format, AOT_INTERNAL_FORMAT);
@@ -1153,18 +1146,14 @@ mod tests {
 
         let graph = load_workspace_graph(&dir).expect("load graph");
         let order = plan_workspace(&graph).expect("plan");
-        let first_fingerprints = fake_member_fingerprints(&graph);
-        let first_statuses = plan_build(&graph, &order, &first_fingerprints, None).expect("plan");
-        execute_planned_build(&graph, &first_statuses).expect("execute build");
+        let (first_prepared, first_statuses) = plan_test_build(&graph, &order, None);
+        execute_planned_build(&graph, &first_prepared, &first_statuses).expect("execute build");
         let lock_path = write_lockfile(&graph, &order, &first_statuses).expect("lockfile");
         let existing = read_lockfile(&lock_path)
             .expect("read lock")
             .expect("lock exists");
 
-        let status = first_statuses
-            .iter()
-            .find(|status| status.member == "app")
-            .expect("app status should exist");
+        let status = status(&first_statuses, "app");
         let artifact_path = graph.root_dir.join(&status.artifact_rel_path);
         let stale = fs::read_to_string(&artifact_path).expect("artifact should exist");
         fs::write(
@@ -1173,10 +1162,8 @@ mod tests {
         )
         .expect("artifact should be rewritten");
 
-        let second_statuses =
-            plan_build(&graph, &order, &first_fingerprints, Some(&existing)).expect("plan");
-        assert_eq!(second_statuses[0].member, "app");
-        assert_eq!(second_statuses[0].disposition, BuildDisposition::Built);
+        let (_, second_statuses) = plan_test_build(&graph, &order, Some(&existing));
+        assert_dispositions(&second_statuses, &[("app", BuildDisposition::Built)]);
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1193,27 +1180,59 @@ mod tests {
 
         let graph = load_workspace_graph(&dir).expect("load graph");
         let order = plan_workspace(&graph).expect("plan");
-        let first_fingerprints = fake_member_fingerprints(&graph);
-        let first_statuses = plan_build(&graph, &order, &first_fingerprints, None).expect("plan");
-        execute_planned_build(&graph, &first_statuses).expect("execute build");
+        let (first_prepared, first_statuses) = plan_test_build(&graph, &order, None);
+        execute_planned_build(&graph, &first_prepared, &first_statuses).expect("execute build");
         let lock_path = write_lockfile(&graph, &order, &first_statuses).expect("lockfile");
         let existing = read_lockfile(&lock_path)
             .expect("read lock")
             .expect("lock exists");
 
-        let status = first_statuses
-            .iter()
-            .find(|status| status.member == "app")
-            .expect("app status should exist");
+        let status = status(&first_statuses, "app");
         let artifact_path = graph.root_dir.join(&status.artifact_rel_path);
         let stale = fs::read_to_string(&artifact_path).expect("artifact should exist");
         fs::write(&artifact_path, stale.replace("Int = 0", "Int = 99"))
             .expect("artifact should be rewritten");
 
-        let second_statuses =
-            plan_build(&graph, &order, &first_fingerprints, Some(&existing)).expect("plan");
-        assert_eq!(second_statuses[0].member, "app");
-        assert_eq!(second_statuses[0].disposition, BuildDisposition::Built);
+        let (_, second_statuses) = plan_test_build(&graph, &order, Some(&existing));
+        assert_dispositions(&second_statuses, &[("app", BuildDisposition::Built)]);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lockfile_toolchain_mismatch_triggers_rebuild() {
+        let dir = temp_dir("toolchain_mismatch");
+        write_file(&dir.join("book.toml"), "name = \"app\"\nkind = \"app\"\n");
+        write_file(
+            &dir.join("src").join("shelf.arc"),
+            "fn main() -> Int:\n    return 0\n",
+        );
+        write_file(&dir.join("src").join("types.arc"), "// types\n");
+
+        let graph = load_workspace_graph(&dir).expect("load graph");
+        let order = plan_workspace(&graph).expect("plan");
+        let (first_prepared, first_statuses) = plan_test_build(&graph, &order, None);
+        execute_planned_build(&graph, &first_prepared, &first_statuses).expect("execute build");
+        let lock_path = write_lockfile(&graph, &order, &first_statuses).expect("lockfile");
+        let stale_lock = fs::read_to_string(&lock_path).expect("lockfile should exist");
+        fs::write(
+            &lock_path,
+            stale_lock.replace(
+                &format!(
+                    "toolchain = \"{}\"",
+                    crate::build_identity::current_build_toolchain()
+                        .expect("toolchain id should compute")
+                ),
+                "toolchain = \"arcana-cli definitely-different\"",
+            ),
+        )
+        .expect("lockfile should be rewritten");
+        let existing = read_lockfile(&lock_path)
+            .expect("read lock")
+            .expect("lock exists");
+
+        let (_, second_statuses) = plan_test_build(&graph, &order, Some(&existing));
+        assert_dispositions(&second_statuses, &[("app", BuildDisposition::Built)]);
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1242,14 +1261,10 @@ mod tests {
         );
         let graph = load_workspace_graph(&dir).expect("load graph");
         let order = plan_workspace(&graph).expect("plan");
-        let fingerprints = fake_member_fingerprints(&graph);
-        let statuses = plan_build(&graph, &order, &fingerprints, None).expect("plan");
-        execute_planned_build(&graph, &statuses).expect("execute");
+        let (prepared, statuses) = plan_test_build(&graph, &order, None);
+        execute_planned_build(&graph, &prepared, &statuses).expect("execute");
 
-        let core = statuses
-            .iter()
-            .find(|status| status.member == "core")
-            .expect("core status");
+        let core = status(&statuses, "core");
         let artifact = fs::read_to_string(graph.root_dir.join(&core.artifact_rel_path))
             .expect("artifact should exist");
         let parsed = parse_package_artifact(&artifact).expect("artifact should parse");
@@ -1340,14 +1355,10 @@ mod tests {
 
         let graph = load_workspace_graph(&dir).expect("load graph");
         let order = plan_workspace(&graph).expect("plan");
-        let fingerprints = fake_member_fingerprints(&graph);
-        let statuses = plan_build(&graph, &order, &fingerprints, None).expect("plan");
-        execute_planned_build(&graph, &statuses).expect("execute");
+        let (prepared, statuses) = plan_test_build(&graph, &order, None);
+        execute_planned_build(&graph, &prepared, &statuses).expect("execute");
 
-        let app = statuses
-            .iter()
-            .find(|status| status.member == "app")
-            .expect("app status");
+        let app = status(&statuses, "app");
         let artifact = fs::read_to_string(graph.root_dir.join(&app.artifact_rel_path))
             .expect("artifact should exist");
         let parsed = parse_package_artifact(&artifact).expect("artifact should parse");
@@ -1409,11 +1420,7 @@ mod tests {
         );
 
         let graph = load_workspace_graph(&dir).expect("load graph");
-        let order = plan_workspace(&graph).expect("plan");
-        let fingerprints = fake_member_fingerprints(&graph);
-        let statuses = plan_build(&graph, &order, &fingerprints, None).expect("plan");
-        let err = execute_planned_build(&graph, &statuses)
-            .expect_err("ambiguous concrete bare method should fail build");
+        let err = prepare_build(&graph).expect_err("ambiguous concrete bare method should fail");
         assert!(
             err.contains("bare-method qualifier `tap` on `app.types.Counter` is ambiguous"),
             "{err}"
@@ -1434,18 +1441,17 @@ mod tests {
 
         let graph = load_workspace_graph(&dir).expect("load graph");
         let order = plan_workspace(&graph).expect("plan");
-        let fingerprints = fake_member_fingerprints(&graph);
         let workspace = load_workspace_hir_from_graph(&dir, &graph).expect("workspace");
         let resolved_workspace = arcana_hir::resolve_workspace(&workspace).expect("resolve");
         let prepared =
-            prepare_build_from_workspace(workspace, resolved_workspace).expect("prepare build");
+            prepare_build_from_workspace(&graph, workspace, resolved_workspace).expect("prepare");
 
         write_file(
             &dir.join("src/shelf.arc"),
             "fn main() -> Int:\n    return 7\n",
         );
 
-        let statuses = plan_build(&graph, &order, &fingerprints, None).expect("plan");
+        let statuses = plan_build(&graph, &order, &prepared, None).expect("plan");
         execute_build(&graph, &prepared, &statuses).expect("execute");
 
         let artifact_path = graph.root_dir.join(&statuses[0].artifact_rel_path);
@@ -1455,6 +1461,34 @@ mod tests {
             "expected prepared build to write the checked snapshot, got: {artifact}"
         );
         assert!(!artifact.contains("Int = 7"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn execute_build_rejects_statuses_from_different_snapshot() {
+        let dir = temp_dir("prepared_snapshot_mismatch");
+        write_file(&dir.join("book.toml"), "name = \"app\"\nkind = \"app\"\n");
+        write_file(
+            &dir.join("src/shelf.arc"),
+            "fn main() -> Int:\n    return 0\n",
+        );
+        write_file(&dir.join("src/types.arc"), "// types\n");
+
+        let graph = load_workspace_graph(&dir).expect("load graph");
+        let order = plan_workspace(&graph).expect("plan");
+        let first_prepared = prepare_test_build(&graph);
+        write_file(
+            &dir.join("src/shelf.arc"),
+            "fn main() -> Int:\n    return 7\n",
+        );
+        let (_, statuses) = plan_test_build(&graph, &order, None);
+        let err = execute_build(&graph, &first_prepared, &statuses)
+            .expect_err("mismatched snapshot should fail");
+        assert!(
+            err.contains("planned from snapshot"),
+            "expected snapshot mismatch error, got: {err}"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1475,20 +1509,23 @@ mod tests {
         write_grimoire(&dir.join("core"), GrimoireKind::Lib, "core", &[]);
         let graph = load_workspace_graph(&dir).expect("load graph");
         let order = plan_workspace(&graph).expect("plan");
-        let first_fingerprints = fake_member_fingerprints(&graph);
-        let first_statuses = plan_build(&graph, &order, &first_fingerprints, None).expect("plan");
-        execute_planned_build(&graph, &first_statuses).expect("execute");
+        let (first_prepared, first_statuses) = plan_test_build(&graph, &order, None);
+        execute_planned_build(&graph, &first_prepared, &first_statuses).expect("execute");
         let lock_path = write_lockfile(&graph, &order, &first_statuses).expect("lock");
         let existing = read_lockfile(&lock_path).expect("read").expect("lock");
 
-        let second_fingerprints =
-            mutate_member_fingerprint(&first_fingerprints, "app", Some("leaf-edit"), None);
-        let second_statuses =
-            plan_build(&graph, &order, &second_fingerprints, Some(&existing)).expect("plan");
-        assert_eq!(second_statuses[0].member, "core");
-        assert_eq!(second_statuses[0].disposition, BuildDisposition::CacheHit);
-        assert_eq!(second_statuses[1].member, "app");
-        assert_eq!(second_statuses[1].disposition, BuildDisposition::Built);
+        write_file(
+            &dir.join("app/src/shelf.arc"),
+            "fn main() -> Int:\n    return 1\n",
+        );
+        let (_, second_statuses) = plan_test_build(&graph, &order, Some(&existing));
+        assert_dispositions(
+            &second_statuses,
+            &[
+                ("core", BuildDisposition::CacheHit),
+                ("app", BuildDisposition::Built),
+            ],
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1522,9 +1559,8 @@ mod tests {
         );
         let graph = load_workspace_graph(&dir).expect("load graph");
         let order = plan_workspace(&graph).expect("plan");
-        let first_fingerprints = fake_member_fingerprints(&graph);
-        let first_statuses = plan_build(&graph, &order, &first_fingerprints, None).expect("plan");
-        execute_planned_build(&graph, &first_statuses).expect("execute");
+        let (first_prepared, first_statuses) = plan_test_build(&graph, &order, None);
+        execute_planned_build(&graph, &first_prepared, &first_statuses).expect("execute");
         let lock_path = write_lockfile(&graph, &order, &first_statuses).expect("lock");
         let existing = read_lockfile(&lock_path).expect("read").expect("lock");
 
@@ -1532,23 +1568,67 @@ mod tests {
             &dir.join("core/src/helper.arc"),
             "fn helper() -> Int:\n    return 7\n",
         );
-        let second_fingerprints =
-            mutate_member_fingerprint(&first_fingerprints, "core", Some("private-edit"), None);
-        let second_statuses =
-            plan_build(&graph, &order, &second_fingerprints, Some(&existing)).expect("plan");
-        assert_eq!(second_statuses[0].member, "core");
-        assert_eq!(second_statuses[0].disposition, BuildDisposition::Built);
-        assert_eq!(second_statuses[1].member, "app");
-        assert_eq!(second_statuses[1].disposition, BuildDisposition::Built);
-        assert_eq!(second_statuses[2].member, "tool");
-        assert_eq!(second_statuses[2].disposition, BuildDisposition::Built);
+        let (second_prepared, second_statuses) = plan_test_build(&graph, &order, Some(&existing));
+        assert_dispositions(
+            &second_statuses,
+            &[
+                ("core", BuildDisposition::Built),
+                ("app", BuildDisposition::Built),
+                ("tool", BuildDisposition::Built),
+            ],
+        );
 
-        execute_planned_build(&graph, &second_statuses).expect("rebuild dependents");
+        execute_planned_build(&graph, &second_prepared, &second_statuses)
+            .expect("rebuild dependents");
         let app_artifact_path = graph.root_dir.join(&second_statuses[1].artifact_rel_path);
         let app_artifact = fs::read_to_string(&app_artifact_path).expect("app artifact");
         assert!(
             app_artifact.contains("Int = 7"),
             "expected rebuilt app artifact to embed updated linked dependency: {app_artifact}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn editing_implicit_std_rebuilds_dependents() {
+        let dir = temp_dir("implicit_std");
+        write_file(&dir.join("book.toml"), "name = \"app\"\nkind = \"app\"\n");
+        write_file(
+            &dir.join("src/shelf.arc"),
+            "import std.answer\nfn main() -> Int:\n    return std.answer.value :: :: call\n",
+        );
+        write_file(&dir.join("src/types.arc"), "// types\n");
+        write_grimoire(&dir.join("std"), GrimoireKind::Lib, "std", &[]);
+        write_file(&dir.join("std/src/book.arc"), "import answer\n");
+        write_file(
+            &dir.join("std/src/answer.arc"),
+            "export fn value() -> Int:\n    return 0\n",
+        );
+
+        let graph = load_workspace_graph(&dir).expect("load graph");
+        let order = plan_workspace(&graph).expect("plan");
+        let (first_prepared, first_statuses) = plan_test_build(&graph, &order, None);
+        execute_planned_build(&graph, &first_prepared, &first_statuses).expect("execute");
+        let lock_path = write_lockfile(&graph, &order, &first_statuses).expect("lock");
+        let existing = read_lockfile(&lock_path).expect("read").expect("lock");
+
+        write_file(
+            &dir.join("std/src/answer.arc"),
+            "export fn value() -> Int:\n    return 7\n",
+        );
+        let (second_prepared, second_statuses) = plan_test_build(&graph, &order, Some(&existing));
+        assert_dispositions(&second_statuses, &[("app", BuildDisposition::Built)]);
+
+        execute_planned_build(&graph, &second_prepared, &second_statuses)
+            .expect("rebuild dependents");
+        let artifact_path = graph
+            .root_dir
+            .join(status(&second_statuses, "app").artifact_rel_path());
+        let artifact = fs::read_to_string(&artifact_path).expect("app artifact");
+        assert!(
+            artifact.contains("Int = 7"),
+            "expected rebuilt app artifact to embed updated std routine: {artifact}"
         );
 
         let _ = fs::remove_dir_all(&dir);
@@ -1580,26 +1660,23 @@ mod tests {
         );
         let graph = load_workspace_graph(&dir).expect("load graph");
         let order = plan_workspace(&graph).expect("plan");
-        let first_fingerprints = fake_member_fingerprints(&graph);
-        let first_statuses = plan_build(&graph, &order, &first_fingerprints, None).expect("plan");
-        execute_planned_build(&graph, &first_statuses).expect("execute");
+        let (first_prepared, first_statuses) = plan_test_build(&graph, &order, None);
+        execute_planned_build(&graph, &first_prepared, &first_statuses).expect("execute");
         let lock_path = write_lockfile(&graph, &order, &first_statuses).expect("lock");
         let existing = read_lockfile(&lock_path).expect("read").expect("lock");
 
-        let second_fingerprints = mutate_member_fingerprint(
-            &first_fingerprints,
-            "core",
-            Some("api-shape"),
-            Some("api-shape"),
+        write_file(
+            &dir.join("core/src/book.arc"),
+            "export fn shared_value(read value: Int) -> Int:\n    return value\n",
         );
-        let second_statuses =
-            plan_build(&graph, &order, &second_fingerprints, Some(&existing)).expect("plan");
-        assert_eq!(second_statuses[0].member, "core");
-        assert_eq!(second_statuses[0].disposition, BuildDisposition::Built);
-        assert!(
-            second_statuses[1..]
-                .iter()
-                .all(|status| status.disposition == BuildDisposition::Built)
+        let (_, second_statuses) = plan_test_build(&graph, &order, Some(&existing));
+        assert_dispositions(
+            &second_statuses,
+            &[
+                ("core", BuildDisposition::Built),
+                ("app", BuildDisposition::Built),
+                ("tool", BuildDisposition::Built),
+            ],
         );
         let _ = fs::remove_dir_all(&dir);
     }

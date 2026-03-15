@@ -27,7 +27,6 @@ dependencies = [
  "arcana-ir",
  "arcana-package",
  "arcana-syntax",
- "sha2",
  "toml",
 ]
 
@@ -53,6 +52,7 @@ dependencies = [
  "arcana-aot",
  "arcana-hir",
  "arcana-ir",
+ "arcana-syntax",
  "pathdiff",
  "sha2",
  "toml",

@@ -1,9 +1,7 @@
 use std::env;
 use std::path::PathBuf;
 
-use arcana_frontend::{
-    check_path, check_workspace_graph, compute_member_fingerprints_for_checked_workspace,
-};
+use arcana_frontend::{check_path, check_workspace_graph};
 use arcana_package::{
     BuildDisposition, execute_build, load_workspace_graph, plan_build, plan_workspace,
     prepare_build_from_workspace, read_lockfile, render_build_summary, write_lockfile,
@@ -81,24 +79,23 @@ fn run_build(workspace_dir: PathBuf, plan_only: bool) -> Result<i32, String> {
     }
 
     let checked = check_workspace_graph(&graph)?;
-    let fingerprints = compute_member_fingerprints_for_checked_workspace(&graph, &checked)?;
     let (workspace, resolved_workspace) = checked.into_workspace_parts();
-    let prepared = prepare_build_from_workspace(workspace, resolved_workspace)?;
+    let prepared = prepare_build_from_workspace(&graph, workspace, resolved_workspace)?;
     let lock_path = graph.root_dir.join("Arcana.lock");
     let existing_lock = read_lockfile(&lock_path)?;
-    let statuses = plan_build(&graph, &order, &fingerprints, existing_lock.as_ref())?;
+    let statuses = plan_build(&graph, &order, &prepared, existing_lock.as_ref())?;
     execute_build(&graph, &prepared, &statuses)?;
     write_lockfile(&graph, &order, &statuses)?;
 
     for status in &statuses {
         println!(
             "{} {} {}",
-            match status.disposition {
+            match status.disposition() {
                 BuildDisposition::Built => "built",
                 BuildDisposition::CacheHit => "cache_hit",
             },
-            status.member,
-            status.fingerprint
+            status.member(),
+            status.fingerprint()
         );
     }
     println!("{}", render_build_summary(&statuses, &graph));

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -17,7 +17,7 @@ use arcana_hir::{
 };
 use arcana_ir::{is_runtime_main_entry_symbol, validate_runtime_main_entry_symbol};
 use arcana_package::{
-    MemberFingerprints, WorkspaceGraph, load_workspace_hir as load_package_workspace_hir,
+    WorkspaceFingerprints, WorkspaceGraph, load_workspace_hir as load_package_workspace_hir,
     load_workspace_hir_from_graph as load_package_workspace_hir_from_graph,
 };
 use arcana_syntax::{
@@ -2156,13 +2156,13 @@ pub fn check_workspace_graph(graph: &WorkspaceGraph) -> Result<CheckedWorkspace,
 pub fn compute_member_fingerprints_for_checked_workspace(
     graph: &WorkspaceGraph,
     checked: &CheckedWorkspace,
-) -> Result<HashMap<String, MemberFingerprints>, String> {
+) -> Result<WorkspaceFingerprints, String> {
     api_fingerprint::compute_member_fingerprints_for_checked_workspace(graph, checked)
 }
 
 pub fn compute_member_fingerprints(
     graph: &WorkspaceGraph,
-) -> Result<HashMap<String, MemberFingerprints>, String> {
+) -> Result<WorkspaceFingerprints, String> {
     let workspace = load_package_workspace_hir_from_graph(&graph.root_dir, graph)?;
     let resolved_workspace = resolve_workspace(&workspace)
         .map_err(|errors| render_resolution_errors(&workspace, errors))?;
@@ -5120,8 +5120,8 @@ mod tests {
         compute_member_fingerprints_for_checked_workspace, load_workspace_hir, lower_to_hir,
     };
     use arcana_package::{
-        BuildDisposition, execute_build, load_workspace_graph, plan_build, plan_workspace,
-        prepare_build, read_lockfile, write_lockfile,
+        BuildDisposition, execute_build, load_workspace_graph, plan_workspace, prepare_build,
+        read_lockfile, write_lockfile,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -5130,8 +5130,19 @@ mod tests {
 
     static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(1);
 
+    fn plan_build(
+        graph: &arcana_package::WorkspaceGraph,
+        order: &[String],
+        _fingerprints: &arcana_package::WorkspaceFingerprints,
+        existing_lock: Option<&arcana_package::Lockfile>,
+    ) -> Result<Vec<arcana_package::BuildStatus>, String> {
+        let prepared = prepare_build(graph)?;
+        arcana_package::plan_build(graph, order, &prepared, existing_lock)
+    }
+
     fn execute_planned_build(
         graph: &arcana_package::WorkspaceGraph,
+        _fingerprints: &arcana_package::WorkspaceFingerprints,
         statuses: &[arcana_package::BuildStatus],
     ) {
         let prepared = prepare_build(graph).expect("prepare build");
@@ -5466,7 +5477,7 @@ mod tests {
         let order = plan_workspace(&graph).expect("plan");
         let first_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
         let first_statuses = plan_build(&graph, &order, &first_fingerprints, None).expect("plan");
-        execute_planned_build(&graph, &first_statuses);
+        execute_planned_build(&graph, &first_fingerprints, &first_statuses);
         let lock_path = write_lockfile(&graph, &order, &first_statuses).expect("lock");
         let existing = read_lockfile(&lock_path).expect("read").expect("lock");
 
@@ -5479,10 +5490,10 @@ mod tests {
         let second_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
         let second_statuses =
             plan_build(&graph, &order, &second_fingerprints, Some(&existing)).expect("plan");
-        assert_eq!(second_statuses[0].member, "core");
-        assert_eq!(second_statuses[0].disposition, BuildDisposition::Built);
-        assert_eq!(second_statuses[1].member, "app");
-        assert_eq!(second_statuses[1].disposition, BuildDisposition::Built);
+        assert_eq!(second_statuses[0].member(), "core");
+        assert_eq!(second_statuses[0].disposition(), BuildDisposition::Built);
+        assert_eq!(second_statuses[1].member(), "app");
+        assert_eq!(second_statuses[1].disposition(), BuildDisposition::Built);
 
         fs::remove_dir_all(root).expect("cleanup should succeed");
     }
@@ -5537,7 +5548,7 @@ mod tests {
         let order = plan_workspace(&graph).expect("plan");
         let first_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
         let first_statuses = plan_build(&graph, &order, &first_fingerprints, None).expect("plan");
-        execute_planned_build(&graph, &first_statuses);
+        execute_planned_build(&graph, &first_fingerprints, &first_statuses);
         let lock_path = write_lockfile(&graph, &order, &first_statuses).expect("lock");
         let existing = read_lockfile(&lock_path).expect("read").expect("lock");
 
@@ -5570,7 +5581,7 @@ mod tests {
         assert!(
             second_statuses
                 .iter()
-                .all(|status| status.disposition == BuildDisposition::CacheHit)
+                .all(|status| status.disposition() == BuildDisposition::CacheHit)
         );
 
         fs::remove_dir_all(root).expect("cleanup should succeed");
@@ -5605,7 +5616,7 @@ mod tests {
         let order = plan_workspace(&graph).expect("plan");
         let first_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
         let first_statuses = plan_build(&graph, &order, &first_fingerprints, None).expect("plan");
-        execute_planned_build(&graph, &first_statuses);
+        execute_planned_build(&graph, &first_fingerprints, &first_statuses);
         let lock_path = write_lockfile(&graph, &order, &first_statuses).expect("lock");
         let existing = read_lockfile(&lock_path).expect("read").expect("lock");
 
@@ -5635,10 +5646,10 @@ mod tests {
 
         let second_statuses =
             plan_build(&graph, &order, &second_fingerprints, Some(&existing)).expect("plan");
-        assert_eq!(second_statuses[0].member, "core");
-        assert_eq!(second_statuses[0].disposition, BuildDisposition::Built);
-        assert_eq!(second_statuses[1].member, "app");
-        assert_eq!(second_statuses[1].disposition, BuildDisposition::Built);
+        assert_eq!(second_statuses[0].member(), "core");
+        assert_eq!(second_statuses[0].disposition(), BuildDisposition::Built);
+        assert_eq!(second_statuses[1].member(), "app");
+        assert_eq!(second_statuses[1].disposition(), BuildDisposition::Built);
 
         fs::remove_dir_all(root).expect("cleanup should succeed");
     }
@@ -5773,7 +5784,7 @@ mod tests {
         let order = plan_workspace(&graph).expect("plan");
         let first_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
         let first_statuses = plan_build(&graph, &order, &first_fingerprints, None).expect("plan");
-        execute_planned_build(&graph, &first_statuses);
+        execute_planned_build(&graph, &first_fingerprints, &first_statuses);
         let lock_path = write_lockfile(&graph, &order, &first_statuses).expect("lock");
         let existing = read_lockfile(&lock_path).expect("read").expect("lock");
 
@@ -5786,10 +5797,10 @@ mod tests {
         let second_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
         let second_statuses =
             plan_build(&graph, &order, &second_fingerprints, Some(&existing)).expect("plan");
-        assert_eq!(second_statuses[0].member, "core");
-        assert_eq!(second_statuses[0].disposition, BuildDisposition::Built);
-        assert_eq!(second_statuses[1].member, "app");
-        assert_eq!(second_statuses[1].disposition, BuildDisposition::Built);
+        assert_eq!(second_statuses[0].member(), "core");
+        assert_eq!(second_statuses[0].disposition(), BuildDisposition::Built);
+        assert_eq!(second_statuses[1].member(), "app");
+        assert_eq!(second_statuses[1].disposition(), BuildDisposition::Built);
 
         fs::remove_dir_all(root).expect("cleanup should succeed");
     }
@@ -5825,7 +5836,7 @@ mod tests {
         let order = plan_workspace(&graph).expect("plan");
         let first_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
         let first_statuses = plan_build(&graph, &order, &first_fingerprints, None).expect("plan");
-        execute_planned_build(&graph, &first_statuses);
+        execute_planned_build(&graph, &first_fingerprints, &first_statuses);
         let lock_path = write_lockfile(&graph, &order, &first_statuses).expect("lock");
         let existing = read_lockfile(&lock_path).expect("read").expect("lock");
 
@@ -5838,10 +5849,10 @@ mod tests {
         let second_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
         let second_statuses =
             plan_build(&graph, &order, &second_fingerprints, Some(&existing)).expect("plan");
-        assert_eq!(second_statuses[0].member, "core");
-        assert_eq!(second_statuses[0].disposition, BuildDisposition::Built);
-        assert_eq!(second_statuses[1].member, "app");
-        assert_eq!(second_statuses[1].disposition, BuildDisposition::Built);
+        assert_eq!(second_statuses[0].member(), "core");
+        assert_eq!(second_statuses[0].disposition(), BuildDisposition::Built);
+        assert_eq!(second_statuses[1].member(), "app");
+        assert_eq!(second_statuses[1].disposition(), BuildDisposition::Built);
 
         fs::remove_dir_all(root).expect("cleanup should succeed");
     }

@@ -8,5 +8,4 @@ arcana-hir.workspace = true
 arcana-ir.workspace = true
 arcana-package.workspace = true
 arcana-syntax.workspace = true
-sha2.workspace = true
 toml.workspace = true

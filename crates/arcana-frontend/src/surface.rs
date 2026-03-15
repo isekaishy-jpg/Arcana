@@ -1,7 +1,4 @@
-use arcana_hir::{
-    HirResolvedModule, HirResolvedSymbolRef, HirSymbolKind, HirWorkspacePackage,
-    HirWorkspaceSummary,
-};
+use arcana_hir::{HirResolvedModule, HirResolvedSymbolRef, HirSymbolKind, HirWorkspaceSummary};
 use arcana_syntax::is_builtin_type_name;
 
 use super::TypeScope;
@@ -132,31 +129,6 @@ pub(crate) fn canonicalize_surface_path(
 
 pub(crate) fn collect_surface_refs(text: &str) -> SurfaceRefs {
     parse_surface_text(text).refs
-}
-
-pub(crate) fn surface_text_is_public(
-    package: &HirWorkspacePackage,
-    resolved_module: &HirResolvedModule,
-    workspace: &HirWorkspaceSummary,
-    scope: &TypeScope,
-    text: &str,
-) -> bool {
-    let refs = collect_surface_refs(text);
-    if refs.paths.is_empty() {
-        return true;
-    }
-    for path in refs.paths {
-        if path.len() == 1 && (scope.allows_type_name(&path[0]) || is_builtin_type_name(&path[0])) {
-            continue;
-        }
-        let Some(symbol_ref) = lookup_symbol_path(workspace, resolved_module, &path) else {
-            return false;
-        };
-        if symbol_ref.package_name == package.summary.package_name && !symbol_ref.symbol.exported {
-            return false;
-        }
-    }
-    true
 }
 
 fn parse_surface_text(text: &str) -> ParsedSurface {

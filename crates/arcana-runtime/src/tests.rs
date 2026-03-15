@@ -11,9 +11,7 @@ use arcana_aot::{
     AotRoutineArtifact, render_package_artifact,
 };
 use arcana_frontend::{check_workspace_graph, compute_member_fingerprints_for_checked_workspace};
-use arcana_package::{
-    execute_build, load_workspace_graph, plan_build, plan_workspace, prepare_build,
-};
+use arcana_package::{execute_build, load_workspace_graph, plan_workspace, prepare_build};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -48,10 +46,21 @@ fn repo_root() -> PathBuf {
 
 fn execute_workspace_build(
     graph: &arcana_package::WorkspaceGraph,
+    _fingerprints: &arcana_package::WorkspaceFingerprints,
     statuses: &[arcana_package::BuildStatus],
 ) {
     let prepared = prepare_build(graph).expect("prepare build");
     execute_build(graph, &prepared, statuses).expect("build should execute");
+}
+
+fn plan_build(
+    graph: &arcana_package::WorkspaceGraph,
+    order: &[String],
+    _fingerprints: &arcana_package::WorkspaceFingerprints,
+    existing_lock: Option<&arcana_package::Lockfile>,
+) -> Result<Vec<arcana_package::BuildStatus>, String> {
+    let prepared = prepare_build(graph)?;
+    arcana_package::plan_build(graph, order, &prepared, existing_lock)
 }
 
 fn write_file(path: &Path, text: &str) {
@@ -449,14 +458,14 @@ fn load_package_plan_accepts_behavior_attr_values_with_colons() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_workspace_build(&graph, &statuses);
+    execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
             .iter()
-            .find(|status| status.member == "runtime_behavior_attr")
+            .find(|status| status.member() == "runtime_behavior_attr")
             .expect("app artifact status should exist")
-            .artifact_rel_path,
+            .artifact_rel_path(),
     );
     let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
     let tick = plan
@@ -750,14 +759,14 @@ fn execute_main_runs_page_rollups_on_loop_exit_and_try_propagation() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_workspace_build(&graph, &statuses);
+    execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
             .iter()
-            .find(|status| status.member == "runtime_page_rollups")
+            .find(|status| status.member() == "runtime_page_rollups")
             .expect("app artifact status should exist")
-            .artifact_rel_path,
+            .artifact_rel_path(),
     );
     let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
     let mut host = BufferedHost::default();
@@ -941,14 +950,14 @@ fn execute_main_runs_counter_style_workspace_artifact() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_workspace_build(&graph, &statuses);
+    execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
             .iter()
-            .find(|status| status.member == "runtime_counter")
+            .find(|status| status.member() == "runtime_counter")
             .expect("app artifact status should exist")
-            .artifact_rel_path,
+            .artifact_rel_path(),
     );
     let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
     let mut host = BufferedHost::default();
@@ -996,14 +1005,14 @@ fn execute_main_runs_routine_calls_with_std_args() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_workspace_build(&graph, &statuses);
+    execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
             .iter()
-            .find(|status| status.member == "runtime_args")
+            .find(|status| status.member() == "runtime_args")
             .expect("app artifact status should exist")
-            .artifact_rel_path,
+            .artifact_rel_path(),
     );
     let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
     let mut host = BufferedHost {
@@ -1044,14 +1053,14 @@ fn execute_main_runs_linked_std_text_routine() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_workspace_build(&graph, &statuses);
+    execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
             .iter()
-            .find(|status| status.member == "runtime_std_text")
+            .find(|status| status.member() == "runtime_std_text")
             .expect("app artifact status should exist")
-            .artifact_rel_path,
+            .artifact_rel_path(),
     );
     let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
     let mut host = BufferedHost::default();
@@ -1098,14 +1107,14 @@ fn execute_main_runs_linked_std_array_routines() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_workspace_build(&graph, &statuses);
+    execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
             .iter()
-            .find(|status| status.member == "runtime_std_array")
+            .find(|status| status.member() == "runtime_std_array")
             .expect("app artifact status should exist")
-            .artifact_rel_path,
+            .artifact_rel_path(),
     );
     let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
     let mut host = BufferedHost::default();
@@ -1152,14 +1161,14 @@ fn execute_main_runs_linked_std_iter_and_set_routines() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_workspace_build(&graph, &statuses);
+    execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
             .iter()
-            .find(|status| status.member == "runtime_std_iter_set")
+            .find(|status| status.member() == "runtime_std_iter_set")
             .expect("app artifact status should exist")
-            .artifact_rel_path,
+            .artifact_rel_path(),
     );
     let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
     let mut host = BufferedHost::default();
@@ -1219,14 +1228,14 @@ fn execute_main_runs_linked_std_config_routines() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_workspace_build(&graph, &statuses);
+    execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
             .iter()
-            .find(|status| status.member == "runtime_std_config")
+            .find(|status| status.member() == "runtime_std_config")
             .expect("app artifact status should exist")
-            .artifact_rel_path,
+            .artifact_rel_path(),
     );
     let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
     let mut host = BufferedHost::default();
@@ -1298,14 +1307,14 @@ fn execute_main_runs_linked_std_manifest_routines() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_workspace_build(&graph, &statuses);
+    execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
             .iter()
-            .find(|status| status.member == "runtime_std_manifest")
+            .find(|status| status.member() == "runtime_std_manifest")
             .expect("app artifact status should exist")
-            .artifact_rel_path,
+            .artifact_rel_path(),
     );
     let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
     let mut host = BufferedHost::default();
@@ -1374,14 +1383,14 @@ fn execute_main_runs_linked_std_concurrent_routines() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_workspace_build(&graph, &statuses);
+    execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
             .iter()
-            .find(|status| status.member == "runtime_std_concurrent")
+            .find(|status| status.member() == "runtime_std_concurrent")
             .expect("app artifact status should exist")
-            .artifact_rel_path,
+            .artifact_rel_path(),
     );
     let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
     let mut host = BufferedHost::default();
@@ -1463,14 +1472,14 @@ fn execute_main_runs_linked_std_memory_routines() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_workspace_build(&graph, &statuses);
+    execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
             .iter()
-            .find(|status| status.member == "runtime_std_memory")
+            .find(|status| status.member() == "runtime_std_memory")
             .expect("app artifact status should exist")
-            .artifact_rel_path,
+            .artifact_rel_path(),
     );
     let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
     let mut host = BufferedHost::default();
@@ -1536,14 +1545,14 @@ fn execute_main_runs_linked_std_memory_borrow_routines() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_workspace_build(&graph, &statuses);
+    execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
             .iter()
-            .find(|status| status.member == "runtime_std_memory_borrow")
+            .find(|status| status.member() == "runtime_std_memory_borrow")
             .expect("app artifact status should exist")
-            .artifact_rel_path,
+            .artifact_rel_path(),
     );
     let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
     let mut host = BufferedHost::default();
@@ -1592,14 +1601,14 @@ fn execute_main_runs_memory_phrase_attachment_routines() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_workspace_build(&graph, &statuses);
+    execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
             .iter()
-            .find(|status| status.member == "runtime_memory_phrase_attachments")
+            .find(|status| status.member() == "runtime_memory_phrase_attachments")
             .expect("app artifact status should exist")
-            .artifact_rel_path,
+            .artifact_rel_path(),
     );
     let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
     let mut host = BufferedHost::default();
@@ -1644,14 +1653,14 @@ fn execute_main_runs_local_borrow_and_deref_routines() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_workspace_build(&graph, &statuses);
+    execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
             .iter()
-            .find(|status| status.member == "runtime_local_borrow")
+            .find(|status| status.member() == "runtime_local_borrow")
             .expect("app artifact status should exist")
-            .artifact_rel_path,
+            .artifact_rel_path(),
     );
     let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
     let mut host = BufferedHost::default();
@@ -1701,14 +1710,14 @@ fn execute_main_runs_linked_std_concurrent_task_thread_routines() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_workspace_build(&graph, &statuses);
+    execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
             .iter()
-            .find(|status| status.member == "runtime_std_concurrent_async")
+            .find(|status| status.member() == "runtime_std_concurrent_async")
             .expect("app artifact status should exist")
-            .artifact_rel_path,
+            .artifact_rel_path(),
     );
     let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
     let mut host = BufferedHost::default();
@@ -1757,14 +1766,14 @@ fn execute_main_runs_async_main_entrypoint() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_workspace_build(&graph, &statuses);
+    execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
             .iter()
-            .find(|status| status.member == "runtime_async_main")
+            .find(|status| status.member() == "runtime_async_main")
             .expect("app artifact status should exist")
-            .artifact_rel_path,
+            .artifact_rel_path(),
     );
     let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
     let mut host = BufferedHost::default();
@@ -1806,14 +1815,14 @@ fn execute_main_defers_non_call_spawned_values_until_join() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_workspace_build(&graph, &statuses);
+    execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
             .iter()
-            .find(|status| status.member == "runtime_spawned_values_pending")
+            .find(|status| status.member() == "runtime_spawned_values_pending")
             .expect("app artifact status should exist")
-            .artifact_rel_path,
+            .artifact_rel_path(),
     );
     let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
     let mut host = BufferedHost::default();
@@ -1864,14 +1873,14 @@ fn execute_main_split_threads_report_distinct_thread_ids() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_workspace_build(&graph, &statuses);
+    execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
             .iter()
-            .find(|status| status.member == "runtime_split_thread_id")
+            .find(|status| status.member() == "runtime_split_thread_id")
             .expect("app artifact status should exist")
-            .artifact_rel_path,
+            .artifact_rel_path(),
     );
     let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
     let mut host = BufferedHost::default();
@@ -1921,14 +1930,14 @@ fn execute_main_runs_chain_expressions_with_parallel_fanout() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_workspace_build(&graph, &statuses);
+    execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
             .iter()
-            .find(|status| status.member == "runtime_chain")
+            .find(|status| status.member() == "runtime_chain")
             .expect("app artifact status should exist")
-            .artifact_rel_path,
+            .artifact_rel_path(),
     );
     let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
     let mut host = BufferedHost::default();
@@ -1988,14 +1997,14 @@ fn execute_main_runs_linked_std_host_text_bytes_io_env_routines() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_workspace_build(&graph, &statuses);
+    execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
             .iter()
-            .find(|status| status.member == "runtime_std_host_misc")
+            .find(|status| status.member() == "runtime_std_host_misc")
             .expect("app artifact status should exist")
-            .artifact_rel_path,
+            .artifact_rel_path(),
     );
     let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
     let mut host = BufferedHost {
@@ -2148,7 +2157,7 @@ fn execute_main_runs_linked_std_wrapper_closure_routines() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_workspace_build(&graph, &statuses);
+    execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let fixture_root = dir.join("fixture");
     let assets_dir = fixture_root.join("assets");
@@ -2159,9 +2168,9 @@ fn execute_main_runs_linked_std_wrapper_closure_routines() {
     let artifact_path = graph.root_dir.join(
         &statuses
             .iter()
-            .find(|status| status.member == "runtime_std_wrapper_closure")
+            .find(|status| status.member() == "runtime_std_wrapper_closure")
             .expect("app artifact status should exist")
-            .artifact_rel_path,
+            .artifact_rel_path(),
     );
     let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
     let cwd = fixture_root.to_string_lossy().replace('\\', "/");
@@ -2301,14 +2310,14 @@ fn execute_main_runs_linked_std_fs_bytes_routines() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_workspace_build(&graph, &statuses);
+    execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
             .iter()
-            .find(|status| status.member == "runtime_std_fs_bytes")
+            .find(|status| status.member() == "runtime_std_fs_bytes")
             .expect("app artifact status should exist")
-            .artifact_rel_path,
+            .artifact_rel_path(),
     );
     let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
     let cwd = dir.join("fixture").to_string_lossy().replace('\\', "/");
@@ -2435,14 +2444,14 @@ fn execute_main_runs_linked_std_fs_stream_routines() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_workspace_build(&graph, &statuses);
+    execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
             .iter()
-            .find(|status| status.member == "runtime_std_fs_streams")
+            .find(|status| status.member() == "runtime_std_fs_streams")
             .expect("app artifact status should exist")
-            .artifact_rel_path,
+            .artifact_rel_path(),
     );
     let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
     let fixture_root = dir.join("fixture");
@@ -2496,14 +2505,14 @@ fn execute_main_runs_local_record_constructor_and_impl_method() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_workspace_build(&graph, &statuses);
+    execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
             .iter()
-            .find(|status| status.member == "runtime_record_method")
+            .find(|status| status.member() == "runtime_record_method")
             .expect("app artifact status should exist")
-            .artifact_rel_path,
+            .artifact_rel_path(),
     );
     let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
     let mut host = BufferedHost::default();
@@ -2580,14 +2589,14 @@ fn execute_main_runs_linked_std_process_routines() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_workspace_build(&graph, &statuses);
+    execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
             .iter()
-            .find(|status| status.member == "runtime_std_process")
+            .find(|status| status.member() == "runtime_std_process")
             .expect("app artifact status should exist")
-            .artifact_rel_path,
+            .artifact_rel_path(),
     );
     let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
     let mut host = BufferedHost {
@@ -2637,14 +2646,14 @@ fn execute_main_runs_linked_std_option_routines() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_workspace_build(&graph, &statuses);
+    execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
             .iter()
-            .find(|status| status.member == "runtime_std_option")
+            .find(|status| status.member() == "runtime_std_option")
             .expect("app artifact status should exist")
-            .artifact_rel_path,
+            .artifact_rel_path(),
     );
     let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
     let mut host = BufferedHost::default();
@@ -2693,14 +2702,14 @@ fn execute_main_runs_named_qualifier_path_routines() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_workspace_build(&graph, &statuses);
+    execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
             .iter()
-            .find(|status| status.member == "runtime_named_qualifier_path")
+            .find(|status| status.member() == "runtime_named_qualifier_path")
             .expect("app artifact status should exist")
-            .artifact_rel_path,
+            .artifact_rel_path(),
     );
     let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
     let mut host = BufferedHost::default();
@@ -2747,14 +2756,14 @@ fn execute_main_runs_linked_std_result_routines() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_workspace_build(&graph, &statuses);
+    execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
             .iter()
-            .find(|status| status.member == "runtime_std_result")
+            .find(|status| status.member() == "runtime_std_result")
             .expect("app artifact status should exist")
-            .artifact_rel_path,
+            .artifact_rel_path(),
     );
     let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
     let mut host = BufferedHost::default();
@@ -2817,14 +2826,14 @@ fn execute_main_runs_try_qualifier_routines() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_workspace_build(&graph, &statuses);
+    execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
             .iter()
-            .find(|status| status.member == "runtime_try_qualifier")
+            .find(|status| status.member() == "runtime_try_qualifier")
             .expect("app artifact status should exist")
-            .artifact_rel_path,
+            .artifact_rel_path(),
     );
     let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
     let mut host = BufferedHost::default();
@@ -2865,14 +2874,14 @@ fn execute_main_matches_zero_payload_variant_names() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_workspace_build(&graph, &statuses);
+    execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
             .iter()
-            .find(|status| status.member == "runtime_match_zero_payload_variant")
+            .find(|status| status.member() == "runtime_match_zero_payload_variant")
             .expect("app artifact status should exist")
-            .artifact_rel_path,
+            .artifact_rel_path(),
     );
     let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
     let mut host = BufferedHost::default();
@@ -2907,14 +2916,14 @@ fn execute_main_preserves_uppercase_match_bindings() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_workspace_build(&graph, &statuses);
+    execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
             .iter()
-            .find(|status| status.member == "runtime_match_uppercase_binding")
+            .find(|status| status.member() == "runtime_match_uppercase_binding")
             .expect("app artifact status should exist")
-            .artifact_rel_path,
+            .artifact_rel_path(),
     );
     let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
     let mut host = BufferedHost::default();
@@ -3050,14 +3059,14 @@ fn execute_main_runs_linked_std_collection_method_routines() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_workspace_build(&graph, &statuses);
+    execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
             .iter()
-            .find(|status| status.member == "runtime_std_collection_methods")
+            .find(|status| status.member() == "runtime_std_collection_methods")
             .expect("app artifact status should exist")
-            .artifact_rel_path,
+            .artifact_rel_path(),
     );
     let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
     let mut host = BufferedHost::default();
@@ -3143,14 +3152,14 @@ fn execute_main_runs_range_index_slice_and_literal_match_routines() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_workspace_build(&graph, &statuses);
+    execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
             .iter()
-            .find(|status| status.member == "runtime_range_index_slice_match")
+            .find(|status| status.member() == "runtime_range_index_slice_match")
             .expect("app artifact status should exist")
-            .artifact_rel_path,
+            .artifact_rel_path(),
     );
     let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
     let mut host = BufferedHost::default();
@@ -3215,14 +3224,14 @@ fn execute_main_runs_indexed_assignment_routines() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_workspace_build(&graph, &statuses);
+    execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
             .iter()
-            .find(|status| status.member == "runtime_indexed_assignment")
+            .find(|status| status.member() == "runtime_indexed_assignment")
             .expect("app artifact status should exist")
-            .artifact_rel_path,
+            .artifact_rel_path(),
     );
     let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
     let mut host = BufferedHost::default();
@@ -3495,14 +3504,14 @@ fn execute_main_allows_copy_take_and_reassign_after_take_move() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_workspace_build(&graph, &statuses);
+    execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
             .iter()
-            .find(|status| status.member == "runtime_take_copy_and_reassign")
+            .find(|status| status.member() == "runtime_take_copy_and_reassign")
             .expect("app artifact status should exist")
-            .artifact_rel_path,
+            .artifact_rel_path(),
     );
     let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
     let mut host = BufferedHost::default();
@@ -3549,14 +3558,14 @@ fn execute_main_runs_apply_and_await_apply_qualifiers() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_workspace_build(&graph, &statuses);
+    execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
             .iter()
-            .find(|status| status.member == "runtime_apply_and_await_apply")
+            .find(|status| status.member() == "runtime_apply_and_await_apply")
             .expect("app artifact status should exist")
-            .artifact_rel_path,
+            .artifact_rel_path(),
     );
     let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
     let mut host = BufferedHost::default();
@@ -3636,14 +3645,14 @@ fn execute_main_runs_linked_std_ecs_behavior_routines() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_workspace_build(&graph, &statuses);
+    execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
             .iter()
-            .find(|status| status.member == "runtime_std_ecs")
+            .find(|status| status.member() == "runtime_std_ecs")
             .expect("app artifact status should exist")
-            .artifact_rel_path,
+            .artifact_rel_path(),
     );
     let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
     let mut host = BufferedHost::default();
@@ -3752,14 +3761,14 @@ fn execute_main_runs_owned_app_facade_workspace() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_workspace_build(&graph, &statuses);
+    execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
             .iter()
-            .find(|status| status.member == "runtime_owned_app_facade")
+            .find(|status| status.member() == "runtime_owned_app_facade")
             .expect("app artifact status should exist")
-            .artifact_rel_path,
+            .artifact_rel_path(),
     );
     let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
     let fixture_root = dir.join("fixture");
@@ -3851,14 +3860,14 @@ fn execute_main_runs_synthetic_audio_runtime() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_workspace_build(&graph, &statuses);
+    execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
             .iter()
-            .find(|status| status.member == "runtime_std_audio")
+            .find(|status| status.member() == "runtime_std_audio")
             .expect("app artifact status should exist")
-            .artifact_rel_path,
+            .artifact_rel_path(),
     );
     let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
     let fixture_root = dir.join("fixture");
@@ -3994,14 +4003,14 @@ fn execute_main_runs_synthetic_window_canvas_events_runtime() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_workspace_build(&graph, &statuses);
+    execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
             .iter()
-            .find(|status| status.member == "runtime_window_canvas")
+            .find(|status| status.member() == "runtime_window_canvas")
             .expect("app artifact status should exist")
-            .artifact_rel_path,
+            .artifact_rel_path(),
     );
     let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
     let fixture_root = dir.join("fixture");
@@ -4177,14 +4186,14 @@ fn execute_main_runs_synthetic_host_core_workspace_artifact() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_workspace_build(&graph, &statuses);
+    execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
             .iter()
-            .find(|status| status.member == "runtime_host_core")
+            .find(|status| status.member() == "runtime_host_core")
             .expect("app artifact status should exist")
-            .artifact_rel_path,
+            .artifact_rel_path(),
     );
     let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
 
