@@ -2,23 +2,27 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use arcana_aot::{
-    AOT_INTERNAL_FORMAT, AotPackageArtifact, compile_package, render_package_artifact,
-};
+#[cfg(test)]
+use arcana_aot::AOT_INTERNAL_FORMAT;
 use arcana_hir::{
     HirWorkspacePackage, HirWorkspaceSummary, build_package_layout, build_package_summary,
     build_workspace_package, build_workspace_summary, derive_source_module_path, lower_module_text,
-    resolve_workspace,
 };
-use arcana_ir::lower_workspace_package_with_resolution;
 use pathdiff::diff_paths;
+
+mod build;
 
 pub type PackageResult<T> = Result<T, String>;
 
-const LOCKFILE_VERSION: i64 = 1;
-const CACHE_DIR: &str = ".arcana";
-const ARTIFACT_DIR: &str = "artifacts";
-const LOGS_DIR: &str = "logs";
+pub use build::{
+    BuildDisposition, BuildStatus, PreparedBuild, execute_build, plan_build, prepare_build,
+    prepare_build_from_workspace, render_build_summary, render_lockfile, write_lockfile,
+};
+
+pub(crate) const LOCKFILE_VERSION: i64 = 1;
+pub(crate) const CACHE_DIR: &str = ".arcana";
+pub(crate) const ARTIFACT_DIR: &str = "artifacts";
+pub(crate) const LOGS_DIR: &str = "logs";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GrimoireKind {
@@ -92,6 +96,7 @@ pub struct LockMember {
     pub fingerprint: String,
     pub api_fingerprint: String,
     pub artifact: String,
+    pub artifact_hash: String,
     pub kind: GrimoireKind,
     pub format: String,
 }
@@ -102,23 +107,6 @@ pub struct Lockfile {
     pub workspace: String,
     pub order: Vec<String>,
     pub members: BTreeMap<String, LockMember>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BuildDisposition {
-    Built,
-    CacheHit,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BuildStatus {
-    pub member: String,
-    pub disposition: BuildDisposition,
-    pub fingerprint: String,
-    pub api_fingerprint: String,
-    pub artifact_rel_path: String,
-    pub kind: GrimoireKind,
-    pub format: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -457,6 +445,7 @@ pub fn read_lockfile(path: &Path) -> PackageResult<Option<Lockfile>> {
         .get("artifacts")
         .and_then(toml::Value::as_table)
         .ok_or_else(|| format!("missing `[artifacts]` in `{}`", path.display()))?;
+    let artifact_hashes = table.get("artifact_hashes").and_then(toml::Value::as_table);
     let kinds = table
         .get("kinds")
         .and_then(toml::Value::as_table)
@@ -492,6 +481,14 @@ pub fn read_lockfile(path: &Path) -> PackageResult<Option<Lockfile>> {
             .and_then(toml::Value::as_str)
             .ok_or_else(|| format!("missing artifact path for `{name}`"))?
             .to_string();
+        let artifact_hash = match artifact_hashes {
+            Some(hashes) => hashes
+                .get(name)
+                .and_then(toml::Value::as_str)
+                .ok_or_else(|| format!("missing artifact hash for `{name}`"))?
+                .to_string(),
+            None => String::new(),
+        };
         let kind = match kinds
             .get(name)
             .and_then(toml::Value::as_str)
@@ -514,6 +511,7 @@ pub fn read_lockfile(path: &Path) -> PackageResult<Option<Lockfile>> {
                 fingerprint,
                 api_fingerprint,
                 artifact,
+                artifact_hash,
                 kind,
                 format,
             },
@@ -526,398 +524,6 @@ pub fn read_lockfile(path: &Path) -> PackageResult<Option<Lockfile>> {
         order,
         members,
     }))
-}
-
-pub fn plan_build(
-    graph: &WorkspaceGraph,
-    order: &[String],
-    fingerprints: &HashMap<String, MemberFingerprints>,
-    existing_lock: Option<&Lockfile>,
-) -> PackageResult<Vec<BuildStatus>> {
-    let mut statuses = Vec::new();
-    let mut api_changed = HashMap::<String, bool>::new();
-
-    for name in order {
-        let member = graph
-            .member(name)
-            .ok_or_else(|| format!("workspace planner missing member `{name}`"))?;
-        let member_fingerprints = fingerprints
-            .get(name)
-            .ok_or_else(|| format!("missing fingerprint for member `{name}`"))?;
-        let fingerprint = member_fingerprints.source.clone();
-        let api_fingerprint = member_fingerprints.api.clone();
-        let artifact_rel_path = artifact_rel_path(name, &fingerprint, &member.kind);
-        let existing = existing_lock.and_then(|lock| lock.members.get(name));
-        let format = AOT_INTERNAL_FORMAT.to_string();
-        let artifact_abs_path = graph.root_dir.join(&artifact_rel_path);
-        let fingerprint_changed = existing
-            .map(|entry| entry.fingerprint != fingerprint)
-            .unwrap_or(true);
-        let api_fingerprint_changed = existing
-            .map(|entry| entry.api_fingerprint != api_fingerprint)
-            .unwrap_or(true);
-        let format_changed = existing.map(|entry| entry.format != format).unwrap_or(true);
-        let upstream_api_changed = member
-            .deps
-            .iter()
-            .any(|dep| api_changed.get(dep).copied().unwrap_or(false));
-        let built = fingerprint_changed
-            || api_fingerprint_changed
-            || upstream_api_changed
-            || format_changed
-            || !cached_artifact_matches_format(&artifact_abs_path, &format);
-        api_changed.insert(name.clone(), api_fingerprint_changed);
-        statuses.push(BuildStatus {
-            member: name.clone(),
-            disposition: if built {
-                BuildDisposition::Built
-            } else {
-                BuildDisposition::CacheHit
-            },
-            fingerprint,
-            api_fingerprint,
-            artifact_rel_path,
-            kind: member.kind.clone(),
-            format,
-        });
-    }
-
-    Ok(statuses)
-}
-
-pub fn execute_build(graph: &WorkspaceGraph, statuses: &[BuildStatus]) -> PackageResult<PathBuf> {
-    let cache_root = graph.root_dir.join(CACHE_DIR);
-    let workspace = load_workspace_hir_from_graph(&graph.root_dir, graph)?;
-    let resolved_workspace = resolve_workspace(&workspace).map_err(|errors| {
-        errors
-            .into_iter()
-            .map(|error| {
-                format!(
-                    "{}:{}:{}: {}",
-                    error.source_module_id, error.span.line, error.span.column, error.message
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    })?;
-    let lowered_packages = workspace
-        .packages
-        .values()
-        .map(|package| {
-            Ok((
-                package.summary.package_name.clone(),
-                lower_workspace_package_with_resolution(&workspace, &resolved_workspace, package)?,
-            ))
-        })
-        .collect::<PackageResult<BTreeMap<_, _>>>()?;
-    fs::create_dir_all(cache_root.join(LOGS_DIR)).map_err(|e| {
-        format!(
-            "failed to create cache logs directory `{}`: {e}",
-            cache_root.join(LOGS_DIR).display()
-        )
-    })?;
-
-    for status in statuses {
-        if status.disposition == BuildDisposition::CacheHit {
-            continue;
-        }
-        let member = graph
-            .member(&status.member)
-            .ok_or_else(|| format!("missing workspace member `{}`", status.member))?;
-        let linked_package_names = collect_linked_package_names(graph, &workspace, &status.member)?;
-        let root_package = lowered_packages
-            .get(&member.name)
-            .cloned()
-            .ok_or_else(|| format!("missing lowered package `{}`", member.name))?;
-        let linked_packages = linked_package_names
-            .into_iter()
-            .filter(|name| name != &member.name)
-            .map(|name| {
-                lowered_packages
-                    .get(&name)
-                    .cloned()
-                    .ok_or_else(|| format!("missing lowered linked package `{name}`"))
-            })
-            .collect::<PackageResult<Vec<_>>>()?;
-        let artifact = compile_package(&link_ir_packages(root_package, linked_packages));
-        if artifact.format != status.format {
-            return Err(format!(
-                "artifact format mismatch for `{}`: planner={}, compiler={}",
-                status.member, status.format, artifact.format
-            ));
-        }
-        let artifact_path = graph.root_dir.join(&status.artifact_rel_path);
-        if let Some(parent) = artifact_path.parent() {
-            fs::create_dir_all(parent).map_err(|e| {
-                format!(
-                    "failed to create artifact directory `{}`: {e}",
-                    parent.display()
-                )
-            })?;
-        }
-        let rendered = format!(
-            "member = \"{}\"\nkind = \"{}\"\nfingerprint = \"{}\"\napi_fingerprint = \"{}\"\n{}",
-            status.member,
-            status.kind.as_str(),
-            status.fingerprint,
-            status.api_fingerprint,
-            render_package_artifact(&artifact)
-        );
-        fs::write(&artifact_path, rendered).map_err(|e| {
-            format!(
-                "failed to write artifact `{}`: {e}",
-                artifact_path.display()
-            )
-        })?;
-    }
-
-    let summary_path = graph
-        .root_dir
-        .join(CACHE_DIR)
-        .join(LOGS_DIR)
-        .join("build-last.txt");
-    fs::write(&summary_path, render_build_summary(statuses, graph))
-        .map_err(|e| format!("failed to write `{}`: {e}", summary_path.display()))?;
-    Ok(summary_path)
-}
-
-fn collect_linked_package_names(
-    graph: &WorkspaceGraph,
-    workspace: &HirWorkspaceSummary,
-    root_member: &str,
-) -> PackageResult<Vec<String>> {
-    let mut names = collect_transitive_member_names(graph, root_member)?;
-    let uses_std = names.iter().any(|name| {
-        workspace
-            .package(name)
-            .map(package_uses_implicit_std)
-            .unwrap_or(false)
-    });
-    if uses_std && workspace.package("std").is_some() {
-        names.insert("std".to_string());
-    }
-    Ok(names.into_iter().collect())
-}
-
-fn collect_transitive_member_names(
-    graph: &WorkspaceGraph,
-    root_member: &str,
-) -> PackageResult<BTreeSet<String>> {
-    let mut pending = vec![root_member.to_string()];
-    let mut visited = BTreeSet::new();
-    while let Some(name) = pending.pop() {
-        if !visited.insert(name.clone()) {
-            continue;
-        }
-        let member = graph
-            .member(&name)
-            .ok_or_else(|| format!("missing workspace member `{name}`"))?;
-        for dep in member.deps.iter().rev() {
-            pending.push(dep.clone());
-        }
-    }
-    Ok(visited)
-}
-
-fn package_uses_implicit_std(package: &HirWorkspacePackage) -> bool {
-    package.summary.dependency_edges.iter().any(|edge| {
-        edge.target_path
-            .first()
-            .is_some_and(|segment| segment == "std")
-    })
-}
-
-fn link_ir_packages(
-    root: arcana_ir::IrPackage,
-    mut linked: Vec<arcana_ir::IrPackage>,
-) -> arcana_ir::IrPackage {
-    linked.sort_by(|left, right| left.package_name.cmp(&right.package_name));
-
-    let mut direct_deps = root.direct_deps.iter().cloned().collect::<BTreeSet<_>>();
-    if linked.iter().any(|package| package.package_name == "std") {
-        direct_deps.insert("std".to_string());
-    }
-
-    let mut modules = root.modules.clone();
-    let mut dependency_rows = root
-        .dependency_rows
-        .iter()
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let mut exported_surface_rows = root
-        .exported_surface_rows
-        .iter()
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let mut runtime_requirements = root
-        .runtime_requirements
-        .iter()
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let mut routines = root.routines.clone();
-
-    for package in linked {
-        modules.extend(package.modules);
-        dependency_rows.extend(package.dependency_rows);
-        exported_surface_rows.extend(package.exported_surface_rows);
-        runtime_requirements.extend(package.runtime_requirements);
-        routines.extend(package.routines);
-    }
-
-    modules.sort_by(|left, right| left.module_id.cmp(&right.module_id));
-    routines.sort_by(|left, right| {
-        left.module_id
-            .cmp(&right.module_id)
-            .then_with(|| left.symbol_name.cmp(&right.symbol_name))
-            .then_with(|| left.signature_row.cmp(&right.signature_row))
-    });
-
-    arcana_ir::IrPackage {
-        package_name: root.package_name,
-        root_module_id: root.root_module_id,
-        direct_deps: direct_deps.into_iter().collect(),
-        modules,
-        dependency_edge_count: dependency_rows.len(),
-        dependency_rows: dependency_rows.into_iter().collect(),
-        exported_surface_rows: exported_surface_rows.into_iter().collect(),
-        runtime_requirements: runtime_requirements.into_iter().collect(),
-        entrypoints: root.entrypoints,
-        routines,
-    }
-}
-
-pub fn write_lockfile(
-    graph: &WorkspaceGraph,
-    order: &[String],
-    statuses: &[BuildStatus],
-) -> PackageResult<PathBuf> {
-    let lock_path = graph.root_dir.join("Arcana.lock");
-    let rendered = render_lockfile(graph, order, statuses)?;
-    fs::write(&lock_path, rendered)
-        .map_err(|e| format!("failed to write `{}`: {e}", lock_path.display()))?;
-    Ok(lock_path)
-}
-
-pub fn render_lockfile(
-    graph: &WorkspaceGraph,
-    order: &[String],
-    statuses: &[BuildStatus],
-) -> PackageResult<String> {
-    let mut out = String::new();
-    out.push_str(&format!("version = {LOCKFILE_VERSION}\n"));
-    out.push_str(&format!(
-        "workspace = \"{}\"\n",
-        escape_toml(&graph.root_name)
-    ));
-    out.push_str(&format!(
-        "toolchain = \"arcana-cli {}\"\n",
-        env!("CARGO_PKG_VERSION")
-    ));
-    out.push_str(&format!("order = {}\n\n", format_string_array(order)));
-
-    let status_map = statuses
-        .iter()
-        .map(|status| (status.member.clone(), status))
-        .collect::<HashMap<_, _>>();
-
-    let mut names = graph
-        .members
-        .iter()
-        .map(|member| member.name.clone())
-        .collect::<Vec<_>>();
-    names.sort();
-
-    out.push_str("[paths]\n");
-    for name in &names {
-        let member = graph
-            .member(name)
-            .ok_or_else(|| format!("missing workspace member `{name}`"))?;
-        out.push_str(&format!(
-            "\"{}\" = \"{}\"\n",
-            escape_toml(name),
-            escape_toml(&member.rel_dir)
-        ));
-    }
-    out.push('\n');
-
-    out.push_str("[deps]\n");
-    for name in &names {
-        let member = graph
-            .member(name)
-            .ok_or_else(|| format!("missing workspace member `{name}`"))?;
-        out.push_str(&format!(
-            "\"{}\" = {}\n",
-            escape_toml(name),
-            format_string_array(&member.deps)
-        ));
-    }
-    out.push('\n');
-
-    out.push_str("[kinds]\n");
-    for name in &names {
-        let status = status_map
-            .get(name)
-            .ok_or_else(|| format!("missing build status for `{name}`"))?;
-        out.push_str(&format!(
-            "\"{}\" = \"{}\"\n",
-            escape_toml(name),
-            status.kind.as_str()
-        ));
-    }
-    out.push('\n');
-
-    out.push_str("[formats]\n");
-    for name in &names {
-        let status = status_map
-            .get(name)
-            .ok_or_else(|| format!("missing build status for `{name}`"))?;
-        out.push_str(&format!(
-            "\"{}\" = \"{}\"\n",
-            escape_toml(name),
-            escape_toml(&status.format)
-        ));
-    }
-    out.push('\n');
-
-    out.push_str("[fingerprints]\n");
-    for name in &names {
-        let status = status_map
-            .get(name)
-            .ok_or_else(|| format!("missing build status for `{name}`"))?;
-        out.push_str(&format!(
-            "\"{}\" = \"{}\"\n",
-            escape_toml(name),
-            escape_toml(&status.fingerprint)
-        ));
-    }
-    out.push('\n');
-
-    out.push_str("[api_fingerprints]\n");
-    for name in &names {
-        let status = status_map
-            .get(name)
-            .ok_or_else(|| format!("missing build status for `{name}`"))?;
-        out.push_str(&format!(
-            "\"{}\" = \"{}\"\n",
-            escape_toml(name),
-            escape_toml(&status.api_fingerprint)
-        ));
-    }
-    out.push('\n');
-
-    out.push_str("[artifacts]\n");
-    for name in &names {
-        let status = status_map
-            .get(name)
-            .ok_or_else(|| format!("missing build status for `{name}`"))?;
-        out.push_str(&format!(
-            "\"{}\" = \"{}\"\n",
-            escape_toml(name),
-            escape_toml(&status.artifact_rel_path)
-        ));
-    }
-
-    Ok(out)
 }
 
 pub fn validate_path(path: &Path) -> PackageResult<()> {
@@ -938,26 +544,6 @@ pub fn validate_path(path: &Path) -> PackageResult<()> {
         validate_grimoire_layout(&member.abs_dir, &member.kind)?;
     }
     Ok(())
-}
-
-pub fn render_build_summary(statuses: &[BuildStatus], graph: &WorkspaceGraph) -> String {
-    let mut out = String::from("summary-v1\n");
-    for status in statuses {
-        out.push_str(&format!(
-            "BUILD_STATUS member={} disposition={} fingerprint={}\n",
-            status.member,
-            match status.disposition {
-                BuildDisposition::Built => "built",
-                BuildDisposition::CacheHit => "cache_hit",
-            },
-            status.fingerprint
-        ));
-    }
-    out.push_str(&format!(
-        "LOCK path={}\n",
-        graph.root_dir.join("Arcana.lock").display()
-    ));
-    out
 }
 
 fn parse_string_array(value: &toml::Value) -> PackageResult<Vec<String>> {
@@ -1185,45 +771,6 @@ fn relative_from_root(path: &Path, root: &Path) -> PackageResult<String> {
     }
 }
 
-fn artifact_rel_path(name: &str, fingerprint: &str, kind: &GrimoireKind) -> String {
-    let suffix = match kind {
-        GrimoireKind::App => "app.artifact.toml",
-        GrimoireKind::Lib => "lib.artifact.toml",
-    };
-    format!(
-        "{CACHE_DIR}/{ARTIFACT_DIR}/{name}/{}/{}",
-        sanitize_fingerprint(fingerprint),
-        suffix
-    )
-}
-
-fn sanitize_fingerprint(text: &str) -> String {
-    text.replace(':', "_")
-}
-
-fn cached_artifact_matches_format(path: &Path, expected_format: &str) -> bool {
-    let Ok(text) = fs::read_to_string(path) else {
-        return false;
-    };
-    let Ok(artifact) = toml::from_str::<AotPackageArtifact>(&text) else {
-        return false;
-    };
-    artifact.format == expected_format
-}
-
-fn format_string_array(items: &[String]) -> String {
-    let rendered = items
-        .iter()
-        .map(|item| format!("\"{}\"", escape_toml(item)))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("[{rendered}]")
-}
-
-fn escape_toml(text: &str) -> String {
-    text.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1297,6 +844,14 @@ mod tests {
             fingerprint.api.push_str(api_suffix);
         }
         next
+    }
+
+    fn execute_planned_build(
+        graph: &WorkspaceGraph,
+        statuses: &[BuildStatus],
+    ) -> PackageResult<PathBuf> {
+        let prepared = prepare_build(graph)?;
+        execute_build(graph, &prepared, statuses)
     }
 
     #[test]
@@ -1463,11 +1018,13 @@ mod tests {
         let order = plan_workspace(&graph).expect("plan");
         let fingerprints = fake_member_fingerprints(&graph);
         let statuses = plan_build(&graph, &order, &fingerprints, None).expect("build plan");
+        execute_planned_build(&graph, &statuses).expect("execute build");
         let first = render_lockfile(&graph, &order, &statuses).expect("render");
         let second = render_lockfile(&graph, &order, &statuses).expect("render");
         assert_eq!(first, second);
         assert!(first.contains("version = 1"));
         assert!(first.contains("[api_fingerprints]"));
+        assert!(first.contains("[artifact_hashes]"));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1483,7 +1040,7 @@ mod tests {
         let order = plan_workspace(&graph).expect("plan");
         let first_fingerprints = fake_member_fingerprints(&graph);
         let first_statuses = plan_build(&graph, &order, &first_fingerprints, None).expect("plan");
-        execute_build(&graph, &first_statuses).expect("execute build");
+        execute_planned_build(&graph, &first_statuses).expect("execute build");
         let lock_path = write_lockfile(&graph, &order, &first_statuses).expect("lockfile");
         let existing = read_lockfile(&lock_path)
             .expect("read lock")
@@ -1520,7 +1077,7 @@ mod tests {
 
         let fingerprints = fake_member_fingerprints(&graph);
         let statuses = plan_build(&graph, &order, &fingerprints, None).expect("build plan");
-        execute_build(&graph, &statuses).expect("execute build");
+        execute_planned_build(&graph, &statuses).expect("execute build");
         let lock_path = write_lockfile(&graph, &order, &statuses).expect("write lockfile");
         let lock = read_lockfile(&lock_path)
             .expect("read lockfile")
@@ -1530,6 +1087,7 @@ mod tests {
             .get("workspace")
             .expect("root package should be written to lockfile");
         assert_eq!(root.path, ".");
+        assert!(!root.artifact_hash.is_empty());
         assert!(dir.join(&root.artifact).is_file());
 
         let _ = fs::remove_dir_all(&dir);
@@ -1549,7 +1107,7 @@ mod tests {
         let order = plan_workspace(&graph).expect("plan");
         let first_fingerprints = fake_member_fingerprints(&graph);
         let first_statuses = plan_build(&graph, &order, &first_fingerprints, None).expect("plan");
-        execute_build(&graph, &first_statuses).expect("execute build");
+        execute_planned_build(&graph, &first_statuses).expect("execute build");
         let lock_path = write_lockfile(&graph, &order, &first_statuses).expect("lockfile");
         let existing = read_lockfile(&lock_path)
             .expect("read lock")
@@ -1575,10 +1133,87 @@ mod tests {
         assert_eq!(second_statuses[0].member, "app");
         assert_eq!(second_statuses[0].disposition, BuildDisposition::Built);
 
-        execute_build(&graph, &second_statuses).expect("rebuild should refresh artifact");
+        execute_planned_build(&graph, &second_statuses).expect("rebuild should refresh artifact");
         let refreshed = fs::read_to_string(&artifact_path).expect("artifact should exist");
         let parsed = parse_package_artifact(&refreshed).expect("artifact should parse");
         assert_eq!(parsed.format, AOT_INTERNAL_FORMAT);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn invalid_cached_artifact_identity_triggers_rebuild() {
+        let dir = temp_dir("invalid_artifact_identity");
+        write_file(&dir.join("book.toml"), "name = \"app\"\nkind = \"app\"\n");
+        write_file(
+            &dir.join("src").join("shelf.arc"),
+            "fn main() -> Int:\n    return 0\n",
+        );
+        write_file(&dir.join("src").join("types.arc"), "// types\n");
+
+        let graph = load_workspace_graph(&dir).expect("load graph");
+        let order = plan_workspace(&graph).expect("plan");
+        let first_fingerprints = fake_member_fingerprints(&graph);
+        let first_statuses = plan_build(&graph, &order, &first_fingerprints, None).expect("plan");
+        execute_planned_build(&graph, &first_statuses).expect("execute build");
+        let lock_path = write_lockfile(&graph, &order, &first_statuses).expect("lockfile");
+        let existing = read_lockfile(&lock_path)
+            .expect("read lock")
+            .expect("lock exists");
+
+        let status = first_statuses
+            .iter()
+            .find(|status| status.member == "app")
+            .expect("app status should exist");
+        let artifact_path = graph.root_dir.join(&status.artifact_rel_path);
+        let stale = fs::read_to_string(&artifact_path).expect("artifact should exist");
+        fs::write(
+            &artifact_path,
+            stale.replace("package_name = \"app\"", "package_name = \"wrong\""),
+        )
+        .expect("artifact should be rewritten");
+
+        let second_statuses =
+            plan_build(&graph, &order, &first_fingerprints, Some(&existing)).expect("plan");
+        assert_eq!(second_statuses[0].member, "app");
+        assert_eq!(second_statuses[0].disposition, BuildDisposition::Built);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn invalid_cached_artifact_payload_triggers_rebuild() {
+        let dir = temp_dir("invalid_artifact_payload");
+        write_file(&dir.join("book.toml"), "name = \"app\"\nkind = \"app\"\n");
+        write_file(
+            &dir.join("src").join("shelf.arc"),
+            "fn main() -> Int:\n    return 0\n",
+        );
+        write_file(&dir.join("src").join("types.arc"), "// types\n");
+
+        let graph = load_workspace_graph(&dir).expect("load graph");
+        let order = plan_workspace(&graph).expect("plan");
+        let first_fingerprints = fake_member_fingerprints(&graph);
+        let first_statuses = plan_build(&graph, &order, &first_fingerprints, None).expect("plan");
+        execute_planned_build(&graph, &first_statuses).expect("execute build");
+        let lock_path = write_lockfile(&graph, &order, &first_statuses).expect("lockfile");
+        let existing = read_lockfile(&lock_path)
+            .expect("read lock")
+            .expect("lock exists");
+
+        let status = first_statuses
+            .iter()
+            .find(|status| status.member == "app")
+            .expect("app status should exist");
+        let artifact_path = graph.root_dir.join(&status.artifact_rel_path);
+        let stale = fs::read_to_string(&artifact_path).expect("artifact should exist");
+        fs::write(&artifact_path, stale.replace("Int = 0", "Int = 99"))
+            .expect("artifact should be rewritten");
+
+        let second_statuses =
+            plan_build(&graph, &order, &first_fingerprints, Some(&existing)).expect("plan");
+        assert_eq!(second_statuses[0].member, "app");
+        assert_eq!(second_statuses[0].disposition, BuildDisposition::Built);
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1609,7 +1244,7 @@ mod tests {
         let order = plan_workspace(&graph).expect("plan");
         let fingerprints = fake_member_fingerprints(&graph);
         let statuses = plan_build(&graph, &order, &fingerprints, None).expect("plan");
-        execute_build(&graph, &statuses).expect("execute");
+        execute_planned_build(&graph, &statuses).expect("execute");
 
         let core = statuses
             .iter()
@@ -1707,7 +1342,7 @@ mod tests {
         let order = plan_workspace(&graph).expect("plan");
         let fingerprints = fake_member_fingerprints(&graph);
         let statuses = plan_build(&graph, &order, &fingerprints, None).expect("plan");
-        execute_build(&graph, &statuses).expect("execute");
+        execute_planned_build(&graph, &statuses).expect("execute");
 
         let app = statuses
             .iter()
@@ -1777,12 +1412,49 @@ mod tests {
         let order = plan_workspace(&graph).expect("plan");
         let fingerprints = fake_member_fingerprints(&graph);
         let statuses = plan_build(&graph, &order, &fingerprints, None).expect("plan");
-        let err = execute_build(&graph, &statuses)
+        let err = execute_planned_build(&graph, &statuses)
             .expect_err("ambiguous concrete bare method should fail build");
         assert!(
             err.contains("bare-method qualifier `tap` on `app.types.Counter` is ambiguous"),
             "{err}"
         );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prepared_build_uses_workspace_snapshot() {
+        let dir = temp_dir("prepared_snapshot");
+        write_file(&dir.join("book.toml"), "name = \"app\"\nkind = \"app\"\n");
+        write_file(
+            &dir.join("src/shelf.arc"),
+            "fn main() -> Int:\n    return 0\n",
+        );
+        write_file(&dir.join("src/types.arc"), "// types\n");
+
+        let graph = load_workspace_graph(&dir).expect("load graph");
+        let order = plan_workspace(&graph).expect("plan");
+        let fingerprints = fake_member_fingerprints(&graph);
+        let workspace = load_workspace_hir_from_graph(&dir, &graph).expect("workspace");
+        let resolved_workspace = arcana_hir::resolve_workspace(&workspace).expect("resolve");
+        let prepared =
+            prepare_build_from_workspace(workspace, resolved_workspace).expect("prepare build");
+
+        write_file(
+            &dir.join("src/shelf.arc"),
+            "fn main() -> Int:\n    return 7\n",
+        );
+
+        let statuses = plan_build(&graph, &order, &fingerprints, None).expect("plan");
+        execute_build(&graph, &prepared, &statuses).expect("execute");
+
+        let artifact_path = graph.root_dir.join(&statuses[0].artifact_rel_path);
+        let artifact = fs::read_to_string(&artifact_path).expect("artifact should exist");
+        assert!(
+            artifact.contains("Int = 0"),
+            "expected prepared build to write the checked snapshot, got: {artifact}"
+        );
+        assert!(!artifact.contains("Int = 7"));
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1805,7 +1477,7 @@ mod tests {
         let order = plan_workspace(&graph).expect("plan");
         let first_fingerprints = fake_member_fingerprints(&graph);
         let first_statuses = plan_build(&graph, &order, &first_fingerprints, None).expect("plan");
-        execute_build(&graph, &first_statuses).expect("execute");
+        execute_planned_build(&graph, &first_statuses).expect("execute");
         let lock_path = write_lockfile(&graph, &order, &first_statuses).expect("lock");
         let existing = read_lockfile(&lock_path).expect("read").expect("lock");
 
@@ -1821,7 +1493,7 @@ mod tests {
     }
 
     #[test]
-    fn editing_private_dependency_code_does_not_rebuild_dependents() {
+    fn editing_linked_dependency_code_rebuilds_dependents() {
         let dir = temp_dir("shared");
         write_file(
             &dir.join("book.toml"),
@@ -1852,10 +1524,14 @@ mod tests {
         let order = plan_workspace(&graph).expect("plan");
         let first_fingerprints = fake_member_fingerprints(&graph);
         let first_statuses = plan_build(&graph, &order, &first_fingerprints, None).expect("plan");
-        execute_build(&graph, &first_statuses).expect("execute");
+        execute_planned_build(&graph, &first_statuses).expect("execute");
         let lock_path = write_lockfile(&graph, &order, &first_statuses).expect("lock");
         let existing = read_lockfile(&lock_path).expect("read").expect("lock");
 
+        write_file(
+            &dir.join("core/src/helper.arc"),
+            "fn helper() -> Int:\n    return 7\n",
+        );
         let second_fingerprints =
             mutate_member_fingerprint(&first_fingerprints, "core", Some("private-edit"), None);
         let second_statuses =
@@ -1863,9 +1539,18 @@ mod tests {
         assert_eq!(second_statuses[0].member, "core");
         assert_eq!(second_statuses[0].disposition, BuildDisposition::Built);
         assert_eq!(second_statuses[1].member, "app");
-        assert_eq!(second_statuses[1].disposition, BuildDisposition::CacheHit);
+        assert_eq!(second_statuses[1].disposition, BuildDisposition::Built);
         assert_eq!(second_statuses[2].member, "tool");
-        assert_eq!(second_statuses[2].disposition, BuildDisposition::CacheHit);
+        assert_eq!(second_statuses[2].disposition, BuildDisposition::Built);
+
+        execute_planned_build(&graph, &second_statuses).expect("rebuild dependents");
+        let app_artifact_path = graph.root_dir.join(&second_statuses[1].artifact_rel_path);
+        let app_artifact = fs::read_to_string(&app_artifact_path).expect("app artifact");
+        assert!(
+            app_artifact.contains("Int = 7"),
+            "expected rebuilt app artifact to embed updated linked dependency: {app_artifact}"
+        );
+
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1897,7 +1582,7 @@ mod tests {
         let order = plan_workspace(&graph).expect("plan");
         let first_fingerprints = fake_member_fingerprints(&graph);
         let first_statuses = plan_build(&graph, &order, &first_fingerprints, None).expect("plan");
-        execute_build(&graph, &first_statuses).expect("execute");
+        execute_planned_build(&graph, &first_statuses).expect("execute");
         let lock_path = write_lockfile(&graph, &order, &first_statuses).expect("lock");
         let existing = read_lockfile(&lock_path).expect("read").expect("lock");
 

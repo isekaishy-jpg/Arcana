@@ -14,7 +14,8 @@ use arcana_ir::{
     ExecHeaderAttachment as ParsedHeaderAttachment, ExecMatchArm as ParsedMatchArm,
     ExecMatchPattern as ParsedMatchPattern, ExecPageRollup as ParsedPageRollup,
     ExecPhraseArg as ParsedPhraseArg, ExecPhraseQualifierKind as ParsedPhraseQualifierKind,
-    ExecStmt as ParsedStmt, ExecUnaryOp as ParsedUnaryOp,
+    ExecStmt as ParsedStmt, ExecUnaryOp as ParsedUnaryOp, RUNTIME_MAIN_ENTRYPOINT_NAME,
+    runtime_main_return_type_from_signature, validate_runtime_main_entry_contract,
 };
 use pathdiff::diff_paths;
 use sha2::{Digest, Sha256};
@@ -2741,9 +2742,10 @@ fn lower_entrypoint(
     entrypoint: &AotEntrypointArtifact,
     routines: &[RuntimeRoutinePlan],
 ) -> Result<RuntimeEntrypointPlan, String> {
-    let routine_index = routines
+    let (routine_index, routine) = routines
         .iter()
-        .position(|routine| {
+        .enumerate()
+        .find(|(_, routine)| {
             routine.module_id == entrypoint.module_id
                 && routine.symbol_name == entrypoint.symbol_name
         })
@@ -2753,6 +2755,12 @@ fn lower_entrypoint(
                 entrypoint.symbol_name, entrypoint.module_id
             )
         })?;
+    if entrypoint.symbol_kind == "fn" && entrypoint.symbol_name == RUNTIME_MAIN_ENTRYPOINT_NAME {
+        validate_runtime_main_entry_contract(
+            routine.params.len(),
+            runtime_main_return_type_from_signature(&routine.signature_row),
+        )?;
+    }
     Ok(RuntimeEntrypointPlan {
         module_id: entrypoint.module_id.clone(),
         symbol_name: entrypoint.symbol_name.clone(),
@@ -10712,6 +10720,14 @@ pub fn execute_main(plan: &RuntimePackagePlan, host: &mut dyn RuntimeHost) -> Re
     let entry = plan
         .main_entrypoint()
         .ok_or_else(|| format!("package `{}` has no main entrypoint", plan.package_name))?;
+    let routine = plan
+        .routines
+        .get(entry.routine_index)
+        .ok_or_else(|| format!("invalid routine index `{}`", entry.routine_index))?;
+    validate_runtime_main_entry_contract(
+        routine.params.len(),
+        runtime_main_return_type_from_signature(&routine.signature_row),
+    )?;
     let mut state = RuntimeExecutionState::default();
     if state.next_scheduler_thread_id <= 0 {
         state.next_scheduler_thread_id = 1;

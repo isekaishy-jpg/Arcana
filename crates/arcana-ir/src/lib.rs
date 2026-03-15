@@ -1,3 +1,4 @@
+mod entrypoint;
 mod executable;
 
 use std::cell::RefCell;
@@ -14,6 +15,11 @@ use arcana_hir::{
     infer_receiver_expr_type_text, lookup_method_candidates_for_type, lookup_symbol_path,
     match_name_resolves_to_zero_payload_variant, routine_key_for_impl_method,
     routine_key_for_symbol,
+};
+pub use entrypoint::{
+    RUNTIME_MAIN_ENTRYPOINT_NAME, is_runtime_main_entry_symbol,
+    runtime_main_return_type_from_signature, validate_runtime_main_entry_contract,
+    validate_runtime_main_entry_symbol,
 };
 
 pub use executable::{
@@ -1565,9 +1571,11 @@ fn lower_package(package: &HirPackageSummary) -> IrPackage {
             module.symbols.iter().filter_map(|symbol| {
                 let is_entry = symbol.kind == HirSymbolKind::System
                     || symbol.kind == HirSymbolKind::Behavior
-                    || (symbol.kind == HirSymbolKind::Fn
-                        && module.module_id == package.package_name
-                        && symbol.name == "main");
+                    || is_runtime_main_entry_symbol(
+                        &package.package_name,
+                        &module.module_id,
+                        symbol,
+                    );
                 if !is_entry {
                     return None;
                 }

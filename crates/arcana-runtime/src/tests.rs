@@ -11,7 +11,9 @@ use arcana_aot::{
     AotRoutineArtifact, render_package_artifact,
 };
 use arcana_frontend::{check_workspace_graph, compute_member_fingerprints_for_checked_workspace};
-use arcana_package::{execute_build, load_workspace_graph, plan_build, plan_workspace};
+use arcana_package::{
+    execute_build, load_workspace_graph, plan_build, plan_workspace, prepare_build,
+};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -42,6 +44,14 @@ fn repo_root() -> PathBuf {
         .and_then(Path::parent)
         .expect("workspace root should exist")
         .to_path_buf()
+}
+
+fn execute_workspace_build(
+    graph: &arcana_package::WorkspaceGraph,
+    statuses: &[arcana_package::BuildStatus],
+) {
+    let prepared = prepare_build(graph).expect("prepare build");
+    execute_build(graph, &prepared, statuses).expect("build should execute");
 }
 
 fn write_file(path: &Path, text: &str) {
@@ -439,7 +449,7 @@ fn load_package_plan_accepts_behavior_attr_values_with_colons() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_build(&graph, &statuses).expect("build should execute");
+    execute_workspace_build(&graph, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
@@ -460,6 +470,31 @@ fn load_package_plan_accepts_behavior_attr_values_with_colons() {
     );
 
     let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn plan_from_artifact_rejects_main_with_parameters() {
+    let mut artifact = sample_return_artifact();
+    artifact.routines[0].param_rows = vec!["mode=:name=x:ty=Int".to_string()];
+    artifact.routines[0].signature_row = "fn main(x: Int) -> Int:".to_string();
+
+    let err = plan_from_artifact(&artifact).expect_err("parameterized main should fail");
+    assert!(
+        err.contains("main must not take parameters in the current runtime lane"),
+        "{err}"
+    );
+}
+
+#[test]
+fn plan_from_artifact_rejects_main_with_non_runtime_return_type() {
+    let mut artifact = sample_return_artifact();
+    artifact.routines[0].signature_row = "fn main() -> Bool:".to_string();
+
+    let err = plan_from_artifact(&artifact).expect_err("bool-returning main should fail");
+    assert!(
+        err.contains("main must return Int or Unit in the current runtime lane"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -715,7 +750,7 @@ fn execute_main_runs_page_rollups_on_loop_exit_and_try_propagation() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_build(&graph, &statuses).expect("build should execute");
+    execute_workspace_build(&graph, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
@@ -906,7 +941,7 @@ fn execute_main_runs_counter_style_workspace_artifact() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_build(&graph, &statuses).expect("build should execute");
+    execute_workspace_build(&graph, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
@@ -961,7 +996,7 @@ fn execute_main_runs_routine_calls_with_std_args() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_build(&graph, &statuses).expect("build should execute");
+    execute_workspace_build(&graph, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
@@ -1009,7 +1044,7 @@ fn execute_main_runs_linked_std_text_routine() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_build(&graph, &statuses).expect("build should execute");
+    execute_workspace_build(&graph, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
@@ -1063,7 +1098,7 @@ fn execute_main_runs_linked_std_array_routines() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_build(&graph, &statuses).expect("build should execute");
+    execute_workspace_build(&graph, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
@@ -1117,7 +1152,7 @@ fn execute_main_runs_linked_std_iter_and_set_routines() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_build(&graph, &statuses).expect("build should execute");
+    execute_workspace_build(&graph, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
@@ -1184,7 +1219,7 @@ fn execute_main_runs_linked_std_config_routines() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_build(&graph, &statuses).expect("build should execute");
+    execute_workspace_build(&graph, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
@@ -1263,7 +1298,7 @@ fn execute_main_runs_linked_std_manifest_routines() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_build(&graph, &statuses).expect("build should execute");
+    execute_workspace_build(&graph, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
@@ -1339,7 +1374,7 @@ fn execute_main_runs_linked_std_concurrent_routines() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_build(&graph, &statuses).expect("build should execute");
+    execute_workspace_build(&graph, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
@@ -1428,7 +1463,7 @@ fn execute_main_runs_linked_std_memory_routines() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_build(&graph, &statuses).expect("build should execute");
+    execute_workspace_build(&graph, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
@@ -1501,7 +1536,7 @@ fn execute_main_runs_linked_std_memory_borrow_routines() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_build(&graph, &statuses).expect("build should execute");
+    execute_workspace_build(&graph, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
@@ -1557,7 +1592,7 @@ fn execute_main_runs_memory_phrase_attachment_routines() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_build(&graph, &statuses).expect("build should execute");
+    execute_workspace_build(&graph, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
@@ -1609,7 +1644,7 @@ fn execute_main_runs_local_borrow_and_deref_routines() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_build(&graph, &statuses).expect("build should execute");
+    execute_workspace_build(&graph, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
@@ -1666,7 +1701,7 @@ fn execute_main_runs_linked_std_concurrent_task_thread_routines() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_build(&graph, &statuses).expect("build should execute");
+    execute_workspace_build(&graph, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
@@ -1722,7 +1757,7 @@ fn execute_main_runs_async_main_entrypoint() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_build(&graph, &statuses).expect("build should execute");
+    execute_workspace_build(&graph, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
@@ -1771,7 +1806,7 @@ fn execute_main_defers_non_call_spawned_values_until_join() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_build(&graph, &statuses).expect("build should execute");
+    execute_workspace_build(&graph, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
@@ -1829,7 +1864,7 @@ fn execute_main_split_threads_report_distinct_thread_ids() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_build(&graph, &statuses).expect("build should execute");
+    execute_workspace_build(&graph, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
@@ -1886,7 +1921,7 @@ fn execute_main_runs_chain_expressions_with_parallel_fanout() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_build(&graph, &statuses).expect("build should execute");
+    execute_workspace_build(&graph, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
@@ -1953,7 +1988,7 @@ fn execute_main_runs_linked_std_host_text_bytes_io_env_routines() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_build(&graph, &statuses).expect("build should execute");
+    execute_workspace_build(&graph, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
@@ -2113,7 +2148,7 @@ fn execute_main_runs_linked_std_wrapper_closure_routines() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_build(&graph, &statuses).expect("build should execute");
+    execute_workspace_build(&graph, &statuses);
 
     let fixture_root = dir.join("fixture");
     let assets_dir = fixture_root.join("assets");
@@ -2266,7 +2301,7 @@ fn execute_main_runs_linked_std_fs_bytes_routines() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_build(&graph, &statuses).expect("build should execute");
+    execute_workspace_build(&graph, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
@@ -2400,7 +2435,7 @@ fn execute_main_runs_linked_std_fs_stream_routines() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_build(&graph, &statuses).expect("build should execute");
+    execute_workspace_build(&graph, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
@@ -2461,7 +2496,7 @@ fn execute_main_runs_local_record_constructor_and_impl_method() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_build(&graph, &statuses).expect("build should execute");
+    execute_workspace_build(&graph, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
@@ -2545,7 +2580,7 @@ fn execute_main_runs_linked_std_process_routines() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_build(&graph, &statuses).expect("build should execute");
+    execute_workspace_build(&graph, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
@@ -2602,7 +2637,7 @@ fn execute_main_runs_linked_std_option_routines() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_build(&graph, &statuses).expect("build should execute");
+    execute_workspace_build(&graph, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
@@ -2658,7 +2693,7 @@ fn execute_main_runs_named_qualifier_path_routines() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_build(&graph, &statuses).expect("build should execute");
+    execute_workspace_build(&graph, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
@@ -2712,7 +2747,7 @@ fn execute_main_runs_linked_std_result_routines() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_build(&graph, &statuses).expect("build should execute");
+    execute_workspace_build(&graph, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
@@ -2782,7 +2817,7 @@ fn execute_main_runs_try_qualifier_routines() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_build(&graph, &statuses).expect("build should execute");
+    execute_workspace_build(&graph, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
@@ -2830,7 +2865,7 @@ fn execute_main_matches_zero_payload_variant_names() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_build(&graph, &statuses).expect("build should execute");
+    execute_workspace_build(&graph, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
@@ -2872,7 +2907,7 @@ fn execute_main_preserves_uppercase_match_bindings() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_build(&graph, &statuses).expect("build should execute");
+    execute_workspace_build(&graph, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
@@ -3015,7 +3050,7 @@ fn execute_main_runs_linked_std_collection_method_routines() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_build(&graph, &statuses).expect("build should execute");
+    execute_workspace_build(&graph, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
@@ -3108,7 +3143,7 @@ fn execute_main_runs_range_index_slice_and_literal_match_routines() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_build(&graph, &statuses).expect("build should execute");
+    execute_workspace_build(&graph, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
@@ -3180,7 +3215,7 @@ fn execute_main_runs_indexed_assignment_routines() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_build(&graph, &statuses).expect("build should execute");
+    execute_workspace_build(&graph, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
@@ -3460,7 +3495,7 @@ fn execute_main_allows_copy_take_and_reassign_after_take_move() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_build(&graph, &statuses).expect("build should execute");
+    execute_workspace_build(&graph, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
@@ -3514,7 +3549,7 @@ fn execute_main_runs_apply_and_await_apply_qualifiers() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_build(&graph, &statuses).expect("build should execute");
+    execute_workspace_build(&graph, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
@@ -3601,7 +3636,7 @@ fn execute_main_runs_linked_std_ecs_behavior_routines() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_build(&graph, &statuses).expect("build should execute");
+    execute_workspace_build(&graph, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
@@ -3717,7 +3752,7 @@ fn execute_main_runs_owned_app_facade_workspace() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_build(&graph, &statuses).expect("build should execute");
+    execute_workspace_build(&graph, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
@@ -3816,7 +3851,7 @@ fn execute_main_runs_synthetic_audio_runtime() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_build(&graph, &statuses).expect("build should execute");
+    execute_workspace_build(&graph, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
@@ -3959,7 +3994,7 @@ fn execute_main_runs_synthetic_window_canvas_events_runtime() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_build(&graph, &statuses).expect("build should execute");
+    execute_workspace_build(&graph, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses
@@ -4142,7 +4177,7 @@ fn execute_main_runs_synthetic_host_core_workspace_artifact() {
     let order = plan_workspace(&graph).expect("workspace order should plan");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_build(&graph, &statuses).expect("build should execute");
+    execute_workspace_build(&graph, &statuses);
 
     let artifact_path = graph.root_dir.join(
         &statuses

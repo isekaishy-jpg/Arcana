@@ -24,6 +24,7 @@ name = "arcana-frontend"
 version = "0.1.0"
 dependencies = [
  "arcana-hir",
+ "arcana-ir",
  "arcana-package",
  "arcana-syntax",
  "sha2",
