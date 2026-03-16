@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
-use arcana_aot::compile_package;
+use arcana_aot::{AotEmitContext, AotEmitTarget, AotPackageEmission, emit_package_with_context};
 use arcana_hir::{HirResolvedWorkspace, HirWorkspaceSummary, resolve_workspace};
 use arcana_ir::{
     IrPackage, RuntimeRequirementRoots, derive_runtime_requirements_with_roots,
@@ -10,8 +10,9 @@ use arcana_ir::{
 };
 
 use crate::build_identity::{
-    artifact_body_hash, artifact_body_hash_for_path, cached_artifact_matches_status,
-    current_build_toolchain_for_target, render_cached_artifact,
+    cache_metadata_path_for_output, cached_artifact_matches_status, cached_emission_hash,
+    cached_emission_hash_for_path, current_build_toolchain_for_target_with_context,
+    render_cached_artifact,
 };
 use crate::fingerprint::{
     WorkspaceFingerprints, compute_workspace_fingerprints, package_uses_implicit_std,
@@ -73,6 +74,9 @@ pub struct PreparedBuild {
     pub(crate) lowered_packages: BTreeMap<String, IrPackage>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BuildExecutionContext;
+
 pub fn prepare_build(graph: &WorkspaceGraph) -> PackageResult<PreparedBuild> {
     let workspace = crate::load_workspace_hir_from_graph(&graph.root_dir, graph)?;
     let resolved_workspace = resolve_workspace(&workspace).map_err(|errors| {
@@ -122,7 +126,25 @@ pub fn plan_build_for_target(
     existing_lock: Option<&Lockfile>,
     target: BuildTarget,
 ) -> PackageResult<Vec<BuildStatus>> {
-    let planned_toolchain = current_build_toolchain_for_target(&target)?;
+    plan_build_for_target_with_context(
+        graph,
+        order,
+        prepared,
+        existing_lock,
+        target,
+        &BuildExecutionContext::default(),
+    )
+}
+
+pub fn plan_build_for_target_with_context(
+    graph: &WorkspaceGraph,
+    order: &[String],
+    prepared: &PreparedBuild,
+    existing_lock: Option<&Lockfile>,
+    target: BuildTarget,
+    context: &BuildExecutionContext,
+) -> PackageResult<Vec<BuildStatus>> {
+    let planned_toolchain = current_build_toolchain_for_target_with_context(&target, context)?;
     let mut statuses = Vec::new();
     let mut upstream_built = HashMap::<String, bool>::new();
 
@@ -220,7 +242,16 @@ pub fn execute_build(
     prepared: &PreparedBuild,
     statuses: &[BuildStatus],
 ) -> PackageResult<PathBuf> {
-    validate_prepared_snapshot(prepared, statuses)?;
+    execute_build_with_context(graph, prepared, statuses, &BuildExecutionContext::default())
+}
+
+pub fn execute_build_with_context(
+    graph: &WorkspaceGraph,
+    prepared: &PreparedBuild,
+    statuses: &[BuildStatus],
+    context: &BuildExecutionContext,
+) -> PackageResult<PathBuf> {
+    validate_prepared_snapshot_with_context(prepared, statuses, context)?;
 
     let cache_root = graph.root_dir.join(CACHE_DIR);
     fs::create_dir_all(cache_root.join(LOGS_DIR)).map_err(|e| {
@@ -255,16 +286,20 @@ pub fn execute_build(
                     .ok_or_else(|| format!("missing lowered linked package `{name}`"))
             })
             .collect::<PackageResult<Vec<_>>>()?;
-        let artifact = compile_artifact_for_target(
+        let emission = emit_artifact_for_target(
             &status.target,
             &member.kind,
             root_package,
             linked_packages,
+            context,
         )?;
-        if artifact.format != status.format {
+        let artifact = &emission.artifact;
+        if status.format != emission.target.format() {
             return Err(format!(
-                "artifact format mismatch for `{}`: planner={}, compiler={}",
-                status.member, status.format, artifact.format
+                "artifact format mismatch for `{}`: planner={}, emitter={}",
+                status.member,
+                status.format,
+                emission.target.format()
             ));
         }
         let artifact_path = graph.root_dir.join(&status.artifact_rel_path);
@@ -276,24 +311,34 @@ pub fn execute_build(
                 )
             })?;
         }
-        let artifact_hash = artifact_body_hash(&artifact);
+        write_root_emission_artifact(&artifact_path, &emission)?;
+        write_emission_support_files(&artifact_path, &emission)?;
+        let artifact_hash = cached_emission_hash(
+            status.target.key(),
+            &status.format,
+            artifact,
+            emission.root_artifact_bytes.as_deref(),
+            &emission.support_files,
+        );
+        let metadata_path = cache_metadata_path_for_output(&artifact_path, &status.target);
         fs::write(
-            &artifact_path,
+            &metadata_path,
             render_cached_artifact(
                 &status.member,
                 &status.kind,
                 &status.fingerprint,
                 &status.api_fingerprint,
                 &status.target,
+                &status.format,
                 &status.toolchain,
-                &artifact,
+                &emission,
                 &artifact_hash,
             ),
         )
         .map_err(|e| {
             format!(
                 "failed to write artifact `{}`: {e}",
-                artifact_path.display()
+                metadata_path.display()
             )
         })?;
     }
@@ -429,7 +474,7 @@ fn merge_lock_build_entries(
     let mut updates = HashMap::<(String, BuildTarget), LockTargetEntry>::new();
     for status in statuses {
         let artifact_path = graph.root_dir.join(&status.artifact_rel_path);
-        let artifact_hash = artifact_body_hash_for_path(&artifact_path)?;
+        let artifact_hash = cached_emission_hash_for_path(&artifact_path, &status.target)?;
         updates.insert(
             (status.member.clone(), status.target.clone()),
             LockTargetEntry {
@@ -586,20 +631,121 @@ fn link_ir_packages(
     linked_package
 }
 
-fn compile_artifact_for_target(
+fn emit_artifact_for_target(
     target: &BuildTarget,
     root_kind: &GrimoireKind,
     root: IrPackage,
     linked_packages: Vec<IrPackage>,
-) -> PackageResult<arcana_aot::AotPackageArtifact> {
+    build_context: &BuildExecutionContext,
+) -> PackageResult<AotPackageEmission> {
+    let context = emit_context_for_target(target, root_kind, build_context)?;
     match target {
-        BuildTarget::InternalAot => Ok(compile_package(&link_ir_packages(
-            root_kind,
-            root,
-            linked_packages,
-        ))),
+        BuildTarget::InternalAot => emit_package_with_context(
+            AotEmitTarget::InternalArtifact,
+            &link_ir_packages(root_kind, root, linked_packages),
+            &context,
+        ),
+        BuildTarget::WindowsExe => emit_package_with_context(
+            AotEmitTarget::WindowsExeBundle,
+            &link_ir_packages(root_kind, root, linked_packages),
+            &context,
+        ),
+        BuildTarget::WindowsDll => emit_package_with_context(
+            AotEmitTarget::WindowsDllBundle,
+            &link_ir_packages(root_kind, root, linked_packages),
+            &context,
+        ),
         BuildTarget::Other(_) => Err(format!("unsupported build target `{target}`")),
     }
+}
+
+fn emit_context_for_target(
+    target: &BuildTarget,
+    kind: &GrimoireKind,
+    build_context: &BuildExecutionContext,
+) -> PackageResult<AotEmitContext> {
+    let root_artifact_file_name = target.artifact_file_name(kind)?.to_string();
+    let _ = build_context;
+    match target {
+        BuildTarget::InternalAot | BuildTarget::WindowsExe | BuildTarget::WindowsDll => {
+            Ok(AotEmitContext {
+                root_artifact_file_name: Some(root_artifact_file_name),
+            })
+        }
+        BuildTarget::Other(_) => Err(format!("unsupported build target `{target}`")),
+    }
+}
+
+fn write_root_emission_artifact(
+    artifact_path: &Path,
+    emission: &AotPackageEmission,
+) -> PackageResult<()> {
+    if let Some(bytes) = &emission.root_artifact_bytes {
+        fs::write(artifact_path, bytes).map_err(|e| {
+            format!(
+                "failed to write emitted artifact `{}`: {e}",
+                artifact_path.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn write_emission_support_files(
+    artifact_path: &Path,
+    emission: &AotPackageEmission,
+) -> PackageResult<()> {
+    let Some(artifact_dir) = artifact_path.parent() else {
+        return Err(format!(
+            "artifact path `{}` is missing a parent directory",
+            artifact_path.display()
+        ));
+    };
+    let mut seen_paths = BTreeSet::new();
+    for file in &emission.support_files {
+        let relative = Path::new(&file.relative_path);
+        if file.relative_path.is_empty() {
+            return Err("backend emission produced an empty support file path".to_string());
+        }
+        if !seen_paths.insert(file.relative_path.as_str()) {
+            return Err(format!(
+                "backend emission produced duplicate support file path `{}`",
+                file.relative_path
+            ));
+        }
+        if relative.is_absolute()
+            || relative.components().any(|component| {
+                matches!(
+                    component,
+                    Component::Prefix(_)
+                        | Component::RootDir
+                        | Component::CurDir
+                        | Component::ParentDir
+                )
+            })
+        {
+            return Err(format!(
+                "backend emission produced invalid support file path `{}`",
+                file.relative_path
+            ));
+        }
+        let output_path = artifact_dir.join(relative);
+        if let Some(parent) = output_path.parent() {
+            fs::create_dir_all(parent).map_err(|e| {
+                format!(
+                    "failed to create emitted support file directory `{}`: {e}",
+                    parent.display()
+                )
+            })?;
+        }
+        fs::write(&output_path, &file.bytes).map_err(|e| {
+            format!(
+                "failed to write emitted support file `{}`: {e}",
+                output_path.display()
+            )
+        })?;
+    }
+    Ok(())
 }
 
 fn artifact_rel_path(
@@ -620,9 +766,10 @@ fn sanitize_fingerprint(text: &str) -> String {
     text.replace(':', "_")
 }
 
-fn validate_prepared_snapshot(
+fn validate_prepared_snapshot_with_context(
     prepared: &PreparedBuild,
     statuses: &[BuildStatus],
+    context: &BuildExecutionContext,
 ) -> PackageResult<()> {
     for status in statuses {
         if status.snapshot_id != prepared.snapshot_id {
@@ -637,7 +784,8 @@ fn validate_prepared_snapshot(
                 status.member, status.fingerprint_set_id, prepared.fingerprint_set_id
             ));
         }
-        let expected_toolchain = current_build_toolchain_for_target(&status.target)?;
+        let expected_toolchain =
+            current_build_toolchain_for_target_with_context(&status.target, context)?;
         if status.toolchain != expected_toolchain {
             return Err(format!(
                 "build status for `{}` targets toolchain `{}` but current `{}` toolchain is `{expected_toolchain}`",
@@ -661,4 +809,100 @@ fn format_string_array(items: &[String]) -> String {
 
 fn escape_toml(text: &str) -> String {
     text.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use arcana_aot::{AOT_INTERNAL_FORMAT, AotEmissionFile, AotPackageArtifact};
+
+    use super::{AotEmitTarget, AotPackageEmission, write_emission_support_files};
+
+    fn temp_dir(label: &str) -> std::path::PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("arcana_build_{label}_{unique}"));
+        fs::create_dir_all(&dir).expect("temp dir should be created");
+        dir
+    }
+
+    fn dummy_emission(files: Vec<AotEmissionFile>) -> AotPackageEmission {
+        AotPackageEmission {
+            target: AotEmitTarget::InternalArtifact,
+            artifact: AotPackageArtifact {
+                format: AOT_INTERNAL_FORMAT.to_string(),
+                package_name: "tool".to_string(),
+                root_module_id: "tool".to_string(),
+                direct_deps: Vec::new(),
+                module_count: 0,
+                dependency_edge_count: 0,
+                dependency_rows: Vec::new(),
+                exported_surface_rows: Vec::new(),
+                runtime_requirements: Vec::new(),
+                entrypoints: Vec::new(),
+                routines: Vec::new(),
+                modules: Vec::new(),
+            },
+            primary_artifact_body: String::new(),
+            root_artifact_bytes: None,
+            support_files: files,
+        }
+    }
+
+    #[test]
+    fn write_emission_support_files_writes_relative_outputs() {
+        let dir = temp_dir("support_files_ok");
+        let artifact_path = dir.join("app.artifact.toml");
+        let emission = dummy_emission(vec![AotEmissionFile {
+            relative_path: "bin/app.exe".to_string(),
+            bytes: b"binary".to_vec(),
+        }]);
+
+        write_emission_support_files(&artifact_path, &emission)
+            .expect("support files should write");
+
+        let written = fs::read(dir.join("bin").join("app.exe")).expect("support file should exist");
+        assert_eq!(written, b"binary");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_emission_support_files_rejects_parent_traversal() {
+        let dir = temp_dir("support_files_bad_path");
+        let artifact_path = dir.join("app.artifact.toml");
+        let emission = dummy_emission(vec![AotEmissionFile {
+            relative_path: "..\\escape.exe".to_string(),
+            bytes: b"binary".to_vec(),
+        }]);
+
+        let err = write_emission_support_files(&artifact_path, &emission)
+            .expect_err("support files should reject parent traversal");
+        assert!(err.contains("invalid support file path"), "{err}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_emission_support_files_rejects_duplicate_paths() {
+        let dir = temp_dir("support_files_duplicate");
+        let artifact_path = dir.join("app.artifact.toml");
+        let emission = dummy_emission(vec![
+            AotEmissionFile {
+                relative_path: "bin/app.exe".to_string(),
+                bytes: b"first".to_vec(),
+            },
+            AotEmissionFile {
+                relative_path: "bin/app.exe".to_string(),
+                bytes: b"second".to_vec(),
+            },
+        ]);
+
+        let err = write_emission_support_files(&artifact_path, &emission)
+            .expect_err("support files should reject duplicate paths");
+        assert!(err.contains("duplicate support file path"), "{err}");
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

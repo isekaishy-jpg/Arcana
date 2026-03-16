@@ -19,16 +19,28 @@ use arcana_ir::{
     runtime_main_return_type_from_signature, validate_runtime_main_entry_contract,
 };
 use pathdiff::diff_paths;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+mod json_abi;
+mod native_abi;
+mod package_image;
+pub use json_abi::{
+    RUNTIME_JSON_ABI_FORMAT, execute_exported_json_abi_routine, render_exported_json_abi_manifest,
+};
+pub use native_abi::{RuntimeAbiValue, execute_exported_abi_routine};
+pub use package_image::{
+    RUNTIME_PACKAGE_IMAGE_FORMAT, parse_runtime_package_image, render_runtime_package_image,
+};
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeParamPlan {
     pub mode: Option<String>,
     pub name: String,
     pub ty: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeRoutinePlan {
     pub module_id: String,
     pub routine_key: String,
@@ -48,7 +60,7 @@ pub struct RuntimeRoutinePlan {
     statements: Vec<ParsedStmt>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeEntrypointPlan {
     pub module_id: String,
     pub symbol_name: String,
@@ -58,7 +70,7 @@ pub struct RuntimeEntrypointPlan {
     pub routine_index: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimePackagePlan {
     pub package_name: String,
     pub root_module_id: String,
@@ -10890,6 +10902,34 @@ pub fn execute_main(plan: &RuntimePackagePlan, host: &mut dyn RuntimeHost) -> Re
     let entry = plan
         .main_entrypoint()
         .ok_or_else(|| format!("package `{}` has no main entrypoint", plan.package_name))?;
+    let routine_key = plan
+        .routines
+        .get(entry.routine_index)
+        .map(|routine| routine.routine_key.clone())
+        .ok_or_else(|| format!("invalid routine index `{}`", entry.routine_index))?;
+    execute_entrypoint_routine(plan, &routine_key, host)
+}
+
+pub fn execute_entrypoint_routine(
+    plan: &RuntimePackagePlan,
+    routine_key: &str,
+    host: &mut dyn RuntimeHost,
+) -> Result<i32, String> {
+    validate_runtime_requirements_supported(plan, host)?;
+    let entry = plan
+        .entrypoints
+        .iter()
+        .find(|entry| {
+            plan.routines
+                .get(entry.routine_index)
+                .is_some_and(|routine| routine.routine_key == routine_key)
+        })
+        .ok_or_else(|| {
+            format!(
+                "entrypoint routine `{routine_key}` is not present in package `{}`",
+                plan.package_name
+            )
+        })?;
     let routine = plan
         .routines
         .get(entry.routine_index)

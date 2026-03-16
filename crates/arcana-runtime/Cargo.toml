@@ -7,6 +7,8 @@ edition.workspace = true
 arcana-aot.workspace = true
 arcana-ir.workspace = true
 pathdiff.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 sha2.workspace = true
 
 [dev-dependencies]

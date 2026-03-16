@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use arcana_aot::AOT_INTERNAL_FORMAT;
+use arcana_aot::{AOT_INTERNAL_FORMAT, AOT_WINDOWS_DLL_FORMAT, AOT_WINDOWS_EXE_FORMAT};
 use arcana_hir::{
     HirWorkspacePackage, HirWorkspaceSummary, build_package_layout, build_package_summary,
     build_workspace_summary, derive_source_module_path, lower_module_text,
@@ -11,14 +11,20 @@ use pathdiff::diff_paths;
 
 mod build;
 mod build_identity;
+mod distribution;
 mod fingerprint;
 
 pub type PackageResult<T> = Result<T, String>;
 
 pub use build::{
-    BuildDisposition, BuildStatus, PreparedBuild, execute_build, plan_build, plan_build_for_target,
-    prepare_build, prepare_build_from_workspace, render_build_summary, render_lockfile,
-    write_lockfile,
+    BuildDisposition, BuildExecutionContext, BuildStatus, PreparedBuild, execute_build,
+    execute_build_with_context, plan_build, plan_build_for_target,
+    plan_build_for_target_with_context, prepare_build, prepare_build_from_workspace,
+    render_build_summary, render_lockfile, write_lockfile,
+};
+pub use distribution::{
+    DISTRIBUTION_BUNDLE_FORMAT, DistributionBundle, default_distribution_dir,
+    stage_distribution_bundle,
 };
 pub use fingerprint::{
     MemberFingerprints, WorkspaceFingerprints, compute_workspace_fingerprints,
@@ -34,6 +40,8 @@ pub(crate) const LOGS_DIR: &str = "logs";
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum BuildTarget {
     InternalAot,
+    WindowsExe,
+    WindowsDll,
     Other(String),
 }
 
@@ -42,16 +50,28 @@ impl BuildTarget {
         Self::InternalAot
     }
 
+    pub fn windows_exe() -> Self {
+        Self::WindowsExe
+    }
+
+    pub fn windows_dll() -> Self {
+        Self::WindowsDll
+    }
+
     pub fn key(&self) -> &str {
         match self {
             Self::InternalAot => "internal-aot",
+            Self::WindowsExe => "windows-exe",
+            Self::WindowsDll => "windows-dll",
             Self::Other(other) => other,
         }
     }
 
-    fn from_storage_key(text: &str) -> Self {
+    pub(crate) fn from_storage_key(text: &str) -> Self {
         match text {
             "internal-aot" => Self::InternalAot,
+            "windows-exe" => Self::WindowsExe,
+            "windows-dll" => Self::WindowsDll,
             other => Self::Other(other.to_string()),
         }
     }
@@ -59,6 +79,8 @@ impl BuildTarget {
     pub fn format(&self) -> Option<&'static str> {
         match self {
             Self::InternalAot => Some(AOT_INTERNAL_FORMAT),
+            Self::WindowsExe => Some(AOT_WINDOWS_EXE_FORMAT),
+            Self::WindowsDll => Some(AOT_WINDOWS_DLL_FORMAT),
             Self::Other(_) => None,
         }
     }
@@ -67,6 +89,14 @@ impl BuildTarget {
         match (self, kind) {
             (Self::InternalAot, GrimoireKind::App) => Ok("app.artifact.toml"),
             (Self::InternalAot, GrimoireKind::Lib) => Ok("lib.artifact.toml"),
+            (Self::WindowsExe, GrimoireKind::App) => Ok("app.exe"),
+            (Self::WindowsExe, GrimoireKind::Lib) => {
+                Err("windows-exe target requires an app grimoire".to_string())
+            }
+            (Self::WindowsDll, GrimoireKind::Lib) => Ok("lib.dll"),
+            (Self::WindowsDll, GrimoireKind::App) => {
+                Err("windows-dll target requires a lib grimoire".to_string())
+            }
             (Self::Other(_), _) => Err(format!("unsupported build target `{self}`")),
         }
     }
@@ -81,6 +111,8 @@ impl std::fmt::Display for BuildTarget {
 pub fn parse_build_target(text: &str) -> PackageResult<BuildTarget> {
     match text {
         "internal-aot" => Ok(BuildTarget::InternalAot),
+        "windows-exe" => Ok(BuildTarget::WindowsExe),
+        "windows-dll" => Ok(BuildTarget::WindowsDll),
         other => Err(format!("unsupported build target `{other}`")),
     }
 }
@@ -89,6 +121,8 @@ fn infer_build_target_from_format(format: &str) -> Option<BuildTarget> {
     match format {
         AOT_INTERNAL_FORMAT => Some(BuildTarget::InternalAot),
         other if other.starts_with("arcana-aot-") => Some(BuildTarget::InternalAot),
+        AOT_WINDOWS_EXE_FORMAT => Some(BuildTarget::WindowsExe),
+        AOT_WINDOWS_DLL_FORMAT => Some(BuildTarget::WindowsDll),
         _ => None,
     }
 }
@@ -1070,8 +1104,7 @@ fn relative_from_root(path: &Path, root: &Path) -> PackageResult<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arcana_aot::parse_package_artifact;
-    use sha2::{Digest, Sha256};
+    use arcana_aot::{AOT_WINDOWS_DLL_FORMAT, AOT_WINDOWS_EXE_FORMAT, parse_package_artifact};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_dir(name: &str) -> PathBuf {
@@ -1087,16 +1120,6 @@ mod tests {
             fs::create_dir_all(parent).expect("create parent");
         }
         fs::write(path, text).expect("write file");
-    }
-
-    fn cached_artifact_body_hash(text: &str) -> String {
-        let body_start = text
-            .find("format = \"")
-            .expect("cached artifact should contain a backend artifact body");
-        let mut hasher = Sha256::new();
-        hasher.update(b"arcana_aot_body_v1\n");
-        hasher.update(text[body_start..].as_bytes());
-        format!("sha256:{:x}", hasher.finalize())
     }
 
     fn write_grimoire(dir: &Path, kind: GrimoireKind, name: &str, deps: &[(&str, &str)]) {
@@ -1153,6 +1176,295 @@ mod tests {
             .iter()
             .find(|status| status.member == member)
             .expect("status should exist")
+    }
+
+    #[test]
+    fn parse_build_target_accepts_native_targets() {
+        assert_eq!(
+            parse_build_target("internal-aot").expect("target"),
+            BuildTarget::InternalAot
+        );
+        assert_eq!(
+            parse_build_target("windows-exe").expect("target"),
+            BuildTarget::WindowsExe
+        );
+        assert_eq!(
+            parse_build_target("windows-dll").expect("target"),
+            BuildTarget::WindowsDll
+        );
+        assert_eq!(
+            BuildTarget::WindowsExe
+                .artifact_file_name(&GrimoireKind::App)
+                .expect("app exe target"),
+            "app.exe"
+        );
+        assert_eq!(
+            BuildTarget::WindowsDll
+                .artifact_file_name(&GrimoireKind::Lib)
+                .expect("lib dll target"),
+            "lib.dll"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn execute_build_emits_windows_exe_bundle() {
+        let dir = temp_dir("pending_windows_exe");
+        write_file(&dir.join("book.toml"), "name = \"app\"\nkind = \"app\"\n");
+        write_file(
+            &dir.join("src").join("shelf.arc"),
+            "fn main() -> Int:\n    return 0\n",
+        );
+        write_file(&dir.join("src").join("types.arc"), "// types\n");
+
+        let graph = load_workspace_graph(&dir).expect("load graph");
+        let order = plan_workspace(&graph).expect("plan");
+        let prepared = prepare_test_build(&graph);
+        let statuses = plan_build_for_target_with_context(
+            &graph,
+            &order,
+            &prepared,
+            None,
+            BuildTarget::windows_exe(),
+            &BuildExecutionContext::default(),
+        )
+        .expect("windows exe plan should build");
+        assert_eq!(statuses[0].target(), &BuildTarget::windows_exe());
+        execute_build_with_context(
+            &graph,
+            &prepared,
+            &statuses,
+            &BuildExecutionContext::default(),
+        )
+        .expect("windows exe build should succeed");
+        let artifact_path = graph.root_dir.join(statuses[0].artifact_rel_path());
+        let metadata_path = crate::build_identity::cache_metadata_path_for_output(
+            &artifact_path,
+            &BuildTarget::windows_exe(),
+        );
+        assert!(
+            artifact_path.is_file(),
+            "expected emitted exe at {}",
+            artifact_path.display()
+        );
+        assert!(
+            metadata_path.is_file(),
+            "expected cache metadata at {}",
+            metadata_path.display()
+        );
+        let metadata = crate::build_identity::read_cached_output_metadata(
+            &artifact_path,
+            &BuildTarget::windows_exe(),
+        )
+        .expect("native exe cache metadata should read");
+        let launch_path = artifact_path.with_file_name("app.exe.arcana-launch.toml");
+        let embedded_artifact_path = artifact_path.with_file_name("app.exe.artifact.toml");
+        let exe_bytes = fs::read(&artifact_path).expect("emitted exe should read");
+        assert!(
+            !exe_bytes.is_empty(),
+            "expected non-empty emitted exe at {}",
+            artifact_path.display()
+        );
+        assert_eq!(metadata.target_format, AOT_WINDOWS_EXE_FORMAT);
+        assert_eq!(
+            metadata.support_files,
+            vec!["app.exe.arcana-native.toml".to_string()]
+        );
+        assert!(
+            !launch_path.exists(),
+            "did not expect legacy launch metadata at {}",
+            launch_path.display()
+        );
+        assert!(
+            !embedded_artifact_path.exists(),
+            "did not expect legacy embedded artifact at {}",
+            embedded_artifact_path.display()
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stage_distribution_bundle_exports_windows_exe_output() {
+        let dir = temp_dir("dist_windows_exe");
+        write_file(&dir.join("book.toml"), "name = \"app\"\nkind = \"app\"\n");
+        write_file(
+            &dir.join("src").join("shelf.arc"),
+            "fn main() -> Int:\n    return 0\n",
+        );
+        write_file(&dir.join("src").join("types.arc"), "// types\n");
+
+        let graph = load_workspace_graph(&dir).expect("load graph");
+        let order = plan_workspace(&graph).expect("plan");
+        let prepared = prepare_test_build(&graph);
+        let statuses = plan_build_for_target_with_context(
+            &graph,
+            &order,
+            &prepared,
+            None,
+            BuildTarget::windows_exe(),
+            &BuildExecutionContext::default(),
+        )
+        .expect("windows exe plan should build");
+        execute_build_with_context(
+            &graph,
+            &prepared,
+            &statuses,
+            &BuildExecutionContext::default(),
+        )
+        .expect("windows exe build should succeed");
+
+        let bundle_dir = default_distribution_dir(&graph, "app", &BuildTarget::windows_exe());
+        let bundle = stage_distribution_bundle(
+            &graph,
+            &statuses,
+            "app",
+            &BuildTarget::windows_exe(),
+            &bundle_dir,
+        )
+        .expect("distribution staging should succeed");
+        assert_eq!(bundle.root_artifact, "app.exe");
+        assert_eq!(
+            bundle.support_files,
+            vec!["app.exe.arcana-native.toml".to_string()]
+        );
+        let manifest_text =
+            fs::read_to_string(&bundle.manifest_path).expect("distribution manifest should read");
+        assert!(manifest_text.contains("format = \"arcana-distribution-bundle-v1\""));
+        assert!(bundle.bundle_dir.join("app.exe").is_file());
+        assert!(
+            bundle
+                .bundle_dir
+                .join("app.exe.arcana-native.toml")
+                .is_file(),
+            "expected staged native manifest beside exe"
+        );
+        assert!(
+            !bundle.bundle_dir.join("app.exe.artifact.toml").exists(),
+            "did not expect legacy embedded artifact in staged bundle"
+        );
+        assert!(
+            !bundle
+                .bundle_dir
+                .join("app.exe.arcana-launch.toml")
+                .exists(),
+            "did not expect legacy launch manifest in staged bundle"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn second_windows_exe_build_is_cache_hit() {
+        let dir = temp_dir("windows_exe_cache_hit");
+        write_file(&dir.join("book.toml"), "name = \"app\"\nkind = \"app\"\n");
+        write_file(
+            &dir.join("src").join("shelf.arc"),
+            "fn main() -> Int:\n    return 0\n",
+        );
+        write_file(&dir.join("src").join("types.arc"), "// types\n");
+
+        let graph = load_workspace_graph(&dir).expect("load graph");
+        let order = plan_workspace(&graph).expect("plan");
+        let prepared = prepare_test_build(&graph);
+        let first_statuses = plan_build_for_target_with_context(
+            &graph,
+            &order,
+            &prepared,
+            None,
+            BuildTarget::windows_exe(),
+            &BuildExecutionContext::default(),
+        )
+        .expect("first windows exe plan should build");
+        execute_build_with_context(
+            &graph,
+            &prepared,
+            &first_statuses,
+            &BuildExecutionContext::default(),
+        )
+        .expect("first windows exe build should succeed");
+        let lock_path = write_lockfile(&graph, &order, &first_statuses).expect("lockfile");
+        let existing = read_lockfile(&lock_path)
+            .expect("read lockfile")
+            .expect("lockfile should exist");
+
+        let second_statuses = plan_build_for_target_with_context(
+            &graph,
+            &order,
+            &prepared,
+            Some(&existing),
+            BuildTarget::windows_exe(),
+            &BuildExecutionContext::default(),
+        )
+        .expect("second windows exe plan should succeed");
+        assert_dispositions(&second_statuses, &[("app", BuildDisposition::CacheHit)]);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn execute_build_emits_windows_dll_bundle_with_typed_header() {
+        let dir = temp_dir("pending_windows_dll");
+        write_file(&dir.join("book.toml"), "name = \"core\"\nkind = \"lib\"\n");
+        write_file(
+            &dir.join("src").join("book.arc"),
+            "export fn answer() -> Int:\n    return 11\n",
+        );
+        write_file(&dir.join("src").join("types.arc"), "// types\n");
+
+        let graph = load_workspace_graph(&dir).expect("load graph");
+        let order = plan_workspace(&graph).expect("plan");
+        let prepared = prepare_test_build(&graph);
+        let statuses = plan_build_for_target_with_context(
+            &graph,
+            &order,
+            &prepared,
+            None,
+            BuildTarget::windows_dll(),
+            &BuildExecutionContext::default(),
+        )
+        .expect("windows dll plan should build");
+        execute_build_with_context(
+            &graph,
+            &prepared,
+            &statuses,
+            &BuildExecutionContext::default(),
+        )
+        .expect("windows dll build should succeed");
+
+        let artifact_path = graph.root_dir.join(statuses[0].artifact_rel_path());
+        let metadata = crate::build_identity::read_cached_output_metadata(
+            &artifact_path,
+            &BuildTarget::windows_dll(),
+        )
+        .expect("native dll cache metadata should read");
+        assert!(artifact_path.is_file());
+        assert_eq!(metadata.target_format, AOT_WINDOWS_DLL_FORMAT);
+        assert_eq!(
+            metadata.support_files,
+            vec![
+                "lib.dll.h".to_string(),
+                "lib.dll.def".to_string(),
+                "lib.dll.arcana-native.toml".to_string()
+            ]
+        );
+        let header_text = fs::read_to_string(artifact_path.with_file_name("lib.dll.h"))
+            .expect("typed dll header should read");
+        assert!(header_text.contains("uint8_t answer(int64_t* out_result);"));
+        let def_text = fs::read_to_string(artifact_path.with_file_name("lib.dll.def"))
+            .expect("dll definition file should read");
+        assert!(def_text.contains("EXPORTS"));
+        assert!(def_text.contains("answer"));
+        let native_manifest =
+            fs::read_to_string(artifact_path.with_file_name("lib.dll.arcana-native.toml"))
+                .expect("native dll manifest should read");
+        assert!(native_manifest.contains("format = \"arcana-native-bundle-manifest-v1\""));
+        assert!(native_manifest.contains("kind = \"dynamic-library\""));
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     fn disposition_map(statuses: &[BuildStatus]) -> BTreeMap<String, BuildDisposition> {
@@ -1431,6 +1743,45 @@ mod tests {
     }
 
     #[test]
+    fn read_lockfile_infers_legacy_native_exe_target() {
+        let dir = temp_dir("legacy_lock_native_exe");
+        let lock_path = dir.join("Arcana.lock");
+        write_file(
+            &lock_path,
+            concat!(
+                "version = 1\n",
+                "workspace = \"ws\"\n",
+                "toolchain = \"binary-sha256:abc\"\n",
+                "order = [\"app\"]\n\n",
+                "[paths]\n",
+                "\"app\" = \"app\"\n\n",
+                "[deps]\n",
+                "\"app\" = []\n\n",
+                "[kinds]\n",
+                "\"app\" = \"app\"\n\n",
+                "[formats]\n",
+                "\"app\" = \"arcana-native-exe-v1\"\n\n",
+                "[fingerprints]\n",
+                "\"app\" = \"fp\"\n\n",
+                "[api_fingerprints]\n",
+                "\"app\" = \"api\"\n\n",
+                "[artifacts]\n",
+                "\"app\" = \".arcana/artifacts/app/windows-exe/fp/app.exe\"\n\n",
+                "[artifact_hashes]\n",
+                "\"app\" = \"sha256:deadbeef\"\n",
+            ),
+        );
+
+        let lock = read_lockfile(&lock_path)
+            .expect("legacy lockfile should parse")
+            .expect("lockfile should exist");
+        let app = lock.members.get("app").expect("app member should exist");
+        assert!(app.target(&BuildTarget::windows_exe()).is_some());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn second_build_is_cache_hit_only() {
         let dir = temp_dir("cache_hit");
         write_file(
@@ -1614,26 +1965,12 @@ mod tests {
         let (first_prepared, first_statuses) = plan_test_build(&graph, &order, None);
         execute_planned_build(&graph, &first_prepared, &first_statuses).expect("execute build");
         let lock_path = write_lockfile(&graph, &order, &first_statuses).expect("lockfile");
-        let existing = read_lockfile(&lock_path)
-            .expect("read lock")
-            .expect("lock exists");
 
         let status = status(&first_statuses, "app");
         let artifact_path = graph.root_dir.join(&status.artifact_rel_path);
         let stale = fs::read_to_string(&artifact_path).expect("artifact should exist");
-        let old_hash = existing
-            .members
-            .get("app")
-            .and_then(|member| member.target(&BuildTarget::internal_aot()))
-            .map(|target| target.artifact_hash.clone())
-            .expect("lockfile should record the app artifact hash");
         let malformed = stale.replace("module=app:import:std.io:", "module=app:import::");
-        let new_hash = cached_artifact_body_hash(&malformed);
-        let malformed = malformed.replace(&old_hash, &new_hash);
         fs::write(&artifact_path, malformed).expect("artifact should be rewritten");
-        let stale_lock = fs::read_to_string(&lock_path).expect("lockfile should exist");
-        fs::write(&lock_path, stale_lock.replace(&old_hash, &new_hash))
-            .expect("lockfile should be rewritten");
         let existing = read_lockfile(&lock_path)
             .expect("read lock")
             .expect("lock exists");

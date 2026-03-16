@@ -2,9 +2,11 @@ use super::{
     BufferedEvent, BufferedFrameInput, BufferedHost, ParsedExpr, ParsedPageRollup, ParsedPhraseArg,
     ParsedPhraseQualifierKind, ParsedStmt, RuntimeCallArg, RuntimeEntrypointPlan,
     RuntimeExecutionState, RuntimeHost, RuntimeOpaqueValue, RuntimePackagePlan, RuntimeParamPlan,
-    RuntimeRoutinePlan, RuntimeValue, execute_main, execute_routine, insert_runtime_channel,
-    load_package_plan, parse_rollup_row, parse_stmt, plan_from_artifact, resolve_routine_index,
-    resolve_routine_index_for_call,
+    RuntimeRoutinePlan, RuntimeValue, execute_entrypoint_routine, execute_exported_abi_routine,
+    execute_exported_json_abi_routine, execute_main, execute_routine, insert_runtime_channel,
+    load_package_plan, parse_rollup_row, parse_runtime_package_image, parse_stmt,
+    plan_from_artifact, render_exported_json_abi_manifest, render_runtime_package_image,
+    resolve_routine_index, resolve_routine_index_for_call,
 };
 use arcana_aot::{
     AOT_INTERNAL_FORMAT, AotEntrypointArtifact, AotPackageArtifact, AotPackageModuleArtifact,
@@ -471,6 +473,14 @@ fn load_package_plan_reads_rendered_backend_artifact() {
 }
 
 #[test]
+fn runtime_package_image_roundtrips_runtime_plan() {
+    let plan = plan_from_artifact(&sample_return_artifact()).expect("runtime plan should build");
+    let image = render_runtime_package_image(&plan).expect("runtime package image should render");
+    let decoded = parse_runtime_package_image(&image).expect("runtime package image should parse");
+    assert_eq!(decoded, plan);
+}
+
+#[test]
 fn load_package_plan_accepts_behavior_attr_values_with_colons() {
     let dir = temp_workspace_dir("behavior_attr_colons");
     write_file(
@@ -789,6 +799,246 @@ fn execute_main_prints_hello() {
 }
 
 #[test]
+fn runtime_json_abi_manifest_lists_exported_callable_routines() {
+    let plan = plan_from_artifact(&sample_return_artifact()).expect("runtime plan should build");
+    let manifest = render_exported_json_abi_manifest(&plan).expect("json abi manifest");
+    let value = manifest
+        .parse::<serde_json::Value>()
+        .expect("manifest should parse as json");
+    assert_eq!(value["format"].as_str(), Some("arcana-runtime-json-abi-v1"));
+    let routines = value["routines"]
+        .as_array()
+        .expect("manifest routines should be an array");
+    assert_eq!(routines.len(), 1);
+    assert_eq!(routines[0]["routine_key"].as_str(), Some("hello#sym-0"));
+}
+
+#[test]
+fn runtime_json_abi_executes_exported_routine() {
+    let plan = RuntimePackagePlan {
+        package_name: "tool".to_string(),
+        root_module_id: "tool".to_string(),
+        direct_deps: Vec::new(),
+        runtime_requirements: Vec::new(),
+        module_aliases: BTreeMap::new(),
+        entrypoints: Vec::new(),
+        routines: vec![RuntimeRoutinePlan {
+            module_id: "tool".to_string(),
+            routine_key: "tool#fn-0".to_string(),
+            symbol_name: "answer".to_string(),
+            symbol_kind: "fn".to_string(),
+            exported: true,
+            is_async: false,
+            type_params: Vec::new(),
+            behavior_attrs: BTreeMap::new(),
+            params: vec![RuntimeParamPlan {
+                mode: None,
+                name: "value".to_string(),
+                ty: "Int".to_string(),
+            }],
+            signature_row: "fn answer(value: Int) -> Int:".to_string(),
+            intrinsic_impl: None,
+            impl_target_type: None,
+            impl_trait_path: None,
+            foreword_rows: Vec::new(),
+            rollups: Vec::new(),
+            statements: vec![ParsedStmt::ReturnValue {
+                value: ParsedExpr::Binary {
+                    op: arcana_ir::ExecBinaryOp::Add,
+                    left: Box::new(ParsedExpr::Path(vec!["value".to_string()])),
+                    right: Box::new(ParsedExpr::Int(2)),
+                },
+            }],
+        }],
+    };
+    let mut host = BufferedHost::default();
+    let result = execute_exported_json_abi_routine(&plan, "tool#fn-0", "[5]", &mut host)
+        .expect("json abi invoke should succeed");
+    assert_eq!(result, "7");
+}
+
+#[test]
+fn runtime_native_abi_executes_exported_routine() {
+    let plan = RuntimePackagePlan {
+        package_name: "tool".to_string(),
+        root_module_id: "tool".to_string(),
+        direct_deps: Vec::new(),
+        runtime_requirements: Vec::new(),
+        module_aliases: BTreeMap::new(),
+        entrypoints: Vec::new(),
+        routines: vec![RuntimeRoutinePlan {
+            module_id: "tool".to_string(),
+            routine_key: "tool#fn-0".to_string(),
+            symbol_name: "answer".to_string(),
+            symbol_kind: "fn".to_string(),
+            exported: true,
+            is_async: false,
+            type_params: Vec::new(),
+            behavior_attrs: BTreeMap::new(),
+            params: vec![RuntimeParamPlan {
+                mode: None,
+                name: "value".to_string(),
+                ty: "Int".to_string(),
+            }],
+            signature_row: "fn answer(value: Int) -> Int:".to_string(),
+            intrinsic_impl: None,
+            impl_target_type: None,
+            impl_trait_path: None,
+            foreword_rows: Vec::new(),
+            rollups: Vec::new(),
+            statements: vec![ParsedStmt::ReturnValue {
+                value: ParsedExpr::Binary {
+                    op: arcana_ir::ExecBinaryOp::Add,
+                    left: Box::new(ParsedExpr::Path(vec!["value".to_string()])),
+                    right: Box::new(ParsedExpr::Int(2)),
+                },
+            }],
+        }],
+    };
+    let mut host = BufferedHost::default();
+    let result = execute_exported_abi_routine(
+        &plan,
+        "tool#fn-0",
+        vec![super::RuntimeAbiValue::Int(5)],
+        &mut host,
+    )
+    .expect("native abi invoke should succeed");
+    assert_eq!(result, super::RuntimeAbiValue::Int(7));
+}
+
+#[test]
+fn runtime_native_abi_supports_string_and_byte_values() {
+    let plan = RuntimePackagePlan {
+        package_name: "tool".to_string(),
+        root_module_id: "tool".to_string(),
+        direct_deps: Vec::new(),
+        runtime_requirements: Vec::new(),
+        module_aliases: BTreeMap::new(),
+        entrypoints: Vec::new(),
+        routines: vec![
+            RuntimeRoutinePlan {
+                module_id: "tool".to_string(),
+                routine_key: "tool#fn-0".to_string(),
+                symbol_name: "greet".to_string(),
+                symbol_kind: "fn".to_string(),
+                exported: true,
+                is_async: false,
+                type_params: Vec::new(),
+                behavior_attrs: BTreeMap::new(),
+                params: vec![RuntimeParamPlan {
+                    mode: Some("read".to_string()),
+                    name: "name".to_string(),
+                    ty: "Str".to_string(),
+                }],
+                signature_row: "fn greet(read name: Str) -> Str:".to_string(),
+                intrinsic_impl: None,
+                impl_target_type: None,
+                impl_trait_path: None,
+                foreword_rows: Vec::new(),
+                rollups: Vec::new(),
+                statements: vec![ParsedStmt::ReturnValue {
+                    value: ParsedExpr::Binary {
+                        op: arcana_ir::ExecBinaryOp::Add,
+                        left: Box::new(ParsedExpr::Str("hi ".to_string())),
+                        right: Box::new(ParsedExpr::Path(vec!["name".to_string()])),
+                    },
+                }],
+            },
+            RuntimeRoutinePlan {
+                module_id: "tool".to_string(),
+                routine_key: "tool#fn-1".to_string(),
+                symbol_name: "tail".to_string(),
+                symbol_kind: "fn".to_string(),
+                exported: true,
+                is_async: false,
+                type_params: Vec::new(),
+                behavior_attrs: BTreeMap::new(),
+                params: vec![RuntimeParamPlan {
+                    mode: Some("read".to_string()),
+                    name: "bytes".to_string(),
+                    ty: "Array[Int]".to_string(),
+                }],
+                signature_row: "fn tail(read bytes: Array[Int]) -> Array[Int]:".to_string(),
+                intrinsic_impl: None,
+                impl_target_type: None,
+                impl_trait_path: None,
+                foreword_rows: Vec::new(),
+                rollups: Vec::new(),
+                statements: vec![ParsedStmt::ReturnValue {
+                    value: ParsedExpr::Slice {
+                        expr: Box::new(ParsedExpr::Path(vec!["bytes".to_string()])),
+                        start: Some(Box::new(ParsedExpr::Int(1))),
+                        end: None,
+                        inclusive_end: false,
+                    },
+                }],
+            },
+            RuntimeRoutinePlan {
+                module_id: "tool".to_string(),
+                routine_key: "tool#fn-2".to_string(),
+                symbol_name: "echo_pair".to_string(),
+                symbol_kind: "fn".to_string(),
+                exported: true,
+                is_async: false,
+                type_params: Vec::new(),
+                behavior_attrs: BTreeMap::new(),
+                params: vec![RuntimeParamPlan {
+                    mode: Some("read".to_string()),
+                    name: "pair".to_string(),
+                    ty: "Pair[Str, Int]".to_string(),
+                }],
+                signature_row: "fn echo_pair(read pair: Pair[Str, Int]) -> Pair[Str, Int]:"
+                    .to_string(),
+                intrinsic_impl: None,
+                impl_target_type: None,
+                impl_trait_path: None,
+                foreword_rows: Vec::new(),
+                rollups: Vec::new(),
+                statements: vec![ParsedStmt::ReturnValue {
+                    value: ParsedExpr::Path(vec!["pair".to_string()]),
+                }],
+            },
+        ],
+    };
+    let mut host = BufferedHost::default();
+    let greet = execute_exported_abi_routine(
+        &plan,
+        "tool#fn-0",
+        vec![super::RuntimeAbiValue::Str("arcana".to_string())],
+        &mut host,
+    )
+    .expect("string abi invoke should succeed");
+    assert_eq!(greet, super::RuntimeAbiValue::Str("hi arcana".to_string()));
+
+    let tail = execute_exported_abi_routine(
+        &plan,
+        "tool#fn-1",
+        vec![super::RuntimeAbiValue::Bytes(b"arc".to_vec())],
+        &mut host,
+    )
+    .expect("byte abi invoke should succeed");
+    assert_eq!(tail, super::RuntimeAbiValue::Bytes(b"rc".to_vec()));
+
+    let echoed = execute_exported_abi_routine(
+        &plan,
+        "tool#fn-2",
+        vec![super::RuntimeAbiValue::Pair(
+            Box::new(super::RuntimeAbiValue::Str("arcana".to_string())),
+            Box::new(super::RuntimeAbiValue::Int(7)),
+        )],
+        &mut host,
+    )
+    .expect("pair abi invoke should succeed");
+    assert_eq!(
+        echoed,
+        super::RuntimeAbiValue::Pair(
+            Box::new(super::RuntimeAbiValue::Str("arcana".to_string())),
+            Box::new(super::RuntimeAbiValue::Int(7)),
+        )
+    );
+}
+
+#[test]
 fn execute_main_rejects_missing_runtime_requirement() {
     let plan = plan_from_artifact(&sample_print_artifact()).expect("runtime plan should build");
     let mut host = BufferedHost {
@@ -800,6 +1050,15 @@ fn execute_main_rejects_missing_runtime_requirement() {
         err.contains("std.io"),
         "expected std.io capability error, got {err}"
     );
+}
+
+#[test]
+fn execute_entrypoint_routine_runs_named_main_by_routine_key() {
+    let plan = plan_from_artifact(&sample_return_artifact()).expect("runtime plan should build");
+    let mut host = BufferedHost::default();
+    let code = execute_entrypoint_routine(&plan, "hello#sym-0", &mut host)
+        .expect("named entrypoint routine should execute");
+    assert_eq!(code, 7);
 }
 
 #[test]
