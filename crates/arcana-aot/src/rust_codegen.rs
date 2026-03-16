@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 use crate::native_abi::{NativeAbiParam, NativeAbiType, NativeExport};
 use crate::native_layout::{NativeAbiRole, NativeLayoutCatalog};
 use crate::native_lowering::{
-    NativeDirectExpr, NativeDirectRoutine, NativeExportLowering, NativeLaunchLowering,
+    NativeDirectBlock, NativeDirectExpr, NativeDirectIntBinaryOp, NativeDirectIntCompareOp,
+    NativeDirectRoutine, NativeDirectStmt, NativeExportLowering, NativeLaunchLowering,
     NativeLoweringPlan, NativeRoutineLowering,
 };
 use crate::native_manifest::{
@@ -609,13 +610,16 @@ fn render_runtime_abi_expr_from_native(ty: &NativeAbiType, expr: &str, context: 
     }
 }
 
-fn render_lowered_runtime_abi_expr(expr: &NativeDirectExpr) -> String {
+fn render_lowered_runtime_abi_expr(expr: &NativeDirectExpr, indent_level: usize) -> String {
     match expr {
         NativeDirectExpr::Int(value) => {
             format!("Result::<RuntimeAbiValue, String>::Ok(RuntimeAbiValue::Int({value}))")
         }
         NativeDirectExpr::Bool(value) => {
             format!("Result::<RuntimeAbiValue, String>::Ok(RuntimeAbiValue::Bool({value}))")
+        }
+        NativeDirectExpr::Unit => {
+            "Result::<RuntimeAbiValue, String>::Ok(RuntimeAbiValue::Unit)".to_string()
         }
         NativeDirectExpr::Str(value) => {
             format!(
@@ -625,11 +629,17 @@ fn render_lowered_runtime_abi_expr(expr: &NativeDirectExpr) -> String {
         NativeDirectExpr::Bytes(bytes) => {
             format!("Result::<RuntimeAbiValue, String>::Ok(RuntimeAbiValue::Bytes(vec!{bytes:?}))")
         }
-        NativeDirectExpr::Param(name) => {
+        NativeDirectExpr::Binding(name) => {
             format!("Result::<RuntimeAbiValue, String>::Ok({name}_value.clone())")
         }
+        NativeDirectExpr::IntBinary { op, left, right } => {
+            render_direct_int_binary_expr(*op, left, right, indent_level)
+        }
+        NativeDirectExpr::IntCompare { op, left, right } => {
+            render_direct_int_compare_expr(*op, left, right, indent_level)
+        }
         NativeDirectExpr::Call { routine_key, args } => {
-            render_direct_routine_call_expr(routine_key, args)
+            render_direct_routine_call_expr(routine_key, args, indent_level)
         }
         NativeDirectExpr::Pair { left, right } => format!(
             concat!(
@@ -643,8 +653,8 @@ fn render_lowered_runtime_abi_expr(expr: &NativeDirectExpr) -> String {
                 "        }}\n",
                 "    }}"
             ),
-            render_lowered_runtime_abi_expr(left),
-            render_lowered_runtime_abi_expr(right),
+            render_lowered_runtime_abi_expr(left, indent_level + 2),
+            render_lowered_runtime_abi_expr(right, indent_level + 2),
         ),
         NativeDirectExpr::StringConcat { left, right } => format!(
             concat!(
@@ -663,9 +673,36 @@ fn render_lowered_runtime_abi_expr(expr: &NativeDirectExpr) -> String {
                 "        }}\n",
                 "    }}"
             ),
-            render_lowered_runtime_abi_expr(left),
-            render_lowered_runtime_abi_expr(right),
+            render_lowered_runtime_abi_expr(left, indent_level + 2),
+            render_lowered_runtime_abi_expr(right, indent_level + 2),
         ),
+        NativeDirectExpr::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            let base_indent = indent(indent_level);
+            let match_indent = indent(indent_level + 1);
+            let arm_indent = indent(indent_level + 2);
+            format!(
+                concat!(
+                    "{{\n",
+                    "{match_indent}match {condition} {{\n",
+                    "{arm_indent}Ok(RuntimeAbiValue::Bool(true)) => {then_block},\n",
+                    "{arm_indent}Ok(RuntimeAbiValue::Bool(false)) => {else_block},\n",
+                    "{arm_indent}Ok(_) => Err(\"direct if expected Bool condition\".to_string()),\n",
+                    "{arm_indent}Err(err) => Err(err),\n",
+                    "{match_indent}}}\n",
+                    "{base_indent}}}"
+                ),
+                match_indent = match_indent,
+                arm_indent = arm_indent,
+                base_indent = base_indent,
+                condition = render_lowered_runtime_abi_expr(condition, indent_level + 2),
+                then_block = render_direct_block_expr(then_block, indent_level + 2),
+                else_block = render_direct_block_expr(else_block, indent_level + 2),
+            )
+        }
     }
 }
 
@@ -684,16 +721,57 @@ fn render_direct_routine_helper(routine: &NativeDirectRoutine) -> String {
         .map(|param| format!("{}_value: RuntimeAbiValue", param.name))
         .collect::<Vec<_>>()
         .join(", ");
+    let body = render_direct_block_body(&routine.body, 1);
     format!(
         concat!(
             "fn {}({}) -> Result<RuntimeAbiValue, String> {{\n",
-            "    {}\n",
+            "{}",
             "}}\n\n"
         ),
         direct_routine_fn_name(&routine.routine_key),
         params,
-        render_lowered_runtime_abi_expr(&routine.body),
+        body,
     )
+}
+
+fn render_direct_block_body(block: &NativeDirectBlock, indent_level: usize) -> String {
+    let mut out = String::new();
+    for stmt in &block.statements {
+        out.push_str(&render_direct_routine_stmt(stmt, indent_level));
+    }
+    out.push_str(&indent(indent_level));
+    out.push_str(&render_lowered_runtime_abi_expr(
+        &block.return_expr,
+        indent_level,
+    ));
+    out.push('\n');
+    out
+}
+
+fn render_direct_block_expr(block: &NativeDirectBlock, indent_level: usize) -> String {
+    let mut out = String::new();
+    out.push_str("{\n");
+    out.push_str(&render_direct_block_body(block, indent_level + 1));
+    out.push_str(&indent(indent_level));
+    out.push('}');
+    out
+}
+
+fn render_direct_routine_stmt(stmt: &NativeDirectStmt, indent_level: usize) -> String {
+    match stmt {
+        NativeDirectStmt::Let { name, value } => format!(
+            concat!(
+                "{indent}let {}_value = match {} {{\n",
+                "{match_indent}Ok(value) => value,\n",
+                "{match_indent}Err(err) => return Err(err),\n",
+                "{indent}}};\n"
+            ),
+            name,
+            render_lowered_runtime_abi_expr(value, indent_level + 1),
+            indent = indent(indent_level),
+            match_indent = indent(indent_level + 1),
+        ),
+    }
 }
 
 fn render_direct_routine_call_from_values(routine_key: &str, values: &[String]) -> String {
@@ -704,8 +782,12 @@ fn render_direct_routine_call_from_values(routine_key: &str, values: &[String]) 
     )
 }
 
-fn render_direct_routine_call_expr(routine_key: &str, args: &[NativeDirectExpr]) -> String {
-    render_direct_routine_call_match_chain(routine_key, args, 0, &mut Vec::new())
+fn render_direct_routine_call_expr(
+    routine_key: &str,
+    args: &[NativeDirectExpr],
+    indent_level: usize,
+) -> String {
+    render_direct_routine_call_match_chain(routine_key, args, 0, &mut Vec::new(), indent_level)
 }
 
 fn render_direct_routine_call_match_chain(
@@ -713,26 +795,117 @@ fn render_direct_routine_call_match_chain(
     args: &[NativeDirectExpr],
     index: usize,
     bound_args: &mut Vec<String>,
+    indent_level: usize,
 ) -> String {
     if index == args.len() {
         return render_direct_routine_call_from_values(routine_key, bound_args);
     }
     let binding = format!("arg_{index}");
     bound_args.push(binding.clone());
-    let next = render_direct_routine_call_match_chain(routine_key, args, index + 1, bound_args);
+    let next = render_direct_routine_call_match_chain(
+        routine_key,
+        args,
+        index + 1,
+        bound_args,
+        indent_level + 1,
+    );
     bound_args.pop();
     format!(
         concat!(
             "{{\n",
-            "        match {} {{\n",
-            "            Ok({}) => {},\n",
-            "            Err(err) => Err(err),\n",
-            "        }}\n",
-            "    }}"
+            "{match_indent}match {} {{\n",
+            "{arm_indent}Ok({}) => {},\n",
+            "{arm_indent}Err(err) => Err(err),\n",
+            "{match_indent}}}\n",
+            "{indent}}}"
         ),
-        render_lowered_runtime_abi_expr(&args[index]),
+        render_lowered_runtime_abi_expr(&args[index], indent_level + 2),
         binding,
         next,
+        indent = indent(indent_level),
+        match_indent = indent(indent_level + 1),
+        arm_indent = indent(indent_level + 2),
+    )
+}
+
+fn render_direct_int_binary_expr(
+    op: NativeDirectIntBinaryOp,
+    left: &NativeDirectExpr,
+    right: &NativeDirectExpr,
+    indent_level: usize,
+) -> String {
+    let op_text = match op {
+        NativeDirectIntBinaryOp::Add => "+",
+        NativeDirectIntBinaryOp::Sub => "-",
+        NativeDirectIntBinaryOp::Mul => "*",
+        NativeDirectIntBinaryOp::Div => "/",
+        NativeDirectIntBinaryOp::Mod => "%",
+    };
+    render_direct_int_expr(
+        left,
+        right,
+        indent_level,
+        format!("Ok(RuntimeAbiValue::Int(left {op_text} right))"),
+        "direct Int op expected Int lhs",
+        "direct Int op expected Int rhs",
+    )
+}
+
+fn render_direct_int_compare_expr(
+    op: NativeDirectIntCompareOp,
+    left: &NativeDirectExpr,
+    right: &NativeDirectExpr,
+    indent_level: usize,
+) -> String {
+    let op_text = match op {
+        NativeDirectIntCompareOp::Eq => "==",
+        NativeDirectIntCompareOp::NotEq => "!=",
+        NativeDirectIntCompareOp::Lt => "<",
+        NativeDirectIntCompareOp::LtEq => "<=",
+        NativeDirectIntCompareOp::Gt => ">",
+        NativeDirectIntCompareOp::GtEq => ">=",
+    };
+    render_direct_int_expr(
+        left,
+        right,
+        indent_level,
+        format!("Ok(RuntimeAbiValue::Bool(left {op_text} right))"),
+        "direct Int compare expected Int lhs",
+        "direct Int compare expected Int rhs",
+    )
+}
+
+fn render_direct_int_expr(
+    left: &NativeDirectExpr,
+    right: &NativeDirectExpr,
+    indent_level: usize,
+    success_expr: String,
+    lhs_message: &str,
+    rhs_message: &str,
+) -> String {
+    format!(
+        concat!(
+            "{{\n",
+            "{match_indent}match {} {{\n",
+            "{arm_indent}Ok(RuntimeAbiValue::Int(left)) => match {} {{\n",
+            "{deep_indent}Ok(RuntimeAbiValue::Int(right)) => {},\n",
+            "{deep_indent}Ok(_) => Err({rhs_message:?}.to_string()),\n",
+            "{deep_indent}Err(err) => Err(err),\n",
+            "{arm_indent}}},\n",
+            "{arm_indent}Ok(_) => Err({lhs_message:?}.to_string()),\n",
+            "{arm_indent}Err(err) => Err(err),\n",
+            "{match_indent}}}\n",
+            "{indent}}}"
+        ),
+        render_lowered_runtime_abi_expr(left, indent_level + 2),
+        render_lowered_runtime_abi_expr(right, indent_level + 3),
+        success_expr,
+        indent = indent(indent_level),
+        match_indent = indent(indent_level + 1),
+        arm_indent = indent(indent_level + 2),
+        deep_indent = indent(indent_level + 3),
+        lhs_message = lhs_message,
+        rhs_message = rhs_message,
     )
 }
 
@@ -795,6 +968,10 @@ fn render_store_runtime_abi_value(
             )
         }
     }
+}
+
+fn indent(level: usize) -> String {
+    "    ".repeat(level)
 }
 
 fn repo_root() -> PathBuf {

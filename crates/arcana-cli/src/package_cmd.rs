@@ -213,9 +213,14 @@ mod tests {
             &dir,
             concat!(
                 "fn helper(value: Int) -> Int:\n",
-                "    return value\n",
+                "    let bumped = value + 1\n",
+                "    return bumped\n",
                 "fn main() -> Int:\n",
-                "    return helper :: 9 :: call\n",
+                "    let base = 8\n",
+                "    if base >= 8:\n",
+                "        return helper :: base :: call\n",
+                "    else:\n",
+                "        return 0\n",
             ),
         );
 
@@ -253,9 +258,14 @@ mod tests {
             concat!(
                 "import std.bytes\n",
                 "fn answer_impl(value: Int) -> Int:\n",
-                "    return value\n",
+                "    let doubled = value * 2\n",
+                "    return doubled\n",
                 "export fn answer() -> Int:\n",
-                "    return answer_impl :: 11 :: call\n",
+                "    let base = 6\n",
+                "    if base > 4:\n",
+                "        return answer_impl :: base :: call\n",
+                "    else:\n",
+                "        return 0\n",
                 "export fn greet(read name: Str) -> Str:\n",
                 "    return \"hello \" + name\n",
                 "export fn prefix() -> Array[Int]:\n",
@@ -330,7 +340,7 @@ mod tests {
                     read_allocated_utf8(&last_error, &free_bytes).expect("last error should read");
                 panic!("typed dll export failed: {err}");
             }
-            assert_eq!(result, 11);
+            assert_eq!(result, 12);
 
             let mut greeting = ArcanaOwnedStr::default();
             let name = b"arcana";

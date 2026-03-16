@@ -17,6 +17,7 @@ If a reference doc still contains useful deferred direction, that direction must
 
 Useful current reference docs:
 - `docs/reference/audits/milestone_6_7_findings_closure_matrix_v1.md`
+- `docs/reference/backend/milestone_8_native_handoff.md`
 - `docs/reference/language/rewrite-language-audit-sheet.md`
 - `docs/reference/language/current-coding-practice-draft.md`
 
