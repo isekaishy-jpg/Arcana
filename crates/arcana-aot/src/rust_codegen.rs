@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use crate::native_abi::{NativeAbiParam, NativeAbiType, NativeExport};
 use crate::native_layout::{NativeAbiRole, NativeLayoutCatalog};
 use crate::native_lowering::{
-    NativeDirectExpr, NativeExportLowering, NativeLaunchLowering, NativeLoweringPlan,
-    NativeRoutineLowering,
+    NativeDirectExpr, NativeDirectRoutine, NativeExportLowering, NativeLaunchLowering,
+    NativeLoweringPlan, NativeRoutineLowering,
 };
 use crate::native_manifest::{
     native_bundle_manifest_file_name, render_native_bundle_manifest,
@@ -59,7 +59,11 @@ pub fn generate_windows_exe_project(
         cargo_toml: render_exe_cargo_toml(plan.artifact.package_name.as_str(), &output_stem),
         build_rs: Some(render_native_build_rs(None)),
         lib_rs: None,
-        main_rs: Some(render_exe_main_rs(main_routine_key, main_lowering)),
+        main_rs: Some(render_exe_main_rs(
+            main_routine_key,
+            main_lowering,
+            lowering,
+        )),
     })
 }
 
@@ -111,7 +115,7 @@ pub fn generate_windows_dll_project(
         ],
         cargo_toml: render_dll_cargo_toml(plan.artifact.package_name.as_str(), &output_stem),
         build_rs: Some(render_native_build_rs(Some(&definition_text))),
-        lib_rs: Some(render_dll_lib_rs(lowered_exports, &layout)),
+        lib_rs: Some(render_dll_lib_rs(lowered_exports, &layout, lowering)),
         main_rs: None,
     })
 }
@@ -202,11 +206,16 @@ fn render_dll_cargo_toml(crate_name: &str, output_stem: &str) -> String {
     )
 }
 
-fn render_exe_main_rs(main_routine_key: &str, lowering: &NativeRoutineLowering) -> String {
+fn render_exe_main_rs(
+    main_routine_key: &str,
+    lowering: &NativeRoutineLowering,
+    plan: &NativeLoweringPlan,
+) -> String {
     match lowering {
-        NativeRoutineLowering::Direct(expr) => format!(
+        NativeRoutineLowering::Direct { routine_key } => format!(
             concat!(
                 "use arcana_runtime::RuntimeAbiValue;\n\n",
+                "{}",
                 "fn main() {{\n",
                 "    let code = match run() {{\n",
                 "        Ok(code) => code,\n",
@@ -226,14 +235,15 @@ fn render_exe_main_rs(main_routine_key: &str, lowering: &NativeRoutineLowering) 
                 "        .map_err(|_| format!(\"main routine `{}` returned Int outside i32 range: {{code}}\"))\n",
                 "}}\n",
             ),
-            render_lowered_runtime_abi_expr(expr),
+            render_direct_routine_helpers(plan),
+            render_direct_routine_call_from_values(routine_key, &[]),
             main_routine_key,
         ),
         NativeRoutineLowering::RuntimeDispatch => {
             let template = concat!(
                 "use std::collections::BTreeMap;\n",
                 "use std::io::{self, Write};\n\n",
-                "use arcana_runtime::{BufferedHost, execute_entrypoint_routine, parse_runtime_package_image};\n\n",
+                "use arcana_runtime::{BufferedHost, RuntimeAbiValue, execute_entrypoint_routine, parse_runtime_package_image};\n\n",
                 "static PACKAGE_IMAGE_TEXT: &str = include_str!(concat!(env!(\"OUT_DIR\"), \"/runtime-package.json\"));\n\n",
                 "static MAIN_ROUTINE_KEY: &str = __ARCANA_MAIN_ROUTINE_KEY__;\n\n",
                 "fn main() {\n",
@@ -277,10 +287,13 @@ fn render_exe_main_rs(main_routine_key: &str, lowering: &NativeRoutineLowering) 
                 "    Ok(())\n",
                 "}\n",
             );
-            template.replace(
+            let mut out = String::new();
+            out.push_str(&render_direct_routine_helpers(plan));
+            out.push_str(&template.replace(
                 "__ARCANA_MAIN_ROUTINE_KEY__",
                 &format!("{main_routine_key:?}"),
-            )
+            ));
+            out
         }
     }
 }
@@ -333,7 +346,11 @@ fn render_native_build_rs(dll_definition_text: Option<&str>) -> String {
     out
 }
 
-fn render_dll_lib_rs(exports: &[NativeExportLowering], layout: &NativeLayoutCatalog) -> String {
+fn render_dll_lib_rs(
+    exports: &[NativeExportLowering],
+    layout: &NativeLayoutCatalog,
+    lowering: &NativeLoweringPlan,
+) -> String {
     let mut out = String::new();
     out.push_str(
         concat!(
@@ -413,6 +430,7 @@ fn render_dll_lib_rs(exports: &[NativeExportLowering], layout: &NativeLayoutCata
         ),
     );
     out.push_str(&layout.render_rust_type_defs());
+    out.push_str(&render_direct_routine_helpers(lowering));
 
     for export in exports {
         out.push_str(&render_export_fn(export, layout));
@@ -441,9 +459,15 @@ fn render_export_fn(export: &NativeExportLowering, layout: &NativeLayoutCatalog)
         body.push_str(&render_native_param_binding(api, param, layout));
     }
     match &export.lowering {
-        NativeRoutineLowering::Direct(expr) => {
+        NativeRoutineLowering::Direct { routine_key } => {
             body.push_str("    let result = match ");
-            body.push_str(&render_lowered_runtime_abi_expr(expr));
+            body.push_str(&render_direct_routine_call_from_values(
+                routine_key,
+                &api.params
+                    .iter()
+                    .map(|param| format!("{}_value", param.name))
+                    .collect::<Vec<_>>(),
+            ));
             body.push_str(" {\n");
             body.push_str("        Ok(value) => value,\n");
             body.push_str("        Err(err) => { set_last_error(err); return 0; }\n");
@@ -604,6 +628,9 @@ fn render_lowered_runtime_abi_expr(expr: &NativeDirectExpr) -> String {
         NativeDirectExpr::Param(name) => {
             format!("Result::<RuntimeAbiValue, String>::Ok({name}_value.clone())")
         }
+        NativeDirectExpr::Call { routine_key, args } => {
+            render_direct_routine_call_expr(routine_key, args)
+        }
         NativeDirectExpr::Pair { left, right } => format!(
             concat!(
                 "{{\n",
@@ -640,6 +667,73 @@ fn render_lowered_runtime_abi_expr(expr: &NativeDirectExpr) -> String {
             render_lowered_runtime_abi_expr(right),
         ),
     }
+}
+
+fn render_direct_routine_helpers(plan: &NativeLoweringPlan) -> String {
+    let mut out = String::new();
+    for routine in &plan.direct_routines {
+        out.push_str(&render_direct_routine_helper(routine));
+    }
+    out
+}
+
+fn render_direct_routine_helper(routine: &NativeDirectRoutine) -> String {
+    let params = routine
+        .params
+        .iter()
+        .map(|param| format!("{}_value: RuntimeAbiValue", param.name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        concat!(
+            "fn {}({}) -> Result<RuntimeAbiValue, String> {{\n",
+            "    {}\n",
+            "}}\n\n"
+        ),
+        direct_routine_fn_name(&routine.routine_key),
+        params,
+        render_lowered_runtime_abi_expr(&routine.body),
+    )
+}
+
+fn render_direct_routine_call_from_values(routine_key: &str, values: &[String]) -> String {
+    format!(
+        "{}({})",
+        direct_routine_fn_name(routine_key),
+        values.join(", ")
+    )
+}
+
+fn render_direct_routine_call_expr(routine_key: &str, args: &[NativeDirectExpr]) -> String {
+    render_direct_routine_call_match_chain(routine_key, args, 0, &mut Vec::new())
+}
+
+fn render_direct_routine_call_match_chain(
+    routine_key: &str,
+    args: &[NativeDirectExpr],
+    index: usize,
+    bound_args: &mut Vec<String>,
+) -> String {
+    if index == args.len() {
+        return render_direct_routine_call_from_values(routine_key, bound_args);
+    }
+    let binding = format!("arg_{index}");
+    bound_args.push(binding.clone());
+    let next = render_direct_routine_call_match_chain(routine_key, args, index + 1, bound_args);
+    bound_args.pop();
+    format!(
+        concat!(
+            "{{\n",
+            "        match {} {{\n",
+            "            Ok({}) => {},\n",
+            "            Err(err) => Err(err),\n",
+            "        }}\n",
+            "    }}"
+        ),
+        render_lowered_runtime_abi_expr(&args[index]),
+        binding,
+        next,
+    )
 }
 
 fn render_store_runtime_abi_value(
@@ -729,6 +823,10 @@ fn sanitize_crate_name(name: &str) -> String {
         out.insert(0, '_');
     }
     out
+}
+
+fn direct_routine_fn_name(routine_key: &str) -> String {
+    format!("arcana_direct_{}", sanitize_crate_name(routine_key))
 }
 
 fn native_output_stem(output_name: &str) -> String {

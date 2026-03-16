@@ -24,6 +24,12 @@ pub struct NativeExport {
     pub return_type: NativeAbiType,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeRoutineSignature {
+    pub params: Vec<NativeAbiParam>,
+    pub return_type: NativeAbiType,
+}
+
 pub fn collect_native_exports(artifact: &AotPackageArtifact) -> Result<Vec<NativeExport>, String> {
     let root_prefix = format!("{}.", artifact.root_module_id);
     let mut exports = Vec::new();
@@ -60,17 +66,17 @@ pub fn collect_native_exports(artifact: &AotPackageArtifact) -> Result<Vec<Nativ
             ));
         }
 
-        let params = routine
-            .param_rows
-            .iter()
-            .map(|row| parse_native_param_row(row))
-            .collect::<Result<Vec<_>, _>>()?;
-        let return_type = parse_native_return_type(&routine.signature_row).map_err(|err| {
-            format!(
-                "windows-dll target cannot export `{}`: {err}",
-                routine.routine_key
-            )
-        })?;
+        let NativeRoutineSignature {
+            params,
+            return_type,
+        } = parse_native_routine_signature(&routine.param_rows, &routine.signature_row).map_err(
+            |err| {
+                format!(
+                    "windows-dll target cannot export `{}`: {err}",
+                    routine.routine_key
+                )
+            },
+        )?;
         let mut export_name = default_export_name(
             &artifact.root_module_id,
             &routine.module_id,
@@ -91,7 +97,20 @@ pub fn collect_native_exports(artifact: &AotPackageArtifact) -> Result<Vec<Nativ
     Ok(exports)
 }
 
-fn parse_native_param_row(text: &str) -> Result<NativeAbiParam, String> {
+pub fn parse_native_routine_signature(
+    param_rows: &[String],
+    signature_row: &str,
+) -> Result<NativeRoutineSignature, String> {
+    Ok(NativeRoutineSignature {
+        params: param_rows
+            .iter()
+            .map(|row| parse_native_param_row(row))
+            .collect::<Result<Vec<_>, _>>()?,
+        return_type: parse_native_return_type(signature_row)?,
+    })
+}
+
+pub fn parse_native_param_row(text: &str) -> Result<NativeAbiParam, String> {
     let parts = text.splitn(3, ':').collect::<Vec<_>>();
     if parts.len() != 3 {
         return Err(format!("malformed runtime param row `{text}`"));
@@ -108,7 +127,7 @@ fn parse_native_param_row(text: &str) -> Result<NativeAbiParam, String> {
     })
 }
 
-fn parse_native_return_type(signature_row: &str) -> Result<NativeAbiType, String> {
+pub fn parse_native_return_type(signature_row: &str) -> Result<NativeAbiType, String> {
     let Some((_, tail)) = signature_row.rsplit_once("->") else {
         return Ok(NativeAbiType::Unit);
     };

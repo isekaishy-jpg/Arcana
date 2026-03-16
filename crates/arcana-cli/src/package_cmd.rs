@@ -209,7 +209,15 @@ mod tests {
     #[test]
     fn package_workspace_stages_runnable_windows_exe_bundle() {
         let dir = temp_dir("windows_exe");
-        write_app_workspace(&dir, "fn main() -> Int:\n    return 9\n");
+        write_app_workspace(
+            &dir,
+            concat!(
+                "fn helper(value: Int) -> Int:\n",
+                "    return value\n",
+                "fn main() -> Int:\n",
+                "    return helper :: 9 :: call\n",
+            ),
+        );
 
         let bundle = package_workspace(dir.clone(), BuildTarget::windows_exe(), None, None)
             .expect("package should succeed");
@@ -244,8 +252,10 @@ mod tests {
             &dir,
             concat!(
                 "import std.bytes\n",
+                "fn answer_impl(value: Int) -> Int:\n",
+                "    return value\n",
                 "export fn answer() -> Int:\n",
-                "    return 11\n",
+                "    return answer_impl :: 11 :: call\n",
                 "export fn greet(read name: Str) -> Str:\n",
                 "    return \"hello \" + name\n",
                 "export fn prefix() -> Array[Int]:\n",
