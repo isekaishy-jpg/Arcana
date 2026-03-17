@@ -25,9 +25,11 @@ arcana-ir = { path = "crates/arcana-ir" }
 arcana-package = { path = "crates/arcana-package" }
 arcana-runtime = { path = "crates/arcana-runtime" }
 arcana-syntax = { path = "crates/arcana-syntax" }
+font8x8 = "0.3"
 libloading = "0.8"
 pathdiff = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 toml = "0.8"
+windows-sys = "0.59"

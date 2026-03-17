@@ -24,11 +24,15 @@ use sha2::{Digest, Sha256};
 
 mod json_abi;
 mod native_abi;
+#[cfg(windows)]
+mod native_host;
 mod package_image;
 pub use json_abi::{
     RUNTIME_JSON_ABI_FORMAT, execute_exported_json_abi_routine, render_exported_json_abi_manifest,
 };
 pub use native_abi::{RuntimeAbiValue, execute_exported_abi_routine};
+#[cfg(windows)]
+pub use native_host::NativeProcessHost;
 pub use package_image::{
     RUNTIME_PACKAGE_IMAGE_FORMAT, parse_runtime_package_image, render_runtime_package_image,
 };
@@ -953,7 +957,6 @@ struct BufferedAudioDevice {
     sample_rate_hz: i64,
     channels: i64,
     gain_milli: i64,
-    closed: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1169,7 +1172,6 @@ impl BufferedHost {
                 sample_rate_hz,
                 channels,
                 gain_milli: 1000,
-                closed: false,
             },
         );
         handle
@@ -2071,7 +2073,18 @@ impl RuntimeHost for BufferedHost {
     }
 
     fn audio_output_close(&mut self, device: RuntimeAudioDeviceHandle) -> Result<(), String> {
-        self.audio_device_mut(device)?.closed = true;
+        if !self.audio_devices.contains_key(&device) {
+            return Err(format!("invalid AudioDevice handle `{}`", device.0));
+        }
+        let playback_handles = self
+            .audio_playbacks
+            .iter()
+            .filter_map(|(handle, playback)| (playback.device == device).then_some(*handle))
+            .collect::<Vec<_>>();
+        for handle in playback_handles {
+            self.audio_playbacks.remove(&handle);
+        }
+        self.audio_devices.remove(&device);
         self.audio_log.push(format!("output_close:{}", device.0));
         Ok(())
     }
@@ -2122,9 +2135,14 @@ impl RuntimeHost for BufferedHost {
         device: RuntimeAudioDeviceHandle,
         buffer: RuntimeAudioBufferHandle,
     ) -> Result<RuntimeAudioPlaybackHandle, String> {
-        if self.audio_device_ref(device)?.closed {
-            return Err(format!("AudioDevice `{}` is closed", device.0));
-        }
+        let device_state = self.audio_device_ref(device)?;
+        let buffer_state = self.audio_buffer_ref(buffer)?;
+        ensure_audio_buffer_matches_device(
+            device_state.sample_rate_hz,
+            device_state.channels,
+            buffer_state.sample_rate_hz,
+            buffer_state.channels,
+        )?;
         let buffer_path = self.audio_buffer_ref(buffer)?.path.clone();
         let handle = self.insert_audio_playback(device, buffer)?;
         self.audio_log.push(format!(
@@ -2146,14 +2164,9 @@ impl RuntimeHost for BufferedHost {
     }
 
     fn audio_playback_stop(&mut self, playback: RuntimeAudioPlaybackHandle) -> Result<(), String> {
-        let frames = {
-            let playback_state = self.audio_playback_ref(playback)?;
-            self.audio_buffer_ref(playback_state.buffer)?.frames
-        };
-        let playback_state = self.audio_playback_mut(playback)?;
-        playback_state.finished = true;
-        playback_state.paused = false;
-        playback_state.position_frames = frames;
+        if self.audio_playbacks.remove(&playback).is_none() {
+            return Err(format!("invalid AudioPlayback handle `{}`", playback.0));
+        }
         self.audio_log.push(format!("playback_stop:{}", playback.0));
         Ok(())
     }
@@ -10971,6 +10984,39 @@ pub fn execute_entrypoint_routine(
             Err("main must return Int or Unit in the current runtime lane".to_string())
         }
     }
+}
+
+pub fn current_process_runtime_host() -> Result<Box<dyn RuntimeHost>, String> {
+    #[cfg(windows)]
+    {
+        return Ok(Box::new(NativeProcessHost::current()?));
+    }
+
+    #[cfg(not(windows))]
+    {
+        let mut host = BufferedHost::default();
+        host.args = std::env::args().skip(1).collect();
+        host.env = std::env::vars().collect();
+        host.allow_process = true;
+        host.cwd = std::env::current_dir()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        Ok(Box::new(host))
+    }
+}
+
+pub(crate) fn ensure_audio_buffer_matches_device(
+    device_sample_rate_hz: i64,
+    device_channels: i64,
+    buffer_sample_rate_hz: i64,
+    buffer_channels: i64,
+) -> Result<(), String> {
+    if device_sample_rate_hz == buffer_sample_rate_hz && device_channels == buffer_channels {
+        return Ok(());
+    }
+    Err(format!(
+        "AudioBuffer format {buffer_sample_rate_hz} Hz / {buffer_channels} channel(s) does not match AudioDevice format {device_sample_rate_hz} Hz / {device_channels} channel(s)"
+    ))
 }
 
 #[cfg(test)]

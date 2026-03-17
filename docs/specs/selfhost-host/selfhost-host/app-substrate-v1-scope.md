@@ -43,6 +43,7 @@ Scope notes:
   - device info/config hooks: `default_output -> Result[AudioDevice, Str]`, `output_close -> Result[Unit, Str]`, `output_sample_rate_hz`, `output_channels`, `output_set_gain_milli`
   - buffer hooks: `buffer_load_wav -> Result[AudioBuffer, Str]`, `buffer_frames`, `buffer_channels`, `buffer_sample_rate_hz`
   - playback hooks: `play_buffer(edit device, read buffer) -> Result[AudioPlayback, Str]`, `stop -> Result[Unit, Str]`, `pause`, `resume`, `playing`, `paused`, `finished`, `set_gain_milli`, `set_looping`, `looping`, `position_frames`
+  - low-level playback does not implicitly resample or remix; the current bootstrap lane requires `AudioBuffer` sample rate and channel count to match the selected `AudioDevice` config and returns `Result.Err(...)` otherwise
   - current bootstrap seam uses source-declared opaque audio handles plus explicit failure results for device/buffer/playback acquisition
 - Primitive graphics/text support sufficient for real apps/showcases:
   - solid fills

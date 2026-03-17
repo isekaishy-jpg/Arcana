@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use arcana_aot::{AOT_INTERNAL_FORMAT, AOT_WINDOWS_DLL_FORMAT, AOT_WINDOWS_EXE_FORMAT};
 use arcana_hir::{
@@ -36,6 +36,43 @@ pub(crate) const LEGACY_LOCKFILE_VERSION: i64 = 1;
 pub(crate) const CACHE_DIR: &str = ".arcana";
 pub(crate) const ARTIFACT_DIR: &str = "artifacts";
 pub(crate) const LOGS_DIR: &str = "logs";
+
+pub(crate) fn collect_validated_support_file_paths<'a, I>(paths: I) -> PackageResult<Vec<String>>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let mut validated = Vec::new();
+    let mut seen_paths = BTreeSet::new();
+    for relative_path in paths {
+        validate_support_file_relative_path(relative_path)?;
+        if !seen_paths.insert(relative_path) {
+            return Err(format!("duplicate support file path `{relative_path}`"));
+        }
+        validated.push(relative_path.to_string());
+    }
+    Ok(validated)
+}
+
+pub(crate) fn validate_support_file_relative_path(relative_path: &str) -> PackageResult<()> {
+    if relative_path.is_empty() {
+        return Err("support file path must not be empty".to_string());
+    }
+    let relative = Path::new(relative_path);
+    if relative.is_absolute()
+        || relative.components().any(|component| {
+            matches!(
+                component,
+                Component::Prefix(_)
+                    | Component::RootDir
+                    | Component::CurDir
+                    | Component::ParentDir
+            )
+        })
+    {
+        return Err(format!("invalid support file path `{relative_path}`"));
+    }
+    Ok(())
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum BuildTarget {
@@ -1350,6 +1387,134 @@ mod tests {
                 .join("app.exe.arcana-launch.toml")
                 .exists(),
             "did not expect legacy launch manifest in staged bundle"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stage_distribution_bundle_removes_stale_files_before_copying() {
+        let dir = temp_dir("dist_windows_exe_clean");
+        write_file(&dir.join("book.toml"), "name = \"app\"\nkind = \"app\"\n");
+        write_file(
+            &dir.join("src").join("shelf.arc"),
+            "fn main() -> Int:\n    return 0\n",
+        );
+        write_file(&dir.join("src").join("types.arc"), "// types\n");
+
+        let graph = load_workspace_graph(&dir).expect("load graph");
+        let order = plan_workspace(&graph).expect("plan");
+        let prepared = prepare_test_build(&graph);
+        let statuses = plan_build_for_target_with_context(
+            &graph,
+            &order,
+            &prepared,
+            None,
+            BuildTarget::windows_exe(),
+            &BuildExecutionContext::default(),
+        )
+        .expect("windows exe plan should build");
+        execute_build_with_context(
+            &graph,
+            &prepared,
+            &statuses,
+            &BuildExecutionContext::default(),
+        )
+        .expect("windows exe build should succeed");
+
+        let bundle_dir = default_distribution_dir(&graph, "app", &BuildTarget::windows_exe());
+        stage_distribution_bundle(
+            &graph,
+            &statuses,
+            "app",
+            &BuildTarget::windows_exe(),
+            &bundle_dir,
+        )
+        .expect("first distribution staging should succeed");
+        fs::write(bundle_dir.join("stale.txt"), "stale").expect("stale file should write");
+        fs::create_dir_all(bundle_dir.join("stale-dir")).expect("stale dir should write");
+        fs::write(bundle_dir.join("stale-dir").join("nested.txt"), "stale")
+            .expect("nested stale file should write");
+
+        let bundle = stage_distribution_bundle(
+            &graph,
+            &statuses,
+            "app",
+            &BuildTarget::windows_exe(),
+            &bundle_dir,
+        )
+        .expect("second distribution staging should succeed");
+        assert!(
+            !bundle.bundle_dir.join("stale.txt").exists(),
+            "expected stale file to be removed before staging"
+        );
+        assert!(
+            !bundle.bundle_dir.join("stale-dir").exists(),
+            "expected stale directory to be removed before staging"
+        );
+        assert!(bundle.bundle_dir.join("app.exe").is_file());
+        assert!(
+            bundle
+                .bundle_dir
+                .join("app.exe.arcana-native.toml")
+                .is_file(),
+            "expected staged native manifest beside exe after cleanup"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stage_distribution_bundle_rejects_unmanaged_non_empty_output_dir() {
+        let dir = temp_dir("dist_windows_exe_unmanaged");
+        write_file(&dir.join("book.toml"), "name = \"app\"\nkind = \"app\"\n");
+        write_file(
+            &dir.join("src").join("shelf.arc"),
+            "fn main() -> Int:\n    return 0\n",
+        );
+        write_file(&dir.join("src").join("types.arc"), "// types\n");
+
+        let graph = load_workspace_graph(&dir).expect("load graph");
+        let order = plan_workspace(&graph).expect("plan");
+        let prepared = prepare_test_build(&graph);
+        let statuses = plan_build_for_target_with_context(
+            &graph,
+            &order,
+            &prepared,
+            None,
+            BuildTarget::windows_exe(),
+            &BuildExecutionContext::default(),
+        )
+        .expect("windows exe plan should build");
+        execute_build_with_context(
+            &graph,
+            &prepared,
+            &statuses,
+            &BuildExecutionContext::default(),
+        )
+        .expect("windows exe build should succeed");
+
+        let bundle_dir = default_distribution_dir(&graph, "app", &BuildTarget::windows_exe());
+        fs::create_dir_all(&bundle_dir).expect("bundle dir should exist");
+        fs::write(bundle_dir.join("user.txt"), "keep").expect("user file should write");
+
+        let err = stage_distribution_bundle(
+            &graph,
+            &statuses,
+            "app",
+            &BuildTarget::windows_exe(),
+            &bundle_dir,
+        )
+        .expect_err("unmanaged output directory should be rejected");
+        assert!(
+            err.contains("refusing to overwrite non-empty unmanaged distribution directory"),
+            "{err}"
+        );
+        assert!(
+            bundle_dir.join("user.txt").is_file(),
+            "expected unmanaged directory contents to be preserved"
         );
 
         let _ = fs::remove_dir_all(&dir);

@@ -4399,6 +4399,39 @@ fn execute_main_runs_synthetic_audio_runtime() {
 }
 
 #[test]
+fn synthetic_audio_stop_and_output_close_consume_handles() {
+    let mut host = BufferedHost::default();
+    let device = RuntimeHost::audio_default_output(&mut host).expect("audio device should open");
+    let clip = host.insert_audio_buffer("/tmp/clip.wav", 64, 2, 48_000);
+    let playback =
+        RuntimeHost::audio_play_buffer(&mut host, device, clip).expect("playback should start");
+
+    RuntimeHost::audio_playback_stop(&mut host, playback).expect("stop should succeed");
+    assert!(RuntimeHost::audio_playback_finished(&mut host, playback).is_err());
+
+    let second_device =
+        RuntimeHost::audio_default_output(&mut host).expect("second audio device should open");
+    let second_clip = host.insert_audio_buffer("/tmp/clip2.wav", 64, 2, 48_000);
+    let second_playback = RuntimeHost::audio_play_buffer(&mut host, second_device, second_clip)
+        .expect("second playback should start");
+
+    RuntimeHost::audio_output_close(&mut host, second_device).expect("device close should succeed");
+    assert!(RuntimeHost::audio_output_channels(&mut host, second_device).is_err());
+    assert!(RuntimeHost::audio_playback_playing(&mut host, second_playback).is_err());
+}
+
+#[test]
+fn synthetic_audio_playback_rejects_buffer_format_mismatch() {
+    let mut host = BufferedHost::default();
+    let device = RuntimeHost::audio_default_output(&mut host).expect("audio device should open");
+    let mismatched_clip = host.insert_audio_buffer("/tmp/clip.wav", 64, 1, 44_100);
+
+    let err = RuntimeHost::audio_play_buffer(&mut host, device, mismatched_clip)
+        .expect_err("mismatched buffer should be rejected");
+    assert!(err.contains("does not match AudioDevice format"));
+}
+
+#[test]
 fn execute_main_runs_synthetic_window_canvas_events_runtime() {
     let dir = temp_workspace_dir("std_window_canvas");
     write_file(

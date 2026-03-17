@@ -58,12 +58,7 @@ pub fn stage_distribution_bundle(
         ));
     }
 
-    fs::create_dir_all(bundle_dir).map_err(|e| {
-        format!(
-            "failed to create distribution directory `{}`: {e}",
-            bundle_dir.display()
-        )
-    })?;
+    reset_distribution_dir(bundle_dir)?;
 
     let root_file_name = source_root
         .file_name()
@@ -129,6 +124,96 @@ fn copy_distribution_file(source: &Path, destination: &Path) -> PackageResult<()
             destination.display()
         )
     })
+}
+
+fn reset_distribution_dir(bundle_dir: &Path) -> PackageResult<()> {
+    if !bundle_dir.exists() {
+        return fs::create_dir_all(bundle_dir).map_err(|e| {
+            format!(
+                "failed to create distribution directory `{}`: {e}",
+                bundle_dir.display()
+            )
+        });
+    }
+    if !bundle_dir.is_dir() {
+        return Err(format!(
+            "distribution path `{}` exists and is not a directory",
+            bundle_dir.display()
+        ));
+    }
+    if directory_is_empty(bundle_dir)? {
+        return Ok(());
+    }
+    validate_managed_distribution_dir(bundle_dir)?;
+    clear_distribution_dir_contents(bundle_dir)
+}
+
+fn directory_is_empty(dir: &Path) -> PackageResult<bool> {
+    let mut entries = fs::read_dir(dir).map_err(|e| {
+        format!(
+            "failed to read distribution directory `{}`: {e}",
+            dir.display()
+        )
+    })?;
+    Ok(entries.next().is_none())
+}
+
+fn validate_managed_distribution_dir(bundle_dir: &Path) -> PackageResult<()> {
+    let manifest_path = bundle_dir.join(DISTRIBUTION_MANIFEST_FILE);
+    let manifest_text = fs::read_to_string(&manifest_path).map_err(|_| {
+        format!(
+            "refusing to overwrite non-empty unmanaged distribution directory `{}`",
+            bundle_dir.display()
+        )
+    })?;
+    let value = manifest_text.parse::<toml::Value>().map_err(|e| {
+        format!(
+            "failed to parse distribution manifest `{}`: {e}",
+            manifest_path.display()
+        )
+    })?;
+    let format = value
+        .as_table()
+        .and_then(|table| table.get("format"))
+        .and_then(toml::Value::as_str);
+    if format != Some(DISTRIBUTION_BUNDLE_FORMAT) {
+        return Err(format!(
+            "refusing to overwrite unmanaged distribution directory `{}` because `{}` is not an `{DISTRIBUTION_BUNDLE_FORMAT}` manifest",
+            bundle_dir.display(),
+            manifest_path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn clear_distribution_dir_contents(bundle_dir: &Path) -> PackageResult<()> {
+    let entries = fs::read_dir(bundle_dir).map_err(|e| {
+        format!(
+            "failed to read distribution directory `{}`: {e}",
+            bundle_dir.display()
+        )
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|e| {
+            format!(
+                "failed to enumerate distribution directory `{}`: {e}",
+                bundle_dir.display()
+            )
+        })?;
+        let path = entry.path();
+        let remove_result = if path.is_dir() {
+            fs::remove_dir_all(&path)
+        } else {
+            fs::remove_file(&path)
+        };
+        remove_result.map_err(|e| {
+            format!(
+                "failed to clear staged distribution entry `{}`: {e}",
+                path.display()
+            )
+        })?;
+    }
+    Ok(())
 }
 
 fn render_distribution_manifest(

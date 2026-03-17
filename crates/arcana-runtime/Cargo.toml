@@ -11,6 +11,19 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+font8x8.workspace = true
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Media",
+    "Win32_Media_Audio",
+    "Win32_Media_Multimedia",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
 [dev-dependencies]
 arcana-frontend.workspace = true
 arcana-package.workspace = true

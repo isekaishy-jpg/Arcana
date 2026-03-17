@@ -116,6 +116,76 @@ mod tests {
         fs::write(path, text).expect("file should write");
     }
 
+    fn write_test_wav_with_format(path: &Path, sample_rate_hz: u32, channels: u16) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("parent directories should be created");
+        }
+        let bits_per_sample = 16u16;
+        let frame_count = 64u32;
+        let block_align = channels * (bits_per_sample / 8);
+        let byte_rate = sample_rate_hz * u32::from(block_align);
+        let data_len = frame_count * u32::from(block_align);
+        let mut bytes = Vec::with_capacity(44 + data_len as usize);
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data_len).to_le_bytes());
+        bytes.extend_from_slice(b"WAVE");
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&channels.to_le_bytes());
+        bytes.extend_from_slice(&sample_rate_hz.to_le_bytes());
+        bytes.extend_from_slice(&byte_rate.to_le_bytes());
+        bytes.extend_from_slice(&block_align.to_le_bytes());
+        bytes.extend_from_slice(&bits_per_sample.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data_len.to_le_bytes());
+        for frame in 0..frame_count {
+            let sample = if frame % 8 < 4 {
+                i16::MAX / 8
+            } else {
+                -(i16::MAX / 8)
+            };
+            bytes.extend_from_slice(&sample.to_le_bytes());
+            bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+        fs::write(path, bytes).expect("wav fixture should write");
+    }
+
+    fn write_test_wav(path: &Path) {
+        write_test_wav_with_format(path, 48_000, 2);
+    }
+
+    fn write_test_bmp(path: &Path) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("parent directories should be created");
+        }
+        let width = 2u32;
+        let height = 2u32;
+        let row_stride = 8u32;
+        let pixel_data_len = row_stride * height;
+        let file_len = 54u32 + pixel_data_len;
+        let mut bytes = Vec::with_capacity(file_len as usize);
+        bytes.extend_from_slice(b"BM");
+        bytes.extend_from_slice(&file_len.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&54u32.to_le_bytes());
+        bytes.extend_from_slice(&40u32.to_le_bytes());
+        bytes.extend_from_slice(&(width as i32).to_le_bytes());
+        bytes.extend_from_slice(&(height as i32).to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&24u16.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&pixel_data_len.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&[0x00, 0x00, 0xFF, 0x00, 0xFF, 0x00, 0x00, 0x00]);
+        bytes.extend_from_slice(&[0xFF, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0x00, 0x00]);
+        fs::write(path, bytes).expect("bmp fixture should write");
+    }
+
     fn write_app_workspace(dir: &Path, body: &str) {
         write_file(&dir.join("book.toml"), "name = \"app\"\nkind = \"app\"\n");
         write_file(&dir.join("src/shelf.arc"), body);
@@ -126,6 +196,29 @@ mod tests {
         write_file(&dir.join("book.toml"), "name = \"core\"\nkind = \"lib\"\n");
         write_file(&dir.join("src/book.arc"), body);
         write_file(&dir.join("src/types.arc"), "// types\n");
+    }
+
+    fn repo_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("repo root should exist")
+            .to_path_buf()
+    }
+
+    fn add_std_dep(dir: &Path) {
+        let std_path = repo_root()
+            .join("std")
+            .display()
+            .to_string()
+            .replace('\\', "/");
+        fs::write(
+            dir.join("book.toml"),
+            format!(
+                "name = \"app\"\nkind = \"app\"\n\n[deps]\nstd = {{ path = \"{std_path}\" }}\n"
+            ),
+        )
+        .expect("book manifest should write");
     }
 
     fn write_std_bytes_grimoire(dir: &Path) {
@@ -212,13 +305,20 @@ mod tests {
         write_app_workspace(
             &dir,
             concat!(
+                "fn touch():\n",
+                "    return\n",
                 "fn helper(value: Int) -> Int:\n",
-                "    let bumped = value + 1\n",
+                "    touch :: :: call\n",
+                "    let mut i = 0\n",
+                "    let mut bumped = value\n",
+                "    while i < 1:\n",
+                "        bumped += 1\n",
+                "        i += 1\n",
                 "    return bumped\n",
                 "fn main() -> Int:\n",
                 "    let base = 8\n",
                 "    if base >= 8:\n",
-                "        return helper :: base :: call\n",
+                "        return helper :: value = base :: call\n",
                 "    else:\n",
                 "        return 0\n",
             ),
@@ -250,6 +350,32 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn package_workspace_runs_unit_returning_windows_exe_bundle() {
+        let dir = temp_dir("windows_exe_unit_main");
+        write_app_workspace(
+            &dir,
+            concat!(
+                "fn touch():\n",
+                "    return\n",
+                "fn main():\n",
+                "    touch :: :: call\n",
+                "    return\n",
+            ),
+        );
+
+        let bundle = package_workspace(dir.clone(), BuildTarget::windows_exe(), None, None)
+            .expect("package should succeed");
+        let exe_path = bundle.bundle_dir.join(&bundle.root_artifact);
+        let status = Command::new(&exe_path)
+            .status()
+            .expect("staged bundle should launch");
+        assert_eq!(status.code(), Some(0));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn package_workspace_stages_loadable_windows_dll_bundle() {
         let dir = temp_dir("windows_dll");
         write_std_bytes_grimoire(&dir);
@@ -257,13 +383,20 @@ mod tests {
             &dir,
             concat!(
                 "import std.bytes\n",
+                "fn touch():\n",
+                "    return\n",
                 "fn answer_impl(value: Int) -> Int:\n",
-                "    let doubled = value * 2\n",
+                "    touch :: :: call\n",
+                "    let mut i = 0\n",
+                "    let mut doubled = 0\n",
+                "    while i < 2:\n",
+                "        doubled += value\n",
+                "        i += 1\n",
                 "    return doubled\n",
                 "export fn answer() -> Int:\n",
                 "    let base = 6\n",
                 "    if base > 4:\n",
-                "        return answer_impl :: base :: call\n",
+                "        return answer_impl :: value = base :: call\n",
                 "    else:\n",
                 "        return 0\n",
                 "export fn greet(read name: Str) -> Str:\n",
@@ -410,6 +543,204 @@ mod tests {
             assert_eq!(echoed_left, "pair");
             assert_eq!(echoed_pair.right, 17);
         }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn package_workspace_runs_native_window_canvas_app_bundle() {
+        let dir = temp_dir("windows_window_canvas");
+        write_test_bmp(&dir.join("fixture").join("sprite.bmp"));
+        write_app_workspace(
+            &dir,
+            concat!(
+                "import std.canvas\n",
+                "import std.io\n",
+                "import std.window\n",
+                "use std.result.Result\n",
+                "fn draw_image(edit win: std.window.Window, read img: std.canvas.Image) -> Int:\n",
+                "    let img_size = std.canvas.image_size :: img :: call\n",
+                "    if img_size.0 != 2:\n",
+                "        return 4\n",
+                "    if img_size.1 != 2:\n",
+                "        return 5\n",
+                "    std.canvas.blit :: win, img, 8 :: call\n",
+                "        y = 9\n",
+                "    return 0\n",
+                "fn run(take win: std.window.Window) -> Int:\n",
+                "    let mut win = win\n",
+                "    if not (std.window.alive :: win :: call):\n",
+                "        return 2\n",
+                "    let size = std.window.size :: win :: call\n",
+                "    std.io.print[Int] :: size.0 :: call\n",
+                "    std.io.print[Int] :: size.1 :: call\n",
+                "    let color = std.canvas.rgb :: 10, 20, 30 :: call\n",
+                "    std.canvas.fill :: win, color :: call\n",
+                "    let image_status = match (std.canvas.image_load :: \"sprite.bmp\" :: call):\n",
+                "        Result.Ok(img) => draw_image :: win, img :: call\n",
+                "        Result.Err(_) => 6\n",
+                "    if image_status != 0:\n",
+                "        return image_status\n",
+                "    std.canvas.present :: win :: call\n",
+                "    let close = std.window.close :: win :: call\n",
+                "    if close :: :: is_err:\n",
+                "        return 3\n",
+                "    return 0\n",
+                "fn main() -> Int:\n",
+                "    return match (std.window.open :: \"Arcana\", 320, 200 :: call):\n",
+                "        Result.Ok(win) => run :: win :: call\n",
+                "        Result.Err(_) => 1\n",
+            ),
+        );
+        add_std_dep(&dir);
+
+        let bundle = package_workspace(
+            dir.clone(),
+            BuildTarget::windows_exe(),
+            Some("app".to_string()),
+            None,
+        )
+        .expect("window canvas package should succeed");
+        let exe_path = bundle.bundle_dir.join(&bundle.root_artifact);
+        fs::copy(
+            dir.join("fixture").join("sprite.bmp"),
+            bundle.bundle_dir.join("sprite.bmp"),
+        )
+        .expect("sprite fixture should copy into bundle");
+        let output = Command::new(&exe_path)
+            .current_dir(&bundle.bundle_dir)
+            .output()
+            .expect("staged bundle should launch");
+        assert_eq!(output.status.code(), Some(0));
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .collect::<Vec<_>>(),
+            vec!["320200"]
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn package_workspace_runs_native_audio_app_bundle() {
+        let dir = temp_dir("windows_audio");
+        write_test_wav(&dir.join("fixture").join("clip.wav"));
+        write_app_workspace(
+            &dir,
+            concat!(
+                "import std.audio\n",
+                "import std.io\n",
+                "use std.result.Result\n",
+                "fn use_playback(take device: std.audio.AudioDevice, take playback: std.audio.AudioPlayback) -> Int:\n",
+                "    let stop = playback :: :: stop\n",
+                "    if stop :: :: is_err:\n",
+                "        return 4\n",
+                "    let close = std.audio.output_close :: device :: call\n",
+                "    if close :: :: is_err:\n",
+                "        return 5\n",
+                "    return 0\n",
+                "fn use_clip(take device: std.audio.AudioDevice, read clip: std.audio.AudioBuffer) -> Int:\n",
+                "    let mut device = device\n",
+                "    std.io.print[Int] :: (std.audio.buffer_sample_rate_hz :: clip :: call) :: call\n",
+                "    let playback_result = std.audio.play_buffer :: device, clip :: call\n",
+                "    return match playback_result:\n",
+                "        Result.Ok(value) => use_playback :: device, value :: call\n",
+                "        Result.Err(_) => 3\n",
+                "fn main() -> Int:\n",
+                "    return match (std.audio.default_output :: :: call):\n",
+                "        Result.Ok(device) => match (std.audio.buffer_load_wav :: \"clip.wav\" :: call):\n",
+                "            Result.Ok(clip) => use_clip :: device, clip :: call\n",
+                "            Result.Err(_) => 2\n",
+                "        Result.Err(_) => 1\n",
+            ),
+        );
+        add_std_dep(&dir);
+
+        let bundle = package_workspace(
+            dir.clone(),
+            BuildTarget::windows_exe(),
+            Some("app".to_string()),
+            None,
+        )
+        .expect("audio package should succeed");
+        let exe_path = bundle.bundle_dir.join(&bundle.root_artifact);
+        fs::copy(
+            dir.join("fixture").join("clip.wav"),
+            bundle.bundle_dir.join("clip.wav"),
+        )
+        .expect("clip fixture should copy into bundle");
+        let output = Command::new(&exe_path)
+            .current_dir(&bundle.bundle_dir)
+            .output()
+            .expect("staged audio bundle should launch");
+        assert_eq!(output.status.code(), Some(0));
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .collect::<Vec<_>>(),
+            vec!["48000"]
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn package_workspace_rejects_native_audio_buffer_format_mismatch() {
+        let dir = temp_dir("windows_audio_mismatch");
+        write_test_wav_with_format(&dir.join("fixture").join("clip_48k_stereo.wav"), 48_000, 2);
+        write_test_wav_with_format(&dir.join("fixture").join("clip_44k_stereo.wav"), 44_100, 2);
+        write_app_workspace(
+            &dir,
+            concat!(
+                "import std.audio\n",
+                "use std.result.Result\n",
+                "fn mismatch_path(read device: std.audio.AudioDevice) -> Str:\n",
+                "    if (std.audio.output_sample_rate_hz :: device :: call) == 48000:\n",
+                "        return \"clip_44k_stereo.wav\"\n",
+                "    return \"clip_48k_stereo.wav\"\n",
+                "fn use_device(take device: std.audio.AudioDevice) -> Int:\n",
+                "    let mut device = device\n",
+                "    let path = mismatch_path :: device :: call\n",
+                "    return match (std.audio.buffer_load_wav :: path :: call):\n",
+                "        Result.Ok(clip) => match (std.audio.play_buffer :: device, clip :: call):\n",
+                "            Result.Ok(_) => 4\n",
+                "            Result.Err(_) => 0\n",
+                "        Result.Err(_) => 3\n",
+                "fn main() -> Int:\n",
+                "    return match (std.audio.default_output :: :: call):\n",
+                "        Result.Ok(device) => use_device :: device :: call\n",
+                "        Result.Err(_) => 1\n",
+            ),
+        );
+        add_std_dep(&dir);
+
+        let bundle = package_workspace(
+            dir.clone(),
+            BuildTarget::windows_exe(),
+            Some("app".to_string()),
+            None,
+        )
+        .expect("audio mismatch package should succeed");
+        let exe_path = bundle.bundle_dir.join(&bundle.root_artifact);
+        fs::copy(
+            dir.join("fixture").join("clip_48k_stereo.wav"),
+            bundle.bundle_dir.join("clip_48k_stereo.wav"),
+        )
+        .expect("stereo clip fixture should copy into bundle");
+        fs::copy(
+            dir.join("fixture").join("clip_44k_stereo.wav"),
+            bundle.bundle_dir.join("clip_44k_stereo.wav"),
+        )
+        .expect("44k clip fixture should copy into bundle");
+        let output = Command::new(&exe_path)
+            .current_dir(&bundle.bundle_dir)
+            .output()
+            .expect("staged audio mismatch bundle should launch");
+        assert_eq!(output.status.code(), Some(0));
 
         let _ = fs::remove_dir_all(&dir);
     }

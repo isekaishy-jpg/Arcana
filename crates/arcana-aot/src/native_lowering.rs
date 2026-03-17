@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 
-use arcana_ir::{ExecBinaryOp, ExecExpr, ExecPhraseQualifierKind, ExecStmt};
+use arcana_ir::{
+    ExecAssignOp, ExecAssignTarget, ExecBinaryOp, ExecExpr, ExecPhraseQualifierKind, ExecStmt,
+};
 
 use crate::artifact::AotRoutineArtifact;
 use crate::emit::AotEmitTarget;
@@ -50,9 +52,31 @@ pub enum NativeDirectExpr {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NativeDirectStmt {
     Let {
+        mutable: bool,
         name: String,
         value: NativeDirectExpr,
     },
+    Expr {
+        value: NativeDirectExpr,
+    },
+    Assign {
+        name: String,
+        value: NativeDirectExpr,
+    },
+    Return {
+        value: NativeDirectExpr,
+    },
+    If {
+        condition: NativeDirectExpr,
+        then_body: Vec<NativeDirectStmt>,
+        else_body: Vec<NativeDirectStmt>,
+    },
+    While {
+        condition: NativeDirectExpr,
+        body: Vec<NativeDirectStmt>,
+    },
+    Break,
+    Continue,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -129,6 +153,12 @@ enum LoweringState {
 struct LoweredDirectExpr {
     expr: NativeDirectExpr,
     ty: NativeAbiType,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct NativeBinding {
+    ty: NativeAbiType,
+    mutable: bool,
 }
 
 struct NativeLoweringBuilder<'a> {
@@ -239,7 +269,15 @@ impl<'a> NativeLoweringBuilder<'a> {
         let bindings = signature
             .params
             .iter()
-            .map(|param| (param.name.clone(), param.ty.clone()))
+            .map(|param| {
+                (
+                    param.name.clone(),
+                    NativeBinding {
+                        ty: param.ty.clone(),
+                        mutable: false,
+                    },
+                )
+            })
             .collect::<BTreeMap<_, _>>();
         let body = self.lower_block(&routine.statements, &bindings, &signature.return_type)?;
         Some(NativeDirectRoutine {
@@ -253,7 +291,7 @@ impl<'a> NativeLoweringBuilder<'a> {
     fn lower_block(
         &mut self,
         statements: &[ExecStmt],
-        bindings: &BTreeMap<String, NativeAbiType>,
+        bindings: &BTreeMap<String, NativeBinding>,
         expected_return_type: &NativeAbiType,
     ) -> Option<NativeDirectBlock> {
         let mut bindings = bindings.clone();
@@ -262,17 +300,8 @@ impl<'a> NativeLoweringBuilder<'a> {
         while let Some(stmt) = iter.next() {
             let is_last = iter.peek().is_none();
             match stmt {
-                ExecStmt::Let {
-                    mutable: false,
-                    name,
-                    value,
-                } => {
-                    let lowered = self.lower_typed_expr(value, &bindings)?;
-                    bindings.insert(name.clone(), lowered.ty.clone());
-                    lowered_statements.push(NativeDirectStmt::Let {
-                        name: name.clone(),
-                        value: lowered.expr,
-                    });
+                ExecStmt::Let { .. } => {
+                    lowered_statements.push(self.lower_stmt(stmt, &mut bindings, false)?);
                 }
                 ExecStmt::ReturnValue { value } if is_last => {
                     return Some(NativeDirectBlock {
@@ -306,16 +335,152 @@ impl<'a> NativeLoweringBuilder<'a> {
                         },
                     });
                 }
-                _ => return None,
+                _ => lowered_statements.push(self.lower_stmt(stmt, &mut bindings, false)?),
             }
         }
         None
     }
 
+    fn lower_stmt(
+        &mut self,
+        stmt: &ExecStmt,
+        bindings: &mut BTreeMap<String, NativeBinding>,
+        in_loop: bool,
+    ) -> Option<NativeDirectStmt> {
+        match stmt {
+            ExecStmt::Let {
+                mutable,
+                name,
+                value,
+            } => {
+                let lowered = self.lower_typed_expr(value, bindings)?;
+                bindings.insert(
+                    name.clone(),
+                    NativeBinding {
+                        ty: lowered.ty.clone(),
+                        mutable: *mutable,
+                    },
+                );
+                Some(NativeDirectStmt::Let {
+                    mutable: *mutable,
+                    name: name.clone(),
+                    value: lowered.expr,
+                })
+            }
+            ExecStmt::Assign { target, op, value } => {
+                let ExecAssignTarget::Name(name) = target else {
+                    return None;
+                };
+                let binding = bindings.get(name)?;
+                if !binding.mutable {
+                    return None;
+                }
+                Some(NativeDirectStmt::Assign {
+                    name: name.clone(),
+                    value: self.lower_assignment_value(name, binding, *op, value, bindings)?,
+                })
+            }
+            ExecStmt::Expr { expr, rollups } if rollups.is_empty() => {
+                Some(NativeDirectStmt::Expr {
+                    value: self.lower_typed_expr(expr, bindings)?.expr,
+                })
+            }
+            ExecStmt::ReturnValue { value } => Some(NativeDirectStmt::Return {
+                value: self.lower_typed_expr(value, bindings)?.expr,
+            }),
+            ExecStmt::ReturnVoid => Some(NativeDirectStmt::Return {
+                value: NativeDirectExpr::Unit,
+            }),
+            ExecStmt::If {
+                condition,
+                then_branch,
+                else_branch,
+                rollups,
+            } if rollups.is_empty() => Some(NativeDirectStmt::If {
+                condition: self.lower_expr(condition, bindings, &NativeAbiType::Bool)?,
+                then_body: self.lower_stmt_body(then_branch, bindings, in_loop)?,
+                else_body: self.lower_stmt_body(else_branch, bindings, in_loop)?,
+            }),
+            ExecStmt::While {
+                condition,
+                body,
+                rollups,
+            } if rollups.is_empty() => Some(NativeDirectStmt::While {
+                condition: self.lower_expr(condition, bindings, &NativeAbiType::Bool)?,
+                body: self.lower_stmt_body(body, bindings, true)?,
+            }),
+            ExecStmt::Break if in_loop => Some(NativeDirectStmt::Break),
+            ExecStmt::Continue if in_loop => Some(NativeDirectStmt::Continue),
+            _ => None,
+        }
+    }
+
+    fn lower_stmt_body(
+        &mut self,
+        statements: &[ExecStmt],
+        bindings: &BTreeMap<String, NativeBinding>,
+        in_loop: bool,
+    ) -> Option<Vec<NativeDirectStmt>> {
+        let mut body_bindings = bindings.clone();
+        statements
+            .iter()
+            .map(|stmt| self.lower_stmt(stmt, &mut body_bindings, in_loop))
+            .collect()
+    }
+
+    fn lower_assignment_value(
+        &mut self,
+        name: &str,
+        binding: &NativeBinding,
+        op: ExecAssignOp,
+        value: &ExecExpr,
+        bindings: &BTreeMap<String, NativeBinding>,
+    ) -> Option<NativeDirectExpr> {
+        match op {
+            ExecAssignOp::Assign => self.lower_expr(value, bindings, &binding.ty),
+            ExecAssignOp::AddAssign if binding.ty == NativeAbiType::Int => {
+                Some(NativeDirectExpr::IntBinary {
+                    op: NativeDirectIntBinaryOp::Add,
+                    left: Box::new(NativeDirectExpr::Binding(name.to_string())),
+                    right: Box::new(self.lower_expr(value, bindings, &NativeAbiType::Int)?),
+                })
+            }
+            ExecAssignOp::SubAssign if binding.ty == NativeAbiType::Int => {
+                Some(NativeDirectExpr::IntBinary {
+                    op: NativeDirectIntBinaryOp::Sub,
+                    left: Box::new(NativeDirectExpr::Binding(name.to_string())),
+                    right: Box::new(self.lower_expr(value, bindings, &NativeAbiType::Int)?),
+                })
+            }
+            ExecAssignOp::MulAssign if binding.ty == NativeAbiType::Int => {
+                Some(NativeDirectExpr::IntBinary {
+                    op: NativeDirectIntBinaryOp::Mul,
+                    left: Box::new(NativeDirectExpr::Binding(name.to_string())),
+                    right: Box::new(self.lower_expr(value, bindings, &NativeAbiType::Int)?),
+                })
+            }
+            ExecAssignOp::DivAssign if binding.ty == NativeAbiType::Int => {
+                Some(NativeDirectExpr::IntBinary {
+                    op: NativeDirectIntBinaryOp::Div,
+                    left: Box::new(NativeDirectExpr::Binding(name.to_string())),
+                    right: Box::new(self.lower_expr(value, bindings, &NativeAbiType::Int)?),
+                })
+            }
+            ExecAssignOp::ModAssign if binding.ty == NativeAbiType::Int => {
+                Some(NativeDirectExpr::IntBinary {
+                    op: NativeDirectIntBinaryOp::Mod,
+                    left: Box::new(NativeDirectExpr::Binding(name.to_string())),
+                    right: Box::new(self.lower_expr(value, bindings, &NativeAbiType::Int)?),
+                })
+            }
+            _ => None,
+        }
+    }
+
     fn lower_expr(
         &mut self,
         expr: &ExecExpr,
-        bindings: &BTreeMap<String, NativeAbiType>,
+        bindings: &BTreeMap<String, NativeBinding>,
         expected: &NativeAbiType,
     ) -> Option<NativeDirectExpr> {
         let lowered = self.lower_typed_expr(expr, bindings)?;
@@ -325,7 +490,7 @@ impl<'a> NativeLoweringBuilder<'a> {
     fn lower_typed_expr(
         &mut self,
         expr: &ExecExpr,
-        bindings: &BTreeMap<String, NativeAbiType>,
+        bindings: &BTreeMap<String, NativeBinding>,
     ) -> Option<LoweredDirectExpr> {
         match expr {
             ExecExpr::Int(value) => Some(LoweredDirectExpr {
@@ -368,7 +533,7 @@ impl<'a> NativeLoweringBuilder<'a> {
             }
             ExecExpr::Path(segments) if segments.len() == 1 => {
                 let name = segments[0].clone();
-                let ty = bindings.get(&name)?.clone();
+                let ty = bindings.get(&name)?.ty.clone();
                 Some(LoweredDirectExpr {
                     expr: NativeDirectExpr::Binding(name),
                     ty,
@@ -383,8 +548,7 @@ impl<'a> NativeLoweringBuilder<'a> {
                 ..
             } if *qualifier_kind == ExecPhraseQualifierKind::Call
                 && dynamic_dispatch.is_none()
-                && attached.is_empty()
-                && args.iter().all(|arg| arg.name.is_none()) =>
+                && attached.is_empty() =>
             {
                 let callee_signature = self.signature_for(callee_key)?;
                 if args.len() != callee_signature.params.len() {
@@ -395,11 +559,8 @@ impl<'a> NativeLoweringBuilder<'a> {
                 else {
                     return None;
                 };
-                let lowered_args = args
-                    .iter()
-                    .zip(&callee_signature.params)
-                    .map(|(arg, param)| self.lower_expr(&arg.value, bindings, &param.ty))
-                    .collect::<Option<Vec<_>>>()?;
+                let lowered_args =
+                    self.lower_call_args(args, &callee_signature.params, bindings)?;
                 Some(LoweredDirectExpr {
                     expr: NativeDirectExpr::Call {
                         routine_key,
@@ -412,12 +573,39 @@ impl<'a> NativeLoweringBuilder<'a> {
         }
     }
 
+    fn lower_call_args(
+        &mut self,
+        args: &[arcana_ir::ExecPhraseArg],
+        params: &[NativeAbiParam],
+        bindings: &BTreeMap<String, NativeBinding>,
+    ) -> Option<Vec<NativeDirectExpr>> {
+        if args.iter().all(|arg| arg.name.is_none()) {
+            return args
+                .iter()
+                .zip(params)
+                .map(|(arg, param)| self.lower_expr(&arg.value, bindings, &param.ty))
+                .collect();
+        }
+        if !args.iter().all(|arg| arg.name.is_some()) {
+            return None;
+        }
+        params
+            .iter()
+            .map(|param| {
+                let arg = args
+                    .iter()
+                    .find(|arg| arg.name.as_deref() == Some(param.name.as_str()))?;
+                self.lower_expr(&arg.value, bindings, &param.ty)
+            })
+            .collect()
+    }
+
     fn lower_binary_expr(
         &mut self,
         left: &ExecExpr,
         op: ExecBinaryOp,
         right: &ExecExpr,
-        bindings: &BTreeMap<String, NativeAbiType>,
+        bindings: &BTreeMap<String, NativeBinding>,
     ) -> Option<LoweredDirectExpr> {
         let left = self.lower_typed_expr(left, bindings)?;
         let right = self.lower_typed_expr(right, bindings)?;
@@ -605,8 +793,8 @@ mod tests {
     use crate::emit::{AotEmitContext, AotEmitTarget};
     use crate::native_plan::build_native_package_plan;
     use arcana_ir::{
-        ExecExpr, ExecPhraseArg, ExecPhraseQualifierKind, ExecStmt, IrEntrypoint, IrPackage,
-        IrPackageModule, IrRoutine,
+        ExecAssignOp, ExecAssignTarget, ExecExpr, ExecPhraseArg, ExecPhraseQualifierKind, ExecStmt,
+        IrEntrypoint, IrPackage, IrPackageModule, IrRoutine,
     };
 
     fn base_package() -> IrPackage {
@@ -1034,6 +1222,7 @@ mod tests {
         assert_eq!(
             lowering_plan.direct_routines[0].body.statements,
             vec![NativeDirectStmt::Let {
+                mutable: false,
                 name: "value".to_string(),
                 value: NativeDirectExpr::Int(9),
             }]
@@ -1157,6 +1346,7 @@ mod tests {
             routine.routine_key == "core#fn-1"
                 && routine.body.statements
                     == vec![NativeDirectStmt::Let {
+                        mutable: false,
                         name: "bumped".to_string(),
                         value: NativeDirectExpr::IntBinary {
                             op: NativeDirectIntBinaryOp::Add,
@@ -1191,7 +1381,7 @@ mod tests {
     }
 
     #[test]
-    fn lowering_keeps_named_or_attached_calls_on_runtime_dispatch() {
+    fn lowering_supports_named_calls_but_keeps_attached_calls_on_runtime_dispatch() {
         let mut package = base_package();
         package.routines.extend([
             IrRoutine {
@@ -1263,6 +1453,358 @@ mod tests {
             panic!("expected dynamic-library lowering");
         };
         assert_eq!(exports.len(), 1);
+        assert!(matches!(
+            exports[0].lowering,
+            NativeRoutineLowering::Direct { ref routine_key } if routine_key == "core#fn-0"
+        ));
+    }
+
+    #[test]
+    fn lowering_keeps_attached_calls_on_runtime_dispatch() {
+        let mut package = base_package();
+        package.routines.extend([
+            IrRoutine {
+                module_id: "core".to_string(),
+                routine_key: "core#fn-0".to_string(),
+                symbol_name: "attached_call".to_string(),
+                symbol_kind: "fn".to_string(),
+                exported: true,
+                is_async: false,
+                type_param_rows: Vec::new(),
+                behavior_attr_rows: Vec::new(),
+                param_rows: vec!["mode=:name=value:ty=Int".to_string()],
+                signature_row: "fn attached_call(value: Int) -> Int:".to_string(),
+                intrinsic_impl: None,
+                impl_target_type: None,
+                impl_trait_path: None,
+                foreword_rows: Vec::new(),
+                rollups: Vec::new(),
+                statements: vec![ExecStmt::ReturnValue {
+                    value: ExecExpr::Phrase {
+                        subject: Box::new(ExecExpr::Path(vec!["helper".to_string()])),
+                        args: vec![ExecPhraseArg {
+                            name: None,
+                            value: ExecExpr::Path(vec!["value".to_string()]),
+                        }],
+                        qualifier_kind: ExecPhraseQualifierKind::Call,
+                        qualifier: "call".to_string(),
+                        resolved_callable: Some(vec!["core".to_string(), "helper".to_string()]),
+                        resolved_routine: Some("core#fn-1".to_string()),
+                        dynamic_dispatch: None,
+                        attached: vec![arcana_ir::ExecHeaderAttachment::Named {
+                            name: "trace".to_string(),
+                            value: ExecExpr::Bool(true),
+                        }],
+                    },
+                }],
+            },
+            IrRoutine {
+                module_id: "core".to_string(),
+                routine_key: "core#fn-1".to_string(),
+                symbol_name: "helper".to_string(),
+                symbol_kind: "fn".to_string(),
+                exported: false,
+                is_async: false,
+                type_param_rows: Vec::new(),
+                behavior_attr_rows: Vec::new(),
+                param_rows: vec!["mode=:name=value:ty=Int".to_string()],
+                signature_row: "fn helper(value: Int) -> Int:".to_string(),
+                intrinsic_impl: None,
+                impl_target_type: None,
+                impl_trait_path: None,
+                foreword_rows: Vec::new(),
+                rollups: Vec::new(),
+                statements: vec![ExecStmt::ReturnValue {
+                    value: ExecExpr::Path(vec!["value".to_string()]),
+                }],
+            },
+        ]);
+
+        let package_plan = build_native_package_plan(
+            AotEmitTarget::WindowsDllBundle,
+            &package,
+            &AotEmitContext {
+                root_artifact_file_name: Some("lib.dll".to_string()),
+            },
+        )
+        .expect("native package plan should build");
+        let lowering_plan =
+            build_native_lowering_plan(&package_plan).expect("native lowering should build");
+
+        let NativeLaunchLowering::DynamicLibrary { exports } = lowering_plan.launch else {
+            panic!("expected dynamic-library lowering");
+        };
+        assert_eq!(exports.len(), 1);
         assert_eq!(exports[0].lowering, NativeRoutineLowering::RuntimeDispatch);
+    }
+
+    #[test]
+    fn lowering_supports_while_mutation_and_loop_control() {
+        let mut package = base_package();
+        package.entrypoints.push(IrEntrypoint {
+            module_id: "core".to_string(),
+            symbol_name: "main".to_string(),
+            symbol_kind: "fn".to_string(),
+            is_async: false,
+            exported: true,
+        });
+        package.routines.push(IrRoutine {
+            module_id: "core".to_string(),
+            routine_key: "core#fn-0".to_string(),
+            symbol_name: "main".to_string(),
+            symbol_kind: "fn".to_string(),
+            exported: true,
+            is_async: false,
+            type_param_rows: Vec::new(),
+            behavior_attr_rows: Vec::new(),
+            param_rows: Vec::new(),
+            signature_row: "fn main() -> Int:".to_string(),
+            intrinsic_impl: None,
+            impl_target_type: None,
+            impl_trait_path: None,
+            foreword_rows: Vec::new(),
+            rollups: Vec::new(),
+            statements: vec![
+                ExecStmt::Let {
+                    mutable: true,
+                    name: "i".to_string(),
+                    value: ExecExpr::Int(0),
+                },
+                ExecStmt::Let {
+                    mutable: true,
+                    name: "sum".to_string(),
+                    value: ExecExpr::Int(0),
+                },
+                ExecStmt::While {
+                    condition: ExecExpr::Binary {
+                        left: Box::new(ExecExpr::Path(vec!["i".to_string()])),
+                        op: arcana_ir::ExecBinaryOp::Lt,
+                        right: Box::new(ExecExpr::Int(5)),
+                    },
+                    body: vec![
+                        ExecStmt::Assign {
+                            target: ExecAssignTarget::Name("i".to_string()),
+                            op: ExecAssignOp::AddAssign,
+                            value: ExecExpr::Int(1),
+                        },
+                        ExecStmt::If {
+                            condition: ExecExpr::Binary {
+                                left: Box::new(ExecExpr::Path(vec!["i".to_string()])),
+                                op: arcana_ir::ExecBinaryOp::EqEq,
+                                right: Box::new(ExecExpr::Int(3)),
+                            },
+                            then_branch: vec![ExecStmt::Continue],
+                            else_branch: Vec::new(),
+                            rollups: Vec::new(),
+                        },
+                        ExecStmt::Assign {
+                            target: ExecAssignTarget::Name("sum".to_string()),
+                            op: ExecAssignOp::AddAssign,
+                            value: ExecExpr::Path(vec!["i".to_string()]),
+                        },
+                        ExecStmt::If {
+                            condition: ExecExpr::Binary {
+                                left: Box::new(ExecExpr::Path(vec!["sum".to_string()])),
+                                op: arcana_ir::ExecBinaryOp::Gt,
+                                right: Box::new(ExecExpr::Int(6)),
+                            },
+                            then_branch: vec![ExecStmt::Break],
+                            else_branch: Vec::new(),
+                            rollups: Vec::new(),
+                        },
+                    ],
+                    rollups: Vec::new(),
+                },
+                ExecStmt::ReturnValue {
+                    value: ExecExpr::Path(vec!["sum".to_string()]),
+                },
+            ],
+        });
+
+        let package_plan = build_native_package_plan(
+            AotEmitTarget::WindowsExeBundle,
+            &package,
+            &AotEmitContext {
+                root_artifact_file_name: Some("app.exe".to_string()),
+            },
+        )
+        .expect("native package plan should build");
+        let lowering_plan =
+            build_native_lowering_plan(&package_plan).expect("native lowering should build");
+
+        assert_eq!(lowering_plan.direct_routines.len(), 1);
+        assert_eq!(
+            lowering_plan.direct_routines[0].body.statements,
+            vec![
+                NativeDirectStmt::Let {
+                    mutable: true,
+                    name: "i".to_string(),
+                    value: NativeDirectExpr::Int(0),
+                },
+                NativeDirectStmt::Let {
+                    mutable: true,
+                    name: "sum".to_string(),
+                    value: NativeDirectExpr::Int(0),
+                },
+                NativeDirectStmt::While {
+                    condition: NativeDirectExpr::IntCompare {
+                        op: NativeDirectIntCompareOp::Lt,
+                        left: Box::new(NativeDirectExpr::Binding("i".to_string())),
+                        right: Box::new(NativeDirectExpr::Int(5)),
+                    },
+                    body: vec![
+                        NativeDirectStmt::Assign {
+                            name: "i".to_string(),
+                            value: NativeDirectExpr::IntBinary {
+                                op: NativeDirectIntBinaryOp::Add,
+                                left: Box::new(NativeDirectExpr::Binding("i".to_string())),
+                                right: Box::new(NativeDirectExpr::Int(1)),
+                            },
+                        },
+                        NativeDirectStmt::If {
+                            condition: NativeDirectExpr::IntCompare {
+                                op: NativeDirectIntCompareOp::Eq,
+                                left: Box::new(NativeDirectExpr::Binding("i".to_string())),
+                                right: Box::new(NativeDirectExpr::Int(3)),
+                            },
+                            then_body: vec![NativeDirectStmt::Continue],
+                            else_body: Vec::new(),
+                        },
+                        NativeDirectStmt::Assign {
+                            name: "sum".to_string(),
+                            value: NativeDirectExpr::IntBinary {
+                                op: NativeDirectIntBinaryOp::Add,
+                                left: Box::new(NativeDirectExpr::Binding("sum".to_string())),
+                                right: Box::new(NativeDirectExpr::Binding("i".to_string())),
+                            },
+                        },
+                        NativeDirectStmt::If {
+                            condition: NativeDirectExpr::IntCompare {
+                                op: NativeDirectIntCompareOp::Gt,
+                                left: Box::new(NativeDirectExpr::Binding("sum".to_string())),
+                                right: Box::new(NativeDirectExpr::Int(6)),
+                            },
+                            then_body: vec![NativeDirectStmt::Break],
+                            else_body: Vec::new(),
+                        },
+                    ],
+                },
+            ]
+        );
+        assert_eq!(
+            lowering_plan.direct_routines[0].body.return_expr,
+            NativeDirectExpr::Binding("sum".to_string())
+        );
+    }
+
+    #[test]
+    fn lowering_supports_statement_calls_and_early_return_in_if() {
+        let mut package = base_package();
+        package.entrypoints.push(IrEntrypoint {
+            module_id: "core".to_string(),
+            symbol_name: "main".to_string(),
+            symbol_kind: "fn".to_string(),
+            is_async: false,
+            exported: true,
+        });
+        package.routines.extend([
+            IrRoutine {
+                module_id: "core".to_string(),
+                routine_key: "core#fn-0".to_string(),
+                symbol_name: "main".to_string(),
+                symbol_kind: "fn".to_string(),
+                exported: true,
+                is_async: false,
+                type_param_rows: Vec::new(),
+                behavior_attr_rows: Vec::new(),
+                param_rows: Vec::new(),
+                signature_row: "fn main() -> Int:".to_string(),
+                intrinsic_impl: None,
+                impl_target_type: None,
+                impl_trait_path: None,
+                foreword_rows: Vec::new(),
+                rollups: Vec::new(),
+                statements: vec![
+                    ExecStmt::Expr {
+                        expr: ExecExpr::Phrase {
+                            subject: Box::new(ExecExpr::Path(vec!["touch".to_string()])),
+                            args: Vec::new(),
+                            qualifier_kind: ExecPhraseQualifierKind::Call,
+                            qualifier: "call".to_string(),
+                            resolved_callable: Some(vec!["core".to_string(), "touch".to_string()]),
+                            resolved_routine: Some("core#fn-1".to_string()),
+                            dynamic_dispatch: None,
+                            attached: Vec::new(),
+                        },
+                        rollups: Vec::new(),
+                    },
+                    ExecStmt::If {
+                        condition: ExecExpr::Bool(true),
+                        then_branch: vec![ExecStmt::ReturnValue {
+                            value: ExecExpr::Int(9),
+                        }],
+                        else_branch: Vec::new(),
+                        rollups: Vec::new(),
+                    },
+                    ExecStmt::ReturnValue {
+                        value: ExecExpr::Int(0),
+                    },
+                ],
+            },
+            IrRoutine {
+                module_id: "core".to_string(),
+                routine_key: "core#fn-1".to_string(),
+                symbol_name: "touch".to_string(),
+                symbol_kind: "fn".to_string(),
+                exported: false,
+                is_async: false,
+                type_param_rows: Vec::new(),
+                behavior_attr_rows: Vec::new(),
+                param_rows: Vec::new(),
+                signature_row: "fn touch():".to_string(),
+                intrinsic_impl: None,
+                impl_target_type: None,
+                impl_trait_path: None,
+                foreword_rows: Vec::new(),
+                rollups: Vec::new(),
+                statements: vec![ExecStmt::ReturnVoid],
+            },
+        ]);
+
+        let package_plan = build_native_package_plan(
+            AotEmitTarget::WindowsExeBundle,
+            &package,
+            &AotEmitContext {
+                root_artifact_file_name: Some("app.exe".to_string()),
+            },
+        )
+        .expect("native package plan should build");
+        let lowering_plan =
+            build_native_lowering_plan(&package_plan).expect("native lowering should build");
+
+        assert_eq!(lowering_plan.direct_routines.len(), 2);
+        assert!(lowering_plan.direct_routines.iter().any(|routine| {
+            routine.routine_key == "core#fn-1" && routine.body.return_expr == NativeDirectExpr::Unit
+        }));
+        assert!(lowering_plan.direct_routines.iter().any(|routine| {
+            routine.routine_key == "core#fn-0"
+                && routine.body.statements
+                    == vec![
+                        NativeDirectStmt::Expr {
+                            value: NativeDirectExpr::Call {
+                                routine_key: "core#fn-1".to_string(),
+                                args: Vec::new(),
+                            },
+                        },
+                        NativeDirectStmt::If {
+                            condition: NativeDirectExpr::Bool(true),
+                            then_body: vec![NativeDirectStmt::Return {
+                                value: NativeDirectExpr::Int(9),
+                            }],
+                            else_body: Vec::new(),
+                        },
+                    ]
+                && routine.body.return_expr == NativeDirectExpr::Int(0)
+        }));
     }
 }

@@ -229,11 +229,12 @@ fn render_exe_main_rs(
                 "}}\n\n",
                 "fn run() -> Result<i32, String> {{\n",
                 "    let result = {}?;\n",
-                "    let arcana_runtime::RuntimeAbiValue::Int(code) = result else {{\n",
-                "        return Err(\"direct native main must return Int\".to_string());\n",
-                "    }};\n",
-                "    i32::try_from(code)\n",
-                "        .map_err(|_| format!(\"main routine `{}` returned Int outside i32 range: {{code}}\"))\n",
+                "    match result {{\n",
+                "        RuntimeAbiValue::Int(code) => i32::try_from(code)\n",
+                "            .map_err(|_| format!(\"main routine `{}` returned Int outside i32 range: {{code}}\")),\n",
+                "        RuntimeAbiValue::Unit => Ok(0),\n",
+                "        _ => Err(\"direct native main must return Int or Unit\".to_string()),\n",
+                "    }}\n",
                 "}}\n",
             ),
             render_direct_routine_helpers(plan),
@@ -242,9 +243,7 @@ fn render_exe_main_rs(
         ),
         NativeRoutineLowering::RuntimeDispatch => {
             let template = concat!(
-                "use std::collections::BTreeMap;\n",
-                "use std::io::{self, Write};\n\n",
-                "use arcana_runtime::{BufferedHost, RuntimeAbiValue, execute_entrypoint_routine, parse_runtime_package_image};\n\n",
+                "use arcana_runtime::{current_process_runtime_host, execute_entrypoint_routine, parse_runtime_package_image};\n\n",
                 "static PACKAGE_IMAGE_TEXT: &str = include_str!(concat!(env!(\"OUT_DIR\"), \"/runtime-package.json\"));\n\n",
                 "static MAIN_ROUTINE_KEY: &str = __ARCANA_MAIN_ROUTINE_KEY__;\n\n",
                 "fn main() {\n",
@@ -259,34 +258,10 @@ fn render_exe_main_rs(
                 "}\n\n",
                 "fn run() -> Result<i32, String> {\n",
                 "    let plan = parse_runtime_package_image(PACKAGE_IMAGE_TEXT)?;\n",
-                "    let mut host = BufferedHost::default();\n",
-                "    host.args = std::env::args().skip(1).collect();\n",
-                "    host.env = std::env::vars().collect::<BTreeMap<_, _>>();\n",
-                "    host.allow_process = true;\n",
-                "    host.cwd = std::env::current_dir()\n",
-                "        .map(|path| path.to_string_lossy().into_owned())\n",
-                "        .unwrap_or_default();\n",
-                "    let code = execute_entrypoint_routine(&plan, MAIN_ROUTINE_KEY, &mut host)?;\n",
-                "    flush_buffered_host(&host)?;\n",
+                "    let mut host = current_process_runtime_host()?;\n",
+                "    let code = execute_entrypoint_routine(&plan, MAIN_ROUTINE_KEY, host.as_mut())?;\n",
                 "    Ok(code)\n",
                 "}\n\n",
-                "fn flush_buffered_host(host: &BufferedHost) -> Result<(), String> {\n",
-                "    if !host.stdout.is_empty() {\n",
-                "        let mut stdout = io::stdout().lock();\n",
-                "        for chunk in &host.stdout {\n",
-                "            stdout.write_all(chunk.as_bytes()).map_err(|e| format!(\"failed to write stdout: {e}\"))?;\n",
-                "        }\n",
-                "        stdout.flush().map_err(|e| format!(\"failed to flush stdout: {e}\"))?;\n",
-                "    }\n",
-                "    if !host.stderr.is_empty() {\n",
-                "        let mut stderr = io::stderr().lock();\n",
-                "        for chunk in &host.stderr {\n",
-                "            stderr.write_all(chunk.as_bytes()).map_err(|e| format!(\"failed to write stderr: {e}\"))?;\n",
-                "        }\n",
-                "        stderr.flush().map_err(|e| format!(\"failed to flush stderr: {e}\"))?;\n",
-                "    }\n",
-                "    Ok(())\n",
-                "}\n",
             );
             let mut out = String::new();
             out.push_str(&render_direct_routine_helpers(plan));
@@ -357,10 +332,9 @@ fn render_dll_lib_rs(
         concat!(
             "#![allow(dead_code, unused_imports)]\n\n",
             "use std::cell::RefCell;\n",
-            "use std::collections::BTreeMap;\n",
             "use std::ptr;\n",
             "use std::sync::OnceLock;\n\n",
-            "use arcana_runtime::{BufferedHost, RuntimeAbiValue, RuntimePackagePlan, execute_exported_abi_routine, parse_runtime_package_image};\n\n",
+            "use arcana_runtime::{RuntimeAbiValue, RuntimePackagePlan, current_process_runtime_host, execute_exported_abi_routine, parse_runtime_package_image};\n\n",
             "thread_local! {\n",
             "    static LAST_ERROR: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };\n",
             "}\n\n",
@@ -384,13 +358,8 @@ fn render_dll_lib_rs(
             "        Err(err) => Err(err.clone()),\n",
             "    }\n",
             "}\n\n",
-            "fn default_host() -> BufferedHost {\n",
-            "    let mut host = BufferedHost::default();\n",
-            "    host.args = std::env::args().skip(1).collect();\n",
-            "    host.env = std::env::vars().collect::<BTreeMap<_, _>>();\n",
-            "    host.allow_process = true;\n",
-            "    host.cwd = std::env::current_dir().map(|path| path.to_string_lossy().into_owned()).unwrap_or_default();\n",
-            "    host\n",
+            "fn default_host() -> Result<Box<dyn arcana_runtime::RuntimeHost>, String> {\n",
+            "    current_process_runtime_host()\n",
             "}\n\n",
             "fn set_last_error(err: String) {\n",
             "    LAST_ERROR.with(|slot| *slot.borrow_mut() = err.into_bytes());\n",
@@ -479,7 +448,10 @@ fn render_export_fn(export: &NativeExportLowering, layout: &NativeLayoutCatalog)
             body.push_str("        Ok(plan) => plan,\n");
             body.push_str("        Err(err) => { set_last_error(err); return 0; }\n");
             body.push_str("    };\n");
-            body.push_str("    let mut host = default_host();\n");
+            body.push_str("    let mut host = match default_host() {\n");
+            body.push_str("        Ok(host) => host,\n");
+            body.push_str("        Err(err) => { set_last_error(err); return 0; }\n");
+            body.push_str("    };\n");
             body.push_str("    let result = match execute_exported_abi_routine(plan, ");
             body.push_str(&format!("{:?}", api.routine_key));
             body.push_str(", vec![");
@@ -490,7 +462,7 @@ fn render_export_fn(export: &NativeExportLowering, layout: &NativeLayoutCatalog)
                     .collect::<Vec<_>>()
                     .join(", "),
             );
-            body.push_str("], &mut host) {\n");
+            body.push_str("], host.as_mut()) {\n");
             body.push_str("        Ok(value) => value,\n");
             body.push_str("        Err(err) => { set_last_error(err); return 0; }\n");
             body.push_str("    };\n");
@@ -759,9 +731,40 @@ fn render_direct_block_expr(block: &NativeDirectBlock, indent_level: usize) -> S
 
 fn render_direct_routine_stmt(stmt: &NativeDirectStmt, indent_level: usize) -> String {
     match stmt {
-        NativeDirectStmt::Let { name, value } => format!(
+        NativeDirectStmt::Let {
+            mutable,
+            name,
+            value,
+        } => {
+            let mut_kw = if *mutable { "mut " } else { "" };
+            format!(
+                concat!(
+                    "{indent}let {mut_kw}{}_value = match {} {{\n",
+                    "{match_indent}Ok(value) => value,\n",
+                    "{match_indent}Err(err) => return Err(err),\n",
+                    "{indent}}};\n"
+                ),
+                name,
+                render_lowered_runtime_abi_expr(value, indent_level + 1),
+                indent = indent(indent_level),
+                match_indent = indent(indent_level + 1),
+                mut_kw = mut_kw,
+            )
+        }
+        NativeDirectStmt::Expr { value } => format!(
             concat!(
-                "{indent}let {}_value = match {} {{\n",
+                "{indent}match {} {{\n",
+                "{match_indent}Ok(_) => {{}}\n",
+                "{match_indent}Err(err) => return Err(err),\n",
+                "{indent}}};\n"
+            ),
+            render_lowered_runtime_abi_expr(value, indent_level + 1),
+            indent = indent(indent_level),
+            match_indent = indent(indent_level + 1),
+        ),
+        NativeDirectStmt::Assign { name, value } => format!(
+            concat!(
+                "{indent}{}_value = match {} {{\n",
                 "{match_indent}Ok(value) => value,\n",
                 "{match_indent}Err(err) => return Err(err),\n",
                 "{indent}}};\n"
@@ -771,7 +774,63 @@ fn render_direct_routine_stmt(stmt: &NativeDirectStmt, indent_level: usize) -> S
             indent = indent(indent_level),
             match_indent = indent(indent_level + 1),
         ),
+        NativeDirectStmt::Return { value } => format!(
+            "{}return {};\n",
+            indent(indent_level),
+            render_lowered_runtime_abi_expr(value, indent_level)
+        ),
+        NativeDirectStmt::If {
+            condition,
+            then_body,
+            else_body,
+        } => format!(
+            concat!(
+                "{indent}match {} {{\n",
+                "{arm_indent}Ok(RuntimeAbiValue::Bool(true)) => {{\n",
+                "{}",
+                "{arm_indent}}},\n",
+                "{arm_indent}Ok(RuntimeAbiValue::Bool(false)) => {{\n",
+                "{}",
+                "{arm_indent}}},\n",
+                "{arm_indent}Ok(_) => return Err(\"direct if expected Bool condition\".to_string()),\n",
+                "{arm_indent}Err(err) => return Err(err),\n",
+                "{indent}}}\n"
+            ),
+            render_lowered_runtime_abi_expr(condition, indent_level + 1),
+            render_direct_stmt_body(then_body, indent_level + 2),
+            render_direct_stmt_body(else_body, indent_level + 2),
+            indent = indent(indent_level),
+            arm_indent = indent(indent_level + 1),
+        ),
+        NativeDirectStmt::While { condition, body } => format!(
+            concat!(
+                "{indent}loop {{\n",
+                "{match_indent}match {} {{\n",
+                "{arm_indent}Ok(RuntimeAbiValue::Bool(true)) => {{\n",
+                "{}",
+                "{arm_indent}}},\n",
+                "{arm_indent}Ok(RuntimeAbiValue::Bool(false)) => break,\n",
+                "{arm_indent}Ok(_) => return Err(\"direct while expected Bool condition\".to_string()),\n",
+                "{arm_indent}Err(err) => return Err(err),\n",
+                "{match_indent}}}\n",
+                "{indent}}}\n"
+            ),
+            render_lowered_runtime_abi_expr(condition, indent_level + 2),
+            render_direct_stmt_body(body, indent_level + 2),
+            indent = indent(indent_level),
+            match_indent = indent(indent_level + 1),
+            arm_indent = indent(indent_level + 2),
+        ),
+        NativeDirectStmt::Break => format!("{}break;\n", indent(indent_level)),
+        NativeDirectStmt::Continue => format!("{}continue;\n", indent(indent_level)),
     }
+}
+
+fn render_direct_stmt_body(statements: &[NativeDirectStmt], indent_level: usize) -> String {
+    statements
+        .iter()
+        .map(|stmt| render_direct_routine_stmt(stmt, indent_level))
+        .collect()
 }
 
 fn render_direct_routine_call_from_values(routine_key: &str, values: &[String]) -> String {

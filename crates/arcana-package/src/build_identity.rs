@@ -7,7 +7,10 @@ use arcana_aot::{
 };
 use sha2::{Digest, Sha256};
 
-use crate::{BuildTarget, GrimoireKind, PackageResult, build::BuildExecutionContext};
+use crate::{
+    BuildTarget, GrimoireKind, PackageResult, build::BuildExecutionContext,
+    collect_validated_support_file_paths,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CachedOutputMetadata {
@@ -378,14 +381,16 @@ fn support_files_from_table(table: &toml::Table) -> Result<Vec<String>, String> 
     let items = value
         .as_array()
         .ok_or_else(|| "`support_files` must be an array".to_string())?;
-    items
+    let paths = items
         .iter()
         .map(|item| {
             item.as_str()
                 .map(ToString::to_string)
                 .ok_or_else(|| "support file entries must be strings".to_string())
         })
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    collect_validated_support_file_paths(paths.iter().map(String::as_str))
+        .map_err(|e| e.to_string())
 }
 
 fn required_header_field(
@@ -577,6 +582,75 @@ mod tests {
             "toolchain",
             &hash,
         ));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_cached_output_metadata_rejects_invalid_support_file_path() {
+        let dir = temp_dir("invalid_support_metadata");
+        let artifact_path = dir.join("app.exe");
+        let metadata_path =
+            cache_metadata_path_for_output(&artifact_path, &BuildTarget::windows_exe());
+        fs::write(
+            &metadata_path,
+            concat!(
+                "member = \"tool\"\n",
+                "kind = \"app\"\n",
+                "fingerprint = \"fp\"\n",
+                "api_fingerprint = \"api\"\n",
+                "target = \"windows-exe\"\n",
+                "target_format = \"arcana-aot-windows-exe-v1\"\n",
+                "toolchain = \"toolchain\"\n",
+                "artifact_hash = \"sha256:abc\"\n",
+                "support_files = [\"..\\\\escape.exe\"]\n",
+            ),
+        )
+        .expect("metadata should write");
+
+        let err = read_cached_output_metadata(&artifact_path, &BuildTarget::windows_exe())
+            .expect_err("invalid support file metadata should fail");
+        assert!(err.contains("invalid support file metadata"), "{err}");
+        assert!(err.contains("invalid support file path"), "{err}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cached_emission_hash_rejects_invalid_support_file_path_metadata() {
+        let dir = temp_dir("invalid_support_hash");
+        let artifact_path = dir.join("app.artifact.toml");
+        let emission = dummy_emission(vec![AotEmissionFile {
+            relative_path: "..\\escape.exe".to_string(),
+            bytes: b"unused".to_vec(),
+        }]);
+        let hash = cached_emission_hash(
+            BuildTarget::internal_aot().key(),
+            AOT_INTERNAL_FORMAT,
+            &emission.artifact,
+            None,
+            &[],
+        );
+        fs::write(
+            &artifact_path,
+            render_cached_artifact(
+                "tool",
+                &GrimoireKind::App,
+                "fp",
+                "api",
+                &BuildTarget::internal_aot(),
+                AOT_INTERNAL_FORMAT,
+                "toolchain",
+                &emission,
+                &hash,
+            ),
+        )
+        .expect("metadata should write");
+
+        let err = cached_emission_hash_for_path(&artifact_path, &BuildTarget::internal_aot())
+            .expect_err("invalid support file metadata should fail hashing");
+        assert!(err.contains("invalid support file metadata"), "{err}");
+        assert!(err.contains("invalid support file path"), "{err}");
 
         let _ = fs::remove_dir_all(&dir);
     }

@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use arcana_aot::{AotEmitContext, AotEmitTarget, AotPackageEmission, emit_package_with_context};
 use arcana_hir::{HirResolvedWorkspace, HirWorkspaceSummary, resolve_workspace};
@@ -19,7 +19,7 @@ use crate::fingerprint::{
 };
 use crate::{
     ARTIFACT_DIR, BuildTarget, CACHE_DIR, GrimoireKind, LOCKFILE_VERSION, LOGS_DIR,
-    LockTargetEntry, Lockfile, PackageResult, WorkspaceGraph,
+    LockTargetEntry, Lockfile, PackageResult, WorkspaceGraph, collect_validated_support_file_paths,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -144,7 +144,6 @@ pub fn plan_build_for_target_with_context(
     target: BuildTarget,
     context: &BuildExecutionContext,
 ) -> PackageResult<Vec<BuildStatus>> {
-    let planned_toolchain = current_build_toolchain_for_target_with_context(&target, context)?;
     let mut statuses = Vec::new();
     let mut upstream_built = HashMap::<String, bool>::new();
 
@@ -156,15 +155,19 @@ pub fn plan_build_for_target_with_context(
             .fingerprints
             .member(name)
             .ok_or_else(|| format!("missing fingerprint for member `{name}`"))?;
+        let member_target = planned_target_for_member(&target, &member.kind);
+        let planned_toolchain =
+            current_build_toolchain_for_target_with_context(&member_target, context)?;
         let fingerprint = member_fingerprints.source().to_string();
         let api_fingerprint = member_fingerprints.api().to_string();
-        let artifact_rel_path = artifact_rel_path(name, &fingerprint, &member.kind, &target)?;
+        let artifact_rel_path =
+            artifact_rel_path(name, &fingerprint, &member.kind, &member_target)?;
         let existing = existing_lock
             .and_then(|lock| lock.members.get(name))
-            .and_then(|member| member.target(&target));
-        let format = target
+            .and_then(|member| member.target(&member_target));
+        let format = member_target
             .format()
-            .ok_or_else(|| format!("unsupported build target `{target}`"))?
+            .ok_or_else(|| format!("unsupported build target `{member_target}`"))?
             .to_string();
         let artifact_abs_path = graph.root_dir.join(&artifact_rel_path);
         let fingerprint_changed = existing
@@ -192,7 +195,7 @@ pub fn plan_build_for_target_with_context(
                 &member.kind,
                 &fingerprint,
                 &api_fingerprint,
-                &target,
+                &member_target,
                 &format,
                 &planned_toolchain,
                 existing
@@ -211,7 +214,7 @@ pub fn plan_build_for_target_with_context(
             fingerprint_set_id: prepared.fingerprint_set_id.clone(),
             fingerprint,
             api_fingerprint,
-            target: target.clone(),
+            target: member_target,
             artifact_rel_path,
             kind: member.kind.clone(),
             format,
@@ -220,6 +223,13 @@ pub fn plan_build_for_target_with_context(
     }
 
     Ok(statuses)
+}
+
+fn planned_target_for_member(requested: &BuildTarget, kind: &GrimoireKind) -> BuildTarget {
+    match (requested, kind) {
+        (BuildTarget::WindowsExe, GrimoireKind::Lib) => BuildTarget::InternalAot,
+        _ => requested.clone(),
+    }
 }
 
 pub fn plan_build(
@@ -701,34 +711,15 @@ fn write_emission_support_files(
             artifact_path.display()
         ));
     };
-    let mut seen_paths = BTreeSet::new();
+    collect_validated_support_file_paths(
+        emission
+            .support_files
+            .iter()
+            .map(|file| file.relative_path.as_str()),
+    )
+    .map_err(|e| format!("backend emission produced {e}"))?;
     for file in &emission.support_files {
         let relative = Path::new(&file.relative_path);
-        if file.relative_path.is_empty() {
-            return Err("backend emission produced an empty support file path".to_string());
-        }
-        if !seen_paths.insert(file.relative_path.as_str()) {
-            return Err(format!(
-                "backend emission produced duplicate support file path `{}`",
-                file.relative_path
-            ));
-        }
-        if relative.is_absolute()
-            || relative.components().any(|component| {
-                matches!(
-                    component,
-                    Component::Prefix(_)
-                        | Component::RootDir
-                        | Component::CurDir
-                        | Component::ParentDir
-                )
-            })
-        {
-            return Err(format!(
-                "backend emission produced invalid support file path `{}`",
-                file.relative_path
-            ));
-        }
         let output_path = artifact_dir.join(relative);
         if let Some(parent) = output_path.parent() {
             fs::create_dir_all(parent).map_err(|e| {

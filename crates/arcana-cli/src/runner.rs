@@ -1,12 +1,14 @@
+#[cfg(test)]
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use arcana_frontend::check_workspace_graph;
 use arcana_package::{
-    BuildTarget, GrimoireKind, WorkspaceGraph, execute_build_with_context, load_workspace_graph,
-    plan_build_for_target_with_context, plan_workspace, prepare_build_from_workspace,
-    read_lockfile, write_lockfile,
+    BuildTarget, GrimoireKind, WorkspaceGraph, default_distribution_dir,
+    execute_build_with_context, load_workspace_graph, plan_build_for_target_with_context,
+    plan_workspace, prepare_build_from_workspace, read_lockfile, stage_distribution_bundle,
+    write_lockfile,
 };
 
 use crate::build_context::build_execution_context_for_target;
@@ -17,6 +19,7 @@ pub(crate) struct PreparedRun {
     pub target: BuildTarget,
     pub member: String,
     pub artifact_path: PathBuf,
+    pub working_dir: Option<PathBuf>,
 }
 
 pub(crate) fn run_workspace(
@@ -30,7 +33,11 @@ pub(crate) fn run_workspace(
         BuildTarget::InternalAot => {
             runtime_exec::run_plan_file(&prepared.artifact_path, ProcessContext::current(args))
         }
-        BuildTarget::WindowsExe => run_native_executable(&prepared.artifact_path, &args),
+        BuildTarget::WindowsExe => run_native_executable(
+            &prepared.artifact_path,
+            prepared.working_dir.as_deref(),
+            &args,
+        ),
         BuildTarget::WindowsDll => {
             Err("`arcana run` does not support the non-executable `windows-dll` target".to_string())
         }
@@ -77,10 +84,34 @@ pub(crate) fn prepare_run_workspace(
         .ok_or_else(|| {
             format!("missing build status for runnable member `{runnable_member_name}`")
         })?;
+    let artifact_path = graph.root_dir.join(status.artifact_rel_path());
+    let working_dir = match target {
+        BuildTarget::WindowsExe => {
+            let bundle_dir =
+                default_distribution_dir(&graph, &runnable_member_name, &BuildTarget::WindowsExe);
+            let bundle = stage_distribution_bundle(
+                &graph,
+                &statuses,
+                &runnable_member_name,
+                &BuildTarget::WindowsExe,
+                &bundle_dir,
+            )?;
+            Some(bundle.bundle_dir)
+        }
+        _ => None,
+    };
+    let artifact_path =
+        match &working_dir {
+            Some(bundle_dir) => bundle_dir.join(artifact_path.file_name().ok_or_else(|| {
+                format!("invalid built artifact path `{}`", artifact_path.display())
+            })?),
+            None => artifact_path,
+        };
     Ok(PreparedRun {
         target,
         member: runnable_member_name,
-        artifact_path: graph.root_dir.join(status.artifact_rel_path()),
+        artifact_path,
+        working_dir,
     })
 }
 
@@ -120,8 +151,17 @@ fn default_run_member(graph: &WorkspaceGraph) -> Result<&arcana_package::Workspa
     }
 }
 
-fn run_native_executable(exe_path: &Path, args: &[String]) -> Result<i32, String> {
-    let status = Command::new(exe_path).args(args).status().map_err(|e| {
+fn run_native_executable(
+    exe_path: &Path,
+    working_dir: Option<&Path>,
+    args: &[String],
+) -> Result<i32, String> {
+    let mut command = Command::new(exe_path);
+    command.args(args);
+    if let Some(working_dir) = working_dir {
+        command.current_dir(working_dir);
+    }
+    let status = command.status().map_err(|e| {
         format!(
             "failed to run emitted executable `{}`: {e}",
             exe_path.display()
@@ -159,6 +199,29 @@ mod tests {
         write_file(&dir.join("src/types.arc"), "// types\n");
     }
 
+    fn repo_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("repo root should exist")
+            .to_path_buf()
+    }
+
+    fn add_std_dep(dir: &Path) {
+        let std_path = repo_root()
+            .join("std")
+            .display()
+            .to_string()
+            .replace('\\', "/");
+        fs::write(
+            dir.join("book.toml"),
+            format!(
+                "name = \"app\"\nkind = \"app\"\n\n[deps]\nstd = {{ path = \"{std_path}\" }}\n"
+            ),
+        )
+        .expect("book manifest should write");
+    }
+
     #[test]
     fn run_workspace_executes_internal_aot_artifact() {
         let dir = temp_dir("run_internal");
@@ -179,9 +242,36 @@ mod tests {
 
         let prepared = prepare_run_workspace(&dir, BuildTarget::windows_exe(), None)
             .expect("windows exe run should build");
-        let code = run_native_executable(&prepared.artifact_path, &["alpha".to_string()])
-            .expect("native exe should run");
+        let code = run_native_executable(
+            &prepared.artifact_path,
+            prepared.working_dir.as_deref(),
+            &["alpha".to_string()],
+        )
+        .expect("native exe should run");
         assert_eq!(code, 7);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn run_workspace_windows_exe_uses_staged_bundle_directory() {
+        let dir = temp_dir("run_windows_bundle");
+        write_app_workspace(
+            &dir,
+            concat!(
+                "import std.fs\n",
+                "fn main() -> Int:\n",
+                "    if std.fs.exists :: \"arcana.bundle.toml\" :: call:\n",
+                "        return 0\n",
+                "    return 9\n",
+            ),
+        );
+        add_std_dep(&dir);
+
+        let code = run_workspace(dir.clone(), BuildTarget::windows_exe(), None, Vec::new())
+            .expect("windows exe run should succeed");
+        assert_eq!(code, 0);
 
         let _ = fs::remove_dir_all(&dir);
     }

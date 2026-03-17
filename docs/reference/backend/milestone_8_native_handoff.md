@@ -1,8 +1,8 @@
-# Milestone 8 Native Backend Handoff
+# Milestone 8 Native Backend Completion Note
 
 Status: `reference-only`
 
-This note captures the current Milestone 8 native-backend state for the next agent.
+This note captures the completed Milestone 8 native-backend state.
 It is implementation context, not rewrite contract authority.
 
 Use current authority first:
@@ -52,6 +52,9 @@ Runtime-side support already exists for native bundles:
 - runtime package image embedding/loading
 - typed native ABI conversion in `crates/arcana-runtime/src/native_abi.rs`
 - stable entrypoint execution keyed by routine identity rather than loose symbol lookup
+- generated native entry/runtime fallback now calls `current_process_runtime_host()`
+- on Windows, `current_process_runtime_host()` constructs `NativeProcessHost`, which provides real stdout/stderr/stdin, time/sleep, Win32 window/input/canvas/event behavior, BMP image loading/blitting, and WinMM WAV playback for emitted bundles
+- non-Windows callers still fall back to `BufferedHost`, but the Milestone 8 native `windows-exe` / `windows-dll` path now runs on the real Windows host seam instead of the synthetic app/runtime host
 
 ## What Is Implemented Now
 
@@ -63,38 +66,84 @@ Bundle/runtime contract:
 - native bundles stage and run without Arcana installed
 - runtime package images are generated at native build time and embedded into the emitted native project
 - native bundle manifests are backend-owned artifacts
+- generated native runtime fallback uses the current-process runtime host rather than a synthetic buffered launcher host
+- emitted native bundles now execute real host-backed window/canvas and audio flows on Windows
 
 Direct native lowering:
-- direct lowering supports immutable `let` blocks
+- direct lowering supports local `let` blocks, including mutable locals
 - direct lowering supports terminal `if`
+- direct lowering supports statement-form `if`
+- direct lowering supports `while` with local-name assignment plus `break` / `continue`
+- direct lowering supports direct statement-form calls and early `return` in the structured subset
 - direct lowering supports Int `+`, `-`, `*`, `/`, `%`
 - direct lowering supports Int comparisons `==`, `!=`, `<`, `<=`, `>`, `>=`
-- direct lowering supports direct same-package resolved positional `:: call`
+- direct lowering supports resolved positional and named `:: call` where the resolved signature stays inside the current native ABI/direct subset
 - direct lowering still falls back to runtime dispatch when the routine/body shape is outside the supported subset
 
 Typed DLL ABI:
 - current ABI covers `Int`, `Bool`, `Str`, `Array[Int]`, `Pair[...]`, and `Unit`
 - exports are package-specific typed native functions, not the old generic JSON shim ABI
 
-## Recent Slice
+Native runtime-host coverage:
+- `NativeProcessHost` delegates host-core filesystem/path/process behavior through `BufferedHost` where that is already rewrite-owned and sufficient, but owns the real OS-bound window/canvas/audio/time/stdin/stdout seams itself
+- canvas support covers fill/rect/line/circle/label/present plus BMP image load and blit/blit_scaled/blit_region
+- audio support covers default-output selection, WAV decode to PCM16, playback start/stop/pause/resume, looping, gain, and position queries
+- playback-open failure paths now clean up native audio handles before returning errors instead of leaking partially opened playback state
+- audio `stop` and `output_close` now follow the approved consuming-lifecycle contract in both the native host and the buffered host used by synthetic runtime tests
+- Win32 window-class registration is now module-specific, so multiple Arcana-generated DLLs can create windows in the same host process without colliding on a shared class name
+- native asset decoders now have direct unit coverage and stricter overflow/shape validation in addition to the emitted-binary smokes
 
-The latest Milestone 8 slice widened the backend-neutral direct subset:
+## Recent Slices
+
+The previous Milestone 8 slice widened the backend-neutral direct subset:
 - `native_lowering.rs` now models direct routine bodies as `NativeDirectBlock`
 - direct lowering can now carry immutable local bindings plus terminal `if`
 - Int arithmetic/comparisons are lowered into backend-neutral direct nodes
 - `rust_codegen.rs` renders those direct block/int-op nodes rather than assuming a single flat return expression
 - native bundle smoke tests now prove source-level `if` plus Int ops through both `windows-exe` and `windows-dll`
 
+The latest Milestone 8 slice widened the structured statement subset further:
+- `native_lowering.rs` now carries mutable local bindings, local-name assignment, statement-form `if`, and `while` loop bodies with `break` / `continue`
+- compound Int assignment on mutable local names (`+=`, `-=`, `*=`, `/=`, `%=`) lowers into backend-neutral direct nodes instead of forcing runtime fallback
+- `rust_codegen.rs` renders the expanded direct statement subset without moving those semantics out of backend-neutral lowering
+- native bundle smoke tests now prove source-level mutable locals and `while` loops through both `windows-exe` and `windows-dll`
+
+The newest Milestone 8 slice widened direct-call/control-flow coverage again:
+- direct lowering now carries statement-form direct calls and nested early `return` inside the supported structured subset instead of forcing those bodies onto runtime fallback
+- direct call lowering now accepts named arguments when they match the resolved native routine signature, not only plain positional calls
+- native bundle smoke tests now prove named-call lowering through both `windows-exe` and `windows-dll`
+
+The latest Milestone 8 slice also closed a package-planning hole and broadened end-to-end native smoke depth:
+- `arcana-package` no longer tries to build native `windows-exe` artifacts for library dependencies of app bundles; those library deps now stay on internal artifacts while still linking into the root native bundle
+- native exe smoke coverage now includes app-substrate window/canvas and audio apps running as emitted bundles, not only trivial helper-style programs
+
+The completion slice closed the remaining real-host gap:
+- `arcana-runtime` now exposes `current_process_runtime_host()`
+- generated `windows-exe` / `windows-dll` runtime fallback code now constructs that host instead of hardcoding `BufferedHost`
+- the Windows implementation is `NativeProcessHost`, a real current-process runtime host backed by Win32 window/canvas/input/events plus WinMM audio
+- native visual smoke now stages and loads a real BMP image from the emitted bundle and blits it through the real canvas host path
+- native audio smoke now stages and loads a real WAV file from the emitted bundle and plays it through a real default audio output path
+- `native_host.rs` now has direct unit tests for BMP/WAV decoding and stricter size/shape validation so the host seam is covered below the end-to-end bundle tests
+
+The follow-up hardening slice closed the review findings from the first completion pass:
+- `play_buffer` cleanup now closes native audio state on post-open failures instead of leaking a `waveOut` handle or leaving partially started playback behind
+- finished native playbacks now release queued PCM data once playback completes, and explicit `stop` / `output_close` remove consumed playback or device handles from the active host maps
+- the synthetic `BufferedHost` now matches that consuming audio lifecycle behavior, so runtime tests and the real Windows host do not drift on stop/close semantics
+- native window class registration now derives a module-specific class name from the current runtime module, avoiding same-process collisions between multiple Arcana-generated DLLs
+
 Relevant files:
 - `crates/arcana-aot/src/native_lowering.rs`
 - `crates/arcana-aot/src/rust_codegen.rs`
+- `crates/arcana-runtime/src/native_host.rs`
+- `crates/arcana-runtime/src/lib.rs`
 - `crates/arcana-cli/src/package_cmd.rs`
+- `crates/arcana-package/src/build.rs`
 
-## What To Do Next
+## After Milestone 8
 
-Highest-value next slices:
-1. Broaden direct lowering beyond terminal `if` into a small structured loop/statement subset where it is semantically safe.
-2. Broaden direct call lowering beyond plain positional `:: call` where the IR/runtime contract is clear.
+Likely next backend slices after Milestone 8:
+1. Broaden direct lowering beyond local-name `while` / statement-`if` / nested early-return into the next semantically safe structured subset.
+2. Broaden direct call lowering beyond positional-or-named resolved `:: call` where the IR/runtime contract is clear.
 3. Keep pushing logic downward into backend-neutral lowering/native-plan layers so a future Cranelift emitter consumes the same plan instead of cloning Rust-codegen logic.
 4. Revisit the native ABI surface only when there is a clear stable calling-convention story; do not bolt on ad hoc export forms.
 
@@ -113,12 +162,15 @@ Good guardrails for future work:
 
 ## Verification
 
-The latest slice was verified with:
+Milestone 8 completion was verified with:
 - `cargo fmt`
+- `cargo test -q -p arcana-runtime`
 - `cargo test -q -p arcana-aot`
 - `cargo test -q -p arcana-cli package_workspace_stages_runnable_windows_exe_bundle`
 - `cargo test -q -p arcana-cli package_workspace_stages_loadable_windows_dll_bundle`
-- `cargo test -q -p arcana-package`
+- `cargo test -q -p arcana-cli package_workspace_runs_native_window_canvas_app_bundle`
+- `cargo test -q -p arcana-cli package_workspace_runs_native_audio_app_bundle`
+- `cargo test -q -p arcana-cli`
 - `cargo test -q`
 
 ## One Cleanup Note
