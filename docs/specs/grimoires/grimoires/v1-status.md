@@ -13,7 +13,7 @@ Rules:
 id: GRIMOIRE-DESKTOP-FACADE
 classification: bootstrap-required
 role: desktop/media facade grimoire
-current_scaffold: `grimoires/owned/app/arcana-desktop`
+current_scaffold: `grimoires/owned/libs/arcana-desktop`
 historical_seed: archived MeadowLang desktop app corpus
 why: ergonomic desktop/window/run-loop/frame layer above the low-level app/runtime substrate
 current_source: scaffolded-rewrite-owned
@@ -24,7 +24,7 @@ promotion_condition: the rewrite-owned desktop/media facade grows beyond scaffol
 id: GRIMOIRE-GRAPHICS-FACADE
 classification: bootstrap-required
 role: graphics facade grimoire
-current_scaffold: `grimoires/owned/app/arcana-graphics`
+current_scaffold: `grimoires/owned/libs/arcana-graphics`
 historical_seed: archived MeadowLang desktop app corpus
 why: 2D graphics/image convenience above the low-level canvas substrate
 current_source: scaffolded-rewrite-owned
@@ -35,7 +35,7 @@ promotion_condition: a rewrite-owned graphics facade exists and proves the low-l
 id: GRIMOIRE-TEXT-FACADE
 classification: bootstrap-required
 role: text facade grimoire
-current_scaffold: `grimoires/owned/app/arcana-text`
+current_scaffold: `grimoires/owned/libs/arcana-text`
 historical_seed: archived MeadowLang desktop app corpus
 why: text draw and text-asset convenience above `std.canvas`, `std.text`, and `std.fs`
 current_source: scaffolded-rewrite-owned
@@ -46,7 +46,7 @@ promotion_condition: a rewrite-owned text facade exists and proves text draw plu
 id: GRIMOIRE-AUDIO-FACADE
 classification: bootstrap-required
 role: audio facade grimoire
-current_scaffold: `grimoires/owned/app/arcana-audio`
+current_scaffold: `grimoires/owned/libs/arcana-audio`
 historical_seed: archived MeadowLang audio app corpus
 why: higher-level playback/convenience layer above the low-level `std.audio` substrate
 current_source: scaffolded-rewrite-owned

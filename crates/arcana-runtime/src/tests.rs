@@ -140,6 +140,30 @@ fn synthetic_audio_host(fixture_root: &Path) -> BufferedHost {
     }
 }
 
+#[test]
+fn buffered_host_maps_common_desktop_input_names() {
+    let mut host = BufferedHost::default();
+    assert_eq!(host.input_key_code("Tab").expect("tab should map"), 9);
+    assert_eq!(host.input_key_code("Shift").expect("shift should map"), 16);
+    assert_eq!(
+        host.input_key_code("PageDown")
+            .expect("page down should map"),
+        34
+    );
+    assert_eq!(host.input_key_code("F5").expect("f5 should map"), 116);
+    assert_eq!(host.input_key_code("Meta").expect("meta should map"), 91);
+    assert_eq!(
+        host.input_mouse_button_code("Back")
+            .expect("back should map"),
+        4
+    );
+    assert_eq!(
+        host.input_mouse_button_code("Forward")
+            .expect("forward should map"),
+        5
+    );
+}
+
 fn write_host_core_workspace(destination: &Path) {
     write_file(
         &destination.join("book.toml"),
@@ -4641,6 +4665,63 @@ fn execute_main_runs_synthetic_window_canvas_events_runtime() {
             payload: vec![RuntimeValue::Bool(true)],
         }
     );
+    let moved = execute_routine(
+        &plan,
+        decode_routine,
+        vec![
+            RuntimeValue::Int(10),
+            RuntimeValue::Int(12),
+            RuntimeValue::Int(-4),
+        ],
+        &mut debug_host,
+    )
+    .expect("window moved event should decode");
+    assert_eq!(
+        moved,
+        RuntimeValue::Variant {
+            name: "std.kernel.events.Event.WindowMoved".to_string(),
+            payload: vec![RuntimeValue::Pair(
+                Box::new(RuntimeValue::Int(12)),
+                Box::new(RuntimeValue::Int(-4)),
+            )],
+        }
+    );
+    let entered = execute_routine(
+        &plan,
+        decode_routine,
+        vec![
+            RuntimeValue::Int(11),
+            RuntimeValue::Int(0),
+            RuntimeValue::Int(0),
+        ],
+        &mut debug_host,
+    )
+    .expect("mouse entered event should decode");
+    assert_eq!(
+        entered,
+        RuntimeValue::Variant {
+            name: "std.kernel.events.Event.MouseEntered".to_string(),
+            payload: vec![],
+        }
+    );
+    let left = execute_routine(
+        &plan,
+        decode_routine,
+        vec![
+            RuntimeValue::Int(12),
+            RuntimeValue::Int(0),
+            RuntimeValue::Int(0),
+        ],
+        &mut debug_host,
+    )
+    .expect("mouse left event should decode");
+    assert_eq!(
+        left,
+        RuntimeValue::Variant {
+            name: "std.kernel.events.Event.MouseLeft".to_string(),
+            payload: vec![],
+        }
+    );
 
     let debug_window = debug_host
         .window_open("Arcana", 320, 200)
@@ -4678,6 +4759,23 @@ fn execute_main_runs_synthetic_window_canvas_events_runtime() {
             payload: vec![RuntimeValue::Variant {
                 name: "AppEvent.WindowFocused".to_string(),
                 payload: vec![RuntimeValue::Bool(true)],
+            }],
+        }
+    );
+    let lifted_entered = execute_routine(
+        &plan,
+        lift_event_routine,
+        vec![entered.clone()],
+        &mut debug_host,
+    )
+    .expect("std.events.lift_event should lift mouse entered");
+    assert_eq!(
+        lifted_entered,
+        RuntimeValue::Variant {
+            name: "std.option.Option.Some".to_string(),
+            payload: vec![RuntimeValue::Variant {
+                name: "AppEvent.MouseEntered".to_string(),
+                payload: vec![],
             }],
         }
     );

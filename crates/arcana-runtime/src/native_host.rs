@@ -26,8 +26,7 @@ use windows_sys::Win32::System::LibraryLoader::{
     GetModuleHandleExW,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT,
-    VK_SPACE, VK_UP,
+    TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW,
@@ -38,15 +37,16 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SetCursor,
     SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage, WM_CLOSE,
     WM_DESTROY, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
-    WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_RBUTTONDOWN,
-    WM_RBUTTONUP, WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WNDCLASSW, WS_EX_APPWINDOW, WS_MAXIMIZEBOX,
-    WS_OVERLAPPEDWINDOW, WS_SIZEBOX, WS_VISIBLE,
+    WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MOVE, WM_NCCREATE, WM_NCDESTROY, WM_PAINT,
+    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WM_XBUTTONDOWN, WM_XBUTTONUP,
+    WNDCLASSW, WS_EX_APPWINDOW, WS_MAXIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_SIZEBOX, WS_VISIBLE,
 };
 
 use crate::{
     BufferedAppFrame, BufferedEvent, BufferedFrameInput, BufferedHost, RuntimeAppFrameHandle,
     RuntimeAudioBufferHandle, RuntimeAudioDeviceHandle, RuntimeAudioPlaybackHandle, RuntimeHost,
-    RuntimeImageHandle, RuntimeWindowHandle, ensure_audio_buffer_matches_device,
+    RuntimeImageHandle, RuntimeWindowHandle, common_named_key_code, common_named_mouse_button_code,
+    ensure_audio_buffer_matches_device,
 };
 
 const WINDOW_CLASS_NAME: &str = "ArcanaNativeRuntimeWindow";
@@ -59,6 +59,9 @@ const EVENT_MOUSE_DOWN: i64 = 6;
 const EVENT_MOUSE_UP: i64 = 7;
 const EVENT_MOUSE_MOVE: i64 = 8;
 const EVENT_MOUSE_WHEEL_Y: i64 = 9;
+const EVENT_WINDOW_MOVED: i64 = 10;
+const EVENT_MOUSE_ENTERED: i64 = 11;
+const EVENT_MOUSE_LEFT: i64 = 12;
 const WM_MOUSELEAVE_MESSAGE: u32 = 0x02A3;
 
 static REGISTERED_WINDOW_CLASS: OnceLock<Result<NativeWindowClass, String>> = OnceLock::new();
@@ -1189,7 +1192,7 @@ impl RuntimeHost for NativeProcessHost {
     }
 
     fn input_key_code(&mut self, name: &str) -> Result<i64, String> {
-        Ok(map_key_name(name))
+        Ok(common_named_key_code(name))
     }
 
     fn input_key_down(&mut self, frame: RuntimeAppFrameHandle, key: i64) -> Result<bool, String> {
@@ -1213,12 +1216,7 @@ impl RuntimeHost for NativeProcessHost {
     }
 
     fn input_mouse_button_code(&mut self, name: &str) -> Result<i64, String> {
-        Ok(match name {
-            "Left" | "left" => 1,
-            "Right" | "right" => 2,
-            "Middle" | "middle" => 3,
-            _ => -1,
-        })
+        Ok(common_named_mouse_button_code(name))
     }
 
     fn input_mouse_pos(&mut self, frame: RuntimeAppFrameHandle) -> Result<(i64, i64), String> {
@@ -1740,6 +1738,12 @@ unsafe extern "system" fn arcana_window_proc(
             state.push_event(EVENT_WINDOW_RESIZED, state.width, state.height);
             0
         }
+        WM_MOVE => {
+            let x = signed_loword(lparam as u32) as i64;
+            let y = signed_hiword(lparam as u32) as i64;
+            state.push_event(EVENT_WINDOW_MOVED, x, y);
+            0
+        }
         WM_SETFOCUS => {
             state.focused = true;
             state.push_event(EVENT_WINDOW_FOCUSED, 1, 0);
@@ -1769,6 +1773,7 @@ unsafe extern "system" fn arcana_window_proc(
             let x = signed_loword(lparam as u32) as i64;
             let y = signed_hiword(lparam as u32) as i64;
             state.mouse_pos = (x, y);
+            let entering = !state.mouse_in_window;
             state.mouse_in_window = true;
             let mut track = TRACKMOUSEEVENT {
                 cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
@@ -1777,22 +1782,26 @@ unsafe extern "system" fn arcana_window_proc(
                 dwHoverTime: 0,
             };
             unsafe { TrackMouseEvent(&mut track) };
+            if entering {
+                state.push_event(EVENT_MOUSE_ENTERED, 0, 0);
+            }
             state.push_event(EVENT_MOUSE_MOVE, x, y);
             0
         }
         WM_MOUSELEAVE_MESSAGE => {
             state.mouse_in_window = false;
+            state.push_event(EVENT_MOUSE_LEFT, 0, 0);
             0
         }
-        WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN => {
-            let button = mouse_button_from_message(message);
+        WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN => {
+            let button = mouse_button_from_message(message, wparam as u32);
             state.mouse_down.insert(button);
             state.mouse_pressed.insert(button);
             state.push_event(EVENT_MOUSE_DOWN, button, 0);
             0
         }
-        WM_LBUTTONUP | WM_RBUTTONUP | WM_MBUTTONUP => {
-            let button = mouse_button_from_message(message);
+        WM_LBUTTONUP | WM_RBUTTONUP | WM_MBUTTONUP | WM_XBUTTONUP => {
+            let button = mouse_button_from_message(message, wparam as u32);
             state.mouse_down.remove(&button);
             state.mouse_released.insert(button);
             state.push_event(EVENT_MOUSE_UP, button, 0);
@@ -2234,25 +2243,16 @@ fn sanitize_dimension(value: i64) -> i64 {
     value.max(1)
 }
 
-fn map_key_name(name: &str) -> i64 {
-    match name {
-        "Space" | "space" => VK_SPACE as i64,
-        "Escape" | "escape" => VK_ESCAPE as i64,
-        "Enter" | "enter" => VK_RETURN as i64,
-        "Left" | "left" => VK_LEFT as i64,
-        "Right" | "right" => VK_RIGHT as i64,
-        "Up" | "up" => VK_UP as i64,
-        "Down" | "down" => VK_DOWN as i64,
-        _ if name.len() == 1 => name.chars().next().unwrap().to_ascii_uppercase() as i64,
-        _ => -1,
-    }
-}
-
-fn mouse_button_from_message(message: u32) -> i64 {
+fn mouse_button_from_message(message: u32, wparam: u32) -> i64 {
     match message {
         WM_LBUTTONDOWN | WM_LBUTTONUP => 1,
         WM_RBUTTONDOWN | WM_RBUTTONUP => 2,
         WM_MBUTTONDOWN | WM_MBUTTONUP => 3,
+        WM_XBUTTONDOWN | WM_XBUTTONUP => match hiword(wparam) as u32 {
+            1 => 4,
+            2 => 5,
+            _ => -1,
+        },
         _ => -1,
     }
 }

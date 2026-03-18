@@ -151,7 +151,7 @@ promotion_condition: rewrite-owned substrate uses a small stable core-type layer
 id: STD-WINDOW
 classification: bootstrap-required
 why: raw window lifecycle/state/control substrate for desktop apps and showcases
-consumers: `grimoires/owned/app/arcana-desktop`, owned window/showcase proofs
+consumers: `grimoires/owned/libs/arcana-desktop`, owned window/showcase proofs
 current_source: carried
 still_needs_rebuild: backend/runtime ownership under the rewrite, without inheriting old framework policy
 update_note: keep only raw window substrate here; `open` is now explicitly fallible (`Result[Window, Str]`), `close` is now a consuming `take` operation with explicit `Result[Unit, Str]`, `alive` remains a lifecycle query rather than the input/event frame pump, `std.canvas.open`/`alive` remain bootstrap compatibility wrappers, ergonomic desktop loops and policies belong in future Arcana-owned grimoire layers, and the current source-declared opaque `Window` handle is a bootstrap seam rather than a permanently ratified resource model
@@ -160,25 +160,25 @@ promotion_condition: rewrite-owned app/runtime backend implements the approved l
 id: STD-INPUT
 classification: bootstrap-required
 why: raw keyboard/mouse polling and code lookup for desktop apps and showcases
-consumers: `grimoires/owned/app/arcana-desktop`, owned input/showcase proofs
+consumers: `grimoires/owned/libs/arcana-desktop`, owned input/showcase proofs
 current_source: carried
 still_needs_rebuild: backend/runtime ownership under the rewrite and documented event/input timing semantics
-update_note: action mapping and richer input helpers belong in grimoires above `std.input`; edge-triggered and per-frame state now flows through the move-only source-declared opaque `AppFrame` handle produced by `std.events.pump(edit win)`, and that frame-advance operation is an explicit window mutation rather than a read-only query
+update_note: action mapping and richer input helpers belong in grimoires above `std.input`; edge-triggered and per-frame state now flows through the move-only source-declared opaque `AppFrame` handle produced by `std.events.pump(edit win)`, that frame-advance operation is an explicit window mutation rather than a read-only query, and low-level named key/button lookup now includes the common modifier, navigation, function-key, and auxiliary-mouse families needed by future grimoires
 promotion_condition: rewrite-owned input substrate satisfies the approved low-level surface
 
 id: STD-EVENTS
 classification: bootstrap-required
 why: typed event queue and frame-pump boundary for desktop consumers
-consumers: `grimoires/owned/app/arcana-desktop`, owned event/showcase proofs
+consumers: `grimoires/owned/libs/arcana-desktop`, owned event/showcase proofs
 current_source: carried
 still_needs_rebuild: confirm deterministic event pump semantics under the rewrite backend/runtime
-update_note: routing, snapshots, and keybind helpers belong in grimoires above `std.events`; the public event surface is `Option`/`List`-based, assumes a single backend event-record poll per step rather than separate kind/payload probes, and requires `poll(edit frame)` / `drain(take frame)` to consume the queue carried by the move-only source-declared opaque `AppFrame` handle so event reads stay aligned with the explicit frame boundary
+update_note: routing, snapshots, and keybind helpers belong in grimoires above `std.events`; the public event surface is `Option`/`List`-based, assumes a single backend event-record poll per step rather than separate kind/payload probes, requires `poll(edit frame)` / `drain(take frame)` to consume the queue carried by the move-only source-declared opaque `AppFrame` handle so event reads stay aligned with the explicit frame boundary, and now includes low-level window-move plus pointer-enter/leave events instead of forcing grimoires to infer them indirectly
 promotion_condition: rewrite-owned event substrate and pump semantics are documented and tested
 
 id: STD-CANVAS
 classification: bootstrap-required
 why: primitive render/text/image substrate for desktop apps and showcase proof
-consumers: `grimoires/owned/app/arcana-graphics`, `grimoires/owned/app/arcana-text`, owned window/showcase proofs
+consumers: `grimoires/owned/libs/arcana-graphics`, `grimoires/owned/libs/arcana-text`, owned window/showcase proofs
 current_source: carried
 still_needs_rebuild: backend/runtime ownership under the rewrite and explicit primitive-graphics contract
 update_note: keep canvas low-level; the approved independent-development baseline now includes line draw, filled circle draw, and default-font label measurement in addition to rect/text/image primitives, `open` stays as a bootstrap compatibility wrapper over `std.window.open`, `image_load` is now explicitly fallible (`Result[Image, Str]`), UI kits and richer scene/render abstractions belong in grimoires, and the current source-declared opaque `Image` handle is only a bootstrap seam until the rewrite-owned resource model is revisited
@@ -187,7 +187,7 @@ promotion_condition: rewrite-owned app/runtime backend satisfies primitive rende
 id: STD-TIME
 classification: bootstrap-required
 why: low-level monotonic timing substrate for run-loop and frame-timing grimoires
-consumers: `grimoires/owned/app/arcana-desktop`, owned showcase/runtime-smoke proofs
+consumers: `grimoires/owned/libs/arcana-desktop`, owned showcase/runtime-smoke proofs
 current_source: rewrite-owned
 still_needs_rebuild: runtime/backend implementation of monotonic clocks beyond the current compile-time substrate
 update_note: keep `std.time` low-level; fixed-step or app-loop policy stays out of std
@@ -196,7 +196,7 @@ promotion_condition: rewrite-owned runtime implements the documented monotonic t
 id: STD-AUDIO
 classification: bootstrap-required
 why: low-level audio output/buffer/playback substrate needed to support a later first-party audio grimoire
-consumers: `grimoires/owned/app/arcana-audio`, owned audio-smoke proofs
+consumers: `grimoires/owned/libs/arcana-audio`, owned audio-smoke proofs
 current_source: rewrite-owned
 still_needs_rebuild: runtime/backend implementation of audio device/buffer/playback intrinsics
 update_note: keep `std.audio` substrate-level; `default_output`, `buffer_load_wav`, and `play_buffer(edit device, read buffer)` are explicitly fallible (`Result[...]`) acquisition/start operations, `output_close` and playback `stop` are consuming lifecycle operations with explicit `Result[Unit, Str]`, the current bootstrap lane does not implicitly resample or remix so `play_buffer` requires the buffer sample rate/channel count to match the selected device config, output lifecycle/info hooks plus pause/resume/looping/gain/position playback control remain baseline, mixing/streaming policy and ergonomic playback helpers belong in grimoires, and the current source-declared opaque audio handles are bootstrap seams rather than long-term resource-model commitments

@@ -22,6 +22,7 @@ Scope notes:
   - `key_code`
   - `key_down`, `key_pressed`, `key_released` on `AppFrame`
   - `mouse_button_code`, `mouse_pos`, `mouse_down`, `mouse_pressed`, `mouse_released`, `mouse_wheel_y`, `mouse_in_window` on `AppFrame`
+  - named key/button lookup includes the common modifier, navigation, function-key, and auxiliary-mouse families needed by future grimoires while staying low-level
 - `std.canvas`:
   - bootstrap compatibility wrappers `open -> Result[Window, Str]`, `alive`
   - `fill`, `rect`, `rect_draw`, `line`, `line_draw`, `circle_fill`, `circle_fill_draw`
@@ -32,6 +33,7 @@ Scope notes:
 - `std.events`:
   - `poll(edit frame) -> Option[std.events.AppEvent]`, `drain(take frame) -> List[std.events.AppEvent]`, `pump(edit win) -> AppFrame`
   - typed `std.events.AppEvent` queue surface sourced from the same frame pump boundary, with polling defined by a single backend event record per step rather than separate kind/payload probes
+  - current low-level event floor includes resize, move, close-request, focus, key, mouse-button, mouse-move, mouse-wheel, and pointer-enter/leave events
   - `AppFrame` is a move-only source-declared opaque per-step frame handle shared by `std.events` and `std.input`
   - edge-triggered input state is advanced explicitly by `std.events.pump`, which mutates frame state through `edit win`
   - `std.events.poll` consumes one event from `AppFrame`, and `std.events.drain` consumes the remaining frame-local queue instead of rereading it

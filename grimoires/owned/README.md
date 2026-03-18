@@ -7,7 +7,7 @@ Rules:
 - App/media grimoires here should sit above `std` and consume the rewrite-owned substrate without forcing new compiler special cases.
 
 Current contents:
-- `app/arcana-desktop`
-- `app/arcana-audio`
-- `app/arcana-graphics`
-- `app/arcana-text`
+- `libs/arcana-desktop`
+- `libs/arcana-audio`
+- `libs/arcana-graphics`
+- `libs/arcana-text`

@@ -945,6 +945,57 @@ struct BufferedEvent {
     b: i64,
 }
 
+pub(crate) fn common_named_key_code(name: &str) -> i64 {
+    match name {
+        "Backspace" | "backspace" => 8,
+        "Tab" | "tab" => 9,
+        "Enter" | "enter" => 13,
+        "Shift" | "shift" => 16,
+        "Control" | "control" | "Ctrl" | "ctrl" => 17,
+        "Alt" | "alt" => 18,
+        "Pause" | "pause" => 19,
+        "CapsLock" | "capslock" => 20,
+        "Escape" | "escape" => 27,
+        "Space" | "space" => 32,
+        "PageUp" | "pageup" => 33,
+        "PageDown" | "pagedown" => 34,
+        "End" | "end" => 35,
+        "Home" | "home" => 36,
+        "Left" | "left" => 37,
+        "Up" | "up" => 38,
+        "Right" | "right" => 39,
+        "Down" | "down" => 40,
+        "Insert" | "insert" => 45,
+        "Delete" | "delete" => 46,
+        "Meta" | "meta" | "Super" | "super" | "Command" | "command" => 91,
+        "F1" | "f1" => 112,
+        "F2" | "f2" => 113,
+        "F3" | "f3" => 114,
+        "F4" | "f4" => 115,
+        "F5" | "f5" => 116,
+        "F6" | "f6" => 117,
+        "F7" | "f7" => 118,
+        "F8" | "f8" => 119,
+        "F9" | "f9" => 120,
+        "F10" | "f10" => 121,
+        "F11" | "f11" => 122,
+        "F12" | "f12" => 123,
+        _ if name.len() == 1 => name.chars().next().unwrap().to_ascii_uppercase() as i64,
+        _ => -1,
+    }
+}
+
+pub(crate) fn common_named_mouse_button_code(name: &str) -> i64 {
+    match name {
+        "Left" | "left" => 1,
+        "Right" | "right" => 2,
+        "Middle" | "middle" => 3,
+        "Back" | "back" | "X1" | "x1" => 4,
+        "Forward" | "forward" | "X2" | "x2" => 5,
+        _ => -1,
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct BufferedFrameInput {
     key_down: Vec<i64>,
@@ -2024,12 +2075,7 @@ impl RuntimeHost for BufferedHost {
     }
 
     fn input_key_code(&mut self, name: &str) -> Result<i64, String> {
-        Ok(match name {
-            "A" | "a" => 65,
-            "Space" | "space" => 32,
-            "Escape" | "escape" => 27,
-            _ => -1,
-        })
+        Ok(common_named_key_code(name))
     }
 
     fn input_key_down(&mut self, frame: RuntimeAppFrameHandle, key: i64) -> Result<bool, String> {
@@ -2053,12 +2099,7 @@ impl RuntimeHost for BufferedHost {
     }
 
     fn input_mouse_button_code(&mut self, name: &str) -> Result<i64, String> {
-        Ok(match name {
-            "Left" | "left" => 1,
-            "Right" | "right" => 2,
-            "Middle" | "middle" => 3,
-            _ => -1,
-        })
+        Ok(common_named_mouse_button_code(name))
     }
 
     fn input_mouse_pos(&mut self, frame: RuntimeAppFrameHandle) -> Result<(i64, i64), String> {

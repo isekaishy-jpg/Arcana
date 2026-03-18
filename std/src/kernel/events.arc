@@ -4,6 +4,7 @@ use std.window.Window
 enum Event:
     None
     WindowResized((Int, Int))
+    WindowMoved((Int, Int))
     WindowCloseRequested
     WindowFocused(Bool)
     KeyDown(Int)
@@ -12,6 +13,8 @@ enum Event:
     MouseUp(Int)
     MouseMove((Int, Int))
     MouseWheelY(Int)
+    MouseEntered
+    MouseLeft
 
 intrinsic fn pump_frame(edit win: Window) -> AppFrame = EventsPump
 intrinsic fn poll_frame(edit frame: AppFrame) -> (Int, (Int, Int)) = EventsPoll
@@ -22,6 +25,8 @@ fn pump(edit win: Window) -> AppFrame:
 fn decode(kind: Int, a: Int, b: Int) -> std.kernel.events.Event:
     if kind == 1:
         return std.kernel.events.Event.WindowResized :: (a, b) :: call
+    if kind == 10:
+        return std.kernel.events.Event.WindowMoved :: (a, b) :: call
     if kind == 2:
         return std.kernel.events.Event.WindowCloseRequested :: :: call
     if kind == 3:
@@ -38,6 +43,10 @@ fn decode(kind: Int, a: Int, b: Int) -> std.kernel.events.Event:
         return std.kernel.events.Event.MouseMove :: (a, b) :: call
     if kind == 9:
         return std.kernel.events.Event.MouseWheelY :: a :: call
+    if kind == 11:
+        return std.kernel.events.Event.MouseEntered :: :: call
+    if kind == 12:
+        return std.kernel.events.Event.MouseLeft :: :: call
     return std.kernel.events.Event.None :: :: call
 
 fn poll(edit frame: AppFrame) -> std.kernel.events.Event:

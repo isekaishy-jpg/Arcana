@@ -15,18 +15,18 @@ Scope notes:
 ## Required Roles Before Selfhost
 
 - Desktop/media facade grimoire
-  - rewrite-owned scaffold: `grimoires/owned/app/arcana-desktop`
+  - rewrite-owned scaffold: `grimoires/owned/libs/arcana-desktop`
   - responsibility: ergonomic desktop/window/run-loop/frame convenience above `std.window`, `std.input`, `std.events`, `std.canvas`, and `std.time`
   - responsibility: may also own event routing, frame-input snapshots, keybind/action helpers, and similar desktop-facing utility layers if Arcana's rewrite-native layout folds those into one package
 - Graphics facade grimoire
-  - rewrite-owned scaffold: `grimoires/owned/app/arcana-graphics`
+  - rewrite-owned scaffold: `grimoires/owned/libs/arcana-graphics`
   - responsibility: 2D graphics/image convenience above `std.canvas`
 - Text facade grimoire
-  - rewrite-owned scaffold: `grimoires/owned/app/arcana-text`
+  - rewrite-owned scaffold: `grimoires/owned/libs/arcana-text`
   - responsibility: text draw and text-asset convenience above `std.canvas`, `std.text`, and `std.fs`
   - note: file IO remains in `std.fs`; this layer may add text-asset convenience rather than replace host-core file APIs
 - Audio facade grimoire
-  - rewrite-owned scaffold: `grimoires/owned/app/arcana-audio`
+  - rewrite-owned scaffold: `grimoires/owned/libs/arcana-audio`
   - responsibility: miniaudio-style higher-level playback/convenience above `std.audio`
 
 ## Rules
