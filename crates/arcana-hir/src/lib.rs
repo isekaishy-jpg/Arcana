@@ -59,6 +59,8 @@ pub enum HirSymbolKind {
     Fn,
     System,
     Record,
+    Object,
+    Owner,
     Enum,
     OpaqueType,
     Trait,
@@ -72,6 +74,8 @@ impl HirSymbolKind {
             Self::Fn => "fn",
             Self::System => "system",
             Self::Record => "record",
+            Self::Object => "obj",
+            Self::Owner => "create",
             Self::Enum => "enum",
             Self::OpaqueType => "opaque_type",
             Self::Trait => "trait",
@@ -129,6 +133,7 @@ pub struct HirSymbol {
     pub return_type: Option<String>,
     pub behavior_attrs: Vec<HirBehaviorAttr>,
     pub opaque_policy: Option<HirOpaqueTypePolicy>,
+    pub availability: Vec<HirAvailabilityAttachment>,
     pub forewords: Vec<HirForewordApp>,
     pub intrinsic_impl: Option<String>,
     pub body: HirSymbolBody,
@@ -213,6 +218,27 @@ pub struct HirPageRollup {
     pub kind: HirPageRollupKind,
     pub subject: String,
     pub handler_path: Vec<String>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HirAvailabilityAttachment {
+    pub path: Vec<String>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HirOwnerObject {
+    pub type_path: Vec<String>,
+    pub local_name: String,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HirOwnerExit {
+    pub name: String,
+    pub condition: HirExpr,
+    pub holds: Vec<String>,
     pub span: Span,
 }
 
@@ -483,6 +509,7 @@ pub enum HirStatementKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HirStatement {
     pub kind: HirStatementKind,
+    pub availability: Vec<HirAvailabilityAttachment>,
     pub forewords: Vec<HirForewordApp>,
     pub rollups: Vec<HirPageRollup>,
     pub span: Span,
@@ -508,8 +535,16 @@ pub enum HirSymbolBody {
     Record {
         fields: Vec<HirField>,
     },
+    Object {
+        fields: Vec<HirField>,
+        methods: Vec<HirSymbol>,
+    },
     Enum {
         variants: Vec<HirEnumVariant>,
+    },
+    Owner {
+        objects: Vec<HirOwnerObject>,
+        exits: Vec<HirOwnerExit>,
     },
     Trait {
         assoc_types: Vec<HirTraitAssocType>,
@@ -849,7 +884,7 @@ impl HirResolvedWorkspace {
 pub struct HirMethodCandidate<'a> {
     pub module_id: &'a str,
     pub symbol: &'a HirSymbol,
-    pub declared_receiver_type: &'a str,
+    pub declared_receiver_type: String,
     pub routine_key: String,
 }
 
@@ -863,6 +898,14 @@ pub fn routine_key_for_impl_method(
     method_index: usize,
 ) -> String {
     format!("{module_id}#impl-{impl_index}-method-{method_index}")
+}
+
+pub fn routine_key_for_object_method(
+    module_id: &str,
+    symbol_index: usize,
+    method_index: usize,
+) -> String {
+    format!("{module_id}#obj-{symbol_index}-method-{method_index}")
 }
 
 fn canonicalize_method_lookup_base(
@@ -1302,7 +1345,10 @@ fn symbol_return_type_text(
     None.or_else(|| {
         matches!(
             symbol_ref.symbol.kind,
-            HirSymbolKind::Record | HirSymbolKind::Enum | HirSymbolKind::OpaqueType
+            HirSymbolKind::Record
+                | HirSymbolKind::Object
+                | HirSymbolKind::Enum
+                | HirSymbolKind::OpaqueType
         )
         .then(|| format!("{}.{}", symbol_ref.module_id, symbol_ref.symbol.name))
     })
@@ -1315,7 +1361,10 @@ fn symbol_call_return_type_text(
 ) -> Option<String> {
     if matches!(
         symbol_ref.symbol.kind,
-        HirSymbolKind::Record | HirSymbolKind::Enum | HirSymbolKind::OpaqueType
+        HirSymbolKind::Record
+            | HirSymbolKind::Object
+            | HirSymbolKind::Enum
+            | HirSymbolKind::OpaqueType
     ) {
         let base = format!("{}.{}", symbol_ref.module_id, symbol_ref.symbol.name);
         if generic_args.is_empty() {
@@ -1377,7 +1426,7 @@ fn infer_member_access_type<L: HirLocalTypeLookup>(
     let path = split_simple_path(&base)?;
     let symbol_ref = lookup_symbol_path(workspace, resolved_module, &path)?;
     match &symbol_ref.symbol.body {
-        HirSymbolBody::Record { fields } => fields
+        HirSymbolBody::Record { fields } | HirSymbolBody::Object { fields, .. } => fields
             .iter()
             .find(|field| field.name == member)
             .map(|field| field.ty.clone()),
@@ -1497,7 +1546,7 @@ pub fn infer_receiver_expr_type_text<L: HirLocalTypeLookup>(
                 [candidate] => candidate.symbol.return_type.as_ref().map(|text| {
                     let substitutions = build_receiver_type_substitutions(
                         &subject_ty,
-                        candidate.declared_receiver_type,
+                        &candidate.declared_receiver_type,
                     );
                     substitute_type_params(text, &substitutions)
                 }),
@@ -1652,6 +1701,7 @@ pub fn lower_parsed_module(
                     })
                     .collect(),
                 opaque_policy: symbol.opaque_policy.as_ref().map(lower_opaque_policy),
+                availability: lower_availability_attachments(&symbol.availability),
                 forewords: lower_forewords(&symbol.forewords),
                 intrinsic_impl: symbol.intrinsic_impl.clone(),
                 body: lower_symbol_body(&symbol.body),
@@ -1874,12 +1924,12 @@ fn render_lang_item_fingerprint(lang_item: &HirLangItem) -> String {
     )
 }
 
-fn render_symbol_fingerprint(symbol: &HirSymbol) -> String {
+pub fn render_symbol_fingerprint(symbol: &HirSymbol) -> String {
     format!(
         concat!(
             "symbol(",
             "kind={}|name={}|exported={}|async={}|signature={}|type_params=[{}]|",
-            "where_clause={}|behavior_attrs=[{}]|forewords=[{}]|intrinsic={}|body={}|",
+            "where_clause={}|behavior_attrs=[{}]|availability=[{}]|forewords=[{}]|intrinsic={}|body={}|",
             "statements=[{}]|rollups=[{}])"
         ),
         symbol.kind.as_str(),
@@ -1902,6 +1952,12 @@ fn render_symbol_fingerprint(symbol: &HirSymbol) -> String {
             .behavior_attrs
             .iter()
             .map(render_behavior_attr_fingerprint)
+            .collect::<Vec<_>>()
+            .join(","),
+        symbol
+            .availability
+            .iter()
+            .map(render_availability_attachment_fingerprint)
             .collect::<Vec<_>>()
             .join(","),
         symbol
@@ -1978,6 +2034,23 @@ fn render_symbol_body_fingerprint(body: &HirSymbolBody) -> String {
                 .collect::<Vec<_>>()
                 .join(",")
         ),
+        HirSymbolBody::Object { fields, methods } => format!(
+            "object(fields=[{}]|methods=[{}])",
+            fields
+                .iter()
+                .map(|field| format!(
+                    "field(name={}|ty={})",
+                    quote_fingerprint_text(&field.name),
+                    quote_fingerprint_text(&field.ty)
+                ))
+                .collect::<Vec<_>>()
+                .join(","),
+            methods
+                .iter()
+                .map(render_symbol_fingerprint)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
         HirSymbolBody::Enum { variants } => format!(
             "enum([{}])",
             variants
@@ -1990,6 +2063,38 @@ fn render_symbol_body_fingerprint(body: &HirSymbolBody) -> String {
                         .as_ref()
                         .map(|payload| quote_fingerprint_text(payload))
                         .unwrap_or_else(|| "none".to_string())
+                ))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        HirSymbolBody::Owner { objects, exits } => format!(
+            "owner(objects=[{}]|exits=[{}])",
+            objects
+                .iter()
+                .map(|object| format!(
+                    "object(type=[{}]|name={})",
+                    object
+                        .type_path
+                        .iter()
+                        .map(|segment| quote_fingerprint_text(segment))
+                        .collect::<Vec<_>>()
+                        .join(","),
+                    quote_fingerprint_text(&object.local_name)
+                ))
+                .collect::<Vec<_>>()
+                .join(","),
+            exits
+                .iter()
+                .map(|owner_exit| format!(
+                    "exit(name={}|condition={}|holds=[{}])",
+                    quote_fingerprint_text(&owner_exit.name),
+                    render_expr_fingerprint(&owner_exit.condition),
+                    owner_exit
+                        .holds
+                        .iter()
+                        .map(|hold| quote_fingerprint_text(hold))
+                        .collect::<Vec<_>>()
+                        .join(",")
                 ))
                 .collect::<Vec<_>>()
                 .join(",")
@@ -2085,7 +2190,13 @@ fn render_rollup_fingerprint(rollup: &HirPageRollup) -> String {
 
 fn render_statement_fingerprint(statement: &HirStatement) -> String {
     format!(
-        "stmt(forewords=[{}]|rollups=[{}]|kind={})",
+        "stmt(availability=[{}]|forewords=[{}]|rollups=[{}]|kind={})",
+        statement
+            .availability
+            .iter()
+            .map(render_availability_attachment_fingerprint)
+            .collect::<Vec<_>>()
+            .join(","),
         statement
             .forewords
             .iter()
@@ -2099,6 +2210,18 @@ fn render_statement_fingerprint(statement: &HirStatement) -> String {
             .collect::<Vec<_>>()
             .join(","),
         render_statement_kind_fingerprint(&statement.kind)
+    )
+}
+
+fn render_availability_attachment_fingerprint(attachment: &HirAvailabilityAttachment) -> String {
+    format!(
+        "availability(path=[{}])",
+        attachment
+            .path
+            .iter()
+            .map(|segment| quote_fingerprint_text(segment))
+            .collect::<Vec<_>>()
+            .join(",")
     )
 }
 
@@ -2201,7 +2324,7 @@ fn render_assign_target_fingerprint(target: &HirAssignTarget) -> String {
     }
 }
 
-fn render_expr_fingerprint(expr: &HirExpr) -> String {
+pub fn render_expr_fingerprint(expr: &HirExpr) -> String {
     match expr {
         HirExpr::Path { segments } => format!(
             "path([{}])",
@@ -3031,6 +3154,8 @@ fn lower_symbol_kind(kind: &ParsedSymbolKind) -> HirSymbolKind {
         ParsedSymbolKind::Fn => HirSymbolKind::Fn,
         ParsedSymbolKind::System => HirSymbolKind::System,
         ParsedSymbolKind::Record => HirSymbolKind::Record,
+        ParsedSymbolKind::Object => HirSymbolKind::Object,
+        ParsedSymbolKind::Owner => HirSymbolKind::Owner,
         ParsedSymbolKind::Enum => HirSymbolKind::Enum,
         ParsedSymbolKind::OpaqueType => HirSymbolKind::OpaqueType,
         ParsedSymbolKind::Trait => HirSymbolKind::Trait,
@@ -3073,6 +3198,17 @@ fn lower_symbol_body(body: &arcana_syntax::SymbolBody) -> HirSymbolBody {
                 })
                 .collect(),
         },
+        arcana_syntax::SymbolBody::Object { fields, methods } => HirSymbolBody::Object {
+            fields: fields
+                .iter()
+                .map(|field| HirField {
+                    name: field.name.clone(),
+                    ty: field.ty.clone(),
+                    span: field.span,
+                })
+                .collect(),
+            methods: methods.iter().map(lower_trait_or_impl_method).collect(),
+        },
         arcana_syntax::SymbolBody::Enum { variants } => HirSymbolBody::Enum {
             variants: variants
                 .iter()
@@ -3080,6 +3216,25 @@ fn lower_symbol_body(body: &arcana_syntax::SymbolBody) -> HirSymbolBody {
                     name: variant.name.clone(),
                     payload: variant.payload.clone(),
                     span: variant.span,
+                })
+                .collect(),
+        },
+        arcana_syntax::SymbolBody::Owner { objects, exits } => HirSymbolBody::Owner {
+            objects: objects
+                .iter()
+                .map(|object| HirOwnerObject {
+                    type_path: object.type_path.clone(),
+                    local_name: object.local_name.clone(),
+                    span: object.span,
+                })
+                .collect(),
+            exits: exits
+                .iter()
+                .map(|owner_exit| HirOwnerExit {
+                    name: owner_exit.name.clone(),
+                    condition: lower_expr(&owner_exit.condition),
+                    holds: owner_exit.holds.clone(),
+                    span: owner_exit.span,
                 })
                 .collect(),
         },
@@ -3127,6 +3282,7 @@ fn lower_trait_or_impl_method(method: &arcana_syntax::SymbolDecl) -> HirSymbol {
             })
             .collect(),
         opaque_policy: method.opaque_policy.as_ref().map(lower_opaque_policy),
+        availability: lower_availability_attachments(&method.availability),
         forewords: lower_forewords(&method.forewords),
         intrinsic_impl: method.intrinsic_impl.clone(),
         body: lower_symbol_body(&method.body),
@@ -3135,6 +3291,18 @@ fn lower_trait_or_impl_method(method: &arcana_syntax::SymbolDecl) -> HirSymbol {
         surface_text: method.surface_text.clone(),
         span: method.span,
     }
+}
+
+fn lower_availability_attachments(
+    attachments: &[arcana_syntax::AvailabilityAttachment],
+) -> Vec<HirAvailabilityAttachment> {
+    attachments
+        .iter()
+        .map(|attachment| HirAvailabilityAttachment {
+            path: attachment.path.clone(),
+            span: attachment.span,
+        })
+        .collect()
 }
 
 fn lower_forewords(forewords: &[arcana_syntax::ForewordApp]) -> Vec<HirForewordApp> {
@@ -3475,6 +3643,7 @@ fn lower_statement(statement: &arcana_syntax::Statement) -> HirStatement {
                 expr: lower_expr(expr),
             },
         },
+        availability: lower_availability_attachments(&statement.availability),
         forewords: lower_forewords(&statement.forewords),
         rollups: lower_rollups(&statement.rollups),
         span: statement.span,

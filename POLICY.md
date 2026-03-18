@@ -26,8 +26,9 @@ Allowed pre-selfhost language edits are limited to:
 - `docs/specs/spec-status.md` defines which spec files are frozen, approved, reserved, or deferred-only.
 - Page rollups are an approved pre-selfhost contract.
 - Pair-tuple rules are an approved pre-selfhost contract.
+- The explicit object/owner model in `docs/specs/objects/objects/v1-scope.md` is an approved pre-selfhost contract.
 - `AnyBox`-style erased Arcana values are banned from the rewrite contract.
-- Closures and general callable values are not part of the selfhost baseline; future callable capability is expected to use explicit function/context objects instead.
+- Closures and general callable values are not part of the selfhost baseline; callable/context roles must stay inside the approved explicit object model unless a later contract expands them.
 
 ## 4. Arcana-Owned Package Boundary
 
@@ -70,6 +71,7 @@ Allowed pre-selfhost language edits are limited to:
   - `docs/specs/spec-status.md`
   - `docs/specs/page-rollups/page-rollups/v1-scope.md`
   - `docs/specs/tuples/tuples/v1-scope.md`
+  - `docs/specs/objects/objects/v1-scope.md`
   - `docs/specs/backend/anybox-policy.md`
   - `docs/specs/callables/callables/v1-status.md`
 

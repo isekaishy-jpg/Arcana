@@ -461,6 +461,37 @@ pub fn lookup_method_candidates_for_type<'a>(
             .map(|name| name != package.summary.package_name)
             .unwrap_or(false);
         for module in &package.summary.modules {
+            for (symbol_index, symbol) in module.symbols.iter().enumerate() {
+                let HirSymbolBody::Object { methods, .. } = &symbol.body else {
+                    continue;
+                };
+                if foreign_package && !symbol.exported {
+                    continue;
+                }
+                let declared = format!("{}.{}", module.module_id, symbol.name);
+                if !method_target_type_matches(&declared, &wanted, &mut BTreeMap::new()) {
+                    continue;
+                }
+                for (method_index, method) in methods.iter().enumerate() {
+                    if method.name != method_name {
+                        continue;
+                    }
+                    let routine_key = routine_key_for_object_method(
+                        &module.module_id,
+                        symbol_index,
+                        method_index,
+                    );
+                    if !seen_routines.insert(routine_key.clone()) {
+                        continue;
+                    }
+                    candidates.push(HirMethodCandidate {
+                        module_id: &module.module_id,
+                        symbol: method,
+                        declared_receiver_type: declared.clone(),
+                        routine_key,
+                    });
+                }
+            }
             for (impl_index, impl_decl) in module.impls.iter().enumerate() {
                 if foreign_package
                     && !impl_target_is_public_from_package(
@@ -493,7 +524,7 @@ pub fn lookup_method_candidates_for_type<'a>(
                     candidates.push(HirMethodCandidate {
                         module_id: &module.module_id,
                         symbol: method,
-                        declared_receiver_type: &impl_decl.target_type,
+                        declared_receiver_type: impl_decl.target_type.clone(),
                         routine_key,
                     });
                 }

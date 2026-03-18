@@ -16,6 +16,7 @@ Arcana v0 currently includes:
 - `Int`, `Bool`, `Str`, `Unit`
 - Access-mode parameters and compile-time checks for `read`/`edit`/`take`
 - `record` declarations, construction, field access, and field assignment
+- `obj` declarations plus `create ... scope-exit` owner domains with explicit activation and hold/re-entry
 - Multi-file Grimoires (`book.toml`, `import`, `export`, `reexport`)
 - Arcana-native concurrency/behavior support (`async fn`, `weave`, `split`, `>> await`, `behavior[...] fn`)
 - Core operators: unary `-` / `not` / `~`, `%`, `!=`, `<=`, `>=`, `and`, `or`, bitwise `& | ^ << shr`, `Str + Str`, compound assignments
@@ -57,6 +58,25 @@ Current rewrite builds operate at workspace scope; cache invalidation and rebuil
 driven by member fingerprints inside `arcana build <workspace-dir>`.
 
 Detailed backend, selfhost, and bootstrap workflow policy is tracked outside this document.
+
+## Objects And Owners (v0.41)
+
+Arcana now includes an explicit object/owner lifetime model.
+
+- `obj Name:` declares nominal packaged state with optional nested methods.
+- `create Owner [ObjectA, ObjectB] scope-exit:` declares a managed owner lifetime domain.
+- Owner exits use `exit when ...` or `name: when ...`, optionally with `hold [...]`.
+- Bare path lines immediately above block-owning headers attach owner/object availability.
+- Availability does not create live state by itself.
+- Explicit owner activation uses qualified phrases:
+  - `let active = Session :: ctx :: call`
+  - `Session :: ctx :: call`
+- Direct attached object names are usable only while the owner is active on that execution path.
+- Owned objects may define lifecycle hooks with nested `init` / `resume` methods; first realization runs `init`, and held-state re-entry runs `resume`.
+- Activation context is only meaningful through those lifecycle hooks and must match the hook context type used by that owner.
+- Suspension is modeled as owner exit plus `hold [...]`; held state requires explicit re-entry before it becomes active again.
+- Callable objects and context objects are ordinary `obj` roles inside this same model.
+- Dispatch remains static; closures, lambdas, and general function values remain outside the selfhost baseline.
 
 ## Grimoires (v0.3)
 

@@ -3,7 +3,7 @@ use std::collections::{BTreeSet, HashMap};
 use arcana_hir::{
     HirDirectiveKind, HirImplDecl, HirResolvedModule, HirResolvedPackage, HirResolvedTarget,
     HirResolvedWorkspace, HirSymbol, HirSymbolBody, HirSymbolKind, HirWorkspacePackage,
-    HirWorkspaceSummary,
+    HirWorkspaceSummary, render_expr_fingerprint, render_symbol_fingerprint,
 };
 use arcana_syntax::is_builtin_type_name;
 use sha2::{Digest, Sha256};
@@ -283,6 +283,8 @@ fn render_symbol_api_fingerprint(
             &TypeScope::default(),
         ),
         HirSymbolKind::Record => render_record_api_fingerprint(workspace, resolved_module, symbol),
+        HirSymbolKind::Object => render_object_api_fingerprint(workspace, resolved_module, symbol),
+        HirSymbolKind::Owner => render_owner_api_fingerprint(workspace, resolved_module, symbol),
         HirSymbolKind::Enum => render_enum_api_fingerprint(workspace, resolved_module, symbol),
         HirSymbolKind::OpaqueType => {
             render_opaque_type_api_fingerprint(workspace, resolved_module, symbol)
@@ -399,6 +401,25 @@ fn append_symbol_contract_metadata(
     resolved_module: &HirResolvedModule,
     symbol: &HirSymbol,
 ) -> String {
+    if !symbol.availability.is_empty() {
+        base.push_str("|availability=[");
+        base.push_str(
+            &symbol
+                .availability
+                .iter()
+                .map(|attachment| {
+                    canonicalize_surface_path(
+                        workspace,
+                        resolved_module,
+                        &TypeScope::default(),
+                        &attachment.path,
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+        base.push(']');
+    }
     if !symbol.forewords.is_empty() {
         base.push_str("|forewords=[");
         base.push_str(
@@ -497,6 +518,123 @@ fn render_record_api_fingerprint(
     rendered.push_str("|fields=[");
     rendered.push_str(&fields);
     rendered.push(']');
+    rendered
+}
+
+fn render_object_api_fingerprint(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    symbol: &HirSymbol,
+) -> String {
+    let scope = TypeScope::default().with_params(&symbol.type_params);
+    let mut rendered = format!("object:{}[{}]", symbol.name, symbol.type_params.join(","));
+    if let Some(where_clause) = &symbol.where_clause {
+        rendered.push_str("|where=");
+        rendered.push_str(&canonicalize_surface_text(
+            workspace,
+            resolved_module,
+            &scope,
+            where_clause,
+        ));
+    }
+    if let HirSymbolBody::Object { fields, methods } = &symbol.body {
+        rendered.push_str("|fields=[");
+        rendered.push_str(
+            &fields
+                .iter()
+                .map(|field| {
+                    format!(
+                        "{}:{}",
+                        field.name,
+                        canonicalize_surface_text(workspace, resolved_module, &scope, &field.ty)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+        rendered.push(']');
+        rendered.push_str("|methods=[");
+        rendered.push_str(
+            &methods
+                .iter()
+                .map(|method| {
+                    render_callable_symbol_api_fingerprint(
+                        workspace,
+                        resolved_module,
+                        method,
+                        &scope,
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+        rendered.push(']');
+    }
+    rendered
+}
+
+fn render_owner_api_fingerprint(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    symbol: &HirSymbol,
+) -> String {
+    let mut rendered = format!("owner:{}", symbol.name);
+    if let HirSymbolBody::Owner { objects, exits } = &symbol.body {
+        rendered.push_str("|objects=[");
+        rendered.push_str(
+            &objects
+                .iter()
+                .map(|object| {
+                    let lifecycle = arcana_hir::lookup_symbol_path(
+                        workspace,
+                        resolved_module,
+                        &object.type_path,
+                    )
+                    .and_then(|resolved_object| match &resolved_object.symbol.body {
+                        HirSymbolBody::Object { methods, .. } => {
+                            let hooks = methods
+                                .iter()
+                                .filter(|method| matches!(method.name.as_str(), "init" | "resume"))
+                                .map(render_symbol_fingerprint)
+                                .collect::<Vec<_>>();
+                            (!hooks.is_empty()).then(|| format!(":[{}]", hooks.join(",")))
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                    format!(
+                        "{}:{}{}",
+                        object.local_name,
+                        canonicalize_surface_path(
+                            workspace,
+                            resolved_module,
+                            &TypeScope::default(),
+                            &object.type_path,
+                        ),
+                        lifecycle
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+        rendered.push(']');
+        rendered.push_str("|exits=[");
+        rendered.push_str(
+            &exits
+                .iter()
+                .map(|owner_exit| {
+                    format!(
+                        "{}:{}:[{}]",
+                        owner_exit.name,
+                        render_expr_fingerprint(&owner_exit.condition),
+                        owner_exit.holds.join(",")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+        rendered.push(']');
+    }
     rendered
 }
 

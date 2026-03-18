@@ -2723,6 +2723,124 @@ toolchain = \"future-toolchain\"\n"
     }
 
     #[test]
+    fn owner_body_changes_update_api_fingerprint() {
+        fn member_api_fingerprint(dir: &Path, member: &str) -> String {
+            let graph = load_workspace_graph(dir).expect("load graph");
+            let workspace = load_workspace_hir_from_graph(dir, &graph).expect("workspace");
+            let resolved_workspace = arcana_hir::resolve_workspace(&workspace).expect("resolve");
+            compute_workspace_fingerprints(&graph, &workspace, &resolved_workspace)
+                .expect("fingerprints")
+                .member(member)
+                .expect("member fingerprint should exist")
+                .api()
+                .to_string()
+        }
+
+        let dir = temp_dir("owner_api_fingerprint");
+        write_file(
+            &dir.join("book.toml"),
+            "name = \"ws\"\nkind = \"app\"\n[workspace]\nmembers = [\"core\"]\n",
+        );
+        write_grimoire(&dir.join("core"), GrimoireKind::Lib, "core", &[]);
+        write_file(
+            &dir.join("core/src/book.arc"),
+            concat!(
+                "export obj Counter:\n",
+                "    value: Int\n",
+                "\n",
+                "export create Session [Counter] scope-exit:\n",
+                "    done: when Counter.value >= 1 hold [Counter]\n",
+            ),
+        );
+
+        let first = member_api_fingerprint(&dir, "core");
+
+        write_file(
+            &dir.join("core/src/book.arc"),
+            concat!(
+                "export obj Counter:\n",
+                "    value: Int\n",
+                "\n",
+                "export create Session [Counter] scope-exit:\n",
+                "    done: when Counter.value >= 2\n",
+            ),
+        );
+
+        let second = member_api_fingerprint(&dir, "core");
+
+        assert_ne!(
+            first, second,
+            "owner exit/body changes should affect the public api fingerprint"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn owner_lifecycle_hook_changes_update_api_fingerprint() {
+        fn member_api_fingerprint(dir: &Path, member: &str) -> String {
+            let graph = load_workspace_graph(dir).expect("load graph");
+            let workspace = load_workspace_hir_from_graph(dir, &graph).expect("workspace");
+            let resolved_workspace = arcana_hir::resolve_workspace(&workspace).expect("resolve");
+            compute_workspace_fingerprints(&graph, &workspace, &resolved_workspace)
+                .expect("fingerprints")
+                .member(member)
+                .expect("member fingerprint should exist")
+                .api()
+                .to_string()
+        }
+
+        let dir = temp_dir("owner_lifecycle_api_fingerprint");
+        write_file(
+            &dir.join("book.toml"),
+            "name = \"ws\"\nkind = \"app\"\n[workspace]\nmembers = [\"core\"]\n",
+        );
+        write_grimoire(&dir.join("core"), GrimoireKind::Lib, "core", &[]);
+        write_file(
+            &dir.join("core/src/book.arc"),
+            concat!(
+                "export obj SessionCtx:\n",
+                "    base: Int\n",
+                "\n",
+                "export obj Counter:\n",
+                "    value: Int\n",
+                "    fn init(edit self: Self, read ctx: SessionCtx):\n",
+                "        self.value = ctx.base\n",
+                "\n",
+                "export create Session [Counter] scope-exit:\n",
+                "    done: when Counter.value >= 1 hold [Counter]\n",
+            ),
+        );
+
+        let first = member_api_fingerprint(&dir, "core");
+
+        write_file(
+            &dir.join("core/src/book.arc"),
+            concat!(
+                "export obj SessionCtx:\n",
+                "    base: Int\n",
+                "\n",
+                "export obj Counter:\n",
+                "    value: Int\n",
+                "    fn resume(edit self: Self, read ctx: SessionCtx):\n",
+                "        self.value = ctx.base\n",
+                "\n",
+                "export create Session [Counter] scope-exit:\n",
+                "    done: when Counter.value >= 1 hold [Counter]\n",
+            ),
+        );
+
+        let second = member_api_fingerprint(&dir, "core");
+
+        assert_ne!(
+            first, second,
+            "owner lifecycle hook changes should affect the public api fingerprint"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn execute_build_rejects_statuses_from_different_snapshot() {
         let dir = temp_dir("prepared_snapshot_mismatch");
         write_file(&dir.join("book.toml"), "name = \"app\"\nkind = \"app\"\n");

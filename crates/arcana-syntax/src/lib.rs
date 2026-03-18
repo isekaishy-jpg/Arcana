@@ -45,6 +45,8 @@ pub enum SymbolKind {
     Fn,
     System,
     Record,
+    Object,
+    Owner,
     Enum,
     OpaqueType,
     Trait,
@@ -58,6 +60,8 @@ impl SymbolKind {
             Self::Fn => "fn",
             Self::System => "system",
             Self::Record => "record",
+            Self::Object => "obj",
+            Self::Owner => "create",
             Self::Enum => "enum",
             Self::OpaqueType => "opaque type",
             Self::Trait => "trait",
@@ -192,6 +196,27 @@ pub struct PageRollup {
     pub kind: PageRollupKind,
     pub subject: String,
     pub handler_path: Vec<String>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AvailabilityAttachment {
+    pub path: Vec<String>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OwnerObjectDecl {
+    pub type_path: Vec<String>,
+    pub local_name: String,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OwnerExitDecl {
+    pub name: String,
+    pub condition: Expr,
+    pub holds: Vec<String>,
     pub span: Span,
 }
 
@@ -469,6 +494,7 @@ pub enum StatementKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Statement {
     pub kind: StatementKind,
+    pub availability: Vec<AvailabilityAttachment>,
     pub forewords: Vec<ForewordApp>,
     pub rollups: Vec<PageRollup>,
     pub span: Span,
@@ -480,8 +506,16 @@ pub enum SymbolBody {
     Record {
         fields: Vec<FieldDecl>,
     },
+    Object {
+        fields: Vec<FieldDecl>,
+        methods: Vec<SymbolDecl>,
+    },
     Enum {
         variants: Vec<EnumVariantDecl>,
+    },
+    Owner {
+        objects: Vec<OwnerObjectDecl>,
+        exits: Vec<OwnerExitDecl>,
     },
     Trait {
         assoc_types: Vec<TraitAssocTypeDecl>,
@@ -501,6 +535,7 @@ pub struct SymbolDecl {
     pub return_type: Option<String>,
     pub behavior_attrs: Vec<BehaviorAttr>,
     pub opaque_policy: Option<OpaqueTypePolicy>,
+    pub availability: Vec<AvailabilityAttachment>,
     pub forewords: Vec<ForewordApp>,
     pub intrinsic_impl: Option<String>,
     pub body: SymbolBody,
@@ -566,6 +601,7 @@ pub fn parse_module(source: &str) -> Result<ParsedModule, String> {
     let mut symbols = Vec::new();
     let mut impls = Vec::new();
     let mut pending_forewords = Vec::new();
+    let mut pending_availability = Vec::new();
     let mut index = 0usize;
     while index < entries.len() {
         let entry = &entries[index];
@@ -573,6 +609,15 @@ pub fn parse_module(source: &str) -> Result<ParsedModule, String> {
             pending_forewords.push(foreword);
             index += 1;
             continue;
+        }
+        if let Some(attachment) = parse_availability_attachment(entry)? {
+            if !module_has_following_availability_target(&entries, index)? {
+                // Fall through so ordinary path-like statements keep their existing meaning.
+            } else {
+                pending_availability.push(attachment);
+                index += 1;
+                continue;
+            }
         }
         if parse_page_rollup_entry(entry)?.is_some() {
             return Err(format!(
@@ -600,6 +645,13 @@ pub fn parse_module(source: &str) -> Result<ParsedModule, String> {
         }
 
         if let Some(impl_decl) = parse_impl_decl(entry)? {
+            if !pending_availability.is_empty() {
+                let span = pending_availability[0].span;
+                return Err(format!(
+                    "{}:{}: availability attachments can only target block-owning headers",
+                    span.line, span.column
+                ));
+            }
             if !pending_forewords.is_empty() {
                 let foreword = &pending_forewords[0];
                 return Err(format!(
@@ -614,6 +666,14 @@ pub fn parse_module(source: &str) -> Result<ParsedModule, String> {
 
         if let Some(mut symbol) = parse_symbol_entry(entry)? {
             symbol.forewords = std::mem::take(&mut pending_forewords);
+            symbol.availability = std::mem::take(&mut pending_availability);
+            if !symbol.availability.is_empty() && !symbol_can_own_availability(&symbol) {
+                let span = symbol.availability[0].span;
+                return Err(format!(
+                    "{}:{}: availability attachments can only target block-owning headers",
+                    span.line, span.column
+                ));
+            }
             let (rollups, consumed) = collect_following_rollups(&entries, index + 1)?;
             if !rollups.is_empty() {
                 if symbol_can_own_rollups(&symbol) {
@@ -630,6 +690,13 @@ pub fn parse_module(source: &str) -> Result<ParsedModule, String> {
             index += 1 + consumed;
             continue;
         }
+        if !pending_availability.is_empty() {
+            let span = pending_availability[0].span;
+            return Err(format!(
+                "{}:{}: availability attachment without a valid target",
+                span.line, span.column
+            ));
+        }
 
         return Err(format!(
             "{}:{}: unsupported top-level syntax: `{}`",
@@ -641,6 +708,12 @@ pub fn parse_module(source: &str) -> Result<ParsedModule, String> {
         return Err(format!(
             "{}:{}: foreword without a valid target",
             foreword.span.line, foreword.span.column
+        ));
+    }
+    if let Some(attachment) = pending_availability.first() {
+        return Err(format!(
+            "{}:{}: availability attachment without a valid target",
+            attachment.span.line, attachment.span.column
         ));
     }
 
@@ -958,7 +1031,15 @@ fn parse_symbol_entry(entry: &RawBlockEntry) -> Result<Option<SymbolDecl>, Strin
         ));
     }
     symbol.surface_text = collect_symbol_surface(&entry.text, &symbol.kind, &entry.children);
-    symbol.body = parse_symbol_body(&symbol.kind, &entry.children)?;
+    symbol.body = if symbol.kind == SymbolKind::Owner {
+        let objects = match &symbol.body {
+            SymbolBody::Owner { objects, .. } => objects.clone(),
+            _ => Vec::new(),
+        };
+        parse_owner_body(&entry.children, objects)?
+    } else {
+        parse_symbol_body(&symbol.kind, &entry.children)?
+    };
     symbol.statements = parse_symbol_statements(&symbol.kind, &entry.children)?;
     Ok(Some(symbol))
 }
@@ -978,6 +1059,9 @@ fn parse_symbol_header(trimmed: &str, span: Span) -> Option<SymbolDecl> {
     if let Some(symbol) = parse_opaque_symbol(rest, exported, span) {
         return Some(symbol);
     }
+    if let Some(symbol) = parse_owner_symbol(rest, exported, span) {
+        return Some(symbol);
+    }
     let (is_async, rest) = if let Some(rest) = rest.strip_prefix("async ") {
         (true, rest)
     } else {
@@ -987,6 +1071,7 @@ fn parse_symbol_header(trimmed: &str, span: Span) -> Option<SymbolDecl> {
         ("fn", SymbolKind::Fn),
         ("system", SymbolKind::System),
         ("record", SymbolKind::Record),
+        ("obj", SymbolKind::Object),
         ("enum", SymbolKind::Enum),
         ("trait", SymbolKind::Trait),
         ("behavior", SymbolKind::Behavior),
@@ -1010,6 +1095,7 @@ fn parse_symbol_header(trimmed: &str, span: Span) -> Option<SymbolDecl> {
             return_type: signature.return_type,
             behavior_attrs: Vec::new(),
             opaque_policy: None,
+            availability: Vec::new(),
             forewords: Vec::new(),
             intrinsic_impl: None,
             body: SymbolBody::None,
@@ -1020,6 +1106,34 @@ fn parse_symbol_header(trimmed: &str, span: Span) -> Option<SymbolDecl> {
         });
     }
     None
+}
+
+fn parse_owner_symbol(rest: &str, exported: bool, span: Span) -> Option<SymbolDecl> {
+    let rest = rest.strip_prefix("create ")?;
+    let (name, objects) = parse_owner_signature(rest)?;
+    Some(SymbolDecl {
+        name,
+        kind: SymbolKind::Owner,
+        exported,
+        is_async: false,
+        type_params: Vec::new(),
+        where_clause: None,
+        params: Vec::new(),
+        return_type: None,
+        behavior_attrs: Vec::new(),
+        opaque_policy: None,
+        availability: Vec::new(),
+        forewords: Vec::new(),
+        intrinsic_impl: None,
+        body: SymbolBody::Owner {
+            objects,
+            exits: Vec::new(),
+        },
+        statements: Vec::new(),
+        rollups: Vec::new(),
+        surface_text: format!("create {}", rest.trim()),
+        span,
+    })
 }
 
 fn parse_behavior_symbol(rest: &str, exported: bool, span: Span) -> Option<SymbolDecl> {
@@ -1043,6 +1157,7 @@ fn parse_behavior_symbol(rest: &str, exported: bool, span: Span) -> Option<Symbo
         return_type: signature.return_type,
         behavior_attrs: attrs,
         opaque_policy: None,
+        availability: Vec::new(),
         forewords: Vec::new(),
         intrinsic_impl: None,
         body: SymbolBody::None,
@@ -1078,6 +1193,7 @@ fn parse_system_symbol(rest: &str, exported: bool, span: Span) -> Option<SymbolD
         return_type: signature.return_type,
         behavior_attrs: attrs,
         opaque_policy: None,
+        availability: Vec::new(),
         forewords: Vec::new(),
         intrinsic_impl: None,
         body: SymbolBody::None,
@@ -1107,6 +1223,7 @@ fn parse_intrinsic_symbol(rest: &str, exported: bool, span: Span) -> Option<Symb
         return_type: signature.return_type,
         behavior_attrs: Vec::new(),
         opaque_policy: None,
+        availability: Vec::new(),
         forewords: Vec::new(),
         intrinsic_impl: Some(binding.to_string()),
         body: SymbolBody::None,
@@ -1136,6 +1253,7 @@ fn parse_opaque_symbol(rest: &str, exported: bool, span: Span) -> Option<SymbolD
         return_type: None,
         behavior_attrs: Vec::new(),
         opaque_policy: Some(policy),
+        availability: Vec::new(),
         forewords: Vec::new(),
         intrinsic_impl: None,
         body: SymbolBody::None,
@@ -1198,6 +1316,7 @@ fn collect_symbol_surface(trimmed: &str, kind: &SymbolKind, entries: &[RawBlockE
             | SymbolKind::Behavior
             | SymbolKind::System
             | SymbolKind::Const
+            | SymbolKind::Owner
             | SymbolKind::OpaqueType
     ) {
         return surface_lines.join("\n");
@@ -1224,10 +1343,12 @@ fn parse_symbol_signature(kind: SymbolKind, rest: &str) -> Option<ParsedSymbolSi
     let (type_params, where_clause, params, return_type) = match kind {
         SymbolKind::Fn | SymbolKind::System => parse_function_signature_tail(after_name)?,
         SymbolKind::Record
+        | SymbolKind::Object
         | SymbolKind::Enum
         | SymbolKind::Trait
         | SymbolKind::Behavior
         | SymbolKind::OpaqueType => parse_named_type_tail(after_name)?,
+        SymbolKind::Owner => return None,
         SymbolKind::Const => parse_const_signature_tail(after_name),
     };
 
@@ -1276,6 +1397,36 @@ fn parse_const_signature_tail(
         .map(|ty| ty.trim().to_string())
         .filter(|ty| !ty.is_empty());
     (Vec::new(), None, Vec::new(), return_type)
+}
+
+fn parse_owner_signature(rest: &str) -> Option<(String, Vec<OwnerObjectDecl>)> {
+    let header = rest.trim().strip_suffix(':').unwrap_or(rest.trim()).trim();
+    let name = parse_symbol_name(header)?;
+    let after_name = header[name.len()..].trim();
+    if !after_name.starts_with('[') {
+        return None;
+    }
+    let close_idx = find_matching_delim(after_name, 0, '[', ']')?;
+    let objects_text = &after_name[1..close_idx];
+    let remainder = after_name[close_idx + 1..].trim();
+    if remainder != "scope-exit" {
+        return None;
+    }
+    let mut objects = Vec::new();
+    for item in split_top_level(objects_text, ',') {
+        let item = item.trim();
+        if item.is_empty() {
+            continue;
+        }
+        let path = parse_path(item).ok()?;
+        let local_name = path.last()?.clone();
+        objects.push(OwnerObjectDecl {
+            type_path: path,
+            local_name,
+            span: Span::default(),
+        });
+    }
+    Some((name, objects))
 }
 
 fn parse_type_params_and_where(tail: &str) -> Option<(Vec<String>, Option<String>, &str)> {
@@ -1495,9 +1646,18 @@ fn parse_symbol_body(kind: &SymbolKind, entries: &[RawBlockEntry]) -> Result<Sym
         | SymbolKind::Const
         | SymbolKind::Behavior
         | SymbolKind::System
+        | SymbolKind::Owner
         | SymbolKind::OpaqueType => {
             if matches!(kind, SymbolKind::OpaqueType) && !entries.is_empty() {
                 return Err("opaque types cannot own nested blocks".to_string());
+            }
+            if matches!(kind, SymbolKind::Owner) {
+                let exits = entries
+                    .iter()
+                    .map(parse_owner_exit_decl)
+                    .collect::<Result<Vec<_>, _>>()?;
+                let objects = Vec::new();
+                return Ok(SymbolBody::Owner { objects, exits });
             }
             Ok(SymbolBody::None)
         }
@@ -1507,6 +1667,67 @@ fn parse_symbol_body(kind: &SymbolKind, entries: &[RawBlockEntry]) -> Result<Sym
                 .filter_map(|entry| parse_field_decl(&entry.text, entry.span))
                 .collect(),
         }),
+        SymbolKind::Object => {
+            let mut fields = Vec::new();
+            let mut methods = Vec::new();
+            let mut pending_forewords = Vec::new();
+            let mut index = 0usize;
+            while index < entries.len() {
+                let entry = &entries[index];
+                if let Some(foreword) = parse_foreword_app(&entry.text, entry.span)? {
+                    pending_forewords.push(foreword);
+                    index += 1;
+                    continue;
+                }
+                if parse_page_rollup_entry(entry)?.is_some() {
+                    return Err(format!(
+                        "{}:{}: page rollup without a valid owning header",
+                        entry.span.line, entry.span.column
+                    ));
+                }
+                if let Some(field) = parse_field_decl(&entry.text, entry.span) {
+                    if !pending_forewords.is_empty() {
+                        let foreword = &pending_forewords[0];
+                        return Err(format!(
+                            "{}:{}: forewords cannot target object fields in v1",
+                            foreword.span.line, foreword.span.column
+                        ));
+                    }
+                    fields.push(field);
+                    index += 1;
+                    continue;
+                }
+                if let Some(mut method) = parse_symbol_entry(entry)? {
+                    method.forewords = std::mem::take(&mut pending_forewords);
+                    let (rollups, consumed) = collect_following_rollups(entries, index + 1)?;
+                    if !rollups.is_empty() {
+                        if symbol_can_own_rollups(&method) {
+                            method.rollups = rollups;
+                        } else {
+                            let span = method.span;
+                            return Err(format!(
+                                "{}:{}: page rollups can only attach to function-like owning headers",
+                                span.line, span.column
+                            ));
+                        }
+                    }
+                    methods.push(method);
+                    index += 1 + consumed;
+                    continue;
+                }
+                return Err(format!(
+                    "{}:{}: unsupported `obj` item syntax: `{}`",
+                    entry.span.line, entry.span.column, entry.text
+                ));
+            }
+            if let Some(foreword) = pending_forewords.first() {
+                return Err(format!(
+                    "{}:{}: foreword without a valid target",
+                    foreword.span.line, foreword.span.column
+                ));
+            }
+            Ok(SymbolBody::Object { fields, methods })
+        }
         SymbolKind::Enum => Ok(SymbolBody::Enum {
             variants: entries
                 .iter()
@@ -1589,11 +1810,92 @@ fn parse_symbol_statements(
             parse_statement_block(entries, 0)
         }
         SymbolKind::Trait
+        | SymbolKind::Object
         | SymbolKind::Record
         | SymbolKind::Enum
         | SymbolKind::Const
+        | SymbolKind::Owner
         | SymbolKind::OpaqueType => Ok(Vec::new()),
     }
+}
+
+fn parse_owner_body(
+    entries: &[RawBlockEntry],
+    objects: Vec<OwnerObjectDecl>,
+) -> Result<SymbolBody, String> {
+    let exits = entries
+        .iter()
+        .map(parse_owner_exit_decl)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(SymbolBody::Owner { objects, exits })
+}
+
+fn parse_owner_exit_decl(entry: &RawBlockEntry) -> Result<OwnerExitDecl, String> {
+    let text = entry.text.trim();
+    let (name, rest) = if let Some(rest) = text.strip_prefix("exit when ") {
+        ("exit".to_string(), rest)
+    } else if let Some((name, rest)) = text.split_once(": when ") {
+        let name = name.trim();
+        if !is_identifier(name) {
+            return Err(format!(
+                "{}:{}: malformed owner exit clause `{}`",
+                entry.span.line, entry.span.column, entry.text
+            ));
+        }
+        (name.to_string(), rest)
+    } else {
+        return Err(format!(
+            "{}:{}: malformed owner exit clause `{}`",
+            entry.span.line, entry.span.column, entry.text
+        ));
+    };
+    if !entry.children.is_empty() {
+        return Err(format!(
+            "{}:{}: owner exit clauses cannot own nested blocks",
+            entry.span.line, entry.span.column
+        ));
+    }
+    let (condition_text, holds) = match rest.split_once(" hold ") {
+        Some((condition, hold_text)) => (
+            condition.trim(),
+            parse_owner_hold_list(hold_text.trim(), entry.span)?,
+        ),
+        None => (rest.trim(), Vec::new()),
+    };
+    if condition_text.is_empty() {
+        return Err(format!(
+            "{}:{}: owner exit clause is missing a condition",
+            entry.span.line, entry.span.column
+        ));
+    }
+    Ok(OwnerExitDecl {
+        name,
+        condition: parse_expression(condition_text, &[], entry.span)?,
+        holds,
+        span: entry.span,
+    })
+}
+
+fn parse_owner_hold_list(text: &str, span: Span) -> Result<Vec<String>, String> {
+    let open = text
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .ok_or_else(|| format!("{}:{}: malformed owner hold list", span.line, span.column))?;
+    let mut holds = Vec::new();
+    for item in split_top_level(open, ',') {
+        let item = item.trim();
+        if item.is_empty() {
+            continue;
+        }
+        if !is_identifier(item) {
+            return Err(format!(
+                "{}:{}: malformed owner hold target `{item}`",
+                span.line, span.column
+            ));
+        }
+        holds.push(item.to_string());
+    }
+    Ok(holds)
 }
 
 fn parse_statement_block(
@@ -1602,6 +1904,7 @@ fn parse_statement_block(
 ) -> Result<Vec<Statement>, String> {
     let mut statements = Vec::new();
     let mut pending_forewords = Vec::new();
+    let mut pending_availability = Vec::new();
     let mut index = 0usize;
     while index < entries.len() {
         let entry = &entries[index];
@@ -1609,6 +1912,15 @@ fn parse_statement_block(
             pending_forewords.push(foreword);
             index += 1;
             continue;
+        }
+        if let Some(attachment) = parse_availability_attachment(entry)? {
+            if !statement_has_following_availability_target(entries, index, loop_depth)? {
+                // Fall through so standalone statements like `break` are not consumed as attachments.
+            } else {
+                pending_availability.push(attachment);
+                index += 1;
+                continue;
+            }
         }
         if entry.text == "else:" {
             return Err(format!(
@@ -1630,6 +1942,14 @@ fn parse_statement_block(
         }
 
         let mut statement = parse_statement(entry, loop_depth)?;
+        statement.availability = std::mem::take(&mut pending_availability);
+        if !statement.availability.is_empty() && !statement_can_own_availability(&statement) {
+            let span = statement.availability[0].span;
+            return Err(format!(
+                "{}:{}: availability attachments can only target block-owning headers",
+                span.line, span.column
+            ));
+        }
         statement.forewords = std::mem::take(&mut pending_forewords);
         let mut next_index = index + 1;
         if let StatementKind::If { else_branch, .. } = &mut statement.kind {
@@ -1669,6 +1989,12 @@ fn parse_statement_block(
             foreword.span.line, foreword.span.column
         ));
     }
+    if let Some(attachment) = pending_availability.first() {
+        return Err(format!(
+            "{}:{}: availability attachment without a valid target",
+            attachment.span.line, attachment.span.column
+        ));
+    }
 
     Ok(statements)
 }
@@ -1686,6 +2012,7 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
                 then_branch: parse_statement_block(&entry.children, loop_depth)?,
                 else_branch: None,
             },
+            availability: Vec::new(),
             forewords: Vec::new(),
             rollups: Vec::new(),
             span: entry.span,
@@ -1703,6 +2030,7 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
                 condition,
                 body: parse_statement_block(&entry.children, loop_depth + 1)?,
             },
+            availability: Vec::new(),
             forewords: Vec::new(),
             rollups: Vec::new(),
             span: entry.span,
@@ -1737,6 +2065,7 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
                 iterable: parse_expression(iterable, &[], entry.span)?,
                 body: parse_statement_block(&entry.children, loop_depth + 1)?,
             },
+            availability: Vec::new(),
             forewords: Vec::new(),
             rollups: Vec::new(),
             span: entry.span,
@@ -1775,6 +2104,7 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
                 name: name.to_string(),
                 value: parse_expression(value, &entry.children, entry.span)?,
             },
+            availability: Vec::new(),
             forewords: Vec::new(),
             rollups: Vec::new(),
             span: entry.span,
@@ -1794,6 +2124,7 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
         };
         return Ok(Statement {
             kind: StatementKind::Return { value },
+            availability: Vec::new(),
             forewords: Vec::new(),
             rollups: Vec::new(),
             span: entry.span,
@@ -1805,6 +2136,7 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
             kind: StatementKind::Defer {
                 expr: parse_expression(rest, &entry.children, entry.span)?,
             },
+            availability: Vec::new(),
             forewords: Vec::new(),
             rollups: Vec::new(),
             span: entry.span,
@@ -1820,6 +2152,7 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
         }
         return Ok(Statement {
             kind: StatementKind::Break,
+            availability: Vec::new(),
             forewords: Vec::new(),
             rollups: Vec::new(),
             span: entry.span,
@@ -1835,6 +2168,7 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
         }
         return Ok(Statement {
             kind: StatementKind::Continue,
+            availability: Vec::new(),
             forewords: Vec::new(),
             rollups: Vec::new(),
             span: entry.span,
@@ -1848,6 +2182,7 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
                 op,
                 value: parse_expression(&value, &entry.children, entry.span)?,
             },
+            availability: Vec::new(),
             forewords: Vec::new(),
             rollups: Vec::new(),
             span: entry.span,
@@ -1858,6 +2193,7 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
         kind: StatementKind::Expr {
             expr: parse_expression(&entry.text, &entry.children, entry.span)?,
         },
+        availability: Vec::new(),
         forewords: Vec::new(),
         rollups: Vec::new(),
         span: entry.span,
@@ -3722,6 +4058,56 @@ fn collect_following_rollups(
     Ok((rollups, index - start_index))
 }
 
+fn parse_availability_attachment(
+    entry: &RawBlockEntry,
+) -> Result<Option<AvailabilityAttachment>, String> {
+    if !entry.children.is_empty() {
+        return Ok(None);
+    }
+    let Some(path) = parse_path(&entry.text).ok() else {
+        return Ok(None);
+    };
+    Ok(Some(AvailabilityAttachment {
+        path,
+        span: entry.span,
+    }))
+}
+
+fn module_has_following_availability_target(
+    entries: &[RawBlockEntry],
+    start_index: usize,
+) -> Result<bool, String> {
+    let mut index = start_index + 1;
+    while let Some(entry) = entries.get(index) {
+        if parse_availability_attachment(entry)?.is_some() {
+            index += 1;
+            continue;
+        }
+        if let Some(symbol) = parse_symbol_entry(entry)? {
+            return Ok(symbol_can_own_availability(&symbol));
+        }
+        return Ok(false);
+    }
+    Ok(false)
+}
+
+fn statement_has_following_availability_target(
+    entries: &[RawBlockEntry],
+    start_index: usize,
+    loop_depth: usize,
+) -> Result<bool, String> {
+    let mut index = start_index + 1;
+    while let Some(entry) = entries.get(index) {
+        if parse_availability_attachment(entry)?.is_some() {
+            index += 1;
+            continue;
+        }
+        let statement = parse_statement(entry, loop_depth)?;
+        return Ok(statement_can_own_availability(&statement));
+    }
+    Ok(false)
+}
+
 fn symbol_can_own_rollups(symbol: &SymbolDecl) -> bool {
     matches!(symbol.kind, SymbolKind::Fn | SymbolKind::Behavior)
 }
@@ -3732,6 +4118,20 @@ fn statement_can_own_rollups(statement: &Statement) -> bool {
         StatementKind::Expr { expr } => expr_has_attached_block(expr),
         _ => false,
     }
+}
+
+fn symbol_can_own_availability(symbol: &SymbolDecl) -> bool {
+    matches!(
+        symbol.kind,
+        SymbolKind::Fn | SymbolKind::Behavior | SymbolKind::System
+    )
+}
+
+fn statement_can_own_availability(statement: &Statement) -> bool {
+    matches!(
+        statement.kind,
+        StatementKind::If { .. } | StatementKind::While { .. } | StatementKind::For { .. }
+    ) || matches!(&statement.kind, StatementKind::Expr { expr } if expr_has_attached_block(expr))
 }
 
 fn expr_has_attached_block(expr: &Expr) -> bool {
@@ -3750,6 +4150,8 @@ enum ForewordTarget {
     Use,
     Function,
     Record,
+    Object,
+    Owner,
     Enum,
     OpaqueType,
     Trait,
@@ -3787,6 +4189,8 @@ fn symbol_foreword_target(kind: SymbolKind) -> ForewordTarget {
     match kind {
         SymbolKind::Fn => ForewordTarget::Function,
         SymbolKind::Record => ForewordTarget::Record,
+        SymbolKind::Object => ForewordTarget::Object,
+        SymbolKind::Owner => ForewordTarget::Owner,
         SymbolKind::Enum => ForewordTarget::Enum,
         SymbolKind::OpaqueType => ForewordTarget::OpaqueType,
         SymbolKind::Trait => ForewordTarget::Trait,
@@ -3802,6 +4206,8 @@ fn foreword_target_allows(target: ForewordTarget, foreword_name: &str) -> bool {
             target,
             ForewordTarget::Function
                 | ForewordTarget::Record
+                | ForewordTarget::Object
+                | ForewordTarget::Owner
                 | ForewordTarget::Enum
                 | ForewordTarget::OpaqueType
                 | ForewordTarget::Trait
@@ -3821,6 +4227,8 @@ fn foreword_target_allows(target: ForewordTarget, foreword_name: &str) -> bool {
                 | ForewordTarget::System
                 | ForewordTarget::Function
                 | ForewordTarget::Record
+                | ForewordTarget::Object
+                | ForewordTarget::Owner
                 | ForewordTarget::Enum
                 | ForewordTarget::OpaqueType
                 | ForewordTarget::TraitMethod
@@ -5067,11 +5475,24 @@ fn validate_symbol_tuple_contract(symbol: &SymbolDecl) -> Result<(), String> {
                 validate_tuple_type_contract(&field.ty, field.span, "field type")?;
             }
         }
+        SymbolBody::Object { fields, methods } => {
+            for field in fields {
+                validate_tuple_type_contract(&field.ty, field.span, "field type")?;
+            }
+            for method in methods {
+                validate_symbol_tuple_contract(method)?;
+            }
+        }
         SymbolBody::Enum { variants } => {
             for variant in variants {
                 if let Some(payload) = &variant.payload {
                     validate_tuple_type_contract(payload, variant.span, "enum variant payload")?;
                 }
+            }
+        }
+        SymbolBody::Owner { exits, .. } => {
+            for owner_exit in exits {
+                validate_expr_tuple_contract(&owner_exit.condition, owner_exit.span)?;
             }
         }
         SymbolBody::Trait {
@@ -5649,7 +6070,12 @@ mod tests {
     }
 
     fn owned_app_root() -> PathBuf {
-        repo_root().join("grimoires").join("owned").join("app")
+        let libs = repo_root().join("grimoires").join("owned").join("libs");
+        if libs.is_dir() {
+            libs
+        } else {
+            repo_root().join("grimoires").join("owned").join("app")
+        }
     }
 
     fn collect_arc_files(root: &Path) -> Vec<PathBuf> {

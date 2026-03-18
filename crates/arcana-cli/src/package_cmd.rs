@@ -376,6 +376,85 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn package_workspace_stages_windows_exe_bundle_with_owner_activation() {
+        let dir = temp_dir("windows_exe_owner");
+        write_app_workspace(
+            &dir,
+            concat!(
+                "obj Counter:\n",
+                "    value: Int\n",
+                "\n",
+                "create Session [Counter] scope-exit:\n",
+                "    done: when Counter.value >= 10 hold [Counter]\n",
+                "\n",
+                "Session\n",
+                "Counter\n",
+                "fn main() -> Int:\n",
+                "    let active = Session :: :: call\n",
+                "    Counter.value = 9\n",
+                "    Counter.value += 1\n",
+                "    let resumed = Session :: :: call\n",
+                "    return resumed.Counter.value\n",
+            ),
+        );
+
+        let bundle = package_workspace(dir.clone(), BuildTarget::windows_exe(), None, None)
+            .expect("package should succeed");
+        let exe_path = bundle.bundle_dir.join(&bundle.root_artifact);
+        let status = Command::new(&exe_path)
+            .status()
+            .expect("staged owner bundle should launch");
+        assert_eq!(status.code(), Some(10));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn package_workspace_stages_windows_exe_bundle_with_owner_context_hooks() {
+        let dir = temp_dir("windows_exe_owner_context");
+        write_app_workspace(
+            &dir,
+            concat!(
+                "obj SessionCtx:\n",
+                "    base: Int\n",
+                "\n",
+                "obj Counter:\n",
+                "    value: Int\n",
+                "    fn init(edit self: Self, read ctx: SessionCtx):\n",
+                "        self.value = ctx.base\n",
+                "    fn resume(edit self: Self, read ctx: SessionCtx):\n",
+                "        self.value += ctx.base\n",
+                "\n",
+                "create Session [Counter] scope-exit:\n",
+                "    done: when Counter.value == 3 hold [Counter]\n",
+                "\n",
+                "Session\n",
+                "Counter\n",
+                "fn main() -> Int:\n",
+                "    let start = SessionCtx :: base = 1 :: call\n",
+                "    Session :: start :: call\n",
+                "    Counter.value\n",
+                "    Counter.value = 3\n",
+                "    let resume_ctx = SessionCtx :: base = 2 :: call\n",
+                "    let resumed = Session :: resume_ctx :: call\n",
+                "    return resumed.Counter.value\n",
+            ),
+        );
+
+        let bundle = package_workspace(dir.clone(), BuildTarget::windows_exe(), None, None)
+            .expect("package should succeed");
+        let exe_path = bundle.bundle_dir.join(&bundle.root_artifact);
+        let status = Command::new(&exe_path)
+            .status()
+            .expect("staged owner context bundle should launch");
+        assert_eq!(status.code(), Some(5));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn package_workspace_stages_loadable_windows_dll_bundle() {
         let dir = temp_dir("windows_dll");
         write_std_bytes_grimoire(&dir);
@@ -543,6 +622,122 @@ mod tests {
             assert_eq!(echoed_left, "pair");
             assert_eq!(echoed_pair.right, 17);
         }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn package_workspace_stages_loadable_windows_dll_bundle_with_owner_activation() {
+        let dir = temp_dir("windows_dll_owner");
+        write_lib_workspace(
+            &dir,
+            concat!(
+                "obj Counter:\n",
+                "    value: Int\n",
+                "\n",
+                "create Session [Counter] scope-exit:\n",
+                "    done: when Counter.value >= 4 hold [Counter]\n",
+                "\n",
+                "Session\n",
+                "Counter\n",
+                "export fn answer() -> Int:\n",
+                "    let active = Session :: :: call\n",
+                "    Counter.value = 2\n",
+                "    Counter.value += 2\n",
+                "    let resumed = Session :: :: call\n",
+                "    return resumed.Counter.value\n",
+            ),
+        );
+
+        let bundle = package_workspace(dir.clone(), BuildTarget::windows_dll(), None, None)
+            .expect("dll package should succeed");
+        let dll_path = bundle.bundle_dir.join(&bundle.root_artifact);
+
+        unsafe {
+            let library = Library::new(&dll_path).expect("dll should load");
+            let answer = library
+                .get::<unsafe extern "system" fn(*mut i64) -> u8>(b"answer")
+                .expect("typed answer export should exist");
+            let last_error = library
+                .get::<unsafe extern "system" fn(*mut usize) -> *mut u8>(b"arcana_last_error_alloc")
+                .expect("last-error export should exist");
+            let free_bytes = library
+                .get::<unsafe extern "system" fn(*mut u8, usize)>(b"arcana_bytes_free")
+                .expect("free export should exist");
+
+            let mut result = 0i64;
+            let ok = answer(&mut result);
+            if ok == 0 {
+                let err =
+                    read_allocated_utf8(&last_error, &free_bytes).expect("last error should read");
+                panic!("typed dll export failed: {err}");
+            }
+            assert_eq!(result, 4);
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn package_workspace_runs_native_window_owner_app_bundle() {
+        let dir = temp_dir("windows_window_owner");
+        write_app_workspace(
+            &dir,
+            concat!(
+                "import std.io\n",
+                "import std.window\n",
+                "use std.result.Result\n",
+                "obj WindowState:\n",
+                "    win: std.window.Window\n",
+                "\n",
+                "create Session [WindowState] scope-exit:\n",
+                "    closed: when not (std.window.alive :: WindowState.win :: call) hold [WindowState]\n",
+                "\n",
+                "Session\n",
+                "WindowState\n",
+                "fn run_with_window(take win: std.window.Window) -> Int:\n",
+                "    let active = Session :: :: call\n",
+                "    WindowState.win = win\n",
+                "    let resumed = Session :: :: call\n",
+                "    let size = std.window.size :: resumed.WindowState.win :: call\n",
+                "    std.io.print[Int] :: size.0 :: call\n",
+                "    std.io.print[Int] :: size.1 :: call\n",
+                "    let close = std.window.close :: resumed.WindowState.win :: call\n",
+                "    if close :: :: is_err:\n",
+                "        return 3\n",
+                "    return 0\n",
+                "\n",
+                "fn run() -> Int:\n",
+                "    return match (std.window.open :: \"Arcana Owner\", 160, 120 :: call):\n",
+                "        Result.Ok(win) => run_with_window :: win :: call\n",
+                "        Result.Err(_) => 1\n",
+                "fn main() -> Int:\n",
+                "    return run :: :: call\n",
+            ),
+        );
+        add_std_dep(&dir);
+
+        let bundle = package_workspace(
+            dir.clone(),
+            BuildTarget::windows_exe(),
+            Some("app".to_string()),
+            None,
+        )
+        .expect("window owner package should succeed");
+        let exe_path = bundle.bundle_dir.join(&bundle.root_artifact);
+        let output = Command::new(&exe_path)
+            .current_dir(&bundle.bundle_dir)
+            .output()
+            .expect("staged owner window bundle should launch");
+        assert_eq!(output.status.code(), Some(0));
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .collect::<Vec<_>>(),
+            vec!["160120"]
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

@@ -7,6 +7,7 @@
   - it underspecified incremental build scope,
   - it was too vague about which legacy materials to carry forward.
 - The rewrite stays Rust-first, but the architecture is explicitly shaped for four non-language goals before selfhost: deterministic package management, real incremental builds, early first-party host plus app/runtime packages, and an eventual AOT backend.
+- One explicit freeze exception is now part of that contract: the object/owner model (`obj`, `create ... scope-exit`, availability attachments, owner activation, hold/re-entry) is approved pre-selfhost because later desktop/grimoire work depends on explicit lifetime-packaged state rather than the discarded historical selfhost grimoire designs.
 
 ## Seed Import and Governance
 - Copy forward only the source-of-truth docs and corpus that define the frozen contract:
@@ -87,9 +88,12 @@
   6. internal IR and first runnable backend with rewrite-owned host/window/input/canvas/events/graphics/text substrate,
   7. close the approved rewrite-owned `std` runtime surface so `std` is broadly runnable rather than only the initial host/app substrate slice,
   8. native AOT artifact emission for the owned `hello`-class, host-core tool, window demo, and audio smoke paths on real hosts, with native `exe` / `dll` outputs rather than only internal backend artifacts,
-  9. add first-party `arcana test` and `arcana format` on the rewrite-owned toolchain, and keep `arcana review` limited to compiler-owned/spec-backed advice until showcase-scale corpus exists,
-  10. write any needed Arcana-owned layers on top of the new toolchain and validate against the owned compiler/tooling corpus plus explicit conformance fixtures without preserving Meadow-era package decomposition by default,
-  11. declare selfhost only when the new compiler can build the owned Arcana compiler/tooling corpus with no fallback to the legacy MeadowLang implementation.
+  9. complete the required Arcana-owned app/media grimoires on top of the new toolchain rather than stopping at scaffold status,
+  10. build and native-run at least one real owned showcase app through those completed grimoires so showcase proof is not just direct substrate smoke,
+  11. add first-party `arcana test` and `arcana format` on the rewrite-owned toolchain,
+  12. add the smaller advisory `arcana review` layer only after showcase/tooling corpus exists to justify it,
+  13. validate against the owned compiler/tooling corpus plus explicit conformance fixtures without preserving Meadow-era package decomposition by default,
+  14. declare selfhost only when the new compiler can build the owned Arcana compiler/tooling corpus with no fallback to the legacy MeadowLang implementation.
 - Historical-corpus archive policy:
   - broad MeadowLang reference corpus is archived outside this repo and is not part of normal validation,
   - approved docs, `crates/*`, rewrite-owned `std`, rewrite-owned grimoires, and conformance fixtures define day-to-day rewrite work,
@@ -116,6 +120,7 @@
   - first runnable backend milestone must run `hello`, one owned host-core tool proof, and one owned window proof,
   - std-runtime-closure milestone must cover the approved rewrite-owned `std` surface needed by owned grimoires rather than only the initial Milestone 6 subset,
   - native-artifact milestone must emit real `exe` / `dll` outputs and support real window/audio smoke on non-synthetic hosts,
+  - post-native grimoire/showcase work must complete the required Arcana-owned grimoires and then prove at least one real owned showcase app through those grimoires on the native artifact lane,
   - selfhost milestone must build the owned Arcana compiler/tooling corpus with the new toolchain and no fallback to the legacy MeadowLang repo.
 
 ## Assumptions and Defaults

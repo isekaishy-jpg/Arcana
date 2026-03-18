@@ -865,6 +865,7 @@ pub(crate) fn parse_stmt(text: &str) -> Result<ParsedStmt, String> {
             .into_iter()
             .map(|item| parse_stmt(&item))
             .collect::<Result<Vec<_>, String>>()?,
+            availability: Vec::new(),
             rollups,
         });
     }
@@ -884,6 +885,7 @@ pub(crate) fn parse_stmt(text: &str) -> Result<ParsedStmt, String> {
             .into_iter()
             .map(|item| parse_stmt(&item))
             .collect::<Result<Vec<_>, String>>()?,
+            availability: Vec::new(),
             rollups,
         });
     }
@@ -907,6 +909,7 @@ pub(crate) fn parse_stmt(text: &str) -> Result<ParsedStmt, String> {
             .into_iter()
             .map(|item| parse_stmt(&item))
             .collect::<Result<Vec<_>, String>>()?,
+            availability: Vec::new(),
             rollups,
         });
     }

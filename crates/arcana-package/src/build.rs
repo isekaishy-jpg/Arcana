@@ -607,11 +607,13 @@ fn link_ir_packages(
         .cloned()
         .collect::<BTreeSet<_>>();
     let mut routines = root.routines.clone();
+    let mut owners = root.owners.clone();
 
     for package in linked {
         modules.extend(package.modules);
         dependency_rows.extend(package.dependency_rows);
         routines.extend(package.routines);
+        owners.extend(package.owners);
     }
 
     modules.sort_by(|left, right| left.module_id.cmp(&right.module_id));
@@ -633,6 +635,7 @@ fn link_ir_packages(
         runtime_requirements: Vec::new(),
         entrypoints: root.entrypoints,
         routines,
+        owners,
     };
     linked_package.runtime_requirements = derive_runtime_requirements_with_roots(
         &linked_package,
@@ -836,6 +839,7 @@ mod tests {
                 runtime_requirements: Vec::new(),
                 entrypoints: Vec::new(),
                 routines: Vec::new(),
+                owners: Vec::new(),
                 modules: Vec::new(),
             },
             primary_artifact_body: String::new(),

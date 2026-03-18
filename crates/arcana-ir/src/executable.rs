@@ -124,6 +124,19 @@ pub enum ExecHeaderAttachment {
     Chain { expr: ExecExpr },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExecAvailabilityKind {
+    Owner,
+    Object,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecAvailabilityAttachment {
+    pub kind: ExecAvailabilityKind,
+    pub path: Vec<String>,
+    pub local_name: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExecMatchPattern {
     Wildcard,
@@ -154,18 +167,29 @@ pub enum ExecStmt {
         condition: ExecExpr,
         then_branch: Vec<ExecStmt>,
         else_branch: Vec<ExecStmt>,
+        availability: Vec<ExecAvailabilityAttachment>,
         rollups: Vec<ExecPageRollup>,
     },
     While {
         condition: ExecExpr,
         body: Vec<ExecStmt>,
+        availability: Vec<ExecAvailabilityAttachment>,
         rollups: Vec<ExecPageRollup>,
     },
     For {
         binding: String,
         iterable: ExecExpr,
         body: Vec<ExecStmt>,
+        availability: Vec<ExecAvailabilityAttachment>,
         rollups: Vec<ExecPageRollup>,
+    },
+    ActivateOwner {
+        owner_path: Vec<String>,
+        owner_local_name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        binding: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context: Option<ExecExpr>,
     },
     Defer(ExecExpr),
     Break,

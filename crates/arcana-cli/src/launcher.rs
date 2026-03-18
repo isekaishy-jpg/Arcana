@@ -143,12 +143,14 @@ mod tests {
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
+                availability: Vec::new(),
                 foreword_rows: Vec::new(),
                 rollups: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Int(7),
                 }],
             }],
+            owners: Vec::new(),
             modules: vec![AotPackageModuleArtifact {
                 module_id: "app".to_string(),
                 symbol_count: 1,

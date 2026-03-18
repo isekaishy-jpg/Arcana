@@ -320,7 +320,8 @@ impl<'a> NativeLoweringBuilder<'a> {
                     then_branch,
                     else_branch,
                     rollups,
-                } if is_last && rollups.is_empty() => {
+                    ..
+                } if rollups.is_empty() && is_last => {
                     let condition = self.lower_expr(condition, &bindings, &NativeAbiType::Bool)?;
                     let then_block =
                         self.lower_block(then_branch, &bindings, expected_return_type)?;
@@ -396,6 +397,7 @@ impl<'a> NativeLoweringBuilder<'a> {
                 then_branch,
                 else_branch,
                 rollups,
+                ..
             } if rollups.is_empty() => Some(NativeDirectStmt::If {
                 condition: self.lower_expr(condition, bindings, &NativeAbiType::Bool)?,
                 then_body: self.lower_stmt_body(then_branch, bindings, in_loop)?,
@@ -405,6 +407,7 @@ impl<'a> NativeLoweringBuilder<'a> {
                 condition,
                 body,
                 rollups,
+                ..
             } if rollups.is_empty() => Some(NativeDirectStmt::While {
                 condition: self.lower_expr(condition, bindings, &NativeAbiType::Bool)?,
                 body: self.lower_stmt_body(body, bindings, true)?,
@@ -818,6 +821,7 @@ mod tests {
             runtime_requirements: Vec::new(),
             entrypoints: Vec::new(),
             routines: Vec::new(),
+            owners: Vec::new(),
         }
     }
 
@@ -845,6 +849,7 @@ mod tests {
             intrinsic_impl: None,
             impl_target_type: None,
             impl_trait_path: None,
+            availability: Vec::new(),
             foreword_rows: Vec::new(),
             rollups: Vec::new(),
             statements: vec![ExecStmt::ReturnValue {
@@ -904,6 +909,7 @@ mod tests {
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
+                availability: Vec::new(),
                 foreword_rows: Vec::new(),
                 rollups: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
@@ -936,6 +942,7 @@ mod tests {
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
+                availability: Vec::new(),
                 foreword_rows: Vec::new(),
                 rollups: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
@@ -995,6 +1002,7 @@ mod tests {
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
+                availability: Vec::new(),
                 foreword_rows: Vec::new(),
                 rollups: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
@@ -1015,6 +1023,7 @@ mod tests {
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
+                availability: Vec::new(),
                 foreword_rows: Vec::new(),
                 rollups: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
@@ -1039,6 +1048,7 @@ mod tests {
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
+                availability: Vec::new(),
                 foreword_rows: Vec::new(),
                 rollups: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
@@ -1069,6 +1079,7 @@ mod tests {
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
+                availability: Vec::new(),
                 foreword_rows: Vec::new(),
                 rollups: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
@@ -1089,6 +1100,7 @@ mod tests {
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
+                availability: Vec::new(),
                 foreword_rows: Vec::new(),
                 rollups: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
@@ -1118,6 +1130,7 @@ mod tests {
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
+                availability: Vec::new(),
                 foreword_rows: Vec::new(),
                 rollups: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
@@ -1193,6 +1206,7 @@ mod tests {
             intrinsic_impl: None,
             impl_target_type: None,
             impl_trait_path: None,
+            availability: Vec::new(),
             foreword_rows: Vec::new(),
             rollups: Vec::new(),
             statements: vec![
@@ -1258,6 +1272,7 @@ mod tests {
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
+                availability: Vec::new(),
                 foreword_rows: Vec::new(),
                 rollups: Vec::new(),
                 statements: vec![
@@ -1294,6 +1309,7 @@ mod tests {
                             value: ExecExpr::Int(0),
                         }],
                         rollups: Vec::new(),
+                        availability: Vec::new(),
                     },
                 ],
             },
@@ -1311,6 +1327,7 @@ mod tests {
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
+                availability: Vec::new(),
                 foreword_rows: Vec::new(),
                 rollups: Vec::new(),
                 statements: vec![
@@ -1398,6 +1415,7 @@ mod tests {
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
+                availability: Vec::new(),
                 foreword_rows: Vec::new(),
                 rollups: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
@@ -1430,6 +1448,7 @@ mod tests {
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
+                availability: Vec::new(),
                 foreword_rows: Vec::new(),
                 rollups: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
@@ -1477,6 +1496,7 @@ mod tests {
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
+                availability: Vec::new(),
                 foreword_rows: Vec::new(),
                 rollups: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
@@ -1512,6 +1532,7 @@ mod tests {
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
+                availability: Vec::new(),
                 foreword_rows: Vec::new(),
                 rollups: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
@@ -1562,6 +1583,7 @@ mod tests {
             intrinsic_impl: None,
             impl_target_type: None,
             impl_trait_path: None,
+            availability: Vec::new(),
             foreword_rows: Vec::new(),
             rollups: Vec::new(),
             statements: vec![
@@ -1596,6 +1618,7 @@ mod tests {
                             then_branch: vec![ExecStmt::Continue],
                             else_branch: Vec::new(),
                             rollups: Vec::new(),
+                            availability: Vec::new(),
                         },
                         ExecStmt::Assign {
                             target: ExecAssignTarget::Name("sum".to_string()),
@@ -1611,9 +1634,11 @@ mod tests {
                             then_branch: vec![ExecStmt::Break],
                             else_branch: Vec::new(),
                             rollups: Vec::new(),
+                            availability: Vec::new(),
                         },
                     ],
                     rollups: Vec::new(),
+                    availability: Vec::new(),
                 },
                 ExecStmt::ReturnValue {
                     value: ExecExpr::Path(vec!["sum".to_string()]),
@@ -1722,6 +1747,7 @@ mod tests {
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
+                availability: Vec::new(),
                 foreword_rows: Vec::new(),
                 rollups: Vec::new(),
                 statements: vec![
@@ -1745,6 +1771,7 @@ mod tests {
                         }],
                         else_branch: Vec::new(),
                         rollups: Vec::new(),
+                        availability: Vec::new(),
                     },
                     ExecStmt::ReturnValue {
                         value: ExecExpr::Int(0),
@@ -1765,6 +1792,7 @@ mod tests {
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
+                availability: Vec::new(),
                 foreword_rows: Vec::new(),
                 rollups: Vec::new(),
                 statements: vec![ExecStmt::ReturnVoid],

@@ -309,9 +309,10 @@ fn runtime_value_to_json_value(value: RuntimeValue) -> Result<serde_json::Value,
                 .map(runtime_value_to_json_value)
                 .collect::<Result<Vec<_>, _>>()?
         })),
-        RuntimeValue::Ref(_) | RuntimeValue::Opaque(_) => {
-            Err("runtime json abi does not support reference or opaque runtime values".to_string())
-        }
+        RuntimeValue::OwnerHandle(_) | RuntimeValue::Ref(_) | RuntimeValue::Opaque(_) => Err(
+            "runtime json abi does not support owner, reference, or opaque runtime values"
+                .to_string(),
+        ),
     }
 }
 

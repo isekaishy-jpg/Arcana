@@ -160,6 +160,7 @@ fn collect_stmt_callees(
             then_branch,
             else_branch,
             rollups,
+            ..
         } => {
             collect_expr_callees(package, current_module_id, condition, out);
             for rollup in rollups {
@@ -176,6 +177,7 @@ fn collect_stmt_callees(
             condition,
             body,
             rollups,
+            ..
         } => {
             collect_expr_callees(package, current_module_id, condition, out);
             for rollup in rollups {
@@ -200,6 +202,11 @@ fn collect_stmt_callees(
             }
         }
         ExecStmt::Defer(expr) => collect_expr_callees(package, current_module_id, expr, out),
+        ExecStmt::ActivateOwner { context, .. } => {
+            if let Some(context) = context {
+                collect_expr_callees(package, current_module_id, context, out);
+            }
+        }
         ExecStmt::Assign { target, value, .. } => {
             collect_assign_target_callees(package, current_module_id, target, out);
             collect_expr_callees(package, current_module_id, value, out);
@@ -448,6 +455,7 @@ mod tests {
             intrinsic_impl: intrinsic_impl.map(ToString::to_string),
             impl_target_type: None,
             impl_trait_path: None,
+            availability: Vec::new(),
             foreword_rows: Vec::new(),
             rollups: Vec::new(),
             statements,
@@ -523,6 +531,7 @@ mod tests {
                     Vec::new(),
                 ),
             ],
+            owners: Vec::new(),
         };
 
         assert_eq!(
@@ -588,6 +597,7 @@ mod tests {
                     Vec::new(),
                 ),
             ],
+            owners: Vec::new(),
         };
 
         assert_eq!(
@@ -633,6 +643,7 @@ mod tests {
                     Vec::new(),
                 ),
             ],
+            owners: Vec::new(),
         };
 
         assert_eq!(
@@ -688,6 +699,7 @@ mod tests {
                     Vec::new(),
                 ),
             ],
+            owners: Vec::new(),
         };
 
         assert_eq!(
@@ -753,6 +765,7 @@ mod tests {
                     intrinsic_impl: None,
                     impl_target_type: None,
                     impl_trait_path: None,
+                    availability: Vec::new(),
                     foreword_rows: Vec::new(),
                     rollups: vec![ExecPageRollup {
                         kind: "cleanup".to_string(),
@@ -777,11 +790,13 @@ mod tests {
                     intrinsic_impl: Some("IoPrint".to_string()),
                     impl_target_type: None,
                     impl_trait_path: None,
+                    availability: Vec::new(),
                     foreword_rows: Vec::new(),
                     rollups: Vec::new(),
                     statements: Vec::new(),
                 },
             ],
+            owners: Vec::new(),
         };
 
         assert!(derive_runtime_requirements(&package).is_empty());

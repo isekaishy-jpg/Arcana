@@ -15,7 +15,7 @@ use arcana_hir::{
     HirWorkspacePackage, HirWorkspaceSummary, impl_target_is_public_from_package,
     infer_receiver_expr_type_text, lookup_method_candidates_for_type, lookup_symbol_path,
     match_name_resolves_to_zero_payload_variant, routine_key_for_impl_method,
-    routine_key_for_symbol,
+    routine_key_for_object_method, routine_key_for_symbol,
 };
 pub use entrypoint::{
     RUNTIME_MAIN_ENTRYPOINT_NAME, is_runtime_main_entry_symbol,
@@ -27,10 +27,10 @@ pub use runtime_requirements::{
 };
 
 pub use executable::{
-    ExecAssignOp, ExecAssignTarget, ExecBinaryOp, ExecChainConnector, ExecChainIntroducer,
-    ExecChainStep, ExecDynamicDispatch, ExecExpr, ExecHeaderAttachment, ExecMatchArm,
-    ExecMatchPattern, ExecPageRollup, ExecPhraseArg, ExecPhraseQualifierKind, ExecStmt,
-    ExecUnaryOp,
+    ExecAssignOp, ExecAssignTarget, ExecAvailabilityAttachment, ExecAvailabilityKind, ExecBinaryOp,
+    ExecChainConnector, ExecChainIntroducer, ExecChainStep, ExecDynamicDispatch, ExecExpr,
+    ExecHeaderAttachment, ExecMatchArm, ExecMatchPattern, ExecPageRollup, ExecPhraseArg,
+    ExecPhraseQualifierKind, ExecStmt, ExecUnaryOp,
 };
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -75,9 +75,36 @@ pub struct IrRoutine {
     pub intrinsic_impl: Option<String>,
     pub impl_target_type: Option<String>,
     pub impl_trait_path: Option<Vec<String>>,
+    pub availability: Vec<ExecAvailabilityAttachment>,
     pub foreword_rows: Vec<String>,
     pub rollups: Vec<ExecPageRollup>,
     pub statements: Vec<ExecStmt>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IrOwnerObject {
+    pub type_path: Vec<String>,
+    pub local_name: String,
+    pub init_routine_key: Option<String>,
+    pub init_with_context_routine_key: Option<String>,
+    pub resume_routine_key: Option<String>,
+    pub resume_with_context_routine_key: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IrOwnerExit {
+    pub name: String,
+    pub condition: ExecExpr,
+    pub holds: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IrOwnerDecl {
+    pub module_id: String,
+    pub owner_path: Vec<String>,
+    pub owner_name: String,
+    pub objects: Vec<IrOwnerObject>,
+    pub exits: Vec<IrOwnerExit>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -92,6 +119,7 @@ pub struct IrPackage {
     pub runtime_requirements: Vec<String>,
     pub entrypoints: Vec<IrEntrypoint>,
     pub routines: Vec<IrRoutine>,
+    pub owners: Vec<IrOwnerDecl>,
 }
 
 impl IrPackage {
@@ -103,6 +131,7 @@ impl IrPackage {
 #[derive(Clone, Debug, Default)]
 struct LowerValueScope {
     locals: BTreeMap<String, String>,
+    owner_member_types: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 impl LowerValueScope {
@@ -116,6 +145,36 @@ impl LowerValueScope {
 
     fn insert(&mut self, name: impl Into<String>, type_text: impl Into<String>) {
         self.locals.insert(name.into(), type_text.into());
+    }
+
+    fn owner_member_type_text(&self, owner_name: &str, member: &str) -> Option<&str> {
+        self.owner_member_types
+            .get(owner_name)
+            .and_then(|members| members.get(member))
+            .map(String::as_str)
+    }
+
+    fn activate_owner(
+        &mut self,
+        owner_local_name: &str,
+        owner_path: &[String],
+        objects: &[(String, String)],
+        explicit_binding: Option<&str>,
+    ) {
+        let owner_type_text = format!("Owner<{}>", owner_path.join("."));
+        let mut owner_members = BTreeMap::new();
+        self.insert(owner_local_name.to_string(), owner_type_text.clone());
+        for (local_name, type_text) in objects {
+            self.insert(local_name.clone(), type_text.clone());
+            owner_members.insert(local_name.clone(), type_text.clone());
+        }
+        self.owner_member_types
+            .insert(owner_local_name.to_string(), owner_members.clone());
+        if let Some(binding) = explicit_binding {
+            self.insert(binding.to_string(), owner_type_text);
+            self.owner_member_types
+                .insert(binding.to_string(), owner_members);
+        }
     }
 }
 
@@ -546,6 +605,13 @@ struct ResolvedPhraseTarget {
     dynamic_dispatch: Option<ExecDynamicDispatch>,
 }
 
+struct ResolvedOwnerActivation<'a> {
+    owner_path: Vec<String>,
+    owner_local_name: String,
+    objects: Vec<(String, String)>,
+    context: Option<&'a HirExpr>,
+}
+
 fn lookup_method_resolution_for_type<'a>(
     scope: &'a ResolvedRenderScope<'a>,
     workspace: &'a HirWorkspaceSummary,
@@ -761,6 +827,18 @@ fn resolve_bare_method_target(
 }
 
 fn infer_expr_type_text(scope: &ResolvedRenderScope<'_>, expr: &HirExpr) -> Option<String> {
+    if let HirExpr::MemberAccess { expr, member } = expr {
+        if let HirExpr::Path { segments } = expr.as_ref() {
+            if segments.len() == 1 && scope.value_scope.contains(&segments[0]) {
+                if let Some(type_text) = scope
+                    .value_scope
+                    .owner_member_type_text(&segments[0], member)
+                {
+                    return Some(type_text.to_string());
+                }
+            }
+        }
+    }
     if let Some(inferred) = infer_receiver_expr_type_text(
         scope.workspace,
         scope.resolved_module,
@@ -993,6 +1071,108 @@ fn lower_header_attachment_exec_resolved(
             expr: lower_exec_expr_resolved(expr, scope),
         },
     }
+}
+
+fn resolve_owner_activation_expr<'a>(
+    scope: &ResolvedRenderScope<'_>,
+    expr: &'a HirExpr,
+) -> Result<Option<ResolvedOwnerActivation<'a>>, String> {
+    let HirExpr::QualifiedPhrase {
+        subject,
+        args,
+        qualifier,
+        ..
+    } = expr
+    else {
+        return Ok(None);
+    };
+    if qualifier != "call" {
+        return Ok(None);
+    }
+    let Some(path) = flatten_callable_expr_path(subject) else {
+        return Ok(None);
+    };
+    let Some(resolved) = lookup_symbol_path(scope.workspace, scope.resolved_module, &path) else {
+        return Ok(None);
+    };
+    if resolved.symbol.kind != HirSymbolKind::Owner {
+        return Ok(None);
+    }
+    if args
+        .iter()
+        .any(|arg| matches!(arg, HirPhraseArg::Named { .. }))
+    {
+        return Err(format!(
+            "owner activation `{}` does not support named arguments",
+            path.join(".")
+        ));
+    }
+    if args.len() > 1 {
+        return Err(format!(
+            "owner activation `{}` accepts at most one context argument",
+            path.join(".")
+        ));
+    }
+    let HirSymbolBody::Owner { objects, .. } = &resolved.symbol.body else {
+        return Ok(None);
+    };
+    Ok(Some(ResolvedOwnerActivation {
+        owner_path: resolved_symbol_path(resolved),
+        owner_local_name: resolved.symbol.name.clone(),
+        objects: objects
+            .iter()
+            .map(|object| (object.local_name.clone(), object.type_path.join(".")))
+            .collect(),
+        context: args.first().and_then(|arg| match arg {
+            HirPhraseArg::Positional(expr) => Some(expr),
+            HirPhraseArg::Named { .. } => None,
+        }),
+    }))
+}
+
+fn lower_availability_attachment_exec(
+    attachment: &arcana_hir::HirAvailabilityAttachment,
+) -> ExecAvailabilityAttachment {
+    ExecAvailabilityAttachment {
+        kind: ExecAvailabilityKind::Object,
+        path: attachment.path.clone(),
+        local_name: attachment.path.last().cloned().unwrap_or_default(),
+    }
+}
+
+fn canonical_symbol_path(module_id: &str, symbol_name: &str) -> Vec<String> {
+    let mut path = module_id.split('.').map(str::to_string).collect::<Vec<_>>();
+    path.push(symbol_name.to_string());
+    path
+}
+
+fn lower_availability_attachment_exec_resolved(
+    attachment: &arcana_hir::HirAvailabilityAttachment,
+    scope: &ResolvedRenderScope<'_>,
+) -> Result<ExecAvailabilityAttachment, String> {
+    let resolved = lookup_symbol_path(scope.workspace, scope.resolved_module, &attachment.path)
+        .ok_or_else(|| {
+            format!(
+                "unresolved availability attachment `{}`",
+                attachment.path.join(".")
+            )
+        })?;
+    let kind = match resolved.symbol.kind {
+        HirSymbolKind::Owner => ExecAvailabilityKind::Owner,
+        HirSymbolKind::Object => ExecAvailabilityKind::Object,
+        other => {
+            return Err(format!(
+                "availability attachment `{}` must resolve to owner or object, found `{}`",
+                attachment.path.join("."),
+                other.as_str()
+            ));
+        }
+    };
+    Ok(ExecAvailabilityAttachment {
+        kind,
+        path: canonical_symbol_path(resolved.module_id, &resolved.symbol.name),
+        local_name: resolved.symbol.name.clone(),
+    })
 }
 
 fn lower_chain_step_exec(step: &HirChainStep) -> ExecChainStep {
@@ -1351,11 +1531,21 @@ fn lower_exec_stmt(statement: &HirStatement) -> ExecStmt {
                 .as_ref()
                 .map(|branch| branch.iter().map(lower_exec_stmt).collect())
                 .unwrap_or_default(),
+            availability: statement
+                .availability
+                .iter()
+                .map(lower_availability_attachment_exec)
+                .collect(),
             rollups: statement.rollups.iter().map(lower_rollup).collect(),
         },
         HirStatementKind::While { condition, body } => ExecStmt::While {
             condition: lower_exec_expr(condition),
             body: lower_exec_stmt_block(body),
+            availability: statement
+                .availability
+                .iter()
+                .map(lower_availability_attachment_exec)
+                .collect(),
             rollups: statement.rollups.iter().map(lower_rollup).collect(),
         },
         HirStatementKind::For {
@@ -1366,6 +1556,11 @@ fn lower_exec_stmt(statement: &HirStatement) -> ExecStmt {
             binding: binding.clone(),
             iterable: lower_exec_expr(iterable),
             body: lower_exec_stmt_block(body),
+            availability: statement
+                .availability
+                .iter()
+                .map(lower_availability_attachment_exec)
+                .collect(),
             rollups: statement.rollups.iter().map(lower_rollup).collect(),
         },
         HirStatementKind::Defer { expr } => ExecStmt::Defer(lower_exec_expr(expr)),
@@ -1382,7 +1577,7 @@ fn lower_exec_stmt(statement: &HirStatement) -> ExecStmt {
 fn lower_exec_stmt_block_resolved(
     statements: &[HirStatement],
     scope: &mut ResolvedRenderScope<'_>,
-) -> Vec<ExecStmt> {
+) -> Result<Vec<ExecStmt>, String> {
     statements
         .iter()
         .map(|statement| lower_exec_stmt_resolved(statement, scope))
@@ -1392,13 +1587,30 @@ fn lower_exec_stmt_block_resolved(
 fn lower_exec_stmt_resolved(
     statement: &HirStatement,
     scope: &mut ResolvedRenderScope<'_>,
-) -> ExecStmt {
-    match &statement.kind {
+) -> Result<ExecStmt, String> {
+    Ok(match &statement.kind {
         HirStatementKind::Let {
             mutable,
             name,
             value,
         } => {
+            if let Some(owner_activation) = resolve_owner_activation_expr(scope, value)? {
+                let lowered_context = owner_activation
+                    .context
+                    .map(|expr| lower_exec_expr_resolved(expr, scope));
+                scope.value_scope.activate_owner(
+                    &owner_activation.owner_local_name,
+                    &owner_activation.owner_path,
+                    &owner_activation.objects,
+                    Some(name),
+                );
+                return Ok(ExecStmt::ActivateOwner {
+                    owner_path: owner_activation.owner_path,
+                    owner_local_name: owner_activation.owner_local_name,
+                    binding: Some(name.clone()),
+                    context: lowered_context,
+                });
+            }
             let lowered = ExecStmt::Let {
                 mutable: *mutable,
                 name: name.clone(),
@@ -1409,14 +1621,36 @@ fn lower_exec_stmt_resolved(
             }
             lowered
         }
-        HirStatementKind::Expr { expr } => ExecStmt::Expr {
-            expr: lower_exec_expr_resolved(expr, scope),
-            rollups: statement
-                .rollups
-                .iter()
-                .map(|rollup| lower_rollup_resolved(scope.workspace, scope.resolved_module, rollup))
-                .collect(),
-        },
+        HirStatementKind::Expr { expr } => {
+            if let Some(owner_activation) = resolve_owner_activation_expr(scope, expr)? {
+                let lowered_context = owner_activation
+                    .context
+                    .map(|value| lower_exec_expr_resolved(value, scope));
+                scope.value_scope.activate_owner(
+                    &owner_activation.owner_local_name,
+                    &owner_activation.owner_path,
+                    &owner_activation.objects,
+                    None,
+                );
+                ExecStmt::ActivateOwner {
+                    owner_path: owner_activation.owner_path,
+                    owner_local_name: owner_activation.owner_local_name,
+                    binding: None,
+                    context: lowered_context,
+                }
+            } else {
+                ExecStmt::Expr {
+                    expr: lower_exec_expr_resolved(expr, scope),
+                    rollups: statement
+                        .rollups
+                        .iter()
+                        .map(|rollup| {
+                            lower_rollup_resolved(scope.workspace, scope.resolved_module, rollup)
+                        })
+                        .collect(),
+                }
+            }
+        }
         HirStatementKind::Return { value } => match value.as_ref() {
             Some(value) => ExecStmt::ReturnValue {
                 value: lower_exec_expr_resolved(value, scope),
@@ -1429,18 +1663,26 @@ fn lower_exec_stmt_resolved(
             else_branch,
         } => {
             let mut then_scope = scope.clone();
-            let then_branch = lower_exec_stmt_block_resolved(then_branch, &mut then_scope);
+            let then_branch = lower_exec_stmt_block_resolved(then_branch, &mut then_scope)?;
             let else_branch = else_branch
                 .as_ref()
                 .map(|branch| {
                     let mut else_scope = scope.clone();
                     lower_exec_stmt_block_resolved(branch, &mut else_scope)
                 })
+                .transpose()?
                 .unwrap_or_default();
             ExecStmt::If {
                 condition: lower_exec_expr_resolved(condition, scope),
                 then_branch,
                 else_branch,
+                availability: statement
+                    .availability
+                    .iter()
+                    .map(|attachment| {
+                        lower_availability_attachment_exec_resolved(attachment, scope)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
                 rollups: statement
                     .rollups
                     .iter()
@@ -1452,10 +1694,17 @@ fn lower_exec_stmt_resolved(
         }
         HirStatementKind::While { condition, body } => {
             let mut body_scope = scope.clone();
-            let body = lower_exec_stmt_block_resolved(body, &mut body_scope);
+            let body = lower_exec_stmt_block_resolved(body, &mut body_scope)?;
             ExecStmt::While {
                 condition: lower_exec_expr_resolved(condition, scope),
                 body,
+                availability: statement
+                    .availability
+                    .iter()
+                    .map(|attachment| {
+                        lower_availability_attachment_exec_resolved(attachment, scope)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
                 rollups: statement
                     .rollups
                     .iter()
@@ -1474,11 +1723,18 @@ fn lower_exec_stmt_resolved(
             if let Some(type_text) = infer_iterable_binding_type_text(scope, iterable) {
                 body_scope.value_scope.insert(binding.clone(), type_text);
             }
-            let body = lower_exec_stmt_block_resolved(body, &mut body_scope);
+            let body = lower_exec_stmt_block_resolved(body, &mut body_scope)?;
             ExecStmt::For {
                 binding: binding.clone(),
                 iterable: lower_exec_expr_resolved(iterable, scope),
                 body,
+                availability: statement
+                    .availability
+                    .iter()
+                    .map(|attachment| {
+                        lower_availability_attachment_exec_resolved(attachment, scope)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
                 rollups: statement
                     .rollups
                     .iter()
@@ -1506,7 +1762,7 @@ fn lower_exec_stmt_resolved(
             }
             lowered
         }
-    }
+    })
 }
 
 fn is_routine_symbol(symbol: &HirSymbol) -> bool {
@@ -1514,6 +1770,238 @@ fn is_routine_symbol(symbol: &HirSymbol) -> bool {
         symbol.kind,
         HirSymbolKind::Fn | HirSymbolKind::System | HirSymbolKind::Behavior | HirSymbolKind::Const
     )
+}
+
+fn lower_object_method_routines(module: &HirModuleSummary) -> Vec<IrRoutine> {
+    module
+        .symbols
+        .iter()
+        .enumerate()
+        .flat_map(|(symbol_index, symbol)| {
+            let HirSymbolBody::Object { methods, .. } = &symbol.body else {
+                return Vec::new();
+            };
+            methods
+                .iter()
+                .enumerate()
+                .filter(|(_, method)| is_routine_symbol(method))
+                .map(|(method_index, method)| {
+                    lower_routine(
+                        &module.module_id,
+                        routine_key_for_object_method(
+                            &module.module_id,
+                            symbol_index,
+                            method_index,
+                        ),
+                        method,
+                        None,
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn lower_object_method_routines_resolved(
+    workspace: &HirWorkspaceSummary,
+    package: &HirWorkspacePackage,
+    resolved_module: &HirResolvedModule,
+    module: &HirModuleSummary,
+) -> Result<Vec<IrRoutine>, String> {
+    module
+        .symbols
+        .iter()
+        .enumerate()
+        .flat_map(|(symbol_index, symbol)| {
+            let HirSymbolBody::Object { methods, .. } = &symbol.body else {
+                return Vec::new();
+            };
+            methods
+                .iter()
+                .enumerate()
+                .filter(|(_, method)| is_routine_symbol(method))
+                .map(move |(method_index, method)| {
+                    lower_routine_resolved(
+                        workspace,
+                        package,
+                        resolved_module,
+                        module,
+                        &module.module_id,
+                        routine_key_for_object_method(
+                            &module.module_id,
+                            symbol_index,
+                            method_index,
+                        ),
+                        method,
+                        None,
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn lower_owner_decl(module: &HirModuleSummary, symbol: &HirSymbol) -> Option<IrOwnerDecl> {
+    let HirSymbolBody::Owner { objects, exits } = &symbol.body else {
+        return None;
+    };
+    Some(IrOwnerDecl {
+        module_id: module.module_id.clone(),
+        owner_path: canonical_symbol_path(&module.module_id, &symbol.name),
+        owner_name: symbol.name.clone(),
+        objects: objects
+            .iter()
+            .map(|object| IrOwnerObject {
+                type_path: object.type_path.clone(),
+                local_name: object.local_name.clone(),
+                init_routine_key: None,
+                init_with_context_routine_key: None,
+                resume_routine_key: None,
+                resume_with_context_routine_key: None,
+            })
+            .collect(),
+        exits: exits
+            .iter()
+            .map(|owner_exit| IrOwnerExit {
+                name: owner_exit.name.clone(),
+                condition: lower_exec_expr(&owner_exit.condition),
+                holds: owner_exit.holds.clone(),
+            })
+            .collect(),
+    })
+}
+
+fn resolve_object_lifecycle_routine_keys(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    type_path: &[String],
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+) {
+    let Some(resolved) = lookup_symbol_path(workspace, resolved_module, type_path) else {
+        return (None, None, None, None);
+    };
+    let HirSymbolBody::Object { methods, .. } = &resolved.symbol.body else {
+        return (None, None, None, None);
+    };
+
+    let mut init_routine_key = None;
+    let mut init_with_context_routine_key = None;
+    let mut resume_routine_key = None;
+    let mut resume_with_context_routine_key = None;
+
+    for (method_index, method) in methods.iter().enumerate() {
+        let slot = match method.name.as_str() {
+            "init" => {
+                if method.params.len() == 1 {
+                    &mut init_routine_key
+                } else if method.params.len() == 2 {
+                    &mut init_with_context_routine_key
+                } else {
+                    continue;
+                }
+            }
+            "resume" => {
+                if method.params.len() == 1 {
+                    &mut resume_routine_key
+                } else if method.params.len() == 2 {
+                    &mut resume_with_context_routine_key
+                } else {
+                    continue;
+                }
+            }
+            _ => continue,
+        };
+        if method.is_async || !method.type_params.is_empty() {
+            continue;
+        }
+        let Some(receiver) = method.params.first() else {
+            continue;
+        };
+        if receiver.mode != Some(arcana_hir::HirParamMode::Edit) {
+            continue;
+        }
+        if let Some(context) = method.params.get(1)
+            && context.mode != Some(arcana_hir::HirParamMode::Read)
+        {
+            continue;
+        }
+        if slot.is_none() {
+            *slot = Some(routine_key_for_object_method(
+                resolved.module_id,
+                resolved.symbol_index,
+                method_index,
+            ));
+        }
+    }
+
+    (
+        init_routine_key,
+        init_with_context_routine_key,
+        resume_routine_key,
+        resume_with_context_routine_key,
+    )
+}
+
+fn lower_owner_decl_resolved(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    module: &HirModuleSummary,
+    symbol: &HirSymbol,
+) -> Result<Option<IrOwnerDecl>, String> {
+    let HirSymbolBody::Owner { objects, exits } = &symbol.body else {
+        return Ok(None);
+    };
+    let scope = ResolvedRenderScope::new(
+        workspace,
+        resolved_module,
+        symbol.where_clause.as_deref(),
+        &symbol.type_params,
+    );
+    Ok(Some(IrOwnerDecl {
+        module_id: module.module_id.clone(),
+        owner_path: canonical_symbol_path(&module.module_id, &symbol.name),
+        owner_name: symbol.name.clone(),
+        objects: objects
+            .iter()
+            .map(|object| {
+                let canonical = lookup_symbol_path(workspace, resolved_module, &object.type_path)
+                    .map(|resolved| {
+                        canonical_symbol_path(resolved.module_id, &resolved.symbol.name)
+                    })
+                    .unwrap_or_else(|| object.type_path.clone());
+                let (
+                    init_routine_key,
+                    init_with_context_routine_key,
+                    resume_routine_key,
+                    resume_with_context_routine_key,
+                ) = resolve_object_lifecycle_routine_keys(
+                    workspace,
+                    resolved_module,
+                    &object.type_path,
+                );
+                IrOwnerObject {
+                    type_path: canonical,
+                    local_name: object.local_name.clone(),
+                    init_routine_key,
+                    init_with_context_routine_key,
+                    resume_routine_key,
+                    resume_with_context_routine_key,
+                }
+            })
+            .collect(),
+        exits: exits
+            .iter()
+            .map(|owner_exit| IrOwnerExit {
+                name: owner_exit.name.clone(),
+                condition: lower_exec_expr_resolved(&owner_exit.condition, &scope),
+                holds: owner_exit.holds.clone(),
+            })
+            .collect(),
+    }))
 }
 
 fn lower_routine(
@@ -1540,6 +2028,11 @@ fn lower_routine(
                 .as_ref()
                 .map(|path| canonical_impl_trait_path(path))
         }),
+        availability: symbol
+            .availability
+            .iter()
+            .map(lower_availability_attachment_exec)
+            .collect(),
         foreword_rows: symbol.forewords.iter().map(render_foreword_row).collect(),
         rollups: symbol.rollups.iter().map(lower_rollup).collect(),
         statements: lower_exec_stmt_block(&symbol.statements),
@@ -1588,13 +2081,18 @@ fn lower_routine_resolved(
                 .as_ref()
                 .map(|path| canonical_impl_trait_path(path))
         }),
+        availability: symbol
+            .availability
+            .iter()
+            .map(|attachment| lower_availability_attachment_exec_resolved(attachment, &scope))
+            .collect::<Result<Vec<_>, _>>()?,
         foreword_rows: symbol.forewords.iter().map(render_foreword_row).collect(),
         rollups: symbol
             .rollups
             .iter()
             .map(|rollup| lower_rollup_resolved(workspace, resolved_module, rollup))
             .collect(),
-        statements: lower_exec_stmt_block_resolved(&symbol.statements, &mut scope),
+        statements: lower_exec_stmt_block_resolved(&symbol.statements, &mut scope)?,
     };
     scope.finish()?;
     Ok(routine)
@@ -1703,9 +2201,21 @@ fn lower_package(package: &HirPackageSummary) -> IrPackage {
                             })
                     },
                 ));
+                routines.extend(lower_object_method_routines(module));
                 routines
             })
             .collect::<Vec<_>>();
+    let owners = package
+        .modules
+        .iter()
+        .flat_map(|module| {
+            module
+                .symbols
+                .iter()
+                .filter_map(|symbol| lower_owner_decl(module, symbol))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
 
     let mut lowered = IrPackage {
         package_name: package.package_name.clone(),
@@ -1718,6 +2228,7 @@ fn lower_package(package: &HirPackageSummary) -> IrPackage {
         runtime_requirements: Vec::new(),
         entrypoints,
         routines,
+        owners,
     };
     lowered.runtime_requirements = derive_runtime_requirements(&lowered);
     lowered
@@ -1803,7 +2314,32 @@ pub fn lower_workspace_package_with_resolution(
                     })
                     .collect::<Result<Vec<_>, String>>()?,
             );
+            routines.extend(lower_object_method_routines_resolved(
+                workspace,
+                package,
+                resolved_module,
+                module,
+            )?);
             Ok(routines)
+        })
+        .collect::<Result<Vec<_>, String>>()?
+        .into_iter()
+        .flatten()
+        .collect();
+    lowered.owners = package
+        .summary
+        .modules
+        .iter()
+        .map(|module| {
+            let Some(resolved_module) = resolved_package.module(&module.module_id) else {
+                return Ok(Vec::new());
+            };
+            module
+                .symbols
+                .iter()
+                .map(|symbol| lower_owner_decl_resolved(workspace, resolved_module, module, symbol))
+                .collect::<Result<Vec<_>, String>>()
+                .map(|owners| owners.into_iter().flatten().collect::<Vec<_>>())
         })
         .collect::<Result<Vec<_>, String>>()?
         .into_iter()

@@ -45,6 +45,7 @@ pub(crate) fn symbol_matches_surface_use(
             matches!(
                 kind,
                 HirSymbolKind::Record
+                    | HirSymbolKind::Object
                     | HirSymbolKind::Enum
                     | HirSymbolKind::OpaqueType
                     | HirSymbolKind::Trait

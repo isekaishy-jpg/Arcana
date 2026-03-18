@@ -1,8 +1,12 @@
-use arcana_ir::{IrEntrypoint, IrModule, IrPackage, IrPackageModule, IrRoutine};
+use arcana_ir::{
+    IrEntrypoint, IrModule, IrOwnerDecl, IrOwnerExit, IrOwnerObject, IrPackage, IrPackageModule,
+    IrRoutine,
+};
 
 use crate::artifact::{
-    AOT_INTERNAL_FORMAT, AotArtifact, AotEntrypointArtifact, AotPackageArtifact,
-    AotPackageModuleArtifact, AotRoutineArtifact,
+    AOT_INTERNAL_FORMAT, AotArtifact, AotEntrypointArtifact, AotOwnerArtifact,
+    AotOwnerExitArtifact, AotOwnerObjectArtifact, AotPackageArtifact, AotPackageModuleArtifact,
+    AotRoutineArtifact,
 };
 
 pub fn compile_module(module: &IrModule) -> AotArtifact {
@@ -55,9 +59,39 @@ fn compile_routine(routine: &IrRoutine) -> AotRoutineArtifact {
         intrinsic_impl: routine.intrinsic_impl.clone(),
         impl_target_type: routine.impl_target_type.clone(),
         impl_trait_path: routine.impl_trait_path.clone(),
+        availability: routine.availability.clone(),
         foreword_rows: routine.foreword_rows.clone(),
         rollups: routine.rollups.clone(),
         statements: routine.statements.clone(),
+    }
+}
+
+fn compile_owner_object(object: &IrOwnerObject) -> AotOwnerObjectArtifact {
+    AotOwnerObjectArtifact {
+        type_path: object.type_path.clone(),
+        local_name: object.local_name.clone(),
+        init_routine_key: object.init_routine_key.clone(),
+        init_with_context_routine_key: object.init_with_context_routine_key.clone(),
+        resume_routine_key: object.resume_routine_key.clone(),
+        resume_with_context_routine_key: object.resume_with_context_routine_key.clone(),
+    }
+}
+
+fn compile_owner_exit(owner_exit: &IrOwnerExit) -> AotOwnerExitArtifact {
+    AotOwnerExitArtifact {
+        name: owner_exit.name.clone(),
+        condition: owner_exit.condition.clone(),
+        holds: owner_exit.holds.clone(),
+    }
+}
+
+fn compile_owner(owner: &IrOwnerDecl) -> AotOwnerArtifact {
+    AotOwnerArtifact {
+        module_id: owner.module_id.clone(),
+        owner_path: owner.owner_path.clone(),
+        owner_name: owner.owner_name.clone(),
+        objects: owner.objects.iter().map(compile_owner_object).collect(),
+        exits: owner.exits.iter().map(compile_owner_exit).collect(),
     }
 }
 
@@ -74,6 +108,7 @@ pub fn compile_package(package: &IrPackage) -> AotPackageArtifact {
         runtime_requirements: package.runtime_requirements.clone(),
         entrypoints: package.entrypoints.iter().map(compile_entrypoint).collect(),
         routines: package.routines.iter().map(compile_routine).collect(),
+        owners: package.owners.iter().map(compile_owner).collect(),
         modules: package
             .modules
             .iter()

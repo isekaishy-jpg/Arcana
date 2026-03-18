@@ -7,9 +7,9 @@ mod surface;
 
 use arcana_hir::{
     HirAssignTarget, HirBinaryOp, HirChainStep, HirExpr, HirHeaderAttachment, HirImplDecl,
-    HirLocalTypeLookup, HirMatchPattern, HirModule, HirModuleSummary, HirResolvedModule,
-    HirResolvedTarget, HirResolvedWorkspace, HirStatement, HirStatementKind, HirSymbol,
-    HirSymbolBody, HirSymbolKind, HirUnaryOp, HirWorkspacePackage, HirWorkspaceSummary,
+    HirLocalTypeLookup, HirMatchPattern, HirModule, HirModuleSummary, HirPhraseArg,
+    HirResolvedModule, HirResolvedTarget, HirResolvedWorkspace, HirStatement, HirStatementKind,
+    HirSymbol, HirSymbolBody, HirSymbolKind, HirUnaryOp, HirWorkspacePackage, HirWorkspaceSummary,
     current_workspace_package_for_module, impl_target_is_public_from_package,
     infer_receiver_expr_type_text, lookup_method_candidates_for_type, lower_module_text,
     match_name_resolves_to_zero_payload_variant, resolve_workspace,
@@ -155,6 +155,37 @@ struct ValueScope {
     type_texts: BTreeMap<String, String>,
     binding_ids: BTreeMap<String, u64>,
     next_binding_id: u64,
+    available_owners: BTreeMap<String, AvailableOwnerBinding>,
+    attached_object_names: BTreeSet<String>,
+    owner_member_types: BTreeMap<String, BTreeMap<String, String>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AvailableOwnerObjectBinding {
+    local_name: String,
+    type_text: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AvailableOwnerBinding {
+    local_name: String,
+    owner_path: Vec<String>,
+    objects: Vec<AvailableOwnerObjectBinding>,
+    activation_context_type: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum LifecycleHookSlot {
+    Init,
+    InitWithContext,
+    Resume,
+    ResumeWithContext,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ObjectLifecycleSurface {
+    init_context_type: Option<String>,
+    resume_context_type: Option<String>,
 }
 
 impl ValueScope {
@@ -229,6 +260,66 @@ impl ValueScope {
 
     fn binding_id_of(&self, name: &str) -> Option<u64> {
         self.binding_ids.get(name).copied()
+    }
+
+    fn attach_owner(&mut self, owner: AvailableOwnerBinding) {
+        self.available_owners
+            .insert(owner.local_name.clone(), owner);
+    }
+
+    fn attach_object_name(&mut self, name: impl Into<String>) {
+        self.attached_object_names.insert(name.into());
+    }
+
+    fn owner_member_type_text(&self, owner_name: &str, member: &str) -> Option<&str> {
+        self.owner_member_types
+            .get(owner_name)
+            .and_then(|members| members.get(member))
+            .map(String::as_str)
+    }
+
+    fn activate_owner(
+        &mut self,
+        owner: &AvailableOwnerBinding,
+        explicit_binding: Option<&str>,
+        explicit_binding_mutable: bool,
+    ) -> Vec<String> {
+        let mut inserted = Vec::new();
+        let owner_type_text = format!("Owner<{}>", owner.owner_path.join("."));
+        let mut owner_members = BTreeMap::new();
+        for object in &owner.objects {
+            owner_members.insert(object.local_name.clone(), object.type_text.clone());
+            if self.attached_object_names.contains(&object.local_name) {
+                self.insert_typed(
+                    &object.local_name,
+                    true,
+                    OwnershipClass::Move,
+                    Some(object.type_text.clone()),
+                );
+                inserted.push(object.local_name.clone());
+            }
+        }
+        self.insert_typed(
+            &owner.local_name,
+            false,
+            OwnershipClass::Copy,
+            Some(owner_type_text.clone()),
+        );
+        self.owner_member_types
+            .insert(owner.local_name.clone(), owner_members.clone());
+        inserted.push(owner.local_name.clone());
+        if let Some(binding) = explicit_binding {
+            self.insert_typed(
+                binding,
+                explicit_binding_mutable,
+                OwnershipClass::Copy,
+                Some(owner_type_text),
+            );
+            self.owner_member_types
+                .insert(binding.to_string(), owner_members);
+            inserted.push(binding.to_string());
+        }
+        inserted
     }
 }
 
@@ -546,7 +637,7 @@ fn infer_type_ownership(
     };
     match symbol_ref.symbol.kind {
         HirSymbolKind::OpaqueType => ownership_of_opaque_symbol(symbol_ref.symbol),
-        HirSymbolKind::Record | HirSymbolKind::Enum => OwnershipClass::Move,
+        HirSymbolKind::Record | HirSymbolKind::Object | HirSymbolKind::Enum => OwnershipClass::Move,
         _ => OwnershipClass::Unknown,
     }
 }
@@ -558,6 +649,15 @@ fn infer_expr_type_text(
     scope: &ValueScope,
     expr: &HirExpr,
 ) -> Option<String> {
+    if let HirExpr::MemberAccess { expr, member } = expr {
+        if let HirExpr::Path { segments } = expr.as_ref() {
+            if segments.len() == 1 && scope.contains(&segments[0]) {
+                if let Some(type_text) = scope.owner_member_type_text(&segments[0], member) {
+                    return Some(type_text.to_string());
+                }
+            }
+        }
+    }
     infer_receiver_expr_type_text(workspace, resolved_module, scope, expr)
 }
 
@@ -670,6 +770,105 @@ fn resolve_qualified_phrase_target_symbol<'a>(
     }
 
     None
+}
+
+struct ResolvedOwnerActivation<'a> {
+    owner: AvailableOwnerBinding,
+    context: Option<&'a HirExpr>,
+    invalid: Option<String>,
+}
+
+fn resolve_owner_activation_expr<'a>(
+    workspace: &HirWorkspaceSummary,
+    resolved_workspace: &HirResolvedWorkspace,
+    resolved_module: &HirResolvedModule,
+    expr: &'a HirExpr,
+) -> Option<ResolvedOwnerActivation<'a>> {
+    let HirExpr::QualifiedPhrase {
+        subject,
+        args,
+        qualifier,
+        ..
+    } = expr
+    else {
+        return None;
+    };
+    if qualifier != "call" {
+        return None;
+    }
+    let path = flatten_callable_expr_path(subject)?;
+    let resolved = lookup_symbol_path(workspace, resolved_module, &path)?;
+    if resolved.symbol.kind != HirSymbolKind::Owner {
+        return None;
+    }
+    let owner =
+        resolve_available_owner_binding(workspace, resolved_workspace, resolved_module, &path)?;
+    let invalid = if args
+        .iter()
+        .any(|arg| matches!(arg, HirPhraseArg::Named { .. }))
+    {
+        Some("owner activation does not support named arguments".to_string())
+    } else if args.len() > 1 {
+        Some("owner activation accepts at most one context argument".to_string())
+    } else {
+        None
+    };
+    let context = args.first().and_then(|arg| match arg {
+        HirPhraseArg::Positional(expr) => Some(expr),
+        HirPhraseArg::Named { .. } => None,
+    });
+    Some(ResolvedOwnerActivation {
+        owner,
+        context,
+        invalid,
+    })
+}
+
+fn validate_owner_activation_context(
+    workspace: &HirWorkspaceSummary,
+    _resolved_workspace: &HirResolvedWorkspace,
+    resolved_module: &HirResolvedModule,
+    module_path: &Path,
+    type_scope: &TypeScope,
+    scope: &ValueScope,
+    owner_activation: &ResolvedOwnerActivation<'_>,
+    span: Span,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let Some(context) = owner_activation.context else {
+        return;
+    };
+    let Some(expected_context_type) = owner_activation.owner.activation_context_type.as_deref()
+    else {
+        diagnostics.push(Diagnostic {
+            path: module_path.to_path_buf(),
+            line: span.line,
+            column: span.column,
+            message: format!(
+                "owner activation `{}` does not use an activation context",
+                owner_activation.owner.local_name
+            ),
+        });
+        return;
+    };
+    let Some(actual_context_type) =
+        infer_expr_type_text(workspace, resolved_module, type_scope, scope, context)
+    else {
+        return;
+    };
+    let actual_context_type =
+        canonicalize_surface_text(workspace, resolved_module, type_scope, &actual_context_type);
+    if actual_context_type != expected_context_type {
+        diagnostics.push(Diagnostic {
+            path: module_path.to_path_buf(),
+            line: span.line,
+            column: span.column,
+            message: format!(
+                "owner activation `{}` expects context `{}`, found `{}`",
+                owner_activation.owner.local_name, expected_context_type, actual_context_type
+            ),
+        });
+    }
 }
 
 fn collect_qualified_phrase_param_exprs<'a>(
@@ -2416,6 +2615,7 @@ fn validate_module_semantics(
         }
         validate_symbol_surface_types(
             workspace,
+            resolved_workspace,
             resolved_module,
             &module_path,
             symbol,
@@ -2436,6 +2636,7 @@ fn validate_module_semantics(
         );
         validate_symbol_value_semantics(
             workspace,
+            resolved_workspace,
             resolved_module,
             &module_path,
             symbol,
@@ -2455,6 +2656,7 @@ fn validate_module_semantics(
         );
         validate_impl_value_semantics(
             workspace,
+            resolved_workspace,
             resolved_module,
             &module_path,
             impl_decl,
@@ -2465,6 +2667,7 @@ fn validate_module_semantics(
 
 fn validate_symbol_surface_types(
     workspace: &HirWorkspaceSummary,
+    resolved_workspace: &HirResolvedWorkspace,
     resolved_module: &HirResolvedModule,
     module_path: &Path,
     symbol: &HirSymbol,
@@ -2549,6 +2752,40 @@ fn validate_symbol_surface_types(
                 );
             }
         }
+        HirSymbolBody::Object { fields, methods } => {
+            let object_scope = scope.with_self();
+            for field in fields {
+                validate_type_surface_text(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    &object_scope,
+                    &field.ty,
+                    field.span,
+                    &format!("object field type `{}`", field.name),
+                    SurfaceSymbolUse::TypeLike,
+                    diagnostics,
+                );
+            }
+            for method in methods {
+                validate_symbol_surface_types(
+                    workspace,
+                    resolved_workspace,
+                    resolved_module,
+                    module_path,
+                    method,
+                    &object_scope,
+                    diagnostics,
+                );
+            }
+            let _ = collect_object_lifecycle_surface(
+                workspace,
+                resolved_module,
+                module_path,
+                symbol,
+                diagnostics,
+            );
+        }
         HirSymbolBody::Enum { variants } => {
             for variant in variants {
                 if let Some(payload) = &variant.payload {
@@ -2563,6 +2800,122 @@ fn validate_symbol_surface_types(
                         SurfaceSymbolUse::TypeLike,
                         diagnostics,
                     );
+                }
+            }
+        }
+        HirSymbolBody::Owner { objects, exits } => {
+            if exits.is_empty() {
+                diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: symbol.span.line,
+                    column: symbol.span.column,
+                    message: format!(
+                        "owner `{}` must declare at least one scope-exit",
+                        symbol.name
+                    ),
+                });
+            }
+            let mut seen_owned_names = BTreeSet::new();
+            for object in objects {
+                if !seen_owned_names.insert(object.local_name.clone()) {
+                    diagnostics.push(Diagnostic {
+                        path: module_path.to_path_buf(),
+                        line: object.span.line,
+                        column: object.span.column,
+                        message: format!(
+                            "owner object `{}` is declared more than once",
+                            object.local_name
+                        ),
+                    });
+                }
+                validate_type_surface_text(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    &scope,
+                    &object.type_path.join("."),
+                    object.span,
+                    &format!("owner object type `{}`", object.local_name),
+                    SurfaceSymbolUse::TypeLike,
+                    diagnostics,
+                );
+                if let Some(resolved_object) =
+                    lookup_symbol_path(workspace, resolved_module, &object.type_path)
+                {
+                    let object_resolved_module = resolved_workspace
+                        .package(resolved_object.package_name)
+                        .and_then(|package| package.module(resolved_object.module_id))
+                        .unwrap_or(resolved_module);
+                    let object_module_path = workspace
+                        .package(resolved_object.package_name)
+                        .and_then(|package| package.module_path(resolved_object.module_id))
+                        .cloned()
+                        .unwrap_or_else(|| module_path.to_path_buf());
+                    if resolved_object.symbol.kind != HirSymbolKind::Object {
+                        diagnostics.push(Diagnostic {
+                            path: module_path.to_path_buf(),
+                            line: object.span.line,
+                            column: object.span.column,
+                            message: format!(
+                                "owner object `{}` must resolve to an `obj`, found `{}`",
+                                object.local_name,
+                                resolved_object.symbol.kind.as_str()
+                            ),
+                        });
+                    } else {
+                        let _ = collect_object_lifecycle_surface(
+                            workspace,
+                            object_resolved_module,
+                            &object_module_path,
+                            resolved_object.symbol,
+                            diagnostics,
+                        );
+                    }
+                }
+            }
+            let owner_context_types = collect_owner_activation_context_types(
+                workspace,
+                resolved_workspace,
+                resolved_module,
+                objects,
+            );
+            if owner_context_types.len() > 1 {
+                diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: symbol.span.line,
+                    column: symbol.span.column,
+                    message: format!(
+                        "owner `{}` uses incompatible lifecycle context types across owned objects: {}",
+                        symbol.name,
+                        owner_context_types.into_iter().collect::<Vec<_>>().join(", ")
+                    ),
+                });
+            }
+            let mut seen_exit_names = BTreeSet::new();
+            for owner_exit in exits {
+                if !seen_exit_names.insert(owner_exit.name.clone()) {
+                    diagnostics.push(Diagnostic {
+                        path: module_path.to_path_buf(),
+                        line: owner_exit.span.line,
+                        column: owner_exit.span.column,
+                        message: format!(
+                            "owner exit `{}` is declared more than once",
+                            owner_exit.name
+                        ),
+                    });
+                }
+                for hold in &owner_exit.holds {
+                    if !objects.iter().any(|object| object.local_name == *hold) {
+                        diagnostics.push(Diagnostic {
+                            path: module_path.to_path_buf(),
+                            line: owner_exit.span.line,
+                            column: owner_exit.span.column,
+                            message: format!(
+                                "owner exit `{}` holds unknown object `{hold}`",
+                                owner_exit.name
+                            ),
+                        });
+                    }
                 }
             }
         }
@@ -2591,6 +2944,7 @@ fn validate_symbol_surface_types(
             for method in methods {
                 validate_symbol_surface_types(
                     workspace,
+                    resolved_workspace,
                     resolved_module,
                     module_path,
                     method,
@@ -2681,6 +3035,7 @@ fn validate_impl_surface_types(
     for method in &impl_decl.methods {
         validate_symbol_surface_types(
             workspace,
+            resolved_workspace,
             resolved_module,
             module_path,
             method,
@@ -2875,18 +3230,20 @@ fn boundary_symbol_is_safe(
         .and_then(|package| package.module(symbol_ref.module_id))
         .unwrap_or(resolved_module);
     match &symbol_ref.symbol.body {
-        HirSymbolBody::Record { fields } => fields.iter().all(|field| {
-            boundary_type_is_safe(
-                workspace,
-                resolved_workspace,
-                owner_module,
-                &nested_scope,
-                &field.ty,
-                self_type,
-                assoc_bindings,
-                visited_symbols,
-            )
-        }),
+        HirSymbolBody::Record { fields } | HirSymbolBody::Object { fields, .. } => {
+            fields.iter().all(|field| {
+                boundary_type_is_safe(
+                    workspace,
+                    resolved_workspace,
+                    owner_module,
+                    &nested_scope,
+                    &field.ty,
+                    self_type,
+                    assoc_bindings,
+                    visited_symbols,
+                )
+            })
+        }
         HirSymbolBody::Enum { variants } => variants.iter().all(|variant| {
             variant.payload.as_ref().is_none_or(|payload| {
                 boundary_type_is_safe(
@@ -2929,8 +3286,338 @@ fn parse_symbol_or_string_literal(value: &str) -> Option<String> {
         .map(|path| path[0].clone())
 }
 
+fn canonical_symbol_path(module_id: &str, symbol_name: &str) -> Vec<String> {
+    let mut path = module_id.split('.').map(str::to_string).collect::<Vec<_>>();
+    path.push(symbol_name.to_string());
+    path
+}
+
+fn render_object_declared_type_text(symbol: &HirSymbol) -> String {
+    if symbol.type_params.is_empty() {
+        symbol.name.clone()
+    } else {
+        format!("{}[{}]", symbol.name, symbol.type_params.join(", "))
+    }
+}
+
+fn classify_object_lifecycle_method(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    object_symbol: &HirSymbol,
+    object_scope: &TypeScope,
+    method: &HirSymbol,
+) -> Result<Option<(LifecycleHookSlot, Option<String>)>, String> {
+    let slot = match method.name.as_str() {
+        "init" => {
+            if method.params.len() == 1 {
+                LifecycleHookSlot::Init
+            } else if method.params.len() == 2 {
+                LifecycleHookSlot::InitWithContext
+            } else {
+                return Err(
+                    "object lifecycle hook `init` must take `edit self` with optional `read ctx`"
+                        .to_string(),
+                );
+            }
+        }
+        "resume" => {
+            if method.params.len() == 1 {
+                LifecycleHookSlot::Resume
+            } else if method.params.len() == 2 {
+                LifecycleHookSlot::ResumeWithContext
+            } else {
+                return Err(
+                    "object lifecycle hook `resume` must take `edit self` with optional `read ctx`"
+                        .to_string(),
+                );
+            }
+        }
+        _ => return Ok(None),
+    };
+
+    if method.is_async {
+        return Err(format!(
+            "object lifecycle hook `{}` must not be async",
+            method.name
+        ));
+    }
+    if !method.type_params.is_empty() {
+        return Err(format!(
+            "object lifecycle hook `{}` must not declare type parameters",
+            method.name
+        ));
+    }
+    if let Some(return_type) = &method.return_type {
+        let return_type =
+            canonicalize_surface_text(workspace, resolved_module, object_scope, return_type);
+        if return_type != "Unit" {
+            return Err(format!(
+                "object lifecycle hook `{}` must return Unit",
+                method.name
+            ));
+        }
+    }
+    let Some(receiver) = method.params.first() else {
+        return Err(format!(
+            "object lifecycle hook `{}` must declare `edit self`",
+            method.name
+        ));
+    };
+    if receiver.name != "self" {
+        return Err(format!(
+            "object lifecycle hook `{}` must use `self` as its first parameter",
+            method.name
+        ));
+    }
+    if receiver.mode != Some(arcana_hir::HirParamMode::Edit) {
+        return Err(format!(
+            "object lifecycle hook `{}` must take `edit self`",
+            method.name
+        ));
+    }
+    let expected_self = canonicalize_surface_text(
+        workspace,
+        resolved_module,
+        object_scope,
+        &render_object_declared_type_text(object_symbol),
+    );
+    let actual_self =
+        canonicalize_surface_text(workspace, resolved_module, object_scope, &receiver.ty);
+    if actual_self != "Self" && actual_self != expected_self {
+        return Err(format!(
+            "object lifecycle hook `{}` must use receiver type `Self` or `{}`",
+            method.name, expected_self
+        ));
+    }
+
+    let context_type = match method.params.get(1) {
+        Some(context) => {
+            if context.mode != Some(arcana_hir::HirParamMode::Read) {
+                return Err(format!(
+                    "object lifecycle hook `{}` context parameter must be `read`",
+                    method.name
+                ));
+            }
+            Some(canonicalize_surface_text(
+                workspace,
+                resolved_module,
+                object_scope,
+                &context.ty,
+            ))
+        }
+        None => None,
+    };
+
+    Ok(Some((slot, context_type)))
+}
+
+fn collect_object_lifecycle_surface(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    module_path: &Path,
+    symbol: &HirSymbol,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> ObjectLifecycleSurface {
+    let object_scope = TypeScope::default()
+        .with_params(&symbol.type_params)
+        .with_self();
+    let HirSymbolBody::Object { methods, .. } = &symbol.body else {
+        return ObjectLifecycleSurface::default();
+    };
+
+    let mut surface = ObjectLifecycleSurface::default();
+    let mut seen_slots = BTreeSet::new();
+    for method in methods {
+        match classify_object_lifecycle_method(
+            workspace,
+            resolved_module,
+            symbol,
+            &object_scope,
+            method,
+        ) {
+            Ok(Some((slot, context_type))) => {
+                if !seen_slots.insert(slot) {
+                    diagnostics.push(Diagnostic {
+                        path: module_path.to_path_buf(),
+                        line: method.span.line,
+                        column: method.span.column,
+                        message: format!(
+                            "object lifecycle hook `{}` is declared more than once for the same activation shape",
+                            method.name
+                        ),
+                    });
+                    continue;
+                }
+                match slot {
+                    LifecycleHookSlot::InitWithContext => {
+                        surface.init_context_type = context_type;
+                    }
+                    LifecycleHookSlot::ResumeWithContext => {
+                        surface.resume_context_type = context_type;
+                    }
+                    LifecycleHookSlot::Init | LifecycleHookSlot::Resume => {}
+                }
+            }
+            Ok(None) => {}
+            Err(message) => diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: method.span.line,
+                column: method.span.column,
+                message,
+            }),
+        }
+    }
+    surface
+}
+
+fn collect_owner_activation_context_types(
+    workspace: &HirWorkspaceSummary,
+    resolved_workspace: &HirResolvedWorkspace,
+    resolved_module: &HirResolvedModule,
+    objects: &[arcana_hir::HirOwnerObject],
+) -> BTreeSet<String> {
+    let mut context_types = BTreeSet::new();
+    for object in objects {
+        let Some(resolved_object) =
+            lookup_symbol_path(workspace, resolved_module, &object.type_path)
+        else {
+            continue;
+        };
+        let object_resolved_module = resolved_workspace
+            .package(resolved_object.package_name)
+            .and_then(|package| package.module(resolved_object.module_id))
+            .unwrap_or(resolved_module);
+        let HirSymbolBody::Object { methods, .. } = &resolved_object.symbol.body else {
+            continue;
+        };
+        let object_scope = TypeScope::default()
+            .with_params(&resolved_object.symbol.type_params)
+            .with_self();
+        for method in methods {
+            let Ok(classified) = classify_object_lifecycle_method(
+                workspace,
+                object_resolved_module,
+                resolved_object.symbol,
+                &object_scope,
+                method,
+            ) else {
+                continue;
+            };
+            if let Some((_, Some(context_type))) = classified {
+                context_types.insert(context_type);
+            }
+        }
+    }
+    context_types
+}
+
+fn resolve_owner_activation_context_type(
+    workspace: &HirWorkspaceSummary,
+    resolved_workspace: &HirResolvedWorkspace,
+    resolved_module: &HirResolvedModule,
+    objects: &[arcana_hir::HirOwnerObject],
+) -> Option<String> {
+    let context_types = collect_owner_activation_context_types(
+        workspace,
+        resolved_workspace,
+        resolved_module,
+        objects,
+    );
+    if context_types.len() == 1 {
+        context_types.into_iter().next()
+    } else {
+        None
+    }
+}
+
+fn resolve_available_owner_binding(
+    workspace: &HirWorkspaceSummary,
+    resolved_workspace: &HirResolvedWorkspace,
+    resolved_module: &HirResolvedModule,
+    path: &[String],
+) -> Option<AvailableOwnerBinding> {
+    let resolved = lookup_symbol_path(workspace, resolved_module, path)?;
+    let HirSymbolBody::Owner { objects, .. } = &resolved.symbol.body else {
+        return None;
+    };
+    Some(AvailableOwnerBinding {
+        local_name: resolved.symbol.name.clone(),
+        owner_path: canonical_symbol_path(resolved.module_id, &resolved.symbol.name),
+        objects: objects
+            .iter()
+            .map(|object| AvailableOwnerObjectBinding {
+                local_name: object.local_name.clone(),
+                type_text: canonicalize_surface_text(
+                    workspace,
+                    resolved_module,
+                    &TypeScope::default(),
+                    &object.type_path.join("."),
+                ),
+            })
+            .collect(),
+        activation_context_type: resolve_owner_activation_context_type(
+            workspace,
+            resolved_workspace,
+            resolved_module,
+            objects,
+        ),
+    })
+}
+
+fn apply_availability_attachments_to_scope(
+    workspace: &HirWorkspaceSummary,
+    resolved_workspace: &HirResolvedWorkspace,
+    resolved_module: &HirResolvedModule,
+    module_path: &Path,
+    attachments: &[arcana_hir::HirAvailabilityAttachment],
+    scope: &mut ValueScope,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    for attachment in attachments {
+        let Some(resolved) = lookup_symbol_path(workspace, resolved_module, &attachment.path)
+        else {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: attachment.span.line,
+                column: attachment.span.column,
+                message: format!(
+                    "unresolved availability attachment `{}`",
+                    attachment.path.join(".")
+                ),
+            });
+            continue;
+        };
+        match resolved.symbol.kind {
+            HirSymbolKind::Owner => {
+                if let Some(owner) = resolve_available_owner_binding(
+                    workspace,
+                    resolved_workspace,
+                    resolved_module,
+                    &attachment.path,
+                ) {
+                    scope.attach_owner(owner);
+                }
+            }
+            HirSymbolKind::Object => {
+                scope.attach_object_name(resolved.symbol.name.clone());
+            }
+            other => diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: attachment.span.line,
+                column: attachment.span.column,
+                message: format!(
+                    "availability attachment `{}` must resolve to an owner or object, found `{}`",
+                    attachment.path.join("."),
+                    other.as_str()
+                ),
+            }),
+        }
+    }
+}
+
 fn validate_symbol_value_semantics(
     workspace: &HirWorkspaceSummary,
+    resolved_workspace: &HirResolvedWorkspace,
     resolved_module: &HirResolvedModule,
     module_path: &Path,
     symbol: &HirSymbol,
@@ -2940,6 +3627,15 @@ fn validate_symbol_value_semantics(
 ) {
     let type_scope = inherited_type_scope.with_params(&symbol.type_params);
     let mut scope = inherited_scope.with_symbol_params(&symbol.params);
+    apply_availability_attachments_to_scope(
+        workspace,
+        resolved_workspace,
+        resolved_module,
+        module_path,
+        &symbol.availability,
+        &mut scope,
+        diagnostics,
+    );
     let symbol_cleanup_subjects = collect_cleanup_subject_names(&symbol.rollups);
     for param in &symbol.params {
         let ownership = infer_type_ownership(workspace, resolved_module, &type_scope, &param.ty);
@@ -2963,6 +3659,7 @@ fn validate_symbol_value_semantics(
     );
     validate_statement_block_semantics(
         workspace,
+        resolved_workspace,
         resolved_module,
         module_path,
         &symbol.statements,
@@ -2972,6 +3669,60 @@ fn validate_symbol_value_semantics(
         &symbol_cleanup_subjects,
         diagnostics,
     );
+
+    if let HirSymbolBody::Owner { objects, exits } = &symbol.body {
+        let owner_path = canonical_symbol_path(&resolved_module.module_id, &symbol.name);
+        let mut owner_scope = scope.clone();
+        owner_scope.insert_typed(
+            &symbol.name,
+            false,
+            OwnershipClass::Copy,
+            Some(format!("Owner<{}>", owner_path.join("."))),
+        );
+        let available_owner = AvailableOwnerBinding {
+            local_name: symbol.name.clone(),
+            owner_path,
+            objects: objects
+                .iter()
+                .map(|object| AvailableOwnerObjectBinding {
+                    local_name: object.local_name.clone(),
+                    type_text: canonicalize_surface_text(
+                        workspace,
+                        resolved_module,
+                        &TypeScope::default(),
+                        &object.type_path.join("."),
+                    ),
+                })
+                .collect(),
+            activation_context_type: resolve_owner_activation_context_type(
+                workspace,
+                resolved_workspace,
+                resolved_module,
+                objects,
+            ),
+        };
+        let _ = owner_scope.activate_owner(&available_owner, None, false);
+        for owner_exit in exits {
+            validate_expr_semantics(
+                workspace,
+                resolved_module,
+                module_path,
+                &type_scope,
+                &owner_scope,
+                &owner_exit.condition,
+                owner_exit.span,
+                diagnostics,
+            );
+            validate_expected_expr_type(
+                module_path,
+                &owner_exit.condition,
+                owner_exit.span,
+                diagnostics,
+                ExprTypeClass::Bool,
+                "owner exit condition",
+            );
+        }
+    }
 
     if let HirSymbolBody::Trait {
         assoc_types,
@@ -2984,6 +3735,7 @@ fn validate_symbol_value_semantics(
         for method in methods {
             validate_symbol_value_semantics(
                 workspace,
+                resolved_workspace,
                 resolved_module,
                 module_path,
                 method,
@@ -2993,10 +3745,26 @@ fn validate_symbol_value_semantics(
             );
         }
     }
+    if let HirSymbolBody::Object { methods, .. } = &symbol.body {
+        let object_scope = type_scope.with_self();
+        for method in methods {
+            validate_symbol_value_semantics(
+                workspace,
+                resolved_workspace,
+                resolved_module,
+                module_path,
+                method,
+                &object_scope,
+                &ValueScope::default(),
+                diagnostics,
+            );
+        }
+    }
 }
 
 fn validate_impl_value_semantics(
     workspace: &HirWorkspaceSummary,
+    resolved_workspace: &HirResolvedWorkspace,
     resolved_module: &HirResolvedModule,
     module_path: &Path,
     impl_decl: &HirImplDecl,
@@ -3014,6 +3782,7 @@ fn validate_impl_value_semantics(
     for method in &impl_decl.methods {
         validate_symbol_value_semantics(
             workspace,
+            resolved_workspace,
             resolved_module,
             module_path,
             method,
@@ -3112,6 +3881,7 @@ fn activate_current_cleanup_binding(
 
 fn validate_statement_block_semantics(
     workspace: &HirWorkspaceSummary,
+    resolved_workspace: &HirResolvedWorkspace,
     resolved_module: &HirResolvedModule,
     module_path: &Path,
     statements: &[HirStatement],
@@ -3135,6 +3905,75 @@ fn validate_statement_block_semantics(
                 name,
                 value,
             } => {
+                if let Some(owner_activation) = resolve_owner_activation_expr(
+                    workspace,
+                    resolved_workspace,
+                    resolved_module,
+                    value,
+                ) {
+                    if let Some(ref message) = owner_activation.invalid {
+                        diagnostics.push(Diagnostic {
+                            path: module_path.to_path_buf(),
+                            line: statement.span.line,
+                            column: statement.span.column,
+                            message: message.clone(),
+                        });
+                    }
+                    if let Some(context) = owner_activation.context {
+                        validate_expr_semantics(
+                            workspace,
+                            resolved_module,
+                            module_path,
+                            type_scope,
+                            scope,
+                            context,
+                            statement.span,
+                            diagnostics,
+                        );
+                        validate_expr_borrow_flow(
+                            workspace,
+                            resolved_module,
+                            type_scope,
+                            module_path,
+                            scope,
+                            context,
+                            statement.span,
+                            borrow_state,
+                            diagnostics,
+                        );
+                        note_expr_moves(
+                            workspace,
+                            resolved_module,
+                            type_scope,
+                            scope,
+                            context,
+                            borrow_state,
+                        );
+                        note_escaping_expr_borrows(borrow_state, context, scope);
+                    }
+                    validate_owner_activation_context(
+                        workspace,
+                        resolved_workspace,
+                        resolved_module,
+                        module_path,
+                        type_scope,
+                        scope,
+                        &owner_activation,
+                        statement.span,
+                        diagnostics,
+                    );
+                    let inserted =
+                        scope.activate_owner(&owner_activation.owner, Some(name), *mutable);
+                    for inserted_name in inserted {
+                        activate_current_cleanup_binding(
+                            borrow_state,
+                            scope,
+                            current_block_cleanup_subjects,
+                            &inserted_name,
+                        );
+                    }
+                    continue;
+                }
                 validate_expr_semantics(
                     workspace,
                     resolved_module,
@@ -3254,9 +4093,19 @@ fn validate_statement_block_semantics(
                     "if condition",
                 );
                 let mut then_scope = scope.clone();
+                apply_availability_attachments_to_scope(
+                    workspace,
+                    resolved_workspace,
+                    resolved_module,
+                    module_path,
+                    &statement.availability,
+                    &mut then_scope,
+                    diagnostics,
+                );
                 let mut then_borrows = borrow_state.clone();
                 validate_statement_block_semantics(
                     workspace,
+                    resolved_workspace,
                     resolved_module,
                     module_path,
                     then_branch,
@@ -3269,9 +4118,19 @@ fn validate_statement_block_semantics(
                 borrow_state.merge_moves_from(&then_borrows);
                 if let Some(else_branch) = else_branch {
                     let mut else_scope = scope.clone();
+                    apply_availability_attachments_to_scope(
+                        workspace,
+                        resolved_workspace,
+                        resolved_module,
+                        module_path,
+                        &statement.availability,
+                        &mut else_scope,
+                        diagnostics,
+                    );
                     let mut else_borrows = borrow_state.clone();
                     validate_statement_block_semantics(
                         workspace,
+                        resolved_workspace,
                         resolved_module,
                         module_path,
                         else_branch,
@@ -3324,9 +4183,19 @@ fn validate_statement_block_semantics(
                     "while condition",
                 );
                 let mut body_scope = scope.clone();
+                apply_availability_attachments_to_scope(
+                    workspace,
+                    resolved_workspace,
+                    resolved_module,
+                    module_path,
+                    &statement.availability,
+                    &mut body_scope,
+                    diagnostics,
+                );
                 let mut body_borrows = borrow_state.clone();
                 validate_statement_block_semantics(
                     workspace,
+                    resolved_workspace,
                     resolved_module,
                     module_path,
                     body,
@@ -3374,6 +4243,15 @@ fn validate_statement_block_semantics(
                 );
                 let nested_cleanup_subjects = collect_cleanup_subject_names(&statement.rollups);
                 let mut body_scope = scope.with_local(binding, false);
+                apply_availability_attachments_to_scope(
+                    workspace,
+                    resolved_workspace,
+                    resolved_module,
+                    module_path,
+                    &statement.availability,
+                    &mut body_scope,
+                    diagnostics,
+                );
                 let mut body_borrows = borrow_state.clone();
                 activate_current_cleanup_binding(
                     &mut body_borrows,
@@ -3383,6 +4261,7 @@ fn validate_statement_block_semantics(
                 );
                 validate_statement_block_semantics(
                     workspace,
+                    resolved_workspace,
                     resolved_module,
                     module_path,
                     body,
@@ -3395,6 +4274,76 @@ fn validate_statement_block_semantics(
                 borrow_state.merge_moves_from(&body_borrows);
             }
             HirStatementKind::Defer { expr } | HirStatementKind::Expr { expr } => {
+                if let HirStatementKind::Expr { .. } = &statement.kind {
+                    if let Some(owner_activation) = resolve_owner_activation_expr(
+                        workspace,
+                        resolved_workspace,
+                        resolved_module,
+                        expr,
+                    ) {
+                        if let Some(ref message) = owner_activation.invalid {
+                            diagnostics.push(Diagnostic {
+                                path: module_path.to_path_buf(),
+                                line: statement.span.line,
+                                column: statement.span.column,
+                                message: message.clone(),
+                            });
+                        }
+                        if let Some(context) = owner_activation.context {
+                            validate_expr_semantics(
+                                workspace,
+                                resolved_module,
+                                module_path,
+                                type_scope,
+                                scope,
+                                context,
+                                statement.span,
+                                diagnostics,
+                            );
+                            validate_expr_borrow_flow(
+                                workspace,
+                                resolved_module,
+                                type_scope,
+                                module_path,
+                                scope,
+                                context,
+                                statement.span,
+                                borrow_state,
+                                diagnostics,
+                            );
+                            note_expr_moves(
+                                workspace,
+                                resolved_module,
+                                type_scope,
+                                scope,
+                                context,
+                                borrow_state,
+                            );
+                            note_escaping_expr_borrows(borrow_state, context, scope);
+                        }
+                        validate_owner_activation_context(
+                            workspace,
+                            resolved_workspace,
+                            resolved_module,
+                            module_path,
+                            type_scope,
+                            scope,
+                            &owner_activation,
+                            statement.span,
+                            diagnostics,
+                        );
+                        let inserted = scope.activate_owner(&owner_activation.owner, None, false);
+                        for inserted_name in inserted {
+                            activate_current_cleanup_binding(
+                                borrow_state,
+                                scope,
+                                current_block_cleanup_subjects,
+                                &inserted_name,
+                            );
+                        }
+                        continue;
+                    }
+                }
                 validate_expr_semantics(
                     workspace,
                     resolved_module,
@@ -7398,6 +8347,196 @@ mod tests {
     }
 
     #[test]
+    fn check_sources_accepts_object_owner_activation_flow() {
+        let summary = check_sources(
+            [concat!(
+                "obj Counter:\n",
+                "    value: Int\n",
+                "\n",
+                "create Session [Counter] scope-exit:\n",
+                "    done: when Counter.value > 0 hold [Counter]\n",
+                "\n",
+                "Session\n",
+                "Counter\n",
+                "fn main() -> Int:\n",
+                "    let active = Session :: :: call\n",
+                "    Counter.value = 1\n",
+                "    return Counter.value\n",
+            )]
+            .iter()
+            .copied(),
+        )
+        .expect("object/owner flow should check");
+        assert!(summary.symbol_count >= 3);
+    }
+
+    #[test]
+    fn check_sources_rejects_owner_without_scope_exit_clause() {
+        let root = make_temp_package(
+            "owner_missing_exit",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    concat!(
+                        "obj Counter:\n",
+                        "    value: Int\n",
+                        "\n",
+                        "create Session [Counter] scope-exit:\n",
+                        "\n",
+                        "fn main() -> Int:\n",
+                        "    return 0\n",
+                    ),
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+        let err = check_path(&root).expect_err("owner without exit should fail");
+        assert!(
+            err.contains("must declare at least one scope-exit"),
+            "{err}"
+        );
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_sources_rejects_non_bool_owner_exit_condition() {
+        let root = make_temp_package(
+            "owner_non_bool_exit",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    concat!(
+                        "obj Counter:\n",
+                        "    value: Int\n",
+                        "\n",
+                        "create Session [Counter] scope-exit:\n",
+                        "    exit when 1\n",
+                        "\n",
+                        "fn main() -> Int:\n",
+                        "    return 0\n",
+                    ),
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+        let err = check_path(&root).expect_err("non-bool owner exit condition should fail");
+        assert!(
+            err.contains("owner exit condition requires Bool, found Int"),
+            "{err}"
+        );
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_accepts_object_owner_lifecycle_conformance_package() {
+        let summary = check_path(
+            &repo_root()
+                .join("conformance")
+                .join("fixtures")
+                .join("object_owner_lifecycle_workspace")
+                .join("app"),
+        )
+        .expect("lifecycle conformance fixture should check");
+        assert!(summary.package_count >= 1);
+        assert!(summary.module_count >= 2);
+    }
+
+    #[test]
+    fn check_path_rejects_owner_invalid_lifecycle_hook_package() {
+        let err = check_path(
+            &repo_root()
+                .join("conformance")
+                .join("check_parity_packages")
+                .join("owner_invalid_lifecycle_hook"),
+        )
+        .expect_err("invalid lifecycle hook fixture should fail");
+        assert!(err.contains("must take `edit self`"), "{err}");
+    }
+
+    #[test]
+    fn check_path_rejects_owner_wrong_context_type_package() {
+        let err = check_path(
+            &repo_root()
+                .join("conformance")
+                .join("check_parity_packages")
+                .join("owner_wrong_context_type"),
+        )
+        .expect_err("wrong context type fixture should fail");
+        assert!(err.contains("expects context"), "{err}");
+    }
+
+    #[test]
+    fn check_sources_rejects_invalid_object_lifecycle_hook_signature() {
+        let root = make_temp_package(
+            "owner_invalid_hook",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    concat!(
+                        "obj Counter:\n",
+                        "    value: Int\n",
+                        "    fn init(read self: Self):\n",
+                        "        return\n",
+                        "\n",
+                        "create Session [Counter] scope-exit:\n",
+                        "    done: when false hold [Counter]\n",
+                        "\n",
+                        "fn main() -> Int:\n",
+                        "    return 0\n",
+                    ),
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+        let err = check_path(&root).expect_err("invalid lifecycle hook should fail");
+        assert!(err.contains("must take `edit self`"), "{err}");
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_sources_rejects_owner_activation_with_wrong_context_type() {
+        let root = make_temp_package(
+            "owner_wrong_context",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    concat!(
+                        "obj SessionCtx:\n",
+                        "    base: Int\n",
+                        "\n",
+                        "obj Counter:\n",
+                        "    value: Int\n",
+                        "    fn init(edit self: Self, read ctx: SessionCtx):\n",
+                        "        self.value = ctx.base\n",
+                        "\n",
+                        "create Session [Counter] scope-exit:\n",
+                        "    done: when Counter.value > 10 hold [Counter]\n",
+                        "\n",
+                        "Session\n",
+                        "Counter\n",
+                        "fn main() -> Int:\n",
+                        "    Session :: 1 :: call\n",
+                        "    return 0\n",
+                    ),
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+        let err = check_path(&root).expect_err("wrong owner activation context should fail");
+        assert!(err.contains("expects context"), "{err}");
+        assert!(err.contains("Int"), "{err}");
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
     fn check_path_handles_result_variant_constructor_package() {
         let std_dep = repo_root().join("std").to_string_lossy().replace('\\', "/");
         let root = make_temp_package(
@@ -7620,7 +8759,12 @@ mod tests {
     }
 
     fn owned_app_root() -> PathBuf {
-        owned_root().join("app")
+        let libs = owned_root().join("libs");
+        if libs.is_dir() {
+            libs
+        } else {
+            owned_root().join("app")
+        }
     }
 
     fn unique_test_id() -> u64 {

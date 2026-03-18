@@ -1,5 +1,5 @@
 version = 1
-as_of = "2026-03-10"
+as_of = "2026-03-17"
 owner = "Arcana selfhost/compiler team"
 # Positive targets now use current in-repo rewrite-owned corpus after the
 # archived broad MeadowLang corpus moved out of the repository.
@@ -17,6 +17,20 @@ positive = ["std/src", "conformance/fixtures/types_guard_workspace/core/src"]
 negative = [
     "conformance/check_parity_fixtures/parse_error.arc",
     "conformance/check_parity_packages/unresolved_type_ref",
+]
+
+[[feature]]
+id = "objects_and_owners_v1"
+status = "required"
+positive = [
+    "conformance/fixtures/object_owner_workspace/app/src",
+    "conformance/fixtures/object_owner_lifecycle_workspace/app/src",
+]
+negative = [
+    "conformance/check_parity_packages/owner_missing_exit",
+    "conformance/check_parity_packages/owner_non_bool_exit",
+    "conformance/check_parity_packages/owner_invalid_lifecycle_hook",
+    "conformance/check_parity_packages/owner_wrong_context_type",
 ]
 
 [[feature]]

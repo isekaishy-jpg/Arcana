@@ -15,8 +15,9 @@ mod windows_bundle;
 mod windows_dll;
 
 pub use artifact::{
-    AOT_INTERNAL_FORMAT, AotArtifact, AotEntrypointArtifact, AotPackageArtifact,
-    AotPackageModuleArtifact, AotRoutineArtifact,
+    AOT_INTERNAL_FORMAT, AotArtifact, AotEntrypointArtifact, AotOwnerArtifact,
+    AotOwnerExitArtifact, AotOwnerObjectArtifact, AotPackageArtifact, AotPackageModuleArtifact,
+    AotRoutineArtifact,
 };
 pub use codec::{parse_package_artifact, render_package_artifact};
 pub use compile::{compile_module, compile_package};
@@ -59,6 +60,7 @@ mod tests {
             runtime_requirements: Vec::new(),
             entrypoints: Vec::new(),
             routines: Vec::new(),
+            owners: Vec::new(),
             modules: vec![AotPackageModuleArtifact {
                 module_id: "tool".to_string(),
                 symbol_count: 1,
@@ -137,12 +139,14 @@ mod tests {
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
+                availability: Vec::new(),
                 foreword_rows: Vec::new(),
                 rollups: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Int(0),
                 }],
             }],
+            owners: Vec::new(),
         });
         assert_eq!(artifact.format, AOT_INTERNAL_FORMAT);
         assert_eq!(artifact.module_count, 2);
@@ -184,12 +188,14 @@ mod tests {
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
+                availability: Vec::new(),
                 foreword_rows: Vec::new(),
                 rollups: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Int(0),
                 }],
             }],
+            owners: Vec::new(),
         };
 
         let emission =
@@ -246,12 +252,14 @@ mod tests {
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
+                availability: Vec::new(),
                 foreword_rows: Vec::new(),
                 rollups: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Int(0),
                 }],
             }],
+            owners: Vec::new(),
         };
 
         assert_eq!(
@@ -377,12 +385,14 @@ mod tests {
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
+                availability: Vec::new(),
                 foreword_rows: Vec::new(),
                 rollups: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Int(0),
                 }],
             }],
+            owners: Vec::new(),
         };
 
         let plan = build_native_package_plan(
@@ -424,6 +434,7 @@ mod tests {
             runtime_requirements: Vec::new(),
             entrypoints: Vec::new(),
             routines: Vec::new(),
+            owners: Vec::new(),
         };
 
         let err = build_native_package_plan(
@@ -475,12 +486,14 @@ mod tests {
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
+                availability: Vec::new(),
                 foreword_rows: Vec::new(),
                 rollups: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Bool(true),
                 }],
             }],
+            owners: Vec::new(),
         };
 
         let plan = build_native_package_plan(
@@ -550,6 +563,7 @@ mod tests {
                     intrinsic_impl: None,
                     impl_target_type: None,
                     impl_trait_path: None,
+                    availability: Vec::new(),
                     foreword_rows: Vec::new(),
                     rollups: Vec::new(),
                     statements: vec![ExecStmt::ReturnValue {
@@ -570,6 +584,7 @@ mod tests {
                     intrinsic_impl: None,
                     impl_target_type: None,
                     impl_trait_path: None,
+                    availability: Vec::new(),
                     foreword_rows: Vec::new(),
                     rollups: Vec::new(),
                     statements: vec![ExecStmt::ReturnValue {
@@ -577,6 +592,7 @@ mod tests {
                     }],
                 },
             ],
+            owners: Vec::new(),
         };
 
         let plan = build_native_package_plan(
@@ -637,12 +653,14 @@ mod tests {
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
+                availability: Vec::new(),
                 foreword_rows: Vec::new(),
                 rollups: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Path(vec!["pair".to_string()]),
                 }],
             }],
+            owners: Vec::new(),
         };
 
         let plan = build_native_package_plan(
@@ -697,6 +715,7 @@ mod tests {
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
+                availability: Vec::new(),
                 foreword_rows: vec!["test()".to_string()],
                 rollups: vec![ExecPageRollup {
                     kind: "cleanup".to_string(),
@@ -721,6 +740,7 @@ mod tests {
                     rollups: Vec::new(),
                 }],
             }],
+            owners: Vec::new(),
             modules: vec![AotPackageModuleArtifact {
                 module_id: "tool".to_string(),
                 symbol_count: 1,
@@ -772,12 +792,14 @@ mod tests {
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
+                availability: Vec::new(),
                 foreword_rows: Vec::new(),
                 rollups: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Int(0),
                 }],
             }],
+            owners: Vec::new(),
         });
         artifact.module_count = 2;
 
@@ -823,6 +845,7 @@ mod tests {
                     intrinsic_impl: None,
                     impl_target_type: None,
                     impl_trait_path: None,
+                    availability: Vec::new(),
                     foreword_rows: Vec::new(),
                     rollups: Vec::new(),
                     statements: Vec::new(),
@@ -841,11 +864,13 @@ mod tests {
                     intrinsic_impl: None,
                     impl_target_type: None,
                     impl_trait_path: None,
+                    availability: Vec::new(),
                     foreword_rows: Vec::new(),
                     rollups: Vec::new(),
                     statements: Vec::new(),
                 },
             ],
+            owners: Vec::new(),
             modules: vec![AotPackageModuleArtifact {
                 module_id: "tool".to_string(),
                 symbol_count: 1,
@@ -898,12 +923,14 @@ mod tests {
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
+                availability: Vec::new(),
                 foreword_rows: Vec::new(),
                 rollups: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Int(0),
                 }],
             }],
+            owners: Vec::new(),
         });
         artifact.routines[0].param_rows = vec!["mode=borrow:name=value:ty=Int".to_string()];
 
@@ -939,10 +966,12 @@ mod tests {
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
+                availability: Vec::new(),
                 foreword_rows: Vec::new(),
                 rollups: Vec::new(),
                 statements: Vec::new(),
             }],
+            owners: Vec::new(),
             modules: vec![AotPackageModuleArtifact {
                 module_id: "tool".to_string(),
                 symbol_count: 1,

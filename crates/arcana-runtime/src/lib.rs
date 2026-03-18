@@ -4,18 +4,20 @@ use std::io::{Read, Seek, Write};
 use std::path::{Component, Path, PathBuf};
 
 use arcana_aot::{
-    AotEntrypointArtifact, AotPackageArtifact, AotRoutineArtifact, parse_package_artifact,
-    validate_package_artifact,
+    AotEntrypointArtifact, AotOwnerArtifact, AotPackageArtifact, AotRoutineArtifact,
+    parse_package_artifact, validate_package_artifact,
 };
 use arcana_ir::{
     ExecAssignOp as ParsedAssignOp, ExecAssignTarget as ParsedAssignTarget,
-    ExecBinaryOp as ParsedBinaryOp, ExecChainConnector as ParsedChainConnector,
-    ExecChainIntroducer as ParsedChainIntroducer, ExecChainStep as ParsedChainStep,
-    ExecDynamicDispatch as ParsedDynamicDispatch, ExecExpr as ParsedExpr,
-    ExecHeaderAttachment as ParsedHeaderAttachment, ExecMatchArm as ParsedMatchArm,
-    ExecMatchPattern as ParsedMatchPattern, ExecPageRollup as ParsedPageRollup,
-    ExecPhraseArg as ParsedPhraseArg, ExecPhraseQualifierKind as ParsedPhraseQualifierKind,
-    ExecStmt as ParsedStmt, ExecUnaryOp as ParsedUnaryOp, RUNTIME_MAIN_ENTRYPOINT_NAME,
+    ExecAvailabilityAttachment as ParsedAvailabilityAttachment,
+    ExecAvailabilityKind as ParsedAvailabilityKind, ExecBinaryOp as ParsedBinaryOp,
+    ExecChainConnector as ParsedChainConnector, ExecChainIntroducer as ParsedChainIntroducer,
+    ExecChainStep as ParsedChainStep, ExecDynamicDispatch as ParsedDynamicDispatch,
+    ExecExpr as ParsedExpr, ExecHeaderAttachment as ParsedHeaderAttachment,
+    ExecMatchArm as ParsedMatchArm, ExecMatchPattern as ParsedMatchPattern,
+    ExecPageRollup as ParsedPageRollup, ExecPhraseArg as ParsedPhraseArg,
+    ExecPhraseQualifierKind as ParsedPhraseQualifierKind, ExecStmt as ParsedStmt,
+    ExecUnaryOp as ParsedUnaryOp, RUNTIME_MAIN_ENTRYPOINT_NAME,
     runtime_main_return_type_from_signature, validate_runtime_main_entry_contract,
 };
 use pathdiff::diff_paths;
@@ -59,9 +61,36 @@ pub struct RuntimeRoutinePlan {
     pub intrinsic_impl: Option<String>,
     pub impl_target_type: Option<String>,
     pub impl_trait_path: Option<Vec<String>>,
+    pub availability: Vec<ParsedAvailabilityAttachment>,
     pub foreword_rows: Vec<String>,
     rollups: Vec<ParsedPageRollup>,
     statements: Vec<ParsedStmt>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeOwnerObjectPlan {
+    pub type_path: Vec<String>,
+    pub local_name: String,
+    pub init_routine_key: Option<String>,
+    pub init_with_context_routine_key: Option<String>,
+    pub resume_routine_key: Option<String>,
+    pub resume_with_context_routine_key: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeOwnerExitPlan {
+    pub name: String,
+    pub condition: ParsedExpr,
+    pub holds: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeOwnerPlan {
+    pub module_id: String,
+    pub owner_path: Vec<String>,
+    pub owner_name: String,
+    pub objects: Vec<RuntimeOwnerObjectPlan>,
+    pub exits: Vec<RuntimeOwnerExitPlan>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,6 +112,7 @@ pub struct RuntimePackagePlan {
     pub module_aliases: BTreeMap<String, BTreeMap<String, Vec<String>>>,
     pub entrypoints: Vec<RuntimeEntrypointPlan>,
     pub routines: Vec<RuntimeRoutinePlan>,
+    pub owners: Vec<RuntimeOwnerPlan>,
 }
 
 impl RuntimePackagePlan {
@@ -198,6 +228,11 @@ pub struct RuntimePoolIdValue {
 enum RuntimeReferenceTarget {
     Local {
         local: RuntimeLocalHandle,
+        members: Vec<String>,
+    },
+    OwnerObject {
+        owner_key: String,
+        object_name: String,
         members: Vec<String>,
     },
     ArenaSlot {
@@ -2313,6 +2348,7 @@ enum RuntimeValue {
         end: Option<i64>,
         inclusive_end: bool,
     },
+    OwnerHandle(String),
     Ref(RuntimeReferenceValue),
     Opaque(RuntimeOpaqueValue),
     Record {
@@ -2357,6 +2393,8 @@ struct RuntimeLocal {
 struct RuntimeScope {
     locals: BTreeMap<String, RuntimeLocal>,
     deferred: Vec<ParsedExpr>,
+    attached_object_names: BTreeSet<String>,
+    activated_owner_keys: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2395,6 +2433,7 @@ struct RuntimeExecutionState {
     next_local_handle: u64,
     call_stack: Vec<String>,
     rollup_frames: Vec<RuntimeRollupFrame>,
+    owners: BTreeMap<String, RuntimeOwnerState>,
     next_entity_id: i64,
     live_entities: BTreeSet<i64>,
     component_slots: BTreeMap<Vec<String>, BTreeMap<i64, RuntimeValue>>,
@@ -2419,6 +2458,15 @@ struct RuntimeExecutionState {
     atomic_ints: BTreeMap<RuntimeAtomicIntHandle, i64>,
     next_atomic_bool_handle: u64,
     atomic_bools: BTreeMap<RuntimeAtomicBoolHandle, bool>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct RuntimeOwnerState {
+    activation_context: Option<RuntimeValue>,
+    objects: BTreeMap<String, RuntimeValue>,
+    pending_init: BTreeSet<String>,
+    pending_resume: BTreeSet<String>,
+    active_bindings: usize,
 }
 
 const RUNTIME_MAX_CALL_DEPTH: usize = 256;
@@ -2764,10 +2812,40 @@ fn lower_routine(routine: &AotRoutineArtifact) -> Result<RuntimeRoutinePlan, Str
         intrinsic_impl: routine.intrinsic_impl.clone(),
         impl_target_type: routine.impl_target_type.clone(),
         impl_trait_path: routine.impl_trait_path.clone(),
+        availability: routine.availability.clone(),
         foreword_rows: routine.foreword_rows.clone(),
         rollups: routine.rollups.clone(),
         statements: routine.statements.clone(),
     })
+}
+
+fn lower_owner(owner: &AotOwnerArtifact) -> RuntimeOwnerPlan {
+    RuntimeOwnerPlan {
+        module_id: owner.module_id.clone(),
+        owner_path: owner.owner_path.clone(),
+        owner_name: owner.owner_name.clone(),
+        objects: owner
+            .objects
+            .iter()
+            .map(|object| RuntimeOwnerObjectPlan {
+                type_path: object.type_path.clone(),
+                local_name: object.local_name.clone(),
+                init_routine_key: object.init_routine_key.clone(),
+                init_with_context_routine_key: object.init_with_context_routine_key.clone(),
+                resume_routine_key: object.resume_routine_key.clone(),
+                resume_with_context_routine_key: object.resume_with_context_routine_key.clone(),
+            })
+            .collect(),
+        exits: owner
+            .exits
+            .iter()
+            .map(|owner_exit| RuntimeOwnerExitPlan {
+                name: owner_exit.name.clone(),
+                condition: owner_exit.condition.clone(),
+                holds: owner_exit.holds.clone(),
+            })
+            .collect(),
+    }
 }
 
 fn lower_entrypoint(
@@ -2872,6 +2950,7 @@ pub fn plan_from_artifact(artifact: &AotPackageArtifact) -> Result<RuntimePackag
         module_aliases: build_module_aliases(artifact)?,
         entrypoints,
         routines,
+        owners: artifact.owners.iter().map(lower_owner).collect(),
     };
     validate_runtime_rollup_handlers(&plan)?;
     Ok(plan)
@@ -2959,6 +3038,7 @@ fn validate_runtime_rollup_handlers_in_statements(
             ParsedStmt::Let { .. }
             | ParsedStmt::ReturnVoid
             | ParsedStmt::ReturnValue { .. }
+            | ParsedStmt::ActivateOwner { .. }
             | ParsedStmt::Defer(_)
             | ParsedStmt::Break
             | ParsedStmt::Continue
@@ -3952,12 +4032,27 @@ fn runtime_value_to_string(value: &RuntimeValue) -> String {
             }
             rendered
         }
+        RuntimeValue::OwnerHandle(owner_key) => format!("<Owner:{owner_key}>"),
         RuntimeValue::Ref(reference) => match &reference.target {
             RuntimeReferenceTarget::Local { local, members } => {
                 if members.is_empty() {
                     format!("<ref:{}>", local.0)
                 } else {
                     format!("<ref:{}:{}>", local.0, members.join("."))
+                }
+            }
+            RuntimeReferenceTarget::OwnerObject {
+                owner_key,
+                object_name,
+                members,
+            } => {
+                if members.is_empty() {
+                    format!("<ref:Owner:{owner_key}:{object_name}>")
+                } else {
+                    format!(
+                        "<ref:Owner:{owner_key}:{object_name}:{}>",
+                        members.join(".")
+                    )
                 }
             }
             RuntimeReferenceTarget::ArenaSlot { id, members } => {
@@ -4208,6 +4303,511 @@ fn insert_runtime_local(
     );
 }
 
+fn apply_runtime_availability_attachments(
+    scope: &mut RuntimeScope,
+    attachments: &[ParsedAvailabilityAttachment],
+) {
+    for attachment in attachments {
+        if matches!(attachment.kind, ParsedAvailabilityKind::Object) {
+            scope
+                .attached_object_names
+                .insert(attachment.local_name.clone());
+        }
+    }
+}
+
+fn owner_state_key(owner_path: &[String]) -> String {
+    owner_path.join(".")
+}
+
+fn lookup_runtime_owner_plan<'a>(
+    plan: &'a RuntimePackagePlan,
+    owner_path: &[String],
+) -> Option<&'a RuntimeOwnerPlan> {
+    plan.owners
+        .iter()
+        .find(|owner| owner.owner_path == owner_path)
+}
+
+fn attached_object_is_visible(scopes: &[RuntimeScope], name: &str) -> bool {
+    scopes
+        .iter()
+        .rev()
+        .any(|scope| scope.attached_object_names.contains(name))
+}
+
+fn make_owner_object_reference(owner_key: &str, object_name: &str) -> RuntimeValue {
+    RuntimeValue::Ref(RuntimeReferenceValue {
+        mutable: true,
+        target: RuntimeReferenceTarget::OwnerObject {
+            owner_key: owner_key.to_string(),
+            object_name: object_name.to_string(),
+            members: Vec::new(),
+        },
+    })
+}
+
+fn inactive_owner_message(owner_path: &[String]) -> String {
+    format!(
+        "owner `{}` is not active; explicit re-entry is required",
+        owner_path.join(".")
+    )
+}
+
+fn lookup_runtime_owner_object_plan<'a>(
+    owner: &'a RuntimeOwnerPlan,
+    object_name: &str,
+) -> Result<&'a RuntimeOwnerObjectPlan, String> {
+    owner
+        .objects
+        .iter()
+        .find(|object| object.local_name == object_name)
+        .ok_or_else(|| {
+            format!(
+                "runtime owner `{}` does not declare owned object `{object_name}`",
+                owner.owner_path.join(".")
+            )
+        })
+}
+
+fn realize_owner_object_value(
+    plan: &RuntimePackagePlan,
+    owner_path: &[String],
+    object_name: &str,
+) -> Result<RuntimeValue, String> {
+    let owner = lookup_runtime_owner_plan(plan, owner_path).ok_or_else(|| {
+        format!(
+            "runtime owner `{}` is not declared in the package plan",
+            owner_path.join(".")
+        )
+    })?;
+    let object = lookup_runtime_owner_object_plan(owner, object_name)?;
+    Ok(RuntimeValue::Record {
+        name: object.type_path.join("."),
+        fields: BTreeMap::new(),
+    })
+}
+
+fn resolve_routine_index_by_key(
+    plan: &RuntimePackagePlan,
+    routine_key: &str,
+) -> Result<usize, String> {
+    plan.routines
+        .iter()
+        .position(|routine| routine.routine_key == routine_key)
+        .ok_or_else(|| {
+            format!("runtime routine `{routine_key}` is not present in the package plan")
+        })
+}
+
+fn execute_owner_object_lifecycle_hook(
+    scopes: &mut Vec<RuntimeScope>,
+    plan: &RuntimePackagePlan,
+    current_module_id: &str,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
+    owner_key: &str,
+    object_name: &str,
+) -> Result<(), String> {
+    let owner_path = owner_key
+        .split('.')
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let owner = lookup_runtime_owner_plan(plan, &owner_path).ok_or_else(|| {
+        format!(
+            "runtime owner `{}` is not declared in the package plan",
+            owner_key
+        )
+    })?;
+    let object = lookup_runtime_owner_object_plan(owner, object_name)?;
+
+    let (current_value, activation_context, needs_init, needs_resume) = {
+        let owner_state = state
+            .owners
+            .get_mut(owner_key)
+            .ok_or_else(|| inactive_owner_message(&owner_path))?;
+        if owner_state.active_bindings == 0 {
+            return Err(inactive_owner_message(&owner_path));
+        }
+        let (object_value, needs_init) = match owner_state.objects.get(object_name) {
+            Some(value) => (
+                value.clone(),
+                owner_state.pending_init.contains(object_name),
+            ),
+            None => {
+                let value = realize_owner_object_value(plan, &owner_path, object_name)?;
+                owner_state
+                    .objects
+                    .insert(object_name.to_string(), value.clone());
+                owner_state.pending_init.insert(object_name.to_string());
+                (value, true)
+            }
+        };
+        (
+            object_value,
+            owner_state.activation_context.clone(),
+            needs_init,
+            owner_state.pending_resume.contains(object_name),
+        )
+    };
+
+    let (routine_key, args, missing_context_message) = if needs_resume {
+        if let Some(context) = activation_context.clone() {
+            if let Some(routine_key) = object.resume_with_context_routine_key.clone() {
+                (
+                    Some(routine_key),
+                    vec![current_value.clone(), context],
+                    None,
+                )
+            } else if let Some(routine_key) = object.resume_routine_key.clone() {
+                (Some(routine_key), vec![current_value.clone()], None)
+            } else {
+                (None, Vec::new(), None)
+            }
+        } else if let Some(routine_key) = object.resume_routine_key.clone() {
+            (Some(routine_key), vec![current_value.clone()], None)
+        } else if object.resume_with_context_routine_key.is_some() {
+            (
+                None,
+                Vec::new(),
+                Some(format!(
+                    "owner `{}` object `{}` requires an activation context to resume",
+                    owner.owner_path.join("."),
+                    object_name
+                )),
+            )
+        } else {
+            (None, Vec::new(), None)
+        }
+    } else if needs_init {
+        if let Some(context) = activation_context.clone() {
+            if let Some(routine_key) = object.init_with_context_routine_key.clone() {
+                (
+                    Some(routine_key),
+                    vec![current_value.clone(), context],
+                    None,
+                )
+            } else if let Some(routine_key) = object.init_routine_key.clone() {
+                (Some(routine_key), vec![current_value.clone()], None)
+            } else {
+                (None, Vec::new(), None)
+            }
+        } else if let Some(routine_key) = object.init_routine_key.clone() {
+            (Some(routine_key), vec![current_value.clone()], None)
+        } else if object.init_with_context_routine_key.is_some() {
+            (
+                None,
+                Vec::new(),
+                Some(format!(
+                    "owner `{}` object `{}` requires an activation context to initialize",
+                    owner.owner_path.join("."),
+                    object_name
+                )),
+            )
+        } else {
+            (None, Vec::new(), None)
+        }
+    } else if let Some(context) = activation_context.clone() {
+        let _ = context;
+        (None, Vec::new(), None)
+    } else {
+        (None, Vec::new(), None)
+    };
+
+    if let Some(message) = missing_context_message {
+        return Err(message);
+    }
+
+    if let Some(routine_key) = routine_key {
+        let routine_index = resolve_routine_index_by_key(plan, &routine_key)?;
+        let outcome = execute_routine_call_with_state(
+            plan,
+            routine_index,
+            Vec::new(),
+            args,
+            state,
+            host,
+            false,
+        )?;
+        if outcome.value != RuntimeValue::Unit {
+            return Err(format!(
+                "owner lifecycle hook for `{}` must return Unit",
+                object_name
+            ));
+        }
+        let updated_value = outcome.final_args.first().cloned().ok_or_else(|| {
+            format!(
+                "owner lifecycle hook for `{}` did not preserve `self`",
+                object_name
+            )
+        })?;
+        let owner_state = state
+            .owners
+            .entry(owner_key.to_string())
+            .or_insert_with(RuntimeOwnerState::default);
+        owner_state
+            .objects
+            .insert(object_name.to_string(), updated_value);
+        owner_state.pending_init.remove(object_name);
+        owner_state.pending_resume.remove(object_name);
+        let owner_keys = vec![owner_key.to_string()];
+        evaluate_owner_exit_checkpoints(
+            &owner_keys,
+            plan,
+            current_module_id,
+            aliases,
+            type_bindings,
+            state,
+            host,
+            Some(scopes),
+        )?;
+    }
+
+    let owner_state = state
+        .owners
+        .get_mut(owner_key)
+        .ok_or_else(|| inactive_owner_message(&owner_path))?;
+    owner_state.pending_init.remove(object_name);
+    owner_state.pending_resume.remove(object_name);
+    if owner_state.active_bindings == 0 {
+        return Err(inactive_owner_message(&owner_path));
+    }
+    Ok(())
+}
+
+fn owner_object_root_value(
+    scopes: &mut Vec<RuntimeScope>,
+    plan: &RuntimePackagePlan,
+    current_module_id: &str,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
+    owner_key: &str,
+    object_name: &str,
+) -> Result<RuntimeValue, String> {
+    let owner_path = owner_key
+        .split('.')
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let owner_state = state
+        .owners
+        .get(owner_key)
+        .ok_or_else(|| inactive_owner_message(&owner_path))?;
+    if owner_state.active_bindings == 0 {
+        return Err(inactive_owner_message(&owner_path));
+    }
+    let _ = owner_state;
+    execute_owner_object_lifecycle_hook(
+        scopes,
+        plan,
+        current_module_id,
+        aliases,
+        type_bindings,
+        state,
+        host,
+        owner_key,
+        object_name,
+    )?;
+    state
+        .owners
+        .get(owner_key)
+        .ok_or_else(|| inactive_owner_message(&owner_path))?
+        .objects
+        .get(object_name)
+        .cloned()
+        .ok_or_else(|| {
+            format!(
+                "runtime owner `{}` failed to realize object `{object_name}`",
+                owner_path.join(".")
+            )
+        })
+}
+
+fn owner_exit_eval_scope(
+    state: &mut RuntimeExecutionState,
+    owner: &RuntimeOwnerPlan,
+    owner_key: &str,
+) -> Result<Vec<RuntimeScope>, String> {
+    let mut scope = RuntimeScope::default();
+    insert_runtime_local(
+        state,
+        0,
+        &mut scope,
+        owner.owner_name.clone(),
+        false,
+        RuntimeValue::OwnerHandle(owner_key.to_string()),
+    );
+    for object in &owner.objects {
+        insert_runtime_local(
+            state,
+            0,
+            &mut scope,
+            object.local_name.clone(),
+            true,
+            make_owner_object_reference(owner_key, &object.local_name),
+        );
+    }
+    Ok(vec![scope])
+}
+
+fn invalidate_owner_activations_in_scopes(scopes: &mut [RuntimeScope], owner_key: &str) {
+    for scope in scopes {
+        scope
+            .activated_owner_keys
+            .retain(|active| active != owner_key);
+    }
+}
+
+fn release_scope_owner_activations(state: &mut RuntimeExecutionState, owner_keys: &[String]) {
+    let mut released = BTreeSet::new();
+    for owner_key in owner_keys {
+        if !released.insert(owner_key.clone()) {
+            continue;
+        }
+        if let Some(owner_state) = state.owners.get_mut(owner_key) {
+            owner_state.active_bindings = owner_state.active_bindings.saturating_sub(1);
+            if owner_state.active_bindings == 0 {
+                owner_state.activation_context = None;
+                owner_state.pending_init.clear();
+                owner_state.pending_resume.clear();
+            }
+        }
+    }
+}
+
+fn evaluate_owner_exit_checkpoints(
+    owner_keys: &[String],
+    plan: &RuntimePackagePlan,
+    current_module_id: &str,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
+    mut scopes: Option<&mut Vec<RuntimeScope>>,
+) -> Result<(), String> {
+    let mut unique_keys = BTreeSet::new();
+    for owner_key in owner_keys {
+        if !unique_keys.insert(owner_key.clone()) {
+            continue;
+        }
+        let owner_path = owner_key
+            .split('.')
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        let Some(owner) = lookup_runtime_owner_plan(plan, &owner_path).cloned() else {
+            return Err(format!(
+                "runtime owner `{}` is not declared in the package plan",
+                owner_key
+            ));
+        };
+        let Some(owner_state) = state.owners.get(owner_key) else {
+            continue;
+        };
+        if owner_state.active_bindings == 0 {
+            continue;
+        }
+        let mut exit_scopes = owner_exit_eval_scope(state, &owner, owner_key)?;
+        let mut selected_exit = None;
+        for owner_exit in &owner.exits {
+            let condition = eval_expr(
+                &owner_exit.condition,
+                plan,
+                current_module_id,
+                &mut exit_scopes,
+                aliases,
+                type_bindings,
+                state,
+                host,
+            )
+            .map_err(runtime_eval_message)?;
+            if expect_bool(condition, "owner exit condition")? {
+                selected_exit = Some(owner_exit.clone());
+                break;
+            }
+        }
+        if let Some(owner_exit) = selected_exit {
+            let owner_state = state
+                .owners
+                .entry(owner_key.clone())
+                .or_insert_with(RuntimeOwnerState::default);
+            owner_state
+                .objects
+                .retain(|name, _| owner_exit.holds.iter().any(|hold| hold == name));
+            owner_state.pending_init.clear();
+            owner_state.pending_resume.clear();
+            owner_state.activation_context = None;
+            owner_state.active_bindings = 0;
+            if let Some(scopes) = scopes.as_deref_mut() {
+                invalidate_owner_activations_in_scopes(scopes, owner_key);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn activate_owner_scope_binding(
+    scopes: &mut Vec<RuntimeScope>,
+    state: &mut RuntimeExecutionState,
+    owner: &RuntimeOwnerPlan,
+    owner_key: &str,
+    binding: Option<&str>,
+) -> Result<(), String> {
+    let scope_depth = scopes.len().saturating_sub(1);
+    let visible_objects = owner
+        .objects
+        .iter()
+        .filter(|object| attached_object_is_visible(scopes, &object.local_name))
+        .map(|object| object.local_name.clone())
+        .collect::<Vec<_>>();
+    let scope = scopes
+        .last_mut()
+        .ok_or_else(|| "runtime scope stack is empty".to_string())?;
+    let newly_activated = !scope
+        .activated_owner_keys
+        .iter()
+        .any(|active| active == owner_key);
+    if newly_activated {
+        scope.activated_owner_keys.push(owner_key.to_string());
+        state
+            .owners
+            .entry(owner_key.to_string())
+            .or_default()
+            .active_bindings += 1;
+    }
+    insert_runtime_local(
+        state,
+        scope_depth,
+        scope,
+        owner.owner_name.clone(),
+        false,
+        RuntimeValue::OwnerHandle(owner_key.to_string()),
+    );
+    if let Some(binding) = binding {
+        insert_runtime_local(
+            state,
+            scope_depth,
+            scope,
+            binding.to_string(),
+            false,
+            RuntimeValue::OwnerHandle(owner_key.to_string()),
+        );
+    }
+    for object_name in visible_objects {
+        insert_runtime_local(
+            state,
+            scope_depth,
+            scope,
+            object_name.clone(),
+            true,
+            make_owner_object_reference(owner_key, &object_name),
+        );
+    }
+    Ok(())
+}
+
 fn runtime_reference_with_member(
     target: &RuntimeReferenceTarget,
     member: String,
@@ -4218,6 +4818,19 @@ fn runtime_reference_with_member(
             next_members.push(member);
             RuntimeReferenceTarget::Local {
                 local: *local,
+                members: next_members,
+            }
+        }
+        RuntimeReferenceTarget::OwnerObject {
+            owner_key,
+            object_name,
+            members,
+        } => {
+            let mut next_members = members.clone();
+            next_members.push(member);
+            RuntimeReferenceTarget::OwnerObject {
+                owner_key: owner_key.clone(),
+                object_name: object_name.clone(),
                 members: next_members,
             }
         }
@@ -4251,6 +4864,7 @@ fn runtime_reference_with_member(
 fn runtime_reference_members(target: &RuntimeReferenceTarget) -> &[String] {
     match target {
         RuntimeReferenceTarget::Local { members, .. }
+        | RuntimeReferenceTarget::OwnerObject { members, .. }
         | RuntimeReferenceTarget::ArenaSlot { members, .. }
         | RuntimeReferenceTarget::FrameSlot { members, .. }
         | RuntimeReferenceTarget::PoolSlot { members, .. } => members,
@@ -4258,8 +4872,13 @@ fn runtime_reference_members(target: &RuntimeReferenceTarget) -> &[String] {
 }
 
 fn runtime_reference_root_value(
-    scopes: &[RuntimeScope],
-    state: &RuntimeExecutionState,
+    scopes: &mut Vec<RuntimeScope>,
+    plan: &RuntimePackagePlan,
+    current_module_id: &str,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
     target: &RuntimeReferenceTarget,
 ) -> Result<RuntimeValue, String> {
     match target {
@@ -4271,6 +4890,21 @@ fn runtime_reference_root_value(
             }
             Ok(runtime_local.value.clone())
         }
+        RuntimeReferenceTarget::OwnerObject {
+            owner_key,
+            object_name,
+            ..
+        } => owner_object_root_value(
+            scopes,
+            plan,
+            current_module_id,
+            aliases,
+            type_bindings,
+            state,
+            host,
+            owner_key,
+            object_name,
+        ),
         RuntimeReferenceTarget::ArenaSlot { id, .. } => {
             let arena = state
                 .arenas
@@ -4340,17 +4974,34 @@ fn assign_member_chain(
     let Some((member, rest)) = members.split_first() else {
         return Ok(value);
     };
+    if rest.is_empty() {
+        return assign_record_member(base, member, value);
+    }
     let child = eval_member_value(base.clone(), member)?;
     let updated_child = assign_member_chain(child, rest, value)?;
     assign_record_member(base, member, updated_child)
 }
 
 fn read_runtime_reference(
-    scopes: &[RuntimeScope],
-    state: &RuntimeExecutionState,
+    scopes: &mut Vec<RuntimeScope>,
+    plan: &RuntimePackagePlan,
+    current_module_id: &str,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
     reference: &RuntimeReferenceValue,
+    host: &mut dyn RuntimeHost,
 ) -> Result<RuntimeValue, String> {
-    let mut value = runtime_reference_root_value(scopes, state, &reference.target)?;
+    let mut value = runtime_reference_root_value(
+        scopes,
+        plan,
+        current_module_id,
+        aliases,
+        type_bindings,
+        state,
+        host,
+        &reference.target,
+    )?;
     for member in runtime_reference_members(&reference.target) {
         value = eval_member_value(value, member)?;
     }
@@ -4359,18 +5010,44 @@ fn read_runtime_reference(
 
 fn write_runtime_reference(
     scopes: &mut Vec<RuntimeScope>,
+    plan: &RuntimePackagePlan,
+    current_module_id: &str,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
     reference: &RuntimeReferenceValue,
     value: RuntimeValue,
+    host: &mut dyn RuntimeHost,
 ) -> Result<(), String> {
     if !reference.mutable {
         return Err("runtime reference is not mutable".to_string());
     }
     let members = runtime_reference_members(&reference.target);
     let updated_root = if members.is_empty() {
+        if matches!(reference.target, RuntimeReferenceTarget::OwnerObject { .. }) {
+            let _ = runtime_reference_root_value(
+                scopes,
+                plan,
+                current_module_id,
+                aliases,
+                type_bindings,
+                state,
+                host,
+                &reference.target,
+            )?;
+        }
         value
     } else {
-        let root = runtime_reference_root_value(scopes, state, &reference.target)?;
+        let root = runtime_reference_root_value(
+            scopes,
+            plan,
+            current_module_id,
+            aliases,
+            type_bindings,
+            state,
+            host,
+            &reference.target,
+        )?;
         assign_member_chain(root, members, value)?
     };
     match &reference.target {
@@ -4381,6 +5058,33 @@ fn write_runtime_reference(
             runtime_local.value = updated_root;
             update_runtime_rollup_binding_value(state, *local, &runtime_local.value);
             Ok(())
+        }
+        RuntimeReferenceTarget::OwnerObject {
+            owner_key,
+            object_name,
+            ..
+        } => {
+            let owner_state = state
+                .owners
+                .entry(owner_key.clone())
+                .or_insert_with(RuntimeOwnerState::default);
+            owner_state
+                .objects
+                .insert(object_name.clone(), updated_root);
+            let active_owners = scopes
+                .iter()
+                .flat_map(|scope| scope.activated_owner_keys.iter().cloned())
+                .collect::<Vec<_>>();
+            evaluate_owner_exit_checkpoints(
+                &active_owners,
+                plan,
+                current_module_id,
+                aliases,
+                type_bindings,
+                state,
+                host,
+                Some(scopes),
+            )
         }
         RuntimeReferenceTarget::ArenaSlot { id, .. } => {
             let arena = state
@@ -5134,6 +5838,7 @@ fn runtime_value_type_text(
     state: &RuntimeExecutionState,
 ) -> Option<String> {
     match receiver {
+        RuntimeValue::OwnerHandle(owner_key) => Some(format!("Owner<{owner_key}>")),
         RuntimeValue::Record { name, .. } => Some(name.clone()),
         RuntimeValue::Opaque(RuntimeOpaqueValue::Channel(_)) => {
             let type_args = runtime_receiver_type_args(receiver, state);
@@ -5187,6 +5892,7 @@ fn runtime_value_type_root(receiver: &RuntimeValue) -> Option<String> {
         RuntimeValue::List(_) => Some("List".to_string()),
         RuntimeValue::Map(_) => Some("Map".to_string()),
         RuntimeValue::Range { .. } => Some("RangeInt".to_string()),
+        RuntimeValue::OwnerHandle(_) => Some("Owner".to_string()),
         RuntimeValue::Ref(_) => Some("Ref".to_string()),
         RuntimeValue::Opaque(value) => Some(runtime_type_root_name(opaque_type_name(value))),
         RuntimeValue::Record { name, .. } => Some(runtime_type_root_name(name)),
@@ -5202,6 +5908,7 @@ fn runtime_value_is_copy(value: &RuntimeValue) -> bool {
         RuntimeValue::Int(_)
         | RuntimeValue::Bool(_)
         | RuntimeValue::Range { .. }
+        | RuntimeValue::OwnerHandle(_)
         | RuntimeValue::Ref(_)
         | RuntimeValue::Unit => true,
         RuntimeValue::Pair(left, right) => {
@@ -5306,9 +6013,6 @@ fn assign_record_member(
             _ => Err(format!("pair has no member `.{member}`")),
         },
         RuntimeValue::Record { name, mut fields } => {
-            if !fields.contains_key(member) {
-                return Err(format!("record `{name}` has no field `.{member}`"));
-            }
             fields.insert(member.to_string(), value);
             Ok(RuntimeValue::Record { name, fields })
         }
@@ -5354,26 +6058,41 @@ fn resolve_assign_target_place(
 }
 
 fn read_assign_target_value(
-    scopes: &[RuntimeScope],
-    state: &RuntimeExecutionState,
+    scopes: &mut Vec<RuntimeScope>,
+    plan: &RuntimePackagePlan,
+    current_module_id: &str,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
     target: &ParsedAssignTarget,
+    host: &mut dyn RuntimeHost,
 ) -> Result<RuntimeValue, String> {
     let place = resolve_assign_target_place(scopes, target)?;
     read_runtime_reference(
         scopes,
+        plan,
+        current_module_id,
+        aliases,
+        type_bindings,
         state,
         &RuntimeReferenceValue {
             mutable: place.mutable,
             target: place.target,
         },
+        host,
     )
 }
 
 fn write_assign_target_value(
     scopes: &mut Vec<RuntimeScope>,
+    plan: &RuntimePackagePlan,
+    current_module_id: &str,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
     target: &ParsedAssignTarget,
     value: RuntimeValue,
+    host: &mut dyn RuntimeHost,
 ) -> Result<(), String> {
     let place = resolve_assign_target_place(scopes, target)?;
     if !place.mutable {
@@ -5383,12 +6102,17 @@ fn write_assign_target_value(
     }
     write_runtime_reference(
         scopes,
+        plan,
+        current_module_id,
+        aliases,
+        type_bindings,
         state,
         &RuntimeReferenceValue {
             mutable: true,
             target: place.target,
         },
         value,
+        host,
     )
 }
 
@@ -5396,10 +6120,24 @@ fn assign_runtime_index_value(
     base: RuntimeValue,
     index: RuntimeValue,
     value: RuntimeValue,
-    scopes: &[RuntimeScope],
-    state: &RuntimeExecutionState,
+    scopes: &mut Vec<RuntimeScope>,
+    plan: &RuntimePackagePlan,
+    current_module_id: &str,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
 ) -> Result<RuntimeValue, String> {
-    let base = read_runtime_value_if_ref(base, scopes, state)?;
+    let base = read_runtime_value_if_ref(
+        base,
+        scopes,
+        plan,
+        current_module_id,
+        aliases,
+        type_bindings,
+        state,
+        host,
+    )?;
     let index = expect_int(index, "indexed assignment")?;
     match base {
         RuntimeValue::List(mut values) => {
@@ -5452,9 +6190,23 @@ fn read_assign_target_value_runtime(
             )
             .map_err(runtime_eval_message)?,
             scopes,
+            plan,
+            current_module_id,
+            aliases,
+            type_bindings,
             state,
+            host,
         ),
-        _ => read_assign_target_value(scopes, state, target),
+        _ => read_assign_target_value(
+            scopes,
+            plan,
+            current_module_id,
+            aliases,
+            type_bindings,
+            state,
+            target,
+            host,
+        ),
     }
 }
 
@@ -5498,7 +6250,12 @@ fn write_assign_target_value_runtime(
                 .map_err(runtime_eval_message)?,
                 value,
                 scopes,
+                plan,
+                current_module_id,
+                aliases,
+                type_bindings,
                 state,
+                host,
             )?;
             write_assign_target_value_runtime(
                 base_target,
@@ -5512,7 +6269,17 @@ fn write_assign_target_value_runtime(
                 host,
             )
         }
-        _ => write_assign_target_value(scopes, state, target, value),
+        _ => write_assign_target_value(
+            scopes,
+            plan,
+            current_module_id,
+            aliases,
+            type_bindings,
+            state,
+            target,
+            value,
+            host,
+        ),
     }
 }
 
@@ -5610,10 +6377,15 @@ fn intrinsic_take_arg_indices(intrinsic: RuntimeIntrinsic) -> &'static [usize] {
 
 fn write_back_call_args(
     scopes: &mut Vec<RuntimeScope>,
+    plan: &RuntimePackagePlan,
+    current_module_id: &str,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
     edit_arg_indices: &[usize],
     call_args: &[RuntimeCallArg],
     final_args: &[RuntimeValue],
+    host: &mut dyn RuntimeHost,
 ) -> Result<(), String> {
     for &index in edit_arg_indices {
         let Some(call_arg) = call_args.get(index) else {
@@ -5631,7 +6403,17 @@ fn write_back_call_args(
                 call_arg.source_expr
             )
         })?;
-        write_assign_target_value(scopes, state, &target, value.clone())?;
+        write_assign_target_value(
+            scopes,
+            plan,
+            current_module_id,
+            aliases,
+            type_bindings,
+            state,
+            &target,
+            value.clone(),
+            host,
+        )?;
     }
     Ok(())
 }
@@ -5652,10 +6434,15 @@ fn consume_take_call_args(
 
 fn write_back_bound_args(
     scopes: &mut Vec<RuntimeScope>,
+    plan: &RuntimePackagePlan,
+    current_module_id: &str,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
     routine: &RuntimeRoutinePlan,
     args: &[BoundRuntimeArg],
     final_args: &[RuntimeValue],
+    host: &mut dyn RuntimeHost,
 ) -> Result<(), String> {
     for (index, param) in routine.params.iter().enumerate() {
         if param.mode.as_deref() != Some("edit") {
@@ -5676,13 +6463,24 @@ fn write_back_bound_args(
                 param.name
             )
         })?;
-        write_assign_target_value(scopes, state, &target, value.clone())?;
+        write_assign_target_value(
+            scopes,
+            plan,
+            current_module_id,
+            aliases,
+            type_bindings,
+            state,
+            &target,
+            value.clone(),
+            host,
+        )?;
     }
     Ok(())
 }
 
 fn eval_member_value(base: RuntimeValue, member: &str) -> Result<RuntimeValue, String> {
     match base {
+        RuntimeValue::OwnerHandle(owner_key) => Ok(make_owner_object_reference(&owner_key, member)),
         RuntimeValue::Pair(left, right) => match member {
             "0" => Ok((*left).clone()),
             "1" => Ok((*right).clone()),
@@ -5720,12 +6518,26 @@ fn eval_member_value(base: RuntimeValue, member: &str) -> Result<RuntimeValue, S
 fn eval_runtime_member_value(
     base: RuntimeValue,
     member: &str,
-    scopes: &[RuntimeScope],
-    state: &RuntimeExecutionState,
+    scopes: &mut Vec<RuntimeScope>,
+    plan: &RuntimePackagePlan,
+    current_module_id: &str,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
 ) -> Result<RuntimeValue, String> {
     match base {
         RuntimeValue::Ref(reference) => {
-            let value = read_runtime_reference(scopes, state, &reference)?;
+            let value = read_runtime_reference(
+                scopes,
+                plan,
+                current_module_id,
+                aliases,
+                type_bindings,
+                state,
+                &reference,
+                host,
+            )?;
             eval_member_value(value, member)
         }
         other => eval_member_value(other, member),
@@ -5734,11 +6546,25 @@ fn eval_runtime_member_value(
 
 fn read_runtime_value_if_ref(
     value: RuntimeValue,
-    scopes: &[RuntimeScope],
-    state: &RuntimeExecutionState,
+    scopes: &mut Vec<RuntimeScope>,
+    plan: &RuntimePackagePlan,
+    current_module_id: &str,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
 ) -> Result<RuntimeValue, String> {
     match value {
-        RuntimeValue::Ref(reference) => read_runtime_reference(scopes, state, &reference),
+        RuntimeValue::Ref(reference) => read_runtime_reference(
+            scopes,
+            plan,
+            current_module_id,
+            aliases,
+            type_bindings,
+            state,
+            &reference,
+            host,
+        ),
         other => Ok(other),
     }
 }
@@ -5783,10 +6609,24 @@ fn runtime_slice_bound_to_usize(
 fn eval_runtime_index_value(
     base: RuntimeValue,
     index: RuntimeValue,
-    scopes: &[RuntimeScope],
-    state: &RuntimeExecutionState,
+    scopes: &mut Vec<RuntimeScope>,
+    plan: &RuntimePackagePlan,
+    current_module_id: &str,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
 ) -> Result<RuntimeValue, String> {
-    let base = read_runtime_value_if_ref(base, scopes, state)?;
+    let base = read_runtime_value_if_ref(
+        base,
+        scopes,
+        plan,
+        current_module_id,
+        aliases,
+        type_bindings,
+        state,
+        host,
+    )?;
     let index = expect_int(index, "index")?;
     match base {
         RuntimeValue::List(values) => {
@@ -5814,10 +6654,24 @@ fn eval_runtime_slice_value(
     start: Option<RuntimeValue>,
     end: Option<RuntimeValue>,
     inclusive_end: bool,
-    scopes: &[RuntimeScope],
-    state: &RuntimeExecutionState,
+    scopes: &mut Vec<RuntimeScope>,
+    plan: &RuntimePackagePlan,
+    current_module_id: &str,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
 ) -> Result<RuntimeValue, String> {
-    let base = read_runtime_value_if_ref(base, scopes, state)?;
+    let base = read_runtime_value_if_ref(
+        base,
+        scopes,
+        plan,
+        current_module_id,
+        aliases,
+        type_bindings,
+        state,
+        host,
+    )?;
     let (values, slice_kind) = match base {
         RuntimeValue::List(values) => (values, "list"),
         RuntimeValue::Array(values) => (values, "array"),
@@ -6299,7 +7153,18 @@ fn execute_call_by_path(
             host,
             allow_async,
         )?;
-        write_back_bound_args(scopes, state, routine, &bound_args, &outcome.final_args)?;
+        write_back_bound_args(
+            scopes,
+            plan,
+            current_module_id,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            state,
+            routine,
+            &bound_args,
+            &outcome.final_args,
+            host,
+        )?;
         return Ok(outcome.value);
     }
     let intrinsic = resolve_runtime_intrinsic_path(callable)
@@ -6318,10 +7183,15 @@ fn execute_call_by_path(
     let value = execute_runtime_intrinsic(intrinsic, &type_args, &mut values, plan, state, host)?;
     write_back_call_args(
         scopes,
+        plan,
+        current_module_id,
+        &BTreeMap::new(),
+        &BTreeMap::new(),
         state,
         intrinsic_edit_arg_indices(intrinsic),
         &call_args,
         &values,
+        host,
     )?;
     Ok(value)
 }
@@ -9725,7 +10595,17 @@ fn eval_expr(
                 state,
                 host,
             )?;
-            Ok(eval_runtime_member_value(base, member, scopes, state)?)
+            Ok(eval_runtime_member_value(
+                base,
+                member,
+                scopes,
+                plan,
+                current_module_id,
+                aliases,
+                type_bindings,
+                state,
+                host,
+            )?)
         }
         ParsedExpr::Index { expr, index } => Ok(eval_runtime_index_value(
             eval_expr(
@@ -9749,7 +10629,12 @@ fn eval_expr(
                 host,
             )?,
             scopes,
+            plan,
+            current_module_id,
+            aliases,
+            type_bindings,
             state,
+            host,
         )?),
         ParsedExpr::Slice {
             expr,
@@ -9798,7 +10683,12 @@ fn eval_expr(
                 .transpose()?,
             *inclusive_end,
             scopes,
+            plan,
+            current_module_id,
+            aliases,
+            type_bindings,
             state,
+            host,
         )?),
         ParsedExpr::Range {
             start,
@@ -9900,7 +10790,16 @@ fn eval_expr(
                     )?,
                     "deref",
                 )?;
-                Ok(read_runtime_reference(scopes, state, &reference)?)
+                Ok(read_runtime_reference(
+                    scopes,
+                    plan,
+                    current_module_id,
+                    aliases,
+                    type_bindings,
+                    state,
+                    &reference,
+                    host,
+                )?)
             }
             ParsedUnaryOp::Neg => Ok(RuntimeValue::Int(-expect_int(
                 eval_expr(
@@ -10373,14 +11272,31 @@ fn execute_scoped_block(
         state,
         host,
     );
-    scopes.pop();
+    let exited_scope = scopes
+        .pop()
+        .ok_or_else(|| "runtime scope stack is empty".to_string())?;
     defer_result?;
     let frame = if rollups.is_empty() {
         None
     } else {
         pop_runtime_rollup_frame(state)
     };
-    finish_runtime_rollups(result, frame, plan, current_module_id, scopes, state, host)
+    let result =
+        finish_runtime_rollups(result, frame, plan, current_module_id, scopes, state, host);
+    if let Err(err) = evaluate_owner_exit_checkpoints(
+        &exited_scope.activated_owner_keys,
+        plan,
+        current_module_id,
+        aliases,
+        type_bindings,
+        state,
+        host,
+        Some(scopes),
+    ) {
+        return Err(err.into());
+    }
+    release_scope_owner_activations(state, &exited_scope.activated_owner_keys);
+    result
 }
 
 fn execute_statements(
@@ -10469,6 +11385,7 @@ fn execute_statements(
                 then_branch,
                 else_branch,
                 rollups,
+                availability,
             } => {
                 if expect_bool(
                     eval_expr(
@@ -10483,11 +11400,13 @@ fn execute_statements(
                     )?,
                     "if condition",
                 )? {
+                    let mut scope = RuntimeScope::default();
+                    apply_runtime_availability_attachments(&mut scope, availability);
                     execute_scoped_block(
                         then_branch,
                         rollups,
                         scopes,
-                        RuntimeScope::default(),
+                        scope,
                         plan,
                         current_module_id,
                         aliases,
@@ -10498,11 +11417,13 @@ fn execute_statements(
                 } else if else_branch.is_empty() {
                     FlowSignal::Next
                 } else {
+                    let mut scope = RuntimeScope::default();
+                    apply_runtime_availability_attachments(&mut scope, availability);
                     execute_scoped_block(
                         else_branch,
                         rollups,
                         scopes,
-                        RuntimeScope::default(),
+                        scope,
                         plan,
                         current_module_id,
                         aliases,
@@ -10516,6 +11437,7 @@ fn execute_statements(
                 condition,
                 body,
                 rollups,
+                availability,
             } => {
                 push_runtime_rollup_frame(state, rollups, scopes);
                 let result = (|| -> RuntimeEvalResult<FlowSignal> {
@@ -10535,11 +11457,13 @@ fn execute_statements(
                         )? {
                             break Ok(FlowSignal::Next);
                         }
+                        let mut scope = RuntimeScope::default();
+                        apply_runtime_availability_attachments(&mut scope, availability);
                         match execute_scoped_block(
                             body,
                             &[],
                             scopes,
-                            RuntimeScope::default(),
+                            scope,
                             plan,
                             current_module_id,
                             aliases,
@@ -10572,6 +11496,7 @@ fn execute_statements(
                 iterable,
                 body,
                 rollups,
+                availability,
             } => {
                 push_runtime_rollup_frame(state, rollups, scopes);
                 let result = (|| -> RuntimeEvalResult<FlowSignal> {
@@ -10588,6 +11513,7 @@ fn execute_statements(
                     let mut loop_signal = FlowSignal::Next;
                     for value in values {
                         let mut scope = RuntimeScope::default();
+                        apply_runtime_availability_attachments(&mut scope, availability);
                         insert_runtime_local(
                             state,
                             scopes.len(),
@@ -10641,6 +11567,69 @@ fn execute_statements(
                     .ok_or_else(|| "runtime scope stack is empty".to_string())?
                     .deferred
                     .push(expr.clone());
+                FlowSignal::Next
+            }
+            ParsedStmt::ActivateOwner { .. } => {
+                let ParsedStmt::ActivateOwner {
+                    owner_path,
+                    owner_local_name: _,
+                    binding,
+                    context,
+                } = statement
+                else {
+                    unreachable!();
+                };
+                let owner = lookup_runtime_owner_plan(plan, owner_path).ok_or_else(|| {
+                    format!(
+                        "runtime owner activation `{}` resolves to an unknown owner",
+                        owner_path.join(".")
+                    )
+                })?;
+                let owner_key = owner_state_key(owner_path);
+                let had_prior_active_state = state
+                    .owners
+                    .get(&owner_key)
+                    .map(|owner_state| owner_state.active_bindings > 0)
+                    .unwrap_or(false);
+                let context_value = context
+                    .as_ref()
+                    .map(|expr| {
+                        eval_expr(
+                            expr,
+                            plan,
+                            current_module_id,
+                            scopes,
+                            aliases,
+                            type_bindings,
+                            state,
+                            host,
+                        )
+                    })
+                    .transpose()?;
+                let owner_state = state
+                    .owners
+                    .entry(owner_key.clone())
+                    .or_insert_with(RuntimeOwnerState::default);
+                if owner_state.active_bindings == 0 {
+                    owner_state.activation_context = context_value;
+                    owner_state.pending_init.clear();
+                    owner_state.pending_resume = owner_state.objects.keys().cloned().collect();
+                }
+                activate_owner_scope_binding(scopes, state, owner, &owner_key, binding.as_deref())
+                    .map_err(RuntimeEvalSignal::from)?;
+                if had_prior_active_state {
+                    evaluate_owner_exit_checkpoints(
+                        std::slice::from_ref(&owner_key),
+                        plan,
+                        current_module_id,
+                        aliases,
+                        type_bindings,
+                        state,
+                        host,
+                        Some(scopes),
+                    )
+                    .map_err(RuntimeEvalSignal::from)?;
+                }
                 FlowSignal::Next
             }
             ParsedStmt::Break => FlowSignal::Break,
@@ -10754,6 +11743,7 @@ fn execute_routine_call_with_state(
         }
         let outcome = (|| -> Result<RoutineExecutionOutcome, String> {
             let mut initial_scope = RuntimeScope::default();
+            apply_runtime_availability_attachments(&mut initial_scope, &routine.availability);
             push_runtime_rollup_frame(state, &routine.rollups, &[]);
             for (param, value) in routine.params.iter().zip(args) {
                 insert_runtime_local(
@@ -10805,6 +11795,17 @@ fn execute_routine_call_with_state(
                         )
                         .map_err(runtime_eval_message)?;
                     }
+                    evaluate_owner_exit_checkpoints(
+                        &final_scope.activated_owner_keys,
+                        plan,
+                        &routine.module_id,
+                        &aliases,
+                        &type_bindings,
+                        state,
+                        host,
+                        None,
+                    )?;
+                    release_scope_owner_activations(state, &final_scope.activated_owner_keys);
                     let final_args = routine
                         .params
                         .iter()
@@ -10830,6 +11831,17 @@ fn execute_routine_call_with_state(
                         .map_err(runtime_eval_message)?;
                 }
             }
+            evaluate_owner_exit_checkpoints(
+                &final_scope.activated_owner_keys,
+                plan,
+                &routine.module_id,
+                &aliases,
+                &type_bindings,
+                state,
+                host,
+                None,
+            )?;
+            release_scope_owner_activations(state, &final_scope.activated_owner_keys);
             let result = match result {
                 Ok(signal) => signal,
                 Err(RuntimeEvalSignal::Message(message)) => return Err(message),
@@ -10977,6 +11989,7 @@ pub fn execute_entrypoint_routine(
         | RuntimeValue::List(_)
         | RuntimeValue::Map(_)
         | RuntimeValue::Range { .. }
+        | RuntimeValue::OwnerHandle(_)
         | RuntimeValue::Ref(_)
         | RuntimeValue::Opaque(_)
         | RuntimeValue::Record { .. }

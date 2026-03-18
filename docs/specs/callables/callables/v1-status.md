@@ -2,7 +2,7 @@
 
 Status: `reserved-post-selfhost`
 
-This document records the chosen direction for first-class callable capability without making it part of the selfhost baseline.
+This document records what still remains reserved after the pre-selfhost object/owner contract landed in `docs/specs/objects/objects/v1-scope.md`.
 
 ## Current Decision
 
@@ -10,10 +10,11 @@ This document records the chosen direction for first-class callable capability w
 - Arcana does not adopt lambdas in the selfhost baseline.
 - Arcana does not adopt general function values in the selfhost baseline.
 - Arcana does not adopt dynamic-dispatch callable objects in the selfhost baseline.
+- Arcana now does adopt explicit `obj` and `create ... scope-exit` support pre-selfhost; callable objects and context objects are roles inside that approved object model, not future closure placeholders.
 
 ## Chosen Future Direction
 
-- If Arcana later gains first-class callable capability, the intended direction is explicit function objects plus explicit context objects.
+- If Arcana later gains broader first-class callable transport beyond the current object/owner model, the intended direction is still explicit function objects plus explicit context objects.
 - Context is meant to be explicit data, not implicit lexical capture.
 - Callable behavior should be signature-visible and statically understandable.
 
@@ -39,7 +40,7 @@ This document records the chosen direction for first-class callable capability w
 
 ## Required Future Contract Before Implementation
 
-Implementation of function/context objects requires a dedicated scope doc that settles:
+Implementation of broader callable transport beyond the current object/owner scope requires a dedicated contract that settles:
 
 - type identity and generic behavior
 - explicit context construction rules

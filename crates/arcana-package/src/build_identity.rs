@@ -451,6 +451,7 @@ mod tests {
             runtime_requirements: Vec::new(),
             entrypoints: Vec::new(),
             routines: Vec::new(),
+            owners: Vec::new(),
             modules: vec![AotPackageModuleArtifact {
                 module_id: "tool".to_string(),
                 symbol_count: 0,

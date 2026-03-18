@@ -46,6 +46,15 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
+fn owned_grimoire_root() -> PathBuf {
+    let libs = repo_root().join("grimoires").join("owned").join("libs");
+    if libs.is_dir() {
+        libs
+    } else {
+        repo_root().join("grimoires").join("owned").join("app")
+    }
+}
+
 fn execute_workspace_build(
     graph: &arcana_package::WorkspaceGraph,
     _fingerprints: &arcana_package::WorkspaceFingerprints,
@@ -229,6 +238,7 @@ fn sample_return_artifact() -> AotPackageArtifact {
             intrinsic_impl: None,
             impl_target_type: None,
             impl_trait_path: None,
+            availability: Vec::new(),
             foreword_rows: Vec::new(),
             rollups: Vec::new(),
             statements: vec![
@@ -236,6 +246,7 @@ fn sample_return_artifact() -> AotPackageArtifact {
                     .expect("statement should parse"),
             ],
         }],
+        owners: Vec::new(),
         modules: vec![AotPackageModuleArtifact {
             module_id: "hello".to_string(),
             symbol_count: 1,
@@ -284,11 +295,13 @@ fn sample_print_artifact() -> AotPackageArtifact {
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
+                availability: Vec::new(),
                 foreword_rows: Vec::new(),
                 rollups: Vec::new(),
                 statements: vec![parse_stmt("stmt(core=expr(phrase(subject=generic(expr=member(path(io), print),types=[Str]),args=[str(\"\\\"hello, arcana\\\"\")],qualifier=call,attached=[])),forewords=[],rollups=[])")
                     .expect("statement should parse")],
             }],
+            owners: Vec::new(),
             modules: vec![AotPackageModuleArtifact {
                 module_id: "hello".to_string(),
                 symbol_count: 1,
@@ -338,6 +351,7 @@ fn sample_stmt_metadata_artifact() -> AotPackageArtifact {
                     intrinsic_impl: None,
                     impl_target_type: None,
                     impl_trait_path: None,
+                    availability: Vec::new(),
                     foreword_rows: vec!["test()".to_string()],
                     rollups: vec![parse_rollup_row("cleanup:scope:metadata.cleanup")
                         .expect("rollup should parse")],
@@ -360,12 +374,14 @@ fn sample_stmt_metadata_artifact() -> AotPackageArtifact {
                     intrinsic_impl: None,
                     impl_target_type: None,
                     impl_trait_path: None,
+                    availability: Vec::new(),
                     foreword_rows: Vec::new(),
                     rollups: Vec::new(),
                     statements: vec![parse_stmt("stmt(core=return(int(0)),forewords=[],rollups=[])")
                         .expect("statement should parse")],
                 },
             ],
+            owners: Vec::new(),
             modules: vec![AotPackageModuleArtifact {
                 module_id: "metadata".to_string(),
                 symbol_count: 2,
@@ -413,6 +429,7 @@ fn sample_attachment_foreword_artifact() -> AotPackageArtifact {
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
+                availability: Vec::new(),
                 foreword_rows: Vec::new(),
                 rollups: Vec::new(),
                 statements: vec![
@@ -432,6 +449,7 @@ fn sample_attachment_foreword_artifact() -> AotPackageArtifact {
                         .expect("statement should parse"),
                 ],
             }],
+            owners: Vec::new(),
             modules: vec![AotPackageModuleArtifact {
                 module_id: "attachment".to_string(),
                 symbol_count: 1,
@@ -632,6 +650,7 @@ fn resolve_routine_index_for_call_prefers_lowered_routine_identity() {
         runtime_requirements: Vec::new(),
         module_aliases: BTreeMap::new(),
         entrypoints: Vec::new(),
+        owners: Vec::new(),
         routines: vec![
             RuntimeRoutinePlan {
                 module_id: "ops".to_string(),
@@ -651,6 +670,7 @@ fn resolve_routine_index_for_call_prefers_lowered_routine_identity() {
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
+                availability: Vec::new(),
                 foreword_rows: Vec::new(),
                 rollups: Vec::new(),
                 statements: Vec::new(),
@@ -673,6 +693,7 @@ fn resolve_routine_index_for_call_prefers_lowered_routine_identity() {
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
+                availability: Vec::new(),
                 foreword_rows: Vec::new(),
                 rollups: Vec::new(),
                 statements: Vec::new(),
@@ -709,6 +730,7 @@ fn runtime_dynamic_bare_method_fallback_matches_receiver_type_args() {
         runtime_requirements: Vec::new(),
         module_aliases: BTreeMap::new(),
         entrypoints: Vec::new(),
+        owners: Vec::new(),
         routines: vec![
             RuntimeRoutinePlan {
                 module_id: "ops".to_string(),
@@ -728,6 +750,7 @@ fn runtime_dynamic_bare_method_fallback_matches_receiver_type_args() {
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
+                availability: Vec::new(),
                 foreword_rows: Vec::new(),
                 rollups: Vec::new(),
                 statements: Vec::new(),
@@ -751,6 +774,7 @@ fn runtime_dynamic_bare_method_fallback_matches_receiver_type_args() {
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
+                availability: Vec::new(),
                 foreword_rows: Vec::new(),
                 rollups: Vec::new(),
                 statements: Vec::new(),
@@ -822,6 +846,7 @@ fn runtime_json_abi_executes_exported_routine() {
         runtime_requirements: Vec::new(),
         module_aliases: BTreeMap::new(),
         entrypoints: Vec::new(),
+        owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
             module_id: "tool".to_string(),
             routine_key: "tool#fn-0".to_string(),
@@ -840,6 +865,7 @@ fn runtime_json_abi_executes_exported_routine() {
             intrinsic_impl: None,
             impl_target_type: None,
             impl_trait_path: None,
+            availability: Vec::new(),
             foreword_rows: Vec::new(),
             rollups: Vec::new(),
             statements: vec![ParsedStmt::ReturnValue {
@@ -866,6 +892,7 @@ fn runtime_native_abi_executes_exported_routine() {
         runtime_requirements: Vec::new(),
         module_aliases: BTreeMap::new(),
         entrypoints: Vec::new(),
+        owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
             module_id: "tool".to_string(),
             routine_key: "tool#fn-0".to_string(),
@@ -884,6 +911,7 @@ fn runtime_native_abi_executes_exported_routine() {
             intrinsic_impl: None,
             impl_target_type: None,
             impl_trait_path: None,
+            availability: Vec::new(),
             foreword_rows: Vec::new(),
             rollups: Vec::new(),
             statements: vec![ParsedStmt::ReturnValue {
@@ -915,6 +943,7 @@ fn runtime_native_abi_supports_string_and_byte_values() {
         runtime_requirements: Vec::new(),
         module_aliases: BTreeMap::new(),
         entrypoints: Vec::new(),
+        owners: Vec::new(),
         routines: vec![
             RuntimeRoutinePlan {
                 module_id: "tool".to_string(),
@@ -934,6 +963,7 @@ fn runtime_native_abi_supports_string_and_byte_values() {
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
+                availability: Vec::new(),
                 foreword_rows: Vec::new(),
                 rollups: Vec::new(),
                 statements: vec![ParsedStmt::ReturnValue {
@@ -962,6 +992,7 @@ fn runtime_native_abi_supports_string_and_byte_values() {
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
+                availability: Vec::new(),
                 foreword_rows: Vec::new(),
                 rollups: Vec::new(),
                 statements: vec![ParsedStmt::ReturnValue {
@@ -992,6 +1023,7 @@ fn runtime_native_abi_supports_string_and_byte_values() {
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
+                availability: Vec::new(),
                 foreword_rows: Vec::new(),
                 rollups: Vec::new(),
                 statements: vec![ParsedStmt::ReturnValue {
@@ -1255,6 +1287,7 @@ fn execute_main_manual_routine_rollups_run_after_defers() {
             exported: true,
             routine_index: 1,
         }],
+        owners: Vec::new(),
         routines: vec![
             RuntimeRoutinePlan {
                 module_id: "manual_routine_rollups".to_string(),
@@ -1274,6 +1307,7 @@ fn execute_main_manual_routine_rollups_run_after_defers() {
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
+                availability: Vec::new(),
                 foreword_rows: Vec::new(),
                 rollups: vec![ParsedPageRollup {
                     kind: "cleanup".to_string(),
@@ -1342,6 +1376,7 @@ fn execute_main_manual_routine_rollups_run_after_defers() {
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
+                availability: Vec::new(),
                 foreword_rows: Vec::new(),
                 rollups: Vec::new(),
                 statements: vec![
@@ -1384,6 +1419,7 @@ fn execute_main_manual_routine_rollups_run_after_defers() {
                 intrinsic_impl: Some("IoPrint".to_string()),
                 impl_target_type: None,
                 impl_trait_path: None,
+                availability: Vec::new(),
                 foreword_rows: Vec::new(),
                 rollups: Vec::new(),
                 statements: Vec::new(),
@@ -3448,6 +3484,7 @@ fn execute_main_rejects_try_qualifier_arguments() {
             exported: true,
             routine_index: 0,
         }],
+        owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
             module_id: "try_args_runtime".to_string(),
             routine_key: "try_args_runtime#sym-0".to_string(),
@@ -3462,6 +3499,7 @@ fn execute_main_rejects_try_qualifier_arguments() {
             intrinsic_impl: None,
             impl_target_type: None,
             impl_trait_path: None,
+            availability: Vec::new(),
             foreword_rows: Vec::new(),
             rollups: Vec::new(),
             statements: vec![
@@ -3765,6 +3803,7 @@ fn execute_main_rejects_use_after_take_move() {
             exported: true,
             routine_index: 2,
         }],
+        owners: Vec::new(),
         routines: vec![
             RuntimeRoutinePlan {
                 module_id: "take_move_runtime".to_string(),
@@ -3784,6 +3823,7 @@ fn execute_main_rejects_use_after_take_move() {
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
+                availability: Vec::new(),
                 foreword_rows: Vec::new(),
                 rollups: Vec::new(),
                 statements: vec![ParsedStmt::ReturnValue {
@@ -3808,6 +3848,7 @@ fn execute_main_rejects_use_after_take_move() {
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
+                availability: Vec::new(),
                 foreword_rows: Vec::new(),
                 rollups: Vec::new(),
                 statements: vec![ParsedStmt::ReturnValue {
@@ -3828,6 +3869,7 @@ fn execute_main_rejects_use_after_take_move() {
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
+                availability: Vec::new(),
                 foreword_rows: Vec::new(),
                 rollups: Vec::new(),
                 statements: vec![
@@ -3893,6 +3935,7 @@ fn execute_main_rejects_direct_intrinsic_take_fallback_reuse() {
             exported: true,
             routine_index: 0,
         }],
+        owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
             module_id: "take_intrinsic_runtime".to_string(),
             routine_key: "take_intrinsic_runtime#sym-0".to_string(),
@@ -3907,6 +3950,7 @@ fn execute_main_rejects_direct_intrinsic_take_fallback_reuse() {
             intrinsic_impl: None,
             impl_target_type: None,
             impl_trait_path: None,
+            availability: Vec::new(),
             foreword_rows: Vec::new(),
             rollups: Vec::new(),
             statements: vec![
@@ -4165,17 +4209,11 @@ fn execute_main_runs_linked_std_ecs_behavior_routines() {
 #[test]
 fn execute_main_runs_owned_app_facade_workspace() {
     let dir = temp_workspace_dir("owned_app_facade");
-    let desktop_dep = repo_root()
-        .join("grimoires")
-        .join("owned")
-        .join("app")
+    let desktop_dep = owned_grimoire_root()
         .join("arcana-desktop")
         .to_string_lossy()
         .replace('\\', "/");
-    let audio_dep = repo_root()
-        .join("grimoires")
-        .join("owned")
-        .join("app")
+    let audio_dep = owned_grimoire_root()
         .join("arcana-audio")
         .to_string_lossy()
         .replace('\\', "/");
@@ -4754,6 +4792,246 @@ fn execute_main_runs_synthetic_host_core_workspace_artifact() {
         fs::read_to_string(&report_path).expect("report should write"),
         "Arcana Runtime Host Core v1\n"
     );
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn execute_main_runs_object_owner_hold_workspace_artifact() {
+    let dir = temp_workspace_dir("owner_hold");
+    write_file(
+        &dir.join("book.toml"),
+        "name = \"runtime_owner_hold\"\nkind = \"app\"\n",
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "obj Counter:\n",
+            "    value: Int\n",
+            "\n",
+            "create Session [Counter] scope-exit:\n",
+            "    done: when Counter.value >= 10 hold [Counter]\n",
+            "\n",
+            "Session\n",
+            "Counter\n",
+            "fn main() -> Int:\n",
+            "    let active = Session :: :: call\n",
+            "    Counter.value = 9\n",
+            "    Counter.value += 1\n",
+            "    let resumed = Session :: :: call\n",
+            "    return resumed.Counter.value\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let plan = build_workspace_plan_for_member(&dir, "runtime_owner_hold");
+    let mut host = BufferedHost::default();
+    let code = execute_main(&plan, &mut host).expect("runtime should execute owner hold flow");
+
+    assert_eq!(code, 10);
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn execute_main_rejects_stale_owner_access_after_exit() {
+    let dir = temp_workspace_dir("owner_stale_after_exit");
+    write_file(
+        &dir.join("book.toml"),
+        "name = \"runtime_owner_stale_after_exit\"\nkind = \"app\"\n",
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "obj Counter:\n",
+            "    value: Int\n",
+            "\n",
+            "create Session [Counter] scope-exit:\n",
+            "    done: when Counter.value >= 1\n",
+            "\n",
+            "Session\n",
+            "Counter\n",
+            "fn main() -> Int:\n",
+            "    let active = Session :: :: call\n",
+            "    Counter.value = 1\n",
+            "    return active.Counter.value\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let plan = build_workspace_plan_for_member(&dir, "runtime_owner_stale_after_exit");
+    let mut host = BufferedHost::default();
+    let err = execute_main(&plan, &mut host).expect_err("stale owner access should fail");
+
+    assert!(
+        err.contains("explicit re-entry is required"),
+        "expected explicit re-entry diagnostic, got: {err}"
+    );
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn execute_main_reentry_can_exit_owner_without_realized_objects() {
+    let dir = temp_workspace_dir("owner_reentry_without_objects");
+    write_file(
+        &dir.join("book.toml"),
+        "name = \"runtime_owner_reentry_without_objects\"\nkind = \"app\"\n",
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "obj Counter:\n",
+            "    value: Int\n",
+            "\n",
+            "create Session [Counter] scope-exit:\n",
+            "    done: when Session == Session\n",
+            "\n",
+            "Session\n",
+            "Counter\n",
+            "fn main() -> Int:\n",
+            "    Session :: :: call\n",
+            "    let resumed = Session :: :: call\n",
+            "    return resumed.Counter.value\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let plan = build_workspace_plan_for_member(&dir, "runtime_owner_reentry_without_objects");
+    let mut host = BufferedHost::default();
+    let err = execute_main(&plan, &mut host)
+        .expect_err("re-entry should honor exits even before object realization");
+
+    assert!(
+        err.contains("explicit re-entry is required"),
+        "expected explicit re-entry diagnostic, got: {err}"
+    );
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn execute_main_runs_owner_init_hook_with_activation_context() {
+    let dir = temp_workspace_dir("owner_init_context");
+    write_file(
+        &dir.join("book.toml"),
+        "name = \"runtime_owner_init_context\"\nkind = \"app\"\n",
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "obj SessionCtx:\n",
+            "    base: Int\n",
+            "\n",
+            "obj Counter:\n",
+            "    value: Int\n",
+            "    fn init(edit self: Self, read ctx: SessionCtx):\n",
+            "        self.value = ctx.base\n",
+            "\n",
+            "create Session [Counter] scope-exit:\n",
+            "    done: when Counter.value > 10 hold [Counter]\n",
+            "\n",
+            "Session\n",
+            "Counter\n",
+            "fn main() -> Int:\n",
+            "    let ctx = SessionCtx :: base = 4 :: call\n",
+            "    Session :: ctx :: call\n",
+            "    return Counter.value\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let plan = build_workspace_plan_for_member(&dir, "runtime_owner_init_context");
+    let mut host = BufferedHost::default();
+    let code = execute_main(&plan, &mut host).expect("runtime should execute owner init hook");
+
+    assert_eq!(code, 4);
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn execute_main_runs_owner_resume_hook_with_activation_context() {
+    let dir = temp_workspace_dir("owner_resume_context");
+    write_file(
+        &dir.join("book.toml"),
+        "name = \"runtime_owner_resume_context\"\nkind = \"app\"\n",
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "obj SessionCtx:\n",
+            "    base: Int\n",
+            "\n",
+            "obj Counter:\n",
+            "    value: Int\n",
+            "    fn init(edit self: Self, read ctx: SessionCtx):\n",
+            "        self.value = ctx.base\n",
+            "    fn resume(edit self: Self, read ctx: SessionCtx):\n",
+            "        self.value += ctx.base\n",
+            "\n",
+            "create Session [Counter] scope-exit:\n",
+            "    done: when Counter.value == 3 hold [Counter]\n",
+            "\n",
+            "Session\n",
+            "Counter\n",
+            "fn main() -> Int:\n",
+            "    let start = SessionCtx :: base = 1 :: call\n",
+            "    Session :: start :: call\n",
+            "    let first = Counter.value\n",
+            "    Counter.value = 3\n",
+            "    let resume_ctx = SessionCtx :: base = 2 :: call\n",
+            "    let resumed = Session :: resume_ctx :: call\n",
+            "    return resumed.Counter.value\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let plan = build_workspace_plan_for_member(&dir, "runtime_owner_resume_context");
+    let mut host = BufferedHost::default();
+    let code = execute_main(&plan, &mut host).expect("runtime should execute owner resume hook");
+
+    assert_eq!(code, 5);
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn execute_main_rejects_owner_object_init_without_required_context() {
+    let dir = temp_workspace_dir("owner_missing_context");
+    write_file(
+        &dir.join("book.toml"),
+        "name = \"runtime_owner_missing_context\"\nkind = \"app\"\n",
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "obj SessionCtx:\n",
+            "    base: Int\n",
+            "\n",
+            "obj Counter:\n",
+            "    value: Int\n",
+            "    fn init(edit self: Self, read ctx: SessionCtx):\n",
+            "        self.value = ctx.base\n",
+            "\n",
+            "create Session [Counter] scope-exit:\n",
+            "    done: when false hold [Counter]\n",
+            "\n",
+            "Session\n",
+            "Counter\n",
+            "fn main() -> Int:\n",
+            "    Session :: :: call\n",
+            "    return Counter.value\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let plan = build_workspace_plan_for_member(&dir, "runtime_owner_missing_context");
+    let mut host = BufferedHost::default();
+    let err =
+        execute_main(&plan, &mut host).expect_err("owner object init without context should fail");
+
+    assert!(err.contains("requires an activation context"), "{err}");
 
     let _ = fs::remove_dir_all(dir);
 }

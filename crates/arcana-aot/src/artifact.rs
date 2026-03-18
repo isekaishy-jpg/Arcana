@@ -1,4 +1,4 @@
-use arcana_ir::{ExecPageRollup, ExecStmt};
+use arcana_ir::{ExecAvailabilityAttachment, ExecExpr, ExecPageRollup, ExecStmt};
 use serde::{Deserialize, Serialize};
 
 pub const AOT_INTERNAL_FORMAT: &str = "arcana-aot-v4";
@@ -49,9 +49,40 @@ pub struct AotRoutineArtifact {
     pub impl_target_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub impl_trait_path: Option<Vec<String>>,
+    pub availability: Vec<ExecAvailabilityAttachment>,
     pub foreword_rows: Vec<String>,
     pub rollups: Vec<ExecPageRollup>,
     pub statements: Vec<ExecStmt>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AotOwnerObjectArtifact {
+    pub type_path: Vec<String>,
+    pub local_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub init_routine_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub init_with_context_routine_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_routine_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_with_context_routine_key: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AotOwnerExitArtifact {
+    pub name: String,
+    pub condition: ExecExpr,
+    pub holds: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AotOwnerArtifact {
+    pub module_id: String,
+    pub owner_path: Vec<String>,
+    pub owner_name: String,
+    pub objects: Vec<AotOwnerObjectArtifact>,
+    pub exits: Vec<AotOwnerExitArtifact>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,5 +98,6 @@ pub struct AotPackageArtifact {
     pub runtime_requirements: Vec<String>,
     pub entrypoints: Vec<AotEntrypointArtifact>,
     pub routines: Vec<AotRoutineArtifact>,
+    pub owners: Vec<AotOwnerArtifact>,
     pub modules: Vec<AotPackageModuleArtifact>,
 }

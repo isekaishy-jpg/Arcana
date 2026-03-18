@@ -49,6 +49,7 @@ This document defines how Arcana spec files are interpreted during the rewrite.
 `approved-pre-selfhost`
 - `docs/specs/access-modes/access-modes/v1-scope.md`
 - `docs/specs/qualified-phrases/qualified-phrases/v1-scope.md`
+- `docs/specs/objects/objects/v1-scope.md`
 - `docs/specs/collections/collections/v1-scope.md`
 - `docs/specs/where/where/v1-scope.md`
 - `docs/specs/concurrency/concurrency/v1-scope.md`
@@ -101,7 +102,7 @@ This document defines how Arcana spec files are interpreted during the rewrite.
 - `plan` and `lazy` chain semantics must stay explicit in the frozen docs so pipeline validation and demand-sensitive execution are not inferred from old implementation shortcuts.
 - `AnyBox` or equivalent erased Arcana value carriers are banned from the rewrite contract.
 - Closures are not the intended direction; if first-class callable capability is added later, it should be through explicit function/context objects.
-- The 3-top-level-arg phrase cap is intentional and does not, by itself, justify early callable/context-object work; use explicit data shaping until a dedicated callable-object contract exists.
+- The 3-top-level-arg phrase cap is intentional and does not, by itself, justify reopening closure semantics or general function values; use explicit data shaping and the approved object/owner model where that surface fits.
 - Legacy Meadow backend planning must not override the rewrite path; extract only explicitly approved deferred items and keep the original documents reference-only.
 - Rebuild imported `std` for the rewrite architecture instead of preserving Meadow-era layering; showcase/game convenience logic does not become std contract just because it was carried over.
 - `std` is rewrite-owned first-party library surface, not an imported MeadowLang artifact to preserve wholesale.
