@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use arcana_frontend::check_workspace_graph;
 use arcana_package::{
     BuildTarget, DistributionBundle, GrimoireKind, WorkspaceGraph, default_distribution_dir,
-    execute_build_with_context, load_workspace_graph, plan_build_for_target_with_context,
+    execute_build_with_context, load_workspace_graph, plan_package_build_for_target_with_context,
     plan_workspace, prepare_build_from_workspace, read_lockfile, stage_distribution_bundle,
     write_lockfile,
 };
@@ -30,12 +30,13 @@ pub(crate) fn package_workspace(
     let lock_path = graph.root_dir.join("Arcana.lock");
     let existing_lock = read_lockfile(&lock_path)?;
     let execution_context = build_execution_context_for_target(&target)?;
-    let statuses = plan_build_for_target_with_context(
+    let statuses = plan_package_build_for_target_with_context(
         &graph,
         &order,
         &prepared,
         existing_lock.as_ref(),
         target.clone(),
+        &packaged_member_name,
         &execution_context,
     )?;
     execute_build_with_context(&graph, &prepared, &statuses, &execution_context)?;
@@ -89,13 +90,23 @@ fn default_package_member(
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::io::Read;
     use std::path::Path;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::thread;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     #[cfg(windows)]
     use libloading::Library;
     #[cfg(windows)]
-    use std::process::Command;
+    use std::process::{Child, Command, Stdio};
+    #[cfg(windows)]
+    use windows_sys::Win32::Foundation::HWND;
+    #[cfg(windows)]
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
+        IsWindowVisible, SendMessageW, SetForegroundWindow, WM_CHAR, WM_CLOSE,
+        WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    };
 
     use super::*;
 
@@ -114,6 +125,254 @@ mod tests {
             fs::create_dir_all(parent).expect("parent directories should be created");
         }
         fs::write(path, text).expect("file should write");
+    }
+
+    #[cfg(windows)]
+    struct WindowSearch {
+        pid: u32,
+        title_contains: String,
+        hwnd: HWND,
+        title: String,
+    }
+
+    #[cfg(windows)]
+    struct WindowListSearch {
+        pid: u32,
+        windows: Vec<(HWND, String)>,
+    }
+
+    #[cfg(windows)]
+    unsafe extern "system" fn collect_process_window(hwnd: HWND, lparam: isize) -> i32 {
+        let search = unsafe { &mut *(lparam as *mut WindowSearch) };
+        let mut pid = 0u32;
+        unsafe {
+            GetWindowThreadProcessId(hwnd, &mut pid);
+        }
+        if pid != search.pid {
+            return 1;
+        }
+        if unsafe { IsWindowVisible(hwnd) } == 0 {
+            return 1;
+        }
+        let title_len = unsafe { GetWindowTextLengthW(hwnd) };
+        let mut title = String::new();
+        if title_len > 0 {
+            let mut buffer = vec![0u16; usize::try_from(title_len).unwrap_or(0) + 1];
+            let read = unsafe { GetWindowTextW(hwnd, buffer.as_mut_ptr(), title_len + 1) };
+            if read > 0 {
+                title = String::from_utf16_lossy(&buffer[..usize::try_from(read).unwrap_or(0)]);
+            }
+        }
+        if !search.title_contains.is_empty() && !title.contains(&search.title_contains) {
+            return 1;
+        }
+        search.hwnd = hwnd;
+        search.title = title;
+        0
+    }
+
+    #[cfg(windows)]
+    unsafe extern "system" fn collect_process_windows(hwnd: HWND, lparam: isize) -> i32 {
+        let search = unsafe { &mut *(lparam as *mut WindowListSearch) };
+        let mut pid = 0u32;
+        unsafe {
+            GetWindowThreadProcessId(hwnd, &mut pid);
+        }
+        if pid != search.pid {
+            return 1;
+        }
+        if unsafe { IsWindowVisible(hwnd) } == 0 {
+            return 1;
+        }
+        let title_len = unsafe { GetWindowTextLengthW(hwnd) };
+        let mut title = String::new();
+        if title_len > 0 {
+            let mut buffer = vec![0u16; usize::try_from(title_len).unwrap_or(0) + 1];
+            let read = unsafe { GetWindowTextW(hwnd, buffer.as_mut_ptr(), title_len + 1) };
+            if read > 0 {
+                title = String::from_utf16_lossy(&buffer[..usize::try_from(read).unwrap_or(0)]);
+            }
+        }
+        search.windows.push((hwnd, title));
+        1
+    }
+
+    #[cfg(windows)]
+    fn wait_for_process_window(pid: u32, timeout: Duration) -> Option<(HWND, String)> {
+        let start = Instant::now();
+        while start.elapsed() < timeout {
+            let mut search = WindowSearch {
+                pid,
+                title_contains: String::new(),
+                hwnd: std::ptr::null_mut(),
+                title: String::new(),
+            };
+            unsafe {
+                EnumWindows(
+                    Some(collect_process_window),
+                    &mut search as *mut WindowSearch as isize,
+                );
+            }
+            if !search.hwnd.is_null() {
+                return Some((search.hwnd, search.title));
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        None
+    }
+
+    #[cfg(windows)]
+    fn wait_for_process_window_title_contains(
+        pid: u32,
+        needle: &str,
+        timeout: Duration,
+    ) -> Option<(HWND, String)> {
+        let start = Instant::now();
+        while start.elapsed() < timeout {
+            let mut search = WindowSearch {
+                pid,
+                title_contains: needle.to_string(),
+                hwnd: std::ptr::null_mut(),
+                title: String::new(),
+            };
+            unsafe {
+                EnumWindows(
+                    Some(collect_process_window),
+                    &mut search as *mut WindowSearch as isize,
+                );
+            }
+            if !search.hwnd.is_null() {
+                return Some((search.hwnd, search.title));
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        None
+    }
+
+    #[cfg(windows)]
+    fn process_windows(pid: u32) -> Vec<(HWND, String)> {
+        let mut search = WindowListSearch {
+            pid,
+            windows: Vec::new(),
+        };
+        unsafe {
+            EnumWindows(
+                Some(collect_process_windows),
+                &mut search as *mut WindowListSearch as isize,
+            );
+        }
+        search.windows
+    }
+
+    #[cfg(windows)]
+    fn wait_for_additional_process_window(
+        pid: u32,
+        exclude: HWND,
+        timeout: Duration,
+    ) -> Option<(HWND, String)> {
+        let start = Instant::now();
+        while start.elapsed() < timeout {
+            if let Some(found) = process_windows(pid)
+                .into_iter()
+                .find(|(hwnd, _)| *hwnd != exclude)
+            {
+                return Some(found);
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        None
+    }
+
+    #[cfg(windows)]
+    fn read_window_title(hwnd: HWND) -> String {
+        let title_len = unsafe { GetWindowTextLengthW(hwnd) };
+        if title_len <= 0 {
+            return String::new();
+        }
+        let mut buffer = vec![0u16; usize::try_from(title_len).unwrap_or(0) + 1];
+        let read = unsafe { GetWindowTextW(hwnd, buffer.as_mut_ptr(), title_len + 1) };
+        if read <= 0 {
+            return String::new();
+        }
+        String::from_utf16_lossy(&buffer[..usize::try_from(read).unwrap_or(0)])
+    }
+
+    #[cfg(windows)]
+    fn wait_for_window_title_contains(
+        hwnd: HWND,
+        needle: &str,
+        timeout: Duration,
+    ) -> Option<String> {
+        let start = Instant::now();
+        while start.elapsed() < timeout {
+            let title = read_window_title(hwnd);
+            if title.contains(needle) {
+                return Some(title);
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        None
+    }
+
+    #[cfg(windows)]
+    fn pack_mouse_lparam(x: i32, y: i32) -> isize {
+        ((y as u32) << 16 | (x as u32 & 0xFFFF)) as isize
+    }
+
+    #[cfg(windows)]
+    fn send_left_click(hwnd: HWND, x: i32, y: i32) {
+        unsafe {
+            SetForegroundWindow(hwnd);
+            let lparam = pack_mouse_lparam(x, y);
+            SendMessageW(hwnd, WM_MOUSEMOVE, 0, lparam);
+            SendMessageW(hwnd, WM_LBUTTONDOWN, 0, lparam);
+            SendMessageW(hwnd, WM_LBUTTONUP, 0, lparam);
+        }
+    }
+
+    #[cfg(windows)]
+    fn desktop_showcase_button_center(id: i32) -> (i32, i32) {
+        let width = 1280;
+        let gutter = 18;
+        let available_width = width - gutter * 4;
+        let left_width = (available_width * 30 / 100).clamp(320, 420);
+        let inner_button_width = left_width - gutter * 2;
+        let button_cols = if inner_button_width >= 336 { 3 } else { 2 };
+        let button_gap_x = 8;
+        let button_gap_y = 8;
+        let button_width = (inner_button_width - (button_cols - 1) * button_gap_x) / button_cols;
+        let button_height = 30;
+        let col = id % button_cols;
+        let row = id / button_cols;
+        let x = gutter + gutter + col * (button_width + button_gap_x) + button_width / 2;
+        let y = 84 + gutter + row * (button_height + button_gap_y) + button_height / 2;
+        (x, y)
+    }
+
+    #[cfg(windows)]
+    fn wait_for_child_exit(
+        child: &mut Child,
+        timeout: Duration,
+    ) -> Option<std::process::ExitStatus> {
+        let start = Instant::now();
+        while start.elapsed() < timeout {
+            if let Ok(Some(status)) = child.try_wait() {
+                return Some(status);
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        None
+    }
+
+    #[cfg(windows)]
+    fn drive_native_text_input_and_ime(hwnd: HWND) -> Result<(), String> {
+        unsafe {
+            SetForegroundWindow(hwnd);
+            SendMessageW(hwnd, WM_IME_STARTCOMPOSITION, 0, 0);
+            SendMessageW(hwnd, WM_IME_ENDCOMPOSITION, 0, 0);
+            SendMessageW(hwnd, WM_CHAR, 'x' as usize, 0);
+        }
+        Ok(())
     }
 
     fn write_test_wav_with_format(path: &Path, sample_rate_hz: u32, channels: u16) {
@@ -196,6 +455,31 @@ mod tests {
         write_file(&dir.join("book.toml"), "name = \"core\"\nkind = \"lib\"\n");
         write_file(&dir.join("src/book.arc"), body);
         write_file(&dir.join("src/types.arc"), "// types\n");
+    }
+
+    fn desktop_proof_workspace_dir() -> PathBuf {
+        repo_root().join("examples").join("arcana-desktop-proof")
+    }
+
+    struct WorkspaceBuildCleanup {
+        root: PathBuf,
+    }
+
+    impl WorkspaceBuildCleanup {
+        fn new(root: &Path) -> Self {
+            let _ = fs::remove_file(root.join("Arcana.lock"));
+            let _ = fs::remove_dir_all(root.join(".arcana"));
+            Self {
+                root: root.to_path_buf(),
+            }
+        }
+    }
+
+    impl Drop for WorkspaceBuildCleanup {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(self.root.join("Arcana.lock"));
+            let _ = fs::remove_dir_all(self.root.join(".arcana"));
+        }
     }
 
     fn repo_root() -> PathBuf {
@@ -372,6 +656,1159 @@ mod tests {
         assert_eq!(status.code(), Some(0));
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn package_workspace_runs_arcana_desktop_windows_exe_bundle() {
+        let dir = temp_dir("windows_exe_arcana_desktop");
+        let desktop_dep = repo_root()
+            .join("grimoires")
+            .join("owned")
+            .join("libs")
+            .join("arcana-desktop")
+            .to_string_lossy()
+            .replace('\\', "/");
+        write_file(
+            &dir.join("book.toml"),
+            &format!(
+                concat!(
+                    "name = \"app\"\n",
+                    "kind = \"app\"\n",
+                    "[deps]\n",
+                    "arcana_desktop = {desktop_dep:?}\n",
+                ),
+                desktop_dep = desktop_dep,
+            ),
+        );
+        write_file(
+            &dir.join("src/shelf.arc"),
+            concat!(
+                "import arcana_desktop.app\n",
+                "import arcana_desktop.events\n",
+                "import arcana_desktop.monitor\n",
+                "import arcana_desktop.types\n",
+                "import arcana_desktop.window\n",
+                "import std.io\n",
+                "\n",
+                "record Demo:\n",
+                "    seen: Int\n",
+                "\n",
+                "impl arcana_desktop.app.Application[Demo] for Demo:\n",
+                "    fn resumed(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
+                "        let scale = arcana_desktop.window.scale_factor_milli :: cx.runtime.main_window :: call\n",
+                "        let current = arcana_desktop.monitor.current :: cx.runtime.main_window :: call\n",
+                "        let primary = arcana_desktop.monitor.primary :: :: call\n",
+                "        let count = arcana_desktop.monitor.count :: :: call\n",
+                "        self.seen = 0\n",
+                "        if scale > 0:\n",
+                "            self.seen += 1\n",
+                "        if count >= 1:\n",
+                "            self.seen += 1\n",
+                "        if current.scale_factor_milli > 0:\n",
+                "            self.seen += 1\n",
+                "        if primary.primary:\n",
+                "            self.seen += 1\n",
+                "        self.seen += theme_score :: (arcana_desktop.window.theme :: cx.runtime.main_window :: call) :: call\n",
+                "        arcana_desktop.window.request_attention :: cx.runtime.main_window, false :: call\n",
+                "        arcana_desktop.events.wake :: (arcana_desktop.app.wake_handle :: cx :: call) :: call\n",
+                "        arcana_desktop.app.set_control_flow :: cx, (arcana_desktop.types.ControlFlow.Wait :: :: call) :: call\n",
+                "\n",
+                "    fn suspended(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
+                "        return\n",
+                "\n",
+                "    fn window_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read event: std.events.AppEvent) -> arcana_desktop.types.ControlFlow:\n",
+                "        return match event:\n",
+                "            std.events.AppEvent.WindowRedrawRequested(id) => on_redraw :: self, cx, id :: call\n",
+                "            _ => cx.control.control_flow\n",
+                "\n",
+                "    fn device_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read event: std.events.AppEvent) -> arcana_desktop.types.ControlFlow:\n",
+                "        return cx.control.control_flow\n",
+                "\n",
+                "    fn about_to_wait(edit self: Demo, edit cx: arcana_desktop.types.AppContext) -> arcana_desktop.types.ControlFlow:\n",
+                "        return cx.control.control_flow\n",
+                "\n",
+                "    fn wake(edit self: Demo, edit cx: arcana_desktop.types.AppContext) -> arcana_desktop.types.ControlFlow:\n",
+                "        arcana_desktop.window.request_redraw :: cx.runtime.main_window :: call\n",
+                "        return arcana_desktop.types.ControlFlow.Wait :: :: call\n",
+                "\n",
+                "    fn exiting(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
+                "        return\n",
+                "\n",
+                "fn theme_score(read theme: arcana_desktop.types.WindowTheme) -> Int:\n",
+                "    return match theme:\n",
+                "        arcana_desktop.types.WindowTheme.Light => 1\n",
+                "        arcana_desktop.types.WindowTheme.Dark => 1\n",
+                "        arcana_desktop.types.WindowTheme.Unknown => 1\n",
+                "\n",
+                "fn on_redraw(edit self: Demo, edit cx: arcana_desktop.types.AppContext, id: Int) -> arcana_desktop.types.ControlFlow:\n",
+                "    std.io.print_line[Int] :: id :: call\n",
+                "    std.io.print_line[Int] :: self.seen :: call\n",
+                "    arcana_desktop.app.request_exit :: cx, 0 :: call\n",
+                "    return arcana_desktop.types.ControlFlow.Wait :: :: call\n",
+                "\n",
+                "fn main() -> Int:\n",
+                "    let mut app = Demo :: seen = 0 :: call\n",
+                "    return arcana_desktop.app.run :: app, (arcana_desktop.app.default_app_config :: :: call) :: call\n",
+            ),
+        );
+        write_file(&dir.join("src/types.arc"), "// types\n");
+
+        let bundle = package_workspace(dir.clone(), BuildTarget::windows_exe(), None, None)
+            .expect("package should succeed");
+        let exe_path = bundle.bundle_dir.join(&bundle.root_artifact);
+        let output = Command::new(&exe_path)
+            .output()
+            .expect("staged desktop bundle should launch");
+        assert_eq!(output.status.code(), Some(0));
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .collect::<Vec<_>>(),
+            vec!["0", "5"]
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn package_workspace_runs_arcana_desktop_graphics_text_windows_exe_bundle() {
+        let dir = temp_dir("windows_exe_arcana_desktop_graphics_text");
+        let desktop_dep = repo_root()
+            .join("grimoires")
+            .join("owned")
+            .join("libs")
+            .join("arcana-desktop")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let graphics_dep = repo_root()
+            .join("grimoires")
+            .join("owned")
+            .join("libs")
+            .join("arcana-graphics")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let text_dep = repo_root()
+            .join("grimoires")
+            .join("owned")
+            .join("libs")
+            .join("arcana-text")
+            .to_string_lossy()
+            .replace('\\', "/");
+        write_file(
+            &dir.join("book.toml"),
+            &format!(
+                concat!(
+                    "name = \"app\"\n",
+                    "kind = \"app\"\n",
+                    "[deps]\n",
+                    "arcana_desktop = {desktop_dep:?}\n",
+                    "arcana_graphics = {graphics_dep:?}\n",
+                    "arcana_text = {text_dep:?}\n",
+                ),
+                desktop_dep = desktop_dep,
+                graphics_dep = graphics_dep,
+                text_dep = text_dep,
+            ),
+        );
+        write_file(
+            &dir.join("src/shelf.arc"),
+            concat!(
+                "import arcana_desktop.app\n",
+                "import arcana_desktop.types\n",
+                "import arcana_desktop.window\n",
+                "import arcana_graphics.canvas\n",
+                "import arcana_text.labels\n",
+                "import std.events\n",
+                "import std.io\n",
+                "\n",
+                "record Demo:\n",
+                "    drawn: Bool\n",
+                "\n",
+                "impl arcana_desktop.app.Application[Demo] for Demo:\n",
+                "    fn resumed(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
+                "        arcana_desktop.window.request_redraw :: cx.runtime.main_window :: call\n",
+                "        arcana_desktop.app.set_control_flow :: cx, (arcana_desktop.types.ControlFlow.Wait :: :: call) :: call\n",
+                "\n",
+                "    fn suspended(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
+                "        return\n",
+                "\n",
+                "    fn window_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read event: std.events.AppEvent) -> arcana_desktop.types.ControlFlow:\n",
+                "        return match event:\n",
+                "            std.events.AppEvent.WindowRedrawRequested(id) => on_redraw :: self, cx, id :: call\n",
+                "            _ => cx.control.control_flow\n",
+                "\n",
+                "    fn device_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read event: std.events.AppEvent) -> arcana_desktop.types.ControlFlow:\n",
+                "        return cx.control.control_flow\n",
+                "\n",
+                "    fn about_to_wait(edit self: Demo, edit cx: arcana_desktop.types.AppContext) -> arcana_desktop.types.ControlFlow:\n",
+                "        return cx.control.control_flow\n",
+                "\n",
+                "    fn wake(edit self: Demo, edit cx: arcana_desktop.types.AppContext) -> arcana_desktop.types.ControlFlow:\n",
+                "        return cx.control.control_flow\n",
+                "\n",
+                "    fn exiting(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
+                "        return\n",
+                "\n",
+                "fn on_redraw(edit self: Demo, edit cx: arcana_desktop.types.AppContext, id: Int) -> arcana_desktop.types.ControlFlow:\n",
+                "    if self.drawn:\n",
+                "        return cx.control.control_flow\n",
+                "    let measured = arcana_text.labels.measure :: \"desk\" :: call\n",
+                "    if measured.0 <= 0:\n",
+                "        arcana_desktop.app.request_exit :: cx, 3 :: call\n",
+                "        return arcana_desktop.types.ControlFlow.Wait :: :: call\n",
+                "    let bg = arcana_graphics.canvas.rgb :: 12, 24, 36 :: call\n",
+                "    arcana_graphics.canvas.fill :: cx.runtime.main_window, bg :: call\n",
+                "    let accent = arcana_graphics.canvas.rgb :: 200, 100, 40 :: call\n",
+                "    let rect = arcana_graphics.types.RectSpec :: pos = (8, 8), size = (48, 24), color = accent :: call\n",
+                "    arcana_graphics.canvas.rect :: cx.runtime.main_window, rect :: call\n",
+                "    let label_color = arcana_graphics.canvas.rgb :: 255, 255, 255 :: call\n",
+                "    let label = arcana_text.types.LabelSpec :: pos = (12, 16), text = \"desk\", color = label_color :: call\n",
+                "    arcana_text.labels.label :: cx.runtime.main_window, label :: call\n",
+                "    arcana_graphics.canvas.present :: cx.runtime.main_window :: call\n",
+                "    std.io.print_line[Int] :: id :: call\n",
+                "    self.drawn = true\n",
+                "    arcana_desktop.app.request_exit :: cx, 0 :: call\n",
+                "    return arcana_desktop.types.ControlFlow.Wait :: :: call\n",
+                "\n",
+                "fn main() -> Int:\n",
+                "    let mut app = Demo :: drawn = false :: call\n",
+                "    return arcana_desktop.app.run :: app, (arcana_desktop.app.default_app_config :: :: call) :: call\n",
+            ),
+        );
+        write_file(&dir.join("src/types.arc"), "// types\n");
+
+        let bundle = package_workspace(dir.clone(), BuildTarget::windows_exe(), None, None)
+            .expect("package should succeed");
+        let exe_path = bundle.bundle_dir.join(&bundle.root_artifact);
+        let output = Command::new(&exe_path)
+            .output()
+            .expect("staged desktop graphics/text bundle should launch");
+        assert_eq!(output.status.code(), Some(0));
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .collect::<Vec<_>>(),
+            vec!["0"]
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn package_workspace_runs_arcana_desktop_multi_window_clipboard_windows_exe_bundle() {
+        let dir = temp_dir("windows_exe_arcana_desktop_multi_window_clipboard");
+        let desktop_dep = repo_root()
+            .join("grimoires")
+            .join("owned")
+            .join("libs")
+            .join("arcana-desktop")
+            .to_string_lossy()
+            .replace('\\', "/");
+        write_file(
+            &dir.join("book.toml"),
+            &format!(
+                concat!(
+                    "name = \"app\"\n",
+                    "kind = \"app\"\n",
+                    "[deps]\n",
+                    "arcana_desktop = {desktop_dep:?}\n",
+                ),
+                desktop_dep = desktop_dep,
+            ),
+        );
+        write_file(
+            &dir.join("src/shelf.arc"),
+            concat!(
+                "import arcana_desktop.app\n",
+                "import arcana_desktop.clipboard\n",
+                "import arcana_desktop.types\n",
+                "import arcana_desktop.window\n",
+                "import std.events\n",
+                "import std.result\n",
+                "import std.io\n",
+                "\n",
+                "record Demo:\n",
+                "    second_window: Int\n",
+                "\n",
+                "impl arcana_desktop.app.Application[Demo] for Demo:\n",
+                "    fn resumed(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
+                "        let wrote = arcana_desktop.clipboard.write_text :: \"desk\" :: call\n",
+                "        if wrote :: :: is_err:\n",
+                "            arcana_desktop.app.request_exit :: cx, 7 :: call\n",
+                "            return\n",
+                "        let text = (arcana_desktop.clipboard.read_text :: :: call) :: \"\" :: unwrap_or\n",
+                "        if text != \"desk\":\n",
+                "            arcana_desktop.app.request_exit :: cx, 8 :: call\n",
+                "            return\n",
+                "        let opened = arcana_desktop.app.open_window :: cx, \"Second\", (160, 120) :: call\n",
+                "        return match opened:\n",
+                "            std.result.Result.Ok(win) => on_second_window :: self, cx, win :: call\n",
+                "            std.result.Result.Err(_) => arcana_desktop.app.request_exit :: cx, 9 :: call\n",
+                "\n",
+                "    fn suspended(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
+                "        return\n",
+                "\n",
+                "    fn window_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read event: std.events.AppEvent) -> arcana_desktop.types.ControlFlow:\n",
+                "        return match event:\n",
+                "            std.events.AppEvent.WindowRedrawRequested(id) => on_redraw :: self, cx, id :: call\n",
+                "            _ => cx.control.control_flow\n",
+                "\n",
+                "    fn device_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read event: std.events.AppEvent) -> arcana_desktop.types.ControlFlow:\n",
+                "        return cx.control.control_flow\n",
+                "\n",
+                "    fn about_to_wait(edit self: Demo, edit cx: arcana_desktop.types.AppContext) -> arcana_desktop.types.ControlFlow:\n",
+                "        return cx.control.control_flow\n",
+                "\n",
+                "    fn wake(edit self: Demo, edit cx: arcana_desktop.types.AppContext) -> arcana_desktop.types.ControlFlow:\n",
+                "        return cx.control.control_flow\n",
+                "\n",
+                "    fn exiting(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
+                "        return\n",
+                "\n",
+                "fn on_second_window(edit self: Demo, edit cx: arcana_desktop.types.AppContext, take win: std.window.Window):\n",
+                "    let mut win = win\n",
+                "    self.second_window = (arcana_desktop.window.id :: win :: call).value\n",
+                "    arcana_desktop.window.request_redraw :: win :: call\n",
+                "    arcana_desktop.app.set_control_flow :: cx, (arcana_desktop.types.ControlFlow.Wait :: :: call) :: call\n",
+                "    return\n",
+                "\n",
+                "fn on_redraw(edit self: Demo, edit cx: arcana_desktop.types.AppContext, id: Int) -> arcana_desktop.types.ControlFlow:\n",
+                "    if id == self.second_window:\n",
+                "        std.io.print_line[Int] :: id :: call\n",
+                "        arcana_desktop.app.request_exit :: cx, 0 :: call\n",
+                "    return arcana_desktop.types.ControlFlow.Wait :: :: call\n",
+                "\n",
+                "fn main() -> Int:\n",
+                "    let mut app = Demo :: second_window = -1 :: call\n",
+                "    return arcana_desktop.app.run :: app, (arcana_desktop.app.default_app_config :: :: call) :: call\n",
+            ),
+        );
+        write_file(&dir.join("src/types.arc"), "// types\n");
+
+        let bundle = package_workspace(dir.clone(), BuildTarget::windows_exe(), None, None)
+            .expect("package should succeed");
+        let exe_path = bundle.bundle_dir.join(&bundle.root_artifact);
+        let output = Command::new(&exe_path)
+            .output()
+            .expect("staged desktop multi-window clipboard bundle should launch");
+        assert_eq!(output.status.code(), Some(0));
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .collect::<Vec<_>>(),
+            vec!["1"]
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn package_workspace_runs_arcana_desktop_settings_windows_exe_bundle() {
+        let dir = temp_dir("windows_exe_arcana_desktop_settings");
+        let desktop_dep = repo_root()
+            .join("grimoires")
+            .join("owned")
+            .join("libs")
+            .join("arcana-desktop")
+            .to_string_lossy()
+            .replace('\\', "/");
+        write_file(
+            &dir.join("book.toml"),
+            &format!(
+                concat!(
+                    "name = \"app\"\n",
+                    "kind = \"app\"\n",
+                    "[deps]\n",
+                    "arcana_desktop = {desktop_dep:?}\n",
+                ),
+                desktop_dep = desktop_dep,
+            ),
+        );
+        write_file(
+            &dir.join("src/shelf.arc"),
+            concat!(
+                "import arcana_desktop.app\n",
+                "import arcana_desktop.text_input\n",
+                "import arcana_desktop.types\n",
+                "import arcana_desktop.window\n",
+                "import std.events\n",
+                "import std.io\n",
+                "\n",
+                "record Demo:\n",
+                "    done: Bool\n",
+                "\n",
+                "impl arcana_desktop.app.Application[Demo] for Demo:\n",
+                "    fn resumed(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
+                "        arcana_desktop.window.set_min_size :: cx.runtime.main_window, 111, 112 :: call\n",
+                "        arcana_desktop.window.set_max_size :: cx.runtime.main_window, 333, 334 :: call\n",
+                "        arcana_desktop.window.set_transparent :: cx.runtime.main_window, true :: call\n",
+                "        arcana_desktop.window.set_theme_override :: cx.runtime.main_window, (arcana_desktop.types.WindowThemeOverride.Dark :: :: call) :: call\n",
+                "        arcana_desktop.window.set_cursor_icon :: cx.runtime.main_window, (arcana_desktop.types.CursorIcon.Hand :: :: call) :: call\n",
+                "        arcana_desktop.window.set_text_input_enabled :: cx.runtime.main_window, false :: call\n",
+                "        arcana_desktop.text_input.set_enabled :: cx.runtime.main_window, true :: call\n",
+                "        let area = arcana_desktop.types.CompositionArea :: active = true, position = (9, 10), size = (20, 21) :: call\n",
+                "        arcana_desktop.text_input.set_composition_area :: cx.runtime.main_window, area :: call\n",
+                "        let current = arcana_desktop.window.settings :: cx.runtime.main_window :: call\n",
+                "        let text = arcana_desktop.text_input.settings :: cx.runtime.main_window :: call\n",
+                "        let mut total = 0\n",
+                "        if current.bounds.min_size.0 == 111:\n",
+                "            if current.bounds.min_size.1 == 112:\n",
+                "                total += 1\n",
+                "        if current.bounds.max_size.0 == 333:\n",
+                "            if current.bounds.max_size.1 == 334:\n",
+                "                total += 2\n",
+                "        if current.options.style.transparent:\n",
+                "            total += 4\n",
+                "        if current.options.state.theme_override == (arcana_desktop.types.WindowThemeOverride.Dark :: :: call):\n",
+                "            total += 8\n",
+                "        if current.options.cursor.icon == (arcana_desktop.types.CursorIcon.Hand :: :: call):\n",
+                "            total += 16\n",
+                "        if text.enabled:\n",
+                "            total += 32\n",
+                "        if text.composition_area.active:\n",
+                "            if text.composition_area.position.0 == 9:\n",
+                "                if text.composition_area.position.1 == 10:\n",
+                "                    if text.composition_area.size.0 == 20:\n",
+                "                        if text.composition_area.size.1 == 21:\n",
+                "                            total += 64\n",
+                "        std.io.print_line[Int] :: total :: call\n",
+                "        self.done = true\n",
+                "        arcana_desktop.app.request_exit :: cx, 0 :: call\n",
+                "\n",
+                "    fn suspended(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
+                "        return\n",
+                "\n",
+                "    fn window_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read event: std.events.AppEvent) -> arcana_desktop.types.ControlFlow:\n",
+                "        return cx.control.control_flow\n",
+                "\n",
+                "    fn device_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read event: std.events.AppEvent) -> arcana_desktop.types.ControlFlow:\n",
+                "        return cx.control.control_flow\n",
+                "\n",
+                "    fn about_to_wait(edit self: Demo, edit cx: arcana_desktop.types.AppContext) -> arcana_desktop.types.ControlFlow:\n",
+                "        return cx.control.control_flow\n",
+                "\n",
+                "    fn wake(edit self: Demo, edit cx: arcana_desktop.types.AppContext) -> arcana_desktop.types.ControlFlow:\n",
+                "        return cx.control.control_flow\n",
+                "\n",
+                "    fn exiting(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
+                "        return\n",
+                "\n",
+                "fn main() -> Int:\n",
+                "    let mut app = Demo :: done = false :: call\n",
+                "    return arcana_desktop.app.run :: app, (arcana_desktop.app.default_app_config :: :: call) :: call\n",
+            ),
+        );
+        write_file(&dir.join("src/types.arc"), "// types\n");
+
+        let bundle = package_workspace(dir.clone(), BuildTarget::windows_exe(), None, None)
+            .expect("package should succeed");
+        let exe_path = bundle.bundle_dir.join(&bundle.root_artifact);
+        let output = Command::new(&exe_path)
+            .output()
+            .expect("staged desktop settings bundle should launch");
+        assert_eq!(output.status.code(), Some(0));
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .collect::<Vec<_>>(),
+            vec!["127"]
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn package_workspace_runs_arcana_desktop_record_settings_windows_exe_bundle() {
+        let dir = temp_dir("windows_exe_arcana_desktop_record_settings");
+        let desktop_dep = repo_root()
+            .join("grimoires")
+            .join("owned")
+            .join("libs")
+            .join("arcana-desktop")
+            .to_string_lossy()
+            .replace('\\', "/");
+        write_file(
+            &dir.join("book.toml"),
+            &format!(
+                concat!(
+                    "name = \"app\"\n",
+                    "kind = \"app\"\n",
+                    "[deps]\n",
+                    "arcana_desktop = {desktop_dep:?}\n",
+                ),
+                desktop_dep = desktop_dep,
+            ),
+        );
+        write_file(
+            &dir.join("src/shelf.arc"),
+            concat!(
+                "import arcana_desktop.app\n",
+                "import arcana_desktop.text_input\n",
+                "import arcana_desktop.types\n",
+                "import arcana_desktop.window\n",
+                "import std.events\n",
+                "import std.io\n",
+                "\n",
+                "record Demo:\n",
+                "    done: Bool\n",
+                "\n",
+                "impl arcana_desktop.app.Application[Demo] for Demo:\n",
+                "    fn resumed(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
+                "        let mut settings = arcana_desktop.window.settings :: cx.runtime.main_window :: call\n",
+                "        settings.title = \"Applied\"\n",
+                "        settings.bounds.min_size = (900, 620)\n",
+                "        settings.bounds.max_size = (1540, 1040)\n",
+                "        settings.options.style.transparent = true\n",
+                "        settings.options.state.theme_override = (arcana_desktop.types.WindowThemeOverride.Dark :: :: call)\n",
+                "        settings.options.cursor.icon = (arcana_desktop.types.CursorIcon.Hand :: :: call)\n",
+                "        settings.options.cursor.position = (160, 128)\n",
+                "        settings.options.text_input_enabled = true\n",
+                "        arcana_desktop.window.apply_settings :: cx.runtime.main_window, settings :: call\n",
+                "        let mut text = arcana_desktop.text_input.settings :: cx.runtime.main_window :: call\n",
+                "        text.enabled = true\n",
+                "        text.composition_area.active = true\n",
+                "        text.composition_area.position = (120, 540)\n",
+                "        text.composition_area.size = (260, 28)\n",
+                "        arcana_desktop.text_input.apply_settings :: cx.runtime.main_window, text :: call\n",
+                "        let current = arcana_desktop.window.settings :: cx.runtime.main_window :: call\n",
+                "        let text_now = arcana_desktop.text_input.settings :: cx.runtime.main_window :: call\n",
+                "        let mut total = 0\n",
+                "        if current.bounds.min_size.0 == 900:\n",
+                "            if current.bounds.min_size.1 == 620:\n",
+                "                total += 1\n",
+                "        if current.bounds.max_size.0 == 1540:\n",
+                "            if current.bounds.max_size.1 == 1040:\n",
+                "                total += 2\n",
+                "        if current.options.style.transparent:\n",
+                "            total += 4\n",
+                "        if current.options.state.theme_override == (arcana_desktop.types.WindowThemeOverride.Dark :: :: call):\n",
+                "            total += 8\n",
+                "        if current.options.cursor.icon == (arcana_desktop.types.CursorIcon.Hand :: :: call):\n",
+                "            total += 16\n",
+                "        if current.options.cursor.position.0 == 160:\n",
+                "            if current.options.cursor.position.1 == 128:\n",
+                "                total += 32\n",
+                "        if text_now.enabled:\n",
+                "            if text_now.composition_area.active:\n",
+                "                if text_now.composition_area.position.0 == 120:\n",
+                "                    if text_now.composition_area.position.1 == 540:\n",
+                "                        if text_now.composition_area.size.0 == 260:\n",
+                "                            if text_now.composition_area.size.1 == 28:\n",
+                "                                total += 64\n",
+                "        std.io.print_line[Int] :: total :: call\n",
+                "        self.done = true\n",
+                "        arcana_desktop.app.request_exit :: cx, 0 :: call\n",
+                "\n",
+                "    fn suspended(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
+                "        return\n",
+                "\n",
+                "    fn window_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read event: std.events.AppEvent) -> arcana_desktop.types.ControlFlow:\n",
+                "        return cx.control.control_flow\n",
+                "\n",
+                "    fn device_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read event: std.events.AppEvent) -> arcana_desktop.types.ControlFlow:\n",
+                "        return cx.control.control_flow\n",
+                "\n",
+                "    fn about_to_wait(edit self: Demo, edit cx: arcana_desktop.types.AppContext) -> arcana_desktop.types.ControlFlow:\n",
+                "        return cx.control.control_flow\n",
+                "\n",
+                "    fn wake(edit self: Demo, edit cx: arcana_desktop.types.AppContext) -> arcana_desktop.types.ControlFlow:\n",
+                "        return cx.control.control_flow\n",
+                "\n",
+                "    fn exiting(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
+                "        return\n",
+                "\n",
+                "fn main() -> Int:\n",
+                "    let mut app = Demo :: done = false :: call\n",
+                "    return arcana_desktop.app.run :: app, (arcana_desktop.app.default_app_config :: :: call) :: call\n",
+            ),
+        );
+        write_file(&dir.join("src/types.arc"), "// types\n");
+
+        let bundle = package_workspace(dir.clone(), BuildTarget::windows_exe(), None, None)
+            .expect("package should succeed");
+        let exe_path = bundle.bundle_dir.join(&bundle.root_artifact);
+        let output = Command::new(&exe_path)
+            .output()
+            .expect("staged desktop record-settings bundle should launch");
+        assert_eq!(output.status.code(), Some(0));
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .collect::<Vec<_>>(),
+            vec!["127"]
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn package_workspace_runs_arcana_desktop_record_settings_with_graphics_text_windows_exe_bundle()
+    {
+        let dir = temp_dir("windows_exe_arcana_desktop_record_settings_with_graphics_text");
+        let desktop_dep = repo_root()
+            .join("grimoires")
+            .join("owned")
+            .join("libs")
+            .join("arcana-desktop")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let graphics_dep = repo_root()
+            .join("grimoires")
+            .join("owned")
+            .join("libs")
+            .join("arcana-graphics")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let text_dep = repo_root()
+            .join("grimoires")
+            .join("owned")
+            .join("libs")
+            .join("arcana-text")
+            .to_string_lossy()
+            .replace('\\', "/");
+        write_file(
+            &dir.join("book.toml"),
+            &format!(
+                concat!(
+                    "name = \"app\"\n",
+                    "kind = \"app\"\n",
+                    "[deps]\n",
+                    "arcana_desktop = {desktop_dep:?}\n",
+                    "arcana_graphics = {graphics_dep:?}\n",
+                    "arcana_text = {text_dep:?}\n",
+                ),
+                desktop_dep = desktop_dep,
+                graphics_dep = graphics_dep,
+                text_dep = text_dep,
+            ),
+        );
+        write_file(
+            &dir.join("src/shelf.arc"),
+            concat!(
+                "import arcana_desktop.app\n",
+                "import arcana_desktop.text_input\n",
+                "import arcana_desktop.types\n",
+                "import arcana_desktop.window\n",
+                "import arcana_graphics.canvas\n",
+                "import arcana_text.labels\n",
+                "import std.events\n",
+                "import std.io\n",
+                "\n",
+                "record Demo:\n",
+                "    done: Bool\n",
+                "\n",
+                "impl arcana_desktop.app.Application[Demo] for Demo:\n",
+                "    fn resumed(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
+                "        let accent = arcana_graphics.canvas.rgb :: 7, 8, 9 :: call\n",
+                "        let measure = arcana_text.labels.measure :: \"desk\" :: call\n",
+                "        let mut settings = arcana_desktop.window.settings :: cx.runtime.main_window :: call\n",
+                "        settings.title = \"Applied\"\n",
+                "        settings.bounds.min_size = (900, 620)\n",
+                "        settings.bounds.max_size = (1540, 1040)\n",
+                "        settings.options.style.transparent = true\n",
+                "        settings.options.state.theme_override = (arcana_desktop.types.WindowThemeOverride.Dark :: :: call)\n",
+                "        settings.options.cursor.icon = (arcana_desktop.types.CursorIcon.Hand :: :: call)\n",
+                "        settings.options.cursor.position = (160, 128)\n",
+                "        settings.options.text_input_enabled = true\n",
+                "        arcana_desktop.window.apply_settings :: cx.runtime.main_window, settings :: call\n",
+                "        let mut text = arcana_desktop.text_input.settings :: cx.runtime.main_window :: call\n",
+                "        text.enabled = true\n",
+                "        text.composition_area.active = true\n",
+                "        text.composition_area.position = (120, 540)\n",
+                "        text.composition_area.size = (260, 28)\n",
+                "        arcana_desktop.text_input.apply_settings :: cx.runtime.main_window, text :: call\n",
+                "        let current = arcana_desktop.window.settings :: cx.runtime.main_window :: call\n",
+                "        let text_now = arcana_desktop.text_input.settings :: cx.runtime.main_window :: call\n",
+                "        let mut total = 0\n",
+                "        if accent > 0:\n",
+                "            total += 1\n",
+                "        if measure.0 > 0:\n",
+                "            total += 2\n",
+                "        if current.bounds.min_size.0 == 900:\n",
+                "            if current.bounds.min_size.1 == 620:\n",
+                "                total += 4\n",
+                "        if current.bounds.max_size.0 == 1540:\n",
+                "            if current.bounds.max_size.1 == 1040:\n",
+                "                total += 8\n",
+                "        if current.options.style.transparent:\n",
+                "            total += 16\n",
+                "        if current.options.state.theme_override == (arcana_desktop.types.WindowThemeOverride.Dark :: :: call):\n",
+                "            total += 32\n",
+                "        if current.options.cursor.icon == (arcana_desktop.types.CursorIcon.Hand :: :: call):\n",
+                "            total += 64\n",
+                "        if text_now.enabled:\n",
+                "            if text_now.composition_area.active:\n",
+                "                total += 128\n",
+                "        std.io.print_line[Int] :: total :: call\n",
+                "        self.done = true\n",
+                "        arcana_desktop.app.request_exit :: cx, 0 :: call\n",
+                "\n",
+                "    fn suspended(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
+                "        return\n",
+                "\n",
+                "    fn window_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read event: std.events.AppEvent) -> arcana_desktop.types.ControlFlow:\n",
+                "        return cx.control.control_flow\n",
+                "\n",
+                "    fn device_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read event: std.events.AppEvent) -> arcana_desktop.types.ControlFlow:\n",
+                "        return cx.control.control_flow\n",
+                "\n",
+                "    fn about_to_wait(edit self: Demo, edit cx: arcana_desktop.types.AppContext) -> arcana_desktop.types.ControlFlow:\n",
+                "        return cx.control.control_flow\n",
+                "\n",
+                "    fn wake(edit self: Demo, edit cx: arcana_desktop.types.AppContext) -> arcana_desktop.types.ControlFlow:\n",
+                "        return cx.control.control_flow\n",
+                "\n",
+                "    fn exiting(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
+                "        return\n",
+                "\n",
+                "fn main() -> Int:\n",
+                "    let mut app = Demo :: done = false :: call\n",
+                "    return arcana_desktop.app.run :: app, (arcana_desktop.app.default_app_config :: :: call) :: call\n",
+            ),
+        );
+        write_file(&dir.join("src/types.arc"), "// types\n");
+
+        let bundle = package_workspace(dir.clone(), BuildTarget::windows_exe(), None, None)
+            .expect("package should succeed");
+        let exe_path = bundle.bundle_dir.join(&bundle.root_artifact);
+        let output = Command::new(&exe_path)
+            .output()
+            .expect("staged desktop record-settings bundle should launch");
+        assert_eq!(output.status.code(), Some(0));
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .collect::<Vec<_>>(),
+            vec!["255"]
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn package_workspace_runs_arcana_desktop_text_input_ime_windows_exe_bundle() {
+        let dir = temp_dir("windows_exe_arcana_desktop_text_input_ime");
+        let desktop_dep = repo_root()
+            .join("grimoires")
+            .join("owned")
+            .join("libs")
+            .join("arcana-desktop")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let title = format!(
+            "Arcana Desktop IME {}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time should be after epoch")
+                .as_nanos()
+        );
+        write_file(
+            &dir.join("book.toml"),
+            &format!(
+                concat!(
+                    "name = \"app\"\n",
+                    "kind = \"app\"\n",
+                    "[deps]\n",
+                    "arcana_desktop = {desktop_dep:?}\n",
+                ),
+                desktop_dep = desktop_dep,
+            ),
+        );
+        write_file(
+            &dir.join("src/shelf.arc"),
+            &format!(
+                concat!(
+                    "import arcana_desktop.app\n",
+                    "import arcana_desktop.text_input\n",
+                    "import arcana_desktop.types\n",
+                    "import arcana_desktop.window\n",
+                    "import std.events\n",
+                    "import std.io\n",
+                    "\n",
+                    "record Demo:\n",
+                    "    settings_ok: Bool\n",
+                    "    saw_text: Bool\n",
+                    "    saw_comp_started: Bool\n",
+                    "    saw_comp_cancelled: Bool\n",
+                    "    done: Bool\n",
+                    "\n",
+                    "fn default_demo() -> Demo:\n",
+                    "    let mut demo = Demo :: settings_ok = false, saw_text = false, saw_comp_started = false :: call\n",
+                    "    demo.saw_comp_cancelled = false\n",
+                    "    demo.done = false\n",
+                    "    return demo\n",
+                    "\n",
+                    "fn finish_if_ready(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
+                    "    if self.done:\n",
+                    "        return\n",
+                    "    if self.saw_comp_cancelled:\n",
+                    "        if self.settings_ok:\n",
+                    "            if self.saw_text:\n",
+                    "                if self.saw_comp_started:\n",
+                    "                    self.done = true\n",
+                    "                    std.io.print_line[Int] :: 1 :: call\n",
+                    "                    arcana_desktop.app.request_exit :: cx, 0 :: call\n",
+                    "\n",
+                    "impl arcana_desktop.app.Application[Demo] for Demo:\n",
+                    "    fn resumed(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
+                    "        arcana_desktop.text_input.set_enabled :: cx.runtime.main_window, true :: call\n",
+                    "        let area = arcana_desktop.types.CompositionArea :: active = true, position = (9, 10), size = (20, 21) :: call\n",
+                    "        arcana_desktop.text_input.set_composition_area :: cx.runtime.main_window, area :: call\n",
+                    "        let current = arcana_desktop.window.settings :: cx.runtime.main_window :: call\n",
+                    "        let text = arcana_desktop.text_input.settings :: cx.runtime.main_window :: call\n",
+                    "        self.settings_ok = false\n",
+                    "        if current.options.cursor.position.0 == 12:\n",
+                    "            if current.options.cursor.position.1 == 34:\n",
+                    "                if text.enabled:\n",
+                    "                    if text.composition_area.active:\n",
+                    "                        if text.composition_area.position.0 == 9:\n",
+                    "                            if text.composition_area.position.1 == 10:\n",
+                    "                                if text.composition_area.size.0 == 20:\n",
+                    "                                    if text.composition_area.size.1 == 21:\n",
+                    "                                        self.settings_ok = true\n",
+                    "        arcana_desktop.app.set_control_flow :: cx, (arcana_desktop.types.ControlFlow.Wait :: :: call) :: call\n",
+                    "        finish_if_ready :: self, cx :: call\n",
+                    "\n",
+                    "    fn suspended(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
+                    "        return\n",
+                    "\n",
+                    "    fn window_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read event: std.events.AppEvent) -> arcana_desktop.types.ControlFlow:\n",
+                    "        return match event:\n",
+                    "            std.events.AppEvent.TextInput(ev) => on_text :: self, cx, ev :: call\n",
+                    "            std.events.AppEvent.TextCompositionStarted(_) => on_comp_started :: self, cx :: call\n",
+                    "            std.events.AppEvent.TextCompositionCancelled(_) => on_comp_cancelled :: self, cx :: call\n",
+                    "            _ => cx.control.control_flow\n",
+                    "\n",
+                    "    fn device_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read event: std.events.AppEvent) -> arcana_desktop.types.ControlFlow:\n",
+                    "        return cx.control.control_flow\n",
+                    "\n",
+                    "    fn about_to_wait(edit self: Demo, edit cx: arcana_desktop.types.AppContext) -> arcana_desktop.types.ControlFlow:\n",
+                    "        finish_if_ready :: self, cx :: call\n",
+                    "        return cx.control.control_flow\n",
+                    "\n",
+                    "    fn wake(edit self: Demo, edit cx: arcana_desktop.types.AppContext) -> arcana_desktop.types.ControlFlow:\n",
+                    "        return cx.control.control_flow\n",
+                    "\n",
+                    "    fn exiting(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
+                    "        return\n",
+                    "\n",
+                    "fn on_text(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read ev: std.events.TextInputEvent) -> arcana_desktop.types.ControlFlow:\n",
+                    "    if ev.text == \"x\":\n",
+                    "        self.saw_text = true\n",
+                    "    finish_if_ready :: self, cx :: call\n",
+                    "    return arcana_desktop.types.ControlFlow.Wait :: :: call\n",
+                    "\n",
+                    "fn on_comp_started(edit self: Demo, edit cx: arcana_desktop.types.AppContext) -> arcana_desktop.types.ControlFlow:\n",
+                    "    self.saw_comp_started = true\n",
+                    "    finish_if_ready :: self, cx :: call\n",
+                    "    return arcana_desktop.types.ControlFlow.Wait :: :: call\n",
+                    "\n",
+                    "fn on_comp_cancelled(edit self: Demo, edit cx: arcana_desktop.types.AppContext) -> arcana_desktop.types.ControlFlow:\n",
+                    "    self.saw_comp_cancelled = true\n",
+                    "    finish_if_ready :: self, cx :: call\n",
+                    "    return arcana_desktop.types.ControlFlow.Wait :: :: call\n",
+                    "\n",
+                    "fn main() -> Int:\n",
+                    "    let mut cfg = arcana_desktop.app.default_app_config :: :: call\n",
+                    "    cfg.window.title = {title:?}\n",
+                    "    cfg.window.options.cursor.position = (12, 34)\n",
+                    "    let mut app = default_demo :: :: call\n",
+                    "    return arcana_desktop.app.run :: app, cfg :: call\n",
+                ),
+                title = title,
+            ),
+        );
+        write_file(&dir.join("src/types.arc"), "// types\n");
+
+        let bundle = package_workspace(dir.clone(), BuildTarget::windows_exe(), None, None)
+            .expect("package should succeed");
+        let exe_path = bundle.bundle_dir.join(&bundle.root_artifact);
+        let mut child = Command::new(&exe_path)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("staged desktop text-input IME bundle should launch");
+        let child_pid = child.id();
+        let hwnd = match wait_for_process_window(child_pid, Duration::from_secs(5)) {
+            Some((hwnd, _window_title)) => hwnd,
+            None => {
+                let status = wait_for_child_exit(&mut child, Duration::from_secs(1));
+                if status.is_none() {
+                    let _ = child.kill();
+                }
+                let output = child
+                    .wait_with_output()
+                    .expect("desktop IME child output should collect");
+                panic!(
+                    "desktop IME test window should open; status={:?}, stdout={}, stderr={}",
+                    status.and_then(|value| value.code()),
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+        };
+        thread::sleep(Duration::from_millis(100));
+        if let Err(err) = drive_native_text_input_and_ime(hwnd) {
+            let _ = child.kill();
+            let output = child
+                .wait_with_output()
+                .expect("desktop IME child output should collect after drive failure");
+            panic!(
+                "desktop IME input should drive: {err}; stdout={}, stderr={}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let status = wait_for_child_exit(&mut child, Duration::from_secs(10));
+        if status.is_none() {
+            let _ = child.kill();
+        }
+        let output = child
+            .wait_with_output()
+            .expect("desktop IME child output should collect");
+        assert_eq!(
+            status
+                .map(|value| value.code())
+                .unwrap_or_else(|| output.status.code()),
+            Some(0)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .collect::<Vec<_>>(),
+            vec!["1"]
+        );
+        assert!(
+            output.stderr.is_empty(),
+            "desktop IME bundle stderr should stay empty: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn package_workspace_runs_large_arcana_desktop_windows_bundle_with_runtime_dll() {
+        let workspace_dir = desktop_proof_workspace_dir();
+        let _cleanup = WorkspaceBuildCleanup::new(&workspace_dir);
+        let exe_out_dir = temp_dir("windows_large_arcana_desktop_exe_bundle");
+        let exe_bundle = package_workspace(
+            workspace_dir.clone(),
+            BuildTarget::windows_exe(),
+            Some("app".to_string()),
+            Some(exe_out_dir.clone()),
+        )
+        .expect("large desktop exe package should succeed");
+        let exe_path = exe_bundle.bundle_dir.join(&exe_bundle.root_artifact);
+        let runtime_dll_path = exe_bundle.bundle_dir.join("arcana_desktop.dll");
+        assert!(
+            runtime_dll_path.is_file(),
+            "expected staged desktop runtime DLL at {}",
+            runtime_dll_path.display()
+        );
+        let rust_std_dll = fs::read_dir(&exe_bundle.bundle_dir)
+            .expect("bundle dir should be readable")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("std-") && name.ends_with(".dll"))
+            });
+        assert!(
+            rust_std_dll.is_some(),
+            "expected staged Rust std runtime DLL beside {}",
+            runtime_dll_path.display()
+        );
+        let output = Command::new(&exe_path)
+            .current_dir(&exe_bundle.bundle_dir)
+            .arg("--smoke")
+            .output()
+            .expect("large desktop exe bundle should launch");
+        assert_eq!(output.status.code(), Some(0));
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .collect::<Vec<_>>(),
+            vec!["controls=24", "pages=7", "smoke_score=767"]
+        );
+        let _ = fs::remove_dir_all(&exe_out_dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn package_workspace_closes_arcana_desktop_showcase_from_window_close_button() {
+        let workspace_dir = desktop_proof_workspace_dir();
+        let _cleanup = WorkspaceBuildCleanup::new(&workspace_dir);
+        let exe_out_dir = temp_dir("windows_large_arcana_desktop_close_bundle");
+        let exe_bundle = package_workspace(
+            workspace_dir.clone(),
+            BuildTarget::windows_exe(),
+            Some("app".to_string()),
+            Some(exe_out_dir.clone()),
+        )
+        .expect("large desktop exe package should succeed");
+        let exe_path = exe_bundle.bundle_dir.join(&exe_bundle.root_artifact);
+        let mut child = Command::new(&exe_path)
+            .current_dir(&exe_bundle.bundle_dir)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("large desktop exe bundle should launch");
+        let (hwnd, _title) = wait_for_process_window(child.id(), Duration::from_secs(20))
+            .expect("desktop showcase window should appear");
+        unsafe {
+            SendMessageW(hwnd, WM_CLOSE, 0, 0);
+        }
+        let status = wait_for_child_exit(&mut child, Duration::from_secs(20))
+            .expect("desktop showcase should exit after WM_CLOSE");
+        assert_eq!(status.code(), Some(0));
+        let _ = fs::remove_dir_all(&exe_out_dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn package_workspace_drives_arcana_desktop_showcase_next_page_from_mouse_click() {
+        let workspace_dir = desktop_proof_workspace_dir();
+        let _cleanup = WorkspaceBuildCleanup::new(&workspace_dir);
+        let exe_out_dir = temp_dir("windows_large_arcana_desktop_click_bundle");
+        let exe_bundle = package_workspace(
+            workspace_dir.clone(),
+            BuildTarget::windows_exe(),
+            Some("app".to_string()),
+            Some(exe_out_dir.clone()),
+        )
+        .expect("large desktop exe package should succeed");
+        let exe_path = exe_bundle.bundle_dir.join(&exe_bundle.root_artifact);
+        let mut child = Command::new(&exe_path)
+            .current_dir(&exe_bundle.bundle_dir)
+            .arg("--ui-smoke")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("large desktop exe bundle should launch");
+        let (hwnd, _title) = wait_for_process_window(child.id(), Duration::from_secs(20))
+            .expect("desktop showcase window should appear");
+        wait_for_window_title_contains(hwnd, "Overview", Duration::from_secs(10))
+            .expect("desktop showcase should publish the overview title before input");
+        let (x, y) = desktop_showcase_button_center(1);
+        send_left_click(hwnd, x, y);
+        thread::sleep(Duration::from_millis(500));
+        unsafe {
+            SendMessageW(hwnd, WM_CLOSE, 0, 0);
+        }
+        let status = wait_for_child_exit(&mut child, Duration::from_secs(20))
+            .expect("desktop showcase should exit after WM_CLOSE");
+        assert_eq!(status.code(), Some(0));
+        let mut stdout = String::new();
+        child
+            .stdout
+            .take()
+            .expect("stdout should be captured")
+            .read_to_string(&mut stdout)
+            .expect("stdout should read");
+        assert!(
+            stdout.lines().any(|line| line == "page=Window"),
+            "clicking next page should print `page=Window`, got `{stdout}`"
+        );
+        let _ = fs::remove_dir_all(&exe_out_dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn package_workspace_clicking_second_window_does_not_crash_showcase() {
+        let workspace_dir = desktop_proof_workspace_dir();
+        let _cleanup = WorkspaceBuildCleanup::new(&workspace_dir);
+        let exe_out_dir = temp_dir("windows_large_arcana_desktop_second_window_bundle");
+        let exe_bundle = package_workspace(
+            workspace_dir.clone(),
+            BuildTarget::windows_exe(),
+            Some("app".to_string()),
+            Some(exe_out_dir.clone()),
+        )
+        .expect("large desktop exe package should succeed");
+        let exe_path = exe_bundle.bundle_dir.join(&exe_bundle.root_artifact);
+        let mut child = Command::new(&exe_path)
+            .current_dir(&exe_bundle.bundle_dir)
+            .arg("--exercise-second-window")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("large desktop exe bundle should launch");
+        let (main_hwnd, _title) = wait_for_process_window(child.id(), Duration::from_secs(20))
+            .expect("desktop showcase window should appear");
+        let (second_hwnd, _title) = if let Some(found) =
+            wait_for_additional_process_window(child.id(), main_hwnd, Duration::from_secs(20))
+        {
+            found
+        } else {
+            let _ = wait_for_child_exit(&mut child, Duration::from_secs(20));
+            let mut stdout = String::new();
+            child
+                .stdout
+                .take()
+                .expect("stdout should be captured")
+                .read_to_string(&mut stdout)
+                .expect("stdout should read");
+            let mut stderr = String::new();
+            child
+                .stderr
+                .take()
+                .expect("stderr should be captured")
+                .read_to_string(&mut stderr)
+                .expect("stderr should read");
+            let windows = process_windows(child.id())
+                .into_iter()
+                .map(|(_, title)| title)
+                .collect::<Vec<_>>();
+            panic!(
+                "secondary showcase window should appear; stdout was `{stdout}`; stderr was `{stderr}`; windows={windows:?}"
+            );
+        };
+        thread::sleep(Duration::from_millis(200));
+        send_left_click(second_hwnd, 80, 80);
+        let status = wait_for_child_exit(&mut child, Duration::from_secs(20))
+            .expect("desktop showcase should exit after second-window click");
+        let mut stdout = String::new();
+        child
+            .stdout
+            .take()
+            .expect("stdout should be captured")
+            .read_to_string(&mut stdout)
+            .expect("stdout should read");
+        let mut stderr = String::new();
+        child
+            .stderr
+            .take()
+            .expect("stderr should be captured")
+            .read_to_string(&mut stderr)
+            .expect("stderr should read");
+        assert_eq!(status.code(), Some(0));
+        assert!(
+            stdout
+                .lines()
+                .any(|line| line.starts_with("second_window=")),
+            "exercise mode should print the opened second window id, got `{stdout}`"
+        );
+        assert!(
+            stdout
+                .lines()
+                .any(|line| line.starts_with("second_window=click:")),
+            "second-window click should be delivered through the showcase, got `{stdout}`"
+        );
+        assert!(
+            stderr.is_empty(),
+            "showcase second-window exercise should not write stderr: `{stderr}`"
+        );
+        let _ = fs::remove_dir_all(&exe_out_dir);
     }
 
     #[cfg(windows)]

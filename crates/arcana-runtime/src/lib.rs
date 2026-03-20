@@ -165,6 +165,12 @@ pub struct RuntimeImageHandle(u64);
 pub struct RuntimeAppFrameHandle(u64);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RuntimeAppSessionHandle(u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RuntimeWakeHandle(u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RuntimeAudioDeviceHandle(u64);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -267,6 +273,8 @@ enum RuntimeOpaqueValue {
     Window(RuntimeWindowHandle),
     Image(RuntimeImageHandle),
     AppFrame(RuntimeAppFrameHandle),
+    AppSession(RuntimeAppSessionHandle),
+    Wake(RuntimeWakeHandle),
     AudioDevice(RuntimeAudioDeviceHandle),
     AudioBuffer(RuntimeAudioBufferHandle),
     AudioPlayback(RuntimeAudioPlaybackHandle),
@@ -506,9 +514,148 @@ pub trait RuntimeHost {
         let _ = window;
         Err("runtime host window_focused is not implemented".to_string())
     }
+    fn window_id(&mut self, window: RuntimeWindowHandle) -> Result<i64, String> {
+        let _ = window;
+        Err("runtime host window_id is not implemented".to_string())
+    }
+    fn window_position(&mut self, window: RuntimeWindowHandle) -> Result<(i64, i64), String> {
+        let _ = window;
+        Err("runtime host window_position is not implemented".to_string())
+    }
+    fn window_title(&mut self, window: RuntimeWindowHandle) -> Result<String, String> {
+        let _ = window;
+        Err("runtime host window_title is not implemented".to_string())
+    }
+    fn window_visible(&mut self, window: RuntimeWindowHandle) -> Result<bool, String> {
+        let _ = window;
+        Err("runtime host window_visible is not implemented".to_string())
+    }
+    fn window_decorated(&mut self, window: RuntimeWindowHandle) -> Result<bool, String> {
+        let _ = window;
+        Err("runtime host window_decorated is not implemented".to_string())
+    }
+    fn window_resizable(&mut self, window: RuntimeWindowHandle) -> Result<bool, String> {
+        let _ = window;
+        Err("runtime host window_resizable is not implemented".to_string())
+    }
+    fn window_topmost(&mut self, window: RuntimeWindowHandle) -> Result<bool, String> {
+        let _ = window;
+        Err("runtime host window_topmost is not implemented".to_string())
+    }
+    fn window_cursor_visible(&mut self, window: RuntimeWindowHandle) -> Result<bool, String> {
+        let _ = window;
+        Err("runtime host window_cursor_visible is not implemented".to_string())
+    }
+    fn window_min_size(&mut self, window: RuntimeWindowHandle) -> Result<(i64, i64), String> {
+        let _ = window;
+        Err("runtime host window_min_size is not implemented".to_string())
+    }
+    fn window_max_size(&mut self, window: RuntimeWindowHandle) -> Result<(i64, i64), String> {
+        let _ = window;
+        Err("runtime host window_max_size is not implemented".to_string())
+    }
+    fn window_scale_factor_milli(&mut self, window: RuntimeWindowHandle) -> Result<i64, String> {
+        let _ = window;
+        Err("runtime host window_scale_factor_milli is not implemented".to_string())
+    }
+    fn window_theme_code(&mut self, window: RuntimeWindowHandle) -> Result<i64, String> {
+        let _ = window;
+        Err("runtime host window_theme_code is not implemented".to_string())
+    }
+    fn window_transparent(&mut self, window: RuntimeWindowHandle) -> Result<bool, String> {
+        let _ = window;
+        Err("runtime host window_transparent is not implemented".to_string())
+    }
+    fn window_theme_override_code(&mut self, window: RuntimeWindowHandle) -> Result<i64, String> {
+        let _ = window;
+        Err("runtime host window_theme_override_code is not implemented".to_string())
+    }
+    fn window_cursor_icon_code(&mut self, window: RuntimeWindowHandle) -> Result<i64, String> {
+        let _ = window;
+        Err("runtime host window_cursor_icon_code is not implemented".to_string())
+    }
+    fn window_cursor_grab_mode(&mut self, window: RuntimeWindowHandle) -> Result<i64, String> {
+        let _ = window;
+        Err("runtime host window_cursor_grab_mode is not implemented".to_string())
+    }
+    fn window_cursor_position(
+        &mut self,
+        window: RuntimeWindowHandle,
+    ) -> Result<(i64, i64), String> {
+        let _ = window;
+        Err("runtime host window_cursor_position is not implemented".to_string())
+    }
+    fn window_text_input_enabled(&mut self, window: RuntimeWindowHandle) -> Result<bool, String> {
+        let _ = window;
+        Err("runtime host window_text_input_enabled is not implemented".to_string())
+    }
+    fn window_current_monitor_index(&mut self, window: RuntimeWindowHandle) -> Result<i64, String> {
+        let _ = window;
+        Err("runtime host window_current_monitor_index is not implemented".to_string())
+    }
+    fn window_primary_monitor_index(&mut self) -> Result<i64, String> {
+        Err("runtime host window_primary_monitor_index is not implemented".to_string())
+    }
+    fn window_monitor_count(&mut self) -> Result<i64, String> {
+        Err("runtime host window_monitor_count is not implemented".to_string())
+    }
+    fn window_monitor_name(&mut self, index: i64) -> Result<String, String> {
+        let _ = index;
+        Err("runtime host window_monitor_name is not implemented".to_string())
+    }
+    fn window_monitor_position(&mut self, index: i64) -> Result<(i64, i64), String> {
+        let _ = index;
+        Err("runtime host window_monitor_position is not implemented".to_string())
+    }
+    fn window_monitor_size(&mut self, index: i64) -> Result<(i64, i64), String> {
+        let _ = index;
+        Err("runtime host window_monitor_size is not implemented".to_string())
+    }
+    fn window_monitor_scale_factor_milli(&mut self, index: i64) -> Result<i64, String> {
+        let _ = index;
+        Err("runtime host window_monitor_scale_factor_milli is not implemented".to_string())
+    }
+    fn window_monitor_is_primary(&mut self, index: i64) -> Result<bool, String> {
+        let _ = index;
+        Err("runtime host window_monitor_is_primary is not implemented".to_string())
+    }
     fn window_set_title(&mut self, window: RuntimeWindowHandle, title: &str) -> Result<(), String> {
         let _ = (window, title);
         Err("runtime host window_set_title is not implemented".to_string())
+    }
+    fn window_set_position(
+        &mut self,
+        window: RuntimeWindowHandle,
+        x: i64,
+        y: i64,
+    ) -> Result<(), String> {
+        let _ = (window, x, y);
+        Err("runtime host window_set_position is not implemented".to_string())
+    }
+    fn window_set_size(
+        &mut self,
+        window: RuntimeWindowHandle,
+        width: i64,
+        height: i64,
+    ) -> Result<(), String> {
+        let _ = (window, width, height);
+        Err("runtime host window_set_size is not implemented".to_string())
+    }
+    fn window_set_visible(
+        &mut self,
+        window: RuntimeWindowHandle,
+        enabled: bool,
+    ) -> Result<(), String> {
+        let _ = (window, enabled);
+        Err("runtime host window_set_visible is not implemented".to_string())
+    }
+    fn window_set_decorated(
+        &mut self,
+        window: RuntimeWindowHandle,
+        enabled: bool,
+    ) -> Result<(), String> {
+        let _ = (window, enabled);
+        Err("runtime host window_set_decorated is not implemented".to_string())
     }
     fn window_set_resizable(
         &mut self,
@@ -517,6 +664,24 @@ pub trait RuntimeHost {
     ) -> Result<(), String> {
         let _ = (window, enabled);
         Err("runtime host window_set_resizable is not implemented".to_string())
+    }
+    fn window_set_min_size(
+        &mut self,
+        window: RuntimeWindowHandle,
+        width: i64,
+        height: i64,
+    ) -> Result<(), String> {
+        let _ = (window, width, height);
+        Err("runtime host window_set_min_size is not implemented".to_string())
+    }
+    fn window_set_max_size(
+        &mut self,
+        window: RuntimeWindowHandle,
+        width: i64,
+        height: i64,
+    ) -> Result<(), String> {
+        let _ = (window, width, height);
+        Err("runtime host window_set_max_size is not implemented".to_string())
     }
     fn window_set_fullscreen(
         &mut self,
@@ -557,6 +722,67 @@ pub trait RuntimeHost {
     ) -> Result<(), String> {
         let _ = (window, enabled);
         Err("runtime host window_set_cursor_visible is not implemented".to_string())
+    }
+    fn window_set_transparent(
+        &mut self,
+        window: RuntimeWindowHandle,
+        enabled: bool,
+    ) -> Result<(), String> {
+        let _ = (window, enabled);
+        Err("runtime host window_set_transparent is not implemented".to_string())
+    }
+    fn window_set_theme_override_code(
+        &mut self,
+        window: RuntimeWindowHandle,
+        code: i64,
+    ) -> Result<(), String> {
+        let _ = (window, code);
+        Err("runtime host window_set_theme_override_code is not implemented".to_string())
+    }
+    fn window_set_cursor_icon_code(
+        &mut self,
+        window: RuntimeWindowHandle,
+        code: i64,
+    ) -> Result<(), String> {
+        let _ = (window, code);
+        Err("runtime host window_set_cursor_icon_code is not implemented".to_string())
+    }
+    fn window_set_cursor_grab_mode(
+        &mut self,
+        window: RuntimeWindowHandle,
+        mode: i64,
+    ) -> Result<(), String> {
+        let _ = (window, mode);
+        Err("runtime host window_set_cursor_grab_mode is not implemented".to_string())
+    }
+    fn window_set_cursor_position(
+        &mut self,
+        window: RuntimeWindowHandle,
+        x: i64,
+        y: i64,
+    ) -> Result<(), String> {
+        let _ = (window, x, y);
+        Err("runtime host window_set_cursor_position is not implemented".to_string())
+    }
+    fn window_set_text_input_enabled(
+        &mut self,
+        window: RuntimeWindowHandle,
+        enabled: bool,
+    ) -> Result<(), String> {
+        let _ = (window, enabled);
+        Err("runtime host window_set_text_input_enabled is not implemented".to_string())
+    }
+    fn window_request_redraw(&mut self, window: RuntimeWindowHandle) -> Result<(), String> {
+        let _ = window;
+        Err("runtime host window_request_redraw is not implemented".to_string())
+    }
+    fn window_request_attention(
+        &mut self,
+        window: RuntimeWindowHandle,
+        enabled: bool,
+    ) -> Result<(), String> {
+        let _ = (window, enabled);
+        Err("runtime host window_request_attention is not implemented".to_string())
     }
     fn window_close(&mut self, window: RuntimeWindowHandle) -> Result<(), String> {
         let _ = window;
@@ -677,9 +903,76 @@ pub trait RuntimeHost {
         let _ = window;
         Err("runtime host events_pump is not implemented".to_string())
     }
-    fn events_poll(&mut self, frame: RuntimeAppFrameHandle) -> Result<(i64, i64, i64), String> {
+    fn events_poll(
+        &mut self,
+        frame: RuntimeAppFrameHandle,
+    ) -> Result<Option<RuntimeEventRecord>, String> {
         let _ = frame;
         Err("runtime host events_poll is not implemented".to_string())
+    }
+    fn events_session_open(&mut self) -> Result<RuntimeAppSessionHandle, String> {
+        Err("runtime host events_session_open is not implemented".to_string())
+    }
+    fn events_session_close(&mut self, session: RuntimeAppSessionHandle) -> Result<(), String> {
+        let _ = session;
+        Err("runtime host events_session_close is not implemented".to_string())
+    }
+    fn events_session_attach_window(
+        &mut self,
+        session: RuntimeAppSessionHandle,
+        window: RuntimeWindowHandle,
+    ) -> Result<(), String> {
+        let _ = (session, window);
+        Err("runtime host events_session_attach_window is not implemented".to_string())
+    }
+    fn events_session_detach_window(
+        &mut self,
+        session: RuntimeAppSessionHandle,
+        window: RuntimeWindowHandle,
+    ) -> Result<(), String> {
+        let _ = (session, window);
+        Err("runtime host events_session_detach_window is not implemented".to_string())
+    }
+    fn events_session_window_by_id(
+        &mut self,
+        session: RuntimeAppSessionHandle,
+        window_id: i64,
+    ) -> Result<Option<RuntimeWindowHandle>, String> {
+        let _ = (session, window_id);
+        Err("runtime host events_session_window_by_id is not implemented".to_string())
+    }
+    fn events_session_window_ids(
+        &mut self,
+        session: RuntimeAppSessionHandle,
+    ) -> Result<Vec<i64>, String> {
+        let _ = session;
+        Err("runtime host events_session_window_ids is not implemented".to_string())
+    }
+    fn events_session_pump(
+        &mut self,
+        session: RuntimeAppSessionHandle,
+    ) -> Result<RuntimeAppFrameHandle, String> {
+        let _ = session;
+        Err("runtime host events_session_pump is not implemented".to_string())
+    }
+    fn events_session_wait(
+        &mut self,
+        session: RuntimeAppSessionHandle,
+        timeout_ms: i64,
+    ) -> Result<RuntimeAppFrameHandle, String> {
+        let _ = (session, timeout_ms);
+        Err("runtime host events_session_wait is not implemented".to_string())
+    }
+    fn events_session_create_wake(
+        &mut self,
+        session: RuntimeAppSessionHandle,
+    ) -> Result<RuntimeWakeHandle, String> {
+        let _ = session;
+        Err("runtime host events_session_create_wake is not implemented".to_string())
+    }
+    fn events_wake_signal(&mut self, wake: RuntimeWakeHandle) -> Result<(), String> {
+        let _ = wake;
+        Err("runtime host events_wake_signal is not implemented".to_string())
     }
     fn input_key_code(&mut self, name: &str) -> Result<i64, String> {
         let _ = name;
@@ -744,6 +1037,59 @@ pub trait RuntimeHost {
     fn input_mouse_in_window(&mut self, frame: RuntimeAppFrameHandle) -> Result<bool, String> {
         let _ = frame;
         Err("runtime host input_mouse_in_window is not implemented".to_string())
+    }
+    fn clipboard_read_text(&mut self) -> Result<String, String> {
+        Err("runtime host clipboard_read_text is not implemented".to_string())
+    }
+    fn clipboard_write_text(&mut self, text: &str) -> Result<(), String> {
+        let _ = text;
+        Err("runtime host clipboard_write_text is not implemented".to_string())
+    }
+    fn clipboard_read_bytes(&mut self) -> Result<Vec<u8>, String> {
+        Err("runtime host clipboard_read_bytes is not implemented".to_string())
+    }
+    fn clipboard_write_bytes(&mut self, bytes: &[u8]) -> Result<(), String> {
+        let _ = bytes;
+        Err("runtime host clipboard_write_bytes is not implemented".to_string())
+    }
+    fn text_input_composition_area_active(
+        &mut self,
+        window: RuntimeWindowHandle,
+    ) -> Result<bool, String> {
+        let _ = window;
+        Err("runtime host text_input_composition_area_active is not implemented".to_string())
+    }
+    fn text_input_composition_area_position(
+        &mut self,
+        window: RuntimeWindowHandle,
+    ) -> Result<(i64, i64), String> {
+        let _ = window;
+        Err("runtime host text_input_composition_area_position is not implemented".to_string())
+    }
+    fn text_input_composition_area_size(
+        &mut self,
+        window: RuntimeWindowHandle,
+    ) -> Result<(i64, i64), String> {
+        let _ = window;
+        Err("runtime host text_input_composition_area_size is not implemented".to_string())
+    }
+    fn text_input_set_composition_area(
+        &mut self,
+        window: RuntimeWindowHandle,
+        x: i64,
+        y: i64,
+        width: i64,
+        height: i64,
+    ) -> Result<(), String> {
+        let _ = (window, x, y, width, height);
+        Err("runtime host text_input_set_composition_area is not implemented".to_string())
+    }
+    fn text_input_clear_composition_area(
+        &mut self,
+        window: RuntimeWindowHandle,
+    ) -> Result<(), String> {
+        let _ = window;
+        Err("runtime host text_input_clear_composition_area is not implemented".to_string())
     }
     fn audio_default_output(&mut self) -> Result<RuntimeAudioDeviceHandle, String> {
         Err("runtime host audio_default_output is not implemented".to_string())
@@ -939,10 +1285,37 @@ struct BufferedFileStream {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct BufferedEvent {
+pub struct RuntimeEventRecord {
     kind: i64,
+    window_id: i64,
     a: i64,
     b: i64,
+    flags: i64,
+    text: String,
+    key_code: i64,
+    physical_key: i64,
+    logical_key: i64,
+    key_location: i64,
+    pointer_x: i64,
+    pointer_y: i64,
+    repeated: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+struct BufferedEvent {
+    kind: i64,
+    window_id: i64,
+    a: i64,
+    b: i64,
+    flags: i64,
+    text: String,
+    key_code: i64,
+    physical_key: i64,
+    logical_key: i64,
+    key_location: i64,
+    pointer_x: i64,
+    pointer_y: i64,
+    repeated: bool,
 }
 
 pub(crate) fn common_named_key_code(name: &str) -> i64 {
@@ -951,8 +1324,16 @@ pub(crate) fn common_named_key_code(name: &str) -> i64 {
         "Tab" | "tab" => 9,
         "Enter" | "enter" => 13,
         "Shift" | "shift" => 16,
+        "ShiftLeft" | "shiftleft" | "LShift" | "lshift" => 160,
+        "ShiftRight" | "shiftright" | "RShift" | "rshift" => 161,
         "Control" | "control" | "Ctrl" | "ctrl" => 17,
+        "ControlLeft" | "controlleft" | "CtrlLeft" | "ctrlleft" | "LControl" | "lcontrol"
+        | "LCtrl" | "lctrl" => 162,
+        "ControlRight" | "controlright" | "CtrlRight" | "ctrlright" | "RControl" | "rcontrol"
+        | "RCtrl" | "rctrl" => 163,
         "Alt" | "alt" => 18,
+        "AltLeft" | "altleft" | "LAlt" | "lalt" => 164,
+        "AltRight" | "altright" | "RAlt" | "ralt" => 165,
         "Pause" | "pause" => 19,
         "CapsLock" | "capslock" => 20,
         "Escape" | "escape" => 27,
@@ -968,6 +1349,27 @@ pub(crate) fn common_named_key_code(name: &str) -> i64 {
         "Insert" | "insert" => 45,
         "Delete" | "delete" => 46,
         "Meta" | "meta" | "Super" | "super" | "Command" | "command" => 91,
+        "MetaLeft" | "metaleft" | "SuperLeft" | "superleft" | "CommandLeft" | "commandleft" => 91,
+        "MetaRight" | "metaright" | "SuperRight" | "superright" | "CommandRight"
+        | "commandright" => 92,
+        "Select" | "select" => 93,
+        "NumLock" | "numlock" => 144,
+        "ScrollLock" | "scrolllock" => 145,
+        "Numpad0" | "numpad0" => 96,
+        "Numpad1" | "numpad1" => 97,
+        "Numpad2" | "numpad2" => 98,
+        "Numpad3" | "numpad3" => 99,
+        "Numpad4" | "numpad4" => 100,
+        "Numpad5" | "numpad5" => 101,
+        "Numpad6" | "numpad6" => 102,
+        "Numpad7" | "numpad7" => 103,
+        "Numpad8" | "numpad8" => 104,
+        "Numpad9" | "numpad9" => 105,
+        "NumpadMultiply" | "numpadmultiply" => 106,
+        "NumpadAdd" | "numpadadd" => 107,
+        "NumpadSubtract" | "numpadsubtract" => 109,
+        "NumpadDecimal" | "numpaddecimal" => 110,
+        "NumpadDivide" | "numpaddivide" => 111,
         "F1" | "f1" => 112,
         "F2" | "f2" => 113,
         "F3" | "f3" => 114,
@@ -980,6 +1382,17 @@ pub(crate) fn common_named_key_code(name: &str) -> i64 {
         "F10" | "f10" => 121,
         "F11" | "f11" => 122,
         "F12" | "f12" => 123,
+        "Semicolon" | "semicolon" => 186,
+        "Equal" | "equal" | "Equals" | "equals" => 187,
+        "Comma" | "comma" => 188,
+        "Minus" | "minus" => 189,
+        "Period" | "period" => 190,
+        "Slash" | "slash" => 191,
+        "Backquote" | "backquote" | "Grave" | "grave" => 192,
+        "BracketLeft" | "bracketleft" => 219,
+        "Backslash" | "backslash" => 220,
+        "BracketRight" | "bracketright" => 221,
+        "Quote" | "quote" | "Apostrophe" | "apostrophe" => 222,
         _ if name.len() == 1 => name.chars().next().unwrap().to_ascii_uppercase() as i64,
         _ => -1,
     }
@@ -1001,6 +1414,7 @@ struct BufferedFrameInput {
     key_down: Vec<i64>,
     key_pressed: Vec<i64>,
     key_released: Vec<i64>,
+    modifiers: i64,
     mouse_pos: (i64, i64),
     mouse_down: Vec<i64>,
     mouse_pressed: Vec<i64>,
@@ -1014,14 +1428,32 @@ struct BufferedWindow {
     title: String,
     width: i64,
     height: i64,
+    position: (i64, i64),
+    min_size: (i64, i64),
+    max_size: (i64, i64),
+    scale_factor_milli: i64,
+    theme_code: i64,
+    theme_override_code: i64,
     resized: bool,
     fullscreen: bool,
     minimized: bool,
     maximized: bool,
     focused: bool,
+    visible: bool,
     resizable: bool,
+    decorated: bool,
     topmost: bool,
+    transparent: bool,
     cursor_visible: bool,
+    cursor_icon_code: i64,
+    cursor_grab_mode: i64,
+    cursor_position: (i64, i64),
+    text_input_enabled: bool,
+    composition_area_active: bool,
+    composition_area_position: (i64, i64),
+    composition_area_size: (i64, i64),
+    attention_requested: bool,
+    redraw_pending: bool,
     draw_log: Vec<String>,
 }
 
@@ -1036,6 +1468,19 @@ struct BufferedImage {
 struct BufferedAppFrame {
     events: Vec<BufferedEvent>,
     input: BufferedFrameInput,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BufferedSession {
+    windows: Vec<RuntimeWindowHandle>,
+    resumed: bool,
+    suspended: bool,
+    pending_wakes: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BufferedWake {
+    session: RuntimeAppSessionHandle,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1085,8 +1530,14 @@ pub struct BufferedHost {
     images: BTreeMap<RuntimeImageHandle, BufferedImage>,
     next_frame_handle: u64,
     frames: BTreeMap<RuntimeAppFrameHandle, BufferedAppFrame>,
+    next_session_handle: u64,
+    sessions: BTreeMap<RuntimeAppSessionHandle, BufferedSession>,
+    next_wake_handle: u64,
+    wakes: BTreeMap<RuntimeWakeHandle, BufferedWake>,
     next_frame_events: Vec<BufferedEvent>,
     next_frame_input: BufferedFrameInput,
+    clipboard_text: String,
+    clipboard_bytes: Vec<u8>,
     next_audio_device_handle: u64,
     audio_devices: BTreeMap<RuntimeAudioDeviceHandle, BufferedAudioDevice>,
     next_audio_buffer_handle: u64,
@@ -1177,9 +1628,24 @@ impl BufferedHost {
                 title: title.to_string(),
                 width,
                 height,
+                min_size: (0, 0),
+                max_size: (0, 0),
+                scale_factor_milli: 1000,
+                theme_code: 1,
+                theme_override_code: 0,
+                visible: true,
                 focused: true,
                 resizable: true,
+                decorated: true,
+                transparent: false,
                 cursor_visible: true,
+                cursor_icon_code: 0,
+                cursor_grab_mode: 0,
+                cursor_position: (0, 0),
+                text_input_enabled: true,
+                composition_area_active: false,
+                composition_area_position: (0, 0),
+                composition_area_size: (0, 0),
                 ..BufferedWindow::default()
             },
         );
@@ -1243,6 +1709,79 @@ impl BufferedHost {
         self.frames
             .get(&handle)
             .ok_or_else(|| format!("invalid AppFrame handle `{}`", handle.0))
+    }
+
+    fn insert_session(&mut self) -> RuntimeAppSessionHandle {
+        let handle = RuntimeAppSessionHandle(self.next_session_handle);
+        self.next_session_handle += 1;
+        self.sessions.insert(
+            handle,
+            BufferedSession {
+                windows: Vec::new(),
+                resumed: false,
+                suspended: false,
+                pending_wakes: 0,
+            },
+        );
+        handle
+    }
+
+    fn session_mut(
+        &mut self,
+        handle: RuntimeAppSessionHandle,
+    ) -> Result<&mut BufferedSession, String> {
+        self.sessions
+            .get_mut(&handle)
+            .ok_or_else(|| format!("invalid AppSession handle `{}`", handle.0))
+    }
+
+    fn session_ref(&self, handle: RuntimeAppSessionHandle) -> Result<&BufferedSession, String> {
+        self.sessions
+            .get(&handle)
+            .ok_or_else(|| format!("invalid AppSession handle `{}`", handle.0))
+    }
+
+    fn detach_window_from_sessions(&mut self, window: RuntimeWindowHandle) {
+        for session in self.sessions.values_mut() {
+            session.windows.retain(|candidate| *candidate != window);
+        }
+    }
+
+    fn remove_session_wakes(&mut self, session: RuntimeAppSessionHandle) {
+        self.wakes.retain(|_, wake| wake.session != session);
+    }
+
+    fn prune_missing_session_windows(
+        &mut self,
+        session: RuntimeAppSessionHandle,
+    ) -> Result<(), String> {
+        let live_windows = self.windows.keys().copied().collect::<BTreeSet<_>>();
+        let session_state = self.session_mut(session)?;
+        session_state
+            .windows
+            .retain(|candidate| live_windows.contains(candidate));
+        Ok(())
+    }
+
+    fn session_has_ready_events(&self, session: RuntimeAppSessionHandle) -> Result<bool, String> {
+        let session_state = self.session_ref(session)?;
+        if !session_state.resumed || session_state.pending_wakes > 0 {
+            return Ok(true);
+        }
+        Ok(!self.next_frame_events.is_empty())
+    }
+
+    fn insert_wake(&mut self, session: RuntimeAppSessionHandle) -> RuntimeWakeHandle {
+        let handle = RuntimeWakeHandle(self.next_wake_handle);
+        self.next_wake_handle += 1;
+        self.wakes.insert(handle, BufferedWake { session });
+        handle
+    }
+
+    fn wake_ref(&self, handle: RuntimeWakeHandle) -> Result<&BufferedWake, String> {
+        self.wakes
+            .get(&handle)
+            .ok_or_else(|| format!("invalid Wake handle `{}`", handle.0))
     }
 
     fn insert_audio_device(
@@ -1836,8 +2375,174 @@ impl RuntimeHost for BufferedHost {
         Ok(self.window_ref(window)?.focused)
     }
 
+    fn window_id(&mut self, window: RuntimeWindowHandle) -> Result<i64, String> {
+        self.window_ref(window)?;
+        i64::try_from(window.0)
+            .map_err(|_| format!("Window handle `{}` does not fit in Int", window.0))
+    }
+
+    fn window_position(&mut self, window: RuntimeWindowHandle) -> Result<(i64, i64), String> {
+        Ok(self.window_ref(window)?.position)
+    }
+
+    fn window_title(&mut self, window: RuntimeWindowHandle) -> Result<String, String> {
+        Ok(self.window_ref(window)?.title.clone())
+    }
+
+    fn window_visible(&mut self, window: RuntimeWindowHandle) -> Result<bool, String> {
+        Ok(self.window_ref(window)?.visible)
+    }
+
+    fn window_decorated(&mut self, window: RuntimeWindowHandle) -> Result<bool, String> {
+        Ok(self.window_ref(window)?.decorated)
+    }
+
+    fn window_resizable(&mut self, window: RuntimeWindowHandle) -> Result<bool, String> {
+        Ok(self.window_ref(window)?.resizable)
+    }
+
+    fn window_topmost(&mut self, window: RuntimeWindowHandle) -> Result<bool, String> {
+        Ok(self.window_ref(window)?.topmost)
+    }
+
+    fn window_cursor_visible(&mut self, window: RuntimeWindowHandle) -> Result<bool, String> {
+        Ok(self.window_ref(window)?.cursor_visible)
+    }
+
+    fn window_min_size(&mut self, window: RuntimeWindowHandle) -> Result<(i64, i64), String> {
+        Ok(self.window_ref(window)?.min_size)
+    }
+
+    fn window_max_size(&mut self, window: RuntimeWindowHandle) -> Result<(i64, i64), String> {
+        Ok(self.window_ref(window)?.max_size)
+    }
+
+    fn window_scale_factor_milli(&mut self, window: RuntimeWindowHandle) -> Result<i64, String> {
+        Ok(self.window_ref(window)?.scale_factor_milli)
+    }
+
+    fn window_theme_code(&mut self, window: RuntimeWindowHandle) -> Result<i64, String> {
+        Ok(self.window_ref(window)?.theme_code)
+    }
+
+    fn window_transparent(&mut self, window: RuntimeWindowHandle) -> Result<bool, String> {
+        Ok(self.window_ref(window)?.transparent)
+    }
+
+    fn window_theme_override_code(&mut self, window: RuntimeWindowHandle) -> Result<i64, String> {
+        Ok(self.window_ref(window)?.theme_override_code)
+    }
+
+    fn window_cursor_icon_code(&mut self, window: RuntimeWindowHandle) -> Result<i64, String> {
+        Ok(self.window_ref(window)?.cursor_icon_code)
+    }
+
+    fn window_cursor_grab_mode(&mut self, window: RuntimeWindowHandle) -> Result<i64, String> {
+        Ok(self.window_ref(window)?.cursor_grab_mode)
+    }
+
+    fn window_cursor_position(
+        &mut self,
+        window: RuntimeWindowHandle,
+    ) -> Result<(i64, i64), String> {
+        Ok(self.window_ref(window)?.cursor_position)
+    }
+
+    fn window_text_input_enabled(&mut self, window: RuntimeWindowHandle) -> Result<bool, String> {
+        Ok(self.window_ref(window)?.text_input_enabled)
+    }
+
+    fn window_current_monitor_index(&mut self, window: RuntimeWindowHandle) -> Result<i64, String> {
+        self.window_ref(window)?;
+        Ok(0)
+    }
+
+    fn window_primary_monitor_index(&mut self) -> Result<i64, String> {
+        Ok(0)
+    }
+
+    fn window_monitor_count(&mut self) -> Result<i64, String> {
+        Ok(1)
+    }
+
+    fn window_monitor_name(&mut self, index: i64) -> Result<String, String> {
+        if index != 0 {
+            return Err(format!("invalid monitor index `{index}`"));
+        }
+        Ok("Primary".to_string())
+    }
+
+    fn window_monitor_position(&mut self, index: i64) -> Result<(i64, i64), String> {
+        if index != 0 {
+            return Err(format!("invalid monitor index `{index}`"));
+        }
+        Ok((0, 0))
+    }
+
+    fn window_monitor_size(&mut self, index: i64) -> Result<(i64, i64), String> {
+        if index != 0 {
+            return Err(format!("invalid monitor index `{index}`"));
+        }
+        Ok((1920, 1080))
+    }
+
+    fn window_monitor_scale_factor_milli(&mut self, index: i64) -> Result<i64, String> {
+        if index != 0 {
+            return Err(format!("invalid monitor index `{index}`"));
+        }
+        Ok(1000)
+    }
+
+    fn window_monitor_is_primary(&mut self, index: i64) -> Result<bool, String> {
+        if index != 0 {
+            return Err(format!("invalid monitor index `{index}`"));
+        }
+        Ok(true)
+    }
+
     fn window_set_title(&mut self, window: RuntimeWindowHandle, title: &str) -> Result<(), String> {
         self.window_mut(window)?.title = title.to_string();
+        Ok(())
+    }
+
+    fn window_set_position(
+        &mut self,
+        window: RuntimeWindowHandle,
+        x: i64,
+        y: i64,
+    ) -> Result<(), String> {
+        self.window_mut(window)?.position = (x, y);
+        Ok(())
+    }
+
+    fn window_set_size(
+        &mut self,
+        window: RuntimeWindowHandle,
+        width: i64,
+        height: i64,
+    ) -> Result<(), String> {
+        let window = self.window_mut(window)?;
+        window.width = width.max(1);
+        window.height = height.max(1);
+        window.resized = true;
+        Ok(())
+    }
+
+    fn window_set_visible(
+        &mut self,
+        window: RuntimeWindowHandle,
+        enabled: bool,
+    ) -> Result<(), String> {
+        self.window_mut(window)?.visible = enabled;
+        Ok(())
+    }
+
+    fn window_set_decorated(
+        &mut self,
+        window: RuntimeWindowHandle,
+        enabled: bool,
+    ) -> Result<(), String> {
+        self.window_mut(window)?.decorated = enabled;
         Ok(())
     }
 
@@ -1847,6 +2552,26 @@ impl RuntimeHost for BufferedHost {
         enabled: bool,
     ) -> Result<(), String> {
         self.window_mut(window)?.resizable = enabled;
+        Ok(())
+    }
+
+    fn window_set_min_size(
+        &mut self,
+        window: RuntimeWindowHandle,
+        width: i64,
+        height: i64,
+    ) -> Result<(), String> {
+        self.window_mut(window)?.min_size = (width.max(0), height.max(0));
+        Ok(())
+    }
+
+    fn window_set_max_size(
+        &mut self,
+        window: RuntimeWindowHandle,
+        width: i64,
+        height: i64,
+    ) -> Result<(), String> {
+        self.window_mut(window)?.max_size = (width.max(0), height.max(0));
         Ok(())
     }
 
@@ -1895,7 +2620,94 @@ impl RuntimeHost for BufferedHost {
         Ok(())
     }
 
+    fn window_set_transparent(
+        &mut self,
+        window: RuntimeWindowHandle,
+        enabled: bool,
+    ) -> Result<(), String> {
+        self.window_mut(window)?.transparent = enabled;
+        Ok(())
+    }
+
+    fn window_set_theme_override_code(
+        &mut self,
+        window: RuntimeWindowHandle,
+        code: i64,
+    ) -> Result<(), String> {
+        self.window_mut(window)?.theme_override_code = code;
+        Ok(())
+    }
+
+    fn window_set_cursor_icon_code(
+        &mut self,
+        window: RuntimeWindowHandle,
+        code: i64,
+    ) -> Result<(), String> {
+        self.window_mut(window)?.cursor_icon_code = code;
+        Ok(())
+    }
+
+    fn window_set_cursor_grab_mode(
+        &mut self,
+        window: RuntimeWindowHandle,
+        mode: i64,
+    ) -> Result<(), String> {
+        self.window_mut(window)?.cursor_grab_mode = mode;
+        Ok(())
+    }
+
+    fn window_set_cursor_position(
+        &mut self,
+        window: RuntimeWindowHandle,
+        x: i64,
+        y: i64,
+    ) -> Result<(), String> {
+        let window = self.window_mut(window)?;
+        window.cursor_position = (x, y);
+        window.draw_log.push(format!("cursor_position:{x},{y}"));
+        Ok(())
+    }
+
+    fn window_set_text_input_enabled(
+        &mut self,
+        window: RuntimeWindowHandle,
+        enabled: bool,
+    ) -> Result<(), String> {
+        self.window_mut(window)?.text_input_enabled = enabled;
+        Ok(())
+    }
+
+    fn window_request_redraw(&mut self, window: RuntimeWindowHandle) -> Result<(), String> {
+        let window_id = i64::try_from(window.0)
+            .map_err(|_| format!("Window handle `{}` does not fit in Int", window.0))?;
+        if self.window_ref(window)?.redraw_pending {
+            return Ok(());
+        }
+        self.window_mut(window)?.redraw_pending = true;
+        self.next_frame_events.push(BufferedEvent {
+            kind: 13,
+            window_id,
+            a: 0,
+            b: 0,
+            flags: 0,
+            text: String::new(),
+            ..BufferedEvent::default()
+        });
+        Ok(())
+    }
+
+    fn window_request_attention(
+        &mut self,
+        window: RuntimeWindowHandle,
+        enabled: bool,
+    ) -> Result<(), String> {
+        self.window_mut(window)?.attention_requested = enabled;
+        Ok(())
+    }
+
     fn window_close(&mut self, window: RuntimeWindowHandle) -> Result<(), String> {
+        self.window_ref(window)?;
+        self.detach_window_from_sessions(window);
         self.windows
             .remove(&window)
             .map(|_| ())
@@ -2059,19 +2871,227 @@ impl RuntimeHost for BufferedHost {
         if !self.windows.contains_key(&window) {
             return Err(format!("invalid Window handle `{}`", window.0));
         }
-        self.window_mut(window)?.resized = false;
+        let state = self.window_mut(window)?;
+        state.resized = false;
+        state.redraw_pending = false;
         let events = std::mem::take(&mut self.next_frame_events);
         let input = std::mem::take(&mut self.next_frame_input);
         Ok(self.insert_frame(events, input))
     }
 
-    fn events_poll(&mut self, frame: RuntimeAppFrameHandle) -> Result<(i64, i64, i64), String> {
+    fn events_poll(
+        &mut self,
+        frame: RuntimeAppFrameHandle,
+    ) -> Result<Option<RuntimeEventRecord>, String> {
         let frame = self.frame_mut(frame)?;
         let Some(event) = frame.events.first().cloned() else {
-            return Ok((0, 0, 0));
+            return Ok(None);
         };
         frame.events.remove(0);
-        Ok((event.kind, event.a, event.b))
+        Ok(Some(RuntimeEventRecord {
+            kind: event.kind,
+            window_id: event.window_id,
+            a: event.a,
+            b: event.b,
+            flags: event.flags,
+            text: event.text,
+            key_code: event.key_code,
+            physical_key: event.physical_key,
+            logical_key: event.logical_key,
+            key_location: event.key_location,
+            pointer_x: event.pointer_x,
+            pointer_y: event.pointer_y,
+            repeated: event.repeated,
+        }))
+    }
+
+    fn events_session_open(&mut self) -> Result<RuntimeAppSessionHandle, String> {
+        Ok(self.insert_session())
+    }
+
+    fn events_session_close(&mut self, session: RuntimeAppSessionHandle) -> Result<(), String> {
+        let mut windows = self.session_ref(session)?.windows.clone();
+        windows.reverse();
+        self.remove_session_wakes(session);
+        self.sessions.remove(&session);
+        for window in windows {
+            let _ = self.window_close(window);
+        }
+        Ok(())
+    }
+
+    fn events_session_attach_window(
+        &mut self,
+        session: RuntimeAppSessionHandle,
+        window: RuntimeWindowHandle,
+    ) -> Result<(), String> {
+        self.window_ref(window)?;
+        let session_state = self.session_mut(session)?;
+        if !session_state.windows.contains(&window) {
+            session_state.windows.push(window);
+            if session_state.suspended {
+                session_state.resumed = false;
+                session_state.suspended = false;
+            }
+        }
+        Ok(())
+    }
+
+    fn events_session_detach_window(
+        &mut self,
+        session: RuntimeAppSessionHandle,
+        window: RuntimeWindowHandle,
+    ) -> Result<(), String> {
+        let session_state = self.session_mut(session)?;
+        session_state
+            .windows
+            .retain(|candidate| *candidate != window);
+        Ok(())
+    }
+
+    fn events_session_window_by_id(
+        &mut self,
+        session: RuntimeAppSessionHandle,
+        window_id: i64,
+    ) -> Result<Option<RuntimeWindowHandle>, String> {
+        self.prune_missing_session_windows(session)?;
+        let session_windows = self.session_ref(session)?.windows.clone();
+        for window in session_windows {
+            let Ok(id) = self.window_id(window) else {
+                continue;
+            };
+            if id == window_id {
+                return Ok(Some(window));
+            }
+        }
+        Ok(None)
+    }
+
+    fn events_session_window_ids(
+        &mut self,
+        session: RuntimeAppSessionHandle,
+    ) -> Result<Vec<i64>, String> {
+        self.prune_missing_session_windows(session)?;
+        let session_windows = self.session_ref(session)?.windows.clone();
+        let mut ids = Vec::new();
+        for window in session_windows {
+            let Ok(id) = self.window_id(window) else {
+                continue;
+            };
+            ids.push(id);
+        }
+        Ok(ids)
+    }
+
+    fn events_session_pump(
+        &mut self,
+        session: RuntimeAppSessionHandle,
+    ) -> Result<RuntimeAppFrameHandle, String> {
+        self.prune_missing_session_windows(session)?;
+        let mut events = Vec::new();
+        let mut input = std::mem::take(&mut self.next_frame_input);
+        let session_windows = self.session_ref(session)?.windows.clone();
+        for window in &session_windows {
+            if let Ok(state) = self.window_mut(*window) {
+                state.resized = false;
+                state.redraw_pending = false;
+            }
+        }
+        {
+            let session_state = self.session_mut(session)?;
+            if !session_state.resumed {
+                events.push(BufferedEvent {
+                    kind: 20,
+                    window_id: 0,
+                    a: 0,
+                    b: 0,
+                    flags: 0,
+                    text: String::new(),
+                    ..BufferedEvent::default()
+                });
+                session_state.resumed = true;
+                session_state.suspended = false;
+            }
+            while session_state.pending_wakes > 0 {
+                session_state.pending_wakes -= 1;
+                events.push(BufferedEvent {
+                    kind: 21,
+                    window_id: 0,
+                    a: 0,
+                    b: 0,
+                    flags: 0,
+                    text: String::new(),
+                    ..BufferedEvent::default()
+                });
+            }
+        }
+        events.extend(std::mem::take(&mut self.next_frame_events));
+        let closed = session_windows
+            .iter()
+            .filter(|window| self.windows.contains_key(window))
+            .count()
+            == 0;
+        if closed {
+            let session_state = self.session_mut(session)?;
+            if session_state.resumed && !session_state.suspended {
+                events.push(BufferedEvent {
+                    kind: 22,
+                    window_id: 0,
+                    a: 0,
+                    b: 0,
+                    flags: 0,
+                    text: String::new(),
+                    ..BufferedEvent::default()
+                });
+                session_state.suspended = true;
+            }
+        }
+        events.push(BufferedEvent {
+            kind: 23,
+            window_id: 0,
+            a: 0,
+            b: 0,
+            flags: 0,
+            text: String::new(),
+            ..BufferedEvent::default()
+        });
+        if input.modifiers == 0 {
+            input.modifiers = 0;
+        }
+        Ok(self.insert_frame(events, input))
+    }
+
+    fn events_session_wait(
+        &mut self,
+        session: RuntimeAppSessionHandle,
+        timeout_ms: i64,
+    ) -> Result<RuntimeAppFrameHandle, String> {
+        if !self.session_has_ready_events(session)? {
+            if timeout_ms < 0 {
+                self.sleep_log_ms.push(-1);
+            } else if timeout_ms > 0 {
+                self.sleep_log_ms.push(timeout_ms);
+                self.monotonic_now_ms = self.monotonic_now_ms.saturating_add(timeout_ms);
+                self.monotonic_now_ns = self
+                    .monotonic_now_ns
+                    .saturating_add(timeout_ms.saturating_mul(1_000_000));
+            }
+        }
+        self.events_session_pump(session)
+    }
+
+    fn events_session_create_wake(
+        &mut self,
+        session: RuntimeAppSessionHandle,
+    ) -> Result<RuntimeWakeHandle, String> {
+        self.session_ref(session)?;
+        Ok(self.insert_wake(session))
+    }
+
+    fn events_wake_signal(&mut self, wake: RuntimeWakeHandle) -> Result<(), String> {
+        let session = self.wake_ref(wake)?.session;
+        self.session_mut(session)?.pending_wakes += 1;
+        Ok(())
     }
 
     fn input_key_code(&mut self, name: &str) -> Result<i64, String> {
@@ -2140,6 +3160,71 @@ impl RuntimeHost for BufferedHost {
 
     fn input_mouse_in_window(&mut self, frame: RuntimeAppFrameHandle) -> Result<bool, String> {
         Ok(self.frame_ref(frame)?.input.mouse_in_window)
+    }
+
+    fn clipboard_read_text(&mut self) -> Result<String, String> {
+        Ok(self.clipboard_text.clone())
+    }
+
+    fn clipboard_write_text(&mut self, text: &str) -> Result<(), String> {
+        self.clipboard_text = text.to_string();
+        Ok(())
+    }
+
+    fn clipboard_read_bytes(&mut self) -> Result<Vec<u8>, String> {
+        Ok(self.clipboard_bytes.clone())
+    }
+
+    fn clipboard_write_bytes(&mut self, bytes: &[u8]) -> Result<(), String> {
+        self.clipboard_bytes = bytes.to_vec();
+        Ok(())
+    }
+
+    fn text_input_composition_area_active(
+        &mut self,
+        window: RuntimeWindowHandle,
+    ) -> Result<bool, String> {
+        Ok(self.window_ref(window)?.composition_area_active)
+    }
+
+    fn text_input_composition_area_position(
+        &mut self,
+        window: RuntimeWindowHandle,
+    ) -> Result<(i64, i64), String> {
+        Ok(self.window_ref(window)?.composition_area_position)
+    }
+
+    fn text_input_composition_area_size(
+        &mut self,
+        window: RuntimeWindowHandle,
+    ) -> Result<(i64, i64), String> {
+        Ok(self.window_ref(window)?.composition_area_size)
+    }
+
+    fn text_input_set_composition_area(
+        &mut self,
+        window: RuntimeWindowHandle,
+        x: i64,
+        y: i64,
+        width: i64,
+        height: i64,
+    ) -> Result<(), String> {
+        let window = self.window_mut(window)?;
+        window.composition_area_active = true;
+        window.composition_area_position = (x, y);
+        window.composition_area_size = (width.max(0), height.max(0));
+        Ok(())
+    }
+
+    fn text_input_clear_composition_area(
+        &mut self,
+        window: RuntimeWindowHandle,
+    ) -> Result<(), String> {
+        let window = self.window_mut(window)?;
+        window.composition_area_active = false;
+        window.composition_area_position = (0, 0);
+        window.composition_area_size = (0, 0);
+        Ok(())
     }
 
     fn audio_default_output(&mut self) -> Result<RuntimeAudioDeviceHandle, String> {
@@ -2684,16 +3769,66 @@ enum RuntimeIntrinsic {
     WindowMinimized,
     WindowMaximized,
     WindowFocused,
+    WindowId,
+    WindowPosition,
+    WindowTitle,
+    WindowVisible,
+    WindowDecorated,
+    WindowResizable,
+    WindowTopmost,
+    WindowCursorVisible,
+    WindowMinSize,
+    WindowMaxSize,
+    WindowScaleFactorMilli,
+    WindowThemeCode,
+    WindowTransparent,
+    WindowThemeOverrideCode,
+    WindowCursorIconCode,
+    WindowCursorGrabMode,
+    WindowCursorPosition,
+    WindowTextInputEnabled,
+    WindowCurrentMonitorIndex,
+    WindowPrimaryMonitorIndex,
+    WindowMonitorCount,
+    WindowMonitorName,
+    WindowMonitorPosition,
+    WindowMonitorSize,
+    WindowMonitorScaleFactorMilli,
+    WindowMonitorIsPrimary,
     WindowSetTitle,
+    WindowSetPosition,
+    WindowSetSize,
+    WindowSetVisible,
+    WindowSetDecorated,
     WindowSetResizable,
+    WindowSetMinSize,
+    WindowSetMaxSize,
     WindowSetFullscreen,
     WindowSetMinimized,
     WindowSetMaximized,
     WindowSetTopmost,
     WindowSetCursorVisible,
+    WindowSetTransparent,
+    WindowSetThemeOverrideCode,
+    WindowSetCursorIconCode,
+    WindowSetCursorGrabMode,
+    WindowSetCursorPosition,
+    WindowTextInputSetEnabled,
+    WindowRequestRedraw,
+    WindowRequestAttention,
     WindowClose,
     EventsPump,
     EventsPoll,
+    EventsSessionOpen,
+    EventsSessionClose,
+    EventsSessionAttachWindow,
+    EventsSessionDetachWindow,
+    EventsSessionWindowById,
+    EventsSessionWindowIds,
+    EventsSessionPump,
+    EventsSessionWait,
+    EventsSessionCreateWake,
+    EventsWakeSignal,
     InputKeyCode,
     InputKeyDown,
     InputKeyPressed,
@@ -2705,6 +3840,15 @@ enum RuntimeIntrinsic {
     InputMouseReleased,
     InputMouseWheelY,
     InputMouseInWindow,
+    ClipboardReadTextTry,
+    ClipboardWriteTextTry,
+    ClipboardReadBytesTry,
+    ClipboardWriteBytesTry,
+    TextInputCompositionAreaActive,
+    TextInputCompositionAreaPosition,
+    TextInputCompositionAreaSize,
+    TextInputSetCompositionArea,
+    TextInputClearCompositionArea,
     TimeMonotonicNowMs,
     TimeMonotonicNowNs,
     ConcurrentSleep,
@@ -3425,7 +4569,7 @@ fn push_runtime_call_frame(
 }
 
 fn pop_runtime_call_frame(state: &mut RuntimeExecutionState) {
-    let _ = state.call_stack.pop();
+    state.call_stack.pop();
 }
 
 fn resolve_routine_index(
@@ -3881,16 +5025,66 @@ fn resolve_runtime_intrinsic_impl(intrinsic_impl: &str) -> Option<RuntimeIntrins
         "WindowMinimized" => Some(RuntimeIntrinsic::WindowMinimized),
         "WindowMaximized" => Some(RuntimeIntrinsic::WindowMaximized),
         "WindowFocused" => Some(RuntimeIntrinsic::WindowFocused),
+        "WindowId" => Some(RuntimeIntrinsic::WindowId),
+        "WindowPosition" => Some(RuntimeIntrinsic::WindowPosition),
+        "WindowTitle" => Some(RuntimeIntrinsic::WindowTitle),
+        "WindowVisible" => Some(RuntimeIntrinsic::WindowVisible),
+        "WindowDecorated" => Some(RuntimeIntrinsic::WindowDecorated),
+        "WindowResizable" => Some(RuntimeIntrinsic::WindowResizable),
+        "WindowTopmost" => Some(RuntimeIntrinsic::WindowTopmost),
+        "WindowCursorVisible" => Some(RuntimeIntrinsic::WindowCursorVisible),
+        "WindowMinSize" => Some(RuntimeIntrinsic::WindowMinSize),
+        "WindowMaxSize" => Some(RuntimeIntrinsic::WindowMaxSize),
+        "WindowScaleFactorMilli" => Some(RuntimeIntrinsic::WindowScaleFactorMilli),
+        "WindowThemeCode" => Some(RuntimeIntrinsic::WindowThemeCode),
+        "WindowTransparent" => Some(RuntimeIntrinsic::WindowTransparent),
+        "WindowThemeOverrideCode" => Some(RuntimeIntrinsic::WindowThemeOverrideCode),
+        "WindowCursorIconCode" => Some(RuntimeIntrinsic::WindowCursorIconCode),
+        "WindowCursorGrabMode" => Some(RuntimeIntrinsic::WindowCursorGrabMode),
+        "WindowCursorPosition" => Some(RuntimeIntrinsic::WindowCursorPosition),
+        "WindowTextInputEnabled" => Some(RuntimeIntrinsic::WindowTextInputEnabled),
+        "WindowCurrentMonitorIndex" => Some(RuntimeIntrinsic::WindowCurrentMonitorIndex),
+        "WindowPrimaryMonitorIndex" => Some(RuntimeIntrinsic::WindowPrimaryMonitorIndex),
+        "WindowMonitorCount" => Some(RuntimeIntrinsic::WindowMonitorCount),
+        "WindowMonitorName" => Some(RuntimeIntrinsic::WindowMonitorName),
+        "WindowMonitorPosition" => Some(RuntimeIntrinsic::WindowMonitorPosition),
+        "WindowMonitorSize" => Some(RuntimeIntrinsic::WindowMonitorSize),
+        "WindowMonitorScaleFactorMilli" => Some(RuntimeIntrinsic::WindowMonitorScaleFactorMilli),
+        "WindowMonitorIsPrimary" => Some(RuntimeIntrinsic::WindowMonitorIsPrimary),
         "WindowSetTitle" => Some(RuntimeIntrinsic::WindowSetTitle),
+        "WindowSetPosition" => Some(RuntimeIntrinsic::WindowSetPosition),
+        "WindowSetSize" => Some(RuntimeIntrinsic::WindowSetSize),
+        "WindowSetVisible" => Some(RuntimeIntrinsic::WindowSetVisible),
+        "WindowSetDecorated" => Some(RuntimeIntrinsic::WindowSetDecorated),
         "WindowSetResizable" => Some(RuntimeIntrinsic::WindowSetResizable),
+        "WindowSetMinSize" => Some(RuntimeIntrinsic::WindowSetMinSize),
+        "WindowSetMaxSize" => Some(RuntimeIntrinsic::WindowSetMaxSize),
         "WindowSetFullscreen" => Some(RuntimeIntrinsic::WindowSetFullscreen),
         "WindowSetMinimized" => Some(RuntimeIntrinsic::WindowSetMinimized),
         "WindowSetMaximized" => Some(RuntimeIntrinsic::WindowSetMaximized),
         "WindowSetTopmost" => Some(RuntimeIntrinsic::WindowSetTopmost),
         "WindowSetCursorVisible" => Some(RuntimeIntrinsic::WindowSetCursorVisible),
+        "WindowSetTransparent" => Some(RuntimeIntrinsic::WindowSetTransparent),
+        "WindowSetThemeOverrideCode" => Some(RuntimeIntrinsic::WindowSetThemeOverrideCode),
+        "WindowSetCursorIconCode" => Some(RuntimeIntrinsic::WindowSetCursorIconCode),
+        "WindowSetCursorGrabMode" => Some(RuntimeIntrinsic::WindowSetCursorGrabMode),
+        "WindowSetCursorPosition" => Some(RuntimeIntrinsic::WindowSetCursorPosition),
+        "WindowTextInputSetEnabled" => Some(RuntimeIntrinsic::WindowTextInputSetEnabled),
+        "WindowRequestRedraw" => Some(RuntimeIntrinsic::WindowRequestRedraw),
+        "WindowRequestAttention" => Some(RuntimeIntrinsic::WindowRequestAttention),
         "WindowClose" => Some(RuntimeIntrinsic::WindowClose),
         "EventsPump" => Some(RuntimeIntrinsic::EventsPump),
         "EventsPoll" => Some(RuntimeIntrinsic::EventsPoll),
+        "EventsSessionOpen" => Some(RuntimeIntrinsic::EventsSessionOpen),
+        "EventsSessionClose" => Some(RuntimeIntrinsic::EventsSessionClose),
+        "EventsSessionAttachWindow" => Some(RuntimeIntrinsic::EventsSessionAttachWindow),
+        "EventsSessionDetachWindow" => Some(RuntimeIntrinsic::EventsSessionDetachWindow),
+        "EventsSessionWindowById" => Some(RuntimeIntrinsic::EventsSessionWindowById),
+        "EventsSessionWindowIds" => Some(RuntimeIntrinsic::EventsSessionWindowIds),
+        "EventsSessionPump" => Some(RuntimeIntrinsic::EventsSessionPump),
+        "EventsSessionWait" => Some(RuntimeIntrinsic::EventsSessionWait),
+        "EventsSessionCreateWake" => Some(RuntimeIntrinsic::EventsSessionCreateWake),
+        "EventsWakeSignal" => Some(RuntimeIntrinsic::EventsWakeSignal),
         "InputKeyCode" => Some(RuntimeIntrinsic::InputKeyCode),
         "InputKeyDown" => Some(RuntimeIntrinsic::InputKeyDown),
         "InputKeyPressed" => Some(RuntimeIntrinsic::InputKeyPressed),
@@ -3902,6 +5096,17 @@ fn resolve_runtime_intrinsic_impl(intrinsic_impl: &str) -> Option<RuntimeIntrins
         "InputMouseReleased" => Some(RuntimeIntrinsic::InputMouseReleased),
         "InputMouseWheelY" => Some(RuntimeIntrinsic::InputMouseWheelY),
         "InputMouseInWindow" => Some(RuntimeIntrinsic::InputMouseInWindow),
+        "ClipboardReadTextTry" => Some(RuntimeIntrinsic::ClipboardReadTextTry),
+        "ClipboardWriteTextTry" => Some(RuntimeIntrinsic::ClipboardWriteTextTry),
+        "ClipboardReadBytesTry" => Some(RuntimeIntrinsic::ClipboardReadBytesTry),
+        "ClipboardWriteBytesTry" => Some(RuntimeIntrinsic::ClipboardWriteBytesTry),
+        "TextInputCompositionAreaActive" => Some(RuntimeIntrinsic::TextInputCompositionAreaActive),
+        "TextInputCompositionAreaPosition" => {
+            Some(RuntimeIntrinsic::TextInputCompositionAreaPosition)
+        }
+        "TextInputCompositionAreaSize" => Some(RuntimeIntrinsic::TextInputCompositionAreaSize),
+        "TextInputSetCompositionArea" => Some(RuntimeIntrinsic::TextInputSetCompositionArea),
+        "TextInputClearCompositionArea" => Some(RuntimeIntrinsic::TextInputClearCompositionArea),
         "HostTimeMonotonicNowMs" => Some(RuntimeIntrinsic::TimeMonotonicNowMs),
         "HostTimeMonotonicNowNs" => Some(RuntimeIntrinsic::TimeMonotonicNowNs),
         "ConcurrentSleep" => Some(RuntimeIntrinsic::ConcurrentSleep),
@@ -4147,6 +5352,12 @@ fn runtime_value_to_string(value: &RuntimeValue) -> String {
         }
         RuntimeValue::Opaque(RuntimeOpaqueValue::AppFrame(handle)) => {
             format!("<AppFrame:{}>", handle.0)
+        }
+        RuntimeValue::Opaque(RuntimeOpaqueValue::AppSession(handle)) => {
+            format!("<AppSession:{}>", handle.0)
+        }
+        RuntimeValue::Opaque(RuntimeOpaqueValue::Wake(handle)) => {
+            format!("<WakeHandle:{}>", handle.0)
         }
         RuntimeValue::Opaque(RuntimeOpaqueValue::AudioDevice(handle)) => {
             format!("<AudioDevice:{}>", handle.0)
@@ -5201,6 +6412,13 @@ fn expect_bool(value: RuntimeValue, context: &str) -> Result<bool, String> {
     }
 }
 
+fn expect_int_pair(value: RuntimeValue, context: &str) -> Result<(i64, i64), String> {
+    let RuntimeValue::Pair(left, right) = value else {
+        return Err(format!("{context} expected (Int, Int)"));
+    };
+    Ok((expect_int(*left, context)?, expect_int(*right, context)?))
+}
+
 fn expect_str(value: RuntimeValue, context: &str) -> Result<String, String> {
     match value {
         RuntimeValue::Str(value) => Ok(value),
@@ -5261,6 +6479,23 @@ fn expect_image(value: RuntimeValue, context: &str) -> Result<RuntimeImageHandle
 fn expect_app_frame(value: RuntimeValue, context: &str) -> Result<RuntimeAppFrameHandle, String> {
     let RuntimeValue::Opaque(RuntimeOpaqueValue::AppFrame(handle)) = value else {
         return Err(format!("{context} expected AppFrame"));
+    };
+    Ok(handle)
+}
+
+fn expect_app_session(
+    value: RuntimeValue,
+    context: &str,
+) -> Result<RuntimeAppSessionHandle, String> {
+    let RuntimeValue::Opaque(RuntimeOpaqueValue::AppSession(handle)) = value else {
+        return Err(format!("{context} expected AppSession"));
+    };
+    Ok(handle)
+}
+
+fn expect_wake(value: RuntimeValue, context: &str) -> Result<RuntimeWakeHandle, String> {
+    let RuntimeValue::Opaque(RuntimeOpaqueValue::Wake(handle)) = value else {
+        return Err(format!("{context} expected WakeHandle"));
     };
     Ok(handle)
 }
@@ -5795,8 +7030,52 @@ fn ok_variant(value: RuntimeValue) -> RuntimeValue {
     }
 }
 
+fn some_variant(value: RuntimeValue) -> RuntimeValue {
+    RuntimeValue::Variant {
+        name: "Option.Some".to_string(),
+        payload: vec![value],
+    }
+}
+
+fn none_variant() -> RuntimeValue {
+    RuntimeValue::Variant {
+        name: "Option.None".to_string(),
+        payload: Vec::new(),
+    }
+}
+
 fn make_pair(left: RuntimeValue, right: RuntimeValue) -> RuntimeValue {
     RuntimeValue::Pair(Box::new(left), Box::new(right))
+}
+
+fn runtime_event_record_value(event: RuntimeEventRecord) -> RuntimeValue {
+    let mut fields = BTreeMap::new();
+    fields.insert("kind".to_string(), RuntimeValue::Int(event.kind));
+    fields.insert("window_id".to_string(), RuntimeValue::Int(event.window_id));
+    fields.insert("a".to_string(), RuntimeValue::Int(event.a));
+    fields.insert("b".to_string(), RuntimeValue::Int(event.b));
+    fields.insert("flags".to_string(), RuntimeValue::Int(event.flags));
+    fields.insert("text".to_string(), RuntimeValue::Str(event.text));
+    fields.insert("key_code".to_string(), RuntimeValue::Int(event.key_code));
+    fields.insert(
+        "physical_key".to_string(),
+        RuntimeValue::Int(event.physical_key),
+    );
+    fields.insert(
+        "logical_key".to_string(),
+        RuntimeValue::Int(event.logical_key),
+    );
+    fields.insert(
+        "key_location".to_string(),
+        RuntimeValue::Int(event.key_location),
+    );
+    fields.insert("pointer_x".to_string(), RuntimeValue::Int(event.pointer_x));
+    fields.insert("pointer_y".to_string(), RuntimeValue::Int(event.pointer_y));
+    fields.insert("repeated".to_string(), RuntimeValue::Bool(event.repeated));
+    RuntimeValue::Record {
+        name: "std.kernel.events.EventRaw".to_string(),
+        fields,
+    }
 }
 
 fn variant_name_matches(name: &str, expected: &str) -> bool {
@@ -5811,6 +7090,8 @@ fn opaque_type_name(value: &RuntimeOpaqueValue) -> &'static str {
         RuntimeOpaqueValue::Window(_) => "std.window.Window",
         RuntimeOpaqueValue::Image(_) => "std.canvas.Image",
         RuntimeOpaqueValue::AppFrame(_) => "std.events.AppFrame",
+        RuntimeOpaqueValue::AppSession(_) => "std.events.AppSession",
+        RuntimeOpaqueValue::Wake(_) => "std.events.WakeHandle",
         RuntimeOpaqueValue::AudioDevice(_) => "std.audio.AudioDevice",
         RuntimeOpaqueValue::AudioBuffer(_) => "std.audio.AudioBuffer",
         RuntimeOpaqueValue::AudioPlayback(_) => "std.audio.AudioPlayback",
@@ -5959,6 +7240,7 @@ fn runtime_value_is_copy(value: &RuntimeValue) -> bool {
         | RuntimeValue::Opaque(RuntimeOpaqueValue::AtomicBool(_))
         | RuntimeValue::Opaque(RuntimeOpaqueValue::ArenaId(_))
         | RuntimeValue::Opaque(RuntimeOpaqueValue::FrameId(_))
+        | RuntimeValue::Opaque(RuntimeOpaqueValue::Wake(_))
         | RuntimeValue::Opaque(RuntimeOpaqueValue::PoolId(_)) => true,
         RuntimeValue::Str(_)
         | RuntimeValue::Array(_)
@@ -7531,7 +8813,673 @@ fn eval_try_qualifier(
     )?)
 }
 
+fn is_runtime_app_shell_intrinsic(intrinsic: RuntimeIntrinsic) -> bool {
+    matches!(
+        intrinsic,
+        RuntimeIntrinsic::WindowOpenTry
+            | RuntimeIntrinsic::WindowSize
+            | RuntimeIntrinsic::WindowResized
+            | RuntimeIntrinsic::WindowFullscreen
+            | RuntimeIntrinsic::WindowMinimized
+            | RuntimeIntrinsic::WindowMaximized
+            | RuntimeIntrinsic::WindowFocused
+            | RuntimeIntrinsic::WindowId
+            | RuntimeIntrinsic::WindowPosition
+            | RuntimeIntrinsic::WindowTitle
+            | RuntimeIntrinsic::WindowVisible
+            | RuntimeIntrinsic::WindowDecorated
+            | RuntimeIntrinsic::WindowResizable
+            | RuntimeIntrinsic::WindowTopmost
+            | RuntimeIntrinsic::WindowCursorVisible
+            | RuntimeIntrinsic::WindowMinSize
+            | RuntimeIntrinsic::WindowMaxSize
+            | RuntimeIntrinsic::WindowScaleFactorMilli
+            | RuntimeIntrinsic::WindowThemeCode
+            | RuntimeIntrinsic::WindowTransparent
+            | RuntimeIntrinsic::WindowThemeOverrideCode
+            | RuntimeIntrinsic::WindowCursorIconCode
+            | RuntimeIntrinsic::WindowCursorGrabMode
+            | RuntimeIntrinsic::WindowCursorPosition
+            | RuntimeIntrinsic::WindowTextInputEnabled
+            | RuntimeIntrinsic::WindowCurrentMonitorIndex
+            | RuntimeIntrinsic::WindowPrimaryMonitorIndex
+            | RuntimeIntrinsic::WindowMonitorCount
+            | RuntimeIntrinsic::WindowMonitorName
+            | RuntimeIntrinsic::WindowMonitorPosition
+            | RuntimeIntrinsic::WindowMonitorSize
+            | RuntimeIntrinsic::WindowMonitorScaleFactorMilli
+            | RuntimeIntrinsic::WindowMonitorIsPrimary
+            | RuntimeIntrinsic::WindowSetTitle
+            | RuntimeIntrinsic::WindowSetPosition
+            | RuntimeIntrinsic::WindowSetSize
+            | RuntimeIntrinsic::WindowSetVisible
+            | RuntimeIntrinsic::WindowSetDecorated
+            | RuntimeIntrinsic::WindowSetResizable
+            | RuntimeIntrinsic::WindowSetMinSize
+            | RuntimeIntrinsic::WindowSetMaxSize
+            | RuntimeIntrinsic::WindowSetFullscreen
+            | RuntimeIntrinsic::WindowSetMinimized
+            | RuntimeIntrinsic::WindowSetMaximized
+            | RuntimeIntrinsic::WindowSetTopmost
+            | RuntimeIntrinsic::WindowSetCursorVisible
+            | RuntimeIntrinsic::WindowSetTransparent
+            | RuntimeIntrinsic::WindowSetThemeOverrideCode
+            | RuntimeIntrinsic::WindowSetCursorIconCode
+            | RuntimeIntrinsic::WindowSetCursorGrabMode
+            | RuntimeIntrinsic::WindowSetCursorPosition
+            | RuntimeIntrinsic::WindowTextInputSetEnabled
+            | RuntimeIntrinsic::WindowRequestRedraw
+            | RuntimeIntrinsic::WindowRequestAttention
+            | RuntimeIntrinsic::WindowClose
+            | RuntimeIntrinsic::EventsPoll
+            | RuntimeIntrinsic::EventsSessionOpen
+            | RuntimeIntrinsic::EventsSessionClose
+            | RuntimeIntrinsic::EventsSessionAttachWindow
+            | RuntimeIntrinsic::EventsSessionDetachWindow
+            | RuntimeIntrinsic::EventsSessionWindowById
+            | RuntimeIntrinsic::EventsSessionWindowIds
+            | RuntimeIntrinsic::EventsSessionPump
+            | RuntimeIntrinsic::EventsSessionWait
+            | RuntimeIntrinsic::EventsSessionCreateWake
+            | RuntimeIntrinsic::EventsWakeSignal
+    )
+}
+
+#[inline(never)]
+fn execute_runtime_app_shell_intrinsic(
+    intrinsic: RuntimeIntrinsic,
+    args: &[RuntimeValue],
+    host: &mut dyn RuntimeHost,
+) -> Result<RuntimeValue, String> {
+    let args = args.to_vec();
+    match intrinsic {
+        RuntimeIntrinsic::WindowOpenTry => {
+            if args.len() != 3 {
+                return Err("window_open expects three arguments".to_string());
+            }
+            let title = expect_str(args[0].clone(), "window_open")?;
+            let width = expect_int(args[1].clone(), "window_open")?;
+            let height = expect_int(args[2].clone(), "window_open")?;
+            Ok(match host.window_open(&title, width, height) {
+                Ok(handle) => ok_variant(RuntimeValue::Opaque(RuntimeOpaqueValue::Window(handle))),
+                Err(err) => err_variant(err),
+            })
+        }
+        RuntimeIntrinsic::WindowSize => {
+            let window = expect_window(expect_single_arg(args, "window_size")?, "window_size")?;
+            let (width, height) = host.window_size(window)?;
+            Ok(make_pair(
+                RuntimeValue::Int(width),
+                RuntimeValue::Int(height),
+            ))
+        }
+        RuntimeIntrinsic::WindowResized => {
+            let window =
+                expect_window(expect_single_arg(args, "window_resized")?, "window_resized")?;
+            Ok(RuntimeValue::Bool(host.window_resized(window)?))
+        }
+        RuntimeIntrinsic::WindowFullscreen => {
+            let window = expect_window(
+                expect_single_arg(args, "window_fullscreen")?,
+                "window_fullscreen",
+            )?;
+            Ok(RuntimeValue::Bool(host.window_fullscreen(window)?))
+        }
+        RuntimeIntrinsic::WindowMinimized => {
+            let window = expect_window(
+                expect_single_arg(args, "window_minimized")?,
+                "window_minimized",
+            )?;
+            Ok(RuntimeValue::Bool(host.window_minimized(window)?))
+        }
+        RuntimeIntrinsic::WindowMaximized => {
+            let window = expect_window(
+                expect_single_arg(args, "window_maximized")?,
+                "window_maximized",
+            )?;
+            Ok(RuntimeValue::Bool(host.window_maximized(window)?))
+        }
+        RuntimeIntrinsic::WindowFocused => {
+            let window =
+                expect_window(expect_single_arg(args, "window_focused")?, "window_focused")?;
+            Ok(RuntimeValue::Bool(host.window_focused(window)?))
+        }
+        RuntimeIntrinsic::WindowId => {
+            let window = expect_window(expect_single_arg(args, "window_id")?, "window_id")?;
+            Ok(RuntimeValue::Int(host.window_id(window)?))
+        }
+        RuntimeIntrinsic::WindowPosition => {
+            let window = expect_window(
+                expect_single_arg(args, "window_position")?,
+                "window_position",
+            )?;
+            let (x, y) = host.window_position(window)?;
+            Ok(make_pair(RuntimeValue::Int(x), RuntimeValue::Int(y)))
+        }
+        RuntimeIntrinsic::WindowTitle => {
+            let window = expect_window(expect_single_arg(args, "window_title")?, "window_title")?;
+            Ok(RuntimeValue::Str(host.window_title(window)?))
+        }
+        RuntimeIntrinsic::WindowVisible => {
+            let window =
+                expect_window(expect_single_arg(args, "window_visible")?, "window_visible")?;
+            Ok(RuntimeValue::Bool(host.window_visible(window)?))
+        }
+        RuntimeIntrinsic::WindowDecorated => {
+            let window = expect_window(
+                expect_single_arg(args, "window_decorated")?,
+                "window_decorated",
+            )?;
+            Ok(RuntimeValue::Bool(host.window_decorated(window)?))
+        }
+        RuntimeIntrinsic::WindowResizable => {
+            let window = expect_window(
+                expect_single_arg(args, "window_resizable")?,
+                "window_resizable",
+            )?;
+            Ok(RuntimeValue::Bool(host.window_resizable(window)?))
+        }
+        RuntimeIntrinsic::WindowTopmost => {
+            let window =
+                expect_window(expect_single_arg(args, "window_topmost")?, "window_topmost")?;
+            Ok(RuntimeValue::Bool(host.window_topmost(window)?))
+        }
+        RuntimeIntrinsic::WindowCursorVisible => {
+            let window = expect_window(
+                expect_single_arg(args, "window_cursor_visible")?,
+                "window_cursor_visible",
+            )?;
+            Ok(RuntimeValue::Bool(host.window_cursor_visible(window)?))
+        }
+        RuntimeIntrinsic::WindowMinSize => {
+            let window = expect_window(
+                expect_single_arg(args, "window_min_size")?,
+                "window_min_size",
+            )?;
+            let (width, height) = host.window_min_size(window)?;
+            Ok(make_pair(
+                RuntimeValue::Int(width),
+                RuntimeValue::Int(height),
+            ))
+        }
+        RuntimeIntrinsic::WindowMaxSize => {
+            let window = expect_window(
+                expect_single_arg(args, "window_max_size")?,
+                "window_max_size",
+            )?;
+            let (width, height) = host.window_max_size(window)?;
+            Ok(make_pair(
+                RuntimeValue::Int(width),
+                RuntimeValue::Int(height),
+            ))
+        }
+        RuntimeIntrinsic::WindowScaleFactorMilli => {
+            let window = expect_window(
+                expect_single_arg(args, "window_scale_factor_milli")?,
+                "window_scale_factor_milli",
+            )?;
+            Ok(RuntimeValue::Int(host.window_scale_factor_milli(window)?))
+        }
+        RuntimeIntrinsic::WindowThemeCode => {
+            let window = expect_window(
+                expect_single_arg(args, "window_theme_code")?,
+                "window_theme_code",
+            )?;
+            Ok(RuntimeValue::Int(host.window_theme_code(window)?))
+        }
+        RuntimeIntrinsic::WindowTransparent => {
+            let window = expect_window(
+                expect_single_arg(args, "window_transparent")?,
+                "window_transparent",
+            )?;
+            Ok(RuntimeValue::Bool(host.window_transparent(window)?))
+        }
+        RuntimeIntrinsic::WindowThemeOverrideCode => {
+            let window = expect_window(
+                expect_single_arg(args, "window_theme_override_code")?,
+                "window_theme_override_code",
+            )?;
+            Ok(RuntimeValue::Int(host.window_theme_override_code(window)?))
+        }
+        RuntimeIntrinsic::WindowCursorIconCode => {
+            let window = expect_window(
+                expect_single_arg(args, "window_cursor_icon_code")?,
+                "window_cursor_icon_code",
+            )?;
+            Ok(RuntimeValue::Int(host.window_cursor_icon_code(window)?))
+        }
+        RuntimeIntrinsic::WindowCursorGrabMode => {
+            let window = expect_window(
+                expect_single_arg(args, "window_cursor_grab_mode")?,
+                "window_cursor_grab_mode",
+            )?;
+            Ok(RuntimeValue::Int(host.window_cursor_grab_mode(window)?))
+        }
+        RuntimeIntrinsic::WindowCursorPosition => {
+            let window = expect_window(
+                expect_single_arg(args, "window_cursor_position")?,
+                "window_cursor_position",
+            )?;
+            let (x, y) = host.window_cursor_position(window)?;
+            Ok(make_pair(RuntimeValue::Int(x), RuntimeValue::Int(y)))
+        }
+        RuntimeIntrinsic::WindowTextInputEnabled => {
+            let window = expect_window(
+                expect_single_arg(args, "window_text_input_enabled")?,
+                "window_text_input_enabled",
+            )?;
+            Ok(RuntimeValue::Bool(host.window_text_input_enabled(window)?))
+        }
+        RuntimeIntrinsic::WindowCurrentMonitorIndex => {
+            let window = expect_window(
+                expect_single_arg(args, "window_current_monitor_index")?,
+                "window_current_monitor_index",
+            )?;
+            Ok(RuntimeValue::Int(
+                host.window_current_monitor_index(window)?,
+            ))
+        }
+        RuntimeIntrinsic::WindowPrimaryMonitorIndex => {
+            if !args.is_empty() {
+                return Err("window_primary_monitor_index expects zero arguments".to_string());
+            }
+            Ok(RuntimeValue::Int(host.window_primary_monitor_index()?))
+        }
+        RuntimeIntrinsic::WindowMonitorCount => {
+            if !args.is_empty() {
+                return Err("window_monitor_count expects zero arguments".to_string());
+            }
+            Ok(RuntimeValue::Int(host.window_monitor_count()?))
+        }
+        RuntimeIntrinsic::WindowMonitorName => {
+            let index = expect_int(
+                expect_single_arg(args, "window_monitor_name")?,
+                "window_monitor_name",
+            )?;
+            Ok(RuntimeValue::Str(host.window_monitor_name(index)?))
+        }
+        RuntimeIntrinsic::WindowMonitorPosition => {
+            let index = expect_int(
+                expect_single_arg(args, "window_monitor_position")?,
+                "window_monitor_position",
+            )?;
+            let (x, y) = host.window_monitor_position(index)?;
+            Ok(make_pair(RuntimeValue::Int(x), RuntimeValue::Int(y)))
+        }
+        RuntimeIntrinsic::WindowMonitorSize => {
+            let index = expect_int(
+                expect_single_arg(args, "window_monitor_size")?,
+                "window_monitor_size",
+            )?;
+            let (width, height) = host.window_monitor_size(index)?;
+            Ok(make_pair(
+                RuntimeValue::Int(width),
+                RuntimeValue::Int(height),
+            ))
+        }
+        RuntimeIntrinsic::WindowMonitorScaleFactorMilli => {
+            let index = expect_int(
+                expect_single_arg(args, "window_monitor_scale_factor_milli")?,
+                "window_monitor_scale_factor_milli",
+            )?;
+            Ok(RuntimeValue::Int(
+                host.window_monitor_scale_factor_milli(index)?,
+            ))
+        }
+        RuntimeIntrinsic::WindowMonitorIsPrimary => {
+            let index = expect_int(
+                expect_single_arg(args, "window_monitor_is_primary")?,
+                "window_monitor_is_primary",
+            )?;
+            Ok(RuntimeValue::Bool(host.window_monitor_is_primary(index)?))
+        }
+        RuntimeIntrinsic::WindowSetTitle => {
+            if args.len() != 2 {
+                return Err("window_set_title expects two arguments".to_string());
+            }
+            host.window_set_title(
+                expect_window(args[0].clone(), "window_set_title")?,
+                &expect_str(args[1].clone(), "window_set_title")?,
+            )?;
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::WindowSetPosition => {
+            if args.len() != 3 {
+                return Err("window_set_position expects three arguments".to_string());
+            }
+            host.window_set_position(
+                expect_window(args[0].clone(), "window_set_position")?,
+                expect_int(args[1].clone(), "window_set_position")?,
+                expect_int(args[2].clone(), "window_set_position")?,
+            )?;
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::WindowSetSize => {
+            if args.len() != 3 {
+                return Err("window_set_size expects three arguments".to_string());
+            }
+            host.window_set_size(
+                expect_window(args[0].clone(), "window_set_size")?,
+                expect_int(args[1].clone(), "window_set_size")?,
+                expect_int(args[2].clone(), "window_set_size")?,
+            )?;
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::WindowSetVisible => {
+            if args.len() != 2 {
+                return Err("window_set_visible expects two arguments".to_string());
+            }
+            host.window_set_visible(
+                expect_window(args[0].clone(), "window_set_visible")?,
+                expect_bool(args[1].clone(), "window_set_visible")?,
+            )?;
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::WindowSetDecorated => {
+            if args.len() != 2 {
+                return Err("window_set_decorated expects two arguments".to_string());
+            }
+            host.window_set_decorated(
+                expect_window(args[0].clone(), "window_set_decorated")?,
+                expect_bool(args[1].clone(), "window_set_decorated")?,
+            )?;
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::WindowSetResizable => {
+            if args.len() != 2 {
+                return Err("window_set_resizable expects two arguments".to_string());
+            }
+            host.window_set_resizable(
+                expect_window(args[0].clone(), "window_set_resizable")?,
+                expect_bool(args[1].clone(), "window_set_resizable")?,
+            )?;
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::WindowSetMinSize => {
+            if args.len() != 3 {
+                return Err("window_set_min_size expects three arguments".to_string());
+            }
+            host.window_set_min_size(
+                expect_window(args[0].clone(), "window_set_min_size")?,
+                expect_int(args[1].clone(), "window_set_min_size")?,
+                expect_int(args[2].clone(), "window_set_min_size")?,
+            )?;
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::WindowSetMaxSize => {
+            if args.len() != 3 {
+                return Err("window_set_max_size expects three arguments".to_string());
+            }
+            host.window_set_max_size(
+                expect_window(args[0].clone(), "window_set_max_size")?,
+                expect_int(args[1].clone(), "window_set_max_size")?,
+                expect_int(args[2].clone(), "window_set_max_size")?,
+            )?;
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::WindowSetFullscreen => {
+            if args.len() != 2 {
+                return Err("window_set_fullscreen expects two arguments".to_string());
+            }
+            host.window_set_fullscreen(
+                expect_window(args[0].clone(), "window_set_fullscreen")?,
+                expect_bool(args[1].clone(), "window_set_fullscreen")?,
+            )?;
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::WindowSetMinimized => {
+            if args.len() != 2 {
+                return Err("window_set_minimized expects two arguments".to_string());
+            }
+            host.window_set_minimized(
+                expect_window(args[0].clone(), "window_set_minimized")?,
+                expect_bool(args[1].clone(), "window_set_minimized")?,
+            )?;
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::WindowSetMaximized => {
+            if args.len() != 2 {
+                return Err("window_set_maximized expects two arguments".to_string());
+            }
+            host.window_set_maximized(
+                expect_window(args[0].clone(), "window_set_maximized")?,
+                expect_bool(args[1].clone(), "window_set_maximized")?,
+            )?;
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::WindowSetTopmost => {
+            if args.len() != 2 {
+                return Err("window_set_topmost expects two arguments".to_string());
+            }
+            host.window_set_topmost(
+                expect_window(args[0].clone(), "window_set_topmost")?,
+                expect_bool(args[1].clone(), "window_set_topmost")?,
+            )?;
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::WindowSetCursorVisible => {
+            if args.len() != 2 {
+                return Err("window_set_cursor_visible expects two arguments".to_string());
+            }
+            host.window_set_cursor_visible(
+                expect_window(args[0].clone(), "window_set_cursor_visible")?,
+                expect_bool(args[1].clone(), "window_set_cursor_visible")?,
+            )?;
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::WindowSetTransparent => {
+            if args.len() != 2 {
+                return Err("window_set_transparent expects two arguments".to_string());
+            }
+            host.window_set_transparent(
+                expect_window(args[0].clone(), "window_set_transparent")?,
+                expect_bool(args[1].clone(), "window_set_transparent")?,
+            )?;
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::WindowSetThemeOverrideCode => {
+            if args.len() != 2 {
+                return Err("window_set_theme_override_code expects two arguments".to_string());
+            }
+            host.window_set_theme_override_code(
+                expect_window(args[0].clone(), "window_set_theme_override_code")?,
+                expect_int(args[1].clone(), "window_set_theme_override_code")?,
+            )?;
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::WindowSetCursorIconCode => {
+            if args.len() != 2 {
+                return Err("window_set_cursor_icon_code expects two arguments".to_string());
+            }
+            host.window_set_cursor_icon_code(
+                expect_window(args[0].clone(), "window_set_cursor_icon_code")?,
+                expect_int(args[1].clone(), "window_set_cursor_icon_code")?,
+            )?;
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::WindowSetCursorGrabMode => {
+            if args.len() != 2 {
+                return Err("window_set_cursor_grab_mode expects two arguments".to_string());
+            }
+            host.window_set_cursor_grab_mode(
+                expect_window(args[0].clone(), "window_set_cursor_grab_mode")?,
+                expect_int(args[1].clone(), "window_set_cursor_grab_mode")?,
+            )?;
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::WindowSetCursorPosition => {
+            if args.len() != 3 {
+                return Err("window_set_cursor_position expects three arguments".to_string());
+            }
+            host.window_set_cursor_position(
+                expect_window(args[0].clone(), "window_set_cursor_position")?,
+                expect_int(args[1].clone(), "window_set_cursor_position")?,
+                expect_int(args[2].clone(), "window_set_cursor_position")?,
+            )?;
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::WindowTextInputSetEnabled => {
+            if args.len() != 2 {
+                return Err("window_text_input_set_enabled expects two arguments".to_string());
+            }
+            host.window_set_text_input_enabled(
+                expect_window(args[0].clone(), "window_text_input_set_enabled")?,
+                expect_bool(args[1].clone(), "window_text_input_set_enabled")?,
+            )?;
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::WindowRequestRedraw => {
+            let window = expect_window(
+                expect_single_arg(args, "window_request_redraw")?,
+                "window_request_redraw",
+            )?;
+            host.window_request_redraw(window)?;
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::WindowRequestAttention => {
+            if args.len() != 2 {
+                return Err("window_request_attention expects two arguments".to_string());
+            }
+            host.window_request_attention(
+                expect_window(args[0].clone(), "window_request_attention")?,
+                expect_bool(args[1].clone(), "window_request_attention")?,
+            )?;
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::WindowClose => {
+            let window = expect_window(expect_single_arg(args, "window_close")?, "window_close")?;
+            Ok(match host.window_close(window) {
+                Ok(()) => ok_variant(RuntimeValue::Unit),
+                Err(err) => err_variant(err),
+            })
+        }
+        RuntimeIntrinsic::EventsPoll => {
+            let frame = expect_app_frame(expect_single_arg(args, "events_poll")?, "events_poll")?;
+            Ok(match host.events_poll(frame)? {
+                Some(event) => some_variant(runtime_event_record_value(event)),
+                None => none_variant(),
+            })
+        }
+        RuntimeIntrinsic::EventsSessionOpen => {
+            if !args.is_empty() {
+                return Err("events_session_open expects zero arguments".to_string());
+            }
+            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::AppSession(
+                host.events_session_open()?,
+            )))
+        }
+        RuntimeIntrinsic::EventsSessionClose => {
+            let session = expect_app_session(
+                expect_single_arg(args, "events_session_close")?,
+                "events_session_close",
+            )?;
+            host.events_session_close(session)?;
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::EventsSessionAttachWindow => {
+            if args.len() != 2 {
+                return Err("events_session_attach_window expects two arguments".to_string());
+            }
+            host.events_session_attach_window(
+                expect_app_session(args[0].clone(), "events_session_attach_window")?,
+                expect_window(args[1].clone(), "events_session_attach_window")?,
+            )?;
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::EventsSessionDetachWindow => {
+            if args.len() != 2 {
+                return Err("events_session_detach_window expects two arguments".to_string());
+            }
+            host.events_session_detach_window(
+                expect_app_session(args[0].clone(), "events_session_detach_window")?,
+                expect_window(args[1].clone(), "events_session_detach_window")?,
+            )?;
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::EventsSessionWindowById => {
+            if args.len() != 2 {
+                return Err("events_session_window_by_id expects two arguments".to_string());
+            }
+            Ok(
+                match host.events_session_window_by_id(
+                    expect_app_session(args[0].clone(), "events_session_window_by_id")?,
+                    expect_int(args[1].clone(), "events_session_window_by_id")?,
+                )? {
+                    Some(window) => {
+                        some_variant(RuntimeValue::Opaque(RuntimeOpaqueValue::Window(window)))
+                    }
+                    None => none_variant(),
+                },
+            )
+        }
+        RuntimeIntrinsic::EventsSessionWindowIds => {
+            let session = expect_app_session(
+                expect_single_arg(args, "events_session_window_ids")?,
+                "events_session_window_ids",
+            )?;
+            Ok(RuntimeValue::List(
+                host.events_session_window_ids(session)?
+                    .into_iter()
+                    .map(RuntimeValue::Int)
+                    .collect(),
+            ))
+        }
+        RuntimeIntrinsic::EventsSessionPump => {
+            let session = expect_app_session(
+                expect_single_arg(args, "events_session_pump")?,
+                "events_session_pump",
+            )?;
+            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::AppFrame(
+                host.events_session_pump(session)?,
+            )))
+        }
+        RuntimeIntrinsic::EventsSessionWait => {
+            if args.len() != 2 {
+                return Err("events_session_wait expects two arguments".to_string());
+            }
+            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::AppFrame(
+                host.events_session_wait(
+                    expect_app_session(args[0].clone(), "events_session_wait")?,
+                    expect_int(args[1].clone(), "events_session_wait")?,
+                )?,
+            )))
+        }
+        RuntimeIntrinsic::EventsSessionCreateWake => {
+            let session = expect_app_session(
+                expect_single_arg(args, "events_session_create_wake")?,
+                "events_session_create_wake",
+            )?;
+            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::Wake(
+                host.events_session_create_wake(session)?,
+            )))
+        }
+        RuntimeIntrinsic::EventsWakeSignal => {
+            let wake = expect_wake(
+                expect_single_arg(args, "events_wake_signal")?,
+                "events_wake_signal",
+            )?;
+            host.events_wake_signal(wake)?;
+            Ok(RuntimeValue::Unit)
+        }
+        _ => unreachable!("non-app-shell intrinsic routed to execute_runtime_app_shell_intrinsic"),
+    }
+}
+
 fn execute_runtime_intrinsic(
+    intrinsic: RuntimeIntrinsic,
+    type_args: &[String],
+    final_args: &mut Vec<RuntimeValue>,
+    plan: &RuntimePackagePlan,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
+) -> Result<RuntimeValue, String> {
+    if is_runtime_app_shell_intrinsic(intrinsic) {
+        return execute_runtime_app_shell_intrinsic(intrinsic, final_args.as_slice(), host);
+    }
+    execute_runtime_core_intrinsic(intrinsic, type_args, final_args, plan, state, host)
+}
+
+fn execute_runtime_core_intrinsic(
     intrinsic: RuntimeIntrinsic,
     type_args: &[String],
     final_args: &mut Vec<RuntimeValue>,
@@ -8119,6 +10067,186 @@ fn execute_runtime_intrinsic(
                 expect_window(expect_single_arg(args, "window_focused")?, "window_focused")?;
             Ok(RuntimeValue::Bool(host.window_focused(window)?))
         }
+        RuntimeIntrinsic::WindowId => {
+            let window = expect_window(expect_single_arg(args, "window_id")?, "window_id")?;
+            Ok(RuntimeValue::Int(host.window_id(window)?))
+        }
+        RuntimeIntrinsic::WindowPosition => {
+            let window = expect_window(
+                expect_single_arg(args, "window_position")?,
+                "window_position",
+            )?;
+            let (x, y) = host.window_position(window)?;
+            Ok(make_pair(RuntimeValue::Int(x), RuntimeValue::Int(y)))
+        }
+        RuntimeIntrinsic::WindowTitle => {
+            let window = expect_window(expect_single_arg(args, "window_title")?, "window_title")?;
+            Ok(RuntimeValue::Str(host.window_title(window)?))
+        }
+        RuntimeIntrinsic::WindowVisible => {
+            let window =
+                expect_window(expect_single_arg(args, "window_visible")?, "window_visible")?;
+            Ok(RuntimeValue::Bool(host.window_visible(window)?))
+        }
+        RuntimeIntrinsic::WindowDecorated => {
+            let window = expect_window(
+                expect_single_arg(args, "window_decorated")?,
+                "window_decorated",
+            )?;
+            Ok(RuntimeValue::Bool(host.window_decorated(window)?))
+        }
+        RuntimeIntrinsic::WindowResizable => {
+            let window = expect_window(
+                expect_single_arg(args, "window_resizable")?,
+                "window_resizable",
+            )?;
+            Ok(RuntimeValue::Bool(host.window_resizable(window)?))
+        }
+        RuntimeIntrinsic::WindowTopmost => {
+            let window =
+                expect_window(expect_single_arg(args, "window_topmost")?, "window_topmost")?;
+            Ok(RuntimeValue::Bool(host.window_topmost(window)?))
+        }
+        RuntimeIntrinsic::WindowCursorVisible => {
+            let window = expect_window(
+                expect_single_arg(args, "window_cursor_visible")?,
+                "window_cursor_visible",
+            )?;
+            Ok(RuntimeValue::Bool(host.window_cursor_visible(window)?))
+        }
+        RuntimeIntrinsic::WindowMinSize => {
+            let window = expect_window(
+                expect_single_arg(args, "window_min_size")?,
+                "window_min_size",
+            )?;
+            let (x, y) = host.window_min_size(window)?;
+            Ok(make_pair(RuntimeValue::Int(x), RuntimeValue::Int(y)))
+        }
+        RuntimeIntrinsic::WindowMaxSize => {
+            let window = expect_window(
+                expect_single_arg(args, "window_max_size")?,
+                "window_max_size",
+            )?;
+            let (x, y) = host.window_max_size(window)?;
+            Ok(make_pair(RuntimeValue::Int(x), RuntimeValue::Int(y)))
+        }
+        RuntimeIntrinsic::WindowScaleFactorMilli => {
+            let window = expect_window(
+                expect_single_arg(args, "window_scale_factor_milli")?,
+                "window_scale_factor_milli",
+            )?;
+            Ok(RuntimeValue::Int(host.window_scale_factor_milli(window)?))
+        }
+        RuntimeIntrinsic::WindowThemeCode => {
+            let window = expect_window(
+                expect_single_arg(args, "window_theme_code")?,
+                "window_theme_code",
+            )?;
+            Ok(RuntimeValue::Int(host.window_theme_code(window)?))
+        }
+        RuntimeIntrinsic::WindowTransparent => {
+            let window = expect_window(
+                expect_single_arg(args, "window_transparent")?,
+                "window_transparent",
+            )?;
+            Ok(RuntimeValue::Bool(host.window_transparent(window)?))
+        }
+        RuntimeIntrinsic::WindowThemeOverrideCode => {
+            let window = expect_window(
+                expect_single_arg(args, "window_theme_override_code")?,
+                "window_theme_override_code",
+            )?;
+            Ok(RuntimeValue::Int(host.window_theme_override_code(window)?))
+        }
+        RuntimeIntrinsic::WindowCursorIconCode => {
+            let window = expect_window(
+                expect_single_arg(args, "window_cursor_icon_code")?,
+                "window_cursor_icon_code",
+            )?;
+            Ok(RuntimeValue::Int(host.window_cursor_icon_code(window)?))
+        }
+        RuntimeIntrinsic::WindowCursorGrabMode => {
+            let window = expect_window(
+                expect_single_arg(args, "window_cursor_grab_mode")?,
+                "window_cursor_grab_mode",
+            )?;
+            Ok(RuntimeValue::Int(host.window_cursor_grab_mode(window)?))
+        }
+        RuntimeIntrinsic::WindowCursorPosition => {
+            let window = expect_window(
+                expect_single_arg(args, "window_cursor_position")?,
+                "window_cursor_position",
+            )?;
+            let (x, y) = host.window_cursor_position(window)?;
+            Ok(make_pair(RuntimeValue::Int(x), RuntimeValue::Int(y)))
+        }
+        RuntimeIntrinsic::WindowTextInputEnabled => {
+            let window = expect_window(
+                expect_single_arg(args, "window_text_input_enabled")?,
+                "window_text_input_enabled",
+            )?;
+            Ok(RuntimeValue::Bool(host.window_text_input_enabled(window)?))
+        }
+        RuntimeIntrinsic::WindowCurrentMonitorIndex => {
+            let window = expect_window(
+                expect_single_arg(args, "window_current_monitor_index")?,
+                "window_current_monitor_index",
+            )?;
+            Ok(RuntimeValue::Int(
+                host.window_current_monitor_index(window)?,
+            ))
+        }
+        RuntimeIntrinsic::WindowPrimaryMonitorIndex => {
+            if !args.is_empty() {
+                return Err("window_primary_monitor_index expects zero arguments".to_string());
+            }
+            Ok(RuntimeValue::Int(host.window_primary_monitor_index()?))
+        }
+        RuntimeIntrinsic::WindowMonitorCount => {
+            if !args.is_empty() {
+                return Err("window_monitor_count expects zero arguments".to_string());
+            }
+            Ok(RuntimeValue::Int(host.window_monitor_count()?))
+        }
+        RuntimeIntrinsic::WindowMonitorName => {
+            let index = expect_int(
+                expect_single_arg(args, "window_monitor_name")?,
+                "window_monitor_name",
+            )?;
+            Ok(RuntimeValue::Str(host.window_monitor_name(index)?))
+        }
+        RuntimeIntrinsic::WindowMonitorPosition => {
+            let index = expect_int(
+                expect_single_arg(args, "window_monitor_position")?,
+                "window_monitor_position",
+            )?;
+            let (x, y) = host.window_monitor_position(index)?;
+            Ok(make_pair(RuntimeValue::Int(x), RuntimeValue::Int(y)))
+        }
+        RuntimeIntrinsic::WindowMonitorSize => {
+            let index = expect_int(
+                expect_single_arg(args, "window_monitor_size")?,
+                "window_monitor_size",
+            )?;
+            let (x, y) = host.window_monitor_size(index)?;
+            Ok(make_pair(RuntimeValue::Int(x), RuntimeValue::Int(y)))
+        }
+        RuntimeIntrinsic::WindowMonitorScaleFactorMilli => {
+            let index = expect_int(
+                expect_single_arg(args, "window_monitor_scale_factor_milli")?,
+                "window_monitor_scale_factor_milli",
+            )?;
+            Ok(RuntimeValue::Int(
+                host.window_monitor_scale_factor_milli(index)?,
+            ))
+        }
+        RuntimeIntrinsic::WindowMonitorIsPrimary => {
+            let index = expect_int(
+                expect_single_arg(args, "window_monitor_is_primary")?,
+                "window_monitor_is_primary",
+            )?;
+            Ok(RuntimeValue::Bool(host.window_monitor_is_primary(index)?))
+        }
         RuntimeIntrinsic::WindowSetTitle => {
             if args.len() != 2 {
                 return Err("window_set_title expects two arguments".to_string());
@@ -8129,6 +10257,47 @@ fn execute_runtime_intrinsic(
             )?;
             Ok(RuntimeValue::Unit)
         }
+        RuntimeIntrinsic::WindowSetPosition => {
+            if args.len() != 3 {
+                return Err("window_set_position expects three arguments".to_string());
+            }
+            let window = expect_window(args[0].clone(), "window_set_position")?;
+            let x = expect_int(args[1].clone(), "window_set_position")?;
+            let y = expect_int(args[2].clone(), "window_set_position")?;
+            host.window_set_position(window, x, y)?;
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::WindowSetSize => {
+            if args.len() != 3 {
+                return Err("window_set_size expects three arguments".to_string());
+            }
+            host.window_set_size(
+                expect_window(args[0].clone(), "window_set_size")?,
+                expect_int(args[1].clone(), "window_set_size")?,
+                expect_int(args[2].clone(), "window_set_size")?,
+            )?;
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::WindowSetVisible => {
+            if args.len() != 2 {
+                return Err("window_set_visible expects two arguments".to_string());
+            }
+            host.window_set_visible(
+                expect_window(args[0].clone(), "window_set_visible")?,
+                expect_bool(args[1].clone(), "window_set_visible")?,
+            )?;
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::WindowSetDecorated => {
+            if args.len() != 2 {
+                return Err("window_set_decorated expects two arguments".to_string());
+            }
+            host.window_set_decorated(
+                expect_window(args[0].clone(), "window_set_decorated")?,
+                expect_bool(args[1].clone(), "window_set_decorated")?,
+            )?;
+            Ok(RuntimeValue::Unit)
+        }
         RuntimeIntrinsic::WindowSetResizable => {
             if args.len() != 2 {
                 return Err("window_set_resizable expects two arguments".to_string());
@@ -8136,6 +10305,28 @@ fn execute_runtime_intrinsic(
             host.window_set_resizable(
                 expect_window(args[0].clone(), "window_set_resizable")?,
                 expect_bool(args[1].clone(), "window_set_resizable")?,
+            )?;
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::WindowSetMinSize => {
+            if args.len() != 3 {
+                return Err("window_set_min_size expects three arguments".to_string());
+            }
+            host.window_set_min_size(
+                expect_window(args[0].clone(), "window_set_min_size")?,
+                expect_int(args[1].clone(), "window_set_min_size")?,
+                expect_int(args[2].clone(), "window_set_min_size")?,
+            )?;
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::WindowSetMaxSize => {
+            if args.len() != 3 {
+                return Err("window_set_max_size expects three arguments".to_string());
+            }
+            host.window_set_max_size(
+                expect_window(args[0].clone(), "window_set_max_size")?,
+                expect_int(args[1].clone(), "window_set_max_size")?,
+                expect_int(args[2].clone(), "window_set_max_size")?,
             )?;
             Ok(RuntimeValue::Unit)
         }
@@ -8189,6 +10380,85 @@ fn execute_runtime_intrinsic(
             )?;
             Ok(RuntimeValue::Unit)
         }
+        RuntimeIntrinsic::WindowSetTransparent => {
+            if args.len() != 2 {
+                return Err("window_set_transparent expects two arguments".to_string());
+            }
+            host.window_set_transparent(
+                expect_window(args[0].clone(), "window_set_transparent")?,
+                expect_bool(args[1].clone(), "window_set_transparent")?,
+            )?;
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::WindowSetThemeOverrideCode => {
+            if args.len() != 2 {
+                return Err("window_set_theme_override_code expects two arguments".to_string());
+            }
+            host.window_set_theme_override_code(
+                expect_window(args[0].clone(), "window_set_theme_override_code")?,
+                expect_int(args[1].clone(), "window_set_theme_override_code")?,
+            )?;
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::WindowSetCursorIconCode => {
+            if args.len() != 2 {
+                return Err("window_set_cursor_icon_code expects two arguments".to_string());
+            }
+            host.window_set_cursor_icon_code(
+                expect_window(args[0].clone(), "window_set_cursor_icon_code")?,
+                expect_int(args[1].clone(), "window_set_cursor_icon_code")?,
+            )?;
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::WindowSetCursorGrabMode => {
+            if args.len() != 2 {
+                return Err("window_set_cursor_grab_mode expects two arguments".to_string());
+            }
+            host.window_set_cursor_grab_mode(
+                expect_window(args[0].clone(), "window_set_cursor_grab_mode")?,
+                expect_int(args[1].clone(), "window_set_cursor_grab_mode")?,
+            )?;
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::WindowSetCursorPosition => {
+            if args.len() != 3 {
+                return Err("window_set_cursor_position expects three arguments".to_string());
+            }
+            host.window_set_cursor_position(
+                expect_window(args[0].clone(), "window_set_cursor_position")?,
+                expect_int(args[1].clone(), "window_set_cursor_position")?,
+                expect_int(args[2].clone(), "window_set_cursor_position")?,
+            )?;
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::WindowTextInputSetEnabled => {
+            if args.len() != 2 {
+                return Err("window_text_input_set_enabled expects two arguments".to_string());
+            }
+            host.window_set_text_input_enabled(
+                expect_window(args[0].clone(), "window_text_input_set_enabled")?,
+                expect_bool(args[1].clone(), "window_text_input_set_enabled")?,
+            )?;
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::WindowRequestRedraw => {
+            let window = expect_window(
+                expect_single_arg(args, "window_request_redraw")?,
+                "window_request_redraw",
+            )?;
+            host.window_request_redraw(window)?;
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::WindowRequestAttention => {
+            if args.len() != 2 {
+                return Err("window_request_attention expects two arguments".to_string());
+            }
+            host.window_request_attention(
+                expect_window(args[0].clone(), "window_request_attention")?,
+                expect_bool(args[1].clone(), "window_request_attention")?,
+            )?;
+            Ok(RuntimeValue::Unit)
+        }
         RuntimeIntrinsic::WindowClose => {
             let window = expect_window(expect_single_arg(args, "window_close")?, "window_close")?;
             Ok(match host.window_close(window) {
@@ -8204,11 +10474,111 @@ fn execute_runtime_intrinsic(
         }
         RuntimeIntrinsic::EventsPoll => {
             let frame = expect_app_frame(expect_single_arg(args, "events_poll")?, "events_poll")?;
-            let (kind, a, b) = host.events_poll(frame)?;
-            Ok(make_pair(
-                RuntimeValue::Int(kind),
-                make_pair(RuntimeValue::Int(a), RuntimeValue::Int(b)),
+            Ok(match host.events_poll(frame)? {
+                Some(event) => some_variant(runtime_event_record_value(event)),
+                None => none_variant(),
+            })
+        }
+        RuntimeIntrinsic::EventsSessionOpen => {
+            if !args.is_empty() {
+                return Err("events_session_open expects zero arguments".to_string());
+            }
+            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::AppSession(
+                host.events_session_open()?,
+            )))
+        }
+        RuntimeIntrinsic::EventsSessionClose => {
+            let session = expect_app_session(
+                expect_single_arg(args, "events_session_close")?,
+                "events_session_close",
+            )?;
+            host.events_session_close(session)?;
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::EventsSessionAttachWindow => {
+            if args.len() != 2 {
+                return Err("events_session_attach_window expects two arguments".to_string());
+            }
+            host.events_session_attach_window(
+                expect_app_session(args[0].clone(), "events_session_attach_window")?,
+                expect_window(args[1].clone(), "events_session_attach_window")?,
+            )?;
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::EventsSessionDetachWindow => {
+            if args.len() != 2 {
+                return Err("events_session_detach_window expects two arguments".to_string());
+            }
+            host.events_session_detach_window(
+                expect_app_session(args[0].clone(), "events_session_detach_window")?,
+                expect_window(args[1].clone(), "events_session_detach_window")?,
+            )?;
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::EventsSessionWindowById => {
+            if args.len() != 2 {
+                return Err("events_session_window_by_id expects two arguments".to_string());
+            }
+            Ok(
+                match host.events_session_window_by_id(
+                    expect_app_session(args[0].clone(), "events_session_window_by_id")?,
+                    expect_int(args[1].clone(), "events_session_window_by_id")?,
+                )? {
+                    Some(window) => {
+                        some_variant(RuntimeValue::Opaque(RuntimeOpaqueValue::Window(window)))
+                    }
+                    None => none_variant(),
+                },
+            )
+        }
+        RuntimeIntrinsic::EventsSessionWindowIds => {
+            let session = expect_app_session(
+                expect_single_arg(args, "events_session_window_ids")?,
+                "events_session_window_ids",
+            )?;
+            Ok(RuntimeValue::List(
+                host.events_session_window_ids(session)?
+                    .into_iter()
+                    .map(RuntimeValue::Int)
+                    .collect(),
             ))
+        }
+        RuntimeIntrinsic::EventsSessionPump => {
+            let session = expect_app_session(
+                expect_single_arg(args, "events_session_pump")?,
+                "events_session_pump",
+            )?;
+            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::AppFrame(
+                host.events_session_pump(session)?,
+            )))
+        }
+        RuntimeIntrinsic::EventsSessionWait => {
+            if args.len() != 2 {
+                return Err("events_session_wait expects two arguments".to_string());
+            }
+            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::AppFrame(
+                host.events_session_wait(
+                    expect_app_session(args[0].clone(), "events_session_wait")?,
+                    expect_int(args[1].clone(), "events_session_wait")?,
+                )?,
+            )))
+        }
+        RuntimeIntrinsic::EventsSessionCreateWake => {
+            let session = expect_app_session(
+                expect_single_arg(args, "events_session_create_wake")?,
+                "events_session_create_wake",
+            )?;
+            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::Wake(
+                host.events_session_create_wake(session)?,
+            )))
+        }
+        RuntimeIntrinsic::EventsWakeSignal => {
+            let wake = expect_wake(
+                expect_single_arg(args, "events_wake_signal")?,
+                "events_wake_signal",
+            )?;
+            host.events_wake_signal(wake)?;
+            Ok(RuntimeValue::Unit)
         }
         RuntimeIntrinsic::InputKeyCode => {
             let name = expect_str(expect_single_arg(args, "input_key_code")?, "input_key_code")?;
@@ -8296,6 +10666,93 @@ fn execute_runtime_intrinsic(
                 "input_mouse_in_window",
             )?;
             Ok(RuntimeValue::Bool(host.input_mouse_in_window(frame)?))
+        }
+        RuntimeIntrinsic::ClipboardReadTextTry => {
+            if !args.is_empty() {
+                return Err("clipboard_read_text expects zero arguments".to_string());
+            }
+            Ok(match host.clipboard_read_text() {
+                Ok(text) => ok_variant(RuntimeValue::Str(text)),
+                Err(err) => err_variant(err),
+            })
+        }
+        RuntimeIntrinsic::ClipboardWriteTextTry => {
+            let text = expect_str(
+                expect_single_arg(args, "clipboard_write_text")?,
+                "clipboard_write_text",
+            )?;
+            Ok(match host.clipboard_write_text(&text) {
+                Ok(()) => ok_variant(RuntimeValue::Unit),
+                Err(err) => err_variant(err),
+            })
+        }
+        RuntimeIntrinsic::ClipboardReadBytesTry => {
+            if !args.is_empty() {
+                return Err("clipboard_read_bytes expects zero arguments".to_string());
+            }
+            Ok(match host.clipboard_read_bytes() {
+                Ok(bytes) => ok_variant(bytes_to_runtime_array(bytes)),
+                Err(err) => err_variant(err),
+            })
+        }
+        RuntimeIntrinsic::ClipboardWriteBytesTry => {
+            let bytes = expect_byte_array(
+                expect_single_arg(args, "clipboard_write_bytes")?,
+                "clipboard_write_bytes",
+            )?;
+            Ok(match host.clipboard_write_bytes(&bytes) {
+                Ok(()) => ok_variant(RuntimeValue::Unit),
+                Err(err) => err_variant(err),
+            })
+        }
+        RuntimeIntrinsic::TextInputCompositionAreaActive => {
+            let window = expect_window(
+                expect_single_arg(args, "text_input_composition_area_active")?,
+                "text_input_composition_area_active",
+            )?;
+            Ok(RuntimeValue::Bool(
+                host.text_input_composition_area_active(window)?,
+            ))
+        }
+        RuntimeIntrinsic::TextInputCompositionAreaPosition => {
+            let window = expect_window(
+                expect_single_arg(args, "text_input_composition_area_position")?,
+                "text_input_composition_area_position",
+            )?;
+            let (x, y) = host.text_input_composition_area_position(window)?;
+            Ok(make_pair(RuntimeValue::Int(x), RuntimeValue::Int(y)))
+        }
+        RuntimeIntrinsic::TextInputCompositionAreaSize => {
+            let window = expect_window(
+                expect_single_arg(args, "text_input_composition_area_size")?,
+                "text_input_composition_area_size",
+            )?;
+            let (x, y) = host.text_input_composition_area_size(window)?;
+            Ok(make_pair(RuntimeValue::Int(x), RuntimeValue::Int(y)))
+        }
+        RuntimeIntrinsic::TextInputSetCompositionArea => {
+            if args.len() != 3 {
+                return Err("text_input_set_composition_area expects three arguments".to_string());
+            }
+            let (x, y) = expect_int_pair(args[1].clone(), "text_input_set_composition_area")?;
+            let (width, height) =
+                expect_int_pair(args[2].clone(), "text_input_set_composition_area")?;
+            host.text_input_set_composition_area(
+                expect_window(args[0].clone(), "text_input_set_composition_area")?,
+                x,
+                y,
+                width,
+                height,
+            )?;
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::TextInputClearCompositionArea => {
+            let window = expect_window(
+                expect_single_arg(args, "text_input_clear_composition_area")?,
+                "text_input_clear_composition_area",
+            )?;
+            host.text_input_clear_composition_area(window)?;
+            Ok(RuntimeValue::Unit)
         }
         RuntimeIntrinsic::TimeMonotonicNowMs => {
             if !args.is_empty() {

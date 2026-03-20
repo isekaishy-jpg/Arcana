@@ -19,8 +19,8 @@ pub type PackageResult<T> = Result<T, String>;
 pub use build::{
     BuildDisposition, BuildExecutionContext, BuildStatus, PreparedBuild, execute_build,
     execute_build_with_context, plan_build, plan_build_for_target,
-    plan_build_for_target_with_context, prepare_build, prepare_build_from_workspace,
-    render_build_summary, render_lockfile, write_lockfile,
+    plan_build_for_target_with_context, plan_package_build_for_target_with_context, prepare_build,
+    prepare_build_from_workspace, render_build_summary, render_lockfile, write_lockfile,
 };
 pub use distribution::{
     DISTRIBUTION_BUNDLE_FORMAT, DistributionBundle, default_distribution_dir,
@@ -193,10 +193,36 @@ pub enum DependencySource {
     Registry,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeDependencyDelivery {
+    Baked,
+    Dll,
+}
+
+impl NativeDependencyDelivery {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Baked => "baked",
+            Self::Dll => "dll",
+        }
+    }
+
+    fn parse(text: &str) -> PackageResult<Self> {
+        match text {
+            "baked" => Ok(Self::Baked),
+            "dll" => Ok(Self::Dll),
+            other => Err(format!(
+                "`native_delivery` must be \"baked\" or \"dll\" (found `{other}`)"
+            )),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DependencySpec {
     pub source: DependencySource,
     pub location: String,
+    pub native_delivery: NativeDependencyDelivery,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -215,6 +241,7 @@ pub struct WorkspaceMember {
     pub abs_dir: PathBuf,
     pub deps: Vec<String>,
     pub direct_dep_packages: BTreeMap<String, String>,
+    pub direct_dep_specs: BTreeMap<String, DependencySpec>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -268,7 +295,7 @@ struct PendingMember {
     kind: GrimoireKind,
     abs_dir: PathBuf,
     rel_dir: String,
-    dep_bindings: Vec<(String, PathBuf)>,
+    dep_bindings: Vec<(String, PathBuf, DependencySpec)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -384,7 +411,7 @@ pub fn load_workspace_graph(root_dir: &Path) -> PackageResult<WorkspaceGraph> {
         let mut dep_bindings = Vec::new();
         for (dep_name, dep) in &manifest.deps {
             let dep_dir = canonicalize_dir(&abs_dir.join(&dep.location))?;
-            dep_bindings.push((dep_name.clone(), dep_dir.clone()));
+            dep_bindings.push((dep_name.clone(), dep_dir.clone(), dep.clone()));
             queue.push_back(dep_dir);
         }
 
@@ -405,7 +432,8 @@ pub fn load_workspace_graph(root_dir: &Path) -> PackageResult<WorkspaceGraph> {
         .map(|member| {
             let mut deps = BTreeSet::new();
             let mut direct_dep_packages = BTreeMap::new();
-            for (dep_name, path) in &member.dep_bindings {
+            let mut direct_dep_specs = BTreeMap::new();
+            for (dep_name, path, spec) in &member.dep_bindings {
                 let dep = pending_by_dir.get(path).ok_or_else(|| {
                     format!(
                         "dependency at `{}` was not loaded into the workspace graph",
@@ -414,6 +442,7 @@ pub fn load_workspace_graph(root_dir: &Path) -> PackageResult<WorkspaceGraph> {
                 })?;
                 deps.insert(dep.name.clone());
                 direct_dep_packages.insert(dep_name.clone(), dep.name.clone());
+                direct_dep_specs.insert(dep_name.clone(), spec.clone());
             }
             Ok(WorkspaceMember {
                 name: member.name.clone(),
@@ -422,6 +451,7 @@ pub fn load_workspace_graph(root_dir: &Path) -> PackageResult<WorkspaceGraph> {
                 abs_dir: member.abs_dir.clone(),
                 deps: deps.into_iter().collect(),
                 direct_dep_packages,
+                direct_dep_specs,
             })
         })
         .collect::<PackageResult<Vec<_>>>()?;
@@ -588,16 +618,16 @@ fn read_lockfile_v2(
 
     let mut members = BTreeMap::new();
     for (name, base) in base_members {
-        let target_table = builds
+        let targets = builds
             .get(&name)
-            .and_then(toml::Value::as_table)
-            .ok_or_else(|| format!("missing `[builds.\"{name}\"]` in `{}`", path.display()))?;
-        let targets = read_lock_target_entries(name.as_str(), target_table)?;
-        if targets.is_empty() {
-            return Err(format!(
-                "lockfile member `{name}` must contain at least one target entry"
-            ));
-        }
+            .map(|value| {
+                let target_table = value
+                    .as_table()
+                    .ok_or_else(|| format!("lockfile build entry for `{name}` must be a table"))?;
+                read_lock_target_entries(name.as_str(), target_table)
+            })
+            .transpose()?
+            .unwrap_or_default();
         members.insert(
             name,
             LockMember {
@@ -905,6 +935,7 @@ fn parse_dependency_spec(
         return Ok(DependencySpec {
             source: DependencySource::Path,
             location: path.to_string(),
+            native_delivery: NativeDependencyDelivery::Baked,
         });
     }
     let Some(table) = value.as_table() else {
@@ -913,22 +944,34 @@ fn parse_dependency_spec(
             manifest_path.display()
         ));
     };
+    let native_delivery = match table.get("native_delivery") {
+        Some(value) => NativeDependencyDelivery::parse(value.as_str().ok_or_else(|| {
+            format!(
+                "dependency `{name}` in `{}` must set `native_delivery` as a string",
+                manifest_path.display()
+            )
+        })?)?,
+        None => NativeDependencyDelivery::Baked,
+    };
     if let Some(path) = table.get("path").and_then(toml::Value::as_str) {
         return Ok(DependencySpec {
             source: DependencySource::Path,
             location: path.to_string(),
+            native_delivery,
         });
     }
     if let Some(git) = table.get("git").and_then(toml::Value::as_str) {
         return Ok(DependencySpec {
             source: DependencySource::Git,
             location: git.to_string(),
+            native_delivery,
         });
     }
     if let Some(registry) = table.get("registry").and_then(toml::Value::as_str) {
         return Ok(DependencySpec {
             source: DependencySource::Registry,
             location: registry.to_string(),
+            native_delivery,
         });
     }
     Err(format!(
@@ -1632,6 +1675,123 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn package_target_planning_builds_only_selected_lib_closure_for_windows_dll() {
+        let dir = temp_dir("package_windows_dll_closure");
+        write_file(
+            &dir.join("book.toml"),
+            "name = \"workspace\"\nkind = \"lib\"\n\n[workspace]\nmembers = [\"util\", \"core\", \"app\"]\n",
+        );
+        write_file(&dir.join("src/book.arc"), "// workspace root\n");
+        write_file(&dir.join("src/types.arc"), "// workspace types\n");
+
+        write_grimoire(&dir.join("util"), GrimoireKind::Lib, "util", &[]);
+        write_file(
+            &dir.join("util/src/book.arc"),
+            "export fn answer() -> Int:\n    return 7\n",
+        );
+
+        write_grimoire(
+            &dir.join("core"),
+            GrimoireKind::Lib,
+            "core",
+            &[("util", "../util")],
+        );
+        write_file(
+            &dir.join("core/src/book.arc"),
+            concat!(
+                "import util\n",
+                "export fn answer() -> Int:\n",
+                "    return util.answer :: :: call\n",
+            ),
+        );
+
+        write_grimoire(
+            &dir.join("app"),
+            GrimoireKind::App,
+            "app",
+            &[("core", "../core")],
+        );
+        write_file(
+            &dir.join("app/src/shelf.arc"),
+            concat!(
+                "import core\n",
+                "fn main() -> Int:\n",
+                "    return core.answer :: :: call\n",
+            ),
+        );
+
+        let graph = load_workspace_graph(&dir).expect("load graph");
+        let order = plan_workspace(&graph).expect("plan");
+        let prepared = prepare_test_build(&graph);
+        let statuses = plan_package_build_for_target_with_context(
+            &graph,
+            &order,
+            &prepared,
+            None,
+            BuildTarget::windows_dll(),
+            "core",
+            &build::BuildExecutionContext::default(),
+        )
+        .expect("package target plan should succeed");
+        assert_eq!(
+            statuses
+                .iter()
+                .map(|status| (status.member.clone(), status.target.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("util".to_string(), BuildTarget::internal_aot()),
+                ("core".to_string(), BuildTarget::windows_dll()),
+            ]
+        );
+
+        execute_build_with_context(
+            &graph,
+            &prepared,
+            &statuses,
+            &build::BuildExecutionContext::default(),
+        )
+        .expect("selected lib closure should build");
+
+        let lock_path = write_lockfile(&graph, &order, &statuses).expect("lockfile");
+        let lock = read_lockfile(&lock_path)
+            .expect("read lockfile")
+            .expect("lockfile should exist");
+        assert!(
+            lock.members
+                .get("app")
+                .expect("app member should remain in lockfile")
+                .targets
+                .is_empty(),
+            "unbuilt app member should keep an empty target set"
+        );
+        assert!(
+            lock.members
+                .get("workspace")
+                .expect("root workspace member should remain in lockfile")
+                .targets
+                .is_empty(),
+            "unbuilt root workspace member should keep an empty target set"
+        );
+        assert!(
+            lock.members
+                .get("util")
+                .expect("util member should exist")
+                .target(&BuildTarget::internal_aot())
+                .is_some()
+        );
+        assert!(
+            lock.members
+                .get("core")
+                .expect("core member should exist")
+                .target(&BuildTarget::windows_dll())
+                .is_some()
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     fn disposition_map(statuses: &[BuildStatus]) -> BTreeMap<String, BuildDisposition> {
         statuses
             .iter()
@@ -1766,6 +1926,54 @@ mod tests {
         assert_eq!(
             app.direct_dep_packages.get("util"),
             Some(&"core".to_string())
+        );
+        assert_eq!(
+            app.direct_dep_specs
+                .get("util")
+                .expect("dependency spec should exist")
+                .native_delivery,
+            NativeDependencyDelivery::Baked
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_workspace_graph_preserves_native_delivery_metadata() {
+        let dir = temp_dir("graph_native_delivery");
+        write_file(
+            &dir.join("book.toml"),
+            "name = \"ws\"\nkind = \"app\"\n[workspace]\nmembers = [\"app\"]\n",
+        );
+        write_file(
+            &dir.join("app/book.toml"),
+            "name = \"app\"\nkind = \"app\"\n[deps]\ndesktop = { path = \"../desktop\", native_delivery = \"dll\" }\n",
+        );
+        write_file(
+            &dir.join("app/src/shelf.arc"),
+            "fn main() -> Int:\n    return 0\n",
+        );
+        write_file(&dir.join("app/src/types.arc"), "// app types\n");
+        write_file(
+            &dir.join("desktop/book.toml"),
+            "name = \"arcana_desktop\"\nkind = \"lib\"\n",
+        );
+        write_file(
+            &dir.join("desktop/src/book.arc"),
+            "export fn ready() -> Int:\n    return 1\n",
+        );
+        write_file(&dir.join("desktop/src/types.arc"), "// desktop types\n");
+
+        let graph = load_workspace_graph(&dir).expect("load graph");
+        let app = graph.member("app").expect("app should exist");
+        let spec = app
+            .direct_dep_specs
+            .get("desktop")
+            .expect("desktop dependency spec should exist");
+        assert_eq!(spec.native_delivery, NativeDependencyDelivery::Dll);
+        assert_eq!(
+            app.direct_dep_packages.get("desktop"),
+            Some(&"arcana_desktop".to_string())
         );
 
         let _ = fs::remove_dir_all(&dir);
@@ -2835,6 +3043,59 @@ toolchain = \"future-toolchain\"\n"
         assert_ne!(
             first, second,
             "owner lifecycle hook changes should affect the public api fingerprint"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dependency_native_delivery_changes_update_source_fingerprint() {
+        fn member_source_fingerprint(dir: &Path, member: &str) -> String {
+            let graph = load_workspace_graph(dir).expect("graph should load");
+            let workspace = load_workspace_hir_from_graph(dir, &graph).expect("workspace");
+            let resolved_workspace = arcana_hir::resolve_workspace(&workspace).expect("resolve");
+            compute_workspace_fingerprints(&graph, &workspace, &resolved_workspace)
+                .expect("fingerprints")
+                .member(member)
+                .expect("member fingerprint should exist")
+                .source()
+                .to_string()
+        }
+
+        let dir = temp_dir("dependency_native_delivery_fingerprint");
+        write_file(
+            &dir.join("book.toml"),
+            "name = \"ws\"\nkind = \"app\"\n[workspace]\nmembers = [\"app\"]\n",
+        );
+        write_file(
+            &dir.join("app/book.toml"),
+            "name = \"app\"\nkind = \"app\"\n[deps]\ndesktop = { path = \"../desktop\" }\n",
+        );
+        write_file(
+            &dir.join("app/src/shelf.arc"),
+            "fn main() -> Int:\n    return 0\n",
+        );
+        write_file(&dir.join("app/src/types.arc"), "// app types\n");
+        write_file(
+            &dir.join("desktop/book.toml"),
+            "name = \"arcana_desktop\"\nkind = \"lib\"\n",
+        );
+        write_file(
+            &dir.join("desktop/src/book.arc"),
+            "export fn ready() -> Int:\n    return 1\n",
+        );
+        write_file(&dir.join("desktop/src/types.arc"), "// desktop types\n");
+
+        let first = member_source_fingerprint(&dir, "app");
+        write_file(
+            &dir.join("app/book.toml"),
+            "name = \"app\"\nkind = \"app\"\n[deps]\ndesktop = { path = \"../desktop\", native_delivery = \"dll\" }\n",
+        );
+        let second = member_source_fingerprint(&dir, "app");
+
+        assert_ne!(
+            first, second,
+            "dependency native delivery changes should affect the source fingerprint"
         );
 
         let _ = fs::remove_dir_all(&dir);

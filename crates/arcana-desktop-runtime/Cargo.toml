@@ -1,0 +1,11 @@
+[package]
+name = "arcana-desktop-runtime"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "arcana_desktop"
+crate-type = ["dylib"]
+
+[dependencies]
+arcana-runtime.workspace = true

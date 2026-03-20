@@ -19,8 +19,10 @@ pub fn render_runtime_package_image(plan: &RuntimePackagePlan) -> Result<String,
 }
 
 pub fn parse_runtime_package_image(text: &str) -> Result<RuntimePackagePlan, String> {
-    let image = serde_json::from_str::<RuntimePackageImage>(text)
-        .map_err(|e| format!("failed to parse runtime package image: {e}"))?;
+    let mut deserializer = serde_json::Deserializer::from_str(text);
+    let image =
+        RuntimePackageImage::deserialize(serde_stacker::Deserializer::new(&mut deserializer))
+            .map_err(|e| format!("failed to parse runtime package image: {e}"))?;
     if image.format != RUNTIME_PACKAGE_IMAGE_FORMAT {
         return Err(format!(
             "unsupported runtime package image format `{}`; expected `{RUNTIME_PACKAGE_IMAGE_FORMAT}`",

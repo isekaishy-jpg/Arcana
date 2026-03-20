@@ -23,7 +23,7 @@ pub use codec::{parse_package_artifact, render_package_artifact};
 pub use compile::{compile_module, compile_package};
 pub use emit::{
     AOT_WINDOWS_DLL_FORMAT, AOT_WINDOWS_EXE_FORMAT, AotEmissionFile, AotEmitContext, AotEmitTarget,
-    AotPackageEmission, emit_package, emit_package_with_context,
+    AotPackageEmission, AotRuntimeBinding, emit_package, emit_package_with_context,
 };
 pub use native_manifest::{
     NATIVE_BUNDLE_MANIFEST_FORMAT, NativeBundleLaunchManifest, NativeBundleManifest,
@@ -37,7 +37,7 @@ mod tests {
     use super::{
         AOT_INTERNAL_FORMAT, AOT_WINDOWS_DLL_FORMAT, AOT_WINDOWS_EXE_FORMAT, AotEmitContext,
         AotEmitTarget, AotEntrypointArtifact, AotPackageArtifact, AotPackageModuleArtifact,
-        AotRoutineArtifact, NATIVE_BUNDLE_MANIFEST_FORMAT, NativeLaunchPlan,
+        AotRoutineArtifact, AotRuntimeBinding, NATIVE_BUNDLE_MANIFEST_FORMAT, NativeLaunchPlan,
         build_native_package_plan, compile_module, compile_package, emit_package,
         emit_package_with_context, parse_native_bundle_manifest, parse_package_artifact,
         render_native_bundle_manifest, render_package_artifact, validate_package_artifact,
@@ -275,6 +275,7 @@ mod tests {
             &package,
             &AotEmitContext {
                 root_artifact_file_name: Some("app.exe".to_string()),
+                runtime_binding: AotRuntimeBinding::Baked,
             },
         )
         .expect("windows exe emit should succeed");
@@ -306,6 +307,7 @@ mod tests {
             &package,
             &AotEmitContext {
                 root_artifact_file_name: Some("lib.dll".to_string()),
+                runtime_binding: AotRuntimeBinding::Baked,
             },
         )
         .expect("windows dll emit should succeed");
@@ -400,6 +402,7 @@ mod tests {
             &package,
             &AotEmitContext {
                 root_artifact_file_name: Some("app.exe".to_string()),
+                runtime_binding: AotRuntimeBinding::Baked,
             },
         )
         .expect("native plan should build");
@@ -442,6 +445,7 @@ mod tests {
             &package,
             &AotEmitContext {
                 root_artifact_file_name: Some("app.exe".to_string()),
+                runtime_binding: AotRuntimeBinding::Baked,
             },
         )
         .expect_err("native plan should reject missing main");
@@ -501,6 +505,7 @@ mod tests {
             &package,
             &AotEmitContext {
                 root_artifact_file_name: Some("lib.dll".to_string()),
+                runtime_binding: AotRuntimeBinding::Baked,
             },
         )
         .expect("native plan should build");
@@ -600,6 +605,7 @@ mod tests {
             &package,
             &AotEmitContext {
                 root_artifact_file_name: Some("lib.dll".to_string()),
+                runtime_binding: AotRuntimeBinding::Baked,
             },
         )
         .expect("native plan should build");
@@ -615,6 +621,97 @@ mod tests {
         assert_eq!(manifest.launch.exports[1].export_name, "prefix");
         assert_eq!(manifest.launch.exports[1].params[0].ty, "Array[Int]");
         assert_eq!(manifest.launch.exports[1].return_type, "Array[Int]");
+    }
+
+    #[test]
+    fn collect_native_exports_excludes_dependency_generic_surface() {
+        let artifact = AotPackageArtifact {
+            format: AOT_INTERNAL_FORMAT.to_string(),
+            package_name: "core".to_string(),
+            root_module_id: "core".to_string(),
+            direct_deps: vec!["std".to_string()],
+            module_count: 2,
+            dependency_edge_count: 1,
+            dependency_rows: vec!["source=core:import:std.array:".to_string()],
+            exported_surface_rows: vec!["module=core:export:fn:fn answer() -> Int:".to_string()],
+            runtime_requirements: Vec::new(),
+            entrypoints: Vec::new(),
+            routines: vec![
+                AotRoutineArtifact {
+                    module_id: "core".to_string(),
+                    routine_key: "core#fn-0".to_string(),
+                    symbol_name: "answer".to_string(),
+                    symbol_kind: "fn".to_string(),
+                    exported: true,
+                    is_async: false,
+                    type_param_rows: Vec::new(),
+                    behavior_attr_rows: Vec::new(),
+                    param_rows: Vec::new(),
+                    signature_row: "fn answer() -> Int:".to_string(),
+                    intrinsic_impl: None,
+                    impl_target_type: None,
+                    impl_trait_path: None,
+                    availability: Vec::new(),
+                    foreword_rows: Vec::new(),
+                    rollups: Vec::new(),
+                    statements: vec![ExecStmt::ReturnValue {
+                        value: ExecExpr::Int(42),
+                    }],
+                },
+                AotRoutineArtifact {
+                    module_id: "std.array".to_string(),
+                    routine_key: "std.array#sym-0".to_string(),
+                    symbol_name: "len".to_string(),
+                    symbol_kind: "fn".to_string(),
+                    exported: true,
+                    is_async: false,
+                    type_param_rows: vec!["T".to_string()],
+                    behavior_attr_rows: Vec::new(),
+                    param_rows: vec!["mode=read:name=values:ty=Array[T]".to_string()],
+                    signature_row: "fn len[T](read values: Array[T]) -> Int:".to_string(),
+                    intrinsic_impl: None,
+                    impl_target_type: None,
+                    impl_trait_path: None,
+                    availability: Vec::new(),
+                    foreword_rows: Vec::new(),
+                    rollups: Vec::new(),
+                    statements: vec![ExecStmt::ReturnValue {
+                        value: ExecExpr::Int(0),
+                    }],
+                },
+            ],
+            owners: Vec::new(),
+            modules: vec![
+                AotPackageModuleArtifact {
+                    module_id: "core".to_string(),
+                    symbol_count: 1,
+                    item_count: 1,
+                    line_count: 1,
+                    non_empty_line_count: 1,
+                    directive_rows: Vec::new(),
+                    lang_item_rows: Vec::new(),
+                    exported_surface_rows: vec!["export:fn:fn answer() -> Int:".to_string()],
+                },
+                AotPackageModuleArtifact {
+                    module_id: "std.array".to_string(),
+                    symbol_count: 1,
+                    item_count: 1,
+                    line_count: 1,
+                    non_empty_line_count: 1,
+                    directive_rows: Vec::new(),
+                    lang_item_rows: Vec::new(),
+                    exported_surface_rows: vec![
+                        "export:fn:fn len[T](read values: Array[T]) -> Int:".to_string(),
+                    ],
+                },
+            ],
+        };
+
+        let exports = crate::native_abi::collect_native_exports(&artifact)
+            .expect("dependency generic exports should be ignored");
+        assert_eq!(exports.len(), 1);
+        assert_eq!(exports[0].export_name, "answer");
+        assert_eq!(exports[0].routine_key, "core#fn-0");
     }
 
     #[test]
@@ -668,6 +765,7 @@ mod tests {
             &package,
             &AotEmitContext {
                 root_artifact_file_name: Some("lib.dll".to_string()),
+                runtime_binding: AotRuntimeBinding::Baked,
             },
         )
         .expect("native plan should build");

@@ -3,8 +3,11 @@ import arcana_text.types
 use std.window.Window
 
 export fn label(edit win: Window, read spec: arcana_text.types.LabelSpec):
-    let cmd = std.canvas.LabelSpec :: pos = spec.pos, text = spec.text, color = spec.color :: call
-    std.canvas.label_draw :: win, cmd :: call
+    std.canvas.label :: win :: call
+        x = spec.pos.0
+        y = spec.pos.1
+        text = spec.text
+        color = spec.color
 
 export fn measure(text: Str) -> (Int, Int):
     return std.canvas.label_size :: text :: call

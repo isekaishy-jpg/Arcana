@@ -111,13 +111,21 @@ fn synthetic_window_canvas_host(fixture_root: &Path) -> BufferedHost {
         next_frame_events: vec![
             BufferedEvent {
                 kind: 3,
+                window_id: 0,
                 a: 1,
                 b: 0,
+                flags: 0,
+                text: String::new(),
+                ..BufferedEvent::default()
             },
             BufferedEvent {
                 kind: 4,
+                window_id: 0,
                 a: 65,
                 b: 0,
+                flags: 0,
+                text: String::new(),
+                ..BufferedEvent::default()
             },
         ],
         next_frame_input: BufferedFrameInput {
@@ -4607,17 +4615,6 @@ fn execute_main_runs_synthetic_window_canvas_events_runtime() {
     );
     let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
     let fixture_root = dir.join("fixture");
-    let decode_routine = resolve_routine_index(
-        &plan,
-        &plan.root_module_id,
-        &[
-            "std".to_string(),
-            "kernel".to_string(),
-            "events".to_string(),
-            "decode".to_string(),
-        ],
-    )
-    .expect("std.kernel.events.decode should exist");
     let kernel_poll_routine = resolve_routine_index(
         &plan,
         &plan.root_module_id,
@@ -4646,80 +4643,97 @@ fn execute_main_runs_synthetic_window_canvas_events_runtime() {
     )
     .expect("std.events.poll should exist");
 
+    let raw_event =
+        |kind: i64, window_id: i64, a: i64, b: i64, flags: i64, text: &str| RuntimeValue::Record {
+            name: "std.kernel.events.EventRaw".to_string(),
+            fields: BTreeMap::from([
+                ("kind".to_string(), RuntimeValue::Int(kind)),
+                ("window_id".to_string(), RuntimeValue::Int(window_id)),
+                ("a".to_string(), RuntimeValue::Int(a)),
+                ("b".to_string(), RuntimeValue::Int(b)),
+                ("flags".to_string(), RuntimeValue::Int(flags)),
+                ("text".to_string(), RuntimeValue::Str(text.to_string())),
+                ("key_code".to_string(), RuntimeValue::Int(a)),
+                ("physical_key".to_string(), RuntimeValue::Int(0)),
+                ("logical_key".to_string(), RuntimeValue::Int(a)),
+                ("key_location".to_string(), RuntimeValue::Int(0)),
+                ("repeated".to_string(), RuntimeValue::Bool(false)),
+            ]),
+        };
+
     let mut debug_host = synthetic_window_canvas_host(&fixture_root);
-    let decoded = execute_routine(
+    let focused = execute_routine(
         &plan,
-        decode_routine,
-        vec![
-            RuntimeValue::Int(3),
-            RuntimeValue::Int(1),
-            RuntimeValue::Int(0),
-        ],
+        lift_event_routine,
+        vec![raw_event(3, 0, 1, 0, 0, "")],
         &mut debug_host,
     )
-    .expect("std.kernel.events.decode should execute");
+    .expect("std.events.lift_event should execute");
     assert_eq!(
-        decoded,
+        focused,
         RuntimeValue::Variant {
-            name: "std.kernel.events.Event.WindowFocused".to_string(),
-            payload: vec![RuntimeValue::Bool(true)],
+            name: "std.events.AppEvent.WindowFocused".to_string(),
+            payload: vec![RuntimeValue::Record {
+                name: "std.events.WindowFocusEvent".to_string(),
+                fields: BTreeMap::from([
+                    ("window_id".to_string(), RuntimeValue::Int(0)),
+                    ("focused".to_string(), RuntimeValue::Bool(true)),
+                ]),
+            }],
         }
     );
     let moved = execute_routine(
         &plan,
-        decode_routine,
-        vec![
-            RuntimeValue::Int(10),
-            RuntimeValue::Int(12),
-            RuntimeValue::Int(-4),
-        ],
+        lift_event_routine,
+        vec![raw_event(10, 7, 12, -4, 0, "")],
         &mut debug_host,
     )
-    .expect("window moved event should decode");
+    .expect("window moved event should lift");
     assert_eq!(
         moved,
         RuntimeValue::Variant {
-            name: "std.kernel.events.Event.WindowMoved".to_string(),
-            payload: vec![RuntimeValue::Pair(
-                Box::new(RuntimeValue::Int(12)),
-                Box::new(RuntimeValue::Int(-4)),
-            )],
+            name: "std.events.AppEvent.WindowMoved".to_string(),
+            payload: vec![RuntimeValue::Record {
+                name: "std.events.WindowMoveEvent".to_string(),
+                fields: BTreeMap::from([
+                    ("window_id".to_string(), RuntimeValue::Int(7)),
+                    (
+                        "position".to_string(),
+                        RuntimeValue::Pair(
+                            Box::new(RuntimeValue::Int(12)),
+                            Box::new(RuntimeValue::Int(-4)),
+                        ),
+                    ),
+                ]),
+            }],
         }
     );
     let entered = execute_routine(
         &plan,
-        decode_routine,
-        vec![
-            RuntimeValue::Int(11),
-            RuntimeValue::Int(0),
-            RuntimeValue::Int(0),
-        ],
+        lift_event_routine,
+        vec![raw_event(11, 3, 0, 0, 0, "")],
         &mut debug_host,
     )
-    .expect("mouse entered event should decode");
+    .expect("mouse entered event should lift");
     assert_eq!(
         entered,
         RuntimeValue::Variant {
-            name: "std.kernel.events.Event.MouseEntered".to_string(),
-            payload: vec![],
+            name: "std.events.AppEvent.MouseEntered".to_string(),
+            payload: vec![RuntimeValue::Int(3)],
         }
     );
     let left = execute_routine(
         &plan,
-        decode_routine,
-        vec![
-            RuntimeValue::Int(12),
-            RuntimeValue::Int(0),
-            RuntimeValue::Int(0),
-        ],
+        lift_event_routine,
+        vec![raw_event(12, 3, 0, 0, 0, "")],
         &mut debug_host,
     )
-    .expect("mouse left event should decode");
+    .expect("mouse left event should lift");
     assert_eq!(
         left,
         RuntimeValue::Variant {
-            name: "std.kernel.events.Event.MouseLeft".to_string(),
-            payload: vec![],
+            name: "std.events.AppEvent.MouseLeft".to_string(),
+            payload: vec![RuntimeValue::Int(3)],
         }
     );
 
@@ -4741,44 +4755,41 @@ fn execute_main_runs_synthetic_window_canvas_events_runtime() {
     assert_eq!(
         kernel_polled,
         RuntimeValue::Variant {
-            name: "std.kernel.events.Event.WindowFocused".to_string(),
-            payload: vec![RuntimeValue::Bool(true)],
+            name: "Option.Some".to_string(),
+            payload: vec![RuntimeValue::Record {
+                name: "std.kernel.events.EventRaw".to_string(),
+                fields: BTreeMap::from([
+                    ("kind".to_string(), RuntimeValue::Int(3)),
+                    ("window_id".to_string(), RuntimeValue::Int(0)),
+                    ("a".to_string(), RuntimeValue::Int(1)),
+                    ("b".to_string(), RuntimeValue::Int(0)),
+                    ("flags".to_string(), RuntimeValue::Int(0)),
+                    ("text".to_string(), RuntimeValue::Str(String::new())),
+                    ("key_code".to_string(), RuntimeValue::Int(0)),
+                    ("physical_key".to_string(), RuntimeValue::Int(0)),
+                    ("logical_key".to_string(), RuntimeValue::Int(0)),
+                    ("key_location".to_string(), RuntimeValue::Int(0)),
+                    ("repeated".to_string(), RuntimeValue::Bool(false)),
+                ]),
+            }],
         }
     );
     let lifted_direct = execute_routine(
         &plan,
         lift_event_routine,
-        vec![kernel_polled.clone()],
+        vec![raw_event(3, 0, 1, 0, 0, "")],
         &mut debug_host,
     )
     .expect("std.events.lift_event should execute");
-    assert_eq!(
-        lifted_direct,
-        RuntimeValue::Variant {
-            name: "std.option.Option.Some".to_string(),
-            payload: vec![RuntimeValue::Variant {
-                name: "AppEvent.WindowFocused".to_string(),
-                payload: vec![RuntimeValue::Bool(true)],
-            }],
-        }
-    );
+    assert_eq!(lifted_direct, focused);
     let lifted_entered = execute_routine(
         &plan,
         lift_event_routine,
         vec![entered.clone()],
         &mut debug_host,
     )
-    .expect("std.events.lift_event should lift mouse entered");
-    assert_eq!(
-        lifted_entered,
-        RuntimeValue::Variant {
-            name: "std.option.Option.Some".to_string(),
-            payload: vec![RuntimeValue::Variant {
-                name: "AppEvent.MouseEntered".to_string(),
-                payload: vec![],
-            }],
-        }
-    );
+    .expect_err("lift_event should reject already-lifted AppEvent input");
+    assert!(!lifted_entered.is_empty());
 
     let mut debug_host = synthetic_window_canvas_host(&fixture_root);
     let debug_window = debug_host
@@ -4801,8 +4812,14 @@ fn execute_main_runs_synthetic_window_canvas_events_runtime() {
         RuntimeValue::Variant {
             name: "std.option.Option.Some".to_string(),
             payload: vec![RuntimeValue::Variant {
-                name: "AppEvent.WindowFocused".to_string(),
-                payload: vec![RuntimeValue::Bool(true)],
+                name: "std.events.AppEvent.WindowFocused".to_string(),
+                payload: vec![RuntimeValue::Record {
+                    name: "std.events.WindowFocusEvent".to_string(),
+                    fields: BTreeMap::from([
+                        ("window_id".to_string(), RuntimeValue::Int(0)),
+                        ("focused".to_string(), RuntimeValue::Bool(true)),
+                    ]),
+                }],
             }],
         }
     );
@@ -5130,6 +5147,934 @@ fn execute_main_rejects_owner_object_init_without_required_context() {
         execute_main(&plan, &mut host).expect_err("owner object init without context should fail");
 
     assert!(err.contains("requires an activation context"), "{err}");
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn buffered_host_session_pump_emits_lifecycle_wake_redraw_and_clipboard_roundtrips() {
+    let mut host = BufferedHost::default();
+    let window =
+        RuntimeHost::window_open(&mut host, "Arcana", 320, 200).expect("window should open");
+    let session = RuntimeHost::events_session_open(&mut host).expect("session should open");
+    RuntimeHost::events_session_attach_window(&mut host, session, window)
+        .expect("window should attach");
+    let wake = RuntimeHost::events_session_create_wake(&mut host, session)
+        .expect("wake handle should create");
+    RuntimeHost::events_wake_signal(&mut host, wake).expect("wake should signal");
+    RuntimeHost::window_request_redraw(&mut host, window).expect("redraw should queue");
+    RuntimeHost::clipboard_write_text(&mut host, "hello").expect("clipboard text write");
+    RuntimeHost::clipboard_write_bytes(&mut host, &[1, 2, 3]).expect("clipboard bytes write");
+
+    assert_eq!(
+        RuntimeHost::clipboard_read_text(&mut host).expect("clipboard text read"),
+        "hello"
+    );
+    assert_eq!(
+        RuntimeHost::clipboard_read_bytes(&mut host).expect("clipboard bytes read"),
+        vec![1, 2, 3]
+    );
+
+    let frame = RuntimeHost::events_session_pump(&mut host, session).expect("session pump");
+    let mut kinds = Vec::new();
+    while let Some(event) = RuntimeHost::events_poll(&mut host, frame).expect("event poll") {
+        kinds.push(event.kind);
+    }
+
+    assert_eq!(kinds, vec![20, 21, 13, 23]);
+}
+
+#[test]
+fn buffered_host_session_window_lookup_finds_attached_windows_by_id() {
+    let mut host = BufferedHost::default();
+    let first =
+        RuntimeHost::window_open(&mut host, "First", 320, 200).expect("first window should open");
+    let second =
+        RuntimeHost::window_open(&mut host, "Second", 320, 200).expect("second window should open");
+    let session = RuntimeHost::events_session_open(&mut host).expect("session should open");
+    RuntimeHost::events_session_attach_window(&mut host, session, first)
+        .expect("first window should attach");
+    RuntimeHost::events_session_attach_window(&mut host, session, second)
+        .expect("second window should attach");
+
+    let second_id = RuntimeHost::window_id(&mut host, second).expect("second window id");
+    assert_eq!(
+        RuntimeHost::events_session_window_by_id(&mut host, session, second_id)
+            .expect("session lookup should succeed"),
+        Some(second)
+    );
+    assert_eq!(
+        RuntimeHost::events_session_window_by_id(&mut host, session, 999_999)
+            .expect("missing lookup should succeed"),
+        None
+    );
+
+    RuntimeHost::window_close(&mut host, second).expect("second window should close");
+    assert_eq!(
+        RuntimeHost::events_session_window_by_id(&mut host, session, second_id)
+            .expect("closed lookup should succeed"),
+        None
+    );
+}
+
+#[test]
+fn buffered_host_session_reattach_emits_resumed_again() {
+    let mut host = BufferedHost::default();
+    let first =
+        RuntimeHost::window_open(&mut host, "First", 320, 200).expect("first window should open");
+    let session = RuntimeHost::events_session_open(&mut host).expect("session should open");
+    RuntimeHost::events_session_attach_window(&mut host, session, first)
+        .expect("first window should attach");
+
+    let frame = RuntimeHost::events_session_pump(&mut host, session).expect("session pump");
+    let mut kinds = Vec::new();
+    while let Some(event) = RuntimeHost::events_poll(&mut host, frame).expect("event poll") {
+        kinds.push(event.kind);
+    }
+    assert_eq!(kinds, vec![20, 23]);
+
+    RuntimeHost::window_close(&mut host, first).expect("first window should close");
+    let frame = RuntimeHost::events_session_pump(&mut host, session).expect("session pump");
+    let mut kinds = Vec::new();
+    while let Some(event) = RuntimeHost::events_poll(&mut host, frame).expect("event poll") {
+        kinds.push(event.kind);
+    }
+    assert_eq!(kinds, vec![22, 23]);
+
+    let second =
+        RuntimeHost::window_open(&mut host, "Second", 320, 200).expect("second window should open");
+    RuntimeHost::events_session_attach_window(&mut host, session, second)
+        .expect("second window should attach");
+    let frame = RuntimeHost::events_session_pump(&mut host, session).expect("session pump");
+    let mut kinds = Vec::new();
+    while let Some(event) = RuntimeHost::events_poll(&mut host, frame).expect("event poll") {
+        kinds.push(event.kind);
+    }
+    assert_eq!(kinds, vec![20, 23]);
+}
+
+#[test]
+fn buffered_host_session_wait_reports_monitor_defaults_and_timeout() {
+    let mut host = BufferedHost::default();
+    let window =
+        RuntimeHost::window_open(&mut host, "Arcana", 320, 200).expect("window should open");
+    let session = RuntimeHost::events_session_open(&mut host).expect("session should open");
+    RuntimeHost::events_session_attach_window(&mut host, session, window)
+        .expect("window should attach");
+
+    assert_eq!(
+        RuntimeHost::window_scale_factor_milli(&mut host, window).expect("window scale factor"),
+        1000
+    );
+    assert_eq!(
+        RuntimeHost::window_theme_code(&mut host, window).expect("window theme"),
+        1
+    );
+    assert_eq!(
+        RuntimeHost::window_current_monitor_index(&mut host, window).expect("current monitor"),
+        0
+    );
+    assert_eq!(
+        RuntimeHost::window_primary_monitor_index(&mut host).expect("primary monitor"),
+        0
+    );
+    assert_eq!(
+        RuntimeHost::window_monitor_count(&mut host).expect("monitor count"),
+        1
+    );
+    assert_eq!(
+        RuntimeHost::window_monitor_name(&mut host, 0).expect("monitor name"),
+        "Primary"
+    );
+    assert_eq!(
+        RuntimeHost::window_monitor_position(&mut host, 0).expect("monitor position"),
+        (0, 0)
+    );
+    assert_eq!(
+        RuntimeHost::window_monitor_size(&mut host, 0).expect("monitor size"),
+        (1920, 1080)
+    );
+    assert_eq!(
+        RuntimeHost::window_monitor_scale_factor_milli(&mut host, 0).expect("monitor scale factor"),
+        1000
+    );
+    assert!(RuntimeHost::window_monitor_is_primary(&mut host, 0).expect("monitor primary flag"));
+    RuntimeHost::window_request_attention(&mut host, window, true)
+        .expect("attention request should succeed");
+    RuntimeHost::window_request_attention(&mut host, window, false)
+        .expect("attention reset should succeed");
+
+    let frame = RuntimeHost::events_session_wait(&mut host, session, 25).expect("session wait");
+    let mut kinds = Vec::new();
+    while let Some(event) = RuntimeHost::events_poll(&mut host, frame).expect("event poll") {
+        kinds.push(event.kind);
+    }
+
+    assert_eq!(kinds, vec![20, 23]);
+    assert!(host.sleep_log_ms.is_empty());
+    assert_eq!(host.monotonic_now_ms, 0);
+}
+
+#[test]
+fn buffered_host_session_close_removes_windows_and_wakes() {
+    let mut host = BufferedHost::default();
+    let first =
+        RuntimeHost::window_open(&mut host, "First", 320, 200).expect("first window should open");
+    let second = RuntimeHost::window_open(&mut host, "Second", 320, 200)
+        .expect("second window should open");
+    let session = RuntimeHost::events_session_open(&mut host).expect("session should open");
+    RuntimeHost::events_session_attach_window(&mut host, session, first)
+        .expect("first window should attach");
+    RuntimeHost::events_session_attach_window(&mut host, session, second)
+        .expect("second window should attach");
+    let wake = RuntimeHost::events_session_create_wake(&mut host, session)
+        .expect("wake handle should create");
+    RuntimeHost::events_wake_signal(&mut host, wake).expect("wake should signal");
+
+    RuntimeHost::events_session_close(&mut host, session).expect("session close should succeed");
+
+    assert!(host.session_ref(session).is_err());
+    assert!(host.window_ref(first).is_err());
+    assert!(host.window_ref(second).is_err());
+    assert!(host.wake_ref(wake).is_err());
+}
+
+#[test]
+fn buffered_host_window_and_text_input_settings_roundtrip() {
+    let mut host = BufferedHost::default();
+    let window =
+        RuntimeHost::window_open(&mut host, "Arcana", 320, 200).expect("window should open");
+
+    RuntimeHost::window_set_min_size(&mut host, window, 111, 112).expect("min size should set");
+    RuntimeHost::window_set_max_size(&mut host, window, 333, 334).expect("max size should set");
+    RuntimeHost::window_set_transparent(&mut host, window, true).expect("transparent should set");
+    RuntimeHost::window_set_theme_override_code(&mut host, window, 2)
+        .expect("theme override should set");
+    RuntimeHost::window_set_cursor_icon_code(&mut host, window, 3).expect("cursor icon should set");
+    RuntimeHost::window_set_cursor_grab_mode(&mut host, window, 1).expect("cursor grab should set");
+    RuntimeHost::window_set_cursor_position(&mut host, window, 12, 34)
+        .expect("cursor position should set");
+    RuntimeHost::window_set_text_input_enabled(&mut host, window, false)
+        .expect("text input flag should set");
+    RuntimeHost::text_input_set_composition_area(&mut host, window, 9, 10, 20, 21)
+        .expect("composition area should set");
+
+    assert_eq!(
+        RuntimeHost::window_min_size(&mut host, window).expect("min size"),
+        (111, 112)
+    );
+    assert_eq!(
+        RuntimeHost::window_max_size(&mut host, window).expect("max size"),
+        (333, 334)
+    );
+    assert!(RuntimeHost::window_transparent(&mut host, window).expect("transparent state"));
+    assert_eq!(
+        RuntimeHost::window_theme_override_code(&mut host, window).expect("theme override"),
+        2
+    );
+    assert_eq!(
+        RuntimeHost::window_cursor_icon_code(&mut host, window).expect("cursor icon"),
+        3
+    );
+    assert_eq!(
+        RuntimeHost::window_cursor_grab_mode(&mut host, window).expect("cursor grab mode"),
+        1
+    );
+    assert_eq!(
+        RuntimeHost::window_cursor_position(&mut host, window).expect("cursor position"),
+        (12, 34)
+    );
+    assert!(
+        !RuntimeHost::window_text_input_enabled(&mut host, window).expect("text input enabled")
+    );
+    assert!(
+        RuntimeHost::text_input_composition_area_active(&mut host, window)
+            .expect("composition area active")
+    );
+    assert_eq!(
+        RuntimeHost::text_input_composition_area_position(&mut host, window)
+            .expect("composition area position"),
+        (9, 10)
+    );
+    assert_eq!(
+        RuntimeHost::text_input_composition_area_size(&mut host, window)
+            .expect("composition area size"),
+        (20, 21)
+    );
+
+    RuntimeHost::text_input_clear_composition_area(&mut host, window)
+        .expect("composition area should clear");
+    assert!(
+        !RuntimeHost::text_input_composition_area_active(&mut host, window)
+            .expect("composition area active after clear")
+    );
+    assert_eq!(
+        RuntimeHost::text_input_composition_area_position(&mut host, window)
+            .expect("composition area position after clear"),
+        (0, 0)
+    );
+    assert_eq!(
+        RuntimeHost::text_input_composition_area_size(&mut host, window)
+            .expect("composition area size after clear"),
+        (0, 0)
+    );
+}
+
+#[test]
+fn buffered_host_window_close_detaches_session_entries() {
+    let mut host = BufferedHost::default();
+    let window =
+        RuntimeHost::window_open(&mut host, "Arcana", 320, 200).expect("window should open");
+    let session = RuntimeHost::events_session_open(&mut host).expect("session should open");
+    RuntimeHost::events_session_attach_window(&mut host, session, window)
+        .expect("window should attach");
+
+    RuntimeHost::window_close(&mut host, window).expect("window close should succeed");
+    assert!(
+        host.session_ref(session)
+            .expect("session should still exist")
+            .windows
+            .is_empty()
+    );
+
+    let frame = RuntimeHost::events_session_pump(&mut host, session).expect("session pump");
+    let mut kinds = Vec::new();
+    while let Some(event) = RuntimeHost::events_poll(&mut host, frame).expect("event poll") {
+        kinds.push(event.kind);
+    }
+
+    assert_eq!(kinds, vec![20, 22, 23]);
+}
+
+#[test]
+fn execute_main_runs_arcana_desktop_app_runner_workspace() {
+    let dir = temp_workspace_dir("desktop_app_runner");
+    let desktop_dep = owned_grimoire_root()
+        .join("arcana-desktop")
+        .to_string_lossy()
+        .replace('\\', "/");
+    write_file(
+        &dir.join("book.toml"),
+        &format!(
+            concat!(
+                "name = \"runtime_desktop_app_runner\"\n",
+                "kind = \"app\"\n",
+                "[deps]\n",
+                "arcana_desktop = {desktop_dep:?}\n",
+            ),
+            desktop_dep = desktop_dep,
+        ),
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "import arcana_desktop.app\n",
+            "import arcana_desktop.types\n",
+            "import arcana_desktop.window\n",
+            "import std.events\n",
+            "import std.io\n",
+            "\n",
+            "record Demo:\n",
+            "    ticks: Int\n",
+            "\n",
+            "impl arcana_desktop.app.Application[Demo] for Demo:\n",
+            "    fn resumed(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
+            "        std.io.print[Int] :: ((arcana_desktop.window.id :: cx.runtime.main_window :: call).value) :: call\n",
+            "        arcana_desktop.app.set_control_flow :: cx, (arcana_desktop.types.ControlFlow.Poll :: :: call) :: call\n",
+            "\n",
+            "    fn suspended(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
+            "        return\n",
+            "\n",
+            "    fn window_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read event: std.events.AppEvent) -> arcana_desktop.types.ControlFlow:\n",
+            "        return cx.control.control_flow\n",
+            "\n",
+            "    fn device_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read event: std.events.AppEvent) -> arcana_desktop.types.ControlFlow:\n",
+            "        return cx.control.control_flow\n",
+            "\n",
+            "    fn about_to_wait(edit self: Demo, edit cx: arcana_desktop.types.AppContext) -> arcana_desktop.types.ControlFlow:\n",
+            "        arcana_desktop.app.request_exit :: cx, 0 :: call\n",
+            "        return arcana_desktop.types.ControlFlow.Wait :: :: call\n",
+            "\n",
+            "    fn wake(edit self: Demo, edit cx: arcana_desktop.types.AppContext) -> arcana_desktop.types.ControlFlow:\n",
+            "        return cx.control.control_flow\n",
+            "\n",
+            "    fn exiting(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
+            "        return\n",
+            "\n",
+            "fn main() -> Int:\n",
+            "    let mut app = Demo :: ticks = 0 :: call\n",
+            "    return arcana_desktop.app.run :: app, (arcana_desktop.app.default_app_config :: :: call) :: call\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let plan = build_workspace_plan_for_member(&dir, "runtime_desktop_app_runner");
+    let fixture_root = dir.join("fixture");
+    fs::create_dir_all(&fixture_root).expect("fixture root should exist");
+    let mut host = synthetic_window_canvas_host(&fixture_root);
+    let code = execute_main(&plan, &mut host).expect("runtime should execute");
+
+    assert_eq!(code, 0);
+    assert_eq!(host.stdout, vec!["0".to_string()]);
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn execute_main_runs_arcana_desktop_extended_event_runner_workspace() {
+    let dir = temp_workspace_dir("desktop_app_runner_events");
+    let desktop_dep = owned_grimoire_root()
+        .join("arcana-desktop")
+        .to_string_lossy()
+        .replace('\\', "/");
+    write_file(
+        &dir.join("book.toml"),
+        &format!(
+            concat!(
+                "name = \"runtime_desktop_app_runner_events\"\n",
+                "kind = \"app\"\n",
+                "[deps]\n",
+                "arcana_desktop = {desktop_dep:?}\n",
+            ),
+            desktop_dep = desktop_dep,
+        ),
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "import arcana_desktop.app\n",
+            "import arcana_desktop.types\n",
+            "import std.events\n",
+            "import std.io\n",
+            "\n",
+            "record Demo:\n",
+            "    total: Int\n",
+            "\n",
+            "impl arcana_desktop.app.Application[Demo] for Demo:\n",
+            "    fn resumed(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
+            "        return\n",
+            "\n",
+            "    fn suspended(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
+            "        return\n",
+            "\n",
+            "    fn window_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read event: std.events.AppEvent) -> arcana_desktop.types.ControlFlow:\n",
+            "        return match event:\n",
+            "            std.events.AppEvent.WindowScaleFactorChanged(ev) => on_scale :: self, ev :: call\n",
+            "            std.events.AppEvent.WindowThemeChanged(ev) => on_theme :: self, ev :: call\n",
+            "            std.events.AppEvent.TextInput(ev) => on_text :: self, ev :: call\n",
+            "            std.events.AppEvent.FileDropped(ev) => on_drop :: self, ev :: call\n",
+            "            _ => cx.control.control_flow\n",
+            "\n",
+            "    fn device_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read event: std.events.AppEvent) -> arcana_desktop.types.ControlFlow:\n",
+            "        return match event:\n",
+            "            std.events.AppEvent.RawMouseMotion(ev) => on_raw :: self, ev :: call\n",
+            "            _ => cx.control.control_flow\n",
+            "\n",
+            "    fn about_to_wait(edit self: Demo, edit cx: arcana_desktop.types.AppContext) -> arcana_desktop.types.ControlFlow:\n",
+            "        std.io.print[Int] :: self.total :: call\n",
+            "        arcana_desktop.app.request_exit :: cx, 0 :: call\n",
+            "        return arcana_desktop.types.ControlFlow.Wait :: :: call\n",
+            "\n",
+            "    fn wake(edit self: Demo, edit cx: arcana_desktop.types.AppContext) -> arcana_desktop.types.ControlFlow:\n",
+            "        return cx.control.control_flow\n",
+            "\n",
+            "    fn exiting(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
+            "        return\n",
+            "\n",
+            "fn on_scale(edit self: Demo, read ev: std.events.WindowScaleFactorEvent) -> arcana_desktop.types.ControlFlow:\n",
+            "    if ev.scale_factor_milli == 1500:\n",
+            "        self.total += 1\n",
+            "    return arcana_desktop.types.ControlFlow.Wait :: :: call\n",
+            "\n",
+            "fn on_theme(edit self: Demo, read ev: std.events.WindowThemeEvent) -> arcana_desktop.types.ControlFlow:\n",
+            "    if ev.theme_code == 2:\n",
+            "        self.total += 2\n",
+            "    return arcana_desktop.types.ControlFlow.Wait :: :: call\n",
+            "\n",
+            "fn on_text(edit self: Demo, read ev: std.events.TextInputEvent) -> arcana_desktop.types.ControlFlow:\n",
+            "    if ev.text == \"hi\":\n",
+            "        self.total += 4\n",
+            "    return arcana_desktop.types.ControlFlow.Wait :: :: call\n",
+            "\n",
+            "fn on_drop(edit self: Demo, read ev: std.events.FileDropEvent) -> arcana_desktop.types.ControlFlow:\n",
+            "    if ev.path == \"drop.txt\":\n",
+            "        self.total += 8\n",
+            "    return arcana_desktop.types.ControlFlow.Wait :: :: call\n",
+            "\n",
+            "fn on_raw(edit self: Demo, read ev: std.events.RawMouseMotionEvent) -> arcana_desktop.types.ControlFlow:\n",
+            "    if ev.delta.0 == 3:\n",
+            "        if ev.delta.1 == 4:\n",
+            "            self.total += 16\n",
+            "    return arcana_desktop.types.ControlFlow.Wait :: :: call\n",
+            "\n",
+            "fn main() -> Int:\n",
+            "    let mut app = Demo :: total = 0 :: call\n",
+            "    return arcana_desktop.app.run :: app, (arcana_desktop.app.default_app_config :: :: call) :: call\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let plan = build_workspace_plan_for_member(&dir, "runtime_desktop_app_runner_events");
+    let mut host = BufferedHost::default();
+    host.next_frame_events = vec![
+        BufferedEvent {
+            kind: 16,
+            window_id: 0,
+            a: 1500,
+            b: 0,
+            flags: 0,
+            text: String::new(),
+            ..BufferedEvent::default()
+        },
+        BufferedEvent {
+            kind: 17,
+            window_id: 0,
+            a: 2,
+            b: 0,
+            flags: 0,
+            text: String::new(),
+            ..BufferedEvent::default()
+        },
+        BufferedEvent {
+            kind: 14,
+            window_id: 0,
+            a: 0,
+            b: 0,
+            flags: 0,
+            text: "hi".to_string(),
+            ..BufferedEvent::default()
+        },
+        BufferedEvent {
+            kind: 15,
+            window_id: 0,
+            a: 0,
+            b: 0,
+            flags: 0,
+            text: "drop.txt".to_string(),
+            ..BufferedEvent::default()
+        },
+        BufferedEvent {
+            kind: 18,
+            window_id: 0,
+            a: 3,
+            b: 4,
+            flags: 0,
+            text: String::new(),
+            ..BufferedEvent::default()
+        },
+    ];
+
+    let code = execute_main(&plan, &mut host).expect("runtime should execute");
+
+    assert_eq!(code, 0);
+    assert_eq!(host.stdout, vec!["31".to_string()]);
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn execute_main_runs_arcana_desktop_settings_and_text_input_workspace() {
+    let dir = temp_workspace_dir("desktop_app_runner_settings_text_input");
+    let desktop_dep = owned_grimoire_root()
+        .join("arcana-desktop")
+        .to_string_lossy()
+        .replace('\\', "/");
+    write_file(
+        &dir.join("book.toml"),
+        &format!(
+            concat!(
+                "name = \"runtime_desktop_app_runner_settings_text_input\"\n",
+                "kind = \"app\"\n",
+                "[deps]\n",
+                "arcana_desktop = {desktop_dep:?}\n",
+            ),
+            desktop_dep = desktop_dep,
+        ),
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "import arcana_desktop.app\n",
+            "import arcana_desktop.input\n",
+            "import arcana_desktop.text_input\n",
+            "import arcana_desktop.types\n",
+            "import arcana_desktop.window\n",
+            "import std.events\n",
+            "import std.io\n",
+            "\n",
+            "record Demo:\n",
+            "    total: Int\n",
+            "\n",
+            "impl arcana_desktop.app.Application[Demo] for Demo:\n",
+            "    fn resumed(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
+            "        arcana_desktop.window.set_min_size :: cx.runtime.main_window, 111, 112 :: call\n",
+            "        arcana_desktop.window.set_max_size :: cx.runtime.main_window, 333, 334 :: call\n",
+            "        arcana_desktop.window.set_transparent :: cx.runtime.main_window, true :: call\n",
+            "        arcana_desktop.window.set_theme_override :: cx.runtime.main_window, (arcana_desktop.types.WindowThemeOverride.Dark :: :: call) :: call\n",
+            "        arcana_desktop.window.set_cursor_icon :: cx.runtime.main_window, (arcana_desktop.types.CursorIcon.Hand :: :: call) :: call\n",
+            "        arcana_desktop.window.set_cursor_grab_mode :: cx.runtime.main_window, (arcana_desktop.types.CursorGrabMode.Confined :: :: call) :: call\n",
+            "        arcana_desktop.window.set_cursor_position :: cx.runtime.main_window, 12, 34 :: call\n",
+            "        arcana_desktop.window.set_text_input_enabled :: cx.runtime.main_window, false :: call\n",
+            "        arcana_desktop.text_input.set_enabled :: cx.runtime.main_window, true :: call\n",
+            "        let area = arcana_desktop.types.CompositionArea :: active = true, position = (9, 10), size = (20, 21) :: call\n",
+            "        arcana_desktop.text_input.set_composition_area :: cx.runtime.main_window, area :: call\n",
+            "        arcana_desktop.app.set_control_flow :: cx, (arcana_desktop.types.ControlFlow.Wait :: :: call) :: call\n",
+            "\n",
+            "    fn suspended(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
+            "        return\n",
+            "\n",
+            "    fn window_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read event: std.events.AppEvent) -> arcana_desktop.types.ControlFlow:\n",
+            "        return match event:\n",
+            "            std.events.AppEvent.KeyDown(ev) => on_key :: self, ev :: call\n",
+            "            std.events.AppEvent.TextCompositionStarted(_) => on_comp_started :: self :: call\n",
+            "            std.events.AppEvent.TextCompositionUpdated(ev) => on_comp_updated :: self, ev :: call\n",
+            "            std.events.AppEvent.TextCompositionCommitted(ev) => on_comp_committed :: self, ev :: call\n",
+            "            _ => cx.control.control_flow\n",
+            "\n",
+            "    fn device_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read event: std.events.AppEvent) -> arcana_desktop.types.ControlFlow:\n",
+            "        return cx.control.control_flow\n",
+            "\n",
+            "    fn about_to_wait(edit self: Demo, edit cx: arcana_desktop.types.AppContext) -> arcana_desktop.types.ControlFlow:\n",
+            "        let win_settings = arcana_desktop.window.settings :: cx.runtime.main_window :: call\n",
+            "        let text_settings = arcana_desktop.text_input.settings :: cx.runtime.main_window :: call\n",
+            "        if win_settings.bounds.min_size.0 == 111:\n",
+            "            if win_settings.bounds.min_size.1 == 112:\n",
+            "                self.total += 16\n",
+            "        if win_settings.bounds.max_size.0 == 333:\n",
+            "            if win_settings.bounds.max_size.1 == 334:\n",
+            "                self.total += 32\n",
+            "        if win_settings.options.style.transparent:\n",
+            "            self.total += 64\n",
+            "        if win_settings.options.state.theme_override == (arcana_desktop.types.WindowThemeOverride.Dark :: :: call):\n",
+            "            self.total += 128\n",
+            "        if win_settings.options.cursor.icon == (arcana_desktop.types.CursorIcon.Hand :: :: call):\n",
+            "            self.total += 256\n",
+            "        if win_settings.options.cursor.grab_mode == (arcana_desktop.types.CursorGrabMode.Confined :: :: call):\n",
+            "            self.total += 512\n",
+            "        if win_settings.options.cursor.position.0 == 12:\n",
+            "            if win_settings.options.cursor.position.1 == 34:\n",
+            "                self.total += 1024\n",
+            "        if text_settings.enabled:\n",
+            "            self.total += 2048\n",
+            "        if text_settings.composition_area.active:\n",
+            "            if text_settings.composition_area.position.0 == 9:\n",
+            "                if text_settings.composition_area.position.1 == 10:\n",
+            "                    if text_settings.composition_area.size.0 == 20:\n",
+            "                        if text_settings.composition_area.size.1 == 21:\n",
+            "                            self.total += 4096\n",
+            "        std.io.print[Int] :: self.total :: call\n",
+            "        arcana_desktop.app.request_exit :: cx, 0 :: call\n",
+            "        return arcana_desktop.types.ControlFlow.Wait :: :: call\n",
+            "\n",
+            "    fn wake(edit self: Demo, edit cx: arcana_desktop.types.AppContext) -> arcana_desktop.types.ControlFlow:\n",
+            "        return cx.control.control_flow\n",
+            "\n",
+            "    fn exiting(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
+            "        return\n",
+            "\n",
+            "fn on_key(edit self: Demo, read ev: std.events.KeyEvent) -> arcana_desktop.types.ControlFlow:\n",
+            "    if (arcana_desktop.input.key_physical :: ev :: call) == 71:\n",
+            "        self.total += 8192\n",
+            "    if (arcana_desktop.input.key_logical :: ev :: call) == 72:\n",
+            "        self.total += 16384\n",
+            "    if (arcana_desktop.input.key_location :: ev :: call) == (arcana_desktop.input.key_location_right :: :: call):\n",
+            "        self.total += 32768\n",
+            "    if (arcana_desktop.input.key_text :: ev :: call) == \"k\":\n",
+            "        self.total += 65536\n",
+            "    if arcana_desktop.input.key_repeated :: ev :: call:\n",
+            "        self.total += 131072\n",
+            "    return arcana_desktop.types.ControlFlow.Wait :: :: call\n",
+            "\n",
+            "fn on_comp_started(edit self: Demo) -> arcana_desktop.types.ControlFlow:\n",
+            "    self.total += 1\n",
+            "    return arcana_desktop.types.ControlFlow.Wait :: :: call\n",
+            "\n",
+            "fn on_comp_updated(edit self: Demo, read ev: std.events.TextCompositionEvent) -> arcana_desktop.types.ControlFlow:\n",
+            "    if ev.text == \"compose\":\n",
+            "        if ev.caret == 3:\n",
+            "            self.total += 2\n",
+            "    return arcana_desktop.types.ControlFlow.Wait :: :: call\n",
+            "\n",
+            "fn on_comp_committed(edit self: Demo, read ev: std.events.TextCompositionEvent) -> arcana_desktop.types.ControlFlow:\n",
+            "    if ev.text == \"done\":\n",
+            "        self.total += 4\n",
+            "    return arcana_desktop.types.ControlFlow.Wait :: :: call\n",
+            "\n",
+            "fn main() -> Int:\n",
+            "    let mut app = Demo :: total = 0 :: call\n",
+            "    return arcana_desktop.app.run :: app, (arcana_desktop.app.default_app_config :: :: call) :: call\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let plan =
+        build_workspace_plan_for_member(&dir, "runtime_desktop_app_runner_settings_text_input");
+    let mut host = BufferedHost::default();
+    host.next_frame_events = vec![
+        BufferedEvent {
+            kind: 4,
+            window_id: 0,
+            a: 0,
+            b: 0,
+            flags: 0,
+            text: "k".to_string(),
+            key_code: 70,
+            physical_key: 71,
+            logical_key: 72,
+            key_location: 2,
+            repeated: true,
+            ..BufferedEvent::default()
+        },
+        BufferedEvent {
+            kind: 24,
+            window_id: 0,
+            a: 0,
+            b: 0,
+            flags: 0,
+            text: String::new(),
+            ..BufferedEvent::default()
+        },
+        BufferedEvent {
+            kind: 25,
+            window_id: 0,
+            a: 3,
+            b: 0,
+            flags: 0,
+            text: "compose".to_string(),
+            ..BufferedEvent::default()
+        },
+        BufferedEvent {
+            kind: 26,
+            window_id: 0,
+            a: 0,
+            b: 0,
+            flags: 0,
+            text: "done".to_string(),
+            ..BufferedEvent::default()
+        },
+    ];
+
+    let code = execute_main(&plan, &mut host).expect("runtime should execute");
+
+    assert_eq!(code, 0);
+    assert_eq!(host.stdout, vec!["262135".to_string()]);
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn execute_main_runs_arcana_desktop_multi_window_runner_workspace() {
+    let dir = temp_workspace_dir("desktop_app_runner_multi");
+    let desktop_dep = owned_grimoire_root()
+        .join("arcana-desktop")
+        .to_string_lossy()
+        .replace('\\', "/");
+    write_file(
+        &dir.join("book.toml"),
+        &format!(
+            concat!(
+                "name = \"runtime_desktop_app_runner_multi\"\n",
+                "kind = \"app\"\n",
+                "[deps]\n",
+                "arcana_desktop = {desktop_dep:?}\n",
+            ),
+            desktop_dep = desktop_dep,
+        ),
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "import arcana_desktop.app\n",
+            "import arcana_desktop.clipboard\n",
+            "import arcana_desktop.types\n",
+            "import arcana_desktop.window\n",
+            "import std.events\n",
+            "import std.io\n",
+            "import std.result\n",
+            "\n",
+            "record Demo:\n",
+            "    second_window: Int\n",
+            "\n",
+            "impl arcana_desktop.app.Application[Demo] for Demo:\n",
+            "    fn resumed(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
+            "        let wrote = arcana_desktop.clipboard.write_text :: \"desk\" :: call\n",
+            "        if wrote :: :: is_err:\n",
+            "            arcana_desktop.app.request_exit :: cx, 7 :: call\n",
+            "            return\n",
+            "        let text = (arcana_desktop.clipboard.read_text :: :: call) :: \"\" :: unwrap_or\n",
+            "        if text != \"desk\":\n",
+            "            arcana_desktop.app.request_exit :: cx, 8 :: call\n",
+            "            return\n",
+            "        let opened = arcana_desktop.app.open_window :: cx, \"Second\", (160, 120) :: call\n",
+            "        return match opened:\n",
+            "            std.result.Result.Ok(win) => on_second_window :: self, cx, win :: call\n",
+            "            std.result.Result.Err(_) => arcana_desktop.app.request_exit :: cx, 9 :: call\n",
+            "\n",
+            "    fn suspended(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
+            "        return\n",
+            "\n",
+            "    fn window_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read event: std.events.AppEvent) -> arcana_desktop.types.ControlFlow:\n",
+            "        return match event:\n",
+            "            std.events.AppEvent.WindowRedrawRequested(id) => on_redraw :: self, cx, id :: call\n",
+            "            _ => cx.control.control_flow\n",
+            "\n",
+            "    fn device_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read event: std.events.AppEvent) -> arcana_desktop.types.ControlFlow:\n",
+            "        return cx.control.control_flow\n",
+            "\n",
+            "    fn about_to_wait(edit self: Demo, edit cx: arcana_desktop.types.AppContext) -> arcana_desktop.types.ControlFlow:\n",
+            "        return cx.control.control_flow\n",
+            "\n",
+            "    fn wake(edit self: Demo, edit cx: arcana_desktop.types.AppContext) -> arcana_desktop.types.ControlFlow:\n",
+            "        return cx.control.control_flow\n",
+            "\n",
+            "    fn exiting(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
+            "        return\n",
+            "\n",
+            "fn on_second_window(edit self: Demo, edit cx: arcana_desktop.types.AppContext, take win: std.window.Window):\n",
+            "    let win = win\n",
+            "    self.second_window = (arcana_desktop.window.id :: win :: call).value\n",
+            "    arcana_desktop.app.set_control_flow :: cx, (arcana_desktop.types.ControlFlow.Poll :: :: call) :: call\n",
+            "    return\n",
+            "\n",
+            "fn on_redraw(edit self: Demo, edit cx: arcana_desktop.types.AppContext, id: Int) -> arcana_desktop.types.ControlFlow:\n",
+            "    if id == self.second_window:\n",
+            "        std.io.print[Int] :: id :: call\n",
+            "        arcana_desktop.app.request_exit :: cx, 0 :: call\n",
+            "        return arcana_desktop.types.ControlFlow.Wait :: :: call\n",
+            "    return cx.control.control_flow\n",
+            "\n",
+            "fn main() -> Int:\n",
+            "    let mut app = Demo :: second_window = -1 :: call\n",
+            "    return arcana_desktop.app.run :: app, (arcana_desktop.app.default_app_config :: :: call) :: call\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let plan = build_workspace_plan_for_member(&dir, "runtime_desktop_app_runner_multi");
+    let mut host = BufferedHost::default();
+    let code = execute_main(&plan, &mut host).expect("runtime should execute");
+
+    assert_eq!(code, 0);
+    assert_eq!(host.stdout, vec!["1".to_string()]);
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn execute_main_uses_arcana_desktop_wait_slice_from_app_config() {
+    let dir = temp_workspace_dir("desktop_app_runner_wait_slice");
+    let desktop_dep = owned_grimoire_root()
+        .join("arcana-desktop")
+        .to_string_lossy()
+        .replace('\\', "/");
+    write_file(
+        &dir.join("book.toml"),
+        &format!(
+            concat!(
+                "name = \"runtime_desktop_app_runner_wait_slice\"\n",
+                "kind = \"app\"\n",
+                "[deps]\n",
+                "arcana_desktop = {desktop_dep:?}\n",
+            ),
+            desktop_dep = desktop_dep,
+        ),
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "import arcana_desktop.app\n",
+            "import arcana_desktop.types\n",
+            "import arcana_desktop.window\n",
+            "\n",
+            "record Demo:\n",
+            "    about_to_waits: Int\n",
+            "\n",
+            "impl arcana_desktop.app.Application[Demo] for Demo:\n",
+            "    fn resumed(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
+            "        return\n",
+            "\n",
+            "    fn suspended(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
+            "        return\n",
+            "\n",
+            "    fn window_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read event: std.events.AppEvent) -> arcana_desktop.types.ControlFlow:\n",
+            "        return cx.control.control_flow\n",
+            "\n",
+            "    fn device_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read event: std.events.AppEvent) -> arcana_desktop.types.ControlFlow:\n",
+            "        return cx.control.control_flow\n",
+            "\n",
+            "    fn about_to_wait(edit self: Demo, edit cx: arcana_desktop.types.AppContext) -> arcana_desktop.types.ControlFlow:\n",
+            "        self.about_to_waits += 1\n",
+            "        if self.about_to_waits >= 2:\n",
+            "            arcana_desktop.app.request_exit :: cx, 0 :: call\n",
+            "        return arcana_desktop.types.ControlFlow.Wait :: :: call\n",
+            "\n",
+            "    fn wake(edit self: Demo, edit cx: arcana_desktop.types.AppContext) -> arcana_desktop.types.ControlFlow:\n",
+            "        return cx.control.control_flow\n",
+            "\n",
+            "    fn exiting(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
+            "        return\n",
+            "\n",
+            "fn main() -> Int:\n",
+            "    let wait_loop = arcana_desktop.types.AppLoop :: wait_poll_ms = 25 :: call\n",
+            "    let cfg = arcana_desktop.types.AppConfig :: window = (arcana_desktop.window.default_config :: :: call), loop = wait_loop :: call\n",
+            "    let mut app = Demo :: about_to_waits = 0 :: call\n",
+            "    return arcana_desktop.app.run :: app, cfg :: call\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let plan = build_workspace_plan_for_member(&dir, "runtime_desktop_app_runner_wait_slice");
+    let mut host = BufferedHost::default();
+    let code = execute_main(&plan, &mut host).expect("runtime should execute");
+
+    assert_eq!(code, 0);
+    assert_eq!(host.sleep_log_ms, vec![25]);
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn execute_main_runs_arcana_desktop_ecs_adapter_workspace() {
+    let dir = temp_workspace_dir("desktop_app_runner_ecs");
+    let desktop_dep = owned_grimoire_root()
+        .join("arcana-desktop")
+        .to_string_lossy()
+        .replace('\\', "/");
+    write_file(
+        &dir.join("book.toml"),
+        &format!(
+            concat!(
+                "name = \"runtime_desktop_app_runner_ecs\"\n",
+                "kind = \"app\"\n",
+                "[deps]\n",
+                "arcana_desktop = {desktop_dep:?}\n",
+            ),
+            desktop_dep = desktop_dep,
+        ),
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "import arcana_desktop.ecs\n",
+            "import arcana_desktop.types\n",
+            "import std.io\n",
+            "\n",
+            "fn main() -> Int:\n",
+            "    let cfg = arcana_desktop.types.FixedStepConfig :: tick_hz = 60, max_steps = 4 :: call\n",
+            "    let mut adapter = arcana_desktop.ecs.adapter :: cfg :: call\n",
+            "    let total = adapter :: 17 :: step_all\n",
+            "    std.io.print[Int] :: total :: call\n",
+            "    return 0\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let plan = build_workspace_plan_for_member(&dir, "runtime_desktop_app_runner_ecs");
+    let mut host = BufferedHost::default();
+    let code = execute_main(&plan, &mut host).expect("runtime should execute");
+
+    assert_eq!(code, 0);
+    assert_eq!(host.stdout, vec!["0".to_string()]);
 
     let _ = fs::remove_dir_all(dir);
 }

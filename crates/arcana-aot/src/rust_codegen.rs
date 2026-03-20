@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use crate::emit::AotRuntimeBinding;
 use crate::native_abi::{NativeAbiParam, NativeAbiType, NativeExport};
 use crate::native_layout::{NativeAbiRole, NativeLayoutCatalog};
 use crate::native_lowering::{
@@ -20,6 +21,7 @@ pub struct RustNativeProject {
     pub output_name: String,
     pub artifact_text: String,
     pub support_files: Vec<(String, Vec<u8>)>,
+    pub runtime_dynamic_libraries: Vec<String>,
     pub cargo_toml: String,
     pub build_rs: Option<String>,
     pub lib_rs: Option<String>,
@@ -57,7 +59,12 @@ pub fn generate_windows_exe_project(
             native_bundle_manifest_file_name(&plan.root_artifact_file_name),
             render_native_bundle_manifest(plan)?.into_bytes(),
         )],
-        cargo_toml: render_exe_cargo_toml(plan.artifact.package_name.as_str(), &output_stem),
+        runtime_dynamic_libraries: runtime_dynamic_libraries(plan.runtime_binding),
+        cargo_toml: render_exe_cargo_toml(
+            plan.artifact.package_name.as_str(),
+            &output_stem,
+            plan.runtime_binding,
+        ),
         build_rs: Some(render_native_build_rs(None)),
         lib_rs: None,
         main_rs: Some(render_exe_main_rs(
@@ -114,15 +121,25 @@ pub fn generate_windows_dll_project(
                 render_native_bundle_manifest(plan)?.into_bytes(),
             ),
         ],
-        cargo_toml: render_dll_cargo_toml(plan.artifact.package_name.as_str(), &output_stem),
+        runtime_dynamic_libraries: runtime_dynamic_libraries(plan.runtime_binding),
+        cargo_toml: render_dll_cargo_toml(
+            plan.artifact.package_name.as_str(),
+            &output_stem,
+            plan.runtime_binding,
+        ),
         build_rs: Some(render_native_build_rs(Some(&definition_text))),
         lib_rs: Some(render_dll_lib_rs(lowered_exports, &layout, lowering)),
         main_rs: None,
     })
 }
 
-fn render_exe_cargo_toml(crate_name: &str, output_stem: &str) -> String {
+fn render_exe_cargo_toml(
+    crate_name: &str,
+    output_stem: &str,
+    runtime_binding: AotRuntimeBinding,
+) -> String {
     let repo_root = repo_root();
+    let runtime_dependency = render_runtime_dependency(runtime_binding, &repo_root);
     format!(
         concat!(
             "[package]\n",
@@ -133,20 +150,14 @@ fn render_exe_cargo_toml(crate_name: &str, output_stem: &str) -> String {
             "name = \"{}\"\n",
             "path = \"src/main.rs\"\n\n",
             "[dependencies]\n",
-            "arcana-runtime = {{ path = \"{}\" }}\n",
+            "arcana_runtime = {{ {} }}\n",
             "\n[build-dependencies]\n",
             "arcana-aot = {{ path = \"{}\" }}\n",
-            "arcana-runtime = {{ path = \"{}\" }}\n",
+            "arcana_runtime = {{ {} }}\n",
         ),
         sanitize_crate_name(crate_name),
         escape_toml(output_stem),
-        escape_toml(
-            &repo_root
-                .join("crates")
-                .join("arcana-runtime")
-                .display()
-                .to_string()
-        ),
+        runtime_dependency,
         escape_toml(
             &repo_root
                 .join("crates")
@@ -154,18 +165,17 @@ fn render_exe_cargo_toml(crate_name: &str, output_stem: &str) -> String {
                 .display()
                 .to_string()
         ),
-        escape_toml(
-            &repo_root
-                .join("crates")
-                .join("arcana-runtime")
-                .display()
-                .to_string()
-        ),
+        runtime_dependency,
     )
 }
 
-fn render_dll_cargo_toml(crate_name: &str, output_stem: &str) -> String {
+fn render_dll_cargo_toml(
+    crate_name: &str,
+    output_stem: &str,
+    runtime_binding: AotRuntimeBinding,
+) -> String {
     let repo_root = repo_root();
+    let runtime_dependency = render_runtime_dependency(runtime_binding, &repo_root);
     format!(
         concat!(
             "[package]\n",
@@ -176,20 +186,14 @@ fn render_dll_cargo_toml(crate_name: &str, output_stem: &str) -> String {
             "name = \"{}\"\n",
             "crate-type = [\"cdylib\"]\n\n",
             "[dependencies]\n",
-            "arcana-runtime = {{ path = \"{}\" }}\n",
+            "arcana_runtime = {{ {} }}\n",
             "\n[build-dependencies]\n",
             "arcana-aot = {{ path = \"{}\" }}\n",
-            "arcana-runtime = {{ path = \"{}\" }}\n",
+            "arcana_runtime = {{ {} }}\n",
         ),
         sanitize_crate_name(crate_name),
         escape_toml(output_stem),
-        escape_toml(
-            &repo_root
-                .join("crates")
-                .join("arcana-runtime")
-                .display()
-                .to_string()
-        ),
+        runtime_dependency,
         escape_toml(
             &repo_root
                 .join("crates")
@@ -197,14 +201,33 @@ fn render_dll_cargo_toml(crate_name: &str, output_stem: &str) -> String {
                 .display()
                 .to_string()
         ),
-        escape_toml(
-            &repo_root
-                .join("crates")
-                .join("arcana-runtime")
-                .display()
-                .to_string()
-        ),
+        runtime_dependency,
     )
+}
+
+fn render_runtime_dependency(runtime_binding: AotRuntimeBinding, repo_root: &Path) -> String {
+    let dependency_path = match runtime_binding {
+        AotRuntimeBinding::Baked => repo_root.join("crates").join("arcana-runtime"),
+        AotRuntimeBinding::DesktopRuntimeDll => {
+            repo_root.join("crates").join("arcana-desktop-runtime")
+        }
+    };
+    let package_name = match runtime_binding {
+        AotRuntimeBinding::Baked => "arcana-runtime",
+        AotRuntimeBinding::DesktopRuntimeDll => "arcana-desktop-runtime",
+    };
+    format!(
+        "package = \"{}\", path = \"{}\"",
+        escape_toml(package_name),
+        escape_toml(&dependency_path.display().to_string())
+    )
+}
+
+fn runtime_dynamic_libraries(runtime_binding: AotRuntimeBinding) -> Vec<String> {
+    match runtime_binding {
+        AotRuntimeBinding::Baked => Vec::new(),
+        AotRuntimeBinding::DesktopRuntimeDll => vec!["arcana_desktop.dll".to_string()],
+    }
 }
 
 fn render_exe_main_rs(
@@ -215,6 +238,7 @@ fn render_exe_main_rs(
     match lowering {
         NativeRoutineLowering::Direct { routine_key } => format!(
             concat!(
+                "#![windows_subsystem = \"windows\"]\n\n",
                 "use arcana_runtime::RuntimeAbiValue;\n\n",
                 "{}",
                 "fn main() {{\n",
@@ -243,6 +267,7 @@ fn render_exe_main_rs(
         ),
         NativeRoutineLowering::RuntimeDispatch => {
             let template = concat!(
+                "#![windows_subsystem = \"windows\"]\n\n",
                 "use arcana_runtime::{current_process_runtime_host, execute_entrypoint_routine, parse_runtime_package_image};\n\n",
                 "static PACKAGE_IMAGE_TEXT: &str = include_str!(concat!(env!(\"OUT_DIR\"), \"/runtime-package.json\"));\n\n",
                 "static MAIN_ROUTINE_KEY: &str = __ARCANA_MAIN_ROUTINE_KEY__;\n\n",

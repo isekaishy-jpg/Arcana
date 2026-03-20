@@ -1,2 +1,5 @@
 name = "arcana_graphics"
 kind = "lib"
+
+[deps]
+std = { path = "../../../../std" }

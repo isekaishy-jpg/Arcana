@@ -2,7 +2,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use arcana_aot::{AotEmitContext, AotEmitTarget, AotPackageEmission, emit_package_with_context};
+use arcana_aot::{
+    AotEmitContext, AotEmitTarget, AotPackageEmission, AotRuntimeBinding, emit_package_with_context,
+};
 use arcana_hir::{HirResolvedWorkspace, HirWorkspaceSummary, resolve_workspace};
 use arcana_ir::{
     IrPackage, RuntimeRequirementRoots, derive_runtime_requirements_with_roots,
@@ -19,7 +21,8 @@ use crate::fingerprint::{
 };
 use crate::{
     ARTIFACT_DIR, BuildTarget, CACHE_DIR, GrimoireKind, LOCKFILE_VERSION, LOGS_DIR,
-    LockTargetEntry, Lockfile, PackageResult, WorkspaceGraph, collect_validated_support_file_paths,
+    LockTargetEntry, Lockfile, NativeDependencyDelivery, PackageResult, WorkspaceGraph,
+    collect_validated_support_file_paths,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -144,6 +147,57 @@ pub fn plan_build_for_target_with_context(
     target: BuildTarget,
     context: &BuildExecutionContext,
 ) -> PackageResult<Vec<BuildStatus>> {
+    plan_build_for_member_targets_with_context(
+        graph,
+        order,
+        prepared,
+        existing_lock,
+        context,
+        |member| Some(planned_target_for_member(&target, &member.kind)),
+    )
+}
+
+pub fn plan_package_build_for_target_with_context(
+    graph: &WorkspaceGraph,
+    order: &[String],
+    prepared: &PreparedBuild,
+    existing_lock: Option<&Lockfile>,
+    target: BuildTarget,
+    packaged_member: &str,
+    context: &BuildExecutionContext,
+) -> PackageResult<Vec<BuildStatus>> {
+    let packaged_names = collect_transitive_member_names(graph, packaged_member)?;
+    plan_build_for_member_targets_with_context(
+        graph,
+        order,
+        prepared,
+        existing_lock,
+        context,
+        |member| {
+            if packaged_names.contains(&member.name) {
+                Some(planned_package_target_for_member(
+                    &target,
+                    packaged_member,
+                    &member.name,
+                ))
+            } else {
+                None
+            }
+        },
+    )
+}
+
+fn plan_build_for_member_targets_with_context<F>(
+    graph: &WorkspaceGraph,
+    order: &[String],
+    prepared: &PreparedBuild,
+    existing_lock: Option<&Lockfile>,
+    context: &BuildExecutionContext,
+    mut target_for_member: F,
+) -> PackageResult<Vec<BuildStatus>>
+where
+    F: FnMut(&crate::WorkspaceMember) -> Option<BuildTarget>,
+{
     let mut statuses = Vec::new();
     let mut upstream_built = HashMap::<String, bool>::new();
 
@@ -151,11 +205,13 @@ pub fn plan_build_for_target_with_context(
         let member = graph
             .member(name)
             .ok_or_else(|| format!("workspace planner missing member `{name}`"))?;
+        let Some(member_target) = target_for_member(member) else {
+            continue;
+        };
         let member_fingerprints = prepared
             .fingerprints
             .member(name)
             .ok_or_else(|| format!("missing fingerprint for member `{name}`"))?;
-        let member_target = planned_target_for_member(&target, &member.kind);
         let planned_toolchain =
             current_build_toolchain_for_target_with_context(&member_target, context)?;
         let fingerprint = member_fingerprints.source().to_string();
@@ -228,7 +284,20 @@ pub fn plan_build_for_target_with_context(
 fn planned_target_for_member(requested: &BuildTarget, kind: &GrimoireKind) -> BuildTarget {
     match (requested, kind) {
         (BuildTarget::WindowsExe, GrimoireKind::Lib) => BuildTarget::InternalAot,
+        (BuildTarget::WindowsDll, GrimoireKind::App) => BuildTarget::InternalAot,
         _ => requested.clone(),
+    }
+}
+
+fn planned_package_target_for_member(
+    requested: &BuildTarget,
+    packaged_member: &str,
+    member_name: &str,
+) -> BuildTarget {
+    if member_name == packaged_member {
+        requested.clone()
+    } else {
+        BuildTarget::InternalAot
     }
 }
 
@@ -297,6 +366,8 @@ pub fn execute_build_with_context(
             })
             .collect::<PackageResult<Vec<_>>>()?;
         let emission = emit_artifact_for_target(
+            graph,
+            member,
             &status.target,
             &member.kind,
             root_package,
@@ -442,6 +513,9 @@ pub fn render_lockfile(
         let builds = merged_builds
             .get(name)
             .ok_or_else(|| format!("missing build entries for `{name}`"))?;
+        if builds.is_empty() {
+            continue;
+        }
         for (target, entry) in builds {
             out.push_str(&format!(
                 "[builds.\"{}\".\"{}\"]\n",
@@ -509,9 +583,6 @@ fn merge_lock_build_entries(
                 entries.insert(target.clone(), entry.clone());
             }
         }
-        if entries.is_empty() {
-            return Err(format!("missing build entries for `{name}`"));
-        }
         merged.insert(name.clone(), entries);
     }
     Ok(merged)
@@ -574,6 +645,51 @@ fn collect_transitive_member_names(
         }
     }
     Ok(visited)
+}
+
+fn select_native_runtime_binding(
+    graph: &WorkspaceGraph,
+    root_member: &str,
+) -> PackageResult<AotRuntimeBinding> {
+    let closure = collect_transitive_member_names(graph, root_member)?;
+    let mut binding = AotRuntimeBinding::Baked;
+    for member_name in closure {
+        let member = graph
+            .member(&member_name)
+            .ok_or_else(|| format!("missing workspace member `{member_name}`"))?;
+        for (alias, spec) in &member.direct_dep_specs {
+            if spec.native_delivery != NativeDependencyDelivery::Dll {
+                continue;
+            }
+            let package_name = member.direct_dep_packages.get(alias).ok_or_else(|| {
+                format!(
+                    "workspace member `{}` is missing direct dependency package metadata for alias `{alias}`",
+                    member.name
+                )
+            })?;
+            let requested = native_runtime_binding_for_package(package_name).ok_or_else(|| {
+                format!(
+                    "dependency `{}` (package `{package_name}`) in `{}` requests `native_delivery = \"dll\"`, but that package does not define a supported native runtime DLL lane",
+                    alias,
+                    member.name
+                )
+            })?;
+            if binding != AotRuntimeBinding::Baked && binding != requested {
+                return Err(format!(
+                    "native bundle for `{root_member}` requires incompatible DLL runtime bindings"
+                ));
+            }
+            binding = requested;
+        }
+    }
+    Ok(binding)
+}
+
+fn native_runtime_binding_for_package(package_name: &str) -> Option<AotRuntimeBinding> {
+    match package_name {
+        "arcana_desktop" => Some(AotRuntimeBinding::DesktopRuntimeDll),
+        _ => None,
+    }
 }
 
 fn runtime_requirement_roots_for_kind(kind: &GrimoireKind) -> RuntimeRequirementRoots {
@@ -645,13 +761,15 @@ fn link_ir_packages(
 }
 
 fn emit_artifact_for_target(
+    graph: &WorkspaceGraph,
+    root_member: &crate::WorkspaceMember,
     target: &BuildTarget,
     root_kind: &GrimoireKind,
     root: IrPackage,
     linked_packages: Vec<IrPackage>,
     build_context: &BuildExecutionContext,
 ) -> PackageResult<AotPackageEmission> {
-    let context = emit_context_for_target(target, root_kind, build_context)?;
+    let context = emit_context_for_target(graph, root_member, target, root_kind, build_context)?;
     match target {
         BuildTarget::InternalAot => emit_package_with_context(
             AotEmitTarget::InternalArtifact,
@@ -673,16 +791,25 @@ fn emit_artifact_for_target(
 }
 
 fn emit_context_for_target(
+    graph: &WorkspaceGraph,
+    root_member: &crate::WorkspaceMember,
     target: &BuildTarget,
     kind: &GrimoireKind,
     build_context: &BuildExecutionContext,
 ) -> PackageResult<AotEmitContext> {
     let root_artifact_file_name = target.artifact_file_name(kind)?.to_string();
     let _ = build_context;
+    let runtime_binding = match target {
+        BuildTarget::WindowsExe | BuildTarget::WindowsDll => {
+            select_native_runtime_binding(graph, &root_member.name)?
+        }
+        BuildTarget::InternalAot | BuildTarget::Other(_) => AotRuntimeBinding::Baked,
+    };
     match target {
         BuildTarget::InternalAot | BuildTarget::WindowsExe | BuildTarget::WindowsDll => {
             Ok(AotEmitContext {
                 root_artifact_file_name: Some(root_artifact_file_name),
+                runtime_binding,
             })
         }
         BuildTarget::Other(_) => Err(format!("unsupported build target `{target}`")),

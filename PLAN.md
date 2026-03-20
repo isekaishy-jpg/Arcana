@@ -70,6 +70,7 @@
   - app/runtime packages for window/input/canvas/events/time/audio plus primitive graphics/text,
   - ECS/behavior runtime substrate remains first-party and is not treated as showcase-only logic,
   - then future Arcana-owned app/media grimoires for desktop facade, event/input utility, and audio facade prove the package surface is usable,
+  - that post-M8 grimoire step is now active and starts with `grimoires/owned/libs/arcana-desktop` as a real session-backed facade rather than a dead scaffold, including blocking wait, monitor/theme helpers, richer event/device routing, clipboard, and an optional ECS adapter layer above the shared `std.*` substrate,
   - owned compiler/tooling corpus and explicit conformance fixtures provide validation pressure without preserving Meadow-era package decomposition,
   - and those packages are real Rust-side runtime commitments of the rewrite, not temporary compatibility shims to be deferred until after selfhost.
 - Artifact strategy is explicit:
@@ -88,7 +89,7 @@
   6. internal IR and first runnable backend with rewrite-owned host/window/input/canvas/events/graphics/text substrate,
   7. close the approved rewrite-owned `std` runtime surface so `std` is broadly runnable rather than only the initial host/app substrate slice,
   8. native AOT artifact emission for the owned `hello`-class, host-core tool, window demo, and audio smoke paths on real hosts, with native `exe` / `dll` outputs rather than only internal backend artifacts,
-  9. complete the required Arcana-owned app/media grimoires on top of the new toolchain rather than stopping at scaffold status,
+  9. complete the required Arcana-owned app/media grimoires on top of the new toolchain rather than stopping at scaffold status; this is now in progress starting with `grimoires/owned/libs/arcana-desktop`,
   10. build and native-run at least one real owned showcase app through those completed grimoires so showcase proof is not just direct substrate smoke,
   11. add first-party `arcana test` and `arcana format` on the rewrite-owned toolchain,
   12. add the smaller advisory `arcana review` layer only after showcase/tooling corpus exists to justify it,

@@ -1,54 +1,40 @@
+import std.option
 use std.events.AppFrame
+use std.events.AppSession
+use std.events.WakeHandle
+use std.option.Option
 use std.window.Window
 
-enum Event:
-    None
-    WindowResized((Int, Int))
-    WindowMoved((Int, Int))
-    WindowCloseRequested
-    WindowFocused(Bool)
-    KeyDown(Int)
-    KeyUp(Int)
-    MouseDown(Int)
-    MouseUp(Int)
-    MouseMove((Int, Int))
-    MouseWheelY(Int)
-    MouseEntered
-    MouseLeft
+record EventRaw:
+    kind: Int
+    window_id: Int
+    a: Int
+    b: Int
+    flags: Int
+    text: Str
+    key_code: Int
+    physical_key: Int
+    logical_key: Int
+    key_location: Int
+    pointer_x: Int
+    pointer_y: Int
+    repeated: Bool
 
 intrinsic fn pump_frame(edit win: Window) -> AppFrame = EventsPump
-intrinsic fn poll_frame(edit frame: AppFrame) -> (Int, (Int, Int)) = EventsPoll
+intrinsic fn poll_frame(edit frame: AppFrame) -> Option[std.kernel.events.EventRaw] = EventsPoll
+intrinsic fn session_open() -> AppSession = EventsSessionOpen
+intrinsic fn session_close(edit session: AppSession) = EventsSessionClose
+intrinsic fn session_attach_window(edit session: AppSession, read win: Window) = EventsSessionAttachWindow
+intrinsic fn session_detach_window(edit session: AppSession, read win: Window) = EventsSessionDetachWindow
+intrinsic fn session_window_for_id(read session: AppSession, window_id: Int) -> Option[Window] = EventsSessionWindowById
+intrinsic fn session_window_ids(read session: AppSession) -> List[Int] = EventsSessionWindowIds
+intrinsic fn session_pump(edit session: AppSession) -> AppFrame = EventsSessionPump
+intrinsic fn session_wait(edit session: AppSession, timeout_ms: Int) -> AppFrame = EventsSessionWait
+intrinsic fn session_create_wake(edit session: AppSession) -> WakeHandle = EventsSessionCreateWake
+intrinsic fn wake_signal(read wake: WakeHandle) = EventsWakeSignal
 
 fn pump(edit win: Window) -> AppFrame:
     return std.kernel.events.pump_frame :: win :: call
 
-fn decode(kind: Int, a: Int, b: Int) -> std.kernel.events.Event:
-    if kind == 1:
-        return std.kernel.events.Event.WindowResized :: (a, b) :: call
-    if kind == 10:
-        return std.kernel.events.Event.WindowMoved :: (a, b) :: call
-    if kind == 2:
-        return std.kernel.events.Event.WindowCloseRequested :: :: call
-    if kind == 3:
-        return std.kernel.events.Event.WindowFocused :: a != 0 :: call
-    if kind == 4:
-        return std.kernel.events.Event.KeyDown :: a :: call
-    if kind == 5:
-        return std.kernel.events.Event.KeyUp :: a :: call
-    if kind == 6:
-        return std.kernel.events.Event.MouseDown :: a :: call
-    if kind == 7:
-        return std.kernel.events.Event.MouseUp :: a :: call
-    if kind == 8:
-        return std.kernel.events.Event.MouseMove :: (a, b) :: call
-    if kind == 9:
-        return std.kernel.events.Event.MouseWheelY :: a :: call
-    if kind == 11:
-        return std.kernel.events.Event.MouseEntered :: :: call
-    if kind == 12:
-        return std.kernel.events.Event.MouseLeft :: :: call
-    return std.kernel.events.Event.None :: :: call
-
-fn poll(edit frame: AppFrame) -> std.kernel.events.Event:
-    let raw = std.kernel.events.poll_frame :: frame :: call
-    return std.kernel.events.decode :: raw.0, raw.1.0, raw.1.1 :: call
+fn poll(edit frame: AppFrame) -> Option[std.kernel.events.EventRaw]:
+    return std.kernel.events.poll_frame :: frame :: call

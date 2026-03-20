@@ -2,6 +2,7 @@
 members = [
     "crates/arcana-aot",
     "crates/arcana-cli",
+    "crates/arcana-desktop-runtime",
     "crates/arcana-frontend",
     "crates/arcana-hir",
     "crates/arcana-ir",
@@ -19,6 +20,7 @@ license = "MIT"
 
 [workspace.dependencies]
 arcana-aot = { path = "crates/arcana-aot" }
+arcana-desktop-runtime = { path = "crates/arcana-desktop-runtime" }
 arcana-frontend = { path = "crates/arcana-frontend" }
 arcana-hir = { path = "crates/arcana-hir" }
 arcana-ir = { path = "crates/arcana-ir" }
@@ -30,6 +32,7 @@ libloading = "0.8"
 pathdiff = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_stacker = "0.1"
 sha2 = "0.10"
 toml = "0.8"
 windows-sys = "0.59"

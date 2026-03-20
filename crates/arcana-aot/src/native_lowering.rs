@@ -793,7 +793,7 @@ mod tests {
         NativeDirectExpr, NativeDirectIntBinaryOp, NativeDirectIntCompareOp, NativeDirectStmt,
         NativeLaunchLowering, NativeRoutineLowering, build_native_lowering_plan,
     };
-    use crate::emit::{AotEmitContext, AotEmitTarget};
+    use crate::emit::{AotEmitContext, AotEmitTarget, AotRuntimeBinding};
     use crate::native_plan::build_native_package_plan;
     use arcana_ir::{
         ExecAssignOp, ExecAssignTarget, ExecExpr, ExecPhraseArg, ExecPhraseQualifierKind, ExecStmt,
@@ -862,6 +862,7 @@ mod tests {
             &package,
             &AotEmitContext {
                 root_artifact_file_name: Some("app.exe".to_string()),
+                runtime_binding: AotRuntimeBinding::Baked,
             },
         )
         .expect("native package plan should build");
@@ -956,6 +957,7 @@ mod tests {
             &package,
             &AotEmitContext {
                 root_artifact_file_name: Some("app.exe".to_string()),
+                runtime_binding: AotRuntimeBinding::Baked,
             },
         )
         .expect("native package plan should build");
@@ -1144,6 +1146,7 @@ mod tests {
             &package,
             &AotEmitContext {
                 root_artifact_file_name: Some("lib.dll".to_string()),
+                runtime_binding: AotRuntimeBinding::Baked,
             },
         )
         .expect("native package plan should build");
@@ -1226,6 +1229,7 @@ mod tests {
             &package,
             &AotEmitContext {
                 root_artifact_file_name: Some("app.exe".to_string()),
+                runtime_binding: AotRuntimeBinding::Baked,
             },
         )
         .expect("native package plan should build");
@@ -1352,6 +1356,7 @@ mod tests {
             &package,
             &AotEmitContext {
                 root_artifact_file_name: Some("app.exe".to_string()),
+                runtime_binding: AotRuntimeBinding::Baked,
             },
         )
         .expect("native package plan should build");
@@ -1462,6 +1467,7 @@ mod tests {
             &package,
             &AotEmitContext {
                 root_artifact_file_name: Some("lib.dll".to_string()),
+                runtime_binding: AotRuntimeBinding::Baked,
             },
         )
         .expect("native package plan should build");
@@ -1546,6 +1552,7 @@ mod tests {
             &package,
             &AotEmitContext {
                 root_artifact_file_name: Some("lib.dll".to_string()),
+                runtime_binding: AotRuntimeBinding::Baked,
             },
         )
         .expect("native package plan should build");
@@ -1651,6 +1658,7 @@ mod tests {
             &package,
             &AotEmitContext {
                 root_artifact_file_name: Some("app.exe".to_string()),
+                runtime_binding: AotRuntimeBinding::Baked,
             },
         )
         .expect("native package plan should build");
@@ -1804,6 +1812,7 @@ mod tests {
             &package,
             &AotEmitContext {
                 root_artifact_file_name: Some("app.exe".to_string()),
+                runtime_binding: AotRuntimeBinding::Baked,
             },
         )
         .expect("native package plan should build");

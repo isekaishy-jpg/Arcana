@@ -1,4 +1,5 @@
 use crate::artifact::AotPackageArtifact;
+use std::collections::BTreeSet;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum NativeAbiType {
@@ -32,6 +33,7 @@ pub struct NativeRoutineSignature {
 
 pub fn collect_native_exports(artifact: &AotPackageArtifact) -> Result<Vec<NativeExport>, String> {
     let root_prefix = format!("{}.", artifact.root_module_id);
+    let exported_surface = exported_function_surface_rows(artifact);
     let mut exports = Vec::new();
     let mut used_names = std::collections::BTreeSet::new();
 
@@ -39,9 +41,20 @@ pub fn collect_native_exports(artifact: &AotPackageArtifact) -> Result<Vec<Nativ
         if !routine.exported {
             continue;
         }
-        if !(routine.module_id == artifact.root_module_id
-            || routine.module_id.starts_with(&root_prefix))
-        {
+        let surface_exported = exported_surface
+            .as_ref()
+            .map(|rows| {
+                rows.contains(&(
+                    routine.module_id.as_str(),
+                    routine.symbol_kind.as_str(),
+                    routine.signature_row.as_str(),
+                ))
+            })
+            .unwrap_or_else(|| {
+                routine.module_id == artifact.root_module_id
+                    || routine.module_id.starts_with(&root_prefix)
+            });
+        if !surface_exported {
             continue;
         }
         if routine.symbol_kind != "fn" {
@@ -95,6 +108,28 @@ pub fn collect_native_exports(artifact: &AotPackageArtifact) -> Result<Vec<Nativ
     }
 
     Ok(exports)
+}
+
+fn exported_function_surface_rows(
+    artifact: &AotPackageArtifact,
+) -> Option<BTreeSet<(&str, &str, &str)>> {
+    let mut rows = BTreeSet::new();
+    for row in &artifact.exported_surface_rows {
+        let Some(payload) = row.strip_prefix("module=") else {
+            continue;
+        };
+        let Some((module_id, surface_row)) = payload.split_once(':') else {
+            continue;
+        };
+        let Some(surface_payload) = surface_row.strip_prefix("export:") else {
+            continue;
+        };
+        let Some((kind, signature)) = surface_payload.split_once(':') else {
+            continue;
+        };
+        rows.insert((module_id, kind, signature));
+    }
+    if rows.is_empty() { None } else { Some(rows) }
 }
 
 pub fn parse_native_routine_signature(

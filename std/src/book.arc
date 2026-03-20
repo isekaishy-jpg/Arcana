@@ -11,6 +11,8 @@ reexport std.canvas
 reexport std.window
 reexport std.input
 reexport std.events
+reexport std.clipboard
+reexport std.text_input
 reexport std.time
 reexport std.audio
 reexport std.ecs

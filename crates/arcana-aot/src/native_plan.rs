@@ -1,7 +1,7 @@
 use arcana_ir::IrPackage;
 
 use crate::artifact::AotPackageArtifact;
-use crate::emit::{AotEmitContext, AotEmitTarget};
+use crate::emit::{AotEmitContext, AotEmitTarget, AotRuntimeBinding};
 use crate::native_abi::{NativeExport, collect_native_exports};
 use crate::{compile_package, render_package_artifact};
 
@@ -15,6 +15,7 @@ pub enum NativeLaunchPlan {
 pub struct NativePackagePlan {
     pub target: AotEmitTarget,
     pub root_artifact_file_name: String,
+    pub runtime_binding: AotRuntimeBinding,
     pub artifact: AotPackageArtifact,
     pub artifact_text: String,
     pub launch: NativeLaunchPlan,
@@ -47,6 +48,7 @@ pub fn build_native_package_plan(
     Ok(NativePackagePlan {
         target,
         root_artifact_file_name,
+        runtime_binding: context.runtime_binding,
         artifact,
         artifact_text,
         launch,

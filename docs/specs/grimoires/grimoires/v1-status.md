@@ -16,10 +16,10 @@ role: desktop/media facade grimoire
 current_scaffold: `grimoires/owned/libs/arcana-desktop`
 historical_seed: archived MeadowLang desktop app corpus
 why: ergonomic desktop/window/run-loop/frame layer above the low-level app/runtime substrate
-current_source: scaffolded-rewrite-owned
-still_needs_rebuild: flesh out the rewrite-owned facade and replace Meadow-era runtime/backend assumptions with owned package behavior above approved `std.window` / `std.input` / `std.events` / `std.canvas` / `std.time`
-update_note: naming and package split may change; the required role is what is frozen here, not the carried package name or Meadow-era package boundary, and fixed-step/frame-loop convenience should live here rather than in `std.app`
-promotion_condition: the rewrite-owned desktop/media facade grows beyond scaffold status and no longer depends on Meadow-era implementation assumptions
+current_source: rewrite-owned-in-progress
+still_needs_rebuild: broaden the facade from its current real session runner/mailbox/window layer into the full long-term desktop contract, with remaining parity work focused on additional low-level window config knobs and richer input metadata only where future grimoires prove those belong in shared `std.*` substrate rather than desktop-only shortcuts
+update_note: the scaffold is now replaced by a real rewrite-owned facade with static `Application[...]` runner callbacks, session-backed window orchestration, blocking wait support, configurable wait slicing, wake/mailbox helpers, monitor wrappers, clipboard wrappers, settings-facing window and text-input records, cursor/theme hooks, richer key metadata and composition-event routing, optional ECS adapter helpers, and native bundle proof; naming and package split may still change, but fixed-step/frame-loop convenience stays here rather than in `std.app`, and the remaining parity work is facade growth plus substrate hardening rather than reviving Meadow-era runtime assumptions. Current crate-side proof now includes native bundle execution through the facade itself, a simple `arcana_desktop + arcana_graphics + arcana_text` sample path, native multi-window clipboard coverage, native settings/text-input roundtrip plus create-time cursor/text-input config proof through the facade, committed-text plus IME lifecycle smoke on the real host message path, and in-process native host proof for committed IME composition payload delivery.
+promotion_condition: the rewrite-owned desktop/media facade reaches the approved long-term role breadth and powers native showcase apps without direct app-shell fallback to raw `std.*`
 
 id: GRIMOIRE-GRAPHICS-FACADE
 classification: bootstrap-required

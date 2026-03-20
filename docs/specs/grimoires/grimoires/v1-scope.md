@@ -16,8 +16,9 @@ Scope notes:
 
 - Desktop/media facade grimoire
   - rewrite-owned scaffold: `grimoires/owned/libs/arcana-desktop`
-  - responsibility: ergonomic desktop/window/run-loop/frame convenience above `std.window`, `std.input`, `std.events`, `std.canvas`, and `std.time`
-  - responsibility: may also own event routing, frame-input snapshots, keybind/action helpers, and similar desktop-facing utility layers if Arcana's rewrite-native layout folds those into one package
+  - responsibility: ergonomic desktop/window/run-loop/frame convenience above `std.window`, `std.input`, `std.events`, `std.canvas`, `std.time`, and `std.clipboard`
+  - responsibility: may own the session runner, blocking wait policy, multi-window coordination, wake/mailbox helpers, monitor helpers, event routing, frame-input snapshots, optional ECS-loop adapters, keybind/action helpers, and similar desktop-facing utility layers if Arcana's rewrite-native layout folds those into one package
+  - responsibility: must not absorb graphics/text draw policy that belongs in sibling grimoires above the shared low-level substrate
 - Graphics facade grimoire
   - rewrite-owned scaffold: `grimoires/owned/libs/arcana-graphics`
   - responsibility: 2D graphics/image convenience above `std.canvas`

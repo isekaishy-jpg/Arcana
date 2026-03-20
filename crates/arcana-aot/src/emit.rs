@@ -26,6 +26,13 @@ impl AotEmitTarget {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AotRuntimeBinding {
+    #[default]
+    Baked,
+    DesktopRuntimeDll,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AotEmissionFile {
     pub relative_path: String,
@@ -35,6 +42,7 @@ pub struct AotEmissionFile {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AotEmitContext {
     pub root_artifact_file_name: Option<String>,
+    pub runtime_binding: AotRuntimeBinding,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

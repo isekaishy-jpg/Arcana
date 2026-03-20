@@ -110,6 +110,10 @@ pub fn compute_workspace_snapshot_id(
         for dep in &member.deps {
             hasher.update(format!("dep={dep}\n").as_bytes());
         }
+        for row in render_member_dependency_setting_rows(member) {
+            hasher.update(row.as_bytes());
+            hasher.update(b"\n");
+        }
     }
 
     for (name, package) in &workspace.packages {
@@ -176,6 +180,10 @@ fn compute_member_source_fingerprint(
     for dep in &member.deps {
         hasher.update(format!("dep={dep}\n").as_bytes());
     }
+    for row in render_member_dependency_setting_rows(member) {
+        hasher.update(row.as_bytes());
+        hasher.update(b"\n");
+    }
     for row in package.summary.hir_fingerprint_rows() {
         hasher.update(row.as_bytes());
         hasher.update(b"\n");
@@ -190,6 +198,27 @@ fn compute_member_source_fingerprint(
         }
     }
     Ok(format!("sha256:{:x}", hasher.finalize()))
+}
+
+fn render_member_dependency_setting_rows(member: &WorkspaceMember) -> Vec<String> {
+    let mut rows = member
+        .direct_dep_specs
+        .iter()
+        .map(|(alias, spec)| {
+            let package_name = member
+                .direct_dep_packages
+                .get(alias)
+                .map(String::as_str)
+                .unwrap_or("");
+            format!(
+                "dep_setting:alias={alias}|package={package_name}|source={:?}|native_delivery={}",
+                spec.source,
+                spec.native_delivery.as_str()
+            )
+        })
+        .collect::<Vec<_>>();
+    rows.sort();
+    rows
 }
 
 fn resolved_package_api_rows(

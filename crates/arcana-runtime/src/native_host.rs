@@ -8,11 +8,17 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use font8x8::{BASIC_FONTS, UnicodeFonts};
-use windows_sys::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows_sys::Win32::Devices::HumanInterfaceDevice::{
+    HID_USAGE_GENERIC_MOUSE, HID_USAGE_PAGE_GENERIC,
+};
+use windows_sys::Win32::Foundation::{
+    GlobalFree, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
+};
+use windows_sys::Win32::Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute};
 use windows_sys::Win32::Graphics::Gdi::{
-    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, DIB_RGB_COLORS, EndPaint, GetMonitorInfoW,
-    HDC, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, PAINTSTRUCT,
-    ReleaseDC, SRCCOPY, StretchDIBits, UpdateWindow,
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, ClientToScreen, DIB_RGB_COLORS, EndPaint,
+    EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, InvalidateRect, MONITOR_DEFAULTTONEAREST,
+    MONITORINFO, MONITORINFOEXW, MonitorFromWindow, PAINTSTRUCT, ReleaseDC, SRCCOPY, StretchDIBits,
 };
 use windows_sys::Win32::Media::Audio::{
     HWAVEOUT, WAVE_FORMAT_PCM, WAVE_FORMAT_QUERY, WAVE_MAPPER, WAVEFORMATEX, WAVEHDR,
@@ -21,31 +27,60 @@ use windows_sys::Win32::Media::Audio::{
     waveOutRestart, waveOutSetVolume, waveOutUnprepareHeader, waveOutWrite,
 };
 use windows_sys::Win32::Media::{MMSYSERR_NOERROR, MMTIME, TIME_SAMPLES};
+use windows_sys::Win32::System::DataExchange::{
+    CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
+    RegisterClipboardFormatW, SetClipboardData,
+};
 use windows_sys::Win32::System::LibraryLoader::{
     GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
     GetModuleHandleExW,
 };
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+use windows_sys::Win32::System::Memory::{
+    GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
 };
+use windows_sys::Win32::System::Ole::CF_UNICODETEXT;
+use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
+use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI};
+use windows_sys::Win32::UI::Input::Ime::{
+    CANDIDATEFORM, CFS_CANDIDATEPOS, CFS_FORCE_POSITION, COMPOSITIONFORM, GCS_COMPSTR,
+    GCS_CURSORPOS, GCS_RESULTSTR, HIMC, ImmGetCompositionStringW, ImmGetContext, ImmReleaseContext,
+    ImmSetCandidateWindow, ImmSetCompositionWindow,
+};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    MAPVK_VK_TO_CHAR, MAPVK_VSC_TO_VK_EX, MapVirtualKeyW, TME_LEAVE, TRACKMOUSEEVENT,
+    TrackMouseEvent,
+};
+use windows_sys::Win32::UI::Input::{
+    GetRawInputData, HRAWINPUT, MOUSE_MOVE_RELATIVE, RAWINPUT, RAWINPUTDEVICE, RID_INPUT,
+    RIDEV_INPUTSINK, RIM_TYPEMOUSE, RegisterRawInputDevices,
+};
+use windows_sys::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    AdjustWindowRectEx, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW,
-    DefWindowProcW, DestroyWindow, DispatchMessageW, GWL_EXSTYLE, GWL_STYLE, GWLP_USERDATA,
-    GetClientRect, GetWindowLongPtrW, GetWindowRect, HCURSOR, HTCLIENT, HWND_NOTOPMOST, HWND_TOP,
-    HWND_TOPMOST, IDC_ARROW, IsWindow, LoadCursorW, MSG, PM_REMOVE, PeekMessageW, RegisterClassW,
-    SIZE_MAXIMIZED, SIZE_MINIMIZED, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW,
-    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SetCursor,
-    SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage, WM_CLOSE,
-    WM_DESTROY, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
-    WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MOVE, WM_NCCREATE, WM_NCDESTROY, WM_PAINT,
-    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WM_XBUTTONDOWN, WM_XBUTTONUP,
-    WNDCLASSW, WS_EX_APPWINDOW, WS_MAXIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_SIZEBOX, WS_VISIBLE,
+    AdjustWindowRectEx, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, ClipCursor,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, FLASHW_STOP, FLASHW_TRAY,
+    FLASHWINFO, FlashWindowEx, GWL_EXSTYLE, GWL_STYLE, GWLP_USERDATA, GetClientRect,
+    GetWindowLongPtrW, GetWindowRect, HCURSOR, HTCLIENT, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST,
+    IDC_ARROW, IDC_CROSS, IDC_HAND, IDC_HELP, IDC_IBEAM, IDC_NO, IDC_SIZEALL, IDC_SIZENESW,
+    IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, IDC_WAIT, IsWindow, LWA_ALPHA, LoadCursorW, MINMAXINFO,
+    MSG, MWMO_INPUTAVAILABLE, MsgWaitForMultipleObjectsEx, PM_NOREMOVE, PM_REMOVE, PeekMessageW,
+    PostMessageW, QS_ALLINPUT, RegisterClassW, SIZE_MAXIMIZED, SIZE_MINIMIZED, SW_HIDE,
+    SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOOWNERZORDER, SWP_NOSIZE, SetCursor, SetCursorPos, SetLayeredWindowAttributes,
+    SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage, WM_CHAR,
+    WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_DROPFILES, WM_GETMINMAXINFO, WM_IME_COMPOSITION,
+    WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_INPUT, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+    WM_MOVE, WM_NCCREATE, WM_NCDESTROY, WM_NULL, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_THEMECHANGED,
+    WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSW, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_MAXIMIZEBOX,
+    WS_OVERLAPPEDWINDOW, WS_SIZEBOX, WaitMessage,
 };
 
 use crate::{
     BufferedAppFrame, BufferedEvent, BufferedFrameInput, BufferedHost, RuntimeAppFrameHandle,
-    RuntimeAudioBufferHandle, RuntimeAudioDeviceHandle, RuntimeAudioPlaybackHandle, RuntimeHost,
-    RuntimeImageHandle, RuntimeWindowHandle, common_named_key_code, common_named_mouse_button_code,
+    RuntimeAppSessionHandle, RuntimeAudioBufferHandle, RuntimeAudioDeviceHandle,
+    RuntimeAudioPlaybackHandle, RuntimeEventRecord, RuntimeHost, RuntimeImageHandle,
+    RuntimeWakeHandle, RuntimeWindowHandle, common_named_key_code, common_named_mouse_button_code,
     ensure_audio_buffer_matches_device,
 };
 
@@ -62,13 +97,48 @@ const EVENT_MOUSE_WHEEL_Y: i64 = 9;
 const EVENT_WINDOW_MOVED: i64 = 10;
 const EVENT_MOUSE_ENTERED: i64 = 11;
 const EVENT_MOUSE_LEFT: i64 = 12;
+const EVENT_WINDOW_REDRAW_REQUESTED: i64 = 13;
+const EVENT_TEXT_INPUT: i64 = 14;
+const EVENT_FILE_DROPPED: i64 = 15;
+const EVENT_WINDOW_SCALE_FACTOR_CHANGED: i64 = 16;
+const EVENT_WINDOW_THEME_CHANGED: i64 = 17;
+const EVENT_RAW_MOUSE_MOTION: i64 = 18;
+const EVENT_APP_RESUMED: i64 = 20;
+const EVENT_WAKE: i64 = 21;
+const EVENT_APP_SUSPENDED: i64 = 22;
+const EVENT_ABOUT_TO_WAIT: i64 = 23;
+const EVENT_TEXT_COMPOSITION_STARTED: i64 = 24;
+const EVENT_TEXT_COMPOSITION_UPDATED: i64 = 25;
+const EVENT_TEXT_COMPOSITION_COMMITTED: i64 = 26;
+const EVENT_TEXT_COMPOSITION_CANCELLED: i64 = 27;
 const WM_MOUSELEAVE_MESSAGE: u32 = 0x02A3;
+const ARCANA_BYTES_CLIPBOARD_FORMAT_NAME: &str = "ArcanaRuntimeBytes";
 
 static REGISTERED_WINDOW_CLASS: OnceLock<Result<NativeWindowClass, String>> = OnceLock::new();
+static REGISTERED_BYTES_CLIPBOARD_FORMAT: OnceLock<Result<u32, String>> = OnceLock::new();
 
 struct NativeWindowClass {
     module_handle: usize,
     name: Vec<u16>,
+}
+
+struct ClipboardGuard;
+
+impl ClipboardGuard {
+    fn open() -> Result<Self, String> {
+        if unsafe { OpenClipboard(null_mut()) } == 0 {
+            return Err("failed to open Windows clipboard".to_string());
+        }
+        Ok(Self)
+    }
+}
+
+impl Drop for ClipboardGuard {
+    fn drop(&mut self) {
+        unsafe {
+            CloseClipboard();
+        }
+    }
 }
 
 pub struct NativeProcessHost {
@@ -80,6 +150,10 @@ pub struct NativeProcessHost {
     images: BTreeMap<RuntimeImageHandle, NativeImage>,
     next_frame_handle: u64,
     frames: BTreeMap<RuntimeAppFrameHandle, BufferedAppFrame>,
+    next_session_handle: u64,
+    sessions: BTreeMap<RuntimeAppSessionHandle, NativeSessionState>,
+    next_wake_handle: u64,
+    wakes: BTreeMap<RuntimeWakeHandle, NativeWakeState>,
     next_audio_device_handle: u64,
     audio_devices: BTreeMap<RuntimeAudioDeviceHandle, NativeAudioDevice>,
     next_audio_buffer_handle: u64,
@@ -93,14 +167,33 @@ struct NativeWindowState {
     title: String,
     width: i64,
     height: i64,
+    min_size: (i64, i64),
+    max_size: (i64, i64),
     resized: bool,
     fullscreen: bool,
     minimized: bool,
     maximized: bool,
     focused: bool,
+    visible: bool,
+    decorated: bool,
     resizable: bool,
     topmost: bool,
+    transparent: bool,
+    theme_override_code: i64,
     cursor_visible: bool,
+    cursor_icon_code: i64,
+    cursor_grab_mode: i64,
+    cursor_position: (i64, i64),
+    suppress_cursor_move: bool,
+    redraw_pending: bool,
+    text_input_enabled: bool,
+    composition_area_active: bool,
+    composition_area_position: (i64, i64),
+    composition_area_size: (i64, i64),
+    composition_active: bool,
+    composition_committed: bool,
+    applying_dpi_suggestion: bool,
+    applying_theme_override: bool,
     closed: bool,
     restore_style: isize,
     restore_ex_style: isize,
@@ -116,6 +209,28 @@ struct NativeWindowState {
     mouse_released: BTreeSet<i64>,
     mouse_wheel_y: i64,
     mouse_in_window: bool,
+    pending_high_surrogate: Option<u16>,
+}
+
+struct NativeSessionState {
+    windows: Vec<RuntimeWindowHandle>,
+    resumed: bool,
+    suspended: bool,
+    pending_wakes: usize,
+}
+
+struct NativeWakeState {
+    session: RuntimeAppSessionHandle,
+}
+
+#[derive(Clone, Debug)]
+struct NativeMonitorInfo {
+    handle: HMONITOR,
+    name: String,
+    position: (i64, i64),
+    size: (i64, i64),
+    scale_factor_milli: i64,
+    primary: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -175,6 +290,10 @@ impl NativeProcessHost {
             images: BTreeMap::new(),
             next_frame_handle: 0,
             frames: BTreeMap::new(),
+            next_session_handle: 0,
+            sessions: BTreeMap::new(),
+            next_wake_handle: 0,
+            wakes: BTreeMap::new(),
             next_audio_device_handle: 0,
             audio_devices: BTreeMap::new(),
             next_audio_buffer_handle: 0,
@@ -241,6 +360,113 @@ impl NativeProcessHost {
         self.frames
             .get_mut(&handle)
             .ok_or_else(|| format!("invalid AppFrame handle `{}`", handle.0))
+    }
+
+    fn insert_session(&mut self) -> RuntimeAppSessionHandle {
+        let handle = RuntimeAppSessionHandle(self.next_session_handle);
+        self.next_session_handle += 1;
+        self.sessions.insert(
+            handle,
+            NativeSessionState {
+                windows: Vec::new(),
+                resumed: false,
+                suspended: false,
+                pending_wakes: 0,
+            },
+        );
+        handle
+    }
+
+    fn session_ref(&self, handle: RuntimeAppSessionHandle) -> Result<&NativeSessionState, String> {
+        self.sessions
+            .get(&handle)
+            .ok_or_else(|| format!("invalid AppSession handle `{}`", handle.0))
+    }
+
+    fn session_mut(
+        &mut self,
+        handle: RuntimeAppSessionHandle,
+    ) -> Result<&mut NativeSessionState, String> {
+        self.sessions
+            .get_mut(&handle)
+            .ok_or_else(|| format!("invalid AppSession handle `{}`", handle.0))
+    }
+
+    fn detach_window_from_sessions(&mut self, window: RuntimeWindowHandle) {
+        for session in self.sessions.values_mut() {
+            session.windows.retain(|candidate| *candidate != window);
+        }
+    }
+
+    fn remove_session_wakes(&mut self, session: RuntimeAppSessionHandle) {
+        self.wakes.retain(|_, wake| wake.session != session);
+    }
+
+    fn prune_closed_windows(&mut self) {
+        let closed = self
+            .windows
+            .iter()
+            .filter_map(|(handle, state)| {
+                if state.closed || state.hwnd.is_null() {
+                    Some(*handle)
+                } else {
+                    None
+                }
+            })
+            .collect::<BTreeSet<_>>();
+        if closed.is_empty() {
+            return;
+        }
+        for session in self.sessions.values_mut() {
+            session
+                .windows
+                .retain(|candidate| !closed.contains(candidate));
+        }
+        self.windows.retain(|handle, _| !closed.contains(handle));
+    }
+
+    fn close_native_window(
+        &mut self,
+        window: RuntimeWindowHandle,
+        pump_after_destroy: bool,
+    ) -> Result<(), String> {
+        if !self.windows.contains_key(&window) {
+            return Err(format!("invalid Window handle `{}`", window.0));
+        }
+        let hwnd = {
+            let window_state = self.window_mut(window)?;
+            if window_state.closed || window_state.hwnd.is_null() {
+                self.detach_window_from_sessions(window);
+                self.prune_closed_windows();
+                return Ok(());
+            }
+            window_state.closed = true;
+            window_state.hwnd
+        };
+        self.detach_window_from_sessions(window);
+        if !hwnd.is_null() && unsafe { IsWindow(hwnd) != 0 } {
+            unsafe {
+                DestroyWindow(hwnd);
+            }
+            if pump_after_destroy {
+                self.pump_messages()?;
+            }
+        }
+        self.prune_closed_windows();
+        Ok(())
+    }
+
+    fn insert_wake(&mut self, session: RuntimeAppSessionHandle) -> RuntimeWakeHandle {
+        let handle = RuntimeWakeHandle(self.next_wake_handle);
+        self.next_wake_handle += 1;
+        self.wakes.insert(handle, NativeWakeState { session });
+        handle
+    }
+
+    fn wake_ref(&self, handle: RuntimeWakeHandle) -> Result<&NativeWakeState, String> {
+        self.wakes
+            .get(&handle)
+            .ok_or_else(|| format!("invalid Wake handle `{}`", handle.0))
     }
 
     fn insert_audio_device(
@@ -362,7 +588,7 @@ impl NativeProcessHost {
         let window_class = Self::ensure_window_class()?;
         let client_width = sanitize_dimension(width);
         let client_height = sanitize_dimension(height);
-        let style = WS_OVERLAPPEDWINDOW | WS_VISIBLE;
+        let style = WS_OVERLAPPEDWINDOW;
         let ex_style = WS_EX_APPWINDOW;
         let mut rect = RECT {
             left: 0,
@@ -396,9 +622,9 @@ impl NativeProcessHost {
             return Err("failed to create native window".to_string());
         }
         unsafe {
-            ShowWindow(hwnd, SW_SHOW);
-            UpdateWindow(hwnd);
+            DragAcceptFiles(hwnd, 1);
         }
+        Self::register_window_raw_mouse(hwnd)?;
         let handle = self.insert_window(window);
         self.pump_messages()?;
         Ok(handle)
@@ -419,11 +645,167 @@ impl NativeProcessHost {
         Ok(())
     }
 
+    fn collect_monitor_infos(&self) -> Result<Vec<NativeMonitorInfo>, String> {
+        let mut handles = Vec::new();
+        let ok = unsafe {
+            EnumDisplayMonitors(
+                null_mut(),
+                std::ptr::null(),
+                Some(collect_monitor_handle_proc),
+                &mut handles as *mut Vec<HMONITOR> as LPARAM,
+            )
+        };
+        if ok == 0 {
+            return Err("failed to enumerate native monitors".to_string());
+        }
+        let mut monitors = Vec::with_capacity(handles.len());
+        for handle in handles {
+            let mut info = unsafe { zeroed::<MONITORINFOEXW>() };
+            info.monitorInfo.cbSize = size_of::<MONITORINFOEXW>() as u32;
+            if unsafe {
+                GetMonitorInfoW(handle, &mut info as *mut MONITORINFOEXW as *mut MONITORINFO)
+            } == 0
+            {
+                return Err("failed to query native monitor info".to_string());
+            }
+            let scale_factor_milli = query_monitor_scale_factor_milli(handle);
+            let position = (
+                info.monitorInfo.rcMonitor.left as i64,
+                info.monitorInfo.rcMonitor.top as i64,
+            );
+            let size = (
+                (info.monitorInfo.rcMonitor.right - info.monitorInfo.rcMonitor.left) as i64,
+                (info.monitorInfo.rcMonitor.bottom - info.monitorInfo.rcMonitor.top) as i64,
+            );
+            monitors.push(NativeMonitorInfo {
+                handle,
+                name: wide_units_to_string(&info.szDevice),
+                position,
+                size,
+                scale_factor_milli,
+                primary: info.monitorInfo.dwFlags & 1 != 0,
+            });
+        }
+        Ok(monitors)
+    }
+
+    fn monitor_info_at(&self, index: i64) -> Result<NativeMonitorInfo, String> {
+        if index < 0 {
+            return Err(format!("invalid monitor index `{index}`"));
+        }
+        let monitors = self.collect_monitor_infos()?;
+        monitors
+            .get(index as usize)
+            .cloned()
+            .ok_or_else(|| format!("invalid monitor index `{index}`"))
+    }
+
+    fn current_monitor_index_for_window(&self, window: &NativeWindowState) -> Result<i64, String> {
+        let monitor = unsafe { MonitorFromWindow(window.hwnd, MONITOR_DEFAULTTONEAREST) };
+        for (index, info) in self.collect_monitor_infos()?.iter().enumerate() {
+            if info.handle == monitor {
+                return i64::try_from(index)
+                    .map_err(|_| "native monitor index does not fit in Int".to_string());
+            }
+        }
+        Ok(0)
+    }
+
+    fn session_has_ready_events(&self, session: RuntimeAppSessionHandle) -> Result<bool, String> {
+        let session_state = self.session_ref(session)?;
+        if !session_state.resumed || session_state.pending_wakes > 0 {
+            return Ok(true);
+        }
+        for window in &session_state.windows {
+            if let Some(state) = self.windows.get(window) {
+                if !state.events.is_empty() {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    fn wait_for_session_activity(
+        &mut self,
+        session: RuntimeAppSessionHandle,
+        timeout_ms: i64,
+    ) -> Result<(), String> {
+        if self.session_has_ready_events(session)? {
+            return Ok(());
+        }
+        let mut queued = unsafe { zeroed::<MSG>() };
+        if unsafe { PeekMessageW(&mut queued, null_mut(), 0, 0, PM_NOREMOVE) } != 0 {
+            return Ok(());
+        }
+        let live_window_count = self
+            .session_ref(session)?
+            .windows
+            .iter()
+            .filter_map(|handle| self.windows.get(handle))
+            .filter(|window| !window.closed && unsafe { IsWindow(window.hwnd) != 0 })
+            .count();
+        if live_window_count == 0 {
+            return Ok(());
+        }
+        if timeout_ms < 0 {
+            if unsafe { WaitMessage() } == 0 {
+                return Err("failed to wait for native session message".to_string());
+            }
+        } else {
+            let timeout = u32::try_from(timeout_ms).unwrap_or(u32::MAX);
+            unsafe {
+                MsgWaitForMultipleObjectsEx(
+                    0,
+                    std::ptr::null(),
+                    timeout,
+                    QS_ALLINPUT,
+                    MWMO_INPUTAVAILABLE,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn notify_session_queue(&self, session: RuntimeAppSessionHandle) {
+        let session_windows = self
+            .sessions
+            .get(&session)
+            .map(|state| state.windows.clone())
+            .unwrap_or_default();
+        for window in session_windows {
+            let Some(state) = self.windows.get(&window) else {
+                continue;
+            };
+            if state.closed || state.hwnd.is_null() {
+                continue;
+            }
+            unsafe {
+                PostMessageW(state.hwnd, WM_NULL, 0, 0);
+            }
+            break;
+        }
+    }
+
+    fn register_window_raw_mouse(hwnd: HWND) -> Result<(), String> {
+        let device = RAWINPUTDEVICE {
+            usUsagePage: HID_USAGE_PAGE_GENERIC,
+            usUsage: HID_USAGE_GENERIC_MOUSE,
+            dwFlags: RIDEV_INPUTSINK,
+            hwndTarget: hwnd,
+        };
+        if unsafe { RegisterRawInputDevices(&device, 1, size_of::<RAWINPUTDEVICE>() as u32) } == 0 {
+            return Err("failed to register native raw mouse input".to_string());
+        }
+        Ok(())
+    }
+
     fn snapshot_frame_input(window: &mut NativeWindowState) -> BufferedFrameInput {
         let input = BufferedFrameInput {
             key_down: window.key_down.iter().copied().collect(),
             key_pressed: window.key_pressed.iter().copied().collect(),
             key_released: window.key_released.iter().copied().collect(),
+            modifiers: frame_modifier_flags(&window.key_down),
             mouse_pos: window.mouse_pos,
             mouse_down: window.mouse_down.iter().copied().collect(),
             mouse_pressed: window.mouse_pressed.iter().copied().collect(),
@@ -438,6 +820,26 @@ impl NativeProcessHost {
         window.mouse_wheel_y = 0;
         window.resized = false;
         input
+    }
+
+    fn event_with_window_id(window: RuntimeWindowHandle, event: BufferedEvent) -> BufferedEvent {
+        BufferedEvent {
+            window_id: i64::try_from(window.0).unwrap_or(-1),
+            ..event
+        }
+    }
+
+    fn merge_frame_input(target: &mut BufferedFrameInput, input: BufferedFrameInput) {
+        append_unique(&mut target.key_down, input.key_down);
+        append_unique(&mut target.key_pressed, input.key_pressed);
+        append_unique(&mut target.key_released, input.key_released);
+        append_unique(&mut target.mouse_down, input.mouse_down);
+        append_unique(&mut target.mouse_pressed, input.mouse_pressed);
+        append_unique(&mut target.mouse_released, input.mouse_released);
+        target.modifiers |= input.modifiers;
+        target.mouse_pos = input.mouse_pos;
+        target.mouse_wheel_y += input.mouse_wheel_y;
+        target.mouse_in_window |= input.mouse_in_window;
     }
 
     fn present_window(&mut self, handle: RuntimeWindowHandle) -> Result<(), String> {
@@ -844,32 +1246,246 @@ impl RuntimeHost for NativeProcessHost {
         Ok(self.window_ref(window)?.focused)
     }
 
+    fn window_id(&mut self, window: RuntimeWindowHandle) -> Result<i64, String> {
+        self.window_ref(window)?;
+        i64::try_from(window.0)
+            .map_err(|_| format!("Window handle `{}` does not fit in Int", window.0))
+    }
+
+    fn window_position(&mut self, window: RuntimeWindowHandle) -> Result<(i64, i64), String> {
+        let window = self.window_ref(window)?;
+        let mut rect = unsafe { zeroed::<RECT>() };
+        if unsafe { GetWindowRect(window.hwnd, &mut rect) } == 0 {
+            return Err("failed to query window position".to_string());
+        }
+        Ok((rect.left as i64, rect.top as i64))
+    }
+
+    fn window_title(&mut self, window: RuntimeWindowHandle) -> Result<String, String> {
+        Ok(self.window_ref(window)?.title.clone())
+    }
+
+    fn window_visible(&mut self, window: RuntimeWindowHandle) -> Result<bool, String> {
+        Ok(self.window_ref(window)?.visible)
+    }
+
+    fn window_decorated(&mut self, window: RuntimeWindowHandle) -> Result<bool, String> {
+        Ok(self.window_ref(window)?.decorated)
+    }
+
+    fn window_resizable(&mut self, window: RuntimeWindowHandle) -> Result<bool, String> {
+        Ok(self.window_ref(window)?.resizable)
+    }
+
+    fn window_topmost(&mut self, window: RuntimeWindowHandle) -> Result<bool, String> {
+        Ok(self.window_ref(window)?.topmost)
+    }
+
+    fn window_cursor_visible(&mut self, window: RuntimeWindowHandle) -> Result<bool, String> {
+        Ok(self.window_ref(window)?.cursor_visible)
+    }
+
+    fn window_min_size(&mut self, window: RuntimeWindowHandle) -> Result<(i64, i64), String> {
+        Ok(self.window_ref(window)?.min_size)
+    }
+
+    fn window_max_size(&mut self, window: RuntimeWindowHandle) -> Result<(i64, i64), String> {
+        Ok(self.window_ref(window)?.max_size)
+    }
+
+    fn window_scale_factor_milli(&mut self, window: RuntimeWindowHandle) -> Result<i64, String> {
+        let window = self.window_ref(window)?;
+        let dpi = unsafe { GetDpiForWindow(window.hwnd) };
+        if dpi == 0 {
+            return Ok(query_monitor_scale_factor_milli(unsafe {
+                MonitorFromWindow(window.hwnd, MONITOR_DEFAULTTONEAREST)
+            }));
+        }
+        Ok((i64::from(dpi) * 1000) / 96)
+    }
+
+    fn window_theme_code(&mut self, window: RuntimeWindowHandle) -> Result<i64, String> {
+        self.window_ref(window)?;
+        Ok(current_windows_theme_code())
+    }
+
+    fn window_transparent(&mut self, window: RuntimeWindowHandle) -> Result<bool, String> {
+        Ok(self.window_ref(window)?.transparent)
+    }
+
+    fn window_theme_override_code(&mut self, window: RuntimeWindowHandle) -> Result<i64, String> {
+        Ok(self.window_ref(window)?.theme_override_code)
+    }
+
+    fn window_cursor_icon_code(&mut self, window: RuntimeWindowHandle) -> Result<i64, String> {
+        Ok(self.window_ref(window)?.cursor_icon_code)
+    }
+
+    fn window_cursor_grab_mode(&mut self, window: RuntimeWindowHandle) -> Result<i64, String> {
+        Ok(self.window_ref(window)?.cursor_grab_mode)
+    }
+
+    fn window_cursor_position(
+        &mut self,
+        window: RuntimeWindowHandle,
+    ) -> Result<(i64, i64), String> {
+        Ok(self.window_ref(window)?.cursor_position)
+    }
+
+    fn window_text_input_enabled(&mut self, window: RuntimeWindowHandle) -> Result<bool, String> {
+        Ok(self.window_ref(window)?.text_input_enabled)
+    }
+
+    fn window_current_monitor_index(&mut self, window: RuntimeWindowHandle) -> Result<i64, String> {
+        let window = self.window_ref(window)?;
+        self.current_monitor_index_for_window(window)
+    }
+
+    fn window_primary_monitor_index(&mut self) -> Result<i64, String> {
+        for (index, monitor) in self.collect_monitor_infos()?.iter().enumerate() {
+            if monitor.primary {
+                return i64::try_from(index)
+                    .map_err(|_| "native monitor index does not fit in Int".to_string());
+            }
+        }
+        Ok(0)
+    }
+
+    fn window_monitor_count(&mut self) -> Result<i64, String> {
+        i64::try_from(self.collect_monitor_infos()?.len())
+            .map_err(|_| "native monitor count does not fit in Int".to_string())
+    }
+
+    fn window_monitor_name(&mut self, index: i64) -> Result<String, String> {
+        Ok(self.monitor_info_at(index)?.name)
+    }
+
+    fn window_monitor_position(&mut self, index: i64) -> Result<(i64, i64), String> {
+        Ok(self.monitor_info_at(index)?.position)
+    }
+
+    fn window_monitor_size(&mut self, index: i64) -> Result<(i64, i64), String> {
+        Ok(self.monitor_info_at(index)?.size)
+    }
+
+    fn window_monitor_scale_factor_milli(&mut self, index: i64) -> Result<i64, String> {
+        Ok(self.monitor_info_at(index)?.scale_factor_milli)
+    }
+
+    fn window_monitor_is_primary(&mut self, index: i64) -> Result<bool, String> {
+        Ok(self.monitor_info_at(index)?.primary)
+    }
+
     fn window_set_title(&mut self, window: RuntimeWindowHandle, title: &str) -> Result<(), String> {
-        let window = self.window_mut(window)?;
-        window.title = title.to_string();
+        let hwnd = self.window_ref(window)?.hwnd;
         let title_wide = wide_null(title);
-        if unsafe { SetWindowTextW(window.hwnd, title_wide.as_ptr()) } == 0 {
+        if unsafe { SetWindowTextW(hwnd, title_wide.as_ptr()) } == 0 {
             return Err("failed to update window title".to_string());
+        }
+        self.window_mut(window)?.title = title.to_string();
+        Ok(())
+    }
+
+    fn window_set_position(
+        &mut self,
+        window: RuntimeWindowHandle,
+        x: i64,
+        y: i64,
+    ) -> Result<(), String> {
+        let hwnd = self.window_ref(window)?.hwnd;
+        let x =
+            i32::try_from(x).map_err(|_| "window x position does not fit in i32".to_string())?;
+        let y =
+            i32::try_from(y).map_err(|_| "window y position does not fit in i32".to_string())?;
+        let ok = unsafe {
+            SetWindowPos(
+                hwnd,
+                null_mut(),
+                x,
+                y,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
+            )
+        };
+        if ok == 0 {
+            return Err("failed to move native window".to_string());
         }
         Ok(())
     }
 
-    fn window_set_resizable(
+    fn window_set_size(
+        &mut self,
+        window: RuntimeWindowHandle,
+        width: i64,
+        height: i64,
+    ) -> Result<(), String> {
+        let hwnd = self.window_ref(window)?.hwnd;
+        let (width, height) = (sanitize_dimension(width), sanitize_dimension(height));
+        let mut rect = RECT {
+            left: 0,
+            top: 0,
+            right: i32::try_from(width).unwrap_or(i32::MAX),
+            bottom: i32::try_from(height).unwrap_or(i32::MAX),
+        };
+        let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) as u32 };
+        let ex_style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32 };
+        unsafe {
+            AdjustWindowRectEx(&mut rect, style, 0, ex_style);
+        }
+        let ok = unsafe {
+            SetWindowPos(
+                hwnd,
+                null_mut(),
+                0,
+                0,
+                rect.right - rect.left,
+                rect.bottom - rect.top,
+                SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
+            )
+        };
+        if ok == 0 {
+            return Err("failed to resize native window".to_string());
+        }
+        let window = self.window_mut(window)?;
+        window.width = width;
+        window.height = height;
+        window.surface.resize(width, height);
+        window.resized = true;
+        window.push_event(EVENT_WINDOW_RESIZED, width, height);
+        window.push_redraw_event();
+        Ok(())
+    }
+
+    fn window_set_visible(
         &mut self,
         window: RuntimeWindowHandle,
         enabled: bool,
     ) -> Result<(), String> {
-        let window = self.window_mut(window)?;
-        let mut style = unsafe { GetWindowLongPtrW(window.hwnd, GWL_STYLE) };
+        let hwnd = self.window_ref(window)?.hwnd;
+        unsafe {
+            ShowWindow(hwnd, if enabled { SW_SHOW } else { SW_HIDE });
+        }
+        self.window_mut(window)?.visible = enabled;
+        Ok(())
+    }
+
+    fn window_set_decorated(
+        &mut self,
+        window: RuntimeWindowHandle,
+        enabled: bool,
+    ) -> Result<(), String> {
+        let hwnd = self.window_ref(window)?.hwnd;
+        let mut style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) };
         if enabled {
-            style |= (WS_SIZEBOX | WS_MAXIMIZEBOX) as isize;
+            style |= WS_OVERLAPPEDWINDOW as isize;
         } else {
-            style &= !((WS_SIZEBOX | WS_MAXIMIZEBOX) as isize);
+            style &= !(WS_OVERLAPPEDWINDOW as isize);
         }
         unsafe {
-            SetWindowLongPtrW(window.hwnd, GWL_STYLE, style);
+            SetWindowLongPtrW(hwnd, GWL_STYLE, style);
             SetWindowPos(
-                window.hwnd,
+                hwnd,
                 null_mut(),
                 0,
                 0,
@@ -878,7 +1494,69 @@ impl RuntimeHost for NativeProcessHost {
                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_FRAMECHANGED,
             );
         }
-        window.resizable = enabled;
+        self.window_mut(window)?.decorated = enabled;
+        Ok(())
+    }
+
+    fn window_set_resizable(
+        &mut self,
+        window: RuntimeWindowHandle,
+        enabled: bool,
+    ) -> Result<(), String> {
+        let hwnd = self.window_ref(window)?.hwnd;
+        let mut style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) };
+        if enabled {
+            style |= (WS_SIZEBOX | WS_MAXIMIZEBOX) as isize;
+        } else {
+            style &= !((WS_SIZEBOX | WS_MAXIMIZEBOX) as isize);
+        }
+        unsafe {
+            SetWindowLongPtrW(hwnd, GWL_STYLE, style);
+            SetWindowPos(
+                hwnd,
+                null_mut(),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_FRAMECHANGED,
+            );
+        }
+        self.window_mut(window)?.resizable = enabled;
+        Ok(())
+    }
+
+    fn window_set_min_size(
+        &mut self,
+        window: RuntimeWindowHandle,
+        width: i64,
+        height: i64,
+    ) -> Result<(), String> {
+        let hwnd = {
+            let window = self.window_mut(window)?;
+            window.min_size = (width.max(0), height.max(0));
+            window.hwnd
+        };
+        unsafe {
+            InvalidateRect(hwnd, null_mut(), 0);
+        }
+        Ok(())
+    }
+
+    fn window_set_max_size(
+        &mut self,
+        window: RuntimeWindowHandle,
+        width: i64,
+        height: i64,
+    ) -> Result<(), String> {
+        let hwnd = {
+            let window = self.window_mut(window)?;
+            window.max_size = (width.max(0), height.max(0));
+            window.hwnd
+        };
+        unsafe {
+            InvalidateRect(hwnd, null_mut(), 0);
+        }
         Ok(())
     }
 
@@ -887,17 +1565,26 @@ impl RuntimeHost for NativeProcessHost {
         window: RuntimeWindowHandle,
         enabled: bool,
     ) -> Result<(), String> {
-        let window = self.window_mut(window)?;
-        if window.fullscreen == enabled {
-            return Ok(());
-        }
-        if enabled {
-            window.restore_style = unsafe { GetWindowLongPtrW(window.hwnd, GWL_STYLE) };
-            window.restore_ex_style = unsafe { GetWindowLongPtrW(window.hwnd, GWL_EXSTYLE) };
-            unsafe {
-                GetWindowRect(window.hwnd, &mut window.restore_rect);
+        let (hwnd, restore_style, restore_ex_style, restore_rect) = {
+            let window_state = self.window_mut(window)?;
+            if window_state.fullscreen == enabled {
+                return Ok(());
             }
-            let monitor = unsafe { MonitorFromWindow(window.hwnd, MONITOR_DEFAULTTONEAREST) };
+            (
+                window_state.hwnd,
+                window_state.restore_style,
+                window_state.restore_ex_style,
+                window_state.restore_rect,
+            )
+        };
+        if enabled {
+            let next_restore_style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) };
+            let next_restore_ex_style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) };
+            let mut next_restore_rect = unsafe { zeroed::<RECT>() };
+            unsafe {
+                GetWindowRect(hwnd, &mut next_restore_rect);
+            }
+            let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
             let mut monitor_info = MONITORINFO {
                 cbSize: size_of::<MONITORINFO>() as u32,
                 ..unsafe { zeroed() }
@@ -905,14 +1592,20 @@ impl RuntimeHost for NativeProcessHost {
             if unsafe { GetMonitorInfoW(monitor, &mut monitor_info) } == 0 {
                 return Err("failed to resolve monitor bounds for fullscreen window".to_string());
             }
+            {
+                let window_state = self.window_mut(window)?;
+                window_state.restore_style = next_restore_style;
+                window_state.restore_ex_style = next_restore_ex_style;
+                window_state.restore_rect = next_restore_rect;
+            }
             unsafe {
                 SetWindowLongPtrW(
-                    window.hwnd,
+                    hwnd,
                     GWL_STYLE,
-                    window.restore_style & !(WS_OVERLAPPEDWINDOW as isize),
+                    next_restore_style & !(WS_OVERLAPPEDWINDOW as isize),
                 );
                 SetWindowPos(
-                    window.hwnd,
+                    hwnd,
                     HWND_TOP,
                     monitor_info.rcMonitor.left,
                     monitor_info.rcMonitor.top,
@@ -923,20 +1616,20 @@ impl RuntimeHost for NativeProcessHost {
             }
         } else {
             unsafe {
-                SetWindowLongPtrW(window.hwnd, GWL_STYLE, window.restore_style);
-                SetWindowLongPtrW(window.hwnd, GWL_EXSTYLE, window.restore_ex_style);
+                SetWindowLongPtrW(hwnd, GWL_STYLE, restore_style);
+                SetWindowLongPtrW(hwnd, GWL_EXSTYLE, restore_ex_style);
                 SetWindowPos(
-                    window.hwnd,
+                    hwnd,
                     HWND_TOP,
-                    window.restore_rect.left,
-                    window.restore_rect.top,
-                    window.restore_rect.right - window.restore_rect.left,
-                    window.restore_rect.bottom - window.restore_rect.top,
+                    restore_rect.left,
+                    restore_rect.top,
+                    restore_rect.right - restore_rect.left,
+                    restore_rect.bottom - restore_rect.top,
                     SWP_FRAMECHANGED | SWP_NOOWNERZORDER,
                 );
             }
         }
-        window.fullscreen = enabled;
+        self.window_mut(window)?.fullscreen = enabled;
         Ok(())
     }
 
@@ -945,11 +1638,11 @@ impl RuntimeHost for NativeProcessHost {
         window: RuntimeWindowHandle,
         enabled: bool,
     ) -> Result<(), String> {
-        let window = self.window_mut(window)?;
+        let hwnd = self.window_ref(window)?.hwnd;
         unsafe {
-            ShowWindow(window.hwnd, if enabled { SW_MINIMIZE } else { SW_RESTORE });
+            ShowWindow(hwnd, if enabled { SW_MINIMIZE } else { SW_RESTORE });
         }
-        window.minimized = enabled;
+        self.window_mut(window)?.minimized = enabled;
         Ok(())
     }
 
@@ -958,11 +1651,11 @@ impl RuntimeHost for NativeProcessHost {
         window: RuntimeWindowHandle,
         enabled: bool,
     ) -> Result<(), String> {
-        let window = self.window_mut(window)?;
+        let hwnd = self.window_ref(window)?.hwnd;
         unsafe {
-            ShowWindow(window.hwnd, if enabled { SW_MAXIMIZE } else { SW_RESTORE });
+            ShowWindow(hwnd, if enabled { SW_MAXIMIZE } else { SW_RESTORE });
         }
-        window.maximized = enabled;
+        self.window_mut(window)?.maximized = enabled;
         Ok(())
     }
 
@@ -971,10 +1664,10 @@ impl RuntimeHost for NativeProcessHost {
         window: RuntimeWindowHandle,
         enabled: bool,
     ) -> Result<(), String> {
-        let window = self.window_mut(window)?;
+        let hwnd = self.window_ref(window)?.hwnd;
         unsafe {
             SetWindowPos(
-                window.hwnd,
+                hwnd,
                 if enabled {
                     HWND_TOPMOST
                 } else {
@@ -987,7 +1680,7 @@ impl RuntimeHost for NativeProcessHost {
                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
             );
         }
-        window.topmost = enabled;
+        self.window_mut(window)?.topmost = enabled;
         Ok(())
     }
 
@@ -996,29 +1689,179 @@ impl RuntimeHost for NativeProcessHost {
         window: RuntimeWindowHandle,
         enabled: bool,
     ) -> Result<(), String> {
-        let window = self.window_mut(window)?;
-        window.cursor_visible = enabled;
+        let hwnd = {
+            let window = self.window_mut(window)?;
+            window.cursor_visible = enabled;
+            window.hwnd
+        };
         unsafe {
-            InvalidateRect(window.hwnd, null_mut(), 0);
+            InvalidateRect(hwnd, null_mut(), 0);
+        }
+        Ok(())
+    }
+
+    fn window_set_transparent(
+        &mut self,
+        window: RuntimeWindowHandle,
+        enabled: bool,
+    ) -> Result<(), String> {
+        let hwnd = self.window_ref(window)?.hwnd;
+        let mut ex_style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) };
+        if enabled {
+            ex_style |= WS_EX_LAYERED as isize;
+        } else {
+            ex_style &= !(WS_EX_LAYERED as isize);
+        }
+        unsafe {
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex_style);
+        }
+        if enabled {
+            unsafe {
+                SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
+            }
+        }
+        self.window_mut(window)?.transparent = enabled;
+        Ok(())
+    }
+
+    fn window_set_theme_override_code(
+        &mut self,
+        window: RuntimeWindowHandle,
+        code: i64,
+    ) -> Result<(), String> {
+        let hwnd = {
+            let window = self.window_mut(window)?;
+            window.theme_override_code = code;
+            window.applying_theme_override = true;
+            window.hwnd
+        };
+        apply_theme_override(hwnd, code);
+        self.window_mut(window)?.applying_theme_override = false;
+        Ok(())
+    }
+
+    fn window_set_cursor_icon_code(
+        &mut self,
+        window: RuntimeWindowHandle,
+        code: i64,
+    ) -> Result<(), String> {
+        let hwnd = {
+            let window = self.window_mut(window)?;
+            window.cursor_icon_code = code;
+            window.hwnd
+        };
+        unsafe {
+            InvalidateRect(hwnd, null_mut(), 0);
+        }
+        Ok(())
+    }
+
+    fn window_set_cursor_grab_mode(
+        &mut self,
+        window: RuntimeWindowHandle,
+        mode: i64,
+    ) -> Result<(), String> {
+        let (hwnd, center) = {
+            let window_state = self.window_ref(window)?;
+            (
+                window_state.hwnd,
+                (
+                    window_state.width.saturating_div(2),
+                    window_state.height.saturating_div(2),
+                ),
+            )
+        };
+        apply_cursor_grab(hwnd, mode)?;
+        if mode == 2 {
+            let mut point = POINT {
+                x: i32::try_from(center.0)
+                    .map_err(|_| "cursor center x does not fit in i32".to_string())?,
+                y: i32::try_from(center.1)
+                    .map_err(|_| "cursor center y does not fit in i32".to_string())?,
+            };
+            if unsafe { ClientToScreen(hwnd, &mut point) } == 0 {
+                return Err("failed to translate locked cursor position".to_string());
+            }
+            self.window_mut(window)?.suppress_cursor_move = true;
+            unsafe {
+                SetCursorPos(point.x, point.y);
+            }
+        }
+        let window_state = self.window_mut(window)?;
+        window_state.cursor_grab_mode = mode;
+        if mode == 2 {
+            window_state.cursor_position = center;
+            window_state.mouse_pos = center;
+        }
+        Ok(())
+    }
+
+    fn window_set_cursor_position(
+        &mut self,
+        window: RuntimeWindowHandle,
+        x: i64,
+        y: i64,
+    ) -> Result<(), String> {
+        let hwnd = self.window_ref(window)?.hwnd;
+        let mut point = POINT {
+            x: i32::try_from(x).map_err(|_| "cursor x does not fit in i32".to_string())?,
+            y: i32::try_from(y).map_err(|_| "cursor y does not fit in i32".to_string())?,
+        };
+        if unsafe { ClientToScreen(hwnd, &mut point) } == 0 {
+            return Err("failed to translate cursor position".to_string());
+        }
+        self.window_mut(window)?.suppress_cursor_move = true;
+        unsafe {
+            SetCursorPos(point.x, point.y);
+        }
+        let window = self.window_mut(window)?;
+        window.cursor_position = (x, y);
+        window.mouse_pos = (x, y);
+        Ok(())
+    }
+
+    fn window_set_text_input_enabled(
+        &mut self,
+        window: RuntimeWindowHandle,
+        enabled: bool,
+    ) -> Result<(), String> {
+        let window = self.window_mut(window)?;
+        window.text_input_enabled = enabled;
+        if !enabled {
+            window.composition_active = false;
+            window.pending_high_surrogate = None;
+        }
+        Ok(())
+    }
+
+    fn window_request_redraw(&mut self, window: RuntimeWindowHandle) -> Result<(), String> {
+        let window = self.window_mut(window)?;
+        window.push_redraw_event();
+        window.signal_message_loop();
+        Ok(())
+    }
+
+    fn window_request_attention(
+        &mut self,
+        window: RuntimeWindowHandle,
+        enabled: bool,
+    ) -> Result<(), String> {
+        let window = self.window_ref(window)?;
+        let info = FLASHWINFO {
+            cbSize: size_of::<FLASHWINFO>() as u32,
+            hwnd: window.hwnd,
+            dwFlags: if enabled { FLASHW_TRAY } else { FLASHW_STOP },
+            uCount: 1,
+            dwTimeout: 0,
+        };
+        if unsafe { FlashWindowEx(&info) } == 0 {
+            return Err("failed to update native window attention request".to_string());
         }
         Ok(())
     }
 
     fn window_close(&mut self, window: RuntimeWindowHandle) -> Result<(), String> {
-        if !self.windows.contains_key(&window) {
-            return Err(format!("invalid Window handle `{}`", window.0));
-        }
-        let hwnd = self.window_ref(window)?.hwnd;
-        if !hwnd.is_null() && unsafe { IsWindow(hwnd) != 0 } {
-            unsafe {
-                DestroyWindow(hwnd);
-            }
-            self.pump_messages()?;
-        }
-        if let Some(window) = self.windows.get_mut(&window) {
-            window.closed = true;
-        }
-        Ok(())
+        self.close_native_window(window, true)
     }
 
     fn canvas_fill(&mut self, window: RuntimeWindowHandle, color: i64) -> Result<(), String> {
@@ -1090,8 +1933,7 @@ impl RuntimeHost for NativeProcessHost {
     }
 
     fn canvas_present(&mut self, window: RuntimeWindowHandle) -> Result<(), String> {
-        self.present_window(window)?;
-        self.pump_messages()
+        self.present_window(window)
     }
 
     fn canvas_rgb(&mut self, r: i64, g: i64, b: i64) -> Result<i64, String> {
@@ -1174,21 +2016,223 @@ impl RuntimeHost for NativeProcessHost {
         window: RuntimeWindowHandle,
     ) -> Result<RuntimeAppFrameHandle, String> {
         self.pump_messages()?;
-        let window = self.window_mut(window)?;
-        let events = std::mem::take(&mut window.events)
+        let window_state = self.window_mut(window)?;
+        window_state.redraw_pending = false;
+        let events = std::mem::take(&mut window_state.events)
             .into_iter()
+            .map(|event| Self::event_with_window_id(window, event))
             .collect::<Vec<_>>();
-        let input = Self::snapshot_frame_input(window);
+        let input = Self::snapshot_frame_input(window_state);
         Ok(self.insert_frame(BufferedAppFrame { events, input }))
     }
 
-    fn events_poll(&mut self, frame: RuntimeAppFrameHandle) -> Result<(i64, i64, i64), String> {
+    fn events_poll(
+        &mut self,
+        frame: RuntimeAppFrameHandle,
+    ) -> Result<Option<RuntimeEventRecord>, String> {
         let frame = self.frame_mut(frame)?;
         let Some(event) = frame.events.first().cloned() else {
-            return Ok((0, 0, 0));
+            return Ok(None);
         };
         frame.events.remove(0);
-        Ok((event.kind, event.a, event.b))
+        Ok(Some(RuntimeEventRecord {
+            kind: event.kind,
+            window_id: event.window_id,
+            a: event.a,
+            b: event.b,
+            flags: event.flags,
+            text: event.text,
+            key_code: event.key_code,
+            physical_key: event.physical_key,
+            logical_key: event.logical_key,
+            key_location: event.key_location,
+            pointer_x: event.pointer_x,
+            pointer_y: event.pointer_y,
+            repeated: event.repeated,
+        }))
+    }
+
+    fn events_session_open(&mut self) -> Result<RuntimeAppSessionHandle, String> {
+        Ok(self.insert_session())
+    }
+
+    fn events_session_close(&mut self, session: RuntimeAppSessionHandle) -> Result<(), String> {
+        let mut windows = self.session_ref(session)?.windows.clone();
+        windows.reverse();
+        self.remove_session_wakes(session);
+        self.sessions.remove(&session);
+        for window in windows {
+            let _ = self.close_native_window(window, false);
+        }
+        self.pump_messages()?;
+        self.prune_closed_windows();
+        Ok(())
+    }
+
+    fn events_session_attach_window(
+        &mut self,
+        session: RuntimeAppSessionHandle,
+        window: RuntimeWindowHandle,
+    ) -> Result<(), String> {
+        self.window_ref(window)?;
+        let session_state = self.session_mut(session)?;
+        if !session_state.windows.contains(&window) {
+            session_state.windows.push(window);
+            if session_state.suspended {
+                session_state.resumed = false;
+                session_state.suspended = false;
+            }
+        }
+        self.notify_session_queue(session);
+        Ok(())
+    }
+
+    fn events_session_detach_window(
+        &mut self,
+        session: RuntimeAppSessionHandle,
+        window: RuntimeWindowHandle,
+    ) -> Result<(), String> {
+        let session_state = self.session_mut(session)?;
+        session_state
+            .windows
+            .retain(|candidate| *candidate != window);
+        Ok(())
+    }
+
+    fn events_session_window_by_id(
+        &mut self,
+        session: RuntimeAppSessionHandle,
+        window_id: i64,
+    ) -> Result<Option<RuntimeWindowHandle>, String> {
+        let session_windows = self.session_ref(session)?.windows.clone();
+        for window in session_windows {
+            let Ok(id) = self.window_id(window) else {
+                continue;
+            };
+            if id == window_id {
+                return Ok(Some(window));
+            }
+        }
+        Ok(None)
+    }
+
+    fn events_session_window_ids(
+        &mut self,
+        session: RuntimeAppSessionHandle,
+    ) -> Result<Vec<i64>, String> {
+        self.prune_closed_windows();
+        let session_windows = self.session_ref(session)?.windows.clone();
+        let mut ids = Vec::new();
+        for window in session_windows {
+            let Ok(id) = self.window_id(window) else {
+                continue;
+            };
+            ids.push(id);
+        }
+        Ok(ids)
+    }
+
+    fn events_session_pump(
+        &mut self,
+        session: RuntimeAppSessionHandle,
+    ) -> Result<RuntimeAppFrameHandle, String> {
+        self.pump_messages()?;
+        self.prune_closed_windows();
+        let session_windows = self.session_ref(session)?.windows.clone();
+        let mut events = Vec::new();
+        let mut input = BufferedFrameInput::default();
+        {
+            let session_state = self.session_mut(session)?;
+            if !session_state.resumed {
+                events.push(BufferedEvent {
+                    kind: EVENT_APP_RESUMED,
+                    window_id: 0,
+                    a: 0,
+                    b: 0,
+                    flags: 0,
+                    text: String::new(),
+                    ..BufferedEvent::default()
+                });
+                session_state.resumed = true;
+                session_state.suspended = false;
+            }
+            while session_state.pending_wakes > 0 {
+                session_state.pending_wakes -= 1;
+                events.push(BufferedEvent {
+                    kind: EVENT_WAKE,
+                    window_id: 0,
+                    a: 0,
+                    b: 0,
+                    flags: 0,
+                    text: String::new(),
+                    ..BufferedEvent::default()
+                });
+            }
+        }
+        let mut live_windows = 0usize;
+        for window in session_windows {
+            let Ok(state) = self.window_mut(window) else {
+                continue;
+            };
+            live_windows += 1;
+            state.redraw_pending = false;
+            let state_events = std::mem::take(&mut state.events)
+                .into_iter()
+                .map(|event| Self::event_with_window_id(window, event))
+                .collect::<Vec<_>>();
+            let state_input = Self::snapshot_frame_input(state);
+            Self::merge_frame_input(&mut input, state_input);
+            events.extend(state_events);
+        }
+        {
+            let session_state = self.session_mut(session)?;
+            if live_windows == 0 && session_state.resumed && !session_state.suspended {
+                events.push(BufferedEvent {
+                    kind: EVENT_APP_SUSPENDED,
+                    window_id: 0,
+                    a: 0,
+                    b: 0,
+                    flags: 0,
+                    text: String::new(),
+                    ..BufferedEvent::default()
+                });
+                session_state.suspended = true;
+            }
+        }
+        events.push(BufferedEvent {
+            kind: EVENT_ABOUT_TO_WAIT,
+            window_id: 0,
+            a: 0,
+            b: 0,
+            flags: 0,
+            text: String::new(),
+            ..BufferedEvent::default()
+        });
+        Ok(self.insert_frame(BufferedAppFrame { events, input }))
+    }
+
+    fn events_session_wait(
+        &mut self,
+        session: RuntimeAppSessionHandle,
+        timeout_ms: i64,
+    ) -> Result<RuntimeAppFrameHandle, String> {
+        self.wait_for_session_activity(session, timeout_ms)?;
+        self.events_session_pump(session)
+    }
+
+    fn events_session_create_wake(
+        &mut self,
+        session: RuntimeAppSessionHandle,
+    ) -> Result<RuntimeWakeHandle, String> {
+        self.session_ref(session)?;
+        Ok(self.insert_wake(session))
+    }
+
+    fn events_wake_signal(&mut self, wake: RuntimeWakeHandle) -> Result<(), String> {
+        let session = self.wake_ref(wake)?.session;
+        self.session_mut(session)?.pending_wakes += 1;
+        self.notify_session_queue(session);
+        Ok(())
     }
 
     fn input_key_code(&mut self, name: &str) -> Result<i64, String> {
@@ -1257,6 +2301,74 @@ impl RuntimeHost for NativeProcessHost {
 
     fn input_mouse_in_window(&mut self, frame: RuntimeAppFrameHandle) -> Result<bool, String> {
         Ok(self.frame_ref(frame)?.input.mouse_in_window)
+    }
+
+    fn clipboard_read_text(&mut self) -> Result<String, String> {
+        clipboard_read_text_impl()
+    }
+
+    fn clipboard_write_text(&mut self, text: &str) -> Result<(), String> {
+        clipboard_write_text_impl(text)
+    }
+
+    fn clipboard_read_bytes(&mut self) -> Result<Vec<u8>, String> {
+        clipboard_read_bytes_impl()
+    }
+
+    fn clipboard_write_bytes(&mut self, bytes: &[u8]) -> Result<(), String> {
+        clipboard_write_bytes_impl(bytes)
+    }
+
+    fn text_input_composition_area_active(
+        &mut self,
+        window: RuntimeWindowHandle,
+    ) -> Result<bool, String> {
+        Ok(self.window_ref(window)?.composition_area_active)
+    }
+
+    fn text_input_composition_area_position(
+        &mut self,
+        window: RuntimeWindowHandle,
+    ) -> Result<(i64, i64), String> {
+        Ok(self.window_ref(window)?.composition_area_position)
+    }
+
+    fn text_input_composition_area_size(
+        &mut self,
+        window: RuntimeWindowHandle,
+    ) -> Result<(i64, i64), String> {
+        Ok(self.window_ref(window)?.composition_area_size)
+    }
+
+    fn text_input_set_composition_area(
+        &mut self,
+        window: RuntimeWindowHandle,
+        x: i64,
+        y: i64,
+        width: i64,
+        height: i64,
+    ) -> Result<(), String> {
+        let window = self.window_mut(window)?;
+        window.composition_area_active = true;
+        window.composition_area_position = (x, y);
+        window.composition_area_size = (width.max(0), height.max(0));
+        apply_composition_area(
+            window.hwnd,
+            true,
+            window.composition_area_position,
+            window.composition_area_size,
+        )
+    }
+
+    fn text_input_clear_composition_area(
+        &mut self,
+        window: RuntimeWindowHandle,
+    ) -> Result<(), String> {
+        let window = self.window_mut(window)?;
+        window.composition_area_active = false;
+        window.composition_area_position = (0, 0);
+        window.composition_area_size = (0, 0);
+        apply_composition_area(window.hwnd, false, (0, 0), (0, 0))
     }
 
     fn audio_default_output(&mut self) -> Result<RuntimeAudioDeviceHandle, String> {
@@ -1499,14 +2611,33 @@ impl NativeWindowState {
             title: title.to_string(),
             width,
             height,
+            min_size: (0, 0),
+            max_size: (0, 0),
             resized: false,
             fullscreen: false,
             minimized: false,
             maximized: false,
-            focused: true,
+            focused: false,
+            visible: false,
+            decorated: true,
             resizable: true,
             topmost: false,
+            transparent: false,
+            theme_override_code: 0,
             cursor_visible: true,
+            cursor_icon_code: 0,
+            cursor_grab_mode: 0,
+            cursor_position: (0, 0),
+            suppress_cursor_move: false,
+            redraw_pending: false,
+            text_input_enabled: true,
+            composition_area_active: false,
+            composition_area_position: (0, 0),
+            composition_area_size: (0, 0),
+            composition_active: false,
+            composition_committed: false,
+            applying_dpi_suggestion: false,
+            applying_theme_override: false,
             closed: false,
             restore_style: 0,
             restore_ex_style: 0,
@@ -1522,12 +2653,448 @@ impl NativeWindowState {
             mouse_released: BTreeSet::new(),
             mouse_wheel_y: 0,
             mouse_in_window: false,
+            pending_high_surrogate: None,
         }
     }
 
     fn push_event(&mut self, kind: i64, a: i64, b: i64) {
-        self.events.push_back(BufferedEvent { kind, a, b });
+        if self.closed {
+            return;
+        }
+        self.events.push_back(BufferedEvent {
+            kind,
+            window_id: 0,
+            a,
+            b,
+            flags: frame_modifier_flags(&self.key_down),
+            text: String::new(),
+            ..BufferedEvent::default()
+        });
     }
+
+    fn push_redraw_event(&mut self) {
+        if self.closed {
+            return;
+        }
+        if self.redraw_pending {
+            return;
+        }
+        self.redraw_pending = true;
+        self.push_event(EVENT_WINDOW_REDRAW_REQUESTED, 0, 0);
+    }
+
+    fn push_mouse_button_event(&mut self, kind: i64, button: i64, x: i64, y: i64) {
+        if self.closed {
+            return;
+        }
+        self.events.push_back(BufferedEvent {
+            kind,
+            window_id: 0,
+            a: button,
+            b: 0,
+            flags: frame_modifier_flags(&self.key_down),
+            text: String::new(),
+            pointer_x: x,
+            pointer_y: y,
+            ..BufferedEvent::default()
+        });
+    }
+
+    fn push_key_event(
+        &mut self,
+        kind: i64,
+        key_code: i64,
+        physical_key: i64,
+        logical_key: i64,
+        key_location: i64,
+        repeated: bool,
+        text: String,
+    ) {
+        if self.closed {
+            return;
+        }
+        self.events.push_back(BufferedEvent {
+            kind,
+            window_id: 0,
+            a: key_code,
+            b: 0,
+            flags: frame_modifier_flags(&self.key_down),
+            text,
+            key_code,
+            physical_key,
+            logical_key,
+            key_location,
+            pointer_x: self.mouse_pos.0,
+            pointer_y: self.mouse_pos.1,
+            repeated,
+        });
+    }
+
+    fn push_text_event(&mut self, kind: i64, text: String) {
+        if self.closed {
+            return;
+        }
+        self.events.push_back(BufferedEvent {
+            kind,
+            window_id: 0,
+            a: 0,
+            b: 0,
+            flags: frame_modifier_flags(&self.key_down),
+            text,
+            pointer_x: self.mouse_pos.0,
+            pointer_y: self.mouse_pos.1,
+            ..BufferedEvent::default()
+        });
+    }
+
+    fn push_composition_event(&mut self, kind: i64, text: String, caret: i64) {
+        if self.closed {
+            return;
+        }
+        self.events.push_back(BufferedEvent {
+            kind,
+            window_id: 0,
+            a: caret,
+            b: 0,
+            flags: frame_modifier_flags(&self.key_down),
+            text,
+            pointer_x: self.mouse_pos.0,
+            pointer_y: self.mouse_pos.1,
+            ..BufferedEvent::default()
+        });
+    }
+
+    fn signal_message_loop(&self) {
+        if self.closed || self.hwnd.is_null() {
+            return;
+        }
+        unsafe {
+            PostMessageW(self.hwnd, WM_NULL, 0, 0);
+        }
+    }
+
+    fn push_text_input_code_unit(&mut self, code_unit: u16) {
+        if (0xD800..=0xDBFF).contains(&code_unit) {
+            self.pending_high_surrogate = Some(code_unit);
+            return;
+        }
+        let mut units = Vec::new();
+        if let Some(high) = self.pending_high_surrogate.take() {
+            if (0xDC00..=0xDFFF).contains(&code_unit) {
+                units.push(high);
+                units.push(code_unit);
+            } else {
+                units.push(high);
+                if is_text_input_code_unit(code_unit) {
+                    units.push(code_unit);
+                }
+            }
+        } else if is_text_input_code_unit(code_unit) {
+            units.push(code_unit);
+        }
+        if units.is_empty() {
+            return;
+        }
+        let text = String::from_utf16_lossy(&units);
+        if !text.is_empty() {
+            self.push_text_event(EVENT_TEXT_INPUT, text);
+        }
+    }
+}
+
+fn frame_modifier_flags(keys: &BTreeSet<i64>) -> i64 {
+    let mut flags = 0;
+    if keys.contains(&common_named_key_code("Shift")) {
+        flags |= 1;
+    }
+    if keys.contains(&common_named_key_code("Control")) {
+        flags |= 2;
+    }
+    if keys.contains(&common_named_key_code("Alt")) {
+        flags |= 4;
+    }
+    if keys.contains(&common_named_key_code("Meta")) {
+        flags |= 8;
+    }
+    flags
+}
+
+fn append_unique(target: &mut Vec<i64>, values: Vec<i64>) {
+    for value in values {
+        if !target.contains(&value) {
+            target.push(value);
+        }
+    }
+}
+
+fn key_physical_code(lparam: LPARAM) -> i64 {
+    let scancode = ((lparam >> 16) & 0xff) as i64;
+    if (lparam & 0x0100_0000) != 0 {
+        scancode | 0xE000
+    } else {
+        scancode
+    }
+}
+
+fn key_location_code(vkey: u32, lparam: LPARAM) -> i64 {
+    const KEY_LOCATION_STANDARD: i64 = 0;
+    const KEY_LOCATION_LEFT: i64 = 1;
+    const KEY_LOCATION_RIGHT: i64 = 2;
+    const KEY_LOCATION_NUMPAD: i64 = 3;
+
+    let extended = (lparam & 0x0100_0000) != 0;
+    match vkey {
+        0x10 => {
+            let scancode = ((lparam >> 16) & 0xff) as u32;
+            let resolved = unsafe { MapVirtualKeyW(scancode, MAPVK_VSC_TO_VK_EX) };
+            match resolved {
+                0xA0 => KEY_LOCATION_LEFT,
+                0xA1 => KEY_LOCATION_RIGHT,
+                _ => KEY_LOCATION_STANDARD,
+            }
+        }
+        0x11 | 0x12 => {
+            if extended {
+                KEY_LOCATION_RIGHT
+            } else {
+                KEY_LOCATION_LEFT
+            }
+        }
+        0x0D if extended => KEY_LOCATION_NUMPAD,
+        0x60..=0x6F => KEY_LOCATION_NUMPAD,
+        _ => KEY_LOCATION_STANDARD,
+    }
+}
+
+fn key_logical_value_and_text(vkey: u32) -> (i64, String) {
+    let mapped = unsafe { MapVirtualKeyW(vkey, MAPVK_VK_TO_CHAR) };
+    let mapped = mapped & 0x7fff_ffff;
+    let Some(ch) = char::from_u32(mapped) else {
+        return (i64::from(vkey), String::new());
+    };
+    if ch.is_control() {
+        return (i64::from(vkey), String::new());
+    }
+    let text = ch.to_string();
+    (i64::from(mapped), text)
+}
+
+fn is_text_input_code_unit(code_unit: u16) -> bool {
+    let Some(ch) = char::from_u32(u32::from(code_unit)) else {
+        return false;
+    };
+    !ch.is_control() || matches!(ch, '\n' | '\r' | '\t')
+}
+
+fn native_cursor_handle(code: i64) -> HCURSOR {
+    let name = match code {
+        1 => IDC_IBEAM,
+        2 => IDC_CROSS,
+        3 => IDC_HAND,
+        4 => IDC_SIZEALL,
+        5 => IDC_WAIT,
+        6 => IDC_HELP,
+        7 => IDC_NO,
+        8 => IDC_SIZEWE,
+        9 => IDC_SIZENS,
+        10 => IDC_SIZENWSE,
+        11 => IDC_SIZENESW,
+        _ => IDC_ARROW,
+    };
+    unsafe { LoadCursorW(null_mut(), name) as HCURSOR }
+}
+
+fn client_rect_screen(hwnd: HWND) -> Result<RECT, String> {
+    let mut rect = unsafe { zeroed::<RECT>() };
+    if unsafe { GetClientRect(hwnd, &mut rect) } == 0 {
+        return Err("failed to query native client rect".to_string());
+    }
+    let mut origin = POINT {
+        x: rect.left,
+        y: rect.top,
+    };
+    let mut corner = POINT {
+        x: rect.right,
+        y: rect.bottom,
+    };
+    if unsafe { ClientToScreen(hwnd, &mut origin) } == 0
+        || unsafe { ClientToScreen(hwnd, &mut corner) } == 0
+    {
+        return Err("failed to translate native client rect to screen coordinates".to_string());
+    }
+    Ok(RECT {
+        left: origin.x,
+        top: origin.y,
+        right: corner.x,
+        bottom: corner.y,
+    })
+}
+
+fn apply_cursor_grab(hwnd: HWND, mode: i64) -> Result<(), String> {
+    match mode {
+        1 | 2 => {
+            let rect = client_rect_screen(hwnd)?;
+            if unsafe { ClipCursor(&rect) } == 0 {
+                return Err("failed to confine native cursor".to_string());
+            }
+        }
+        _ => {
+            if unsafe { ClipCursor(std::ptr::null()) } == 0 {
+                return Err("failed to release native cursor confinement".to_string());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn apply_theme_override(hwnd: HWND, code: i64) {
+    let value: i32 = if code == 2 { 1 } else { 0 };
+    unsafe {
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE as u32,
+            &value as *const i32 as *const c_void,
+            size_of::<i32>() as u32,
+        );
+    }
+}
+
+fn apply_composition_area(
+    hwnd: HWND,
+    active: bool,
+    position: (i64, i64),
+    size: (i64, i64),
+) -> Result<(), String> {
+    let himc: HIMC = unsafe { ImmGetContext(hwnd) };
+    if himc.is_null() {
+        return Ok(());
+    }
+    let result = (|| {
+        let mut comp = COMPOSITIONFORM {
+            dwStyle: if active {
+                CFS_FORCE_POSITION
+            } else {
+                CFS_FORCE_POSITION
+            },
+            ptCurrentPos: POINT {
+                x: i32::try_from(position.0)
+                    .map_err(|_| "composition x does not fit in i32".to_string())?,
+                y: i32::try_from(position.1)
+                    .map_err(|_| "composition y does not fit in i32".to_string())?,
+            },
+            rcArea: RECT {
+                left: i32::try_from(position.0)
+                    .map_err(|_| "composition left does not fit in i32".to_string())?,
+                top: i32::try_from(position.1)
+                    .map_err(|_| "composition top does not fit in i32".to_string())?,
+                right: i32::try_from(position.0.saturating_add(size.0))
+                    .map_err(|_| "composition right does not fit in i32".to_string())?,
+                bottom: i32::try_from(position.1.saturating_add(size.1))
+                    .map_err(|_| "composition bottom does not fit in i32".to_string())?,
+            },
+        };
+        let mut candidate = CANDIDATEFORM {
+            dwIndex: 0,
+            dwStyle: CFS_CANDIDATEPOS,
+            ptCurrentPos: comp.ptCurrentPos,
+            rcArea: comp.rcArea,
+        };
+        if unsafe { ImmSetCompositionWindow(himc, &mut comp) } == 0 {
+            return Err("failed to update IME composition window".to_string());
+        }
+        if unsafe { ImmSetCandidateWindow(himc, &mut candidate) } == 0 {
+            return Err("failed to update IME candidate window".to_string());
+        }
+        Ok(())
+    })();
+    unsafe {
+        ImmReleaseContext(hwnd, himc);
+    }
+    result
+}
+
+fn read_ime_composition_string(himc: HIMC, which: u32) -> Result<Option<String>, String> {
+    let len = unsafe { ImmGetCompositionStringW(himc, which, null_mut(), 0) };
+    if len < 0 {
+        return Err("failed to read IME composition string".to_string());
+    }
+    if len == 0 {
+        return Ok(None);
+    }
+    let units_len =
+        usize::try_from(len / 2).map_err(|_| "IME composition length overflow".to_string())?;
+    let mut buffer = vec![0u16; units_len];
+    let read = unsafe {
+        ImmGetCompositionStringW(himc, which, buffer.as_mut_ptr() as *mut c_void, len as u32)
+    };
+    if read < 0 {
+        return Err("failed to load IME composition payload".to_string());
+    }
+    Ok(Some(String::from_utf16_lossy(&buffer)))
+}
+
+fn read_ime_cursor_position(himc: HIMC) -> Result<i64, String> {
+    let cursor = unsafe { ImmGetCompositionStringW(himc, GCS_CURSORPOS, null_mut(), 0) };
+    if cursor < 0 {
+        return Err("failed to read IME composition cursor position".to_string());
+    }
+    Ok(i64::from(cursor))
+}
+
+fn theme_code_from_registry_value(light_theme: u32) -> i64 {
+    if light_theme == 0 { 2 } else { 1 }
+}
+
+fn current_windows_theme_code() -> i64 {
+    let subkey = wide_null("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize");
+    let value = wide_null("AppsUseLightTheme");
+    let mut raw = 0u32;
+    let mut size = size_of::<u32>() as u32;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            subkey.as_ptr(),
+            value.as_ptr(),
+            RRF_RT_REG_DWORD,
+            null_mut(),
+            &mut raw as *mut u32 as *mut c_void,
+            &mut size,
+        )
+    };
+    if status != 0 {
+        return 0;
+    }
+    theme_code_from_registry_value(raw)
+}
+
+unsafe extern "system" fn collect_monitor_handle_proc(
+    monitor: HMONITOR,
+    _hdc: HDC,
+    _rect: *mut RECT,
+    lparam: LPARAM,
+) -> i32 {
+    let handles = unsafe { &mut *(lparam as *mut Vec<HMONITOR>) };
+    handles.push(monitor);
+    1
+}
+
+fn query_monitor_scale_factor_milli(monitor: HMONITOR) -> i64 {
+    let mut dpi_x = 0u32;
+    let mut dpi_y = 0u32;
+    let status = unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) };
+    if status >= 0 && dpi_x > 0 {
+        (i64::from(dpi_x) * 1000) / 96
+    } else {
+        1000
+    }
+}
+
+fn wide_units_to_string(units: &[u16]) -> String {
+    let end = units
+        .iter()
+        .position(|unit| *unit == 0)
+        .unwrap_or(units.len());
+    String::from_utf16_lossy(&units[..end])
 }
 
 impl NativeAudioPlayback {
@@ -1717,13 +3284,47 @@ unsafe extern "system" fn arcana_window_proc(
         return unsafe { DefWindowProcW(hwnd, message, wparam, lparam) };
     }
     let state = unsafe { &mut *state_ptr };
-
+    if state.closed {
+        return match message {
+            WM_DESTROY => {
+                let _ = apply_cursor_grab(hwnd, 0);
+                0
+            }
+            WM_NCDESTROY => {
+                unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) };
+                unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+            }
+            _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
+        };
+    }
     match message {
         WM_PAINT => {
             let mut paint = unsafe { zeroed::<PAINTSTRUCT>() };
-            let dc = unsafe { BeginPaint(hwnd, &mut paint) };
-            let _ = blit_surface_to_dc(&state.surface, hwnd, dc);
-            unsafe { EndPaint(hwnd, &paint) };
+            unsafe {
+                BeginPaint(hwnd, &mut paint);
+                EndPaint(hwnd, &paint);
+            }
+            state.push_redraw_event();
+            0
+        }
+        WM_GETMINMAXINFO => {
+            let info = lparam as *mut MINMAXINFO;
+            if info.is_null() {
+                return 0;
+            }
+            let info = unsafe { &mut *info };
+            if state.min_size.0 > 0 {
+                info.ptMinTrackSize.x = i32::try_from(state.min_size.0).unwrap_or(i32::MAX);
+            }
+            if state.min_size.1 > 0 {
+                info.ptMinTrackSize.y = i32::try_from(state.min_size.1).unwrap_or(i32::MAX);
+            }
+            if state.max_size.0 > 0 {
+                info.ptMaxTrackSize.x = i32::try_from(state.max_size.0).unwrap_or(i32::MAX);
+            }
+            if state.max_size.1 > 0 {
+                info.ptMaxTrackSize.y = i32::try_from(state.max_size.1).unwrap_or(i32::MAX);
+            }
             0
         }
         WM_SIZE => {
@@ -1746,33 +3347,113 @@ unsafe extern "system" fn arcana_window_proc(
         }
         WM_SETFOCUS => {
             state.focused = true;
+            if state.cursor_grab_mode != 0 {
+                let _ = apply_cursor_grab(hwnd, state.cursor_grab_mode);
+            }
+            if state.composition_area_active {
+                let _ = apply_composition_area(
+                    hwnd,
+                    true,
+                    state.composition_area_position,
+                    state.composition_area_size,
+                );
+            }
             state.push_event(EVENT_WINDOW_FOCUSED, 1, 0);
             0
         }
         WM_KILLFOCUS => {
             state.focused = false;
+            if state.cursor_grab_mode != 0 {
+                let _ = apply_cursor_grab(hwnd, 0);
+            }
             state.push_event(EVENT_WINDOW_FOCUSED, 0, 0);
             0
         }
         WM_KEYDOWN => {
             let key = wparam as i64;
+            let repeated = (lparam & 0x4000_0000) != 0;
+            let physical_key = key_physical_code(lparam);
+            let key_location = key_location_code(wparam as u32, lparam);
+            let (logical_key, text) = key_logical_value_and_text(wparam as u32);
             if state.key_down.insert(key) {
                 state.key_pressed.insert(key);
-                state.push_event(EVENT_KEY_DOWN, key, 0);
             }
+            state.push_key_event(
+                EVENT_KEY_DOWN,
+                key,
+                physical_key,
+                logical_key,
+                key_location,
+                repeated,
+                text,
+            );
             0
+        }
+        WM_SYSKEYDOWN => {
+            let key = wparam as i64;
+            let repeated = (lparam & 0x4000_0000) != 0;
+            let physical_key = key_physical_code(lparam);
+            let key_location = key_location_code(wparam as u32, lparam);
+            let (logical_key, text) = key_logical_value_and_text(wparam as u32);
+            if state.key_down.insert(key) {
+                state.key_pressed.insert(key);
+            }
+            state.push_key_event(
+                EVENT_KEY_DOWN,
+                key,
+                physical_key,
+                logical_key,
+                key_location,
+                repeated,
+                text,
+            );
+            unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
         }
         WM_KEYUP => {
             let key = wparam as i64;
+            let physical_key = key_physical_code(lparam);
+            let key_location = key_location_code(wparam as u32, lparam);
+            let (logical_key, text) = key_logical_value_and_text(wparam as u32);
             state.key_down.remove(&key);
             state.key_released.insert(key);
-            state.push_event(EVENT_KEY_UP, key, 0);
+            state.push_key_event(
+                EVENT_KEY_UP,
+                key,
+                physical_key,
+                logical_key,
+                key_location,
+                false,
+                text,
+            );
             0
+        }
+        WM_SYSKEYUP => {
+            let key = wparam as i64;
+            let physical_key = key_physical_code(lparam);
+            let key_location = key_location_code(wparam as u32, lparam);
+            let (logical_key, text) = key_logical_value_and_text(wparam as u32);
+            state.key_down.remove(&key);
+            state.key_released.insert(key);
+            state.push_key_event(
+                EVENT_KEY_UP,
+                key,
+                physical_key,
+                logical_key,
+                key_location,
+                false,
+                text,
+            );
+            unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
         }
         WM_MOUSEMOVE => {
             let x = signed_loword(lparam as u32) as i64;
             let y = signed_hiword(lparam as u32) as i64;
+            if state.suppress_cursor_move {
+                state.suppress_cursor_move = false;
+                return 0;
+            }
             state.mouse_pos = (x, y);
+            state.cursor_position = (x, y);
             let entering = !state.mouse_in_window;
             state.mouse_in_window = true;
             let mut track = TRACKMOUSEEVENT {
@@ -1786,6 +3467,24 @@ unsafe extern "system" fn arcana_window_proc(
                 state.push_event(EVENT_MOUSE_ENTERED, 0, 0);
             }
             state.push_event(EVENT_MOUSE_MOVE, x, y);
+            if state.cursor_grab_mode == 2 {
+                let center = (
+                    state.width.saturating_div(2),
+                    state.height.saturating_div(2),
+                );
+                let mut point = POINT {
+                    x: i32::try_from(center.0).unwrap_or(0),
+                    y: i32::try_from(center.1).unwrap_or(0),
+                };
+                if unsafe { ClientToScreen(hwnd, &mut point) } != 0 {
+                    state.suppress_cursor_move = true;
+                    unsafe {
+                        SetCursorPos(point.x, point.y);
+                    }
+                    state.cursor_position = center;
+                    state.mouse_pos = center;
+                }
+            }
             0
         }
         WM_MOUSELEAVE_MESSAGE => {
@@ -1795,16 +3494,24 @@ unsafe extern "system" fn arcana_window_proc(
         }
         WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN => {
             let button = mouse_button_from_message(message, wparam as u32);
+            let x = signed_loword(lparam as u32) as i64;
+            let y = signed_hiword(lparam as u32) as i64;
+            state.mouse_pos = (x, y);
+            state.cursor_position = (x, y);
             state.mouse_down.insert(button);
             state.mouse_pressed.insert(button);
-            state.push_event(EVENT_MOUSE_DOWN, button, 0);
+            state.push_mouse_button_event(EVENT_MOUSE_DOWN, button, x, y);
             0
         }
         WM_LBUTTONUP | WM_RBUTTONUP | WM_MBUTTONUP | WM_XBUTTONUP => {
             let button = mouse_button_from_message(message, wparam as u32);
+            let x = signed_loword(lparam as u32) as i64;
+            let y = signed_hiword(lparam as u32) as i64;
+            state.mouse_pos = (x, y);
+            state.cursor_position = (x, y);
             state.mouse_down.remove(&button);
             state.mouse_released.insert(button);
-            state.push_event(EVENT_MOUSE_UP, button, 0);
+            state.push_mouse_button_event(EVENT_MOUSE_UP, button, x, y);
             0
         }
         WM_MOUSEWHEEL => {
@@ -1813,18 +3520,174 @@ unsafe extern "system" fn arcana_window_proc(
             state.push_event(EVENT_MOUSE_WHEEL_Y, delta, 0);
             0
         }
+        WM_CHAR => {
+            if state.text_input_enabled {
+                state.push_text_input_code_unit(wparam as u16);
+            }
+            0
+        }
+        WM_IME_STARTCOMPOSITION => {
+            if state.text_input_enabled {
+                state.composition_active = true;
+                state.composition_committed = false;
+                state.push_event(EVENT_TEXT_COMPOSITION_STARTED, 0, 0);
+            }
+            0
+        }
+        WM_IME_COMPOSITION => {
+            if !state.text_input_enabled {
+                return 0;
+            }
+            let himc = unsafe { ImmGetContext(hwnd) };
+            if himc.is_null() {
+                return 0;
+            }
+            let _ = (|| -> Result<(), String> {
+                if (lparam as u32 & GCS_COMPSTR) != 0 {
+                    if let Some(text) = read_ime_composition_string(himc, GCS_COMPSTR)? {
+                        let caret = read_ime_cursor_position(himc).unwrap_or(0);
+                        state.push_composition_event(EVENT_TEXT_COMPOSITION_UPDATED, text, caret);
+                    }
+                }
+                if (lparam as u32 & GCS_RESULTSTR) != 0 {
+                    if let Some(text) = read_ime_composition_string(himc, GCS_RESULTSTR)? {
+                        state.composition_committed = true;
+                        state.push_composition_event(EVENT_TEXT_COMPOSITION_COMMITTED, text, 0);
+                    }
+                }
+                Ok(())
+            })();
+            unsafe {
+                ImmReleaseContext(hwnd, himc);
+            }
+            0
+        }
+        WM_IME_ENDCOMPOSITION => {
+            if state.text_input_enabled {
+                if state.composition_active && !state.composition_committed {
+                    state.push_event(EVENT_TEXT_COMPOSITION_CANCELLED, 0, 0);
+                }
+                state.composition_active = false;
+                state.composition_committed = false;
+            }
+            0
+        }
+        WM_DPICHANGED => {
+            let dpi = loword(wparam as u32) as i64;
+            let suggested = lparam as *const RECT;
+            if !suggested.is_null() && !state.applying_dpi_suggestion {
+                let suggested = unsafe { &*suggested };
+                let mut current = unsafe { zeroed::<RECT>() };
+                unsafe {
+                    GetWindowRect(hwnd, &mut current);
+                }
+                if current.left != suggested.left
+                    || current.top != suggested.top
+                    || current.right != suggested.right
+                    || current.bottom != suggested.bottom
+                {
+                    state.applying_dpi_suggestion = true;
+                    unsafe {
+                        SetWindowPos(
+                            hwnd,
+                            null_mut(),
+                            suggested.left,
+                            suggested.top,
+                            suggested.right - suggested.left,
+                            suggested.bottom - suggested.top,
+                            SWP_NOACTIVATE | SWP_NOOWNERZORDER,
+                        );
+                    }
+                    state.applying_dpi_suggestion = false;
+                }
+            }
+            state.push_event(EVENT_WINDOW_SCALE_FACTOR_CHANGED, (dpi * 1000) / 96, 0);
+            0
+        }
+        WM_THEMECHANGED => {
+            if state.theme_override_code != 0 && !state.applying_theme_override {
+                state.applying_theme_override = true;
+                apply_theme_override(hwnd, state.theme_override_code);
+                state.applying_theme_override = false;
+            }
+            state.push_event(EVENT_WINDOW_THEME_CHANGED, current_windows_theme_code(), 0);
+            0
+        }
+        WM_DROPFILES => {
+            let drop = wparam as HDROP;
+            let count = unsafe { DragQueryFileW(drop, u32::MAX, null_mut(), 0) };
+            for index in 0..count {
+                let len = unsafe { DragQueryFileW(drop, index, null_mut(), 0) };
+                if len == 0 {
+                    continue;
+                }
+                let mut buffer = vec![0u16; len as usize + 1];
+                let copied = unsafe { DragQueryFileW(drop, index, buffer.as_mut_ptr(), len + 1) };
+                let text = String::from_utf16_lossy(&buffer[..copied as usize]);
+                state.push_text_event(EVENT_FILE_DROPPED, text);
+            }
+            unsafe {
+                DragFinish(drop);
+            }
+            0
+        }
+        WM_INPUT => {
+            let mut size = 0u32;
+            let header_size = size_of::<windows_sys::Win32::UI::Input::RAWINPUTHEADER>() as u32;
+            let queried = unsafe {
+                GetRawInputData(
+                    lparam as HRAWINPUT,
+                    RID_INPUT,
+                    null_mut(),
+                    &mut size,
+                    header_size,
+                )
+            };
+            if queried == u32::MAX || size == 0 {
+                return 0;
+            }
+            let mut buffer = vec![0u8; size as usize];
+            let read = unsafe {
+                GetRawInputData(
+                    lparam as HRAWINPUT,
+                    RID_INPUT,
+                    buffer.as_mut_ptr() as *mut c_void,
+                    &mut size,
+                    header_size,
+                )
+            };
+            if read == u32::MAX || read == 0 {
+                return 0;
+            }
+            let raw = unsafe { &*(buffer.as_ptr() as *const RAWINPUT) };
+            if raw.header.dwType == RIM_TYPEMOUSE {
+                let mouse = unsafe { raw.data.mouse };
+                if mouse.usFlags == MOUSE_MOVE_RELATIVE || mouse.lLastX != 0 || mouse.lLastY != 0 {
+                    state.push_event(
+                        EVENT_RAW_MOUSE_MOTION,
+                        i64::from(mouse.lLastX),
+                        i64::from(mouse.lLastY),
+                    );
+                }
+            }
+            0
+        }
         WM_CLOSE => {
             state.push_event(EVENT_WINDOW_CLOSE_REQUESTED, 0, 0);
-            unsafe { DestroyWindow(hwnd) };
             0
         }
         WM_DESTROY => {
+            let _ = apply_cursor_grab(hwnd, 0);
             state.closed = true;
             0
         }
         WM_SETCURSOR => {
             if !state.cursor_visible && loword(lparam as u32) as u32 == HTCLIENT {
                 unsafe { SetCursor(null_mut()) };
+                return 1;
+            }
+            if loword(lparam as u32) as u32 == HTCLIENT {
+                unsafe { SetCursor(native_cursor_handle(state.cursor_icon_code)) };
                 return 1;
             }
             unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
@@ -2212,6 +4075,131 @@ fn wide_null(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+fn bytes_clipboard_format() -> Result<u32, String> {
+    REGISTERED_BYTES_CLIPBOARD_FORMAT
+        .get_or_init(|| {
+            let name = wide_null(ARCANA_BYTES_CLIPBOARD_FORMAT_NAME);
+            let format = unsafe { RegisterClipboardFormatW(name.as_ptr()) };
+            if format == 0 {
+                Err("failed to register Arcana bytes clipboard format".to_string())
+            } else {
+                Ok(format)
+            }
+        })
+        .clone()
+}
+
+fn clipboard_payload_from_bytes(bytes: &[u8]) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(8 + bytes.len());
+    payload.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+    payload.extend_from_slice(bytes);
+    payload
+}
+
+fn decode_clipboard_bytes_payload(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    if bytes.len() < 8 {
+        return Err("Windows clipboard bytes payload is truncated".to_string());
+    }
+    let declared_len = u64::from_le_bytes(bytes[..8].try_into().expect("prefix should fit"));
+    let declared_len = usize::try_from(declared_len)
+        .map_err(|_| "Windows clipboard bytes payload length overflow".to_string())?;
+    if bytes.len() < 8 + declared_len {
+        return Err("Windows clipboard bytes payload is truncated".to_string());
+    }
+    Ok(bytes[8..8 + declared_len].to_vec())
+}
+
+fn clipboard_write_block(format: u32, bytes: &[u8]) -> Result<(), String> {
+    let _guard = ClipboardGuard::open()?;
+    if unsafe { EmptyClipboard() } == 0 {
+        return Err("failed to clear Windows clipboard".to_string());
+    }
+    let handle = unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes.len()) } as *mut c_void;
+    if handle.is_null() {
+        return Err("failed to allocate Windows clipboard block".to_string());
+    }
+    let locked = unsafe { GlobalLock(handle) } as *mut u8;
+    if locked.is_null() {
+        unsafe {
+            GlobalFree(handle);
+        }
+        return Err("failed to lock Windows clipboard block".to_string());
+    }
+    if !bytes.is_empty() {
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), locked, bytes.len());
+        }
+    }
+    unsafe {
+        GlobalUnlock(handle);
+    }
+    let stored = unsafe { SetClipboardData(format, handle) } as *mut c_void;
+    if stored.is_null() {
+        unsafe {
+            GlobalFree(handle);
+        }
+        return Err("failed to publish Windows clipboard data".to_string());
+    }
+    Ok(())
+}
+
+fn clipboard_read_block(format: u32) -> Result<Vec<u8>, String> {
+    let _guard = ClipboardGuard::open()?;
+    if unsafe { IsClipboardFormatAvailable(format) } == 0 {
+        return Err("requested Windows clipboard format is not available".to_string());
+    }
+    let handle = unsafe { GetClipboardData(format) } as *mut c_void;
+    if handle.is_null() {
+        return Err("failed to access Windows clipboard data".to_string());
+    }
+    let locked = unsafe { GlobalLock(handle) } as *const u8;
+    if locked.is_null() {
+        return Err("failed to lock Windows clipboard data".to_string());
+    }
+    let size = unsafe { GlobalSize(handle) };
+    let bytes = unsafe { std::slice::from_raw_parts(locked, size) }.to_vec();
+    unsafe {
+        GlobalUnlock(handle);
+    }
+    Ok(bytes)
+}
+
+fn clipboard_write_text_impl(text: &str) -> Result<(), String> {
+    let utf16 = wide_null(text);
+    let bytes = unsafe {
+        std::slice::from_raw_parts(utf16.as_ptr() as *const u8, utf16.len() * size_of::<u16>())
+    };
+    clipboard_write_block(CF_UNICODETEXT.into(), bytes)
+}
+
+fn clipboard_read_text_impl() -> Result<String, String> {
+    let bytes = clipboard_read_block(CF_UNICODETEXT.into())?;
+    if bytes.len() % size_of::<u16>() != 0 {
+        return Err("Windows clipboard text payload is not valid UTF-16".to_string());
+    }
+    let units = unsafe {
+        std::slice::from_raw_parts(bytes.as_ptr() as *const u16, bytes.len() / size_of::<u16>())
+    };
+    let end = units
+        .iter()
+        .position(|&unit| unit == 0)
+        .unwrap_or(units.len());
+    String::from_utf16(&units[..end])
+        .map_err(|_| "Windows clipboard text is not valid UTF-16".to_string())
+}
+
+fn clipboard_write_bytes_impl(bytes: &[u8]) -> Result<(), String> {
+    let format = bytes_clipboard_format()?;
+    let payload = clipboard_payload_from_bytes(bytes);
+    clipboard_write_block(format, &payload)
+}
+
+fn clipboard_read_bytes_impl() -> Result<Vec<u8>, String> {
+    let format = bytes_clipboard_format()?;
+    let payload = clipboard_read_block(format)?;
+    decode_clipboard_bytes_payload(&payload)
+}
+
 fn current_module_handle() -> Result<usize, String> {
     let mut module: HINSTANCE = null_mut();
     let ok = unsafe {
@@ -2305,12 +4293,24 @@ mod tests {
     use std::ptr::null_mut;
 
     use super::{
+        EVENT_ABOUT_TO_WAIT, EVENT_APP_RESUMED, EVENT_APP_SUSPENDED,
+        EVENT_TEXT_COMPOSITION_CANCELLED, EVENT_TEXT_COMPOSITION_COMMITTED,
+        EVENT_TEXT_COMPOSITION_STARTED, EVENT_TEXT_INPUT, EVENT_WINDOW_CLOSE_REQUESTED,
         NativeAudioPlayback, RuntimeAudioDeviceHandle, RuntimeAudioPlaybackHandle, RuntimeHost,
-        decode_bmp_bytes, decode_wav_bytes, native_window_class_name_text,
-        release_playback_resources,
+        clipboard_payload_from_bytes, decode_bmp_bytes, decode_clipboard_bytes_payload,
+        decode_wav_bytes, native_window_class_name_text, release_playback_resources,
     };
     use crate::NativeProcessHost;
     use windows_sys::Win32::Media::Audio::{HWAVEOUT, WHDR_DONE};
+    use windows_sys::Win32::UI::Input::Ime::{
+        CPS_COMPLETE, GCS_COMPSTR, GCS_RESULTSTR, HIMC, ImmAssociateContext, ImmCreateContext,
+        ImmDestroyContext, ImmGetContext, ImmNotifyIME, ImmReleaseContext,
+        ImmSetCompositionStringW, NI_COMPOSITIONSTR, SCS_SETSTR,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        SendMessageW, WM_CHAR, WM_CLOSE, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION,
+        WM_IME_STARTCOMPOSITION,
+    };
 
     #[test]
     fn decode_wav_bytes_preserves_pcm16_frames() {
@@ -2430,6 +4430,21 @@ mod tests {
     }
 
     #[test]
+    fn clipboard_bytes_payload_roundtrips() {
+        let payload = clipboard_payload_from_bytes(&[7, 8, 9]);
+        let decoded =
+            decode_clipboard_bytes_payload(&payload).expect("clipboard payload should decode");
+        assert_eq!(decoded, vec![7, 8, 9]);
+    }
+
+    #[test]
+    fn clipboard_bytes_payload_rejects_truncated_data() {
+        let err = decode_clipboard_bytes_payload(&[1, 2, 3, 4])
+            .expect_err("truncated clipboard payload should fail");
+        assert!(err.contains("truncated"));
+    }
+
+    #[test]
     fn release_playback_resources_drops_cached_pcm_bytes() {
         let mut playback = NativeAudioPlayback::new(
             RuntimeAudioDeviceHandle(3),
@@ -2502,5 +4517,266 @@ mod tests {
         let err = RuntimeHost::audio_play_buffer(&mut host, device, clip)
             .expect_err("mismatched clip should be rejected");
         assert!(err.contains("does not match AudioDevice format"));
+    }
+
+    #[test]
+    fn native_close_request_waits_for_explicit_window_close() {
+        let mut host = NativeProcessHost::current().expect("native host should construct");
+        let window =
+            RuntimeHost::window_open(&mut host, "Arcana", 320, 200).expect("window should open");
+        let session = RuntimeHost::events_session_open(&mut host).expect("session should open");
+        RuntimeHost::events_session_attach_window(&mut host, session, window)
+            .expect("window should attach");
+
+        let hwnd = host
+            .window_ref(window)
+            .expect("window state should exist")
+            .hwnd;
+        unsafe {
+            SendMessageW(hwnd, WM_CLOSE, 0, 0);
+        }
+
+        let frame = RuntimeHost::events_session_pump(&mut host, session).expect("session pump");
+        let mut kinds = Vec::new();
+        while let Some(event) = RuntimeHost::events_poll(&mut host, frame).expect("event poll") {
+            kinds.push(event.kind);
+        }
+
+        assert_eq!(kinds.first().copied(), Some(EVENT_APP_RESUMED));
+        assert_eq!(kinds.last().copied(), Some(EVENT_ABOUT_TO_WAIT));
+        assert!(kinds.contains(&EVENT_WINDOW_CLOSE_REQUESTED));
+        assert!(!kinds.contains(&EVENT_APP_SUSPENDED));
+        assert!(RuntimeHost::window_alive(&mut host, window).expect("window should remain alive"));
+
+        RuntimeHost::window_close(&mut host, window).expect("explicit close should succeed");
+        assert!(host.window_ref(window).is_err());
+        assert!(
+            host.session_ref(session)
+                .expect("session should still exist")
+                .windows
+                .is_empty()
+        );
+
+        let frame = RuntimeHost::events_session_pump(&mut host, session).expect("session pump");
+        let mut kinds = Vec::new();
+        while let Some(event) = RuntimeHost::events_poll(&mut host, frame).expect("event poll") {
+            kinds.push(event.kind);
+        }
+
+        assert_eq!(kinds, vec![EVENT_APP_SUSPENDED, EVENT_ABOUT_TO_WAIT]);
+    }
+
+    #[test]
+    fn native_session_window_lookup_finds_attached_window_by_id() {
+        let mut host = NativeProcessHost::current().expect("native host should construct");
+        let window =
+            RuntimeHost::window_open(&mut host, "Arcana", 320, 200).expect("window should open");
+        let session = RuntimeHost::events_session_open(&mut host).expect("session should open");
+        RuntimeHost::events_session_attach_window(&mut host, session, window)
+            .expect("window should attach");
+
+        let window_id = RuntimeHost::window_id(&mut host, window).expect("window id");
+        assert_eq!(
+            RuntimeHost::events_session_window_by_id(&mut host, session, window_id)
+                .expect("lookup should succeed"),
+            Some(window)
+        );
+        assert_eq!(
+            RuntimeHost::events_session_window_by_id(&mut host, session, 999_999)
+                .expect("missing lookup should succeed"),
+            None
+        );
+
+        RuntimeHost::window_close(&mut host, window).expect("window close should succeed");
+        assert_eq!(
+            RuntimeHost::events_session_window_by_id(&mut host, session, window_id)
+                .expect("closed lookup should succeed"),
+            None
+        );
+    }
+
+    #[test]
+    fn native_session_reattach_emits_resumed_again() {
+        let mut host = NativeProcessHost::current().expect("native host should construct");
+        let first =
+            RuntimeHost::window_open(&mut host, "First", 320, 200).expect("window should open");
+        let session = RuntimeHost::events_session_open(&mut host).expect("session should open");
+        RuntimeHost::events_session_attach_window(&mut host, session, first)
+            .expect("window should attach");
+
+        let frame = RuntimeHost::events_session_pump(&mut host, session).expect("session pump");
+        let mut kinds = Vec::new();
+        while let Some(event) = RuntimeHost::events_poll(&mut host, frame).expect("event poll") {
+            kinds.push(event.kind);
+        }
+        assert_eq!(kinds, vec![EVENT_APP_RESUMED, EVENT_ABOUT_TO_WAIT]);
+
+        RuntimeHost::window_close(&mut host, first).expect("first window should close");
+        let frame = RuntimeHost::events_session_pump(&mut host, session).expect("session pump");
+        let mut kinds = Vec::new();
+        while let Some(event) = RuntimeHost::events_poll(&mut host, frame).expect("event poll") {
+            kinds.push(event.kind);
+        }
+        assert_eq!(kinds, vec![EVENT_APP_SUSPENDED, EVENT_ABOUT_TO_WAIT]);
+
+        let second =
+            RuntimeHost::window_open(&mut host, "Second", 320, 200).expect("window should open");
+        RuntimeHost::events_session_attach_window(&mut host, session, second)
+            .expect("window should attach");
+        let frame = RuntimeHost::events_session_pump(&mut host, session).expect("session pump");
+        let mut kinds = Vec::new();
+        while let Some(event) = RuntimeHost::events_poll(&mut host, frame).expect("event poll") {
+            kinds.push(event.kind);
+        }
+        assert_eq!(kinds, vec![EVENT_APP_RESUMED, EVENT_ABOUT_TO_WAIT]);
+
+        RuntimeHost::window_close(&mut host, second).expect("second window should close");
+    }
+
+    #[test]
+    fn native_session_close_removes_windows_and_wakes() {
+        let mut host = NativeProcessHost::current().expect("native host should construct");
+        let first =
+            RuntimeHost::window_open(&mut host, "First", 320, 200).expect("first window should open");
+        let second = RuntimeHost::window_open(&mut host, "Second", 320, 200)
+            .expect("second window should open");
+        let session = RuntimeHost::events_session_open(&mut host).expect("session should open");
+        RuntimeHost::events_session_attach_window(&mut host, session, first)
+            .expect("first window should attach");
+        RuntimeHost::events_session_attach_window(&mut host, session, second)
+            .expect("second window should attach");
+        let wake = RuntimeHost::events_session_create_wake(&mut host, session)
+            .expect("wake handle should create");
+        RuntimeHost::events_wake_signal(&mut host, wake).expect("wake should signal");
+
+        RuntimeHost::events_session_close(&mut host, session).expect("session close should succeed");
+
+        assert!(host.session_ref(session).is_err());
+        assert!(host.window_ref(first).is_err());
+        assert!(host.window_ref(second).is_err());
+        assert!(host.wake_ref(wake).is_err());
+    }
+
+    #[test]
+    fn native_window_settings_and_text_input_events_roundtrip() {
+        let mut host = NativeProcessHost::current().expect("native host should construct");
+        let window =
+            RuntimeHost::window_open(&mut host, "Arcana", 320, 200).expect("window should open");
+        let session = RuntimeHost::events_session_open(&mut host).expect("session should open");
+        RuntimeHost::events_session_attach_window(&mut host, session, window)
+            .expect("window should attach");
+
+        RuntimeHost::window_set_min_size(&mut host, window, 111, 112).expect("min size should set");
+        RuntimeHost::window_set_max_size(&mut host, window, 333, 334).expect("max size should set");
+        RuntimeHost::window_set_transparent(&mut host, window, true)
+            .expect("transparent should set");
+        RuntimeHost::window_set_theme_override_code(&mut host, window, 2)
+            .expect("theme override should set");
+        RuntimeHost::window_set_cursor_icon_code(&mut host, window, 3)
+            .expect("cursor icon should set");
+        RuntimeHost::window_set_text_input_enabled(&mut host, window, true)
+            .expect("text input should set");
+        RuntimeHost::text_input_set_composition_area(&mut host, window, 9, 10, 20, 21)
+            .expect("composition area should set");
+
+        assert_eq!(
+            RuntimeHost::window_min_size(&mut host, window).expect("min size"),
+            (111, 112)
+        );
+        assert_eq!(
+            RuntimeHost::window_max_size(&mut host, window).expect("max size"),
+            (333, 334)
+        );
+        assert!(RuntimeHost::window_transparent(&mut host, window).expect("transparent state"));
+        assert_eq!(
+            RuntimeHost::window_theme_override_code(&mut host, window).expect("theme override"),
+            2
+        );
+        assert_eq!(
+            RuntimeHost::window_cursor_icon_code(&mut host, window).expect("cursor icon"),
+            3
+        );
+        assert!(
+            RuntimeHost::window_text_input_enabled(&mut host, window).expect("text input enabled")
+        );
+        assert!(
+            RuntimeHost::text_input_composition_area_active(&mut host, window)
+                .expect("composition area active")
+        );
+        assert_eq!(
+            RuntimeHost::text_input_composition_area_position(&mut host, window)
+                .expect("composition area position"),
+            (9, 10)
+        );
+        assert_eq!(
+            RuntimeHost::text_input_composition_area_size(&mut host, window)
+                .expect("composition area size"),
+            (20, 21)
+        );
+
+        let hwnd = host
+            .window_ref(window)
+            .expect("window state should exist")
+            .hwnd;
+        unsafe {
+            SendMessageW(hwnd, WM_CHAR, 'x' as usize, 0);
+            let mut himc = ImmGetContext(hwnd);
+            let mut created_himc: HIMC = null_mut();
+            let mut previous_himc: HIMC = null_mut();
+            if himc.is_null() {
+                created_himc = ImmCreateContext();
+                assert!(!created_himc.is_null(), "IME context should create");
+                previous_himc = ImmAssociateContext(hwnd, created_himc);
+                himc = created_himc;
+            }
+            SendMessageW(hwnd, WM_IME_STARTCOMPOSITION, 0, 0);
+            let composition = "compose".encode_utf16().collect::<Vec<_>>();
+            assert_ne!(
+                ImmSetCompositionStringW(
+                    himc,
+                    SCS_SETSTR,
+                    composition.as_ptr().cast(),
+                    u32::try_from(composition.len() * 2).expect("composition length should fit"),
+                    null_mut(),
+                    0,
+                ),
+                0,
+                "composition string should set"
+            );
+            SendMessageW(hwnd, WM_IME_COMPOSITION, 0, GCS_COMPSTR as isize);
+            assert_ne!(
+                ImmNotifyIME(himc, NI_COMPOSITIONSTR, CPS_COMPLETE, 0),
+                0,
+                "composition should complete"
+            );
+            SendMessageW(hwnd, WM_IME_COMPOSITION, 0, GCS_RESULTSTR as isize);
+            if created_himc.is_null() {
+                ImmReleaseContext(hwnd, himc);
+            } else {
+                ImmAssociateContext(hwnd, previous_himc);
+                ImmDestroyContext(created_himc);
+            }
+            SendMessageW(hwnd, WM_IME_ENDCOMPOSITION, 0, 0);
+        }
+
+        let frame = RuntimeHost::events_session_pump(&mut host, session).expect("session pump");
+        let mut kinds = Vec::new();
+        let mut committed_text = None;
+        while let Some(event) = RuntimeHost::events_poll(&mut host, frame).expect("event poll") {
+            kinds.push(event.kind);
+            if event.kind == EVENT_TEXT_COMPOSITION_COMMITTED {
+                committed_text = Some(event.text.clone());
+            }
+        }
+
+        assert_eq!(kinds.first().copied(), Some(EVENT_APP_RESUMED));
+        assert_eq!(kinds.last().copied(), Some(EVENT_ABOUT_TO_WAIT));
+        assert!(kinds.contains(&EVENT_TEXT_INPUT));
+        assert!(kinds.contains(&EVENT_TEXT_COMPOSITION_STARTED));
+        assert!(kinds.contains(&EVENT_TEXT_COMPOSITION_COMMITTED));
+        assert!(!kinds.contains(&EVENT_TEXT_COMPOSITION_CANCELLED));
+        assert_eq!(committed_text.as_deref(), Some("compose"));
+
+        RuntimeHost::window_close(&mut host, window).expect("window close should succeed");
     }
 }

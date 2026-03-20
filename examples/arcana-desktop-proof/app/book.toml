@@ -1,0 +1,7 @@
+name = "app"
+kind = "app"
+
+[deps]
+arcana_desktop = { path = "../../../grimoires/owned/libs/arcana-desktop", native_delivery = "dll" }
+arcana_graphics = { path = "../../../grimoires/owned/libs/arcana-graphics" }
+arcana_text = { path = "../../../grimoires/owned/libs/arcana-text" }
