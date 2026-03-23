@@ -110,6 +110,8 @@ pub struct RuntimePackagePlan {
     pub direct_deps: Vec<String>,
     pub runtime_requirements: Vec<String>,
     pub module_aliases: BTreeMap<String, BTreeMap<String, Vec<String>>>,
+    #[serde(default)]
+    pub opaque_family_types: BTreeMap<String, Vec<String>>,
     pub entrypoints: Vec<RuntimeEntrypointPlan>,
     pub routines: Vec<RuntimeRoutinePlan>,
     pub owners: Vec<RuntimeOwnerPlan>,
@@ -290,6 +292,138 @@ enum RuntimeOpaqueValue {
     PoolId(RuntimePoolIdValue),
     Task(RuntimeTaskHandle),
     Thread(RuntimeThreadHandle),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuntimeOpaqueFamily {
+    FileStream,
+    Window,
+    Image,
+    AppFrame,
+    AppSession,
+    Wake,
+    AudioDevice,
+    AudioBuffer,
+    AudioPlayback,
+    Channel,
+    Mutex,
+    AtomicInt,
+    AtomicBool,
+    Arena,
+    ArenaId,
+    FrameArena,
+    FrameId,
+    PoolArena,
+    PoolId,
+    Task,
+    Thread,
+}
+
+impl RuntimeOpaqueFamily {
+    const fn lang_item_name(self) -> &'static str {
+        match self {
+            Self::FileStream => "file_stream_handle",
+            Self::Window => "window_handle",
+            Self::Image => "image_handle",
+            Self::AppFrame => "app_frame_handle",
+            Self::AppSession => "app_session_handle",
+            Self::Wake => "wake_handle",
+            Self::AudioDevice => "audio_device_handle",
+            Self::AudioBuffer => "audio_buffer_handle",
+            Self::AudioPlayback => "audio_playback_handle",
+            Self::Channel => "channel_handle",
+            Self::Mutex => "mutex_handle",
+            Self::AtomicInt => "atomic_int_handle",
+            Self::AtomicBool => "atomic_bool_handle",
+            Self::Arena => "arena_handle",
+            Self::ArenaId => "arena_id_handle",
+            Self::FrameArena => "frame_arena_handle",
+            Self::FrameId => "frame_id_handle",
+            Self::PoolArena => "pool_arena_handle",
+            Self::PoolId => "pool_id_handle",
+            Self::Task => "task_handle",
+            Self::Thread => "thread_handle",
+        }
+    }
+
+    const fn canonical_type_name(self) -> &'static str {
+        match self {
+            Self::FileStream => "std.fs.FileStream",
+            Self::Window => "std.window.Window",
+            Self::Image => "std.canvas.Image",
+            Self::AppFrame => "std.events.AppFrame",
+            Self::AppSession => "std.events.AppSession",
+            Self::Wake => "std.events.WakeHandle",
+            Self::AudioDevice => "std.audio.AudioDevice",
+            Self::AudioBuffer => "std.audio.AudioBuffer",
+            Self::AudioPlayback => "std.audio.AudioPlayback",
+            Self::Channel => "std.concurrent.Channel",
+            Self::Mutex => "std.concurrent.Mutex",
+            Self::AtomicInt => "std.concurrent.AtomicInt",
+            Self::AtomicBool => "std.concurrent.AtomicBool",
+            Self::Arena => "std.memory.Arena",
+            Self::ArenaId => "std.memory.ArenaId",
+            Self::FrameArena => "std.memory.FrameArena",
+            Self::FrameId => "std.memory.FrameId",
+            Self::PoolArena => "std.memory.PoolArena",
+            Self::PoolId => "std.memory.PoolId",
+            Self::Task => "std.concurrent.Task",
+            Self::Thread => "std.concurrent.Thread",
+        }
+    }
+
+    fn from_lang_item_name(name: &str) -> Option<Self> {
+        match name {
+            "file_stream_handle" => Some(Self::FileStream),
+            "window_handle" => Some(Self::Window),
+            "image_handle" => Some(Self::Image),
+            "app_frame_handle" => Some(Self::AppFrame),
+            "app_session_handle" => Some(Self::AppSession),
+            "wake_handle" => Some(Self::Wake),
+            "audio_device_handle" => Some(Self::AudioDevice),
+            "audio_buffer_handle" => Some(Self::AudioBuffer),
+            "audio_playback_handle" => Some(Self::AudioPlayback),
+            "channel_handle" => Some(Self::Channel),
+            "mutex_handle" => Some(Self::Mutex),
+            "atomic_int_handle" => Some(Self::AtomicInt),
+            "atomic_bool_handle" => Some(Self::AtomicBool),
+            "arena_handle" => Some(Self::Arena),
+            "arena_id_handle" => Some(Self::ArenaId),
+            "frame_arena_handle" => Some(Self::FrameArena),
+            "frame_id_handle" => Some(Self::FrameId),
+            "pool_arena_handle" => Some(Self::PoolArena),
+            "pool_id_handle" => Some(Self::PoolId),
+            "task_handle" => Some(Self::Task),
+            "thread_handle" => Some(Self::Thread),
+            _ => None,
+        }
+    }
+
+    const fn from_opaque_value(value: &RuntimeOpaqueValue) -> Self {
+        match value {
+            RuntimeOpaqueValue::FileStream(_) => Self::FileStream,
+            RuntimeOpaqueValue::Window(_) => Self::Window,
+            RuntimeOpaqueValue::Image(_) => Self::Image,
+            RuntimeOpaqueValue::AppFrame(_) => Self::AppFrame,
+            RuntimeOpaqueValue::AppSession(_) => Self::AppSession,
+            RuntimeOpaqueValue::Wake(_) => Self::Wake,
+            RuntimeOpaqueValue::AudioDevice(_) => Self::AudioDevice,
+            RuntimeOpaqueValue::AudioBuffer(_) => Self::AudioBuffer,
+            RuntimeOpaqueValue::AudioPlayback(_) => Self::AudioPlayback,
+            RuntimeOpaqueValue::Channel(_) => Self::Channel,
+            RuntimeOpaqueValue::Mutex(_) => Self::Mutex,
+            RuntimeOpaqueValue::AtomicInt(_) => Self::AtomicInt,
+            RuntimeOpaqueValue::AtomicBool(_) => Self::AtomicBool,
+            RuntimeOpaqueValue::Arena(_) => Self::Arena,
+            RuntimeOpaqueValue::ArenaId(_) => Self::ArenaId,
+            RuntimeOpaqueValue::FrameArena(_) => Self::FrameArena,
+            RuntimeOpaqueValue::FrameId(_) => Self::FrameId,
+            RuntimeOpaqueValue::PoolArena(_) => Self::PoolArena,
+            RuntimeOpaqueValue::PoolId(_) => Self::PoolId,
+            RuntimeOpaqueValue::Task(_) => Self::Task,
+            RuntimeOpaqueValue::Thread(_) => Self::Thread,
+        }
+    }
 }
 
 pub trait RuntimeHost {
@@ -963,6 +1097,21 @@ pub trait RuntimeHost {
         let _ = (session, timeout_ms);
         Err("runtime host events_session_wait is not implemented".to_string())
     }
+    fn events_session_device_events(
+        &mut self,
+        session: RuntimeAppSessionHandle,
+    ) -> Result<i64, String> {
+        let _ = session;
+        Err("runtime host events_session_device_events is not implemented".to_string())
+    }
+    fn events_session_set_device_events(
+        &mut self,
+        session: RuntimeAppSessionHandle,
+        policy: i64,
+    ) -> Result<(), String> {
+        let _ = (session, policy);
+        Err("runtime host events_session_set_device_events is not implemented".to_string())
+    }
     fn events_session_create_wake(
         &mut self,
         session: RuntimeAppSessionHandle,
@@ -1318,6 +1467,29 @@ struct BufferedEvent {
     repeated: bool,
 }
 
+fn prioritize_buffered_close_requested(events: &mut Vec<BufferedEvent>) {
+    let Some(index) = events.iter().position(|event| event.kind == 2) else {
+        return;
+    };
+    if index == 0 {
+        return;
+    }
+    let event = events.remove(index);
+    events.insert(0, event);
+}
+
+fn buffered_device_events_allowed(policy: i64, any_window_focused: bool) -> bool {
+    match policy {
+        0 => false,
+        2 => true,
+        _ => any_window_focused,
+    }
+}
+
+fn buffered_device_event_kind(kind: i64) -> bool {
+    matches!(kind, 18 | 19 | 28 | 29)
+}
+
 pub(crate) fn common_named_key_code(name: &str) -> i64 {
     match name {
         "Backspace" | "backspace" => 8,
@@ -1466,7 +1638,7 @@ struct BufferedImage {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct BufferedAppFrame {
-    events: Vec<BufferedEvent>,
+    events: VecDeque<BufferedEvent>,
     input: BufferedFrameInput,
 }
 
@@ -1476,6 +1648,7 @@ struct BufferedSession {
     resumed: bool,
     suspended: bool,
     pending_wakes: usize,
+    device_events_policy: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1642,7 +1815,7 @@ impl BufferedHost {
                 cursor_icon_code: 0,
                 cursor_grab_mode: 0,
                 cursor_position: (0, 0),
-                text_input_enabled: true,
+                text_input_enabled: false,
                 composition_area_active: false,
                 composition_area_position: (0, 0),
                 composition_area_size: (0, 0),
@@ -1691,8 +1864,13 @@ impl BufferedHost {
     ) -> RuntimeAppFrameHandle {
         let handle = RuntimeAppFrameHandle(self.next_frame_handle);
         self.next_frame_handle += 1;
-        self.frames
-            .insert(handle, BufferedAppFrame { events, input });
+        self.frames.insert(
+            handle,
+            BufferedAppFrame {
+                events: VecDeque::from(events),
+                input,
+            },
+        );
         handle
     }
 
@@ -1721,6 +1899,7 @@ impl BufferedHost {
                 resumed: false,
                 suspended: false,
                 pending_wakes: 0,
+                device_events_policy: 1,
             },
         );
         handle
@@ -1766,6 +1945,9 @@ impl BufferedHost {
     fn session_has_ready_events(&self, session: RuntimeAppSessionHandle) -> Result<bool, String> {
         let session_state = self.session_ref(session)?;
         if !session_state.resumed || session_state.pending_wakes > 0 {
+            return Ok(true);
+        }
+        if session_state.resumed && !session_state.suspended && session_state.windows.is_empty() {
             return Ok(true);
         }
         Ok(!self.next_frame_events.is_empty())
@@ -2501,7 +2683,11 @@ impl RuntimeHost for BufferedHost {
     }
 
     fn window_set_title(&mut self, window: RuntimeWindowHandle, title: &str) -> Result<(), String> {
-        self.window_mut(window)?.title = title.to_string();
+        let state = self.window_mut(window)?;
+        if state.title == title {
+            return Ok(());
+        }
+        state.title = title.to_string();
         Ok(())
     }
 
@@ -2884,10 +3070,9 @@ impl RuntimeHost for BufferedHost {
         frame: RuntimeAppFrameHandle,
     ) -> Result<Option<RuntimeEventRecord>, String> {
         let frame = self.frame_mut(frame)?;
-        let Some(event) = frame.events.first().cloned() else {
+        let Some(event) = frame.events.pop_front() else {
             return Ok(None);
         };
-        frame.events.remove(0);
         Ok(Some(RuntimeEventRecord {
             kind: event.kind,
             window_id: event.window_id,
@@ -2988,18 +3173,34 @@ impl RuntimeHost for BufferedHost {
         session: RuntimeAppSessionHandle,
     ) -> Result<RuntimeAppFrameHandle, String> {
         self.prune_missing_session_windows(session)?;
-        let mut events = Vec::new();
+        let mut window_events = Vec::new();
         let mut input = std::mem::take(&mut self.next_frame_input);
         let session_windows = self.session_ref(session)?.windows.clone();
+        let any_window_focused = session_windows
+            .iter()
+            .any(|window| self.windows.get(window).map(|state| state.focused).unwrap_or(false));
         for window in &session_windows {
             if let Ok(state) = self.window_mut(*window) {
                 state.resized = false;
                 state.redraw_pending = false;
             }
         }
+        let mut pending_events = std::mem::take(&mut self.next_frame_events);
+        prioritize_buffered_close_requested(&mut pending_events);
+        let device_events_policy = self.session_ref(session)?.device_events_policy;
+        pending_events.retain(|event| {
+            !buffered_device_event_kind(event.kind)
+                || buffered_device_events_allowed(device_events_policy, any_window_focused)
+        });
+        window_events.extend(pending_events);
+        let live_windows = session_windows
+            .iter()
+            .filter(|window| self.windows.contains_key(window))
+            .count();
+        let mut events = Vec::new();
         {
             let session_state = self.session_mut(session)?;
-            if !session_state.resumed {
+            if !session_state.resumed && live_windows > 0 {
                 events.push(BufferedEvent {
                     kind: 20,
                     window_id: 0,
@@ -3025,13 +3226,8 @@ impl RuntimeHost for BufferedHost {
                 });
             }
         }
-        events.extend(std::mem::take(&mut self.next_frame_events));
-        let closed = session_windows
-            .iter()
-            .filter(|window| self.windows.contains_key(window))
-            .count()
-            == 0;
-        if closed {
+        events.extend(window_events);
+        if live_windows == 0 {
             let session_state = self.session_mut(session)?;
             if session_state.resumed && !session_state.suspended {
                 events.push(BufferedEvent {
@@ -3059,6 +3255,25 @@ impl RuntimeHost for BufferedHost {
             input.modifiers = 0;
         }
         Ok(self.insert_frame(events, input))
+    }
+
+    fn events_session_device_events(
+        &mut self,
+        session: RuntimeAppSessionHandle,
+    ) -> Result<i64, String> {
+        Ok(self.session_ref(session)?.device_events_policy)
+    }
+
+    fn events_session_set_device_events(
+        &mut self,
+        session: RuntimeAppSessionHandle,
+        policy: i64,
+    ) -> Result<(), String> {
+        if !(0..=2).contains(&policy) {
+            return Err(format!("invalid device events policy `{policy}`"));
+        }
+        self.session_mut(session)?.device_events_policy = policy;
+        Ok(())
     }
 
     fn events_session_wait(
@@ -3515,11 +3730,26 @@ struct RuntimeLocal {
     value: RuntimeValue,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeAttachedOwner {
+    owner_path: Vec<String>,
+    local_name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeAttachedObject {
+    object_path: Vec<String>,
+    local_name: String,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct RuntimeScope {
     locals: BTreeMap<String, RuntimeLocal>,
     deferred: Vec<ParsedExpr>,
     attached_object_names: BTreeSet<String>,
+    attached_objects: Vec<RuntimeAttachedObject>,
+    attached_owners: Vec<RuntimeAttachedOwner>,
+    inherited_active_owner_keys: Vec<String>,
     activated_owner_keys: Vec<String>,
 }
 
@@ -3827,6 +4057,8 @@ enum RuntimeIntrinsic {
     EventsSessionWindowIds,
     EventsSessionPump,
     EventsSessionWait,
+    EventsSessionDeviceEvents,
+    EventsSessionSetDeviceEvents,
     EventsSessionCreateWake,
     EventsWakeSignal,
     InputKeyCode,
@@ -4089,6 +4321,21 @@ fn parse_module_directive_row(
     ))
 }
 
+fn parse_lang_item_row(row: &str) -> Result<(String, String, Vec<String>), String> {
+    let payload = row
+        .strip_prefix("module=")
+        .ok_or_else(|| format!("malformed lang item row `{row}`"))?;
+    let parts = payload.split(':').collect::<Vec<_>>();
+    if parts.len() != 4 || parts[1] != "lang" {
+        return Err(format!("malformed lang item row `{row}`"));
+    }
+    Ok((
+        parts[0].to_string(),
+        parts[2].to_string(),
+        parts[3].split('.').map(ToString::to_string).collect(),
+    ))
+}
+
 fn build_module_aliases(
     artifact: &AotPackageArtifact,
 ) -> Result<BTreeMap<String, BTreeMap<String, Vec<String>>>, String> {
@@ -4115,6 +4362,37 @@ fn build_module_aliases(
     Ok(aliases)
 }
 
+fn build_opaque_family_types(
+    artifact: &AotPackageArtifact,
+) -> Result<BTreeMap<String, Vec<String>>, String> {
+    let mut families = BTreeMap::<String, Vec<String>>::new();
+    for module in &artifact.modules {
+        for row in &module.lang_item_rows {
+            let (module_id, name, target) = parse_lang_item_row(row)?;
+            if module_id != module.module_id {
+                return Err(format!(
+                    "lang item row `{row}` does not match containing module `{}`",
+                    module.module_id
+                ));
+            }
+            let Some(family) = RuntimeOpaqueFamily::from_lang_item_name(&name) else {
+                continue;
+            };
+            let target_text = target.join(".");
+            let entries = families
+                .entry(family.lang_item_name().to_string())
+                .or_default();
+            if !entries.contains(&target_text) {
+                entries.push(target_text);
+            }
+        }
+    }
+    for entries in families.values_mut() {
+        entries.sort();
+    }
+    Ok(families)
+}
+
 pub fn plan_from_artifact(artifact: &AotPackageArtifact) -> Result<RuntimePackagePlan, String> {
     validate_package_artifact(artifact)?;
     let routines = artifact
@@ -4133,6 +4411,7 @@ pub fn plan_from_artifact(artifact: &AotPackageArtifact) -> Result<RuntimePackag
         direct_deps: artifact.direct_deps.clone(),
         runtime_requirements: artifact.runtime_requirements.clone(),
         module_aliases: build_module_aliases(artifact)?,
+        opaque_family_types: build_opaque_family_types(artifact)?,
         entrypoints,
         routines,
         owners: artifact.owners.iter().map(lower_owner).collect(),
@@ -4508,7 +4787,51 @@ fn runtime_type_name_matches(expected: &str, actual: &str) -> bool {
         || actual.ends_with(&format!(".{expected}"))
 }
 
+fn runtime_opaque_family_for_type(
+    plan: &RuntimePackagePlan,
+    type_name: &str,
+) -> Option<RuntimeOpaqueFamily> {
+    RuntimeOpaqueFamily::from_lang_item_name(type_name).or_else(|| {
+        [
+            RuntimeOpaqueFamily::FileStream,
+            RuntimeOpaqueFamily::Window,
+            RuntimeOpaqueFamily::Image,
+            RuntimeOpaqueFamily::AppFrame,
+            RuntimeOpaqueFamily::AppSession,
+            RuntimeOpaqueFamily::Wake,
+            RuntimeOpaqueFamily::AudioDevice,
+            RuntimeOpaqueFamily::AudioBuffer,
+            RuntimeOpaqueFamily::AudioPlayback,
+            RuntimeOpaqueFamily::Channel,
+            RuntimeOpaqueFamily::Mutex,
+            RuntimeOpaqueFamily::AtomicInt,
+            RuntimeOpaqueFamily::AtomicBool,
+            RuntimeOpaqueFamily::Arena,
+            RuntimeOpaqueFamily::ArenaId,
+            RuntimeOpaqueFamily::FrameArena,
+            RuntimeOpaqueFamily::FrameId,
+            RuntimeOpaqueFamily::PoolArena,
+            RuntimeOpaqueFamily::PoolId,
+            RuntimeOpaqueFamily::Task,
+            RuntimeOpaqueFamily::Thread,
+        ]
+        .into_iter()
+        .find(|family| {
+            runtime_type_name_matches(family.canonical_type_name(), type_name)
+                || plan
+                    .opaque_family_types
+                    .get(family.lang_item_name())
+                    .is_some_and(|bound| {
+                        bound
+                            .iter()
+                            .any(|candidate| runtime_type_name_matches(candidate, type_name))
+                    })
+        })
+    })
+}
+
 fn runtime_declared_type_matches_actual(
+    plan: &RuntimePackagePlan,
     declared_type: &str,
     actual_type: &str,
     type_params: &BTreeSet<String>,
@@ -4520,7 +4843,13 @@ fn runtime_declared_type_matches_actual(
         return false;
     };
     if !runtime_type_name_matches(&declared_base, &actual_base) {
-        return false;
+        match (
+            runtime_opaque_family_for_type(plan, &declared_base),
+            runtime_opaque_family_for_type(plan, &actual_base),
+        ) {
+            (Some(declared_family), Some(actual_family)) if declared_family == actual_family => {}
+            _ => return false,
+        }
     }
     if declared_args.len() != actual_args.len() {
         return declared_args.is_empty() && actual_args.is_empty();
@@ -4533,7 +4862,7 @@ fn runtime_declared_type_matches_actual(
             if type_params.contains(trimmed) {
                 return true;
             }
-            runtime_declared_type_matches_actual(trimmed, actual_arg, type_params)
+            runtime_declared_type_matches_actual(plan, trimmed, actual_arg, type_params)
         })
 }
 
@@ -5083,6 +5412,8 @@ fn resolve_runtime_intrinsic_impl(intrinsic_impl: &str) -> Option<RuntimeIntrins
         "EventsSessionWindowIds" => Some(RuntimeIntrinsic::EventsSessionWindowIds),
         "EventsSessionPump" => Some(RuntimeIntrinsic::EventsSessionPump),
         "EventsSessionWait" => Some(RuntimeIntrinsic::EventsSessionWait),
+        "EventsSessionDeviceEvents" => Some(RuntimeIntrinsic::EventsSessionDeviceEvents),
+        "EventsSessionSetDeviceEvents" => Some(RuntimeIntrinsic::EventsSessionSetDeviceEvents),
         "EventsSessionCreateWake" => Some(RuntimeIntrinsic::EventsSessionCreateWake),
         "EventsWakeSignal" => Some(RuntimeIntrinsic::EventsWakeSignal),
         "InputKeyCode" => Some(RuntimeIntrinsic::InputKeyCode),
@@ -5560,10 +5891,22 @@ fn apply_runtime_availability_attachments(
     attachments: &[ParsedAvailabilityAttachment],
 ) {
     for attachment in attachments {
-        if matches!(attachment.kind, ParsedAvailabilityKind::Object) {
-            scope
-                .attached_object_names
-                .insert(attachment.local_name.clone());
+        match attachment.kind {
+            ParsedAvailabilityKind::Object => {
+                scope
+                    .attached_object_names
+                    .insert(attachment.local_name.clone());
+                scope.attached_objects.push(RuntimeAttachedObject {
+                    object_path: attachment.path.clone(),
+                    local_name: attachment.local_name.clone(),
+                });
+            }
+            ParsedAvailabilityKind::Owner => {
+                scope.attached_owners.push(RuntimeAttachedOwner {
+                    owner_path: attachment.path.clone(),
+                    local_name: attachment.local_name.clone(),
+                });
+            }
         }
     }
 }
@@ -5581,11 +5924,241 @@ fn lookup_runtime_owner_plan<'a>(
         .find(|owner| owner.owner_path == owner_path)
 }
 
-fn attached_object_is_visible(scopes: &[RuntimeScope], name: &str) -> bool {
+fn attached_object_is_visible(scopes: &[RuntimeScope], object_path: &[String], name: &str) -> bool {
     scopes
         .iter()
         .rev()
-        .any(|scope| scope.attached_object_names.contains(name))
+        .flat_map(|scope| scope.attached_objects.iter())
+        .any(|object| object.local_name == name && object.object_path == object_path)
+}
+
+fn collect_active_owner_keys_from_scopes(scopes: &[RuntimeScope]) -> Vec<String> {
+    let mut active = BTreeSet::new();
+    for scope in scopes {
+        for owner_key in &scope.inherited_active_owner_keys {
+            active.insert(owner_key.clone());
+        }
+        for owner_key in &scope.activated_owner_keys {
+            active.insert(owner_key.clone());
+        }
+        for local in scope.locals.values() {
+            match &local.value {
+                RuntimeValue::OwnerHandle(owner_key) => {
+                    active.insert(owner_key.clone());
+                }
+                RuntimeValue::Ref(reference) => match &reference.target {
+                    RuntimeReferenceTarget::OwnerObject { owner_key, .. } => {
+                        active.insert(owner_key.clone());
+                    }
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+    }
+    active.into_iter().collect()
+}
+
+fn collect_active_owner_keys_from_state(state: &RuntimeExecutionState) -> Vec<String> {
+    state
+        .owners
+        .iter()
+        .filter_map(|(owner_key, owner_state)| {
+            if owner_state.active_bindings > 0 {
+                Some(owner_key.clone())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn owner_key_active_on_execution_path(
+    scopes: &[RuntimeScope],
+    inherited_active_owner_keys: &[String],
+    owner_key: &str,
+) -> bool {
+    scopes.iter().rev().any(|scope| {
+        scope
+            .activated_owner_keys
+            .iter()
+            .any(|active| active == owner_key)
+            || scope
+                .inherited_active_owner_keys
+                .iter()
+                .any(|active| active == owner_key)
+    }) || inherited_active_owner_keys
+        .iter()
+        .any(|active| active == owner_key)
+}
+
+fn activate_attached_runtime_owners_for_current_scope(
+    scopes: &mut Vec<RuntimeScope>,
+    inherited_active_owner_keys: &[String],
+    plan: &RuntimePackagePlan,
+    state: &mut RuntimeExecutionState,
+) -> Result<(), String> {
+    let attached_owners = scopes
+        .last()
+        .ok_or_else(|| "runtime scope stack is empty".to_string())?
+        .attached_owners
+        .clone();
+    for attached_owner in attached_owners {
+        let owner_key = owner_state_key(&attached_owner.owner_path);
+        if !owner_key_active_on_execution_path(scopes, inherited_active_owner_keys, &owner_key) {
+            continue;
+        }
+        let owner =
+            lookup_runtime_owner_plan(plan, &attached_owner.owner_path).ok_or_else(|| {
+                format!(
+                    "runtime availability attachment `{}` resolves to an unknown owner",
+                    attached_owner.owner_path.join(".")
+                )
+            })?;
+        let binding = if attached_owner.local_name == owner.owner_name {
+            None
+        } else {
+            Some(attached_owner.local_name.as_str())
+        };
+        activate_owner_scope_binding(scopes, state, owner, &owner_key, binding)?;
+    }
+    Ok(())
+}
+
+fn activate_attached_runtime_objects_for_current_scope(
+    scopes: &mut Vec<RuntimeScope>,
+    inherited_active_owner_keys: &[String],
+    plan: &RuntimePackagePlan,
+    state: &mut RuntimeExecutionState,
+) -> Result<(), String> {
+    let attached_objects = scopes
+        .last()
+        .ok_or_else(|| "runtime scope stack is empty".to_string())?
+        .attached_objects
+        .clone();
+    for attached_object in attached_objects {
+        let matches = plan
+            .owners
+            .iter()
+            .filter_map(|owner| {
+                let owner_key = owner_state_key(&owner.owner_path);
+                if !owner_key_active_on_execution_path(
+                    scopes,
+                    inherited_active_owner_keys,
+                    &owner_key,
+                ) {
+                    return None;
+                }
+                owner
+                    .objects
+                    .iter()
+                    .find(|object| {
+                        object.local_name == attached_object.local_name
+                            && object.type_path == attached_object.object_path
+                    })
+                    .map(|object| (owner_key, object.local_name.clone()))
+            })
+            .collect::<Vec<_>>();
+        if matches.len() > 1 {
+            return Err(format!(
+                "attached object `{}` is ambiguous across active owners",
+                attached_object.local_name
+            ));
+        }
+        let Some((owner_key, object_name)) = matches.into_iter().next() else {
+            continue;
+        };
+        let scope_depth = scopes.len().saturating_sub(1);
+        let inherited_value = inherited_attached_object_value(scopes, plan, &attached_object)?;
+        let scope = scopes
+            .last_mut()
+            .ok_or_else(|| "runtime scope stack is empty".to_string())?;
+        if scope.locals.contains_key(&attached_object.local_name) {
+            continue;
+        }
+        if let Some(value) = inherited_value {
+            insert_runtime_local(
+                state,
+                scope_depth,
+                scope,
+                attached_object.local_name,
+                true,
+                value,
+            );
+            continue;
+        }
+        insert_runtime_local(
+            state,
+            scope_depth,
+            scope,
+            attached_object.local_name,
+            true,
+            make_owner_object_reference(&owner_key, &object_name),
+        );
+    }
+    Ok(())
+}
+
+fn owner_object_matches_attachment(
+    plan: &RuntimePackagePlan,
+    owner_key: &str,
+    object_name: &str,
+    attached_object: &RuntimeAttachedObject,
+) -> Result<bool, String> {
+    let owner_path = owner_key
+        .split('.')
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let owner = lookup_runtime_owner_plan(plan, &owner_path)
+        .ok_or_else(|| format!("runtime owner `{owner_key}` is not declared in the package plan"))?;
+    let object = lookup_runtime_owner_object_plan(owner, object_name)?;
+    Ok(
+        object.local_name == attached_object.local_name
+            && object.type_path == attached_object.object_path,
+    )
+}
+
+fn inherited_attached_object_value(
+    scopes: &[RuntimeScope],
+    plan: &RuntimePackagePlan,
+    attached_object: &RuntimeAttachedObject,
+) -> Result<Option<RuntimeValue>, String> {
+    let mut matches = Vec::new();
+    for scope in scopes.iter().rev().skip(1) {
+        let Some(local) = scope.locals.get(&attached_object.local_name) else {
+            continue;
+        };
+        let RuntimeValue::Ref(reference) = &local.value else {
+            continue;
+        };
+        let RuntimeReferenceTarget::OwnerObject {
+            owner_key,
+            object_name,
+            members,
+        } = &reference.target
+        else {
+            continue;
+        };
+        if !members.is_empty() {
+            continue;
+        }
+        if owner_object_matches_attachment(plan, owner_key, object_name, attached_object)? {
+            let pair = (owner_key.clone(), object_name.clone(), local.value.clone());
+            if !matches
+                .iter()
+                .any(|(seen_owner, seen_object, _)| seen_owner == owner_key && seen_object == object_name)
+            {
+                matches.push(pair);
+            }
+        }
+    }
+    if matches.len() > 1 {
+        return Err(format!(
+            "attached object `{}` is ambiguous across active owners",
+            attached_object.local_name
+        ));
+    }
+    Ok(matches.into_iter().next().map(|(_, _, value)| value))
 }
 
 fn make_owner_object_reference(owner_key: &str, object_name: &str) -> RuntimeValue {
@@ -5779,6 +6352,7 @@ fn execute_owner_object_lifecycle_hook(
             routine_index,
             Vec::new(),
             args,
+            &collect_active_owner_keys_from_state(state),
             state,
             host,
             false,
@@ -6011,7 +6585,7 @@ fn activate_owner_scope_binding(
     let visible_objects = owner
         .objects
         .iter()
-        .filter(|object| attached_object_is_visible(scopes, &object.local_name))
+        .filter(|object| attached_object_is_visible(scopes, &object.type_path, &object.local_name))
         .map(|object| object.local_name.clone())
         .collect::<Vec<_>>();
     let scope = scopes
@@ -6474,6 +7048,2168 @@ fn expect_image(value: RuntimeValue, context: &str) -> Result<RuntimeImageHandle
         return Err(format!("{context} expected Image"));
     };
     Ok(handle)
+}
+
+fn expect_arcana_desktop_window(
+    value: RuntimeValue,
+    context: &str,
+) -> Result<RuntimeWindowHandle, String> {
+    expect_window(value, context)
+}
+
+fn expect_arcana_desktop_session(
+    value: RuntimeValue,
+    context: &str,
+) -> Result<RuntimeAppSessionHandle, String> {
+    expect_app_session(value, context)
+}
+
+fn expect_arcana_desktop_frame(
+    value: RuntimeValue,
+    context: &str,
+) -> Result<RuntimeAppFrameHandle, String> {
+    expect_app_frame(value, context)
+}
+
+fn expect_arcana_desktop_wake(
+    value: RuntimeValue,
+    context: &str,
+) -> Result<RuntimeWakeHandle, String> {
+    expect_wake(value, context)
+}
+
+fn expect_arcana_window_id_value(value: RuntimeValue, context: &str) -> Result<i64, String> {
+    match value {
+        RuntimeValue::Record { name, mut fields } if name == "arcana_desktop.types.WindowId" => {
+            expect_int(
+                fields
+                    .remove("value")
+                    .ok_or_else(|| format!("{context} missing WindowId.value field"))?,
+                context,
+            )
+        }
+        other => expect_int(other, context),
+    }
+}
+
+fn expect_named_record(
+    value: RuntimeValue,
+    record_name: &str,
+    context: &str,
+) -> Result<BTreeMap<String, RuntimeValue>, String> {
+    let RuntimeValue::Record { name, fields } = value else {
+        return Err(format!("{context} expected {record_name}"));
+    };
+    if name != record_name {
+        return Err(format!("{context} expected {record_name}, got `{name}`"));
+    }
+    Ok(fields)
+}
+
+fn remove_record_field(
+    fields: &mut BTreeMap<String, RuntimeValue>,
+    field: &str,
+    context: &str,
+) -> Result<RuntimeValue, String> {
+    fields
+        .remove(field)
+        .ok_or_else(|| format!("{context} missing `{field}` field"))
+}
+
+fn arcana_window_id_record(id: i64) -> RuntimeValue {
+    let mut fields = BTreeMap::new();
+    fields.insert("value".to_string(), RuntimeValue::Int(id));
+    RuntimeValue::Record {
+        name: "arcana_desktop.types.WindowId".to_string(),
+        fields,
+    }
+}
+
+fn arcana_desktop_window_value(window: RuntimeWindowHandle) -> RuntimeValue {
+    RuntimeValue::Opaque(RuntimeOpaqueValue::Window(window))
+}
+
+fn arcana_desktop_frame_record(frame: RuntimeAppFrameHandle) -> RuntimeValue {
+    RuntimeValue::Opaque(RuntimeOpaqueValue::AppFrame(frame))
+}
+
+fn arcana_desktop_session_record(session: RuntimeAppSessionHandle) -> RuntimeValue {
+    RuntimeValue::Opaque(RuntimeOpaqueValue::AppSession(session))
+}
+
+fn arcana_desktop_wake_record(wake: RuntimeWakeHandle) -> RuntimeValue {
+    RuntimeValue::Opaque(RuntimeOpaqueValue::Wake(wake))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ArcanaDesktopRuntimeContextSpec {
+    session: RuntimeAppSessionHandle,
+    wake: RuntimeWakeHandle,
+    main_window_id: i64,
+    main_window: RuntimeWindowHandle,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ArcanaDesktopAppContextSpec {
+    runtime: ArcanaDesktopRuntimeContextSpec,
+    current_window_id: Option<i64>,
+    current_is_main_window: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ArcanaDesktopTargetEventSpec {
+    window_id: i64,
+    is_main_window: bool,
+}
+
+fn expect_arcana_window_id_option(value: RuntimeValue, context: &str) -> Result<Option<i64>, String> {
+    match value {
+        RuntimeValue::Variant { name, payload }
+            if name == "Option.Some" || name == "std.option.Option.Some" =>
+        {
+            if payload.len() != 1 {
+                return Err(format!(
+                    "{context} expected Option.Some with one payload item"
+                ));
+            }
+            Ok(Some(expect_arcana_window_id_value(
+                payload.into_iter().next().expect("validated payload length"),
+                context,
+            )?))
+        }
+        RuntimeValue::Variant { name, payload }
+            if name == "Option.None" || name == "std.option.Option.None" =>
+        {
+            if !payload.is_empty() {
+                return Err(format!("{context} expected Option.None without payload"));
+            }
+            Ok(None)
+        }
+        other => Err(format!(
+            "{context} expected Option[arcana_desktop.types.WindowId], got `{other:?}`"
+        )),
+    }
+}
+
+fn expect_arcana_desktop_runtime_context(
+    value: RuntimeValue,
+    context: &str,
+) -> Result<ArcanaDesktopRuntimeContextSpec, String> {
+    let mut fields = expect_named_record(value, "arcana_desktop.types.RuntimeContext", context)?;
+    Ok(ArcanaDesktopRuntimeContextSpec {
+        session: expect_arcana_desktop_session(
+            remove_record_field(&mut fields, "session", context)?,
+            context,
+        )?,
+        wake: expect_arcana_desktop_wake(
+            remove_record_field(&mut fields, "wake", context)?,
+            context,
+        )?,
+        main_window_id: expect_arcana_window_id_value(
+            remove_record_field(&mut fields, "main_window_id", context)?,
+            context,
+        )?,
+        main_window: expect_arcana_desktop_window(
+            remove_record_field(&mut fields, "main_window", context)?,
+            context,
+        )?,
+    })
+}
+
+fn expect_arcana_desktop_app_context(
+    value: RuntimeValue,
+    context: &str,
+) -> Result<ArcanaDesktopAppContextSpec, String> {
+    let mut fields = expect_named_record(value, "arcana_desktop.types.AppContext", context)?;
+    Ok(ArcanaDesktopAppContextSpec {
+        runtime: expect_arcana_desktop_runtime_context(
+            remove_record_field(&mut fields, "runtime", context)?,
+            context,
+        )?,
+        current_window_id: expect_arcana_window_id_option(
+            remove_record_field(&mut fields, "current_window_id", context)?,
+            context,
+        )?,
+        current_is_main_window: expect_bool(
+            remove_record_field(&mut fields, "current_is_main_window", context)?,
+            context,
+        )?,
+    })
+}
+
+fn expect_arcana_desktop_target_event(
+    value: RuntimeValue,
+    context: &str,
+) -> Result<ArcanaDesktopTargetEventSpec, String> {
+    let mut fields = expect_named_record(value, "arcana_desktop.types.TargetedEvent", context)?;
+    Ok(ArcanaDesktopTargetEventSpec {
+        window_id: expect_arcana_window_id_value(
+            remove_record_field(&mut fields, "window_id", context)?,
+            context,
+        )?,
+        is_main_window: expect_bool(
+            remove_record_field(&mut fields, "is_main_window", context)?,
+            context,
+        )?,
+    })
+}
+
+fn arcana_desktop_lookup_window_for_id(
+    context: &ArcanaDesktopAppContextSpec,
+    window_id: i64,
+    host: &mut dyn RuntimeHost,
+) -> Result<Option<RuntimeWindowHandle>, String> {
+    host.events_session_window_by_id(context.runtime.session, window_id)
+}
+
+fn arcana_desktop_cached_main_window_if_live(
+    context: &ArcanaDesktopAppContextSpec,
+    host: &mut dyn RuntimeHost,
+) -> Result<Option<RuntimeWindowHandle>, String> {
+    let ids = host.events_session_window_ids(context.runtime.session)?;
+    if ids
+        .into_iter()
+        .any(|candidate| candidate == context.runtime.main_window_id)
+    {
+        return Ok(Some(context.runtime.main_window));
+    }
+    Ok(None)
+}
+
+fn arcana_desktop_best_main_window(
+    context: &ArcanaDesktopAppContextSpec,
+    host: &mut dyn RuntimeHost,
+) -> Result<Option<RuntimeWindowHandle>, String> {
+    if let Some(window) = arcana_desktop_cached_main_window_if_live(context, host)? {
+        return Ok(Some(window));
+    }
+    arcana_desktop_lookup_window_for_id(context, context.runtime.main_window_id, host)
+}
+
+fn arcana_desktop_target_window_value(
+    context: &ArcanaDesktopAppContextSpec,
+    target: &ArcanaDesktopTargetEventSpec,
+    host: &mut dyn RuntimeHost,
+) -> Result<Option<RuntimeWindowHandle>, String> {
+    if target.window_id == context.runtime.main_window_id {
+        return arcana_desktop_cached_main_window_if_live(context, host);
+    }
+    arcana_desktop_lookup_window_for_id(context, target.window_id, host)
+}
+
+fn arcana_desktop_current_window_value(
+    context: &ArcanaDesktopAppContextSpec,
+    host: &mut dyn RuntimeHost,
+) -> Result<Option<RuntimeWindowHandle>, String> {
+    let Some(window_id) = context.current_window_id else {
+        return Ok(None);
+    };
+    if window_id == context.runtime.main_window_id {
+        return arcana_desktop_cached_main_window_if_live(context, host);
+    }
+    arcana_desktop_lookup_window_for_id(context, window_id, host)
+}
+
+struct ArcanaWindowConfigSpec {
+    title: String,
+    size: (i64, i64),
+    position: (i64, i64),
+    visible: bool,
+    min_size: (i64, i64),
+    max_size: (i64, i64),
+    resizable: bool,
+    decorated: bool,
+    transparent: bool,
+    topmost: bool,
+    maximized: bool,
+    fullscreen: bool,
+    theme_override_code: i64,
+    cursor_visible: bool,
+    cursor_grab_mode: i64,
+    cursor_icon_code: i64,
+    cursor_position: (i64, i64),
+    text_input_enabled: bool,
+}
+
+fn expect_arcana_window_config(
+    value: RuntimeValue,
+    context: &str,
+) -> Result<ArcanaWindowConfigSpec, String> {
+    let mut cfg = expect_named_record(value, "arcana_desktop.types.WindowConfig", context)?;
+    let title = expect_str(remove_record_field(&mut cfg, "title", context)?, context)?;
+    let mut bounds = expect_named_record(
+        remove_record_field(&mut cfg, "bounds", context)?,
+        "arcana_desktop.types.WindowBounds",
+        context,
+    )?;
+    let size = expect_int_pair(remove_record_field(&mut bounds, "size", context)?, context)?;
+    let position = expect_int_pair(
+        remove_record_field(&mut bounds, "position", context)?,
+        context,
+    )?;
+    let visible = expect_bool(
+        remove_record_field(&mut bounds, "visible", context)?,
+        context,
+    )?;
+    let min_size = expect_int_pair(
+        remove_record_field(&mut bounds, "min_size", context)?,
+        context,
+    )?;
+    let max_size = expect_int_pair(
+        remove_record_field(&mut bounds, "max_size", context)?,
+        context,
+    )?;
+    let mut options = expect_named_record(
+        remove_record_field(&mut cfg, "options", context)?,
+        "arcana_desktop.types.WindowOptions",
+        context,
+    )?;
+    let mut style = expect_named_record(
+        remove_record_field(&mut options, "style", context)?,
+        "arcana_desktop.types.WindowStyle",
+        context,
+    )?;
+    let mut state = expect_named_record(
+        remove_record_field(&mut options, "state", context)?,
+        "arcana_desktop.types.WindowState",
+        context,
+    )?;
+    let mut cursor = expect_named_record(
+        remove_record_field(&mut options, "cursor", context)?,
+        "arcana_desktop.types.CursorSettings",
+        context,
+    )?;
+    Ok(ArcanaWindowConfigSpec {
+        title,
+        size,
+        position,
+        visible,
+        min_size,
+        max_size,
+        resizable: expect_bool(
+            remove_record_field(&mut style, "resizable", context)?,
+            context,
+        )?,
+        decorated: expect_bool(
+            remove_record_field(&mut style, "decorated", context)?,
+            context,
+        )?,
+        transparent: expect_bool(
+            remove_record_field(&mut style, "transparent", context)?,
+            context,
+        )?,
+        topmost: expect_bool(
+            remove_record_field(&mut state, "topmost", context)?,
+            context,
+        )?,
+        maximized: expect_bool(
+            remove_record_field(&mut state, "maximized", context)?,
+            context,
+        )?,
+        fullscreen: expect_bool(
+            remove_record_field(&mut state, "fullscreen", context)?,
+            context,
+        )?,
+        theme_override_code: expect_arcana_window_theme_override_code(
+            remove_record_field(&mut state, "theme_override", context)?,
+            context,
+        )?,
+        cursor_visible: expect_bool(
+            remove_record_field(&mut cursor, "visible", context)?,
+            context,
+        )?,
+        cursor_grab_mode: expect_arcana_cursor_grab_mode_code(
+            remove_record_field(&mut cursor, "grab_mode", context)?,
+            context,
+        )?,
+        cursor_icon_code: expect_arcana_cursor_icon_code(
+            remove_record_field(&mut cursor, "icon", context)?,
+            context,
+        )?,
+        cursor_position: expect_int_pair(
+            remove_record_field(&mut cursor, "position", context)?,
+            context,
+        )?,
+        text_input_enabled: expect_bool(
+            remove_record_field(&mut options, "text_input_enabled", context)?,
+            context,
+        )?,
+    })
+}
+
+fn expect_arcana_label_spec(
+    value: RuntimeValue,
+    context: &str,
+) -> Result<(i64, i64, String, i64), String> {
+    let mut fields = expect_named_record(value, "arcana_text.types.LabelSpec", context)?;
+    let (x, y) = expect_int_pair(remove_record_field(&mut fields, "pos", context)?, context)?;
+    let text = expect_str(remove_record_field(&mut fields, "text", context)?, context)?;
+    let color = expect_int(remove_record_field(&mut fields, "color", context)?, context)?;
+    Ok((x, y, text, color))
+}
+
+fn expect_arcana_rect_spec(
+    value: RuntimeValue,
+    context: &str,
+) -> Result<(i64, i64, i64, i64, i64), String> {
+    let mut fields = expect_named_record(value, "arcana_graphics.types.RectSpec", context)?;
+    let (x, y) = expect_int_pair(remove_record_field(&mut fields, "pos", context)?, context)?;
+    let (w, h) = expect_int_pair(remove_record_field(&mut fields, "size", context)?, context)?;
+    let color = expect_int(remove_record_field(&mut fields, "color", context)?, context)?;
+    Ok((x, y, w, h, color))
+}
+
+fn expect_arcana_line_spec(
+    value: RuntimeValue,
+    context: &str,
+) -> Result<(i64, i64, i64, i64, i64), String> {
+    let mut fields = expect_named_record(value, "arcana_graphics.types.LineSpec", context)?;
+    let (x1, y1) = expect_int_pair(remove_record_field(&mut fields, "start", context)?, context)?;
+    let (x2, y2) = expect_int_pair(remove_record_field(&mut fields, "end", context)?, context)?;
+    let color = expect_int(remove_record_field(&mut fields, "color", context)?, context)?;
+    Ok((x1, y1, x2, y2, color))
+}
+
+fn expect_arcana_circle_fill_spec(
+    value: RuntimeValue,
+    context: &str,
+) -> Result<(i64, i64, i64, i64), String> {
+    let mut fields = expect_named_record(value, "arcana_graphics.types.CircleFillSpec", context)?;
+    let (x, y) = expect_int_pair(
+        remove_record_field(&mut fields, "center", context)?,
+        context,
+    )?;
+    let radius = expect_int(
+        remove_record_field(&mut fields, "radius", context)?,
+        context,
+    )?;
+    let color = expect_int(remove_record_field(&mut fields, "color", context)?, context)?;
+    Ok((x, y, radius, color))
+}
+
+fn arcana_window_theme_override_variant(code: i64) -> RuntimeValue {
+    let suffix = match code {
+        1 => "Light",
+        2 => "Dark",
+        _ => "System",
+    };
+    RuntimeValue::Variant {
+        name: format!("arcana_desktop.types.WindowThemeOverride.{suffix}"),
+        payload: Vec::new(),
+    }
+}
+
+fn expect_arcana_window_theme_override_code(
+    value: RuntimeValue,
+    context: &str,
+) -> Result<i64, String> {
+    let RuntimeValue::Variant { name, .. } = value else {
+        return Err(format!("{context} expected WindowThemeOverride"));
+    };
+    if variant_name_matches(&name, "arcana_desktop.types.WindowThemeOverride.Light")
+        || variant_name_matches(&name, "WindowThemeOverride.Light")
+    {
+        return Ok(1);
+    }
+    if variant_name_matches(&name, "arcana_desktop.types.WindowThemeOverride.Dark")
+        || variant_name_matches(&name, "WindowThemeOverride.Dark")
+    {
+        return Ok(2);
+    }
+    if variant_name_matches(&name, "arcana_desktop.types.WindowThemeOverride.System")
+        || variant_name_matches(&name, "WindowThemeOverride.System")
+    {
+        return Ok(0);
+    }
+    Err(format!(
+        "{context} expected WindowThemeOverride variant, got `{name}`"
+    ))
+}
+
+fn arcana_cursor_icon_variant(code: i64) -> RuntimeValue {
+    let suffix = match code {
+        1 => "Text",
+        2 => "Crosshair",
+        3 => "Hand",
+        4 => "Move",
+        5 => "Wait",
+        6 => "Help",
+        7 => "NotAllowed",
+        8 => "ResizeHorizontal",
+        9 => "ResizeVertical",
+        10 => "ResizeNwse",
+        11 => "ResizeNesw",
+        _ => "Default",
+    };
+    RuntimeValue::Variant {
+        name: format!("arcana_desktop.types.CursorIcon.{suffix}"),
+        payload: Vec::new(),
+    }
+}
+
+fn expect_arcana_cursor_icon_code(value: RuntimeValue, context: &str) -> Result<i64, String> {
+    let RuntimeValue::Variant { name, .. } = value else {
+        return Err(format!("{context} expected CursorIcon"));
+    };
+    let code = match name.rsplit('.').next().unwrap_or_default() {
+        "Text" => 1,
+        "Crosshair" => 2,
+        "Hand" => 3,
+        "Move" => 4,
+        "Wait" => 5,
+        "Help" => 6,
+        "NotAllowed" => 7,
+        "ResizeHorizontal" => 8,
+        "ResizeVertical" => 9,
+        "ResizeNwse" => 10,
+        "ResizeNesw" => 11,
+        "Default" => 0,
+        _ => {
+            return Err(format!(
+                "{context} expected CursorIcon variant, got `{name}`"
+            ));
+        }
+    };
+    Ok(code)
+}
+
+fn arcana_cursor_grab_mode_variant(code: i64) -> RuntimeValue {
+    let suffix = match code {
+        1 => "Confined",
+        2 => "Locked",
+        _ => "Free",
+    };
+    RuntimeValue::Variant {
+        name: format!("arcana_desktop.types.CursorGrabMode.{suffix}"),
+        payload: Vec::new(),
+    }
+}
+
+fn expect_arcana_cursor_grab_mode_code(value: RuntimeValue, context: &str) -> Result<i64, String> {
+    let RuntimeValue::Variant { name, .. } = value else {
+        return Err(format!("{context} expected CursorGrabMode"));
+    };
+    let code = match name.rsplit('.').next().unwrap_or_default() {
+        "Confined" => 1,
+        "Locked" => 2,
+        "Free" => 0,
+        _ => {
+            return Err(format!(
+                "{context} expected CursorGrabMode variant, got `{name}`"
+            ));
+        }
+    };
+    Ok(code)
+}
+
+fn arcana_window_theme_variant(code: i64) -> RuntimeValue {
+    let suffix = match code {
+        1 => "Light",
+        2 => "Dark",
+        _ => "Unknown",
+    };
+    RuntimeValue::Variant {
+        name: format!("arcana_desktop.types.WindowTheme.{suffix}"),
+        payload: Vec::new(),
+    }
+}
+
+fn arcana_monitor_info_record(
+    index: i64,
+    host: &mut dyn RuntimeHost,
+) -> Result<RuntimeValue, String> {
+    let mut fields = BTreeMap::new();
+    let position = host.window_monitor_position(index)?;
+    let size = host.window_monitor_size(index)?;
+    fields.insert("index".to_string(), RuntimeValue::Int(index));
+    fields.insert(
+        "name".to_string(),
+        RuntimeValue::Str(host.window_monitor_name(index)?),
+    );
+    fields.insert(
+        "position".to_string(),
+        RuntimeValue::Pair(
+            Box::new(RuntimeValue::Int(position.0)),
+            Box::new(RuntimeValue::Int(position.1)),
+        ),
+    );
+    fields.insert(
+        "size".to_string(),
+        RuntimeValue::Pair(
+            Box::new(RuntimeValue::Int(size.0)),
+            Box::new(RuntimeValue::Int(size.1)),
+        ),
+    );
+    fields.insert(
+        "scale_factor_milli".to_string(),
+        RuntimeValue::Int(host.window_monitor_scale_factor_milli(index)?),
+    );
+    fields.insert(
+        "primary".to_string(),
+        RuntimeValue::Bool(host.window_monitor_is_primary(index)?),
+    );
+    Ok(RuntimeValue::Record {
+        name: "arcana_desktop.types.MonitorInfo".to_string(),
+        fields,
+    })
+}
+
+fn arcana_composition_area_record(
+    active: bool,
+    position: (i64, i64),
+    size: (i64, i64),
+) -> RuntimeValue {
+    let mut fields = BTreeMap::new();
+    fields.insert("active".to_string(), RuntimeValue::Bool(active));
+    fields.insert(
+        "position".to_string(),
+        RuntimeValue::Pair(
+            Box::new(RuntimeValue::Int(position.0)),
+            Box::new(RuntimeValue::Int(position.1)),
+        ),
+    );
+    fields.insert(
+        "size".to_string(),
+        RuntimeValue::Pair(
+            Box::new(RuntimeValue::Int(size.0)),
+            Box::new(RuntimeValue::Int(size.1)),
+        ),
+    );
+    RuntimeValue::Record {
+        name: "arcana_desktop.types.CompositionArea".to_string(),
+        fields,
+    }
+}
+
+fn arcana_window_bounds_record(
+    size: (i64, i64),
+    position: (i64, i64),
+    visible: bool,
+    min_size: (i64, i64),
+    max_size: (i64, i64),
+) -> RuntimeValue {
+    let mut fields = BTreeMap::new();
+    fields.insert(
+        "size".to_string(),
+        make_pair(RuntimeValue::Int(size.0), RuntimeValue::Int(size.1)),
+    );
+    fields.insert(
+        "position".to_string(),
+        make_pair(RuntimeValue::Int(position.0), RuntimeValue::Int(position.1)),
+    );
+    fields.insert("visible".to_string(), RuntimeValue::Bool(visible));
+    fields.insert(
+        "min_size".to_string(),
+        make_pair(RuntimeValue::Int(min_size.0), RuntimeValue::Int(min_size.1)),
+    );
+    fields.insert(
+        "max_size".to_string(),
+        make_pair(RuntimeValue::Int(max_size.0), RuntimeValue::Int(max_size.1)),
+    );
+    RuntimeValue::Record {
+        name: "arcana_desktop.types.WindowBounds".to_string(),
+        fields,
+    }
+}
+
+fn arcana_window_style_record(resizable: bool, decorated: bool, transparent: bool) -> RuntimeValue {
+    let mut fields = BTreeMap::new();
+    fields.insert("resizable".to_string(), RuntimeValue::Bool(resizable));
+    fields.insert("decorated".to_string(), RuntimeValue::Bool(decorated));
+    fields.insert("transparent".to_string(), RuntimeValue::Bool(transparent));
+    RuntimeValue::Record {
+        name: "arcana_desktop.types.WindowStyle".to_string(),
+        fields,
+    }
+}
+
+fn arcana_cursor_settings_record(
+    visible: bool,
+    grab_mode_code: i64,
+    icon_code: i64,
+    position: (i64, i64),
+) -> RuntimeValue {
+    let mut fields = BTreeMap::new();
+    fields.insert("visible".to_string(), RuntimeValue::Bool(visible));
+    fields.insert(
+        "grab_mode".to_string(),
+        arcana_cursor_grab_mode_variant(grab_mode_code),
+    );
+    fields.insert("icon".to_string(), arcana_cursor_icon_variant(icon_code));
+    fields.insert(
+        "position".to_string(),
+        make_pair(RuntimeValue::Int(position.0), RuntimeValue::Int(position.1)),
+    );
+    RuntimeValue::Record {
+        name: "arcana_desktop.types.CursorSettings".to_string(),
+        fields,
+    }
+}
+
+fn arcana_window_state_record(
+    topmost: bool,
+    maximized: bool,
+    fullscreen: bool,
+    theme_override_code: i64,
+) -> RuntimeValue {
+    let mut fields = BTreeMap::new();
+    fields.insert("topmost".to_string(), RuntimeValue::Bool(topmost));
+    fields.insert("maximized".to_string(), RuntimeValue::Bool(maximized));
+    fields.insert("fullscreen".to_string(), RuntimeValue::Bool(fullscreen));
+    fields.insert(
+        "theme_override".to_string(),
+        arcana_window_theme_override_variant(theme_override_code),
+    );
+    RuntimeValue::Record {
+        name: "arcana_desktop.types.WindowState".to_string(),
+        fields,
+    }
+}
+
+fn arcana_window_options_record(
+    style: RuntimeValue,
+    state: RuntimeValue,
+    cursor: RuntimeValue,
+    text_input_enabled: bool,
+) -> RuntimeValue {
+    let mut fields = BTreeMap::new();
+    fields.insert("style".to_string(), style);
+    fields.insert("state".to_string(), state);
+    fields.insert("cursor".to_string(), cursor);
+    fields.insert(
+        "text_input_enabled".to_string(),
+        RuntimeValue::Bool(text_input_enabled),
+    );
+    RuntimeValue::Record {
+        name: "arcana_desktop.types.WindowOptions".to_string(),
+        fields,
+    }
+}
+
+fn arcana_window_settings_record(
+    window: RuntimeWindowHandle,
+    host: &mut dyn RuntimeHost,
+) -> Result<RuntimeValue, String> {
+    let bounds = arcana_window_bounds_record(
+        host.window_size(window)?,
+        host.window_position(window)?,
+        host.window_visible(window)?,
+        host.window_min_size(window)?,
+        host.window_max_size(window)?,
+    );
+    let style = arcana_window_style_record(
+        host.window_resizable(window)?,
+        host.window_decorated(window)?,
+        host.window_transparent(window)?,
+    );
+    let cursor = arcana_cursor_settings_record(
+        host.window_cursor_visible(window)?,
+        host.window_cursor_grab_mode(window)?,
+        host.window_cursor_icon_code(window)?,
+        host.window_cursor_position(window)?,
+    );
+    let state = arcana_window_state_record(
+        host.window_topmost(window)?,
+        host.window_maximized(window)?,
+        host.window_fullscreen(window)?,
+        host.window_theme_override_code(window)?,
+    );
+    let options = arcana_window_options_record(
+        style,
+        state,
+        cursor,
+        host.window_text_input_enabled(window)?,
+    );
+    let mut fields = BTreeMap::new();
+    fields.insert(
+        "title".to_string(),
+        RuntimeValue::Str(host.window_title(window)?),
+    );
+    fields.insert("bounds".to_string(), bounds);
+    fields.insert("options".to_string(), options);
+    Ok(RuntimeValue::Record {
+        name: "arcana_desktop.types.WindowSettings".to_string(),
+        fields,
+    })
+}
+
+fn arcana_text_input_settings_record(
+    window: RuntimeWindowHandle,
+    host: &mut dyn RuntimeHost,
+) -> Result<RuntimeValue, String> {
+    let mut fields = BTreeMap::new();
+    fields.insert(
+        "enabled".to_string(),
+        RuntimeValue::Bool(host.window_text_input_enabled(window)?),
+    );
+    fields.insert(
+        "composition_area".to_string(),
+        arcana_composition_area_record(
+            host.text_input_composition_area_active(window)?,
+            host.text_input_composition_area_position(window)?,
+            host.text_input_composition_area_size(window)?,
+        ),
+    );
+    Ok(RuntimeValue::Record {
+        name: "arcana_desktop.types.TextInputSettings".to_string(),
+        fields,
+    })
+}
+
+fn arcana_desktop_key_meta_record(event: &RuntimeEventRecord) -> RuntimeValue {
+    let mut fields = BTreeMap::new();
+    fields.insert("modifiers".to_string(), RuntimeValue::Int(event.flags));
+    fields.insert("repeated".to_string(), RuntimeValue::Bool(event.repeated));
+    fields.insert(
+        "physical_key".to_string(),
+        RuntimeValue::Int(event.physical_key),
+    );
+    fields.insert(
+        "logical_key".to_string(),
+        RuntimeValue::Int(event.logical_key),
+    );
+    fields.insert(
+        "location".to_string(),
+        RuntimeValue::Int(event.key_location),
+    );
+    fields.insert("text".to_string(), RuntimeValue::Str(event.text.clone()));
+    RuntimeValue::Record {
+        name: "arcana_desktop.types.KeyMeta".to_string(),
+        fields,
+    }
+}
+
+fn arcana_desktop_key_event_record(event: &RuntimeEventRecord) -> RuntimeValue {
+    let mut fields = BTreeMap::new();
+    fields.insert("window_id".to_string(), RuntimeValue::Int(event.window_id));
+    fields.insert("key".to_string(), RuntimeValue::Int(event.key_code));
+    fields.insert("meta".to_string(), arcana_desktop_key_meta_record(event));
+    RuntimeValue::Record {
+        name: "arcana_desktop.types.KeyEvent".to_string(),
+        fields,
+    }
+}
+
+fn arcana_desktop_mouse_button_event_record(event: &RuntimeEventRecord) -> RuntimeValue {
+    let mut fields = BTreeMap::new();
+    fields.insert("window_id".to_string(), RuntimeValue::Int(event.window_id));
+    fields.insert("button".to_string(), RuntimeValue::Int(event.a));
+    fields.insert(
+        "position".to_string(),
+        make_pair(
+            RuntimeValue::Int(event.pointer_x),
+            RuntimeValue::Int(event.pointer_y),
+        ),
+    );
+    fields.insert("modifiers".to_string(), RuntimeValue::Int(event.flags));
+    RuntimeValue::Record {
+        name: "arcana_desktop.types.MouseButtonEvent".to_string(),
+        fields,
+    }
+}
+
+fn arcana_desktop_mouse_move_event_record(event: &RuntimeEventRecord) -> RuntimeValue {
+    let mut fields = BTreeMap::new();
+    fields.insert("window_id".to_string(), RuntimeValue::Int(event.window_id));
+    fields.insert(
+        "position".to_string(),
+        make_pair(RuntimeValue::Int(event.a), RuntimeValue::Int(event.b)),
+    );
+    fields.insert("modifiers".to_string(), RuntimeValue::Int(event.flags));
+    RuntimeValue::Record {
+        name: "arcana_desktop.types.MouseMoveEvent".to_string(),
+        fields,
+    }
+}
+
+fn arcana_desktop_mouse_wheel_event_record(event: &RuntimeEventRecord) -> RuntimeValue {
+    let mut fields = BTreeMap::new();
+    fields.insert("window_id".to_string(), RuntimeValue::Int(event.window_id));
+    fields.insert(
+        "delta".to_string(),
+        make_pair(RuntimeValue::Int(0), RuntimeValue::Int(event.a)),
+    );
+    fields.insert("modifiers".to_string(), RuntimeValue::Int(event.flags));
+    RuntimeValue::Record {
+        name: "arcana_desktop.types.MouseWheelEvent".to_string(),
+        fields,
+    }
+}
+
+fn arcana_desktop_text_input_event_record(event: &RuntimeEventRecord) -> RuntimeValue {
+    let mut fields = BTreeMap::new();
+    fields.insert("window_id".to_string(), RuntimeValue::Int(event.window_id));
+    fields.insert("text".to_string(), RuntimeValue::Str(event.text.clone()));
+    RuntimeValue::Record {
+        name: "arcana_desktop.types.TextInputEvent".to_string(),
+        fields,
+    }
+}
+
+fn arcana_desktop_text_composition_event_record(event: &RuntimeEventRecord) -> RuntimeValue {
+    let mut fields = BTreeMap::new();
+    fields.insert("window_id".to_string(), RuntimeValue::Int(event.window_id));
+    fields.insert("text".to_string(), RuntimeValue::Str(event.text.clone()));
+    fields.insert("caret".to_string(), RuntimeValue::Int(event.a));
+    RuntimeValue::Record {
+        name: "arcana_desktop.types.TextCompositionEvent".to_string(),
+        fields,
+    }
+}
+
+fn arcana_desktop_file_drop_event_record(event: &RuntimeEventRecord) -> RuntimeValue {
+    let mut fields = BTreeMap::new();
+    fields.insert("window_id".to_string(), RuntimeValue::Int(event.window_id));
+    fields.insert("path".to_string(), RuntimeValue::Str(event.text.clone()));
+    RuntimeValue::Record {
+        name: "arcana_desktop.types.FileDropEvent".to_string(),
+        fields,
+    }
+}
+
+fn arcana_desktop_device_id_value(device_id: i64) -> RuntimeValue {
+    if device_id == 0 {
+        return none_variant();
+    }
+    some_variant(RuntimeValue::Record {
+        name: "arcana_desktop.types.DeviceId".to_string(),
+        fields: BTreeMap::from([("value".to_string(), RuntimeValue::Int(device_id))]),
+    })
+}
+
+fn arcana_desktop_raw_mouse_motion_event_record(event: &RuntimeEventRecord) -> RuntimeValue {
+    let mut fields = BTreeMap::new();
+    fields.insert(
+        "device_id".to_string(),
+        arcana_desktop_device_id_value(event.window_id),
+    );
+    fields.insert(
+        "delta".to_string(),
+        make_pair(RuntimeValue::Int(event.a), RuntimeValue::Int(event.b)),
+    );
+    RuntimeValue::Record {
+        name: "arcana_desktop.types.RawMouseMotionEvent".to_string(),
+        fields,
+    }
+}
+
+fn arcana_desktop_raw_mouse_button_event_record(event: &RuntimeEventRecord) -> RuntimeValue {
+    let mut fields = BTreeMap::new();
+    fields.insert(
+        "device_id".to_string(),
+        arcana_desktop_device_id_value(event.window_id),
+    );
+    fields.insert("button".to_string(), RuntimeValue::Int(event.a));
+    fields.insert("pressed".to_string(), RuntimeValue::Bool(event.b != 0));
+    RuntimeValue::Record {
+        name: "arcana_desktop.types.RawMouseButtonEvent".to_string(),
+        fields,
+    }
+}
+
+fn arcana_desktop_raw_mouse_wheel_event_record(event: &RuntimeEventRecord) -> RuntimeValue {
+    let mut fields = BTreeMap::new();
+    fields.insert(
+        "device_id".to_string(),
+        arcana_desktop_device_id_value(event.window_id),
+    );
+    fields.insert(
+        "delta".to_string(),
+        make_pair(RuntimeValue::Int(event.a), RuntimeValue::Int(event.b)),
+    );
+    RuntimeValue::Record {
+        name: "arcana_desktop.types.RawMouseWheelEvent".to_string(),
+        fields,
+    }
+}
+
+fn arcana_desktop_raw_key_event_record(event: &RuntimeEventRecord) -> RuntimeValue {
+    let mut fields = BTreeMap::new();
+    fields.insert(
+        "device_id".to_string(),
+        arcana_desktop_device_id_value(event.window_id),
+    );
+    fields.insert("key".to_string(), RuntimeValue::Int(event.key_code));
+    fields.insert("meta".to_string(), arcana_desktop_key_meta_record(event));
+    fields.insert("pressed".to_string(), RuntimeValue::Bool(event.b != 0));
+    RuntimeValue::Record {
+        name: "arcana_desktop.types.RawKeyEvent".to_string(),
+        fields,
+    }
+}
+
+fn arcana_desktop_window_event_variant(event: &RuntimeEventRecord) -> RuntimeValue {
+    match event.kind {
+        1 => RuntimeValue::Variant {
+            name: "arcana_desktop.types.WindowEvent.WindowResized".to_string(),
+            payload: vec![RuntimeValue::Record {
+                name: "arcana_desktop.types.WindowResizeEvent".to_string(),
+                fields: BTreeMap::from([
+                    ("window_id".to_string(), RuntimeValue::Int(event.window_id)),
+                    (
+                        "size".to_string(),
+                        make_pair(RuntimeValue::Int(event.a), RuntimeValue::Int(event.b)),
+                    ),
+                ]),
+            }],
+        },
+        10 => RuntimeValue::Variant {
+            name: "arcana_desktop.types.WindowEvent.WindowMoved".to_string(),
+            payload: vec![RuntimeValue::Record {
+                name: "arcana_desktop.types.WindowMoveEvent".to_string(),
+                fields: BTreeMap::from([
+                    ("window_id".to_string(), RuntimeValue::Int(event.window_id)),
+                    (
+                        "position".to_string(),
+                        make_pair(RuntimeValue::Int(event.a), RuntimeValue::Int(event.b)),
+                    ),
+                ]),
+            }],
+        },
+        2 => RuntimeValue::Variant {
+            name: "arcana_desktop.types.WindowEvent.WindowCloseRequested".to_string(),
+            payload: vec![RuntimeValue::Int(event.window_id)],
+        },
+        3 => RuntimeValue::Variant {
+            name: "arcana_desktop.types.WindowEvent.WindowFocused".to_string(),
+            payload: vec![RuntimeValue::Record {
+                name: "arcana_desktop.types.WindowFocusEvent".to_string(),
+                fields: BTreeMap::from([
+                    ("window_id".to_string(), RuntimeValue::Int(event.window_id)),
+                    ("focused".to_string(), RuntimeValue::Bool(event.a != 0)),
+                ]),
+            }],
+        },
+        13 => RuntimeValue::Variant {
+            name: "arcana_desktop.types.WindowEvent.WindowRedrawRequested".to_string(),
+            payload: vec![RuntimeValue::Int(event.window_id)],
+        },
+        16 => RuntimeValue::Variant {
+            name: "arcana_desktop.types.WindowEvent.WindowScaleFactorChanged".to_string(),
+            payload: vec![RuntimeValue::Record {
+                name: "arcana_desktop.types.WindowScaleFactorEvent".to_string(),
+                fields: BTreeMap::from([
+                    ("window_id".to_string(), RuntimeValue::Int(event.window_id)),
+                    ("scale_factor_milli".to_string(), RuntimeValue::Int(event.a)),
+                ]),
+            }],
+        },
+        17 => RuntimeValue::Variant {
+            name: "arcana_desktop.types.WindowEvent.WindowThemeChanged".to_string(),
+            payload: vec![RuntimeValue::Record {
+                name: "arcana_desktop.types.WindowThemeEvent".to_string(),
+                fields: BTreeMap::from([
+                    ("window_id".to_string(), RuntimeValue::Int(event.window_id)),
+                    ("theme_code".to_string(), RuntimeValue::Int(event.a)),
+                ]),
+            }],
+        },
+        4 => RuntimeValue::Variant {
+            name: "arcana_desktop.types.WindowEvent.KeyDown".to_string(),
+            payload: vec![arcana_desktop_key_event_record(event)],
+        },
+        5 => RuntimeValue::Variant {
+            name: "arcana_desktop.types.WindowEvent.KeyUp".to_string(),
+            payload: vec![arcana_desktop_key_event_record(event)],
+        },
+        6 => RuntimeValue::Variant {
+            name: "arcana_desktop.types.WindowEvent.MouseDown".to_string(),
+            payload: vec![arcana_desktop_mouse_button_event_record(event)],
+        },
+        7 => RuntimeValue::Variant {
+            name: "arcana_desktop.types.WindowEvent.MouseUp".to_string(),
+            payload: vec![arcana_desktop_mouse_button_event_record(event)],
+        },
+        8 => RuntimeValue::Variant {
+            name: "arcana_desktop.types.WindowEvent.MouseMove".to_string(),
+            payload: vec![arcana_desktop_mouse_move_event_record(event)],
+        },
+        9 => RuntimeValue::Variant {
+            name: "arcana_desktop.types.WindowEvent.MouseWheel".to_string(),
+            payload: vec![arcana_desktop_mouse_wheel_event_record(event)],
+        },
+        11 => RuntimeValue::Variant {
+            name: "arcana_desktop.types.WindowEvent.MouseEntered".to_string(),
+            payload: vec![RuntimeValue::Int(event.window_id)],
+        },
+        12 => RuntimeValue::Variant {
+            name: "arcana_desktop.types.WindowEvent.MouseLeft".to_string(),
+            payload: vec![RuntimeValue::Int(event.window_id)],
+        },
+        14 => RuntimeValue::Variant {
+            name: "arcana_desktop.types.WindowEvent.TextInput".to_string(),
+            payload: vec![arcana_desktop_text_input_event_record(event)],
+        },
+        24 => RuntimeValue::Variant {
+            name: "arcana_desktop.types.WindowEvent.TextCompositionStarted".to_string(),
+            payload: vec![RuntimeValue::Int(event.window_id)],
+        },
+        25 => RuntimeValue::Variant {
+            name: "arcana_desktop.types.WindowEvent.TextCompositionUpdated".to_string(),
+            payload: vec![arcana_desktop_text_composition_event_record(event)],
+        },
+        26 => RuntimeValue::Variant {
+            name: "arcana_desktop.types.WindowEvent.TextCompositionCommitted".to_string(),
+            payload: vec![arcana_desktop_text_composition_event_record(event)],
+        },
+        27 => RuntimeValue::Variant {
+            name: "arcana_desktop.types.WindowEvent.TextCompositionCancelled".to_string(),
+            payload: vec![RuntimeValue::Int(event.window_id)],
+        },
+        15 => RuntimeValue::Variant {
+            name: "arcana_desktop.types.WindowEvent.FileDropped".to_string(),
+            payload: vec![arcana_desktop_file_drop_event_record(event)],
+        },
+        _ => RuntimeValue::Variant {
+            name: "arcana_desktop.types.AppEvent.Unknown".to_string(),
+            payload: vec![RuntimeValue::Int(event.kind)],
+        },
+    }
+}
+
+fn arcana_desktop_device_event_variant(event: &RuntimeEventRecord) -> RuntimeValue {
+    match event.kind {
+        18 => RuntimeValue::Variant {
+            name: "arcana_desktop.types.DeviceEvent.RawMouseMotion".to_string(),
+            payload: vec![arcana_desktop_raw_mouse_motion_event_record(event)],
+        },
+        19 => RuntimeValue::Variant {
+            name: "arcana_desktop.types.DeviceEvent.RawMouseButton".to_string(),
+            payload: vec![arcana_desktop_raw_mouse_button_event_record(event)],
+        },
+        28 => RuntimeValue::Variant {
+            name: "arcana_desktop.types.DeviceEvent.RawMouseWheel".to_string(),
+            payload: vec![arcana_desktop_raw_mouse_wheel_event_record(event)],
+        },
+        29 => RuntimeValue::Variant {
+            name: "arcana_desktop.types.DeviceEvent.RawKey".to_string(),
+            payload: vec![arcana_desktop_raw_key_event_record(event)],
+        },
+        _ => RuntimeValue::Variant {
+            name: "arcana_desktop.types.AppEvent.Unknown".to_string(),
+            payload: vec![RuntimeValue::Int(event.kind)],
+        },
+    }
+}
+
+fn arcana_desktop_window_dispatch_record(event: &RuntimeEventRecord) -> RuntimeValue {
+    let mut fields = BTreeMap::new();
+    fields.insert(
+        "window_id".to_string(),
+        arcana_window_id_record(event.window_id),
+    );
+    fields.insert(
+        "event".to_string(),
+        arcana_desktop_window_event_variant(event),
+    );
+    RuntimeValue::Record {
+        name: "arcana_desktop.types.WindowDispatchEvent".to_string(),
+        fields,
+    }
+}
+
+fn arcana_desktop_app_event_value(event: RuntimeEventRecord) -> RuntimeValue {
+    match event.kind {
+        20 => RuntimeValue::Variant {
+            name: "arcana_desktop.types.AppEvent.AppResumed".to_string(),
+            payload: Vec::new(),
+        },
+        21 => RuntimeValue::Variant {
+            name: "arcana_desktop.types.AppEvent.Wake".to_string(),
+            payload: Vec::new(),
+        },
+        22 => RuntimeValue::Variant {
+            name: "arcana_desktop.types.AppEvent.AppSuspended".to_string(),
+            payload: Vec::new(),
+        },
+        23 => RuntimeValue::Variant {
+            name: "arcana_desktop.types.AppEvent.AboutToWait".to_string(),
+            payload: Vec::new(),
+        },
+        18 | 19 | 28 | 29 => RuntimeValue::Variant {
+            name: "arcana_desktop.types.AppEvent.Device".to_string(),
+            payload: vec![arcana_desktop_device_event_variant(&event)],
+        },
+        1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 24 | 25
+        | 26 | 27 => RuntimeValue::Variant {
+            name: "arcana_desktop.types.AppEvent.Window".to_string(),
+            payload: vec![arcana_desktop_window_dispatch_record(&event)],
+        },
+        _ => RuntimeValue::Variant {
+            name: "arcana_desktop.types.AppEvent.Unknown".to_string(),
+            payload: vec![RuntimeValue::Int(event.kind)],
+        },
+    }
+}
+
+fn expect_arcana_composition_area(
+    value: RuntimeValue,
+    context: &str,
+) -> Result<(bool, (i64, i64), (i64, i64)), String> {
+    let mut fields = expect_named_record(value, "arcana_desktop.types.CompositionArea", context)?;
+    let active = expect_bool(
+        remove_record_field(&mut fields, "active", context)?,
+        context,
+    )?;
+    let position = expect_int_pair(
+        remove_record_field(&mut fields, "position", context)?,
+        context,
+    )?;
+    let size = expect_int_pair(remove_record_field(&mut fields, "size", context)?, context)?;
+    Ok((active, position, size))
+}
+
+fn try_execute_arcana_owned_api_call(
+    callable: &[String],
+    call_args: &[RuntimeCallArg],
+    host: &mut dyn RuntimeHost,
+) -> Result<Option<RuntimeValue>, String> {
+    let values = call_args
+        .iter()
+        .map(|arg| arg.value.clone())
+        .collect::<Vec<_>>();
+    match callable {
+        [a, b, c] if a == "arcana_graphics" && b == "canvas" && c == "rgb" => {
+            if values.len() != 3 {
+                return Err("arcana_graphics.canvas.rgb expects three arguments".to_string());
+            }
+            Ok(Some(RuntimeValue::Int(host.canvas_rgb(
+                expect_int(values[0].clone(), "arcana_graphics.canvas.rgb")?,
+                expect_int(values[1].clone(), "arcana_graphics.canvas.rgb")?,
+                expect_int(values[2].clone(), "arcana_graphics.canvas.rgb")?,
+            )?)))
+        }
+        [a, b, c] if a == "arcana_graphics" && b == "canvas" && c == "fill" => {
+            if values.len() != 2 {
+                return Err("arcana_graphics.canvas.fill expects two arguments".to_string());
+            }
+            host.canvas_fill(
+                expect_arcana_desktop_window(values[0].clone(), "arcana_graphics.canvas.fill")?,
+                expect_int(values[1].clone(), "arcana_graphics.canvas.fill")?,
+            )?;
+            Ok(Some(RuntimeValue::Unit))
+        }
+        [a, b, c] if a == "arcana_graphics" && b == "canvas" && c == "rect" => {
+            if values.len() != 2 {
+                return Err("arcana_graphics.canvas.rect expects two arguments".to_string());
+            }
+            let (x, y, w, h, color) =
+                expect_arcana_rect_spec(values[1].clone(), "arcana_graphics.canvas.rect")?;
+            host.canvas_rect(
+                expect_arcana_desktop_window(values[0].clone(), "arcana_graphics.canvas.rect")?,
+                x,
+                y,
+                w,
+                h,
+                color,
+            )?;
+            Ok(Some(RuntimeValue::Unit))
+        }
+        [a, b, c] if a == "arcana_graphics" && b == "canvas" && c == "line" => {
+            if values.len() != 2 {
+                return Err("arcana_graphics.canvas.line expects two arguments".to_string());
+            }
+            let (x1, y1, x2, y2, color) =
+                expect_arcana_line_spec(values[1].clone(), "arcana_graphics.canvas.line")?;
+            host.canvas_line(
+                expect_arcana_desktop_window(values[0].clone(), "arcana_graphics.canvas.line")?,
+                x1,
+                y1,
+                x2,
+                y2,
+                color,
+            )?;
+            Ok(Some(RuntimeValue::Unit))
+        }
+        [a, b, c] if a == "arcana_graphics" && b == "canvas" && c == "circle_fill" => {
+            if values.len() != 2 {
+                return Err("arcana_graphics.canvas.circle_fill expects two arguments".to_string());
+            }
+            let (x, y, radius, color) = expect_arcana_circle_fill_spec(
+                values[1].clone(),
+                "arcana_graphics.canvas.circle_fill",
+            )?;
+            host.canvas_circle_fill(
+                expect_arcana_desktop_window(
+                    values[0].clone(),
+                    "arcana_graphics.canvas.circle_fill",
+                )?,
+                x,
+                y,
+                radius,
+                color,
+            )?;
+            Ok(Some(RuntimeValue::Unit))
+        }
+        [a, b, c] if a == "arcana_graphics" && b == "canvas" && c == "present" => {
+            if values.len() != 1 {
+                return Err("arcana_graphics.canvas.present expects one argument".to_string());
+            }
+            host.canvas_present(expect_arcana_desktop_window(
+                values[0].clone(),
+                "arcana_graphics.canvas.present",
+            )?)?;
+            Ok(Some(RuntimeValue::Unit))
+        }
+        [a, b, c] if a == "arcana_text" && b == "labels" && c == "label" => {
+            if values.len() != 2 {
+                return Err("arcana_text.labels.label expects two arguments".to_string());
+            }
+            let (x, y, text, color) =
+                expect_arcana_label_spec(values[1].clone(), "arcana_text.labels.label")?;
+            host.canvas_label(
+                expect_arcana_desktop_window(values[0].clone(), "arcana_text.labels.label")?,
+                x,
+                y,
+                &text,
+                color,
+            )?;
+            Ok(Some(RuntimeValue::Unit))
+        }
+        [a, b, c] if a == "arcana_text" && b == "labels" && c == "measure" => {
+            if values.len() != 1 {
+                return Err("arcana_text.labels.measure expects one argument".to_string());
+            }
+            let (w, h) = host.canvas_label_size(&expect_str(
+                values[0].clone(),
+                "arcana_text.labels.measure",
+            )?)?;
+            Ok(Some(RuntimeValue::Pair(
+                Box::new(RuntimeValue::Int(w)),
+                Box::new(RuntimeValue::Int(h)),
+            )))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "events" && c == "poll" => {
+            if values.len() != 1 {
+                return Err("arcana_desktop.events.poll expects one argument".to_string());
+            }
+            let frame =
+                expect_arcana_desktop_frame(values[0].clone(), "arcana_desktop.events.poll")?;
+            Ok(Some(match host.events_poll(frame)? {
+                Some(event) => some_variant(arcana_desktop_app_event_value(event)),
+                None => none_variant(),
+            }))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "events" && c == "pump" => {
+            if values.len() != 1 {
+                return Err("arcana_desktop.events.pump expects one argument".to_string());
+            }
+            Ok(Some(arcana_desktop_frame_record(host.events_pump(
+                expect_arcana_desktop_window(values[0].clone(), "arcana_desktop.events.pump")?,
+            )?)))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "events" && c == "open_session" => {
+            if !values.is_empty() {
+                return Err("arcana_desktop.events.open_session expects zero arguments".to_string());
+            }
+            Ok(Some(arcana_desktop_session_record(
+                host.events_session_open()?,
+            )))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "events" && c == "close_session" => {
+            let session = expect_arcana_desktop_session(
+                expect_single_arg(values, "arcana_desktop.events.close_session")?,
+                "arcana_desktop.events.close_session",
+            )?;
+            host.events_session_close(session)?;
+            Ok(Some(RuntimeValue::Unit))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "events" && c == "attach_window" => {
+            if values.len() != 2 {
+                return Err("arcana_desktop.events.attach_window expects two arguments".to_string());
+            }
+            host.events_session_attach_window(
+                expect_arcana_desktop_session(
+                    values[0].clone(),
+                    "arcana_desktop.events.attach_window",
+                )?,
+                expect_arcana_desktop_window(
+                    values[1].clone(),
+                    "arcana_desktop.events.attach_window",
+                )?,
+            )?;
+            Ok(Some(RuntimeValue::Unit))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "events" && c == "detach_window" => {
+            if values.len() != 2 {
+                return Err("arcana_desktop.events.detach_window expects two arguments".to_string());
+            }
+            host.events_session_detach_window(
+                expect_arcana_desktop_session(
+                    values[0].clone(),
+                    "arcana_desktop.events.detach_window",
+                )?,
+                expect_arcana_desktop_window(
+                    values[1].clone(),
+                    "arcana_desktop.events.detach_window",
+                )?,
+            )?;
+            Ok(Some(RuntimeValue::Unit))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "events" && c == "window_ids" => {
+            let session = expect_arcana_desktop_session(
+                expect_single_arg(values, "arcana_desktop.events.window_ids")?,
+                "arcana_desktop.events.window_ids",
+            )?;
+            let ids = host.events_session_window_ids(session)?;
+            Ok(Some(RuntimeValue::List(
+                ids.into_iter().map(arcana_window_id_record).collect(),
+            )))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "events" && c == "pump_session" => {
+            let session = expect_arcana_desktop_session(
+                expect_single_arg(values, "arcana_desktop.events.pump_session")?,
+                "arcana_desktop.events.pump_session",
+            )?;
+            Ok(Some(arcana_desktop_frame_record(
+                host.events_session_pump(session)?,
+            )))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "events" && c == "wait_session" => {
+            if values.len() != 2 {
+                return Err("arcana_desktop.events.wait_session expects two arguments".to_string());
+            }
+            let session = expect_arcana_desktop_session(
+                values[0].clone(),
+                "arcana_desktop.events.wait_session",
+            )?;
+            let timeout = expect_int(values[1].clone(), "arcana_desktop.events.wait_session")?;
+            Ok(Some(arcana_desktop_frame_record(
+                host.events_session_wait(session, timeout)?,
+            )))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "events" && c == "create_wake" => {
+            let session = expect_arcana_desktop_session(
+                expect_single_arg(values, "arcana_desktop.events.create_wake")?,
+                "arcana_desktop.events.create_wake",
+            )?;
+            Ok(Some(arcana_desktop_wake_record(
+                host.events_session_create_wake(session)?,
+            )))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "events" && c == "wake" => {
+            let wake = expect_arcana_desktop_wake(
+                expect_single_arg(values, "arcana_desktop.events.wake")?,
+                "arcana_desktop.events.wake",
+            )?;
+            host.events_wake_signal(wake)?;
+            Ok(Some(RuntimeValue::Unit))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "app" && c == "wake_handle" => {
+            let context = expect_arcana_desktop_app_context(
+                expect_single_arg(values, "arcana_desktop.app.wake_handle")?,
+                "arcana_desktop.app.wake_handle",
+            )?;
+            Ok(Some(arcana_desktop_wake_record(context.runtime.wake)))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "app" && c == "window_for_id" => {
+            if values.len() != 2 {
+                return Err("arcana_desktop.app.window_for_id expects two arguments".to_string());
+            }
+            let context = expect_arcana_desktop_app_context(
+                values[0].clone(),
+                "arcana_desktop.app.window_for_id",
+            )?;
+            let window_id = expect_arcana_window_id_value(
+                values[1].clone(),
+                "arcana_desktop.app.window_for_id",
+            )?;
+            Ok(Some(match arcana_desktop_lookup_window_for_id(&context, window_id, host)? {
+                Some(window) => some_variant(arcana_desktop_window_value(window)),
+                None => none_variant(),
+            }))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "app" && c == "main_window_id" => {
+            let context = expect_arcana_desktop_app_context(
+                expect_single_arg(values, "arcana_desktop.app.main_window_id")?,
+                "arcana_desktop.app.main_window_id",
+            )?;
+            Ok(Some(arcana_window_id_record(context.runtime.main_window_id)))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "app" && c == "main_window" => {
+            let context = expect_arcana_desktop_app_context(
+                expect_single_arg(values, "arcana_desktop.app.main_window")?,
+                "arcana_desktop.app.main_window",
+            )?;
+            Ok(Some(match arcana_desktop_best_main_window(&context, host)? {
+                Some(window) => ok_variant(arcana_desktop_window_value(window)),
+                None => err_variant("missing main window".to_string()),
+            }))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "app" && c == "cached_main_window" => {
+            let context = expect_arcana_desktop_app_context(
+                expect_single_arg(values, "arcana_desktop.app.cached_main_window")?,
+                "arcana_desktop.app.cached_main_window",
+            )?;
+            Ok(Some(arcana_desktop_window_value(context.runtime.main_window)))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "app" && c == "main_window_or_cached" => {
+            let context = expect_arcana_desktop_app_context(
+                expect_single_arg(values, "arcana_desktop.app.main_window_or_cached")?,
+                "arcana_desktop.app.main_window_or_cached",
+            )?;
+            let window = arcana_desktop_best_main_window(&context, host)?
+                .unwrap_or(context.runtime.main_window);
+            Ok(Some(arcana_desktop_window_value(window)))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "app" && c == "require_main_window" => {
+            let context = expect_arcana_desktop_app_context(
+                expect_single_arg(values, "arcana_desktop.app.require_main_window")?,
+                "arcana_desktop.app.require_main_window",
+            )?;
+            Ok(Some(match arcana_desktop_best_main_window(&context, host)? {
+                Some(window) => ok_variant(arcana_desktop_window_value(window)),
+                None => err_variant("missing main window".to_string()),
+            }))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "app" && c == "target_window" => {
+            if values.len() != 2 {
+                return Err("arcana_desktop.app.target_window expects two arguments".to_string());
+            }
+            let context = expect_arcana_desktop_app_context(
+                values[0].clone(),
+                "arcana_desktop.app.target_window",
+            )?;
+            let target = expect_arcana_desktop_target_event(
+                values[1].clone(),
+                "arcana_desktop.app.target_window",
+            )?;
+            Ok(Some(
+                match arcana_desktop_target_window_value(&context, &target, host)? {
+                    Some(window) => some_variant(arcana_desktop_window_value(window)),
+                    None => none_variant(),
+                },
+            ))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "app" && c == "require_target_window" => {
+            if values.len() != 2 {
+                return Err(
+                    "arcana_desktop.app.require_target_window expects two arguments".to_string(),
+                );
+            }
+            let context = expect_arcana_desktop_app_context(
+                values[0].clone(),
+                "arcana_desktop.app.require_target_window",
+            )?;
+            let target = expect_arcana_desktop_target_event(
+                values[1].clone(),
+                "arcana_desktop.app.require_target_window",
+            )?;
+            Ok(Some(
+                match arcana_desktop_target_window_value(&context, &target, host)? {
+                    Some(window) => ok_variant(arcana_desktop_window_value(window)),
+                    None => err_variant("missing target event window".to_string()),
+                },
+            ))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "app" && c == "target_is_main_window" => {
+            let target = expect_arcana_desktop_target_event(
+                expect_single_arg(values, "arcana_desktop.app.target_is_main_window")?,
+                "arcana_desktop.app.target_is_main_window",
+            )?;
+            Ok(Some(RuntimeValue::Bool(target.is_main_window)))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "app" && c == "current_window_id" => {
+            let context = expect_arcana_desktop_app_context(
+                expect_single_arg(values, "arcana_desktop.app.current_window_id")?,
+                "arcana_desktop.app.current_window_id",
+            )?;
+            Ok(Some(match context.current_window_id {
+                Some(window_id) => some_variant(arcana_window_id_record(window_id)),
+                None => none_variant(),
+            }))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "app" && c == "current_window" => {
+            let context = expect_arcana_desktop_app_context(
+                expect_single_arg(values, "arcana_desktop.app.current_window")?,
+                "arcana_desktop.app.current_window",
+            )?;
+            let window = arcana_desktop_current_window_value(&context, host)?;
+            Ok(Some(match window {
+                Some(window) => some_variant(arcana_desktop_window_value(window)),
+                None => none_variant(),
+            }))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "app" && c == "require_current_window" => {
+            let context = expect_arcana_desktop_app_context(
+                expect_single_arg(values, "arcana_desktop.app.require_current_window")?,
+                "arcana_desktop.app.require_current_window",
+            )?;
+            let window = arcana_desktop_current_window_value(&context, host)?;
+            Ok(Some(match window {
+                Some(window) => ok_variant(arcana_desktop_window_value(window)),
+                None => err_variant("missing current event window".to_string()),
+            }))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "app" && c == "current_is_main_window" => {
+            let context = expect_arcana_desktop_app_context(
+                expect_single_arg(values, "arcana_desktop.app.current_is_main_window")?,
+                "arcana_desktop.app.current_is_main_window",
+            )?;
+            Ok(Some(RuntimeValue::Bool(context.current_is_main_window)))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "app" && c == "target_window_id" => {
+            let target = expect_arcana_desktop_target_event(
+                expect_single_arg(values, "arcana_desktop.app.target_window_id")?,
+                "arcana_desktop.app.target_window_id",
+            )?;
+            Ok(Some(arcana_window_id_record(target.window_id)))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "open_in" => {
+            if values.len() != 2 {
+                return Err("arcana_desktop.window.open_in expects two arguments".to_string());
+            }
+            let session =
+                expect_arcana_desktop_session(values[0].clone(), "arcana_desktop.window.open_in")?;
+            let cfg =
+                expect_arcana_window_config(values[1].clone(), "arcana_desktop.window.open_in")?;
+            Ok(Some(
+                match host.window_open(&cfg.title, cfg.size.0, cfg.size.1) {
+                    Ok(window) => {
+                        let applied = (|| -> Result<(), String> {
+                            host.window_set_position(window, cfg.position.0, cfg.position.1)?;
+                            host.window_set_min_size(window, cfg.min_size.0, cfg.min_size.1)?;
+                            host.window_set_max_size(window, cfg.max_size.0, cfg.max_size.1)?;
+                            host.window_set_resizable(window, cfg.resizable)?;
+                            host.window_set_decorated(window, cfg.decorated)?;
+                            host.window_set_transparent(window, cfg.transparent)?;
+                            host.window_set_topmost(window, cfg.topmost)?;
+                            host.window_set_maximized(window, cfg.maximized)?;
+                            host.window_set_fullscreen(window, cfg.fullscreen)?;
+                            host.window_set_theme_override_code(window, cfg.theme_override_code)?;
+                            host.window_set_cursor_visible(window, cfg.cursor_visible)?;
+                            host.window_set_cursor_icon_code(window, cfg.cursor_icon_code)?;
+                            host.window_set_cursor_grab_mode(window, cfg.cursor_grab_mode)?;
+                            if cfg.cursor_position.0 >= 0 && cfg.cursor_position.1 >= 0 {
+                                host.window_set_cursor_position(
+                                    window,
+                                    cfg.cursor_position.0,
+                                    cfg.cursor_position.1,
+                                )?;
+                            }
+                            host.window_set_text_input_enabled(window, cfg.text_input_enabled)?;
+                            host.window_set_visible(window, cfg.visible)?;
+                            host.events_session_attach_window(session, window)?;
+                            Ok(())
+                        })();
+                        match applied {
+                            Ok(()) => ok_variant(arcana_desktop_window_value(window)),
+                            Err(err) => {
+                                let _ = host.window_close(window);
+                                err_variant(err)
+                            }
+                        }
+                    }
+                    Err(err) => err_variant(err),
+                },
+            ))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "id" => {
+            if values.len() != 1 {
+                return Err("arcana_desktop.window.id expects one argument".to_string());
+            }
+            let window =
+                expect_arcana_desktop_window(values[0].clone(), "arcana_desktop.window.id")?;
+            let id = host.window_id(window)?;
+            Ok(Some(arcana_window_id_record(id)))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "alive" => {
+            if values.len() != 1 {
+                return Err("arcana_desktop.window.alive expects one argument".to_string());
+            }
+            let window =
+                expect_arcana_desktop_window(values[0].clone(), "arcana_desktop.window.alive")?;
+            let alive = host.window_alive(window)?;
+            Ok(Some(RuntimeValue::Bool(alive)))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "size" => {
+            if values.len() != 1 {
+                return Err("arcana_desktop.window.size expects one argument".to_string());
+            }
+            let (w, h) = host.window_size(expect_arcana_desktop_window(
+                values[0].clone(),
+                "arcana_desktop.window.size",
+            )?)?;
+            Ok(Some(RuntimeValue::Pair(
+                Box::new(RuntimeValue::Int(w)),
+                Box::new(RuntimeValue::Int(h)),
+            )))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "title" => {
+            if values.len() != 1 {
+                return Err("arcana_desktop.window.title expects one argument".to_string());
+            }
+            Ok(Some(RuntimeValue::Str(host.window_title(
+                expect_arcana_desktop_window(values[0].clone(), "arcana_desktop.window.title")?,
+            )?)))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "scale_factor_milli" => {
+            if values.len() != 1 {
+                return Err(
+                    "arcana_desktop.window.scale_factor_milli expects one argument".to_string(),
+                );
+            }
+            Ok(Some(RuntimeValue::Int(host.window_scale_factor_milli(
+                expect_arcana_desktop_window(
+                    values[0].clone(),
+                    "arcana_desktop.window.scale_factor_milli",
+                )?,
+            )?)))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "primary_monitor" => {
+            if !values.is_empty() {
+                return Err(
+                    "arcana_desktop.window.primary_monitor expects zero arguments".to_string(),
+                );
+            }
+            Ok(Some(arcana_monitor_info_record(
+                host.window_primary_monitor_index()?,
+                host,
+            )?))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "current_monitor" => {
+            if values.len() != 1 {
+                return Err(
+                    "arcana_desktop.window.current_monitor expects one argument".to_string()
+                );
+            }
+            Ok(Some(arcana_monitor_info_record(
+                host.window_current_monitor_index(expect_arcana_desktop_window(
+                    values[0].clone(),
+                    "arcana_desktop.window.current_monitor",
+                )?)?,
+                host,
+            )?))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "monitor_count" => {
+            if !values.is_empty() {
+                return Err(
+                    "arcana_desktop.window.monitor_count expects zero arguments".to_string()
+                );
+            }
+            Ok(Some(RuntimeValue::Int(host.window_monitor_count()?)))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "events" && c == "window_for_id" => {
+            if values.len() != 2 {
+                return Err("arcana_desktop.events.window_for_id expects two arguments".to_string());
+            }
+            let session = expect_arcana_desktop_session(
+                values[0].clone(),
+                "arcana_desktop.events.window_for_id",
+            )?;
+            let window_id = expect_arcana_window_id_value(
+                values[1].clone(),
+                "arcana_desktop.events.window_for_id",
+            )?;
+            Ok(Some(
+                match host.events_session_window_by_id(session, window_id)? {
+                    Some(window) => RuntimeValue::Variant {
+                        name: "Option.Some".to_string(),
+                        payload: vec![arcana_desktop_window_value(window)],
+                    },
+                    None => RuntimeValue::Variant {
+                        name: "Option.None".to_string(),
+                        payload: Vec::new(),
+                    },
+                },
+            ))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "monitor" && c == "primary" => {
+            if !values.is_empty() {
+                return Err("arcana_desktop.monitor.primary expects zero arguments".to_string());
+            }
+            Ok(Some(arcana_monitor_info_record(
+                host.window_primary_monitor_index()?,
+                host,
+            )?))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "monitor" && c == "current" => {
+            if values.len() != 1 {
+                return Err("arcana_desktop.monitor.current expects one argument".to_string());
+            }
+            Ok(Some(arcana_monitor_info_record(
+                host.window_current_monitor_index(expect_arcana_desktop_window(
+                    values[0].clone(),
+                    "arcana_desktop.monitor.current",
+                )?)?,
+                host,
+            )?))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "monitor" && c == "count" => {
+            if !values.is_empty() {
+                return Err("arcana_desktop.monitor.count expects zero arguments".to_string());
+            }
+            Ok(Some(RuntimeValue::Int(host.window_monitor_count()?)))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "min_size" => {
+            if values.len() != 1 {
+                return Err("arcana_desktop.window.min_size expects one argument".to_string());
+            }
+            let (w, h) = host.window_min_size(expect_arcana_desktop_window(
+                values[0].clone(),
+                "arcana_desktop.window.min_size",
+            )?)?;
+            Ok(Some(RuntimeValue::Pair(
+                Box::new(RuntimeValue::Int(w)),
+                Box::new(RuntimeValue::Int(h)),
+            )))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "max_size" => {
+            if values.len() != 1 {
+                return Err("arcana_desktop.window.max_size expects one argument".to_string());
+            }
+            let (w, h) = host.window_max_size(expect_arcana_desktop_window(
+                values[0].clone(),
+                "arcana_desktop.window.max_size",
+            )?)?;
+            Ok(Some(RuntimeValue::Pair(
+                Box::new(RuntimeValue::Int(w)),
+                Box::new(RuntimeValue::Int(h)),
+            )))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "theme_override" => {
+            if values.len() != 1 {
+                return Err("arcana_desktop.window.theme_override expects one argument".to_string());
+            }
+            let code = host.window_theme_override_code(expect_arcana_desktop_window(
+                values[0].clone(),
+                "arcana_desktop.window.theme_override",
+            )?)?;
+            Ok(Some(arcana_window_theme_override_variant(code)))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "theme" => {
+            if values.len() != 1 {
+                return Err("arcana_desktop.window.theme expects one argument".to_string());
+            }
+            Ok(Some(arcana_window_theme_variant(host.window_theme_code(
+                expect_arcana_desktop_window(values[0].clone(), "arcana_desktop.window.theme")?,
+            )?)))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "cursor_icon" => {
+            if values.len() != 1 {
+                return Err("arcana_desktop.window.cursor_icon expects one argument".to_string());
+            }
+            let code = host.window_cursor_icon_code(expect_arcana_desktop_window(
+                values[0].clone(),
+                "arcana_desktop.window.cursor_icon",
+            )?)?;
+            Ok(Some(arcana_cursor_icon_variant(code)))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "cursor_grab_mode" => {
+            if values.len() != 1 {
+                return Err(
+                    "arcana_desktop.window.cursor_grab_mode expects one argument".to_string(),
+                );
+            }
+            Ok(Some(arcana_cursor_grab_mode_variant(
+                host.window_cursor_grab_mode(expect_arcana_desktop_window(
+                    values[0].clone(),
+                    "arcana_desktop.window.cursor_grab_mode",
+                )?)?,
+            )))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "cursor_position" => {
+            if values.len() != 1 {
+                return Err(
+                    "arcana_desktop.window.cursor_position expects one argument".to_string()
+                );
+            }
+            let (x, y) = host.window_cursor_position(expect_arcana_desktop_window(
+                values[0].clone(),
+                "arcana_desktop.window.cursor_position",
+            )?)?;
+            Ok(Some(RuntimeValue::Pair(
+                Box::new(RuntimeValue::Int(x)),
+                Box::new(RuntimeValue::Int(y)),
+            )))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "focused" => {
+            if values.len() != 1 {
+                return Err("arcana_desktop.window.focused expects one argument".to_string());
+            }
+            Ok(Some(RuntimeValue::Bool(host.window_focused(
+                expect_arcana_desktop_window(values[0].clone(), "arcana_desktop.window.focused")?,
+            )?)))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "resized" => {
+            if values.len() != 1 {
+                return Err("arcana_desktop.window.resized expects one argument".to_string());
+            }
+            Ok(Some(RuntimeValue::Bool(host.window_resized(
+                expect_arcana_desktop_window(values[0].clone(), "arcana_desktop.window.resized")?,
+            )?)))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "fullscreen" => {
+            if values.len() != 1 {
+                return Err("arcana_desktop.window.fullscreen expects one argument".to_string());
+            }
+            Ok(Some(RuntimeValue::Bool(host.window_fullscreen(
+                expect_arcana_desktop_window(
+                    values[0].clone(),
+                    "arcana_desktop.window.fullscreen",
+                )?,
+            )?)))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "minimized" => {
+            if values.len() != 1 {
+                return Err("arcana_desktop.window.minimized expects one argument".to_string());
+            }
+            Ok(Some(RuntimeValue::Bool(host.window_minimized(
+                expect_arcana_desktop_window(values[0].clone(), "arcana_desktop.window.minimized")?,
+            )?)))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "maximized" => {
+            if values.len() != 1 {
+                return Err("arcana_desktop.window.maximized expects one argument".to_string());
+            }
+            Ok(Some(RuntimeValue::Bool(host.window_maximized(
+                expect_arcana_desktop_window(values[0].clone(), "arcana_desktop.window.maximized")?,
+            )?)))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "cursor_settings" => {
+            if values.len() != 1 {
+                return Err(
+                    "arcana_desktop.window.cursor_settings expects one argument".to_string()
+                );
+            }
+            let window = expect_arcana_desktop_window(
+                values[0].clone(),
+                "arcana_desktop.window.cursor_settings",
+            )?;
+            Ok(Some(arcana_cursor_settings_record(
+                host.window_cursor_visible(window)?,
+                host.window_cursor_grab_mode(window)?,
+                host.window_cursor_icon_code(window)?,
+                host.window_cursor_position(window)?,
+            )))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "settings" => {
+            if values.len() != 1 {
+                return Err("arcana_desktop.window.settings expects one argument".to_string());
+            }
+            Ok(Some(arcana_window_settings_record(
+                expect_arcana_desktop_window(values[0].clone(), "arcana_desktop.window.settings")?,
+                host,
+            )?))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "text_input_settings" => {
+            if values.len() != 1 {
+                return Err(
+                    "arcana_desktop.window.text_input_settings expects one argument".to_string(),
+                );
+            }
+            Ok(Some(arcana_text_input_settings_record(
+                expect_arcana_desktop_window(
+                    values[0].clone(),
+                    "arcana_desktop.window.text_input_settings",
+                )?,
+                host,
+            )?))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "set_title" => {
+            if values.len() != 2 {
+                return Err("arcana_desktop.window.set_title expects two arguments".to_string());
+            }
+            host.window_set_title(
+                expect_arcana_desktop_window(values[0].clone(), "arcana_desktop.window.set_title")?,
+                &expect_str(values[1].clone(), "arcana_desktop.window.set_title")?,
+            )?;
+            Ok(Some(RuntimeValue::Unit))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "set_min_size" => {
+            if values.len() != 3 {
+                return Err(
+                    "arcana_desktop.window.set_min_size expects three arguments".to_string()
+                );
+            }
+            host.window_set_min_size(
+                expect_arcana_desktop_window(
+                    values[0].clone(),
+                    "arcana_desktop.window.set_min_size",
+                )?,
+                expect_int(values[1].clone(), "arcana_desktop.window.set_min_size")?,
+                expect_int(values[2].clone(), "arcana_desktop.window.set_min_size")?,
+            )?;
+            Ok(Some(RuntimeValue::Unit))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "set_max_size" => {
+            if values.len() != 3 {
+                return Err(
+                    "arcana_desktop.window.set_max_size expects three arguments".to_string()
+                );
+            }
+            host.window_set_max_size(
+                expect_arcana_desktop_window(
+                    values[0].clone(),
+                    "arcana_desktop.window.set_max_size",
+                )?,
+                expect_int(values[1].clone(), "arcana_desktop.window.set_max_size")?,
+                expect_int(values[2].clone(), "arcana_desktop.window.set_max_size")?,
+            )?;
+            Ok(Some(RuntimeValue::Unit))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "set_theme_override" => {
+            if values.len() != 2 {
+                return Err(
+                    "arcana_desktop.window.set_theme_override expects two arguments".to_string(),
+                );
+            }
+            host.window_set_theme_override_code(
+                expect_arcana_desktop_window(
+                    values[0].clone(),
+                    "arcana_desktop.window.set_theme_override",
+                )?,
+                expect_arcana_window_theme_override_code(
+                    values[1].clone(),
+                    "arcana_desktop.window.set_theme_override",
+                )?,
+            )?;
+            Ok(Some(RuntimeValue::Unit))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "set_cursor_icon" => {
+            if values.len() != 2 {
+                return Err(
+                    "arcana_desktop.window.set_cursor_icon expects two arguments".to_string(),
+                );
+            }
+            host.window_set_cursor_icon_code(
+                expect_arcana_desktop_window(
+                    values[0].clone(),
+                    "arcana_desktop.window.set_cursor_icon",
+                )?,
+                expect_arcana_cursor_icon_code(
+                    values[1].clone(),
+                    "arcana_desktop.window.set_cursor_icon",
+                )?,
+            )?;
+            Ok(Some(RuntimeValue::Unit))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "set_cursor_position" => {
+            if values.len() != 3 {
+                return Err(
+                    "arcana_desktop.window.set_cursor_position expects three arguments".to_string(),
+                );
+            }
+            host.window_set_cursor_position(
+                expect_arcana_desktop_window(
+                    values[0].clone(),
+                    "arcana_desktop.window.set_cursor_position",
+                )?,
+                expect_int(
+                    values[1].clone(),
+                    "arcana_desktop.window.set_cursor_position",
+                )?,
+                expect_int(
+                    values[2].clone(),
+                    "arcana_desktop.window.set_cursor_position",
+                )?,
+            )?;
+            Ok(Some(RuntimeValue::Unit))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "window" && c == "request_redraw" => {
+            if values.len() != 1 {
+                return Err("arcana_desktop.window.request_redraw expects one argument".to_string());
+            }
+            host.window_request_redraw(expect_arcana_desktop_window(
+                values[0].clone(),
+                "arcana_desktop.window.request_redraw",
+            )?)?;
+            Ok(Some(RuntimeValue::Unit))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "text_input" && c == "enabled" => {
+            if values.len() != 1 {
+                return Err("arcana_desktop.text_input.enabled expects one argument".to_string());
+            }
+            Ok(Some(RuntimeValue::Bool(host.window_text_input_enabled(
+                expect_arcana_desktop_window(
+                    values[0].clone(),
+                    "arcana_desktop.text_input.enabled",
+                )?,
+            )?)))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "text_input" && c == "settings" => {
+            if values.len() != 1 {
+                return Err("arcana_desktop.text_input.settings expects one argument".to_string());
+            }
+            Ok(Some(arcana_text_input_settings_record(
+                expect_arcana_desktop_window(
+                    values[0].clone(),
+                    "arcana_desktop.text_input.settings",
+                )?,
+                host,
+            )?))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "text_input" && c == "set_enabled" => {
+            if values.len() != 2 {
+                return Err(
+                    "arcana_desktop.text_input.set_enabled expects two arguments".to_string(),
+                );
+            }
+            host.window_set_text_input_enabled(
+                expect_arcana_desktop_window(
+                    values[0].clone(),
+                    "arcana_desktop.text_input.set_enabled",
+                )?,
+                expect_bool(values[1].clone(), "arcana_desktop.text_input.set_enabled")?,
+            )?;
+            Ok(Some(RuntimeValue::Unit))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "text_input" && c == "composition_area" => {
+            if values.len() != 1 {
+                return Err(
+                    "arcana_desktop.text_input.composition_area expects one argument".to_string(),
+                );
+            }
+            let window = expect_arcana_desktop_window(
+                values[0].clone(),
+                "arcana_desktop.text_input.composition_area",
+            )?;
+            Ok(Some(arcana_composition_area_record(
+                host.text_input_composition_area_active(window)?,
+                host.text_input_composition_area_position(window)?,
+                host.text_input_composition_area_size(window)?,
+            )))
+        }
+        [a, b, c] if a == "arcana_desktop" && b == "text_input" && c == "set_composition_area" => {
+            if values.len() != 2 {
+                return Err(
+                    "arcana_desktop.text_input.set_composition_area expects two arguments"
+                        .to_string(),
+                );
+            }
+            let (_, position, size) = expect_arcana_composition_area(
+                values[1].clone(),
+                "arcana_desktop.text_input.set_composition_area",
+            )?;
+            host.text_input_set_composition_area(
+                expect_arcana_desktop_window(
+                    values[0].clone(),
+                    "arcana_desktop.text_input.set_composition_area",
+                )?,
+                position.0,
+                position.1,
+                size.0,
+                size.1,
+            )?;
+            Ok(Some(RuntimeValue::Unit))
+        }
+        [a, b, c]
+            if a == "arcana_desktop" && b == "text_input" && c == "clear_composition_area" =>
+        {
+            if values.len() != 1 {
+                return Err(
+                    "arcana_desktop.text_input.clear_composition_area expects one argument"
+                        .to_string(),
+                );
+            }
+            host.text_input_clear_composition_area(expect_arcana_desktop_window(
+                values[0].clone(),
+                "arcana_desktop.text_input.clear_composition_area",
+            )?)?;
+            Ok(Some(RuntimeValue::Unit))
+        }
+        _ => Ok(None),
+    }
 }
 
 fn expect_app_frame(value: RuntimeValue, context: &str) -> Result<RuntimeAppFrameHandle, String> {
@@ -7085,29 +9821,7 @@ fn variant_name_matches(name: &str, expected: &str) -> bool {
 }
 
 fn opaque_type_name(value: &RuntimeOpaqueValue) -> &'static str {
-    match value {
-        RuntimeOpaqueValue::FileStream(_) => "std.fs.FileStream",
-        RuntimeOpaqueValue::Window(_) => "std.window.Window",
-        RuntimeOpaqueValue::Image(_) => "std.canvas.Image",
-        RuntimeOpaqueValue::AppFrame(_) => "std.events.AppFrame",
-        RuntimeOpaqueValue::AppSession(_) => "std.events.AppSession",
-        RuntimeOpaqueValue::Wake(_) => "std.events.WakeHandle",
-        RuntimeOpaqueValue::AudioDevice(_) => "std.audio.AudioDevice",
-        RuntimeOpaqueValue::AudioBuffer(_) => "std.audio.AudioBuffer",
-        RuntimeOpaqueValue::AudioPlayback(_) => "std.audio.AudioPlayback",
-        RuntimeOpaqueValue::Channel(_) => "std.concurrent.Channel",
-        RuntimeOpaqueValue::Mutex(_) => "std.concurrent.Mutex",
-        RuntimeOpaqueValue::AtomicInt(_) => "std.concurrent.AtomicInt",
-        RuntimeOpaqueValue::AtomicBool(_) => "std.concurrent.AtomicBool",
-        RuntimeOpaqueValue::Arena(_) => "std.memory.Arena",
-        RuntimeOpaqueValue::ArenaId(_) => "std.memory.ArenaId",
-        RuntimeOpaqueValue::FrameArena(_) => "std.memory.FrameArena",
-        RuntimeOpaqueValue::FrameId(_) => "std.memory.FrameId",
-        RuntimeOpaqueValue::PoolArena(_) => "std.memory.PoolArena",
-        RuntimeOpaqueValue::PoolId(_) => "std.memory.PoolId",
-        RuntimeOpaqueValue::Task(_) => "std.concurrent.Task",
-        RuntimeOpaqueValue::Thread(_) => "std.concurrent.Thread",
-    }
+    RuntimeOpaqueFamily::from_opaque_value(value).canonical_type_name()
 }
 
 fn runtime_receiver_type_args(
@@ -8360,7 +11074,12 @@ fn resolve_routine_index_for_call(
                     receiver_type_text
                         .as_deref()
                         .map(|actual| {
-                            runtime_declared_type_matches_actual(declared, actual, &type_params)
+                            runtime_declared_type_matches_actual(
+                                plan,
+                                declared,
+                                actual,
+                                &type_params,
+                            )
                         })
                         .unwrap_or_else(|| runtime_type_root_name(declared) == receiver_root)
                 })
@@ -8447,6 +11166,9 @@ fn execute_call_by_path(
     host: &mut dyn RuntimeHost,
     allow_async: bool,
 ) -> Result<RuntimeValue, String> {
+    if let Some(value) = try_execute_arcana_owned_api_call(callable, &call_args, host)? {
+        return Ok(value);
+    }
     if let Some(routine_index) = resolve_routine_index_for_call(
         plan,
         current_module_id,
@@ -8472,6 +11194,7 @@ fn execute_call_by_path(
             routine_index,
             type_args,
             values,
+            &collect_active_owner_keys_from_scopes(scopes),
             state,
             host,
             allow_async,
@@ -8880,6 +11603,8 @@ fn is_runtime_app_shell_intrinsic(intrinsic: RuntimeIntrinsic) -> bool {
             | RuntimeIntrinsic::EventsSessionWindowIds
             | RuntimeIntrinsic::EventsSessionPump
             | RuntimeIntrinsic::EventsSessionWait
+            | RuntimeIntrinsic::EventsSessionDeviceEvents
+            | RuntimeIntrinsic::EventsSessionSetDeviceEvents
             | RuntimeIntrinsic::EventsSessionCreateWake
             | RuntimeIntrinsic::EventsWakeSignal
     )
@@ -9437,12 +12162,27 @@ fn execute_runtime_app_shell_intrinsic(
             if args.len() != 2 {
                 return Err("events_session_wait expects two arguments".to_string());
             }
+            let session = expect_app_session(args[0].clone(), "events_session_wait")?;
+            let timeout = expect_int(args[1].clone(), "events_session_wait")?;
             Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::AppFrame(
-                host.events_session_wait(
-                    expect_app_session(args[0].clone(), "events_session_wait")?,
-                    expect_int(args[1].clone(), "events_session_wait")?,
-                )?,
+                host.events_session_wait(session, timeout)?,
             )))
+        }
+        RuntimeIntrinsic::EventsSessionDeviceEvents => {
+            let session = expect_app_session(
+                expect_single_arg(args, "events_session_device_events")?,
+                "events_session_device_events",
+            )?;
+            Ok(RuntimeValue::Int(host.events_session_device_events(session)?))
+        }
+        RuntimeIntrinsic::EventsSessionSetDeviceEvents => {
+            if args.len() != 2 {
+                return Err("events_session_set_device_events expects two arguments".to_string());
+            }
+            let session = expect_app_session(args[0].clone(), "events_session_set_device_events")?;
+            let policy = expect_int(args[1].clone(), "events_session_set_device_events")?;
+            host.events_session_set_device_events(session, policy)?;
+            Ok(RuntimeValue::Unit)
         }
         RuntimeIntrinsic::EventsSessionCreateWake => {
             let session = expect_app_session(
@@ -9882,7 +12622,8 @@ fn execute_runtime_core_intrinsic(
         }
         RuntimeIntrinsic::CanvasAlive => {
             let window = expect_window(expect_single_arg(args, "canvas_alive")?, "canvas_alive")?;
-            Ok(RuntimeValue::Bool(host.window_alive(window)?))
+            let alive = host.window_alive(window)?;
+            Ok(RuntimeValue::Bool(alive))
         }
         RuntimeIntrinsic::CanvasFill => {
             if args.len() != 2 {
@@ -10556,12 +13297,27 @@ fn execute_runtime_core_intrinsic(
             if args.len() != 2 {
                 return Err("events_session_wait expects two arguments".to_string());
             }
+            let session = expect_app_session(args[0].clone(), "events_session_wait")?;
+            let timeout = expect_int(args[1].clone(), "events_session_wait")?;
             Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::AppFrame(
-                host.events_session_wait(
-                    expect_app_session(args[0].clone(), "events_session_wait")?,
-                    expect_int(args[1].clone(), "events_session_wait")?,
-                )?,
+                host.events_session_wait(session, timeout)?,
             )))
+        }
+        RuntimeIntrinsic::EventsSessionDeviceEvents => {
+            let session = expect_app_session(
+                expect_single_arg(args, "events_session_device_events")?,
+                "events_session_device_events",
+            )?;
+            Ok(RuntimeValue::Int(host.events_session_device_events(session)?))
+        }
+        RuntimeIntrinsic::EventsSessionSetDeviceEvents => {
+            if args.len() != 2 {
+                return Err("events_session_set_device_events expects two arguments".to_string());
+            }
+            let session = expect_app_session(args[0].clone(), "events_session_set_device_events")?;
+            let policy = expect_int(args[1].clone(), "events_session_set_device_events")?;
+            host.events_session_set_device_events(session, policy)?;
+            Ok(RuntimeValue::Unit)
         }
         RuntimeIntrinsic::EventsSessionCreateWake => {
             let session = expect_app_session(
@@ -13751,6 +16507,8 @@ fn execute_scoped_block(
 ) -> RuntimeEvalResult<FlowSignal> {
     push_runtime_rollup_frame(state, rollups, scopes);
     scopes.push(scope);
+    activate_attached_runtime_owners_for_current_scope(scopes, &[], plan, state)?;
+    activate_attached_runtime_objects_for_current_scope(scopes, &[], plan, state)?;
     let result = execute_statements(
         statements,
         scopes,
@@ -14104,17 +16862,6 @@ fn execute_statements(
                         )
                     })
                     .transpose()?;
-                let owner_state = state
-                    .owners
-                    .entry(owner_key.clone())
-                    .or_insert_with(RuntimeOwnerState::default);
-                if owner_state.active_bindings == 0 {
-                    owner_state.activation_context = context_value;
-                    owner_state.pending_init.clear();
-                    owner_state.pending_resume = owner_state.objects.keys().cloned().collect();
-                }
-                activate_owner_scope_binding(scopes, state, owner, &owner_key, binding.as_deref())
-                    .map_err(RuntimeEvalSignal::from)?;
                 if had_prior_active_state {
                     evaluate_owner_exit_checkpoints(
                         std::slice::from_ref(&owner_key),
@@ -14128,6 +16875,17 @@ fn execute_statements(
                     )
                     .map_err(RuntimeEvalSignal::from)?;
                 }
+                let owner_state = state
+                    .owners
+                    .entry(owner_key.clone())
+                    .or_insert_with(RuntimeOwnerState::default);
+                if owner_state.active_bindings == 0 {
+                    owner_state.activation_context = context_value;
+                    owner_state.pending_init.clear();
+                    owner_state.pending_resume = owner_state.objects.keys().cloned().collect();
+                }
+                activate_owner_scope_binding(scopes, state, owner, &owner_key, binding.as_deref())
+                    .map_err(RuntimeEvalSignal::from)?;
                 FlowSignal::Next
             }
             ParsedStmt::Break => FlowSignal::Break,
@@ -14170,6 +16928,7 @@ fn execute_routine_call_with_state(
     routine_index: usize,
     type_args: Vec<String>,
     mut args: Vec<RuntimeValue>,
+    inherited_active_owner_keys: &[String],
     state: &mut RuntimeExecutionState,
     host: &mut dyn RuntimeHost,
     allow_async: bool,
@@ -14241,6 +17000,7 @@ fn execute_routine_call_with_state(
         }
         let outcome = (|| -> Result<RoutineExecutionOutcome, String> {
             let mut initial_scope = RuntimeScope::default();
+            initial_scope.inherited_active_owner_keys = inherited_active_owner_keys.to_vec();
             apply_runtime_availability_attachments(&mut initial_scope, &routine.availability);
             push_runtime_rollup_frame(state, &routine.rollups, &[]);
             for (param, value) in routine.params.iter().zip(args) {
@@ -14255,6 +17015,18 @@ fn execute_routine_call_with_state(
             }
             let mut scopes = Vec::new();
             scopes.push(initial_scope);
+            activate_attached_runtime_owners_for_current_scope(
+                &mut scopes,
+                inherited_active_owner_keys,
+                plan,
+                state,
+            )?;
+            activate_attached_runtime_objects_for_current_scope(
+                &mut scopes,
+                inherited_active_owner_keys,
+                plan,
+                state,
+            )?;
             let result = execute_statements(
                 &routine.statements,
                 &mut scopes,
@@ -14388,10 +17160,17 @@ fn execute_routine_with_state(
     state: &mut RuntimeExecutionState,
     host: &mut dyn RuntimeHost,
 ) -> Result<RuntimeValue, String> {
-    Ok(
-        execute_routine_call_with_state(plan, routine_index, type_args, args, state, host, false)?
-            .value,
-    )
+    Ok(execute_routine_call_with_state(
+        plan,
+        routine_index,
+        type_args,
+        args,
+        &collect_active_owner_keys_from_state(state),
+        state,
+        host,
+        false,
+    )?
+    .value)
 }
 
 pub fn validate_runtime_requirements_supported(
@@ -14471,6 +17250,7 @@ pub fn execute_entrypoint_routine(
         entry.routine_index,
         Vec::new(),
         Vec::new(),
+        &[],
         &mut state,
         host,
         true,

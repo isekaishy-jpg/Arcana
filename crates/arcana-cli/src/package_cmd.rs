@@ -222,34 +222,6 @@ mod tests {
     }
 
     #[cfg(windows)]
-    fn wait_for_process_window_title_contains(
-        pid: u32,
-        needle: &str,
-        timeout: Duration,
-    ) -> Option<(HWND, String)> {
-        let start = Instant::now();
-        while start.elapsed() < timeout {
-            let mut search = WindowSearch {
-                pid,
-                title_contains: needle.to_string(),
-                hwnd: std::ptr::null_mut(),
-                title: String::new(),
-            };
-            unsafe {
-                EnumWindows(
-                    Some(collect_process_window),
-                    &mut search as *mut WindowSearch as isize,
-                );
-            }
-            if !search.hwnd.is_null() {
-                return Some((search.hwnd, search.title));
-            }
-            thread::sleep(Duration::from_millis(25));
-        }
-        None
-    }
-
-    #[cfg(windows)]
     fn process_windows(pid: u32) -> Vec<(HWND, String)> {
         let mut search = WindowListSearch {
             pid,
@@ -337,7 +309,7 @@ mod tests {
         let available_width = width - gutter * 4;
         let left_width = (available_width * 30 / 100).clamp(320, 420);
         let inner_button_width = left_width - gutter * 2;
-        let button_cols = if inner_button_width >= 336 { 3 } else { 2 };
+        let button_cols = 3;
         let button_gap_x = 8;
         let button_gap_y = 8;
         let button_width = (inner_button_width - (button_cols - 1) * button_gap_x) / button_cols;
@@ -696,8 +668,9 @@ mod tests {
                 "\n",
                 "impl arcana_desktop.app.Application[Demo] for Demo:\n",
                 "    fn resumed(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
-                "        let scale = arcana_desktop.window.scale_factor_milli :: cx.runtime.main_window :: call\n",
-                "        let current = arcana_desktop.monitor.current :: cx.runtime.main_window :: call\n",
+                "        let mut main_window = (arcana_desktop.app.main_window_or_cached :: cx :: call)\n",
+                "        let scale = arcana_desktop.window.scale_factor_milli :: main_window :: call\n",
+                "        let current = arcana_desktop.monitor.current :: main_window :: call\n",
                 "        let primary = arcana_desktop.monitor.primary :: :: call\n",
                 "        let count = arcana_desktop.monitor.count :: :: call\n",
                 "        self.seen = 0\n",
@@ -709,27 +682,28 @@ mod tests {
                 "            self.seen += 1\n",
                 "        if primary.primary:\n",
                 "            self.seen += 1\n",
-                "        self.seen += theme_score :: (arcana_desktop.window.theme :: cx.runtime.main_window :: call) :: call\n",
-                "        arcana_desktop.window.request_attention :: cx.runtime.main_window, false :: call\n",
+                "        self.seen += theme_score :: (arcana_desktop.window.theme :: main_window :: call) :: call\n",
+                "        arcana_desktop.window.request_attention :: main_window, false :: call\n",
                 "        arcana_desktop.events.wake :: (arcana_desktop.app.wake_handle :: cx :: call) :: call\n",
                 "        arcana_desktop.app.set_control_flow :: cx, (arcana_desktop.types.ControlFlow.Wait :: :: call) :: call\n",
                 "\n",
                 "    fn suspended(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
                 "        return\n",
                 "\n",
-                "    fn window_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read event: std.events.AppEvent) -> arcana_desktop.types.ControlFlow:\n",
-                "        return match event:\n",
-                "            std.events.AppEvent.WindowRedrawRequested(id) => on_redraw :: self, cx, id :: call\n",
+                "    fn window_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read target: arcana_desktop.types.TargetedEvent) -> arcana_desktop.types.ControlFlow:\n",
+                "        return match target.event:\n",
+                "            arcana_desktop.types.WindowEvent.WindowRedrawRequested(id) => on_redraw :: self, cx, id :: call\n",
                 "            _ => cx.control.control_flow\n",
                 "\n",
-                "    fn device_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read event: std.events.AppEvent) -> arcana_desktop.types.ControlFlow:\n",
+                "    fn device_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read event: arcana_desktop.types.DeviceEvent) -> arcana_desktop.types.ControlFlow:\n",
                 "        return cx.control.control_flow\n",
                 "\n",
                 "    fn about_to_wait(edit self: Demo, edit cx: arcana_desktop.types.AppContext) -> arcana_desktop.types.ControlFlow:\n",
                 "        return cx.control.control_flow\n",
                 "\n",
                 "    fn wake(edit self: Demo, edit cx: arcana_desktop.types.AppContext) -> arcana_desktop.types.ControlFlow:\n",
-                "        arcana_desktop.window.request_redraw :: cx.runtime.main_window :: call\n",
+                "        let mut main_window = (arcana_desktop.app.main_window_or_cached :: cx :: call)\n",
+                "        arcana_desktop.app.request_window_redraw :: cx, main_window :: call\n",
                 "        return arcana_desktop.types.ControlFlow.Wait :: :: call\n",
                 "\n",
                 "    fn exiting(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
@@ -820,7 +794,6 @@ mod tests {
                 "import arcana_desktop.window\n",
                 "import arcana_graphics.canvas\n",
                 "import arcana_text.labels\n",
-                "import std.events\n",
                 "import std.io\n",
                 "\n",
                 "record Demo:\n",
@@ -828,18 +801,19 @@ mod tests {
                 "\n",
                 "impl arcana_desktop.app.Application[Demo] for Demo:\n",
                 "    fn resumed(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
-                "        arcana_desktop.window.request_redraw :: cx.runtime.main_window :: call\n",
+                "        let mut main_window = (arcana_desktop.app.main_window_or_cached :: cx :: call)\n",
+                "        arcana_desktop.app.request_window_redraw :: cx, main_window :: call\n",
                 "        arcana_desktop.app.set_control_flow :: cx, (arcana_desktop.types.ControlFlow.Wait :: :: call) :: call\n",
                 "\n",
                 "    fn suspended(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
                 "        return\n",
                 "\n",
-                "    fn window_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read event: std.events.AppEvent) -> arcana_desktop.types.ControlFlow:\n",
-                "        return match event:\n",
-                "            std.events.AppEvent.WindowRedrawRequested(id) => on_redraw :: self, cx, id :: call\n",
+                "    fn window_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read target: arcana_desktop.types.TargetedEvent) -> arcana_desktop.types.ControlFlow:\n",
+                "        return match target.event:\n",
+                "            arcana_desktop.types.WindowEvent.WindowRedrawRequested(id) => on_redraw :: self, cx, id :: call\n",
                 "            _ => cx.control.control_flow\n",
                 "\n",
-                "    fn device_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read event: std.events.AppEvent) -> arcana_desktop.types.ControlFlow:\n",
+                "    fn device_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read event: arcana_desktop.types.DeviceEvent) -> arcana_desktop.types.ControlFlow:\n",
                 "        return cx.control.control_flow\n",
                 "\n",
                 "    fn about_to_wait(edit self: Demo, edit cx: arcana_desktop.types.AppContext) -> arcana_desktop.types.ControlFlow:\n",
@@ -854,19 +828,20 @@ mod tests {
                 "fn on_redraw(edit self: Demo, edit cx: arcana_desktop.types.AppContext, id: Int) -> arcana_desktop.types.ControlFlow:\n",
                 "    if self.drawn:\n",
                 "        return cx.control.control_flow\n",
+                "    let mut main_window = (arcana_desktop.app.main_window_or_cached :: cx :: call)\n",
                 "    let measured = arcana_text.labels.measure :: \"desk\" :: call\n",
                 "    if measured.0 <= 0:\n",
                 "        arcana_desktop.app.request_exit :: cx, 3 :: call\n",
                 "        return arcana_desktop.types.ControlFlow.Wait :: :: call\n",
                 "    let bg = arcana_graphics.canvas.rgb :: 12, 24, 36 :: call\n",
-                "    arcana_graphics.canvas.fill :: cx.runtime.main_window, bg :: call\n",
+                "    arcana_graphics.canvas.fill :: main_window, bg :: call\n",
                 "    let accent = arcana_graphics.canvas.rgb :: 200, 100, 40 :: call\n",
                 "    let rect = arcana_graphics.types.RectSpec :: pos = (8, 8), size = (48, 24), color = accent :: call\n",
-                "    arcana_graphics.canvas.rect :: cx.runtime.main_window, rect :: call\n",
+                "    arcana_graphics.canvas.rect :: main_window, rect :: call\n",
                 "    let label_color = arcana_graphics.canvas.rgb :: 255, 255, 255 :: call\n",
                 "    let label = arcana_text.types.LabelSpec :: pos = (12, 16), text = \"desk\", color = label_color :: call\n",
-                "    arcana_text.labels.label :: cx.runtime.main_window, label :: call\n",
-                "    arcana_graphics.canvas.present :: cx.runtime.main_window :: call\n",
+                "    arcana_text.labels.label :: main_window, label :: call\n",
+                "    arcana_graphics.canvas.present :: main_window :: call\n",
                 "    std.io.print_line[Int] :: id :: call\n",
                 "    self.drawn = true\n",
                 "    arcana_desktop.app.request_exit :: cx, 0 :: call\n",
@@ -926,7 +901,6 @@ mod tests {
                 "import arcana_desktop.clipboard\n",
                 "import arcana_desktop.types\n",
                 "import arcana_desktop.window\n",
-                "import std.events\n",
                 "import std.result\n",
                 "import std.io\n",
                 "\n",
@@ -951,12 +925,12 @@ mod tests {
                 "    fn suspended(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
                 "        return\n",
                 "\n",
-                "    fn window_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read event: std.events.AppEvent) -> arcana_desktop.types.ControlFlow:\n",
-                "        return match event:\n",
-                "            std.events.AppEvent.WindowRedrawRequested(id) => on_redraw :: self, cx, id :: call\n",
+                "    fn window_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read target: arcana_desktop.types.TargetedEvent) -> arcana_desktop.types.ControlFlow:\n",
+                "        return match target.event:\n",
+                "            arcana_desktop.types.WindowEvent.WindowRedrawRequested(id) => on_redraw :: self, cx, id :: call\n",
                 "            _ => cx.control.control_flow\n",
                 "\n",
-                "    fn device_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read event: std.events.AppEvent) -> arcana_desktop.types.ControlFlow:\n",
+                "    fn device_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read event: arcana_desktop.types.DeviceEvent) -> arcana_desktop.types.ControlFlow:\n",
                 "        return cx.control.control_flow\n",
                 "\n",
                 "    fn about_to_wait(edit self: Demo, edit cx: arcana_desktop.types.AppContext) -> arcana_desktop.types.ControlFlow:\n",
@@ -968,10 +942,10 @@ mod tests {
                 "    fn exiting(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
                 "        return\n",
                 "\n",
-                "fn on_second_window(edit self: Demo, edit cx: arcana_desktop.types.AppContext, take win: std.window.Window):\n",
+                "fn on_second_window(edit self: Demo, edit cx: arcana_desktop.types.AppContext, take win: arcana_desktop.types.Window):\n",
                 "    let mut win = win\n",
                 "    self.second_window = (arcana_desktop.window.id :: win :: call).value\n",
-                "    arcana_desktop.window.request_redraw :: win :: call\n",
+                "    arcana_desktop.app.request_window_redraw :: cx, win :: call\n",
                 "    arcana_desktop.app.set_control_flow :: cx, (arcana_desktop.types.ControlFlow.Wait :: :: call) :: call\n",
                 "    return\n",
                 "\n",
@@ -994,7 +968,13 @@ mod tests {
         let output = Command::new(&exe_path)
             .output()
             .expect("staged desktop multi-window clipboard bundle should launch");
-        assert_eq!(output.status.code(), Some(0));
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "stdout=`{}` stderr=`{}`",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
         assert_eq!(
             String::from_utf8_lossy(&output.stdout)
                 .lines()
@@ -1035,7 +1015,6 @@ mod tests {
                 "import arcana_desktop.text_input\n",
                 "import arcana_desktop.types\n",
                 "import arcana_desktop.window\n",
-                "import std.events\n",
                 "import std.io\n",
                 "\n",
                 "record Demo:\n",
@@ -1043,17 +1022,18 @@ mod tests {
                 "\n",
                 "impl arcana_desktop.app.Application[Demo] for Demo:\n",
                 "    fn resumed(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
-                "        arcana_desktop.window.set_min_size :: cx.runtime.main_window, 111, 112 :: call\n",
-                "        arcana_desktop.window.set_max_size :: cx.runtime.main_window, 333, 334 :: call\n",
-                "        arcana_desktop.window.set_transparent :: cx.runtime.main_window, true :: call\n",
-                "        arcana_desktop.window.set_theme_override :: cx.runtime.main_window, (arcana_desktop.types.WindowThemeOverride.Dark :: :: call) :: call\n",
-                "        arcana_desktop.window.set_cursor_icon :: cx.runtime.main_window, (arcana_desktop.types.CursorIcon.Hand :: :: call) :: call\n",
-                "        arcana_desktop.window.set_text_input_enabled :: cx.runtime.main_window, false :: call\n",
-                "        arcana_desktop.text_input.set_enabled :: cx.runtime.main_window, true :: call\n",
+                "        let mut main_window = (arcana_desktop.app.main_window_or_cached :: cx :: call)\n",
+                "        arcana_desktop.window.set_min_size :: main_window, 111, 112 :: call\n",
+                "        arcana_desktop.window.set_max_size :: main_window, 333, 334 :: call\n",
+                "        arcana_desktop.window.set_transparent :: main_window, true :: call\n",
+                "        arcana_desktop.window.set_theme_override :: main_window, (arcana_desktop.types.WindowThemeOverride.Dark :: :: call) :: call\n",
+                "        arcana_desktop.window.set_cursor_icon :: main_window, (arcana_desktop.types.CursorIcon.Hand :: :: call) :: call\n",
+                "        arcana_desktop.window.set_text_input_enabled :: main_window, false :: call\n",
+                "        arcana_desktop.text_input.set_enabled :: main_window, true :: call\n",
                 "        let area = arcana_desktop.types.CompositionArea :: active = true, position = (9, 10), size = (20, 21) :: call\n",
-                "        arcana_desktop.text_input.set_composition_area :: cx.runtime.main_window, area :: call\n",
-                "        let current = arcana_desktop.window.settings :: cx.runtime.main_window :: call\n",
-                "        let text = arcana_desktop.text_input.settings :: cx.runtime.main_window :: call\n",
+                "        arcana_desktop.text_input.set_composition_area :: main_window, area :: call\n",
+                "        let current = arcana_desktop.window.settings :: main_window :: call\n",
+                "        let text = arcana_desktop.text_input.settings :: main_window :: call\n",
                 "        let mut total = 0\n",
                 "        if current.bounds.min_size.0 == 111:\n",
                 "            if current.bounds.min_size.1 == 112:\n",
@@ -1082,10 +1062,10 @@ mod tests {
                 "    fn suspended(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
                 "        return\n",
                 "\n",
-                "    fn window_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read event: std.events.AppEvent) -> arcana_desktop.types.ControlFlow:\n",
+                "    fn window_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read target: arcana_desktop.types.TargetedEvent) -> arcana_desktop.types.ControlFlow:\n",
                 "        return cx.control.control_flow\n",
                 "\n",
-                "    fn device_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read event: std.events.AppEvent) -> arcana_desktop.types.ControlFlow:\n",
+                "    fn device_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read event: arcana_desktop.types.DeviceEvent) -> arcana_desktop.types.ControlFlow:\n",
                 "        return cx.control.control_flow\n",
                 "\n",
                 "    fn about_to_wait(edit self: Demo, edit cx: arcana_desktop.types.AppContext) -> arcana_desktop.types.ControlFlow:\n",
@@ -1151,7 +1131,6 @@ mod tests {
                 "import arcana_desktop.text_input\n",
                 "import arcana_desktop.types\n",
                 "import arcana_desktop.window\n",
-                "import std.events\n",
                 "import std.io\n",
                 "\n",
                 "record Demo:\n",
@@ -1159,7 +1138,8 @@ mod tests {
                 "\n",
                 "impl arcana_desktop.app.Application[Demo] for Demo:\n",
                 "    fn resumed(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
-                "        let mut settings = arcana_desktop.window.settings :: cx.runtime.main_window :: call\n",
+                "        let mut main_window = (arcana_desktop.app.main_window_or_cached :: cx :: call)\n",
+                "        let mut settings = arcana_desktop.window.settings :: main_window :: call\n",
                 "        settings.title = \"Applied\"\n",
                 "        settings.bounds.min_size = (900, 620)\n",
                 "        settings.bounds.max_size = (1540, 1040)\n",
@@ -1168,15 +1148,15 @@ mod tests {
                 "        settings.options.cursor.icon = (arcana_desktop.types.CursorIcon.Hand :: :: call)\n",
                 "        settings.options.cursor.position = (160, 128)\n",
                 "        settings.options.text_input_enabled = true\n",
-                "        arcana_desktop.window.apply_settings :: cx.runtime.main_window, settings :: call\n",
-                "        let mut text = arcana_desktop.text_input.settings :: cx.runtime.main_window :: call\n",
+                "        arcana_desktop.window.apply_settings :: main_window, settings :: call\n",
+                "        let mut text = arcana_desktop.text_input.settings :: main_window :: call\n",
                 "        text.enabled = true\n",
                 "        text.composition_area.active = true\n",
                 "        text.composition_area.position = (120, 540)\n",
                 "        text.composition_area.size = (260, 28)\n",
-                "        arcana_desktop.text_input.apply_settings :: cx.runtime.main_window, text :: call\n",
-                "        let current = arcana_desktop.window.settings :: cx.runtime.main_window :: call\n",
-                "        let text_now = arcana_desktop.text_input.settings :: cx.runtime.main_window :: call\n",
+                "        arcana_desktop.text_input.apply_settings :: main_window, text :: call\n",
+                "        let current = arcana_desktop.window.settings :: main_window :: call\n",
+                "        let text_now = arcana_desktop.text_input.settings :: main_window :: call\n",
                 "        let mut total = 0\n",
                 "        if current.bounds.min_size.0 == 900:\n",
                 "            if current.bounds.min_size.1 == 620:\n",
@@ -1207,10 +1187,10 @@ mod tests {
                 "    fn suspended(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
                 "        return\n",
                 "\n",
-                "    fn window_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read event: std.events.AppEvent) -> arcana_desktop.types.ControlFlow:\n",
+                "    fn window_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read target: arcana_desktop.types.TargetedEvent) -> arcana_desktop.types.ControlFlow:\n",
                 "        return cx.control.control_flow\n",
                 "\n",
-                "    fn device_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read event: std.events.AppEvent) -> arcana_desktop.types.ControlFlow:\n",
+                "    fn device_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read event: arcana_desktop.types.DeviceEvent) -> arcana_desktop.types.ControlFlow:\n",
                 "        return cx.control.control_flow\n",
                 "\n",
                 "    fn about_to_wait(edit self: Demo, edit cx: arcana_desktop.types.AppContext) -> arcana_desktop.types.ControlFlow:\n",
@@ -1297,7 +1277,6 @@ mod tests {
                 "import arcana_desktop.window\n",
                 "import arcana_graphics.canvas\n",
                 "import arcana_text.labels\n",
-                "import std.events\n",
                 "import std.io\n",
                 "\n",
                 "record Demo:\n",
@@ -1307,7 +1286,8 @@ mod tests {
                 "    fn resumed(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
                 "        let accent = arcana_graphics.canvas.rgb :: 7, 8, 9 :: call\n",
                 "        let measure = arcana_text.labels.measure :: \"desk\" :: call\n",
-                "        let mut settings = arcana_desktop.window.settings :: cx.runtime.main_window :: call\n",
+                "        let mut main_window = (arcana_desktop.app.main_window_or_cached :: cx :: call)\n",
+                "        let mut settings = arcana_desktop.window.settings :: main_window :: call\n",
                 "        settings.title = \"Applied\"\n",
                 "        settings.bounds.min_size = (900, 620)\n",
                 "        settings.bounds.max_size = (1540, 1040)\n",
@@ -1316,15 +1296,15 @@ mod tests {
                 "        settings.options.cursor.icon = (arcana_desktop.types.CursorIcon.Hand :: :: call)\n",
                 "        settings.options.cursor.position = (160, 128)\n",
                 "        settings.options.text_input_enabled = true\n",
-                "        arcana_desktop.window.apply_settings :: cx.runtime.main_window, settings :: call\n",
-                "        let mut text = arcana_desktop.text_input.settings :: cx.runtime.main_window :: call\n",
+                "        arcana_desktop.window.apply_settings :: main_window, settings :: call\n",
+                "        let mut text = arcana_desktop.text_input.settings :: main_window :: call\n",
                 "        text.enabled = true\n",
                 "        text.composition_area.active = true\n",
                 "        text.composition_area.position = (120, 540)\n",
                 "        text.composition_area.size = (260, 28)\n",
-                "        arcana_desktop.text_input.apply_settings :: cx.runtime.main_window, text :: call\n",
-                "        let current = arcana_desktop.window.settings :: cx.runtime.main_window :: call\n",
-                "        let text_now = arcana_desktop.text_input.settings :: cx.runtime.main_window :: call\n",
+                "        arcana_desktop.text_input.apply_settings :: main_window, text :: call\n",
+                "        let current = arcana_desktop.window.settings :: main_window :: call\n",
+                "        let text_now = arcana_desktop.text_input.settings :: main_window :: call\n",
                 "        let mut total = 0\n",
                 "        if accent > 0:\n",
                 "            total += 1\n",
@@ -1352,10 +1332,10 @@ mod tests {
                 "    fn suspended(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
                 "        return\n",
                 "\n",
-                "    fn window_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read event: std.events.AppEvent) -> arcana_desktop.types.ControlFlow:\n",
+                "    fn window_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read target: arcana_desktop.types.TargetedEvent) -> arcana_desktop.types.ControlFlow:\n",
                 "        return cx.control.control_flow\n",
                 "\n",
-                "    fn device_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read event: std.events.AppEvent) -> arcana_desktop.types.ControlFlow:\n",
+                "    fn device_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read event: arcana_desktop.types.DeviceEvent) -> arcana_desktop.types.ControlFlow:\n",
                 "        return cx.control.control_flow\n",
                 "\n",
                 "    fn about_to_wait(edit self: Demo, edit cx: arcana_desktop.types.AppContext) -> arcana_desktop.types.ControlFlow:\n",
@@ -1429,7 +1409,6 @@ mod tests {
                     "import arcana_desktop.text_input\n",
                     "import arcana_desktop.types\n",
                     "import arcana_desktop.window\n",
-                    "import std.events\n",
                     "import std.io\n",
                     "\n",
                     "record Demo:\n",
@@ -1458,11 +1437,12 @@ mod tests {
                     "\n",
                     "impl arcana_desktop.app.Application[Demo] for Demo:\n",
                     "    fn resumed(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
-                    "        arcana_desktop.text_input.set_enabled :: cx.runtime.main_window, true :: call\n",
+                    "        let mut main_window = (arcana_desktop.app.main_window_or_cached :: cx :: call)\n",
+                    "        arcana_desktop.text_input.set_enabled :: main_window, true :: call\n",
                     "        let area = arcana_desktop.types.CompositionArea :: active = true, position = (9, 10), size = (20, 21) :: call\n",
-                    "        arcana_desktop.text_input.set_composition_area :: cx.runtime.main_window, area :: call\n",
-                    "        let current = arcana_desktop.window.settings :: cx.runtime.main_window :: call\n",
-                    "        let text = arcana_desktop.text_input.settings :: cx.runtime.main_window :: call\n",
+                    "        arcana_desktop.text_input.set_composition_area :: main_window, area :: call\n",
+                    "        let current = arcana_desktop.window.settings :: main_window :: call\n",
+                    "        let text = arcana_desktop.text_input.settings :: main_window :: call\n",
                     "        self.settings_ok = false\n",
                     "        if current.options.cursor.position.0 == 12:\n",
                     "            if current.options.cursor.position.1 == 34:\n",
@@ -1479,14 +1459,14 @@ mod tests {
                     "    fn suspended(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
                     "        return\n",
                     "\n",
-                    "    fn window_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read event: std.events.AppEvent) -> arcana_desktop.types.ControlFlow:\n",
-                    "        return match event:\n",
-                    "            std.events.AppEvent.TextInput(ev) => on_text :: self, cx, ev :: call\n",
-                    "            std.events.AppEvent.TextCompositionStarted(_) => on_comp_started :: self, cx :: call\n",
-                    "            std.events.AppEvent.TextCompositionCancelled(_) => on_comp_cancelled :: self, cx :: call\n",
+                    "    fn window_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read target: arcana_desktop.types.TargetedEvent) -> arcana_desktop.types.ControlFlow:\n",
+                    "        return match target.event:\n",
+                    "            arcana_desktop.types.WindowEvent.TextInput(ev) => on_text :: self, cx, ev :: call\n",
+                    "            arcana_desktop.types.WindowEvent.TextCompositionStarted(_) => on_comp_started :: self, cx :: call\n",
+                    "            arcana_desktop.types.WindowEvent.TextCompositionCancelled(_) => on_comp_cancelled :: self, cx :: call\n",
                     "            _ => cx.control.control_flow\n",
                     "\n",
-                    "    fn device_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read event: std.events.AppEvent) -> arcana_desktop.types.ControlFlow:\n",
+                    "    fn device_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read event: arcana_desktop.types.DeviceEvent) -> arcana_desktop.types.ControlFlow:\n",
                     "        return cx.control.control_flow\n",
                     "\n",
                     "    fn about_to_wait(edit self: Demo, edit cx: arcana_desktop.types.AppContext) -> arcana_desktop.types.ControlFlow:\n",
@@ -1499,7 +1479,7 @@ mod tests {
                     "    fn exiting(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
                     "        return\n",
                     "\n",
-                    "fn on_text(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read ev: std.events.TextInputEvent) -> arcana_desktop.types.ControlFlow:\n",
+                    "fn on_text(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read ev: arcana_desktop.types.TextInputEvent) -> arcana_desktop.types.ControlFlow:\n",
                     "    if ev.text == \"x\":\n",
                     "        self.saw_text = true\n",
                     "    finish_if_ready :: self, cx :: call\n",
@@ -1638,7 +1618,7 @@ mod tests {
             String::from_utf8_lossy(&output.stdout)
                 .lines()
                 .collect::<Vec<_>>(),
-            vec!["controls=24", "pages=7", "smoke_score=767"]
+            vec!["controls=36", "pages=7", "smoke_score=767"]
         );
         let _ = fs::remove_dir_all(&exe_out_dir);
     }
@@ -1775,8 +1755,30 @@ mod tests {
         };
         thread::sleep(Duration::from_millis(200));
         send_left_click(second_hwnd, 80, 80);
+        thread::sleep(Duration::from_millis(500));
+        assert!(
+            child
+                .try_wait()
+                .expect("desktop showcase child state should be observable")
+                .is_none(),
+            "desktop showcase should stay alive after second-window click"
+        );
+        unsafe {
+            SendMessageW(main_hwnd, WM_CLOSE, 0, 0);
+        }
+        thread::sleep(Duration::from_millis(500));
+        assert!(
+            child
+                .try_wait()
+                .expect("desktop showcase child state should still be observable after main close")
+                .is_none(),
+            "desktop showcase should stay alive while the secondary window remains open"
+        );
+        unsafe {
+            SendMessageW(second_hwnd, WM_CLOSE, 0, 0);
+        }
         let status = wait_for_child_exit(&mut child, Duration::from_secs(20))
-            .expect("desktop showcase should exit after second-window click");
+            .expect("desktop showcase should exit after all windows close");
         let mut stdout = String::new();
         child
             .stdout
@@ -1885,6 +1887,96 @@ mod tests {
         let status = Command::new(&exe_path)
             .status()
             .expect("staged owner context bundle should launch");
+        assert_eq!(status.code(), Some(5));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn package_workspace_stages_windows_exe_bundle_with_active_owner_reentry_context() {
+        let dir = temp_dir("windows_exe_owner_reentry_context");
+        write_app_workspace(
+            &dir,
+            concat!(
+                "import std.concurrent\n",
+                "\n",
+                "obj SessionCtx:\n",
+                "    base: Int\n",
+                "\n",
+                "obj Counter:\n",
+                "    value: Int\n",
+                "    fn init(edit self: Self, read ctx: SessionCtx):\n",
+                "        self.value = ctx.base\n",
+                "\n",
+                "obj GateState:\n",
+                "    gate: AtomicBool\n",
+                "\n",
+                "create Session [Counter, GateState] scope-exit:\n",
+                "    closed: when (std.kernel.concurrency.atomic_bool_load :: GateState.gate :: call)\n",
+                "\n",
+                "Session\n",
+                "Counter\n",
+                "GateState\n",
+                "fn main() -> Int:\n",
+                "    let start = SessionCtx :: base = 1 :: call\n",
+                "    Session :: start :: call\n",
+                "    let gate = std.concurrent.atomic_bool :: false :: call\n",
+                "    GateState.gate = gate\n",
+                "    gate :: true :: store\n",
+                "    let resume_ctx = SessionCtx :: base = 2 :: call\n",
+                "    let resumed = Session :: resume_ctx :: call\n",
+                "    let new_gate = std.concurrent.atomic_bool :: false :: call\n",
+                "    GateState.gate = new_gate\n",
+                "    return resumed.Counter.value\n",
+            ),
+        );
+        add_std_dep(&dir);
+
+        let bundle = package_workspace(dir.clone(), BuildTarget::windows_exe(), None, None)
+            .expect("package should succeed");
+        let exe_path = bundle.bundle_dir.join(&bundle.root_artifact);
+        let status = Command::new(&exe_path)
+            .status()
+            .expect("staged reentry-context owner bundle should launch");
+        assert_eq!(status.code(), Some(2));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn package_workspace_stages_windows_exe_bundle_with_object_only_owner_attachment() {
+        let dir = temp_dir("windows_exe_owner_object_only");
+        write_app_workspace(
+            &dir,
+            concat!(
+                "obj Counter:\n",
+                "    value: Int\n",
+                "\n",
+                "create Session [Counter] scope-exit:\n",
+                "    done: when Counter.value >= 10 hold [Counter]\n",
+                "\n",
+                "Counter\n",
+                "fn bump() -> Int:\n",
+                "    Counter.value += 1\n",
+                "    return Counter.value\n",
+                "\n",
+                "Session\n",
+                "Counter\n",
+                "fn main() -> Int:\n",
+                "    Session :: :: call\n",
+                "    Counter.value = 4\n",
+                "    return bump :: :: call\n",
+            ),
+        );
+
+        let bundle = package_workspace(dir.clone(), BuildTarget::windows_exe(), None, None)
+            .expect("package should succeed");
+        let exe_path = bundle.bundle_dir.join(&bundle.root_artifact);
+        let status = Command::new(&exe_path)
+            .status()
+            .expect("staged object-only owner bundle should launch");
         assert_eq!(status.code(), Some(5));
 
         let _ = fs::remove_dir_all(&dir);
@@ -2422,3 +2514,8 @@ mod tests {
         .map_err(|e| format!("utf8 decode failed: {e}"))
     }
 }
+
+
+
+
+

@@ -69,8 +69,8 @@
   - host/core packages for text, fs, path, process, args/env,
   - app/runtime packages for window/input/canvas/events/time/audio plus primitive graphics/text,
   - ECS/behavior runtime substrate remains first-party and is not treated as showcase-only logic,
-  - then future Arcana-owned app/media grimoires for desktop facade, event/input utility, and audio facade prove the package surface is usable,
-  - that post-M8 grimoire step is now active and starts with `grimoires/owned/libs/arcana-desktop` as a real session-backed facade rather than a dead scaffold, including blocking wait, monitor/theme helpers, richer event/device routing, clipboard, and an optional ECS adapter layer above the shared `std.*` substrate,
+  - then future Arcana-owned app/media grimoires for a desktop app-shell boundary, event/input utility, and audio facade prove the package surface is usable,
+  - that post-M8 grimoire step is now active and starts with `grimoires/owned/libs/arcana-desktop` as a real session-backed desktop app-shell package rather than a dead scaffold, including blocking wait, monitor/theme helpers, richer event/device routing, clipboard, and an optional ECS adapter layer over the shared `std.*` substrate while keeping authoritative window/event/wake control in the grimoire itself,
   - owned compiler/tooling corpus and explicit conformance fixtures provide validation pressure without preserving Meadow-era package decomposition,
   - and those packages are real Rust-side runtime commitments of the rewrite, not temporary compatibility shims to be deferred until after selfhost.
 - Artifact strategy is explicit:

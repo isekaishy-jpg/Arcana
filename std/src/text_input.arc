@@ -17,7 +17,7 @@ fn composition_area_value(active: Bool, position: (Int, Int), size: (Int, Int)) 
 
 export fn default_settings() -> std.text_input.TextInputSettings:
     let area = std.text_input.composition_area_value :: false, (0, 0), (0, 0) :: call
-    return std.text_input.TextInputSettings :: enabled = true, composition_area = area :: call
+    return std.text_input.TextInputSettings :: enabled = false, composition_area = area :: call
 
 export fn enabled(read win: Window) -> Bool:
     return std.window.text_input_enabled :: win :: call

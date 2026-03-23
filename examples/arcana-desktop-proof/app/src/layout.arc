@@ -52,9 +52,7 @@ export fn for_window(window_size: (Int, Int)) -> layout.ViewLayout:
     let center_panel = layout.Rect :: pos = (gutter * 2 + left_width, header_height), size = (center_width, body_height) :: call
     let right_panel = layout.Rect :: pos = (gutter * 3 + left_width + center_width, header_height), size = (right_width, body_height) :: call
     let inner_button_width = left_panel.size.0 - gutter * 2
-    let mut button_cols = 2
-    if inner_button_width >= 336:
-        button_cols = 3
+    let button_cols = 3
     let button_gap = (8, 8)
     let button_width = (inner_button_width - (button_cols - 1) * button_gap.0) / button_cols
     let button_size = (button_width, 30)
@@ -74,13 +72,26 @@ export fn button_rect(read view: layout.ViewLayout, id: Int) -> layout.Rect:
     let y = view.left_panel.pos.1 + view.gutter + row * (view.button_size.1 + view.button_gap.1)
     return layout.Rect :: pos = (x, y), size = view.button_size :: call
 
-export fn button_hit(read rect: layout.Rect, point: (Int, Int)) -> Bool:
-    if point.0 < rect.pos.0:
-        return false
-    if point.1 < rect.pos.1:
-        return false
-    if point.0 > rect.pos.0 + rect.size.0:
-        return false
-    if point.1 > rect.pos.1 + rect.size.1:
-        return false
-    return true
+export fn button_at(read view: layout.ViewLayout, point: (Int, Int)) -> Int:
+    let start_x = view.left_panel.pos.0 + view.gutter
+    let start_y = view.left_panel.pos.1 + view.gutter
+    let local_x = point.0 - start_x
+    let local_y = point.1 - start_y
+    if local_x < 0 or local_y < 0:
+        return -1
+    let stride_x = view.button_size.0 + view.button_gap.0
+    let stride_y = view.button_size.1 + view.button_gap.1
+    if stride_x <= 0 or stride_y <= 0:
+        return -1
+    let col = local_x / stride_x
+    let row = local_y / stride_y
+    if col < 0 or col >= view.button_cols or row < 0:
+        return -1
+    let in_button_x = local_x - col * stride_x
+    let in_button_y = local_y - row * stride_y
+    if in_button_x >= view.button_size.0 or in_button_y >= view.button_size.1:
+        return -1
+    let id = row * view.button_cols + col
+    if id < 0 or id >= 36:
+        return -1
+    return id

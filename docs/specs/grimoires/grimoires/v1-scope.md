@@ -14,10 +14,11 @@ Scope notes:
 
 ## Required Roles Before Selfhost
 
-- Desktop/media facade grimoire
+- Desktop/app-shell grimoire
   - rewrite-owned scaffold: `grimoires/owned/libs/arcana-desktop`
-  - responsibility: ergonomic desktop/window/run-loop/frame convenience above `std.window`, `std.input`, `std.events`, `std.canvas`, `std.time`, and `std.clipboard`
-  - responsibility: may own the session runner, blocking wait policy, multi-window coordination, wake/mailbox helpers, monitor helpers, event routing, frame-input snapshots, optional ECS-loop adapters, keybind/action helpers, and similar desktop-facing utility layers if Arcana's rewrite-native layout folds those into one package
+  - responsibility: Arcana-owned public desktop/window/event-loop boundary for native desktop apps, with winit-class role breadth over rewrite-owned substrate rather than a thin wrapper above a separately-public raw desktop layer
+  - responsibility: may own the canonical session runner, raw window/session/event/wake contracts, blocking wait policy, multi-window coordination, input/timing helpers, monitor/clipboard helpers, event routing, frame-input snapshots, optional ECS-loop adapters, keybind/action helpers, and similar desktop-shell utilities if Arcana's rewrite-native layout folds those into one package
+  - note: `std.window`, `std.input`, `std.events`, `std.canvas`, `std.time`, and `std.clipboard` remain rewrite-owned substrate and backend-support layers; future desktop apps and higher grimoires should normally treat `arcana_desktop` as the app-shell package boundary
   - responsibility: must not absorb graphics/text draw policy that belongs in sibling grimoires above the shared low-level substrate
 - Graphics facade grimoire
   - rewrite-owned scaffold: `grimoires/owned/libs/arcana-graphics`

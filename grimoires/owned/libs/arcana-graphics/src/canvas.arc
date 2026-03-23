@@ -1,24 +1,20 @@
-import std.canvas
+import arcana_desktop.canvas
 import arcana_graphics.types
-use std.window.Window
 
-export fn fill(edit win: Window, color: Int):
-    std.canvas.fill :: win, color :: call
+export fn fill(read win: arcana_desktop.types.Window, color: Int):
+    arcana_desktop.canvas.fill :: win, color :: call
 
 export fn rgb(r: Int, g: Int, b: Int) -> Int:
-    return std.canvas.rgb :: r, g, b :: call
+    return arcana_desktop.canvas.rgb :: r, g, b :: call
 
-export fn rect(edit win: Window, read spec: arcana_graphics.types.RectSpec):
-    let cmd = std.canvas.RectSpec :: pos = spec.pos, size = spec.size, color = spec.color :: call
-    std.canvas.rect_draw :: win, cmd :: call
+export fn rect(read win: arcana_desktop.types.Window, read spec: arcana_graphics.types.RectSpec):
+    arcana_desktop.canvas.rect :: win, (spec.pos, spec.size), spec.color :: call
 
-export fn line(edit win: Window, read spec: arcana_graphics.types.LineSpec):
-    let cmd = std.canvas.LineSpec :: start = spec.start, end = spec.end, color = spec.color :: call
-    std.canvas.line_draw :: win, cmd :: call
+export fn line(read win: arcana_desktop.types.Window, read spec: arcana_graphics.types.LineSpec):
+    arcana_desktop.canvas.line :: win, (spec.start, spec.end), spec.color :: call
 
-export fn circle_fill(edit win: Window, read spec: arcana_graphics.types.CircleFillSpec):
-    let cmd = std.canvas.CircleFillSpec :: center = spec.center, radius = spec.radius, color = spec.color :: call
-    std.canvas.circle_fill_draw :: win, cmd :: call
+export fn circle_fill(read win: arcana_desktop.types.Window, read spec: arcana_graphics.types.CircleFillSpec):
+    arcana_desktop.canvas.circle_fill :: win, (spec.center, spec.radius), spec.color :: call
 
-export fn present(edit win: Window):
-    std.canvas.present :: win :: call
+export fn present(read win: arcana_desktop.types.Window):
+    arcana_desktop.canvas.present :: win :: call

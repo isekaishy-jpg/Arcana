@@ -8,6 +8,10 @@ export opaque type AppFrame as move, boundary_unsafe
 export opaque type AppSession as move, boundary_unsafe
 export opaque type WakeHandle as copy, boundary_unsafe
 
+lang app_frame_handle = AppFrame
+lang app_session_handle = AppSession
+lang wake_handle = WakeHandle
+
 export record WindowResizeEvent:
     window_id: Int
     size: (Int, Int)
@@ -71,14 +75,35 @@ export record FileDropEvent:
     path: Str
 
 export record RawMouseMotionEvent:
-    window_id: Int
+    device_id: Int
     delta: (Int, Int)
+
+export record RawMouseButtonEvent:
+    device_id: Int
+    button: Int
+    pressed: Bool
+
+export record RawMouseWheelEvent:
+    device_id: Int
+    delta: (Int, Int)
+
+export record RawKeyEvent:
+    device_id: Int
+    key: Int
+    meta: std.events.KeyMeta
+    pressed: Bool
+
+export enum DeviceEvents:
+    Never
+    WhenFocused
+    Always
 
 export enum AppEvent:
     AppResumed
     Wake
     AppSuspended
     AboutToWait
+    Unknown(Int)
     WindowResized(std.events.WindowResizeEvent)
     WindowMoved(std.events.WindowMoveEvent)
     WindowCloseRequested(Int)
@@ -101,6 +126,9 @@ export enum AppEvent:
     TextCompositionCancelled(Int)
     FileDropped(std.events.FileDropEvent)
     RawMouseMotion(std.events.RawMouseMotionEvent)
+    RawMouseButton(std.events.RawMouseButtonEvent)
+    RawMouseWheel(std.events.RawMouseWheelEvent)
+    RawKey(std.events.RawKeyEvent)
 
 fn key_meta(read raw: std.kernel.events.EventRaw) -> std.events.KeyMeta:
     let mut meta = std.events.KeyMeta :: modifiers = raw.flags, repeated = raw.repeated, physical_key = raw.physical_key :: call
@@ -124,8 +152,36 @@ fn mouse_move_event(read raw: std.kernel.events.EventRaw) -> std.events.MouseMov
 fn mouse_wheel_event(read raw: std.kernel.events.EventRaw) -> std.events.MouseWheelEvent:
     return std.events.MouseWheelEvent :: window_id = raw.window_id, delta = (0, raw.a), modifiers = raw.flags :: call
 
+fn raw_mouse_motion_event(read raw: std.kernel.events.EventRaw) -> std.events.RawMouseMotionEvent:
+    return std.events.RawMouseMotionEvent :: device_id = raw.window_id, delta = (raw.a, raw.b) :: call
+
+fn raw_mouse_button_event(read raw: std.kernel.events.EventRaw) -> std.events.RawMouseButtonEvent:
+    return std.events.RawMouseButtonEvent :: device_id = raw.window_id, button = raw.a, pressed = (raw.b != 0) :: call
+
+fn raw_mouse_wheel_event(read raw: std.kernel.events.EventRaw) -> std.events.RawMouseWheelEvent:
+    return std.events.RawMouseWheelEvent :: device_id = raw.window_id, delta = (raw.a, raw.b) :: call
+
+fn raw_key_event(read raw: std.kernel.events.EventRaw) -> std.events.RawKeyEvent:
+    let meta = std.events.key_meta :: raw :: call
+    let mut event = std.events.RawKeyEvent :: device_id = raw.window_id, key = raw.key_code, meta = meta :: call
+    event.pressed = raw.b != 0
+    return event
+
 fn composition_event(read raw: std.kernel.events.EventRaw) -> std.events.TextCompositionEvent:
     return std.events.TextCompositionEvent :: window_id = raw.window_id, text = raw.text, caret = raw.a :: call
+
+fn device_events_code(read value: std.events.DeviceEvents) -> Int:
+    return match value:
+        std.events.DeviceEvents.Never => 0
+        std.events.DeviceEvents.Always => 2
+        _ => 1
+
+fn lift_device_events(code: Int) -> std.events.DeviceEvents:
+    if code == 0:
+        return std.events.DeviceEvents.Never :: :: call
+    if code == 2:
+        return std.events.DeviceEvents.Always :: :: call
+    return std.events.DeviceEvents.WhenFocused :: :: call
 
 fn lift_event(read raw: std.kernel.events.EventRaw) -> std.events.AppEvent:
     if raw.kind == 1:
@@ -163,13 +219,17 @@ fn lift_event(read raw: std.kernel.events.EventRaw) -> std.events.AppEvent:
     if raw.kind == 17:
         return std.events.AppEvent.WindowThemeChanged :: (std.events.WindowThemeEvent :: window_id = raw.window_id, theme_code = raw.a :: call) :: call
     if raw.kind == 18:
-        return std.events.AppEvent.RawMouseMotion :: (std.events.RawMouseMotionEvent :: window_id = raw.window_id, delta = (raw.a, raw.b) :: call) :: call
+        return std.events.AppEvent.RawMouseMotion :: (std.events.raw_mouse_motion_event :: raw :: call) :: call
+    if raw.kind == 19:
+        return std.events.AppEvent.RawMouseButton :: (std.events.raw_mouse_button_event :: raw :: call) :: call
     if raw.kind == 20:
         return std.events.AppEvent.AppResumed :: :: call
     if raw.kind == 21:
         return std.events.AppEvent.Wake :: :: call
     if raw.kind == 22:
         return std.events.AppEvent.AppSuspended :: :: call
+    if raw.kind == 23:
+        return std.events.AppEvent.AboutToWait :: :: call
     if raw.kind == 24:
         return std.events.AppEvent.TextCompositionStarted :: raw.window_id :: call
     if raw.kind == 25:
@@ -178,7 +238,11 @@ fn lift_event(read raw: std.kernel.events.EventRaw) -> std.events.AppEvent:
         return std.events.AppEvent.TextCompositionCommitted :: (std.events.composition_event :: raw :: call) :: call
     if raw.kind == 27:
         return std.events.AppEvent.TextCompositionCancelled :: raw.window_id :: call
-    return std.events.AppEvent.AboutToWait :: :: call
+    if raw.kind == 28:
+        return std.events.AppEvent.RawMouseWheel :: (std.events.raw_mouse_wheel_event :: raw :: call) :: call
+    if raw.kind == 29:
+        return std.events.AppEvent.RawKey :: (std.events.raw_key_event :: raw :: call) :: call
+    return std.events.AppEvent.Unknown :: raw.kind :: call
 
 export fn poll(edit frame: AppFrame) -> Option[AppEvent]:
     let raw = std.kernel.events.poll :: frame :: call
@@ -191,10 +255,18 @@ export fn drain(take frame: AppFrame) -> List[AppEvent]:
     let mut out = std.collections.list.new[AppEvent] :: :: call
     while true:
         let next = std.events.poll :: current :: call
-        if next :: :: is_none:
+        if not (std.events.push_drained_event :: out, next :: call):
             return out
-        out :: (next :: (std.events.AppEvent.AboutToWait :: :: call) :: unwrap_or) :: push
     return out
+
+fn push_drained_event(edit out: List[AppEvent], read next: Option[AppEvent]) -> Bool:
+    return match next:
+        Option.Some(value) => push_drained_event_ready :: out, value :: call
+        Option.None => false
+
+fn push_drained_event_ready(edit out: List[AppEvent], read value: AppEvent) -> Bool:
+    out :: value :: push
+    return true
 
 export fn pump(edit win: Window) -> AppFrame:
     return std.kernel.events.pump :: win :: call
@@ -216,6 +288,12 @@ export fn window_for_id(read session: AppSession, window_id: Int) -> Option[Wind
 
 export fn window_ids(read session: AppSession) -> List[Int]:
     return std.kernel.events.session_window_ids :: session :: call
+
+export fn device_events(edit session: AppSession) -> std.events.DeviceEvents:
+    return std.events.lift_device_events :: (std.kernel.events.session_device_events :: session :: call) :: call
+
+export fn set_device_events(edit session: AppSession, read value: std.events.DeviceEvents):
+    std.kernel.events.session_set_device_events :: session, (std.events.device_events_code :: value :: call) :: call
 
 export fn window_id(read event: AppEvent) -> Option[Int]:
     return match event:
@@ -240,8 +318,52 @@ export fn window_id(read event: AppEvent) -> Option[Int]:
         AppEvent.TextCompositionCommitted(ev) => Option.Some[Int] :: ev.window_id :: call
         AppEvent.TextCompositionCancelled(id) => Option.Some[Int] :: id :: call
         AppEvent.FileDropped(ev) => Option.Some[Int] :: ev.window_id :: call
-        AppEvent.RawMouseMotion(ev) => Option.Some[Int] :: ev.window_id :: call
+        AppEvent.RawMouseMotion(_) => Option.None[Int] :: :: call
+        AppEvent.RawMouseButton(_) => Option.None[Int] :: :: call
+        AppEvent.RawMouseWheel(_) => Option.None[Int] :: :: call
+        AppEvent.RawKey(_) => Option.None[Int] :: :: call
         _ => Option.None[Int] :: :: call
+
+export fn device_id(read event: AppEvent) -> Option[Int]:
+    return match event:
+        AppEvent.RawMouseMotion(ev) => Option.Some[Int] :: ev.device_id :: call
+        AppEvent.RawMouseButton(ev) => Option.Some[Int] :: ev.device_id :: call
+        AppEvent.RawMouseWheel(ev) => Option.Some[Int] :: ev.device_id :: call
+        AppEvent.RawKey(ev) => Option.Some[Int] :: ev.device_id :: call
+        _ => Option.None[Int] :: :: call
+
+export fn kind(read event: AppEvent) -> Int:
+    return match event:
+        AppEvent.WindowResized(_) => 1
+        AppEvent.WindowMoved(_) => 10
+        AppEvent.WindowCloseRequested(_) => 2
+        AppEvent.WindowFocused(_) => 3
+        AppEvent.KeyDown(_) => 4
+        AppEvent.KeyUp(_) => 5
+        AppEvent.MouseDown(_) => 6
+        AppEvent.MouseUp(_) => 7
+        AppEvent.MouseMove(_) => 8
+        AppEvent.MouseWheel(_) => 9
+        AppEvent.MouseEntered(_) => 11
+        AppEvent.MouseLeft(_) => 12
+        AppEvent.WindowRedrawRequested(_) => 13
+        AppEvent.TextInput(_) => 14
+        AppEvent.FileDropped(_) => 15
+        AppEvent.WindowScaleFactorChanged(_) => 16
+        AppEvent.WindowThemeChanged(_) => 17
+        AppEvent.RawMouseMotion(_) => 18
+        AppEvent.RawMouseButton(_) => 19
+        AppEvent.AppResumed => 20
+        AppEvent.Wake => 21
+        AppEvent.AppSuspended => 22
+        AppEvent.AboutToWait => 23
+        AppEvent.TextCompositionStarted(_) => 24
+        AppEvent.TextCompositionUpdated(_) => 25
+        AppEvent.TextCompositionCommitted(_) => 26
+        AppEvent.TextCompositionCancelled(_) => 27
+        AppEvent.RawMouseWheel(_) => 28
+        AppEvent.RawKey(_) => 29
+        AppEvent.Unknown(kind) => kind
 
 export fn event_window(read session: AppSession, read event: AppEvent) -> Option[Window]:
     return match (std.events.window_id :: event :: call):

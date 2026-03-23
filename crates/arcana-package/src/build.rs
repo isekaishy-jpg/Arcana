@@ -429,6 +429,10 @@ pub fn execute_build_with_context(
         .join(CACHE_DIR)
         .join(LOGS_DIR)
         .join("build-last.txt");
+    if let Some(parent) = summary_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("failed to create cache logs directory `{}`: {e}", parent.display()))?;
+    }
     fs::write(&summary_path, render_build_summary(statuses, graph))
         .map_err(|e| format!("failed to write `{}`: {e}", summary_path.display()))?;
     Ok(summary_path)

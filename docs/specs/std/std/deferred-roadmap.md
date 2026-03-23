@@ -19,7 +19,7 @@ id: STD-D1
 title: richer text and font stack beyond primitive label draw
 reason_deferred: the bootstrap path only requires primitive text draw; shaping, font families, glyph metrics, and rich layout are not yet substrate-critical.
 target_window: post-first-runnable-backend app/runtime hardening
-trigger_condition: ready_when=desktop facade grimoire and showcase consumers demonstrate repeated primitive-text limits; verify=text layout smoke coverage and deterministic render checks exist; blocked_by=no approved low-level text-resource contract.
+trigger_condition: ready_when=desktop app-shell grimoire and showcase consumers demonstrate repeated primitive-text limits; verify=text layout smoke coverage and deterministic render checks exist; blocked_by=no approved low-level text-resource contract.
 owner: Arcana std/app-runtime team
 acceptance_criteria: std exposes only the additional text/font substrate that higher-level grimoires actually need, without collapsing into a UI framework.
 status: deferred

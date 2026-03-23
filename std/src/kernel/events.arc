@@ -5,7 +5,7 @@ use std.events.WakeHandle
 use std.option.Option
 use std.window.Window
 
-record EventRaw:
+export record EventRaw:
     kind: Int
     window_id: Int
     a: Int
@@ -30,6 +30,8 @@ intrinsic fn session_window_for_id(read session: AppSession, window_id: Int) -> 
 intrinsic fn session_window_ids(read session: AppSession) -> List[Int] = EventsSessionWindowIds
 intrinsic fn session_pump(edit session: AppSession) -> AppFrame = EventsSessionPump
 intrinsic fn session_wait(edit session: AppSession, timeout_ms: Int) -> AppFrame = EventsSessionWait
+intrinsic fn session_device_events(edit session: AppSession) -> Int = EventsSessionDeviceEvents
+intrinsic fn session_set_device_events(edit session: AppSession, policy: Int) = EventsSessionSetDeviceEvents
 intrinsic fn session_create_wake(edit session: AppSession) -> WakeHandle = EventsSessionCreateWake
 intrinsic fn wake_signal(read wake: WakeHandle) = EventsWakeSignal
 

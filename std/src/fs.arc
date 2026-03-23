@@ -4,6 +4,8 @@ use std.result.Result
 
 export opaque type FileStream as move, boundary_unsafe
 
+lang file_stream_handle = FileStream
+
 export fn exists(path: Str) -> Bool:
     return std.kernel.fs.fs_exists :: path :: call
 

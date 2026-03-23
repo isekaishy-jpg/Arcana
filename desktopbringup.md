@@ -5,8 +5,9 @@
 - Target parity for the desktop shell and input/text stack needed by future app/UI grimoires: window lifecycle/config/state, cursor/mouse behavior, keyboard metadata, committed text, IME composition, monitor/theme/clipboard/drag-drop, and runtime settings hooks.
 - Keep policy split clean:
   - `std.*` owns raw host-facing capability and typed settings/state records.
-  - `arcana_desktop` owns the ergonomic static facade and session runner.
+  - `arcana_desktop` owns the canonical app-shell package and session runner.
   - later app/UI grimoires own keybinds, text editing widgets, shortcut routing, and settings-screen UX.
+  - `arcana_desktop` is the authoritative public desktop boundary, analogous in role breadth to winit-class app-shell libraries; it should not collapse into a thin wrapper over separately-public raw `std.*` shell APIs.
 
 ## Key Changes
 - Expand the low-level substrate with typed records and live settings/query hooks.
@@ -42,7 +43,7 @@
 - Lift the substrate cleanly into `arcana_desktop`.
   - Add `arcana_desktop.text_input`.
   - Expand `arcana_desktop.types` with lifted settings/state records and enums that mirror the new std substrate.
-  - `arcana_desktop.window` becomes the settings-facing facade:
+  - `arcana_desktop.window` becomes the settings-facing window-shell module:
     - `default_config`, `open/open_cfg/open_in`, current state queries, and live `settings/apply_settings`.
     - targeted helpers remain for convenience, but records are the primary settings path for later settings UIs.
   - `arcana_desktop.input` exposes the richer key metadata helpers and stays free of shortcut policy.
@@ -60,7 +61,7 @@
 3. Implement buffered-host behavior for the new records/events/settings so the runtime path and tests are stable before the native host grows.
 4. Implement native Windows window/cursor/theme settings and cursor grab/capture/reposition.
 5. Implement native keyboard metadata plus committed text and full IME composition flow.
-6. Lift and verify the final `arcana_desktop` facade over the new substrate.
+6. Lift and verify the final `arcana_desktop` app-shell API over the new substrate.
 7. Close with native bundle proofs and doc/status updates in the same series.
 
 ## Test Plan
@@ -81,7 +82,7 @@
     - receives committed text and composition events,
     - prints logical/physical key info,
     - and exits cleanly.
-  - one small settings-oriented sample that round-trips `WindowSettings`, `CursorSettings`, and `TextInputSettings` without touching raw `std.*` in app-shell code.
+  - one small settings-oriented sample that round-trips `WindowSettings`, `CursorSettings`, and `TextInputSettings` with `arcana_desktop` as the primary app-shell API and any direct `std.*` use limited to explicit substrate checks.
 
 ## Assumptions And Defaults
 - Windows is still the only required backend target for this bring-up; the public Arcana API remains platform-agnostic.

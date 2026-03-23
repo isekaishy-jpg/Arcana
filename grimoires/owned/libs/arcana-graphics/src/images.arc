@@ -1,22 +1,17 @@
-import std.canvas
-import std.result
+import arcana_desktop.canvas
 import arcana_graphics.types
+import std.result
 use std.result.Result
 use std.canvas.Image
-use std.window.Window
 
 export fn load(path: Str) -> Result[Image, Str]:
-    return std.canvas.image_load :: path :: call
+    return arcana_desktop.canvas.load_image :: path :: call
 
 export fn size(read img: Image) -> (Int, Int):
-    return std.canvas.image_size :: img :: call
+    return arcana_desktop.canvas.image_size :: img :: call
 
-export fn blit(edit win: Window, read img: Image, read spec: arcana_graphics.types.SpriteSpec):
-    std.canvas.blit :: win, img, spec.pos.0 :: call
-        y = spec.pos.1
+export fn blit(read win: arcana_desktop.types.Window, read img: Image, read spec: arcana_graphics.types.SpriteSpec):
+    arcana_desktop.canvas.blit :: win, img, spec.pos :: call
 
-export fn blit_scaled(edit win: Window, read img: Image, read spec: arcana_graphics.types.SpriteScaledSpec):
-    std.canvas.blit_scaled :: win, img, spec.pos.0 :: call
-        y = spec.pos.1
-        w = spec.size.0
-        h = spec.size.1
+export fn blit_scaled(read win: arcana_desktop.types.Window, read img: Image, read spec: arcana_graphics.types.SpriteScaledSpec):
+    arcana_desktop.canvas.blit_scaled :: win, img, (spec.pos, spec.size) :: call

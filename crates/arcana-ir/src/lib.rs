@@ -259,6 +259,23 @@ fn render_lang_item_row(module_id: &str, name: &str, target: &[String]) -> Strin
     format!("module={module_id}:lang:{name}:{}", target.join("."))
 }
 
+fn resolved_module_lang_item_rows(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    module: &HirModuleSummary,
+) -> Vec<String> {
+    module
+        .lang_items
+        .iter()
+        .map(|item| {
+            let target = lookup_symbol_path(workspace, resolved_module, &item.target)
+                .map(resolved_symbol_path)
+                .unwrap_or_else(|| item.target.clone());
+            render_lang_item_row(&module.module_id, &item.name, &target)
+        })
+        .collect()
+}
+
 fn render_dependency_row(edge: &HirModuleDependency) -> String {
     format!(
         "source={}:{}:{}:{}",
@@ -2357,9 +2374,32 @@ pub fn lower_workspace_package_with_resolution(
             (module.module_id.clone(), rows)
         })
         .collect::<BTreeMap<_, _>>();
+    let module_lang_item_rows = package
+        .summary
+        .modules
+        .iter()
+        .map(|module| {
+            let rows = resolved_package
+                .module(&module.module_id)
+                .map(|resolved_module| {
+                    resolved_module_lang_item_rows(workspace, resolved_module, module)
+                })
+                .unwrap_or_else(|| {
+                    module
+                        .lang_items
+                        .iter()
+                        .map(|item| render_lang_item_row(&module.module_id, &item.name, &item.target))
+                        .collect()
+                });
+            (module.module_id.clone(), rows)
+        })
+        .collect::<BTreeMap<_, _>>();
     for module in &mut lowered.modules {
         if let Some(rows) = module_surface_rows.get(&module.module_id) {
             module.exported_surface_rows = rows.clone();
+        }
+        if let Some(rows) = module_lang_item_rows.get(&module.module_id) {
+            module.lang_item_rows = rows.clone();
         }
     }
     lowered.exported_surface_rows = package
@@ -2907,6 +2947,69 @@ mod tests {
         assert_eq!(
             ir.dependency_rows,
             vec!["source=app:import:core:".to_string()]
+        );
+    }
+
+    #[test]
+    fn lower_workspace_package_with_resolution_canonicalizes_lang_item_targets() {
+        let app_summary = build_package_summary(
+            "app",
+            vec![
+                lower_module_text(
+                    "app",
+                    concat!(
+                        "import app.types\n",
+                        "lang window_handle = types.Window\n",
+                        "fn main() -> Int:\n",
+                        "    return 0\n",
+                    ),
+                )
+                .expect("root module should lower"),
+                lower_module_text(
+                    "app.types",
+                    "export opaque type Window as move, boundary_unsafe\n",
+                )
+                .expect("types module should lower"),
+            ],
+        );
+        let app_layout = build_package_layout(
+            &app_summary,
+            BTreeMap::from([
+                (
+                    "app".to_string(),
+                    Path::new("C:/repo/app/src/shelf.arc").to_path_buf(),
+                ),
+                (
+                    "app.types".to_string(),
+                    Path::new("C:/repo/app/src/types.arc").to_path_buf(),
+                ),
+            ]),
+            BTreeMap::new(),
+        )
+        .expect("app layout should build");
+        let app_workspace = build_workspace_package(
+            Path::new("C:/repo/app").to_path_buf(),
+            BTreeSet::new(),
+            app_summary,
+            app_layout,
+        )
+        .expect("app workspace should build");
+
+        let workspace =
+            build_workspace_summary(vec![app_workspace]).expect("workspace should build");
+        let resolved = resolve_workspace(&workspace).expect("workspace should resolve");
+        let package = workspace.package("app").expect("app package should exist");
+
+        let ir = lower_workspace_package_with_resolution(&workspace, &resolved, package)
+            .expect("workspace lowering should succeed");
+        let root_module = ir
+            .modules
+            .iter()
+            .find(|module| module.module_id == "app")
+            .expect("root module should exist");
+        assert_eq!(
+            root_module.lang_item_rows,
+            vec!["module=app:lang:window_handle:app.types.Window".to_string()]
         );
     }
 

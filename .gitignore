@@ -1,6 +1,7 @@
 target/
 .arcana/
 **/.arcana/
+**/dist/
 *.tmp
 examples/**/Arcana.lock
 grimoires/**/Arcana.lock

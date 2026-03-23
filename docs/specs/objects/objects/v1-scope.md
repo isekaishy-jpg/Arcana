@@ -96,6 +96,8 @@ Session :: ctx :: call
 - Activation may carry zero or one context argument.
 - Activation introduces the owner handle into active scope.
 - Attached owned-object names become directly usable locals while that owner is active in the attached scope.
+- That active-owner state carries through ordinary routine calls and newly entered attached blocks on the same execution path; attached helpers do not require explicit re-entry when the caller already has the owner active.
+- Re-attaching the object name is sufficient for direct object access on that path; helpers and nested blocks do not need to re-attach the owner when the same owner is already active.
 - If owned objects declare context-taking lifecycle hooks, the owner activation context type must match that declared hook context type across the owner domain.
 
 ## Exit Checkpoints
@@ -108,6 +110,7 @@ Owner exits are evaluated at explicit checkpoints:
 
 If an exit condition resolves true:
 
+- when multiple exit conditions resolve true at the same checkpoint, the first matching exit in source order wins
 - held owned objects remain in the owner domain for later re-entry
 - non-held owned objects are cleaned up deterministically
 

@@ -5,7 +5,10 @@ import arcana_desktop.types
 export fn fixed_tick_ms(tick_hz: Int) -> Int:
     if tick_hz <= 0:
         return 16
-    return 1000 / tick_hz
+    let tick_ms = 1000 / tick_hz
+    if tick_ms <= 0:
+        return 1
+    return tick_ms
 
 export fn fixed_runner(read cfg: arcana_desktop.types.FixedStepConfig) -> arcana_desktop.types.FixedRunner:
     let tick_ms = arcana_desktop.loop.fixed_tick_ms :: cfg.tick_hz :: call

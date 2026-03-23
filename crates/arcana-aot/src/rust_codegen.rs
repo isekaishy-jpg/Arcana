@@ -326,6 +326,17 @@ fn render_native_build_rs(dll_definition_text: Option<&str>) -> String {
         "    fs::write(out_dir.join(\"runtime-package.json\"), image_text)\n",
         "        .map_err(|e| format!(\"failed to write runtime package image: {e}\"))?;\n",
     ));
+    if dll_definition_text.is_none() {
+        out.push_str(concat!(
+            "    if std::env::var(\"CARGO_CFG_TARGET_OS\").as_deref() == Ok(\"windows\") {\n",
+            "        if std::env::var(\"CARGO_CFG_TARGET_ENV\").as_deref() == Ok(\"msvc\") {\n",
+            "            println!(\"cargo:rustc-link-arg=/STACK:8388608\");\n",
+            "        } else if std::env::var(\"CARGO_CFG_TARGET_ENV\").as_deref() == Ok(\"gnu\") {\n",
+            "            println!(\"cargo:rustc-link-arg=-Wl,--stack,8388608\");\n",
+            "        }\n",
+            "    }\n",
+        ));
+    }
     if let Some(definition_text) = dll_definition_text {
         out.push_str("    let definition_text: &str = ");
         out.push_str(&format!("{definition_text:?}"));

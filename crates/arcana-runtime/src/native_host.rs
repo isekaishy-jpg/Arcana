@@ -17,8 +17,8 @@ use windows_sys::Win32::Foundation::{
 use windows_sys::Win32::Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute};
 use windows_sys::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, ClientToScreen, DIB_RGB_COLORS, EndPaint,
-    EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, InvalidateRect, MONITOR_DEFAULTTONEAREST,
-    MONITORINFO, MONITORINFOEXW, MonitorFromWindow, PAINTSTRUCT, ReleaseDC, SRCCOPY, StretchDIBits,
+    EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITORINFO,
+    MONITORINFOEXW, MonitorFromWindow, PAINTSTRUCT, ReleaseDC, SRCCOPY, StretchDIBits,
 };
 use windows_sys::Win32::Media::Audio::{
     HWAVEOUT, WAVE_FORMAT_PCM, WAVE_FORMAT_QUERY, WAVE_MAPPER, WAVEFORMATEX, WAVEHDR,
@@ -52,7 +52,7 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows_sys::Win32::UI::Input::{
     GetRawInputData, HRAWINPUT, MOUSE_MOVE_RELATIVE, RAWINPUT, RAWINPUTDEVICE, RID_INPUT,
-    RIDEV_INPUTSINK, RIM_TYPEMOUSE, RegisterRawInputDevices,
+    RIDEV_INPUTSINK, RIM_TYPEKEYBOARD, RIM_TYPEMOUSE, RegisterRawInputDevices,
 };
 use windows_sys::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -103,6 +103,7 @@ const EVENT_FILE_DROPPED: i64 = 15;
 const EVENT_WINDOW_SCALE_FACTOR_CHANGED: i64 = 16;
 const EVENT_WINDOW_THEME_CHANGED: i64 = 17;
 const EVENT_RAW_MOUSE_MOTION: i64 = 18;
+const EVENT_RAW_MOUSE_BUTTON: i64 = 19;
 const EVENT_APP_RESUMED: i64 = 20;
 const EVENT_WAKE: i64 = 21;
 const EVENT_APP_SUSPENDED: i64 = 22;
@@ -111,6 +112,25 @@ const EVENT_TEXT_COMPOSITION_STARTED: i64 = 24;
 const EVENT_TEXT_COMPOSITION_UPDATED: i64 = 25;
 const EVENT_TEXT_COMPOSITION_COMMITTED: i64 = 26;
 const EVENT_TEXT_COMPOSITION_CANCELLED: i64 = 27;
+const EVENT_RAW_MOUSE_WHEEL: i64 = 28;
+const EVENT_RAW_KEY: i64 = 29;
+const DEVICE_EVENTS_NEVER: i64 = 0;
+const DEVICE_EVENTS_WHEN_FOCUSED: i64 = 1;
+const DEVICE_EVENTS_ALWAYS: i64 = 2;
+const RAW_MOUSE_LEFT_BUTTON_DOWN: u16 = 0x0001;
+const RAW_MOUSE_LEFT_BUTTON_UP: u16 = 0x0002;
+const RAW_MOUSE_RIGHT_BUTTON_DOWN: u16 = 0x0004;
+const RAW_MOUSE_RIGHT_BUTTON_UP: u16 = 0x0008;
+const RAW_MOUSE_MIDDLE_BUTTON_DOWN: u16 = 0x0010;
+const RAW_MOUSE_MIDDLE_BUTTON_UP: u16 = 0x0020;
+const RAW_MOUSE_BUTTON_4_DOWN: u16 = 0x0040;
+const RAW_MOUSE_BUTTON_4_UP: u16 = 0x0080;
+const RAW_MOUSE_BUTTON_5_DOWN: u16 = 0x0100;
+const RAW_MOUSE_BUTTON_5_UP: u16 = 0x0200;
+const RAW_MOUSE_WHEEL: u16 = 0x0400;
+const RAW_MOUSE_HWHEEL: u16 = 0x0800;
+const RAW_KEY_BREAK: u16 = 0x0001;
+const RAW_KEY_E0: u16 = 0x0002;
 const WM_MOUSELEAVE_MESSAGE: u32 = 0x02A3;
 const ARCANA_BYTES_CLIPBOARD_FORMAT_NAME: &str = "ArcanaRuntimeBytes";
 
@@ -185,6 +205,7 @@ struct NativeWindowState {
     cursor_grab_mode: i64,
     cursor_position: (i64, i64),
     suppress_cursor_move: bool,
+    message_loop_signaled: bool,
     redraw_pending: bool,
     text_input_enabled: bool,
     composition_area_active: bool,
@@ -217,6 +238,7 @@ struct NativeSessionState {
     resumed: bool,
     suspended: bool,
     pending_wakes: usize,
+    device_events_policy: i64,
 }
 
 struct NativeWakeState {
@@ -372,6 +394,7 @@ impl NativeProcessHost {
                 resumed: false,
                 suspended: false,
                 pending_wakes: 0,
+                device_events_policy: DEVICE_EVENTS_WHEN_FOCUSED,
             },
         );
         handle
@@ -393,8 +416,16 @@ impl NativeProcessHost {
     }
 
     fn detach_window_from_sessions(&mut self, window: RuntimeWindowHandle) {
-        for session in self.sessions.values_mut() {
-            session.windows.retain(|candidate| *candidate != window);
+        let mut affected = Vec::new();
+        for (session, state) in &mut self.sessions {
+            let before = state.windows.len();
+            state.windows.retain(|candidate| *candidate != window);
+            if state.windows.len() != before {
+                affected.push(*session);
+            }
+        }
+        for session in affected {
+            self.notify_session_queue(session);
         }
     }
 
@@ -407,7 +438,7 @@ impl NativeProcessHost {
             .windows
             .iter()
             .filter_map(|(handle, state)| {
-                if state.closed || state.hwnd.is_null() {
+                if (state.closed || state.hwnd.is_null()) && state.events.is_empty() {
                     Some(*handle)
                 } else {
                     None
@@ -433,7 +464,7 @@ impl NativeProcessHost {
         if !self.windows.contains_key(&window) {
             return Err(format!("invalid Window handle `{}`", window.0));
         }
-        let hwnd = {
+        let (hwnd, keep_attached) = {
             let window_state = self.window_mut(window)?;
             if window_state.closed || window_state.hwnd.is_null() {
                 self.detach_window_from_sessions(window);
@@ -441,9 +472,11 @@ impl NativeProcessHost {
                 return Ok(());
             }
             window_state.closed = true;
-            window_state.hwnd
+            (window_state.hwnd, !window_state.events.is_empty())
         };
-        self.detach_window_from_sessions(window);
+        if !keep_attached {
+            self.detach_window_from_sessions(window);
+        }
         if !hwnd.is_null() && unsafe { IsWindow(hwnd) != 0 } {
             unsafe {
                 DestroyWindow(hwnd);
@@ -621,10 +654,16 @@ impl NativeProcessHost {
         if hwnd.is_null() {
             return Err("failed to create native window".to_string());
         }
+        if unsafe { SetWindowTextW(hwnd, title_wide.as_ptr()) } == 0 {
+            unsafe {
+                DestroyWindow(hwnd);
+            }
+            return Err("failed to publish native window title".to_string());
+        }
         unsafe {
             DragAcceptFiles(hwnd, 1);
         }
-        Self::register_window_raw_mouse(hwnd)?;
+        Self::register_window_raw_input(hwnd)?;
         let handle = self.insert_window(window);
         self.pump_messages()?;
         Ok(handle)
@@ -716,12 +755,20 @@ impl NativeProcessHost {
         if !session_state.resumed || session_state.pending_wakes > 0 {
             return Ok(true);
         }
+        let mut live_windows = 0usize;
         for window in &session_state.windows {
             if let Some(state) = self.windows.get(window) {
+                if state.closed || state.hwnd.is_null() {
+                    continue;
+                }
+                live_windows += 1;
                 if !state.events.is_empty() {
                     return Ok(true);
                 }
             }
+        }
+        if live_windows == 0 && session_state.resumed && !session_state.suspended {
+            return Ok(true);
         }
         Ok(false)
     }
@@ -754,48 +801,61 @@ impl NativeProcessHost {
             }
         } else {
             let timeout = u32::try_from(timeout_ms).unwrap_or(u32::MAX);
-            unsafe {
+            let wait_result = unsafe {
                 MsgWaitForMultipleObjectsEx(
                     0,
                     std::ptr::null(),
                     timeout,
                     QS_ALLINPUT,
                     MWMO_INPUTAVAILABLE,
-                );
+                )
+            };
+            if wait_result == u32::MAX {
+                return Err("failed to wait for native session message".to_string());
             }
         }
         Ok(())
     }
 
-    fn notify_session_queue(&self, session: RuntimeAppSessionHandle) {
+    fn notify_session_queue(&mut self, session: RuntimeAppSessionHandle) {
         let session_windows = self
             .sessions
             .get(&session)
             .map(|state| state.windows.clone())
             .unwrap_or_default();
         for window in session_windows {
-            let Some(state) = self.windows.get(&window) else {
+            let Some(state) = self.windows.get_mut(&window).map(Box::as_mut) else {
                 continue;
             };
-            if state.closed || state.hwnd.is_null() {
-                continue;
-            }
-            unsafe {
-                PostMessageW(state.hwnd, WM_NULL, 0, 0);
-            }
+            state.signal_message_loop();
             break;
         }
     }
 
-    fn register_window_raw_mouse(hwnd: HWND) -> Result<(), String> {
-        let device = RAWINPUTDEVICE {
-            usUsagePage: HID_USAGE_PAGE_GENERIC,
-            usUsage: HID_USAGE_GENERIC_MOUSE,
-            dwFlags: RIDEV_INPUTSINK,
-            hwndTarget: hwnd,
-        };
-        if unsafe { RegisterRawInputDevices(&device, 1, size_of::<RAWINPUTDEVICE>() as u32) } == 0 {
-            return Err("failed to register native raw mouse input".to_string());
+    fn register_window_raw_input(hwnd: HWND) -> Result<(), String> {
+        let devices = [
+            RAWINPUTDEVICE {
+                usUsagePage: HID_USAGE_PAGE_GENERIC,
+                usUsage: HID_USAGE_GENERIC_MOUSE,
+                dwFlags: RIDEV_INPUTSINK,
+                hwndTarget: hwnd,
+            },
+            RAWINPUTDEVICE {
+                usUsagePage: HID_USAGE_PAGE_GENERIC,
+                usUsage: 0x06,
+                dwFlags: RIDEV_INPUTSINK,
+                hwndTarget: hwnd,
+            },
+        ];
+        if unsafe {
+            RegisterRawInputDevices(
+                devices.as_ptr(),
+                devices.len() as u32,
+                size_of::<RAWINPUTDEVICE>() as u32,
+            )
+        } == 0
+        {
+            return Err("failed to register native raw input".to_string());
         }
         Ok(())
     }
@@ -823,6 +883,9 @@ impl NativeProcessHost {
     }
 
     fn event_with_window_id(window: RuntimeWindowHandle, event: BufferedEvent) -> BufferedEvent {
+        if crate::buffered_device_event_kind(event.kind) {
+            return event;
+        }
         BufferedEvent {
             window_id: i64::try_from(window.0).unwrap_or(-1),
             ..event
@@ -1217,7 +1280,9 @@ impl RuntimeHost for NativeProcessHost {
     }
 
     fn window_alive(&mut self, window: RuntimeWindowHandle) -> Result<bool, String> {
-        let window = self.window_ref(window)?;
+        let Some(window) = self.windows.get(&window).map(Box::as_ref) else {
+            return Ok(false);
+        };
         Ok(!window.closed && unsafe { IsWindow(window.hwnd) != 0 })
     }
 
@@ -1248,8 +1313,7 @@ impl RuntimeHost for NativeProcessHost {
 
     fn window_id(&mut self, window: RuntimeWindowHandle) -> Result<i64, String> {
         self.window_ref(window)?;
-        i64::try_from(window.0)
-            .map_err(|_| format!("Window handle `{}` does not fit in Int", window.0))
+        i64::try_from(window.0).map_err(|_| format!("Window handle `{}` does not fit in Int", window.0))
     }
 
     fn window_position(&mut self, window: RuntimeWindowHandle) -> Result<(i64, i64), String> {
@@ -1378,6 +1442,9 @@ impl RuntimeHost for NativeProcessHost {
 
     fn window_set_title(&mut self, window: RuntimeWindowHandle, title: &str) -> Result<(), String> {
         let hwnd = self.window_ref(window)?.hwnd;
+        if self.window_ref(window)?.title == title {
+            return Ok(());
+        }
         let title_wide = wide_null(title);
         if unsafe { SetWindowTextW(hwnd, title_wide.as_ptr()) } == 0 {
             return Err("failed to update window title".to_string());
@@ -1447,13 +1514,6 @@ impl RuntimeHost for NativeProcessHost {
         if ok == 0 {
             return Err("failed to resize native window".to_string());
         }
-        let window = self.window_mut(window)?;
-        window.width = width;
-        window.height = height;
-        window.surface.resize(width, height);
-        window.resized = true;
-        window.push_event(EVENT_WINDOW_RESIZED, width, height);
-        window.push_redraw_event();
         Ok(())
     }
 
@@ -1462,6 +1522,9 @@ impl RuntimeHost for NativeProcessHost {
         window: RuntimeWindowHandle,
         enabled: bool,
     ) -> Result<(), String> {
+        if self.window_ref(window)?.visible == enabled {
+            return Ok(());
+        }
         let hwnd = self.window_ref(window)?.hwnd;
         unsafe {
             ShowWindow(hwnd, if enabled { SW_SHOW } else { SW_HIDE });
@@ -1475,6 +1538,9 @@ impl RuntimeHost for NativeProcessHost {
         window: RuntimeWindowHandle,
         enabled: bool,
     ) -> Result<(), String> {
+        if self.window_ref(window)?.decorated == enabled {
+            return Ok(());
+        }
         let hwnd = self.window_ref(window)?.hwnd;
         let mut style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) };
         if enabled {
@@ -1503,6 +1569,9 @@ impl RuntimeHost for NativeProcessHost {
         window: RuntimeWindowHandle,
         enabled: bool,
     ) -> Result<(), String> {
+        if self.window_ref(window)?.resizable == enabled {
+            return Ok(());
+        }
         let hwnd = self.window_ref(window)?.hwnd;
         let mut style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) };
         if enabled {
@@ -1532,14 +1601,12 @@ impl RuntimeHost for NativeProcessHost {
         width: i64,
         height: i64,
     ) -> Result<(), String> {
-        let hwnd = {
-            let window = self.window_mut(window)?;
-            window.min_size = (width.max(0), height.max(0));
-            window.hwnd
-        };
-        unsafe {
-            InvalidateRect(hwnd, null_mut(), 0);
+        let size = (width.max(0), height.max(0));
+        let window = self.window_mut(window)?;
+        if window.min_size == size {
+            return Ok(());
         }
+        window.min_size = size;
         Ok(())
     }
 
@@ -1549,14 +1616,12 @@ impl RuntimeHost for NativeProcessHost {
         width: i64,
         height: i64,
     ) -> Result<(), String> {
-        let hwnd = {
-            let window = self.window_mut(window)?;
-            window.max_size = (width.max(0), height.max(0));
-            window.hwnd
-        };
-        unsafe {
-            InvalidateRect(hwnd, null_mut(), 0);
+        let size = (width.max(0), height.max(0));
+        let window = self.window_mut(window)?;
+        if window.max_size == size {
+            return Ok(());
         }
+        window.max_size = size;
         Ok(())
     }
 
@@ -1651,6 +1716,9 @@ impl RuntimeHost for NativeProcessHost {
         window: RuntimeWindowHandle,
         enabled: bool,
     ) -> Result<(), String> {
+        if self.window_ref(window)?.maximized == enabled {
+            return Ok(());
+        }
         let hwnd = self.window_ref(window)?.hwnd;
         unsafe {
             ShowWindow(hwnd, if enabled { SW_MAXIMIZE } else { SW_RESTORE });
@@ -1664,6 +1732,9 @@ impl RuntimeHost for NativeProcessHost {
         window: RuntimeWindowHandle,
         enabled: bool,
     ) -> Result<(), String> {
+        if self.window_ref(window)?.topmost == enabled {
+            return Ok(());
+        }
         let hwnd = self.window_ref(window)?.hwnd;
         unsafe {
             SetWindowPos(
@@ -1689,14 +1760,11 @@ impl RuntimeHost for NativeProcessHost {
         window: RuntimeWindowHandle,
         enabled: bool,
     ) -> Result<(), String> {
-        let hwnd = {
-            let window = self.window_mut(window)?;
-            window.cursor_visible = enabled;
-            window.hwnd
-        };
-        unsafe {
-            InvalidateRect(hwnd, null_mut(), 0);
+        let window = self.window_mut(window)?;
+        if window.cursor_visible == enabled {
+            return Ok(());
         }
+        window.cursor_visible = enabled;
         Ok(())
     }
 
@@ -1705,6 +1773,9 @@ impl RuntimeHost for NativeProcessHost {
         window: RuntimeWindowHandle,
         enabled: bool,
     ) -> Result<(), String> {
+        if self.window_ref(window)?.transparent == enabled {
+            return Ok(());
+        }
         let hwnd = self.window_ref(window)?.hwnd;
         let mut ex_style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) };
         if enabled {
@@ -1729,6 +1800,9 @@ impl RuntimeHost for NativeProcessHost {
         window: RuntimeWindowHandle,
         code: i64,
     ) -> Result<(), String> {
+        if self.window_ref(window)?.theme_override_code == code {
+            return Ok(());
+        }
         let hwnd = {
             let window = self.window_mut(window)?;
             window.theme_override_code = code;
@@ -1745,14 +1819,11 @@ impl RuntimeHost for NativeProcessHost {
         window: RuntimeWindowHandle,
         code: i64,
     ) -> Result<(), String> {
-        let hwnd = {
-            let window = self.window_mut(window)?;
-            window.cursor_icon_code = code;
-            window.hwnd
-        };
-        unsafe {
-            InvalidateRect(hwnd, null_mut(), 0);
+        let window = self.window_mut(window)?;
+        if window.cursor_icon_code == code {
+            return Ok(());
         }
+        window.cursor_icon_code = code;
         Ok(())
     }
 
@@ -1761,6 +1832,9 @@ impl RuntimeHost for NativeProcessHost {
         window: RuntimeWindowHandle,
         mode: i64,
     ) -> Result<(), String> {
+        if self.window_ref(window)?.cursor_grab_mode == mode {
+            return Ok(());
+        }
         let (hwnd, center) = {
             let window_state = self.window_ref(window)?;
             (
@@ -1802,6 +1876,9 @@ impl RuntimeHost for NativeProcessHost {
         x: i64,
         y: i64,
     ) -> Result<(), String> {
+        if self.window_ref(window)?.cursor_position == (x, y) {
+            return Ok(());
+        }
         let hwnd = self.window_ref(window)?.hwnd;
         let mut point = POINT {
             x: i32::try_from(x).map_err(|_| "cursor x does not fit in i32".to_string())?,
@@ -1826,6 +1903,9 @@ impl RuntimeHost for NativeProcessHost {
         enabled: bool,
     ) -> Result<(), String> {
         let window = self.window_mut(window)?;
+        if window.text_input_enabled == enabled {
+            return Ok(());
+        }
         window.text_input_enabled = enabled;
         if !enabled {
             window.composition_active = false;
@@ -2021,9 +2101,12 @@ impl RuntimeHost for NativeProcessHost {
         let events = std::mem::take(&mut window_state.events)
             .into_iter()
             .map(|event| Self::event_with_window_id(window, event))
-            .collect::<Vec<_>>();
+            .collect::<VecDeque<_>>();
         let input = Self::snapshot_frame_input(window_state);
-        Ok(self.insert_frame(BufferedAppFrame { events, input }))
+        Ok(self.insert_frame(BufferedAppFrame {
+            events: VecDeque::from(events),
+            input,
+        }))
     }
 
     fn events_poll(
@@ -2031,10 +2114,9 @@ impl RuntimeHost for NativeProcessHost {
         frame: RuntimeAppFrameHandle,
     ) -> Result<Option<RuntimeEventRecord>, String> {
         let frame = self.frame_mut(frame)?;
-        let Some(event) = frame.events.first().cloned() else {
+        let Some(event) = frame.events.pop_front() else {
             return Ok(None);
         };
-        frame.events.remove(0);
         Ok(Some(RuntimeEventRecord {
             kind: event.kind,
             window_id: event.window_id,
@@ -2093,9 +2175,13 @@ impl RuntimeHost for NativeProcessHost {
         window: RuntimeWindowHandle,
     ) -> Result<(), String> {
         let session_state = self.session_mut(session)?;
+        let before = session_state.windows.len();
         session_state
             .windows
             .retain(|candidate| *candidate != window);
+        if session_state.windows.len() != before {
+            self.notify_session_queue(session);
+        }
         Ok(())
     }
 
@@ -2139,11 +2225,40 @@ impl RuntimeHost for NativeProcessHost {
         self.pump_messages()?;
         self.prune_closed_windows();
         let session_windows = self.session_ref(session)?.windows.clone();
-        let mut events = Vec::new();
+        let mut window_events = Vec::new();
         let mut input = BufferedFrameInput::default();
+        let mut live_windows = 0usize;
+        let mut any_window_focused = false;
+        for window in session_windows {
+            let Ok(state) = self.window_mut(window) else {
+                continue;
+            };
+            let is_live = !state.closed && !state.hwnd.is_null();
+            if is_live {
+                live_windows += 1;
+                state.redraw_pending = false;
+                any_window_focused = any_window_focused || state.focused;
+            }
+            let mut state_events = std::mem::take(&mut state.events)
+                .into_iter()
+                .map(|event| Self::event_with_window_id(window, event))
+                .collect::<Vec<_>>();
+            prioritize_close_requested_events(&mut state_events);
+            if is_live {
+                let state_input = Self::snapshot_frame_input(state);
+                Self::merge_frame_input(&mut input, state_input);
+            }
+            window_events.extend(state_events);
+        }
+        let device_events_policy = self.session_ref(session)?.device_events_policy;
+        window_events.retain(|event| {
+            !crate::buffered_device_event_kind(event.kind)
+                || crate::buffered_device_events_allowed(device_events_policy, any_window_focused)
+        });
+        let mut events = Vec::new();
         {
             let session_state = self.session_mut(session)?;
-            if !session_state.resumed {
+            if !session_state.resumed && live_windows > 0 {
                 events.push(BufferedEvent {
                     kind: EVENT_APP_RESUMED,
                     window_id: 0,
@@ -2169,21 +2284,7 @@ impl RuntimeHost for NativeProcessHost {
                 });
             }
         }
-        let mut live_windows = 0usize;
-        for window in session_windows {
-            let Ok(state) = self.window_mut(window) else {
-                continue;
-            };
-            live_windows += 1;
-            state.redraw_pending = false;
-            let state_events = std::mem::take(&mut state.events)
-                .into_iter()
-                .map(|event| Self::event_with_window_id(window, event))
-                .collect::<Vec<_>>();
-            let state_input = Self::snapshot_frame_input(state);
-            Self::merge_frame_input(&mut input, state_input);
-            events.extend(state_events);
-        }
+        events.extend(window_events);
         {
             let session_state = self.session_mut(session)?;
             if live_windows == 0 && session_state.resumed && !session_state.suspended {
@@ -2199,6 +2300,7 @@ impl RuntimeHost for NativeProcessHost {
                 session_state.suspended = true;
             }
         }
+        self.prune_closed_windows();
         events.push(BufferedEvent {
             kind: EVENT_ABOUT_TO_WAIT,
             window_id: 0,
@@ -2208,7 +2310,30 @@ impl RuntimeHost for NativeProcessHost {
             text: String::new(),
             ..BufferedEvent::default()
         });
-        Ok(self.insert_frame(BufferedAppFrame { events, input }))
+        let frame = self.insert_frame(BufferedAppFrame {
+            events: VecDeque::from(events),
+            input,
+        });
+        Ok(frame)
+    }
+
+    fn events_session_device_events(
+        &mut self,
+        session: RuntimeAppSessionHandle,
+    ) -> Result<i64, String> {
+        Ok(self.session_ref(session)?.device_events_policy)
+    }
+
+    fn events_session_set_device_events(
+        &mut self,
+        session: RuntimeAppSessionHandle,
+        policy: i64,
+    ) -> Result<(), String> {
+        if !(DEVICE_EVENTS_NEVER..=DEVICE_EVENTS_ALWAYS).contains(&policy) {
+            return Err(format!("invalid device events policy `{policy}`"));
+        }
+        self.session_mut(session)?.device_events_policy = policy;
+        Ok(())
     }
 
     fn events_session_wait(
@@ -2217,7 +2342,8 @@ impl RuntimeHost for NativeProcessHost {
         timeout_ms: i64,
     ) -> Result<RuntimeAppFrameHandle, String> {
         self.wait_for_session_activity(session, timeout_ms)?;
-        self.events_session_pump(session)
+        let frame = self.events_session_pump(session)?;
+        Ok(frame)
     }
 
     fn events_session_create_wake(
@@ -2629,8 +2755,9 @@ impl NativeWindowState {
             cursor_grab_mode: 0,
             cursor_position: (0, 0),
             suppress_cursor_move: false,
+            message_loop_signaled: false,
             redraw_pending: false,
-            text_input_enabled: true,
+            text_input_enabled: false,
             composition_area_active: false,
             composition_area_position: (0, 0),
             composition_area_size: (0, 0),
@@ -2664,6 +2791,21 @@ impl NativeWindowState {
         self.events.push_back(BufferedEvent {
             kind,
             window_id: 0,
+            a,
+            b,
+            flags: frame_modifier_flags(&self.key_down),
+            text: String::new(),
+            ..BufferedEvent::default()
+        });
+    }
+
+    fn push_device_event(&mut self, kind: i64, device_id: i64, a: i64, b: i64) {
+        if self.closed {
+            return;
+        }
+        self.events.push_back(BufferedEvent {
+            kind,
+            window_id: device_id,
             a,
             b,
             flags: frame_modifier_flags(&self.key_down),
@@ -2747,6 +2889,36 @@ impl NativeWindowState {
         });
     }
 
+    fn push_raw_key_event(
+        &mut self,
+        device_id: i64,
+        key_code: i64,
+        physical_key: i64,
+        logical_key: i64,
+        key_location: i64,
+        pressed: bool,
+        text: String,
+    ) {
+        if self.closed {
+            return;
+        }
+        self.events.push_back(BufferedEvent {
+            kind: EVENT_RAW_KEY,
+            window_id: device_id,
+            a: 0,
+            b: if pressed { 1 } else { 0 },
+            flags: frame_modifier_flags(&self.key_down),
+            text,
+            key_code,
+            physical_key,
+            logical_key,
+            key_location,
+            pointer_x: self.mouse_pos.0,
+            pointer_y: self.mouse_pos.1,
+            repeated: false,
+        });
+    }
+
     fn push_composition_event(&mut self, kind: i64, text: String, caret: i64) {
         if self.closed {
             return;
@@ -2764,10 +2936,14 @@ impl NativeWindowState {
         });
     }
 
-    fn signal_message_loop(&self) {
+    fn signal_message_loop(&mut self) {
         if self.closed || self.hwnd.is_null() {
             return;
         }
+        if self.message_loop_signaled {
+            return;
+        }
+        self.message_loop_signaled = true;
         unsafe {
             PostMessageW(self.hwnd, WM_NULL, 0, 0);
         }
@@ -2819,6 +2995,20 @@ fn frame_modifier_flags(keys: &BTreeSet<i64>) -> i64 {
     flags
 }
 
+fn prioritize_close_requested_events(events: &mut Vec<BufferedEvent>) {
+    let Some(index) = events
+        .iter()
+        .position(|event| event.kind == EVENT_WINDOW_CLOSE_REQUESTED)
+    else {
+        return;
+    };
+    if index == 0 {
+        return;
+    }
+    let event = events.remove(index);
+    events.insert(0, event);
+}
+
 fn append_unique(target: &mut Vec<i64>, values: Vec<i64>) {
     for value in values {
         if !target.contains(&value) {
@@ -2834,6 +3024,76 @@ fn key_physical_code(lparam: LPARAM) -> i64 {
     } else {
         scancode
     }
+}
+
+fn raw_key_lparam(make_code: u16, flags: u16) -> LPARAM {
+    let mut lparam = (i64::from(make_code) & 0xff) << 16;
+    if flags & RAW_KEY_E0 != 0 {
+        lparam |= 0x0100_0000;
+    }
+    lparam as LPARAM
+}
+
+fn raw_key_physical_code(make_code: u16, flags: u16) -> i64 {
+    key_physical_code(raw_key_lparam(make_code, flags))
+}
+
+fn raw_key_location_code(vkey: u32, make_code: u16, flags: u16) -> i64 {
+    key_location_code(vkey, raw_key_lparam(make_code, flags))
+}
+
+fn raw_input_device_id(handle: *mut c_void) -> i64 {
+    if handle.is_null() {
+        0
+    } else {
+        handle as usize as i64
+    }
+}
+
+fn raw_mouse_button_events(flags: u16) -> Vec<(i64, bool)> {
+    let mut out = Vec::new();
+    if flags & RAW_MOUSE_LEFT_BUTTON_DOWN != 0 {
+        out.push((1, true));
+    }
+    if flags & RAW_MOUSE_LEFT_BUTTON_UP != 0 {
+        out.push((1, false));
+    }
+    if flags & RAW_MOUSE_RIGHT_BUTTON_DOWN != 0 {
+        out.push((2, true));
+    }
+    if flags & RAW_MOUSE_RIGHT_BUTTON_UP != 0 {
+        out.push((2, false));
+    }
+    if flags & RAW_MOUSE_MIDDLE_BUTTON_DOWN != 0 {
+        out.push((3, true));
+    }
+    if flags & RAW_MOUSE_MIDDLE_BUTTON_UP != 0 {
+        out.push((3, false));
+    }
+    if flags & RAW_MOUSE_BUTTON_4_DOWN != 0 {
+        out.push((4, true));
+    }
+    if flags & RAW_MOUSE_BUTTON_4_UP != 0 {
+        out.push((4, false));
+    }
+    if flags & RAW_MOUSE_BUTTON_5_DOWN != 0 {
+        out.push((5, true));
+    }
+    if flags & RAW_MOUSE_BUTTON_5_UP != 0 {
+        out.push((5, false));
+    }
+    out
+}
+
+fn raw_mouse_wheel_delta(flags: u16, data: u16) -> Option<(i64, i64)> {
+    let value = i64::from(i16::from_ne_bytes(data.to_ne_bytes()));
+    if flags & RAW_MOUSE_WHEEL != 0 {
+        return Some((0, value));
+    }
+    if flags & RAW_MOUSE_HWHEEL != 0 {
+        return Some((value, 0));
+    }
+    None
 }
 
 fn key_location_code(vkey: u32, lparam: LPARAM) -> i64 {
@@ -3150,10 +3410,15 @@ impl CanvasSurface {
         let y0 = y.max(0);
         let x1 = (x + w).min(self.width).max(x0);
         let y1 = (y + h).min(self.height).max(y0);
+        if x0 == x1 || y0 == y1 {
+            return;
+        }
+        let row_width = self.width as usize;
+        let x0 = x0 as usize;
+        let x1 = x1 as usize;
         for py in y0..y1 {
-            for px in x0..x1 {
-                self.set_pixel(px, py, color);
-            }
+            let row_start = py as usize * row_width;
+            self.pixels[row_start + x0..row_start + x1].fill(color);
         }
     }
 
@@ -3290,6 +3555,10 @@ unsafe extern "system" fn arcana_window_proc(
                 let _ = apply_cursor_grab(hwnd, 0);
                 0
             }
+            WM_NULL => {
+                state.message_loop_signaled = false;
+                0
+            }
             WM_NCDESTROY => {
                 unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) };
                 unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
@@ -3298,6 +3567,10 @@ unsafe extern "system" fn arcana_window_proc(
         };
     }
     match message {
+        WM_NULL => {
+            state.message_loop_signaled = false;
+            0
+        }
         WM_PAINT => {
             let mut paint = unsafe { zeroed::<PAINTSTRUCT>() };
             unsafe {
@@ -3337,6 +3610,7 @@ unsafe extern "system" fn arcana_window_proc(
             state.maximized = wparam as u32 == SIZE_MAXIMIZED;
             state.resized = true;
             state.push_event(EVENT_WINDOW_RESIZED, state.width, state.height);
+            state.push_redraw_event();
             0
         }
         WM_MOVE => {
@@ -3660,13 +3934,47 @@ unsafe extern "system" fn arcana_window_proc(
                 return 0;
             }
             let raw = unsafe { &*(buffer.as_ptr() as *const RAWINPUT) };
+            let device_id = raw_input_device_id(raw.header.hDevice);
             if raw.header.dwType == RIM_TYPEMOUSE {
                 let mouse = unsafe { raw.data.mouse };
                 if mouse.usFlags == MOUSE_MOVE_RELATIVE || mouse.lLastX != 0 || mouse.lLastY != 0 {
-                    state.push_event(
+                    state.push_device_event(
                         EVENT_RAW_MOUSE_MOTION,
+                        device_id,
                         i64::from(mouse.lLastX),
                         i64::from(mouse.lLastY),
+                    );
+                }
+                let button_flags = unsafe { mouse.Anonymous.Anonymous.usButtonFlags };
+                let button_data = unsafe { mouse.Anonymous.Anonymous.usButtonData };
+                for (button, pressed) in raw_mouse_button_events(button_flags) {
+                    state.push_device_event(
+                        EVENT_RAW_MOUSE_BUTTON,
+                        device_id,
+                        button,
+                        if pressed { 1 } else { 0 },
+                    );
+                }
+                if let Some((dx, dy)) = raw_mouse_wheel_delta(button_flags, button_data) {
+                    state.push_device_event(EVENT_RAW_MOUSE_WHEEL, device_id, dx, dy);
+                }
+            } else if raw.header.dwType == RIM_TYPEKEYBOARD {
+                let keyboard = unsafe { raw.data.keyboard };
+                let vkey = keyboard.VKey as u32;
+                if vkey != 0 && vkey != 0xff {
+                    let physical_key = raw_key_physical_code(keyboard.MakeCode, keyboard.Flags);
+                    let key_location =
+                        raw_key_location_code(vkey, keyboard.MakeCode, keyboard.Flags);
+                    let (logical_key, text) = key_logical_value_and_text(vkey);
+                    let pressed = keyboard.Flags & RAW_KEY_BREAK == 0;
+                    state.push_raw_key_event(
+                        device_id,
+                        i64::from(vkey),
+                        physical_key,
+                        logical_key,
+                        key_location,
+                        pressed,
+                        text,
                     );
                 }
             }
@@ -4293,14 +4601,17 @@ mod tests {
     use std::ptr::null_mut;
 
     use super::{
-        EVENT_ABOUT_TO_WAIT, EVENT_APP_RESUMED, EVENT_APP_SUSPENDED,
+        DEVICE_EVENTS_ALWAYS, DEVICE_EVENTS_WHEN_FOCUSED, EVENT_ABOUT_TO_WAIT,
+        EVENT_APP_RESUMED, EVENT_APP_SUSPENDED, EVENT_RAW_MOUSE_MOTION,
         EVENT_TEXT_COMPOSITION_CANCELLED, EVENT_TEXT_COMPOSITION_COMMITTED,
         EVENT_TEXT_COMPOSITION_STARTED, EVENT_TEXT_INPUT, EVENT_WINDOW_CLOSE_REQUESTED,
-        NativeAudioPlayback, RuntimeAudioDeviceHandle, RuntimeAudioPlaybackHandle, RuntimeHost,
+        EVENT_WINDOW_FOCUSED, EVENT_WINDOW_MOVED, EVENT_WINDOW_REDRAW_REQUESTED,
+        EVENT_WINDOW_RESIZED, NativeAudioPlayback,
+        RuntimeAudioDeviceHandle, RuntimeAudioPlaybackHandle, RuntimeHost,
         clipboard_payload_from_bytes, decode_bmp_bytes, decode_clipboard_bytes_payload,
         decode_wav_bytes, native_window_class_name_text, release_playback_resources,
     };
-    use crate::NativeProcessHost;
+    use crate::{BufferedEvent, NativeProcessHost};
     use windows_sys::Win32::Media::Audio::{HWAVEOUT, WHDR_DONE};
     use windows_sys::Win32::UI::Input::Ime::{
         CPS_COMPLETE, GCS_COMPSTR, GCS_RESULTSTR, HIMC, ImmAssociateContext, ImmCreateContext,
@@ -4308,9 +4619,22 @@ mod tests {
         ImmSetCompositionStringW, NI_COMPOSITIONSTR, SCS_SETSTR,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        SendMessageW, WM_CHAR, WM_CLOSE, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION,
-        WM_IME_STARTCOMPOSITION,
+        GetWindowTextLengthW, GetWindowTextW, SendMessageW, WM_CHAR, WM_CLOSE, WM_IME_COMPOSITION,
+        WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION,
     };
+
+    fn read_window_title(hwnd: super::HWND) -> String {
+        let len = unsafe { GetWindowTextLengthW(hwnd) };
+        if len <= 0 {
+            return String::new();
+        }
+        let mut buffer = vec![0u16; usize::try_from(len).unwrap_or(0) + 1];
+        let read = unsafe { GetWindowTextW(hwnd, buffer.as_mut_ptr(), len + 1) };
+        if read <= 0 {
+            return String::new();
+        }
+        String::from_utf16_lossy(&buffer[..usize::try_from(read).unwrap_or(0)])
+    }
 
     #[test]
     fn decode_wav_bytes_preserves_pcm16_frames() {
@@ -4545,11 +4869,32 @@ mod tests {
         assert_eq!(kinds.first().copied(), Some(EVENT_APP_RESUMED));
         assert_eq!(kinds.last().copied(), Some(EVENT_ABOUT_TO_WAIT));
         assert!(kinds.contains(&EVENT_WINDOW_CLOSE_REQUESTED));
+        let close_index = kinds
+            .iter()
+            .position(|kind| *kind == EVENT_WINDOW_CLOSE_REQUESTED)
+            .expect("close request should be present");
+        for later_kind in [
+            EVENT_WINDOW_MOVED,
+            EVENT_WINDOW_RESIZED,
+            EVENT_WINDOW_FOCUSED,
+            EVENT_WINDOW_REDRAW_REQUESTED,
+        ] {
+            if let Some(index) = kinds.iter().position(|kind| *kind == later_kind) {
+                assert!(
+                    close_index < index,
+                    "close request should outrank window event kind {later_kind}, got {kinds:?}"
+                );
+            }
+        }
         assert!(!kinds.contains(&EVENT_APP_SUSPENDED));
         assert!(RuntimeHost::window_alive(&mut host, window).expect("window should remain alive"));
 
         RuntimeHost::window_close(&mut host, window).expect("explicit close should succeed");
         assert!(host.window_ref(window).is_err());
+        assert!(
+            !RuntimeHost::window_alive(&mut host, window)
+                .expect("closed window should report not alive")
+        );
         assert!(
             host.session_ref(session)
                 .expect("session should still exist")
@@ -4564,6 +4909,70 @@ mod tests {
         }
 
         assert_eq!(kinds, vec![EVENT_APP_SUSPENDED, EVENT_ABOUT_TO_WAIT]);
+    }
+
+    #[test]
+    fn native_close_request_survives_close_before_pump() {
+        let mut host = NativeProcessHost::current().expect("native host should construct");
+        let window =
+            RuntimeHost::window_open(&mut host, "Arcana", 320, 200).expect("window should open");
+        let session = RuntimeHost::events_session_open(&mut host).expect("session should open");
+        RuntimeHost::events_session_attach_window(&mut host, session, window)
+            .expect("window should attach");
+
+        let hwnd = host
+            .window_ref(window)
+            .expect("window state should exist")
+            .hwnd;
+        unsafe {
+            SendMessageW(hwnd, WM_CLOSE, 0, 0);
+        }
+
+        RuntimeHost::window_close(&mut host, window).expect("explicit close should succeed");
+
+        let frame = RuntimeHost::events_session_pump(&mut host, session).expect("session pump");
+        let mut kinds = Vec::new();
+        while let Some(event) = RuntimeHost::events_poll(&mut host, frame).expect("event poll") {
+            kinds.push(event.kind);
+        }
+
+        assert_eq!(kinds, vec![EVENT_WINDOW_CLOSE_REQUESTED, EVENT_ABOUT_TO_WAIT]);
+        assert!(
+            host.session_ref(session)
+                .expect("session should still exist")
+                .windows
+                .is_empty()
+        );
+        assert!(host.window_ref(window).is_err());
+    }
+
+    #[test]
+    fn native_session_close_after_close_request_destroys_window_cleanly() {
+        let mut host = NativeProcessHost::current().expect("native host should construct");
+        let window =
+            RuntimeHost::window_open(&mut host, "Arcana", 320, 200).expect("window should open");
+        let session = RuntimeHost::events_session_open(&mut host).expect("session should open");
+        RuntimeHost::events_session_attach_window(&mut host, session, window)
+            .expect("window should attach");
+
+        let hwnd = host
+            .window_ref(window)
+            .expect("window state should exist")
+            .hwnd;
+        unsafe {
+            SendMessageW(hwnd, WM_CLOSE, 0, 0);
+        }
+
+        let frame = RuntimeHost::events_session_pump(&mut host, session).expect("session pump");
+        while RuntimeHost::events_poll(&mut host, frame)
+            .expect("event poll")
+            .is_some()
+        {}
+
+        RuntimeHost::events_session_close(&mut host, session)
+            .expect("session close after close request should succeed");
+        assert!(host.window_ref(window).is_err());
+        assert!(host.session_ref(session).is_err());
     }
 
     #[test]
@@ -4634,10 +5043,156 @@ mod tests {
     }
 
     #[test]
+    fn native_session_device_events_when_focused_filters_unfocused_raw_input() {
+        let mut host = NativeProcessHost::current().expect("native host should construct");
+        let window =
+            RuntimeHost::window_open(&mut host, "Arcana", 320, 200).expect("window should open");
+        let session = RuntimeHost::events_session_open(&mut host).expect("session should open");
+        RuntimeHost::events_session_attach_window(&mut host, session, window)
+            .expect("window should attach");
+
+        assert_eq!(
+            RuntimeHost::events_session_device_events(&mut host, session)
+                .expect("default device events policy"),
+            DEVICE_EVENTS_WHEN_FOCUSED
+        );
+
+        let frame = RuntimeHost::events_session_pump(&mut host, session).expect("session pump");
+        while RuntimeHost::events_poll(&mut host, frame)
+            .expect("event poll should succeed")
+            .is_some()
+        {}
+
+        let state = host.window_mut(window).expect("window state should exist");
+        state.focused = false;
+        state.events.push_back(BufferedEvent {
+            kind: EVENT_RAW_MOUSE_MOTION,
+            window_id: 7,
+            a: 3,
+            b: 4,
+            ..BufferedEvent::default()
+        });
+
+        let frame = RuntimeHost::events_session_pump(&mut host, session).expect("session pump");
+        let mut kinds = Vec::new();
+        while let Some(event) = RuntimeHost::events_poll(&mut host, frame).expect("event poll") {
+            kinds.push(event.kind);
+        }
+
+        assert_eq!(kinds, vec![EVENT_ABOUT_TO_WAIT]);
+    }
+
+    #[test]
+    fn native_session_device_events_always_delivers_unfocused_raw_input() {
+        let mut host = NativeProcessHost::current().expect("native host should construct");
+        let window =
+            RuntimeHost::window_open(&mut host, "Arcana", 320, 200).expect("window should open");
+        let session = RuntimeHost::events_session_open(&mut host).expect("session should open");
+        RuntimeHost::events_session_attach_window(&mut host, session, window)
+            .expect("window should attach");
+
+        RuntimeHost::events_session_set_device_events(&mut host, session, DEVICE_EVENTS_ALWAYS)
+            .expect("device events policy should update");
+
+        let frame = RuntimeHost::events_session_pump(&mut host, session).expect("session pump");
+        while RuntimeHost::events_poll(&mut host, frame)
+            .expect("event poll should succeed")
+            .is_some()
+        {}
+
+        let state = host.window_mut(window).expect("window state should exist");
+        state.focused = false;
+        state.events.push_back(BufferedEvent {
+            kind: EVENT_RAW_MOUSE_MOTION,
+            window_id: 9,
+            a: 5,
+            b: 6,
+            ..BufferedEvent::default()
+        });
+
+        let frame = RuntimeHost::events_session_pump(&mut host, session).expect("session pump");
+        let mut seen = Vec::new();
+        while let Some(event) = RuntimeHost::events_poll(&mut host, frame).expect("event poll") {
+            seen.push((event.kind, event.window_id, event.a, event.b));
+        }
+
+        assert_eq!(
+            seen,
+            vec![
+                (EVENT_RAW_MOUSE_MOTION, 9, 5, 6),
+                (EVENT_ABOUT_TO_WAIT, 0, 0, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn native_window_set_size_emits_single_resize_and_redraw() {
+        let mut host = NativeProcessHost::current().expect("native host should construct");
+        let window =
+            RuntimeHost::window_open(&mut host, "Arcana", 320, 200).expect("window should open");
+        let session = RuntimeHost::events_session_open(&mut host).expect("session should open");
+        RuntimeHost::events_session_attach_window(&mut host, session, window)
+            .expect("window should attach");
+
+        let frame = RuntimeHost::events_session_pump(&mut host, session).expect("session pump");
+        while RuntimeHost::events_poll(&mut host, frame)
+            .expect("event poll should succeed")
+            .is_some()
+        {}
+
+        RuntimeHost::window_set_size(&mut host, window, 400, 250)
+            .expect("window size should update");
+
+        let frame = RuntimeHost::events_session_pump(&mut host, session).expect("session pump");
+        let mut resize_events = Vec::new();
+        let mut redraw_count = 0usize;
+        while let Some(event) = RuntimeHost::events_poll(&mut host, frame).expect("event poll") {
+            if event.kind == EVENT_WINDOW_RESIZED {
+                resize_events.push((event.a, event.b));
+            }
+            if event.kind == EVENT_WINDOW_REDRAW_REQUESTED {
+                redraw_count += 1;
+            }
+        }
+
+        assert_eq!(resize_events, vec![(400, 250)]);
+        assert_eq!(redraw_count, 1);
+
+        RuntimeHost::window_close(&mut host, window).expect("window should close");
+    }
+
+    #[test]
+    fn native_window_open_publishes_os_title() {
+        let mut host = NativeProcessHost::current().expect("native host should construct");
+        let window =
+            RuntimeHost::window_open(&mut host, "Arcana Desktop Proof :: Overview", 320, 200)
+                .expect("window should open");
+        let hwnd = host
+            .window_ref(window)
+            .expect("window state should exist")
+            .hwnd;
+        assert_eq!(read_window_title(hwnd), "Arcana Desktop Proof :: Overview");
+        RuntimeHost::window_close(&mut host, window).expect("window should close");
+    }
+
+    #[test]
+    fn native_window_text_input_is_disabled_by_default() {
+        let mut host = NativeProcessHost::current().expect("native host should construct");
+        let window =
+            RuntimeHost::window_open(&mut host, "Arcana Desktop Proof :: Overview", 320, 200)
+                .expect("window should open");
+        assert!(
+            !RuntimeHost::window_text_input_enabled(&mut host, window)
+                .expect("text input state should be readable")
+        );
+        RuntimeHost::window_close(&mut host, window).expect("window should close");
+    }
+
+    #[test]
     fn native_session_close_removes_windows_and_wakes() {
         let mut host = NativeProcessHost::current().expect("native host should construct");
-        let first =
-            RuntimeHost::window_open(&mut host, "First", 320, 200).expect("first window should open");
+        let first = RuntimeHost::window_open(&mut host, "First", 320, 200)
+            .expect("first window should open");
         let second = RuntimeHost::window_open(&mut host, "Second", 320, 200)
             .expect("second window should open");
         let session = RuntimeHost::events_session_open(&mut host).expect("session should open");
@@ -4649,7 +5204,8 @@ mod tests {
             .expect("wake handle should create");
         RuntimeHost::events_wake_signal(&mut host, wake).expect("wake should signal");
 
-        RuntimeHost::events_session_close(&mut host, session).expect("session close should succeed");
+        RuntimeHost::events_session_close(&mut host, session)
+            .expect("session close should succeed");
 
         assert!(host.session_ref(session).is_err());
         assert!(host.window_ref(first).is_err());

@@ -1,31 +1,11 @@
-import arcana_desktop.ecs
-import arcana_desktop.types
-import std.types.core
-use std.window.Window
-
-record ButtonRect:
-    pos: (Int, Int)
-    size: (Int, Int)
-
-record CloseOutcome:
-    is_main_window: Bool
-    flow: arcana_desktop.types.ControlFlow
-
-record TargetRedraw:
-    target: arcana_desktop.types.TargetedEvent
-    win: Window
-
 record Demo:
     smoke_mode: Bool
     ui_smoke_mode: Bool
     exercise_second_window: Bool
-    smoke_done: Bool
-    smoke_printed: Bool
-    checksum: Int
-    line_count: Int
-    page_index: Int
-    page_scroll: Int
     dirty: Bool
+    title_dirty: Bool
+    smoke_printed: Bool
+    page_index: Int
     redraw_count: Int
     wake_count: Int
     close_requests: Int
@@ -33,27 +13,33 @@ record Demo:
     mouse_events: Int
     text_events: Int
     raw_motion_total: Int
+    raw_button_events: Int
+    raw_wheel_events: Int
+    raw_key_events: Int
+    mouse_wheel_y: Int
+    device_policy_code: Int
     second_window_id: Int
     second_window_seen: Bool
     second_window_dirty: Bool
-    attention_on: Bool
-    adapter_total: Int
+    second_window_visible: Bool
+    second_window_alive: Bool
     status_head: Str
     status_tail: Str
     last_event: Str
     last_key: Str
     last_mouse: Str
     last_text: Str
-    last_comp: Str
-    last_drop: Str
     last_clipboard: Str
+    last_device: Str
     last_monitor: Str
     last_window: Str
-    pending_wake_note: Str
     pending_wake: Bool
     mouse_pos: (Int, Int)
     mouse_inside: Bool
     hover_button_id: Int
-    mouse_wheel_y: Int
-    last_frame_start: std.types.core.MonotonicTimeMs
-    adapter: arcana_desktop.ecs.Adapter
+    controls_dirty: Bool
+    telemetry_dirty: Bool
+    next_telemetry_redraw_ms: Int
+    move_size_cycle: Int
+    clamp_cycle: Int
+    preset_cycle: Int

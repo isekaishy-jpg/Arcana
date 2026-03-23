@@ -67,7 +67,7 @@ Scope notes:
   - `std.audio.AudioBuffer`
   - `std.audio.AudioPlayback`
   - these are declared in std source via `opaque type ... as <ownership>, <boundary>` rather than held as Rust-only builtin names
-  - pre-selfhost use of opaque type declarations is currently restricted to package `std`
+  - pre-selfhost opaque declarations are approved for `std` and for owned grimoires when they need authoritative handle/resource boundaries over approved substrate; the current checker permits them generally because package-level first-party ownership is not yet encoded as a stronger gate
 - Shared low-level types needed by the app/runtime substrate:
   - `std.types.core`
 - Low-level time and audio substrate needed by future Arcana-owned grimoire layers:

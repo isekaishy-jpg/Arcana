@@ -608,6 +608,148 @@ fn opaque_symbol_is_boundary_unsafe(symbol: &HirSymbol) -> bool {
     )
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OpaqueLangFamily {
+    FileStreamHandle,
+    WindowHandle,
+    ImageHandle,
+    AppFrameHandle,
+    AppSessionHandle,
+    WakeHandle,
+    AudioDeviceHandle,
+    AudioBufferHandle,
+    AudioPlaybackHandle,
+    ChannelHandle,
+    MutexHandle,
+    AtomicIntHandle,
+    AtomicBoolHandle,
+    ArenaHandle,
+    ArenaIdHandle,
+    FrameArenaHandle,
+    FrameIdHandle,
+    PoolArenaHandle,
+    PoolIdHandle,
+    TaskHandle,
+    ThreadHandle,
+}
+
+impl OpaqueLangFamily {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::FileStreamHandle => "file_stream_handle",
+            Self::WindowHandle => "window_handle",
+            Self::ImageHandle => "image_handle",
+            Self::AppFrameHandle => "app_frame_handle",
+            Self::AppSessionHandle => "app_session_handle",
+            Self::WakeHandle => "wake_handle",
+            Self::AudioDeviceHandle => "audio_device_handle",
+            Self::AudioBufferHandle => "audio_buffer_handle",
+            Self::AudioPlaybackHandle => "audio_playback_handle",
+            Self::ChannelHandle => "channel_handle",
+            Self::MutexHandle => "mutex_handle",
+            Self::AtomicIntHandle => "atomic_int_handle",
+            Self::AtomicBoolHandle => "atomic_bool_handle",
+            Self::ArenaHandle => "arena_handle",
+            Self::ArenaIdHandle => "arena_id_handle",
+            Self::FrameArenaHandle => "frame_arena_handle",
+            Self::FrameIdHandle => "frame_id_handle",
+            Self::PoolArenaHandle => "pool_arena_handle",
+            Self::PoolIdHandle => "pool_id_handle",
+            Self::TaskHandle => "task_handle",
+            Self::ThreadHandle => "thread_handle",
+        }
+    }
+
+    const fn expected_ownership(self) -> OwnershipClass {
+        match self {
+            Self::WakeHandle
+            | Self::AtomicIntHandle
+            | Self::AtomicBoolHandle
+            | Self::ArenaIdHandle
+            | Self::FrameIdHandle
+            | Self::PoolIdHandle => OwnershipClass::Copy,
+            Self::FileStreamHandle
+            | Self::WindowHandle
+            | Self::ImageHandle
+            | Self::AppFrameHandle
+            | Self::AppSessionHandle
+            | Self::AudioDeviceHandle
+            | Self::AudioBufferHandle
+            | Self::AudioPlaybackHandle
+            | Self::ChannelHandle
+            | Self::MutexHandle
+            | Self::ArenaHandle
+            | Self::FrameArenaHandle
+            | Self::PoolArenaHandle
+            | Self::TaskHandle
+            | Self::ThreadHandle => OwnershipClass::Move,
+        }
+    }
+}
+
+fn opaque_lang_family(name: &str) -> Option<OpaqueLangFamily> {
+    match name {
+        "file_stream_handle" => Some(OpaqueLangFamily::FileStreamHandle),
+        "window_handle" => Some(OpaqueLangFamily::WindowHandle),
+        "image_handle" => Some(OpaqueLangFamily::ImageHandle),
+        "app_frame_handle" => Some(OpaqueLangFamily::AppFrameHandle),
+        "app_session_handle" => Some(OpaqueLangFamily::AppSessionHandle),
+        "wake_handle" => Some(OpaqueLangFamily::WakeHandle),
+        "audio_device_handle" => Some(OpaqueLangFamily::AudioDeviceHandle),
+        "audio_buffer_handle" => Some(OpaqueLangFamily::AudioBufferHandle),
+        "audio_playback_handle" => Some(OpaqueLangFamily::AudioPlaybackHandle),
+        "channel_handle" => Some(OpaqueLangFamily::ChannelHandle),
+        "mutex_handle" => Some(OpaqueLangFamily::MutexHandle),
+        "atomic_int_handle" => Some(OpaqueLangFamily::AtomicIntHandle),
+        "atomic_bool_handle" => Some(OpaqueLangFamily::AtomicBoolHandle),
+        "arena_handle" => Some(OpaqueLangFamily::ArenaHandle),
+        "arena_id_handle" => Some(OpaqueLangFamily::ArenaIdHandle),
+        "frame_arena_handle" => Some(OpaqueLangFamily::FrameArenaHandle),
+        "frame_id_handle" => Some(OpaqueLangFamily::FrameIdHandle),
+        "pool_arena_handle" => Some(OpaqueLangFamily::PoolArenaHandle),
+        "pool_id_handle" => Some(OpaqueLangFamily::PoolIdHandle),
+        "task_handle" => Some(OpaqueLangFamily::TaskHandle),
+        "thread_handle" => Some(OpaqueLangFamily::ThreadHandle),
+        _ => None,
+    }
+}
+
+fn validate_package_lang_item_semantics(
+    package: &HirWorkspacePackage,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let mut seen = BTreeMap::<String, (PathBuf, usize, usize)>::new();
+    for module in &package.summary.modules {
+        let module_path = package
+            .module_path(&module.module_id)
+            .cloned()
+            .unwrap_or_else(|| package.root_dir.join("src").join("unknown.arc"));
+        for lang_item in &module.lang_items {
+            let Some(family) = opaque_lang_family(&lang_item.name) else {
+                continue;
+            };
+            if let Some((prev_path, prev_line, prev_column)) = seen.insert(
+                lang_item.name.clone(),
+                (module_path.clone(), lang_item.span.line, lang_item.span.column),
+            ) {
+                diagnostics.push(Diagnostic {
+                    path: module_path.clone(),
+                    line: lang_item.span.line,
+                    column: lang_item.span.column,
+                    message: format!(
+                        "opaque family lang item `{}` is declared more than once in package `{}`; first seen at {}:{}:{}",
+                        family.name(),
+                        package.summary.package_name,
+                        prev_path.display(),
+                        prev_line,
+                        prev_column
+                    ),
+                });
+            }
+        }
+    }
+}
+
 fn infer_type_ownership(
     workspace: &HirWorkspaceSummary,
     resolved_module: &HirResolvedModule,
@@ -2537,6 +2679,7 @@ fn validate_hir_semantics(
         let Some(resolved_package) = resolved.package(package_name) else {
             continue;
         };
+        validate_package_lang_item_semantics(package, &mut diagnostics);
         for module in &package.summary.modules {
             let Some(resolved_module) = resolved_package.module(&module.module_id) else {
                 continue;
@@ -2568,7 +2711,7 @@ fn validate_module_semantics(
         .unwrap_or_else(|| package.root_dir.join("src").join("unknown.arc"));
 
     for lang_item in &module.lang_items {
-        if lookup_symbol_path(workspace, resolved_module, lang_item.target.as_slice()).is_none() {
+        let Some(symbol_ref) = lookup_symbol_path(workspace, resolved_module, lang_item.target.as_slice()) else {
             diagnostics.push(Diagnostic {
                 path: module_path.clone(),
                 line: lang_item.span.line,
@@ -2579,6 +2722,51 @@ fn validate_module_semantics(
                     lang_item.name
                 ),
             });
+            continue;
+        };
+        if let Some(family) = opaque_lang_family(&lang_item.name) {
+            if symbol_ref.symbol.kind != HirSymbolKind::OpaqueType {
+                diagnostics.push(Diagnostic {
+                    path: module_path.clone(),
+                    line: lang_item.span.line,
+                    column: lang_item.span.column,
+                    message: format!(
+                        "opaque family lang item `{}` must target an opaque type, found `{}`",
+                        family.name(),
+                        symbol_ref.symbol.kind.as_str()
+                    ),
+                });
+                continue;
+            }
+            let actual_ownership = ownership_of_opaque_symbol(symbol_ref.symbol);
+            let expected_ownership = family.expected_ownership();
+            if actual_ownership != expected_ownership {
+                diagnostics.push(Diagnostic {
+                    path: module_path.clone(),
+                    line: lang_item.span.line,
+                    column: lang_item.span.column,
+                    message: format!(
+                        "opaque family lang item `{}` must target a {} opaque type",
+                        family.name(),
+                        match expected_ownership {
+                            OwnershipClass::Copy => "copy",
+                            OwnershipClass::Move => "move",
+                            OwnershipClass::Unknown => "known-ownership",
+                        }
+                    ),
+                });
+            }
+            if !opaque_symbol_is_boundary_unsafe(symbol_ref.symbol) {
+                diagnostics.push(Diagnostic {
+                    path: module_path.clone(),
+                    line: lang_item.span.line,
+                    column: lang_item.span.column,
+                    message: format!(
+                        "opaque family lang item `{}` must target a boundary_unsafe opaque type",
+                        family.name()
+                    ),
+                });
+            }
         }
     }
 
@@ -2592,15 +2780,6 @@ fn validate_module_semantics(
                     message,
                 });
             }
-        }
-        if symbol.kind == HirSymbolKind::OpaqueType && package.summary.package_name != "std" {
-            diagnostics.push(Diagnostic {
-                path: module_path.clone(),
-                line: symbol.span.line,
-                column: symbol.span.column,
-                message: "opaque type declarations are restricted to package `std` in v1"
-                    .to_string(),
-            });
         }
         if symbol.kind == HirSymbolKind::OpaqueType && is_builtin_type_name(&symbol.name) {
             diagnostics.push(Diagnostic {
@@ -8185,7 +8364,7 @@ mod tests {
     }
 
     #[test]
-    fn check_path_rejects_opaque_type_outside_std() {
+    fn check_path_accepts_opaque_type_outside_std() {
         let root = make_temp_package(
             "opaque_type_outside_std",
             "app",
@@ -8199,9 +8378,62 @@ mod tests {
             ],
         );
 
-        let err = check_path(&root).expect_err("opaque types outside std should fail");
+        check_path(&root).expect("opaque types outside std should check");
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_accepts_grimoire_opaque_family_lang_item() {
+        let root = make_temp_package(
+            "desktop",
+            "lib",
+            &[],
+            &[
+                (
+                    "src/types.arc",
+                    concat!(
+                        "export opaque type Window as move, boundary_unsafe\n",
+                        "lang window_handle = Window\n",
+                    ),
+                ),
+                ("src/book.arc", "reexport desktop.types\n"),
+            ],
+        );
+
+        check_path(&root).expect("grimoire opaque family binding should check");
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_duplicate_opaque_family_lang_item_in_package() {
+        let root = make_temp_package(
+            "desktop",
+            "lib",
+            &[],
+            &[
+                (
+                    "src/types.arc",
+                    concat!(
+                        "export opaque type Window as move, boundary_unsafe\n",
+                        "lang window_handle = Window\n",
+                    ),
+                ),
+                (
+                    "src/extra.arc",
+                    concat!(
+                        "export opaque type AltWindow as move, boundary_unsafe\n",
+                        "lang window_handle = AltWindow\n",
+                    ),
+                ),
+                ("src/book.arc", "reexport desktop.types\nreexport desktop.extra\n"),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("duplicate opaque family binding should fail");
         assert!(
-            err.contains("opaque type declarations are restricted to package `std`"),
+            err.contains("opaque family lang item `window_handle` is declared more than once"),
             "{err}"
         );
 
@@ -8367,6 +8599,35 @@ mod tests {
             .copied(),
         )
         .expect("object/owner flow should check");
+        assert!(summary.symbol_count >= 3);
+    }
+
+    #[test]
+    fn check_sources_accepts_object_only_attached_owner_flow() {
+        let summary = check_sources(
+            [concat!(
+                "obj Counter:\n",
+                "    value: Int\n",
+                "\n",
+                "create Session [Counter] scope-exit:\n",
+                "    done: when Counter.value > 0 hold [Counter]\n",
+                "\n",
+                "Counter\n",
+                "fn bump() -> Int:\n",
+                "    Counter.value += 1\n",
+                "    return Counter.value\n",
+                "\n",
+                "Session\n",
+                "Counter\n",
+                "fn main() -> Int:\n",
+                "    let active = Session :: :: call\n",
+                "    Counter.value = 4\n",
+                "    return bump :: :: call\n",
+            )]
+            .iter()
+            .copied(),
+        )
+        .expect("object-only attached owner flow should check");
         assert!(summary.symbol_count >= 3);
     }
 

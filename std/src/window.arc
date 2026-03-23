@@ -5,6 +5,8 @@ use std.result.Result
 
 export opaque type Window as move, boundary_unsafe
 
+lang window_handle = Window
+
 export enum WindowTheme:
     Unknown
     Light
@@ -100,7 +102,7 @@ fn window_state_base(topmost: Bool, maximized: Bool, fullscreen: Bool) -> std.wi
 
 fn window_options_base(read style: std.window.WindowStyle, read state: std.window.WindowState, read cursor: std.window.CursorSettings) -> std.window.WindowOptions:
     let mut options = std.window.WindowOptions :: style = style, state = state, cursor = cursor :: call
-    options.text_input_enabled = true
+    options.text_input_enabled = false
     return options
 
 fn theme_override_code(read value: std.window.WindowThemeOverride) -> Int:
@@ -179,7 +181,7 @@ export fn default_config() -> std.window.WindowConfig:
     let mut state = std.window.window_state_base :: false, false, false :: call
     state.theme_override = std.window.WindowThemeOverride.System :: :: call
     let mut options = std.window.window_options_base :: style, state, cursor :: call
-    options.text_input_enabled = true
+    options.text_input_enabled = false
     return std.window.WindowConfig :: title = "Arcana", bounds = bounds, options = options :: call
 
 fn apply_config(take win: Window, read cfg: std.window.WindowConfig) -> Window:

@@ -2,4 +2,5 @@ name = "arcana_text"
 kind = "lib"
 
 [deps]
+arcana_desktop = { path = "../arcana-desktop" }
 std = { path = "../../../../std" }

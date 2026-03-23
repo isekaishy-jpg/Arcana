@@ -72,9 +72,12 @@ Arcana now includes an explicit object/owner lifetime model.
   - `let active = Session :: ctx :: call`
   - `Session :: ctx :: call`
 - Direct attached object names are usable only while the owner is active on that execution path.
+- That active-owner state carries through ordinary routine calls and newly entered attached blocks on the same execution path; attached helpers do not require re-entry when the caller already has the owner active.
+- Re-attaching the object name is enough for direct object access on that path; helpers and nested blocks do not need to re-attach the owner when the same owner is already active.
 - Owned objects may define lifecycle hooks with nested `init` / `resume` methods; first realization runs `init`, and held-state re-entry runs `resume`.
 - Activation context is only meaningful through those lifecycle hooks and must match the hook context type used by that owner.
 - Suspension is modeled as owner exit plus `hold [...]`; held state requires explicit re-entry before it becomes active again.
+- When multiple owner exit conditions are true at the same checkpoint, the first matching exit in source order wins.
 - Callable objects and context objects are ordinary `obj` roles inside this same model.
 - Dispatch remains static; closures, lambdas, and general function values remain outside the selfhost baseline.
 

@@ -168,7 +168,7 @@ promotion_condition: rewrite-owned input substrate satisfies the approved low-le
 
 id: STD-TEXT-INPUT
 classification: bootstrap-required
-why: low-level committed-text and IME-composition settings substrate needed by the desktop facade and future UI/text grimoires
+why: low-level committed-text and IME-composition settings substrate needed by the desktop app-shell grimoire and future UI/text grimoires
 consumers: `grimoires/owned/libs/arcana-desktop`, future text/UI layers, showcase apps
 current_source: rewrite-owned
 still_needs_rebuild: keep the surface low-level and host-facing without growing editing, shortcut, or widget policy
@@ -181,12 +181,12 @@ why: typed event queue and frame-pump boundary for desktop consumers
 consumers: `grimoires/owned/libs/arcana-desktop`, owned event/showcase proofs
 current_source: rewrite-owned
 still_needs_rebuild: keep deterministic event semantics documented while avoiding facade-level routing policy in std
-update_note: routing, snapshots, and keybind helpers belong in grimoires above `std.events`; the public event surface is `Option`/`List`-based, assumes a single backend event-record poll per step rather than separate kind/payload probes, requires `poll(edit frame)` / `drain(take frame)` to consume the queue carried by the move-only source-declared opaque `AppFrame` handle so event reads stay aligned with the explicit frame boundary, now includes low-level app resumed/suspended/about-to-wait plus wake notifications, redraw, committed text-input, text-composition start/update/commit/cancel, DPI/theme change, raw mouse-motion, and external file-drop events in addition to window-move and pointer-enter/leave coverage, and key events now carry low-level physical/logical/location/text/repeat metadata while `AppSession` plus `WakeHandle` provide the blocking multi-window facade substrate
+update_note: routing, snapshots, and keybind helpers belong in grimoires above `std.events`; the public event surface is `Option`/`List`-based, assumes a single backend event-record poll per step rather than separate kind/payload probes, requires `poll(edit frame)` / `drain(take frame)` to consume the queue carried by the move-only source-declared opaque `AppFrame` handle so event reads stay aligned with the explicit frame boundary, now includes low-level app resumed/suspended/about-to-wait plus wake notifications, redraw, committed text-input, text-composition start/update/commit/cancel, DPI/theme change, raw mouse-motion, and external file-drop events in addition to window-move and pointer-enter/leave coverage, and key events now carry low-level physical/logical/location/text/repeat metadata while `AppSession` plus `WakeHandle` provide the blocking multi-window app-shell substrate
 promotion_condition: rewrite-owned event substrate and pump semantics are documented and tested
 
 id: STD-CLIPBOARD
 classification: bootstrap-required
-why: low-level clipboard substrate needed by the desktop facade and future UI/text grimoires
+why: low-level clipboard substrate needed by the desktop app-shell grimoire and future UI/text grimoires
 consumers: `grimoires/owned/libs/arcana-desktop`, future text/UI layers, showcase apps
 current_source: rewrite-owned
 still_needs_rebuild: keep the surface low-level and host-facing without growing history, selection, or UI policy
@@ -228,7 +228,7 @@ why: current examples use fixed-step helpers, but the module is convenience arch
 consumers: no current consumers remain
 current_source: removed-from-std
 still_needs_rebuild: none before selfhost; any future reintroduction requires a fresh scope case
-update_note: the carried fixed-step helpers were removed from `std` rather than promoted; desktop loop policy belongs in facade grimoires
+update_note: the carried fixed-step helpers were removed from `std` rather than promoted; desktop loop policy belongs in desktop app-shell grimoires
 promotion_condition: only reintroduce if repeated cross-consumer evidence shows a minimal helper subset truly belongs in std
 
 id: STD-TOOLING

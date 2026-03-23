@@ -6,6 +6,8 @@ use std.window.Window
 
 export opaque type Image as move, boundary_unsafe
 
+lang image_handle = Image
+
 export record RectSpec:
     pos: (Int, Int)
     size: (Int, Int)

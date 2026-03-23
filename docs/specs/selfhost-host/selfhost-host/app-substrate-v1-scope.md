@@ -86,7 +86,7 @@ Scope notes:
 - `std.tooling` local planning helpers as rewrite-defining standard surface.
 - Game/showcase-specific convenience helpers that leaked into imported `std`.
 - Imported `winspell` / `spell-events` layering as implementation authority.
-- Higher-level desktop app facade, event routing helpers, and audio playback convenience policies.
+- Higher-level desktop app-shell grimoire responsibilities, event routing helpers, and audio playback convenience policies.
 - Meadow-era `winit`, VM, or bytecode coupling assumptions.
 - General ECS query authoring beyond the already frozen language/runtime baseline.
 - Automatic long-term ratification of the current typed opaque app/runtime handle model.
