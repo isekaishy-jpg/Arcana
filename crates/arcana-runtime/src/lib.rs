@@ -4,8 +4,7 @@ use std::io::{Read, Seek, Write};
 use std::path::{Component, Path, PathBuf};
 
 use arcana_aot::{
-    AotEntrypointArtifact, AotOwnerArtifact, AotPackageArtifact, AotRoutineArtifact,
-    parse_package_artifact, validate_package_artifact,
+    AotOwnerArtifact, AotPackageArtifact, parse_package_artifact, validate_package_artifact,
 };
 use arcana_ir::{
     ExecAssignOp as ParsedAssignOp, ExecAssignTarget as ParsedAssignTarget,
@@ -17,8 +16,7 @@ use arcana_ir::{
     ExecMatchArm as ParsedMatchArm, ExecMatchPattern as ParsedMatchPattern,
     ExecPageRollup as ParsedPageRollup, ExecPhraseArg as ParsedPhraseArg,
     ExecPhraseQualifierKind as ParsedPhraseQualifierKind, ExecStmt as ParsedStmt,
-    ExecUnaryOp as ParsedUnaryOp, RUNTIME_MAIN_ENTRYPOINT_NAME,
-    runtime_main_return_type_from_signature, validate_runtime_main_entry_contract,
+    ExecUnaryOp as ParsedUnaryOp, validate_runtime_main_entry_contract,
 };
 use pathdiff::diff_paths;
 use serde::{Deserialize, Serialize};
@@ -29,6 +27,7 @@ mod native_abi;
 #[cfg(windows)]
 mod native_host;
 mod package_image;
+mod routine_plan;
 pub use json_abi::{
     RUNTIME_JSON_ABI_FORMAT, execute_exported_json_abi_routine, render_exported_json_abi_manifest,
 };
@@ -38,34 +37,8 @@ pub use native_host::NativeProcessHost;
 pub use package_image::{
     RUNTIME_PACKAGE_IMAGE_FORMAT, parse_runtime_package_image, render_runtime_package_image,
 };
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RuntimeParamPlan {
-    pub mode: Option<String>,
-    pub name: String,
-    pub ty: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RuntimeRoutinePlan {
-    pub module_id: String,
-    pub routine_key: String,
-    pub symbol_name: String,
-    pub symbol_kind: String,
-    pub exported: bool,
-    pub is_async: bool,
-    pub type_params: Vec<String>,
-    pub behavior_attrs: BTreeMap<String, String>,
-    pub params: Vec<RuntimeParamPlan>,
-    pub signature_row: String,
-    pub intrinsic_impl: Option<String>,
-    pub impl_target_type: Option<String>,
-    pub impl_trait_path: Option<Vec<String>>,
-    pub availability: Vec<ParsedAvailabilityAttachment>,
-    pub foreword_rows: Vec<String>,
-    rollups: Vec<ParsedPageRollup>,
-    statements: Vec<ParsedStmt>,
-}
+pub use routine_plan::{RuntimeEntrypointPlan, RuntimeParamPlan, RuntimeRoutinePlan};
+use routine_plan::{lower_entrypoint, lower_routine};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeOwnerObjectPlan {
@@ -91,16 +64,6 @@ pub struct RuntimeOwnerPlan {
     pub owner_name: String,
     pub objects: Vec<RuntimeOwnerObjectPlan>,
     pub exits: Vec<RuntimeOwnerExitPlan>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RuntimeEntrypointPlan {
-    pub module_id: String,
-    pub symbol_name: String,
-    pub symbol_kind: String,
-    pub is_async: bool,
-    pub exported: bool,
-    pub routine_index: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -4199,43 +4162,6 @@ enum RuntimeIntrinsic {
     EcsRemoveComponentAt,
 }
 
-fn lower_routine(routine: &AotRoutineArtifact) -> Result<RuntimeRoutinePlan, String> {
-    let params = routine
-        .param_rows
-        .iter()
-        .map(|row| parse_param_row(row))
-        .collect::<Result<Vec<_>, String>>()?;
-    let type_params = routine
-        .type_param_rows
-        .iter()
-        .map(|row| parse_type_param_row(row))
-        .collect::<Result<Vec<_>, String>>()?;
-    let behavior_attrs = routine
-        .behavior_attr_rows
-        .iter()
-        .map(|row| parse_behavior_attr_row(row))
-        .collect::<Result<BTreeMap<_, _>, String>>()?;
-    Ok(RuntimeRoutinePlan {
-        module_id: routine.module_id.clone(),
-        routine_key: routine.routine_key.clone(),
-        symbol_name: routine.symbol_name.clone(),
-        symbol_kind: routine.symbol_kind.clone(),
-        exported: routine.exported,
-        is_async: routine.is_async,
-        type_params,
-        behavior_attrs,
-        params,
-        signature_row: routine.signature_row.clone(),
-        intrinsic_impl: routine.intrinsic_impl.clone(),
-        impl_target_type: routine.impl_target_type.clone(),
-        impl_trait_path: routine.impl_trait_path.clone(),
-        availability: routine.availability.clone(),
-        foreword_rows: routine.foreword_rows.clone(),
-        rollups: routine.rollups.clone(),
-        statements: routine.statements.clone(),
-    })
-}
-
 fn lower_owner(owner: &AotOwnerArtifact) -> RuntimeOwnerPlan {
     RuntimeOwnerPlan {
         module_id: owner.module_id.clone(),
@@ -4263,40 +4189,6 @@ fn lower_owner(owner: &AotOwnerArtifact) -> RuntimeOwnerPlan {
             })
             .collect(),
     }
-}
-
-fn lower_entrypoint(
-    entrypoint: &AotEntrypointArtifact,
-    routines: &[RuntimeRoutinePlan],
-) -> Result<RuntimeEntrypointPlan, String> {
-    let (routine_index, routine) = routines
-        .iter()
-        .enumerate()
-        .find(|(_, routine)| {
-            routine.module_id == entrypoint.module_id
-                && routine.symbol_name == entrypoint.symbol_name
-                && routine.symbol_kind == entrypoint.symbol_kind
-        })
-        .ok_or_else(|| {
-            format!(
-                "entrypoint `{}` in module `{}` has no lowered runtime routine",
-                entrypoint.symbol_name, entrypoint.module_id
-            )
-        })?;
-    if entrypoint.symbol_kind == "fn" && entrypoint.symbol_name == RUNTIME_MAIN_ENTRYPOINT_NAME {
-        validate_runtime_main_entry_contract(
-            routine.params.len(),
-            runtime_main_return_type_from_signature(&routine.signature_row),
-        )?;
-    }
-    Ok(RuntimeEntrypointPlan {
-        module_id: entrypoint.module_id.clone(),
-        symbol_name: entrypoint.symbol_name.clone(),
-        symbol_kind: entrypoint.symbol_kind.clone(),
-        is_async: entrypoint.is_async,
-        exported: entrypoint.exported,
-        routine_index,
-    })
 }
 
 fn parse_module_directive_row(
@@ -4399,7 +4291,7 @@ pub fn plan_from_artifact(artifact: &AotPackageArtifact) -> Result<RuntimePackag
         .routines
         .iter()
         .map(lower_routine)
-        .collect::<Result<Vec<_>, String>>()?;
+        .collect::<Vec<_>>();
     let entrypoints = artifact
         .entrypoints
         .iter()
@@ -4518,66 +4410,6 @@ fn strip_prefix_suffix<'a>(text: &'a str, prefix: &str, suffix: &str) -> Result<
         .and_then(|value| value.strip_suffix(suffix))
         .ok_or_else(|| format!("malformed runtime row `{text}`"))?;
     Ok(inner)
-}
-
-fn parse_param_row(text: &str) -> Result<RuntimeParamPlan, String> {
-    let parts = text.splitn(3, ':').collect::<Vec<_>>();
-    if parts.len() != 3 {
-        return Err(format!("malformed runtime param row `{text}`"));
-    }
-    let mode = parts[0]
-        .strip_prefix("mode=")
-        .ok_or_else(|| format!("runtime param row missing mode in `{text}`"))?;
-    let name = parts[1]
-        .strip_prefix("name=")
-        .ok_or_else(|| format!("runtime param row missing name in `{text}`"))?;
-    let ty = parts[2]
-        .strip_prefix("ty=")
-        .ok_or_else(|| format!("runtime param row missing ty in `{text}`"))?;
-    Ok(RuntimeParamPlan {
-        mode: if mode.is_empty() {
-            None
-        } else {
-            Some(mode.to_string())
-        },
-        name: name.to_string(),
-        ty: ty.to_string(),
-    })
-}
-
-fn parse_type_param_row(text: &str) -> Result<String, String> {
-    text.strip_prefix("name=")
-        .map(ToString::to_string)
-        .ok_or_else(|| format!("runtime type param row missing name in `{text}`"))
-}
-
-fn parse_behavior_attr_row(text: &str) -> Result<(String, String), String> {
-    let payload = text
-        .strip_prefix("name=")
-        .ok_or_else(|| format!("runtime behavior attr row missing name in `{text}`"))?;
-    let Some((name, value)) = payload.split_once(":value=") else {
-        return Err(format!("malformed runtime behavior attr row `{text}`"));
-    };
-    let decode_part = |part: &str| {
-        if part.starts_with('"') {
-            decode_row_string(part)
-        } else {
-            Ok(part.to_string())
-        }
-    };
-    let name = decode_part(name)?;
-    let value = decode_part(value)?;
-    if name.is_empty() {
-        return Err(format!(
-            "runtime behavior attr row missing name in `{text}`"
-        ));
-    }
-    if value.is_empty() {
-        return Err(format!(
-            "runtime behavior attr row missing value in `{text}`"
-        ));
-    }
-    Ok((name, value))
 }
 
 fn decode_row_string(text: &str) -> Result<String, String> {
@@ -4949,6 +4781,20 @@ fn resolve_routine_candidate_indices(
         .enumerate()
         .filter_map(|(index, routine)| {
             (routine.module_id == module_id && routine.symbol_name == symbol_name).then_some(index)
+        })
+        .collect()
+}
+
+fn resolve_method_candidate_indices_by_name(
+    plan: &RuntimePackagePlan,
+    symbol_name: &str,
+) -> Vec<usize> {
+    plan.routines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, routine)| {
+            (routine.symbol_name == symbol_name && routine.impl_target_type.is_some())
+                .then_some(index)
         })
         .collect()
 }
@@ -11004,6 +10850,9 @@ fn resolve_routine_index_for_call(
             };
             resolve_dynamic_method_candidate_indices(plan, method_name, trait_path)
         }
+        None if allow_receiver_root_fallback && callable.len() == 1 => {
+            resolve_method_candidate_indices_by_name(plan, &callable[0])
+        }
         None => resolve_routine_candidate_indices(plan, current_module_id, callable),
     };
     if candidates.is_empty() {
@@ -11079,7 +10928,10 @@ fn resolve_routine_index_for_call(
                                 declared,
                                 actual,
                                 &type_params,
-                            )
+                            ) || parse_runtime_type_application(actual)
+                                .map(|(_, args)| args.is_empty())
+                                .unwrap_or(false)
+                                && runtime_type_root_name(declared) == receiver_root
                         })
                         .unwrap_or_else(|| runtime_type_root_name(declared) == receiver_root)
                 })
@@ -11350,12 +11202,8 @@ fn execute_runtime_method_call(
         host,
     )?;
     let callable = resolved_callable
-        .ok_or_else(|| {
-            format!(
-                "runtime bare-method qualifier `{qualifier}` is missing lowered callable identity"
-            )
-        })?
-        .to_vec();
+        .map(|callable| callable.to_vec())
+        .unwrap_or_else(|| vec![qualifier.to_string()]);
     let type_args = runtime_receiver_type_args(&receiver, state);
     let mut call_args = vec![RuntimeCallArg {
         name: None,
@@ -15537,12 +15385,8 @@ fn capture_spawned_phrase_call(
                 host,
             )?;
             let callable = resolved_callable
-                .ok_or_else(|| {
-                    format!(
-                        "runtime bare-method qualifier `{qualifier}` is missing lowered callable identity"
-                    )
-                })?
-                .to_vec();
+                .map(|callable| callable.to_vec())
+                .unwrap_or_else(|| vec![qualifier.to_string()]);
             let type_args = runtime_receiver_type_args(&receiver, state);
             let mut call_args = vec![RuntimeCallArg {
                 name: None,
@@ -17236,10 +17080,7 @@ pub fn execute_entrypoint_routine(
         .routines
         .get(entry.routine_index)
         .ok_or_else(|| format!("invalid routine index `{}`", entry.routine_index))?;
-    validate_runtime_main_entry_contract(
-        routine.params.len(),
-        runtime_main_return_type_from_signature(&routine.signature_row),
-    )?;
+    validate_runtime_main_entry_contract(routine.params.len(), routine.return_type.as_deref())?;
     let mut state = RuntimeExecutionState::default();
     if state.next_scheduler_thread_id <= 0 {
         state.next_scheduler_thread_id = 1;

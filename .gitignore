@@ -2,6 +2,7 @@ target/
 .arcana/
 **/.arcana/
 **/dist/
+.tmp-package-workspaces/
 *.tmp
 examples/**/Arcana.lock
 grimoires/**/Arcana.lock

@@ -1,4 +1,4 @@
-use crate::artifact::AotPackageArtifact;
+use crate::artifact::{AotPackageArtifact, AotRoutineArtifact, AotRoutineParamArtifact};
 use std::collections::BTreeSet;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -47,7 +47,7 @@ pub fn collect_native_exports(artifact: &AotPackageArtifact) -> Result<Vec<Nativ
                 rows.contains(&(
                     routine.module_id.as_str(),
                     routine.symbol_kind.as_str(),
-                    routine.signature_row.as_str(),
+                    render_export_signature_text(routine).as_str(),
                 ))
             })
             .unwrap_or_else(|| {
@@ -72,7 +72,7 @@ pub fn collect_native_exports(artifact: &AotPackageArtifact) -> Result<Vec<Nativ
                 routine.routine_key
             ));
         }
-        if !routine.type_param_rows.is_empty() {
+        if !routine.type_params.is_empty() {
             return Err(format!(
                 "windows-dll target does not support generic export `{}`",
                 routine.routine_key
@@ -82,14 +82,12 @@ pub fn collect_native_exports(artifact: &AotPackageArtifact) -> Result<Vec<Nativ
         let NativeRoutineSignature {
             params,
             return_type,
-        } = parse_native_routine_signature(&routine.param_rows, &routine.signature_row).map_err(
-            |err| {
-                format!(
-                    "windows-dll target cannot export `{}`: {err}",
-                    routine.routine_key
-                )
-            },
-        )?;
+        } = native_routine_signature(routine).map_err(|err| {
+            format!(
+                "windows-dll target cannot export `{}`: {err}",
+                routine.routine_key
+            )
+        })?;
         let mut export_name = default_export_name(
             &artifact.root_module_id,
             &routine.module_id,
@@ -132,41 +130,75 @@ fn exported_function_surface_rows(
     if rows.is_empty() { None } else { Some(rows) }
 }
 
-pub fn parse_native_routine_signature(
-    param_rows: &[String],
-    signature_row: &str,
+pub fn native_routine_signature(
+    routine: &AotRoutineArtifact,
 ) -> Result<NativeRoutineSignature, String> {
     Ok(NativeRoutineSignature {
-        params: param_rows
+        params: routine
+            .params
             .iter()
-            .map(|row| parse_native_param_row(row))
+            .map(parse_native_param)
             .collect::<Result<Vec<_>, _>>()?,
-        return_type: parse_native_return_type(signature_row)?,
+        return_type: parse_native_return_type(routine.return_type.as_deref())?,
     })
 }
 
-pub fn parse_native_param_row(text: &str) -> Result<NativeAbiParam, String> {
-    let parts = text.splitn(3, ':').collect::<Vec<_>>();
-    if parts.len() != 3 {
-        return Err(format!("malformed runtime param row `{text}`"));
-    }
-    let name = parts[1]
-        .strip_prefix("name=")
-        .ok_or_else(|| format!("param row missing name in `{text}`"))?;
-    let ty = parts[2]
-        .strip_prefix("ty=")
-        .ok_or_else(|| format!("param row missing ty in `{text}`"))?;
+pub fn parse_native_param(param: &AotRoutineParamArtifact) -> Result<NativeAbiParam, String> {
     Ok(NativeAbiParam {
-        name: sanitize_name(name),
-        ty: parse_native_type(ty)?,
+        name: sanitize_name(&param.name),
+        ty: parse_native_type(&param.ty)?,
     })
 }
 
-pub fn parse_native_return_type(signature_row: &str) -> Result<NativeAbiType, String> {
-    let Some((_, tail)) = signature_row.rsplit_once("->") else {
-        return Ok(NativeAbiType::Unit);
-    };
-    parse_native_type(tail.trim().trim_end_matches(':').trim())
+pub fn parse_native_return_type(return_type: Option<&str>) -> Result<NativeAbiType, String> {
+    match return_type.map(str::trim) {
+        None | Some("") => Ok(NativeAbiType::Unit),
+        Some(return_type) => parse_native_type(return_type),
+    }
+}
+
+fn render_export_signature_text(routine: &AotRoutineArtifact) -> String {
+    let mut rendered = String::new();
+    if routine.is_async {
+        rendered.push_str("async ");
+    }
+    if routine.symbol_kind == "system" {
+        rendered.push_str("system ");
+    } else {
+        rendered.push_str("fn ");
+    }
+    rendered.push_str(&routine.symbol_name);
+    if !routine.type_params.is_empty() {
+        rendered.push('[');
+        rendered.push_str(&routine.type_params.join(", "));
+        rendered.push(']');
+    }
+    rendered.push('(');
+    rendered.push_str(
+        &routine
+            .params
+            .iter()
+            .map(|param| {
+                let mut piece = String::new();
+                if let Some(mode) = &param.mode {
+                    piece.push_str(mode);
+                    piece.push(' ');
+                }
+                piece.push_str(&param.name);
+                piece.push_str(": ");
+                piece.push_str(&param.ty);
+                piece
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+    rendered.push(')');
+    if let Some(return_type) = &routine.return_type {
+        rendered.push_str(" -> ");
+        rendered.push_str(return_type);
+    }
+    rendered.push(':');
+    rendered
 }
 
 fn parse_native_type(text: &str) -> Result<NativeAbiType, String> {

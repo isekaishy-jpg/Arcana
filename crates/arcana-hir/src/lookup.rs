@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use super::*;
 
@@ -422,12 +422,11 @@ pub fn impl_target_is_public_from_package(
     workspace: &HirWorkspaceSummary,
     package: &HirWorkspacePackage,
     module: &HirModuleSummary,
-    target_type: &str,
+    target_type: &HirType,
 ) -> bool {
-    let stripped = strip_reference_prefix(target_type);
-    let base = parse_surface_type_application(stripped)
-        .map(|(base, _)| base)
-        .unwrap_or_else(|| stripped.trim().to_string());
+    let base = hir_type_base_path(hir_strip_reference_type(target_type))
+        .map(|path| path.join("."))
+        .unwrap_or_else(|| target_type.render());
     if builtin_type_info(&base).is_some() || canonical_ambient_type_root(&base).is_some() {
         return true;
     }
@@ -447,7 +446,62 @@ pub fn lookup_method_candidates_for_type<'a>(
     type_text: &str,
     method_name: &str,
 ) -> Vec<HirMethodCandidate<'a>> {
-    let wanted = canonicalize_method_lookup_type_text(workspace, resolved_module, type_text);
+    let Ok(wanted) = parse_hir_type(type_text) else {
+        return Vec::new();
+    };
+    lookup_method_candidates_for_hir_type(workspace, resolved_module, &wanted, method_name)
+}
+
+fn object_declared_receiver_type(module_id: &str, symbol: &HirSymbol) -> HirType {
+    let base = HirPath {
+        segments: vec![module_id.to_string(), symbol.name.clone()],
+        span: symbol.span,
+    };
+    if symbol.type_params.is_empty() {
+        HirType {
+            kind: HirTypeKind::Path(base),
+            span: symbol.span,
+        }
+    } else {
+        HirType {
+            kind: HirTypeKind::Apply {
+                base,
+                args: symbol
+                    .type_params
+                    .iter()
+                    .map(|param| HirType {
+                        kind: HirTypeKind::Path(HirPath {
+                            segments: vec![param.clone()],
+                            span: symbol.span,
+                        }),
+                        span: symbol.span,
+                    })
+                    .collect(),
+            },
+            span: symbol.span,
+        }
+    }
+}
+
+pub fn lookup_method_candidates_for_hir_type<'a>(
+    workspace: &'a HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    wanted: &HirType,
+    method_name: &str,
+) -> Vec<HirMethodCandidate<'a>> {
+    let Some(current_package) = current_workspace_package_for_module(workspace, resolved_module)
+    else {
+        return Vec::new();
+    };
+    let Some(current_module) = current_package.module(&resolved_module.module_id) else {
+        return Vec::new();
+    };
+    let wanted = canonicalize_hir_type_in_module(
+        workspace,
+        current_package,
+        current_module,
+        hir_strip_reference_type(wanted),
+    );
     let visible_packages = visible_method_package_names_for_module(workspace, resolved_module);
     let current_package_name = current_workspace_package_for_module(workspace, resolved_module)
         .map(|package| package.summary.package_name.as_str());
@@ -468,8 +522,20 @@ pub fn lookup_method_candidates_for_type<'a>(
                 if foreign_package && !symbol.exported {
                     continue;
                 }
-                let declared = format!("{}.{}", module.module_id, symbol.name);
-                if !method_target_type_matches(&declared, &wanted, &mut BTreeMap::new()) {
+                let declared_hir = object_declared_receiver_type(&module.module_id, symbol);
+                let canonical_declared = canonicalize_hir_type_in_module(
+                    workspace,
+                    package,
+                    module,
+                    &declared_hir,
+                );
+                let bindings = placeholder_binding_scope_for_type(&declared_hir);
+                if !hir_type_matches(
+                    &canonical_declared,
+                    &wanted,
+                    &bindings,
+                    &mut HirTypeSubstitutions::new(),
+                ) {
                     continue;
                 }
                 for (method_index, method) in methods.iter().enumerate() {
@@ -485,9 +551,11 @@ pub fn lookup_method_candidates_for_type<'a>(
                         continue;
                     }
                     candidates.push(HirMethodCandidate {
+                        package_name: &package.summary.package_name,
                         module_id: &module.module_id,
                         symbol: method,
-                        declared_receiver_type: declared.clone(),
+                        declared_receiver_type: declared_hir.render(),
+                        declared_receiver_hir: declared_hir.clone(),
                         routine_key,
                     });
                 }
@@ -503,13 +571,19 @@ pub fn lookup_method_candidates_for_type<'a>(
                 {
                     continue;
                 }
-                let declared = canonicalize_method_lookup_type_text_in_module(
+                let canonical_declared = canonicalize_hir_type_in_module(
                     workspace,
                     package,
                     module,
                     &impl_decl.target_type,
                 );
-                if !method_target_type_matches(&declared, &wanted, &mut BTreeMap::new()) {
+                let bindings = placeholder_binding_scope_for_type(&impl_decl.target_type);
+                if !hir_type_matches(
+                    &canonical_declared,
+                    &wanted,
+                    &bindings,
+                    &mut HirTypeSubstitutions::new(),
+                ) {
                     continue;
                 }
                 for (method_index, method) in impl_decl.methods.iter().enumerate() {
@@ -522,9 +596,11 @@ pub fn lookup_method_candidates_for_type<'a>(
                         continue;
                     }
                     candidates.push(HirMethodCandidate {
+                        package_name: &package.summary.package_name,
                         module_id: &module.module_id,
                         symbol: method,
-                        declared_receiver_type: impl_decl.target_type.clone(),
+                        declared_receiver_type: impl_decl.target_type.render(),
+                        declared_receiver_hir: impl_decl.target_type.clone(),
                         routine_key,
                     });
                 }

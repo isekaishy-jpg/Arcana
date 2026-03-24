@@ -52,7 +52,7 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows_sys::Win32::UI::Input::{
     GetRawInputData, HRAWINPUT, MOUSE_MOVE_RELATIVE, RAWINPUT, RAWINPUTDEVICE, RID_INPUT,
-    RIDEV_INPUTSINK, RIM_TYPEKEYBOARD, RIM_TYPEMOUSE, RegisterRawInputDevices,
+    RIDEV_INPUTSINK, RIDEV_REMOVE, RIM_TYPEKEYBOARD, RIM_TYPEMOUSE, RegisterRawInputDevices,
 };
 use windows_sys::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -486,6 +486,7 @@ impl NativeProcessHost {
             }
         }
         self.prune_closed_windows();
+        self.sync_process_raw_input_registration()?;
         Ok(())
     }
 
@@ -663,7 +664,6 @@ impl NativeProcessHost {
         unsafe {
             DragAcceptFiles(hwnd, 1);
         }
-        Self::register_window_raw_input(hwnd)?;
         let handle = self.insert_window(window);
         self.pump_messages()?;
         Ok(handle)
@@ -681,6 +681,7 @@ impl NativeProcessHost {
                 DispatchMessageW(&msg);
             }
         }
+        self.sync_process_raw_input_registration()?;
         Ok(())
     }
 
@@ -832,19 +833,67 @@ impl NativeProcessHost {
         }
     }
 
-    fn register_window_raw_input(hwnd: HWND) -> Result<(), String> {
+    fn desired_raw_input_registration(&self) -> Option<(RuntimeWindowHandle, u32)> {
+        let mut always_target = None;
+        let mut focused_target = None;
+        for session in self.sessions.values() {
+            let wants_always = session.device_events_policy == DEVICE_EVENTS_ALWAYS;
+            let wants_focused = session.device_events_policy == DEVICE_EVENTS_WHEN_FOCUSED;
+            if !wants_always && !wants_focused {
+                continue;
+            }
+            for window in &session.windows {
+                let Some(state) = self.windows.get(window) else {
+                    continue;
+                };
+                if state.closed || state.hwnd.is_null() {
+                    continue;
+                }
+                if wants_always {
+                    if state.focused {
+                        return Some((*window, RIDEV_INPUTSINK));
+                    }
+                    if always_target.is_none() {
+                        always_target = Some(*window);
+                    }
+                } else if state.focused && focused_target.is_none() {
+                    focused_target = Some(*window);
+                }
+            }
+        }
+        if let Some(window) = always_target {
+            return Some((window, RIDEV_INPUTSINK));
+        }
+        if let Some(window) = focused_target {
+            return Some((window, 0));
+        }
+        None
+    }
+
+    fn sync_process_raw_input_registration(&mut self) -> Result<(), String> {
+        let registration = self.desired_raw_input_registration();
+        match registration {
+            Some((window, flags)) => {
+                let hwnd = self.window_ref(window)?.hwnd;
+                Self::register_raw_input_target(hwnd, flags)
+            }
+            None => Self::register_raw_input_target(null_mut(), RIDEV_REMOVE),
+        }
+    }
+
+    fn register_raw_input_target(hwnd: HWND, flags: u32) -> Result<(), String> {
         let devices = [
             RAWINPUTDEVICE {
                 usUsagePage: HID_USAGE_PAGE_GENERIC,
                 usUsage: HID_USAGE_GENERIC_MOUSE,
-                dwFlags: RIDEV_INPUTSINK,
-                hwndTarget: hwnd,
+                dwFlags: flags,
+                hwndTarget: if flags == RIDEV_REMOVE { null_mut() } else { hwnd },
             },
             RAWINPUTDEVICE {
                 usUsagePage: HID_USAGE_PAGE_GENERIC,
                 usUsage: 0x06,
-                dwFlags: RIDEV_INPUTSINK,
-                hwndTarget: hwnd,
+                dwFlags: flags,
+                hwndTarget: if flags == RIDEV_REMOVE { null_mut() } else { hwnd },
             },
         ];
         if unsafe {
@@ -2143,6 +2192,7 @@ impl RuntimeHost for NativeProcessHost {
         windows.reverse();
         self.remove_session_wakes(session);
         self.sessions.remove(&session);
+        self.sync_process_raw_input_registration()?;
         for window in windows {
             let _ = self.close_native_window(window, false);
         }
@@ -2165,6 +2215,7 @@ impl RuntimeHost for NativeProcessHost {
                 session_state.suspended = false;
             }
         }
+        self.sync_process_raw_input_registration()?;
         self.notify_session_queue(session);
         Ok(())
     }
@@ -2180,6 +2231,7 @@ impl RuntimeHost for NativeProcessHost {
             .windows
             .retain(|candidate| *candidate != window);
         if session_state.windows.len() != before {
+            self.sync_process_raw_input_registration()?;
             self.notify_session_queue(session);
         }
         Ok(())
@@ -2301,6 +2353,7 @@ impl RuntimeHost for NativeProcessHost {
             }
         }
         self.prune_closed_windows();
+        self.sync_process_raw_input_registration()?;
         events.push(BufferedEvent {
             kind: EVENT_ABOUT_TO_WAIT,
             window_id: 0,
@@ -2333,6 +2386,7 @@ impl RuntimeHost for NativeProcessHost {
             return Err(format!("invalid device events policy `{policy}`"));
         }
         self.session_mut(session)?.device_events_policy = policy;
+        self.sync_process_raw_input_registration()?;
         Ok(())
     }
 
@@ -4601,17 +4655,18 @@ mod tests {
     use std::ptr::null_mut;
 
     use super::{
-        DEVICE_EVENTS_ALWAYS, DEVICE_EVENTS_WHEN_FOCUSED, EVENT_ABOUT_TO_WAIT,
-        EVENT_APP_RESUMED, EVENT_APP_SUSPENDED, EVENT_RAW_MOUSE_MOTION,
+        DEVICE_EVENTS_ALWAYS, DEVICE_EVENTS_NEVER, DEVICE_EVENTS_WHEN_FOCUSED,
+        EVENT_ABOUT_TO_WAIT, EVENT_APP_RESUMED, EVENT_APP_SUSPENDED, EVENT_RAW_MOUSE_MOTION,
         EVENT_TEXT_COMPOSITION_CANCELLED, EVENT_TEXT_COMPOSITION_COMMITTED,
         EVENT_TEXT_COMPOSITION_STARTED, EVENT_TEXT_INPUT, EVENT_WINDOW_CLOSE_REQUESTED,
         EVENT_WINDOW_FOCUSED, EVENT_WINDOW_MOVED, EVENT_WINDOW_REDRAW_REQUESTED,
-        EVENT_WINDOW_RESIZED, NativeAudioPlayback,
+        EVENT_WINDOW_RESIZED, NativeAudioPlayback, NativeWindowState, RIDEV_INPUTSINK,
         RuntimeAudioDeviceHandle, RuntimeAudioPlaybackHandle, RuntimeHost,
         clipboard_payload_from_bytes, decode_bmp_bytes, decode_clipboard_bytes_payload,
         decode_wav_bytes, native_window_class_name_text, release_playback_resources,
     };
     use crate::{BufferedEvent, NativeProcessHost};
+    use windows_sys::Win32::Foundation::HWND;
     use windows_sys::Win32::Media::Audio::{HWAVEOUT, WHDR_DONE};
     use windows_sys::Win32::UI::Input::Ime::{
         CPS_COMPLETE, GCS_COMPSTR, GCS_RESULTSTR, HIMC, ImmAssociateContext, ImmCreateContext,
@@ -5080,6 +5135,73 @@ mod tests {
         }
 
         assert_eq!(kinds, vec![EVENT_ABOUT_TO_WAIT]);
+    }
+
+    #[test]
+    fn native_raw_input_registration_uses_focused_window_for_when_focused_policy() {
+        let mut host = NativeProcessHost::current().expect("native host should construct");
+        let session = host.insert_session();
+        let mut window = Box::new(NativeWindowState::new("Arcana", 320, 200));
+        window.hwnd = 1 as HWND;
+        window.focused = true;
+        let handle = host.insert_window(window);
+        host.session_mut(session)
+            .expect("session should exist")
+            .windows
+            .push(handle);
+
+        assert_eq!(host.desired_raw_input_registration(), Some((handle, 0)));
+    }
+
+    #[test]
+    fn native_raw_input_registration_prefers_always_policy_with_input_sink() {
+        let mut host = NativeProcessHost::current().expect("native host should construct");
+        let focused_session = host.insert_session();
+        let always_session = host.insert_session();
+        host.session_mut(always_session)
+            .expect("session should exist")
+            .device_events_policy = DEVICE_EVENTS_ALWAYS;
+
+        let mut focused_window = Box::new(NativeWindowState::new("Focused", 320, 200));
+        focused_window.hwnd = 1 as HWND;
+        focused_window.focused = true;
+        let focused_handle = host.insert_window(focused_window);
+        host.session_mut(focused_session)
+            .expect("session should exist")
+            .windows
+            .push(focused_handle);
+
+        let mut always_window = Box::new(NativeWindowState::new("Always", 320, 200));
+        always_window.hwnd = 2 as HWND;
+        let always_handle = host.insert_window(always_window);
+        host.session_mut(always_session)
+            .expect("session should exist")
+            .windows
+            .push(always_handle);
+
+        assert_eq!(
+            host.desired_raw_input_registration(),
+            Some((always_handle, RIDEV_INPUTSINK))
+        );
+    }
+
+    #[test]
+    fn native_raw_input_registration_returns_none_when_device_events_are_disabled() {
+        let mut host = NativeProcessHost::current().expect("native host should construct");
+        let session = host.insert_session();
+        host.session_mut(session)
+            .expect("session should exist")
+            .device_events_policy = DEVICE_EVENTS_NEVER;
+        let mut window = Box::new(NativeWindowState::new("Arcana", 320, 200));
+        window.hwnd = 1 as HWND;
+        window.focused = true;
+        let handle = host.insert_window(window);
+        host.session_mut(session)
+            .expect("session should exist")
+            .windows
+            .push(handle);
+
+        assert_eq!(host.desired_raw_input_registration(), None);
     }
 
     #[test]

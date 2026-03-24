@@ -17,7 +17,7 @@ mod windows_dll;
 pub use artifact::{
     AOT_INTERNAL_FORMAT, AotArtifact, AotEntrypointArtifact, AotOwnerArtifact,
     AotOwnerExitArtifact, AotOwnerObjectArtifact, AotPackageArtifact, AotPackageModuleArtifact,
-    AotRoutineArtifact,
+    AotRoutineArtifact, AotRoutineParamArtifact,
 };
 pub use codec::{parse_package_artifact, render_package_artifact};
 pub use compile::{compile_module, compile_package};
@@ -37,15 +37,65 @@ mod tests {
     use super::{
         AOT_INTERNAL_FORMAT, AOT_WINDOWS_DLL_FORMAT, AOT_WINDOWS_EXE_FORMAT, AotEmitContext,
         AotEmitTarget, AotEntrypointArtifact, AotPackageArtifact, AotPackageModuleArtifact,
-        AotRoutineArtifact, AotRuntimeBinding, NATIVE_BUNDLE_MANIFEST_FORMAT, NativeLaunchPlan,
+        AotRoutineArtifact, AotRoutineParamArtifact, AotRuntimeBinding,
+        NATIVE_BUNDLE_MANIFEST_FORMAT, NativeLaunchPlan,
         build_native_package_plan, compile_module, compile_package, emit_package,
         emit_package_with_context, parse_native_bundle_manifest, parse_package_artifact,
         render_native_bundle_manifest, render_package_artifact, validate_package_artifact,
     };
     use arcana_ir::{
         ExecExpr, ExecPageRollup, ExecPhraseQualifierKind, ExecStmt, IrEntrypoint, IrModule,
-        IrPackage, IrPackageModule, IrRoutine,
+        IrPackage, IrPackageModule, IrRoutine, IrRoutineParam,
     };
+    use std::collections::BTreeMap;
+
+    trait TestParamRow: Sized {
+        fn from_test_row(row: &str) -> Self;
+    }
+
+    impl TestParamRow for IrRoutineParam {
+        fn from_test_row(row: &str) -> Self {
+            let parts = row.splitn(3, ':').collect::<Vec<_>>();
+            let mode = parts[0].strip_prefix("mode=").unwrap_or_default();
+            let name = parts[1].strip_prefix("name=").unwrap_or_default();
+            let ty = parts[2].strip_prefix("ty=").unwrap_or_default();
+            Self {
+                mode: (!mode.is_empty()).then(|| mode.to_string()),
+                name: name.to_string(),
+                ty: ty.to_string(),
+            }
+        }
+    }
+
+    impl TestParamRow for AotRoutineParamArtifact {
+        fn from_test_row(row: &str) -> Self {
+            let parts = row.splitn(3, ':').collect::<Vec<_>>();
+            let mode = parts[0].strip_prefix("mode=").unwrap_or_default();
+            let name = parts[1].strip_prefix("name=").unwrap_or_default();
+            let ty = parts[2].strip_prefix("ty=").unwrap_or_default();
+            Self {
+                mode: (!mode.is_empty()).then(|| mode.to_string()),
+                name: name.to_string(),
+                ty: ty.to_string(),
+            }
+        }
+    }
+
+    fn test_return_type(signature: &str) -> Option<String> {
+        let (_, tail) = signature.rsplit_once("->")?;
+        let trimmed = tail.trim().trim_end_matches(':').trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    }
+
+    fn test_params<T, S>(rows: &[S]) -> Vec<T>
+    where
+        T: TestParamRow,
+        S: AsRef<str>,
+    {
+        rows.iter()
+            .map(|row| T::from_test_row(row.as_ref()))
+            .collect()
+    }
 
     fn base_surface_validation_artifact() -> AotPackageArtifact {
         AotPackageArtifact {
@@ -132,10 +182,10 @@ mod tests {
                 symbol_kind: "fn".to_string(),
                 exported: true,
                 is_async: false,
-                type_param_rows: Vec::new(),
-                behavior_attr_rows: Vec::new(),
-                param_rows: Vec::new(),
-                signature_row: "fn main() -> Int:".to_string(),
+                type_params: Vec::new(),
+                behavior_attrs: BTreeMap::new(),
+                params: Vec::new(),
+                return_type: test_return_type("fn main() -> Int:"),
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
@@ -181,10 +231,10 @@ mod tests {
                 symbol_kind: "fn".to_string(),
                 exported: true,
                 is_async: false,
-                type_param_rows: Vec::new(),
-                behavior_attr_rows: Vec::new(),
-                param_rows: Vec::new(),
-                signature_row: "fn main() -> Int:".to_string(),
+                type_params: Vec::new(),
+                behavior_attrs: BTreeMap::new(),
+                params: Vec::new(),
+                return_type: test_return_type("fn main() -> Int:"),
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
@@ -245,10 +295,10 @@ mod tests {
                 symbol_kind: "fn".to_string(),
                 exported: true,
                 is_async: false,
-                type_param_rows: Vec::new(),
-                behavior_attr_rows: Vec::new(),
-                param_rows: Vec::new(),
-                signature_row: "fn main() -> Int:".to_string(),
+                type_params: Vec::new(),
+                behavior_attrs: BTreeMap::new(),
+                params: Vec::new(),
+                return_type: test_return_type("fn main() -> Int:"),
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
@@ -380,10 +430,10 @@ mod tests {
                 symbol_kind: "fn".to_string(),
                 exported: true,
                 is_async: false,
-                type_param_rows: Vec::new(),
-                behavior_attr_rows: Vec::new(),
-                param_rows: Vec::new(),
-                signature_row: "fn main() -> Int:".to_string(),
+                type_params: Vec::new(),
+                behavior_attrs: BTreeMap::new(),
+                params: Vec::new(),
+                return_type: test_return_type("fn main() -> Int:"),
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
@@ -483,10 +533,10 @@ mod tests {
                 symbol_kind: "fn".to_string(),
                 exported: true,
                 is_async: false,
-                type_param_rows: Vec::new(),
-                behavior_attr_rows: Vec::new(),
-                param_rows: vec!["mode=:name=value:ty=Int".to_string()],
-                signature_row: "fn answer(value: Int) -> Bool:".to_string(),
+                type_params: Vec::new(),
+                behavior_attrs: BTreeMap::new(),
+                params: test_params(&["mode=:name=value:ty=Int".to_string()]),
+                return_type: test_return_type("fn answer(value: Int) -> Bool:"),
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
@@ -561,10 +611,10 @@ mod tests {
                     symbol_kind: "fn".to_string(),
                     exported: true,
                     is_async: false,
-                    type_param_rows: Vec::new(),
-                    behavior_attr_rows: Vec::new(),
-                    param_rows: vec!["mode=read:name=name:ty=Str".to_string()],
-                    signature_row: "fn greet(read name: Str) -> Str:".to_string(),
+                    type_params: Vec::new(),
+                    behavior_attrs: BTreeMap::new(),
+                    params: test_params(&["mode=read:name=name:ty=Str".to_string()]),
+                    return_type: test_return_type("fn greet(read name: Str) -> Str:"),
                     intrinsic_impl: None,
                     impl_target_type: None,
                     impl_trait_path: None,
@@ -582,10 +632,10 @@ mod tests {
                     symbol_kind: "fn".to_string(),
                     exported: true,
                     is_async: false,
-                    type_param_rows: Vec::new(),
-                    behavior_attr_rows: Vec::new(),
-                    param_rows: vec!["mode=read:name=bytes:ty=Array[Int]".to_string()],
-                    signature_row: "fn prefix(read bytes: Array[Int]) -> Array[Int]:".to_string(),
+                    type_params: Vec::new(),
+                    behavior_attrs: BTreeMap::new(),
+                    params: test_params(&["mode=read:name=bytes:ty=Array[Int]".to_string()]),
+                    return_type: test_return_type("fn prefix(read bytes: Array[Int]) -> Array[Int]:"),
                     intrinsic_impl: None,
                     impl_target_type: None,
                     impl_trait_path: None,
@@ -644,10 +694,10 @@ mod tests {
                     symbol_kind: "fn".to_string(),
                     exported: true,
                     is_async: false,
-                    type_param_rows: Vec::new(),
-                    behavior_attr_rows: Vec::new(),
-                    param_rows: Vec::new(),
-                    signature_row: "fn answer() -> Int:".to_string(),
+                    type_params: Vec::new(),
+                    behavior_attrs: BTreeMap::new(),
+                    params: Vec::new(),
+                    return_type: test_return_type("fn answer() -> Int:"),
                     intrinsic_impl: None,
                     impl_target_type: None,
                     impl_trait_path: None,
@@ -665,10 +715,10 @@ mod tests {
                     symbol_kind: "fn".to_string(),
                     exported: true,
                     is_async: false,
-                    type_param_rows: vec!["T".to_string()],
-                    behavior_attr_rows: Vec::new(),
-                    param_rows: vec!["mode=read:name=values:ty=Array[T]".to_string()],
-                    signature_row: "fn len[T](read values: Array[T]) -> Int:".to_string(),
+                    type_params: vec!["T".to_string()],
+                    behavior_attrs: BTreeMap::new(),
+                    params: test_params(&["mode=read:name=values:ty=Array[T]".to_string()]),
+                    return_type: test_return_type("fn len[T](read values: Array[T]) -> Int:"),
                     intrinsic_impl: None,
                     impl_target_type: None,
                     impl_trait_path: None,
@@ -742,11 +792,10 @@ mod tests {
                 symbol_kind: "fn".to_string(),
                 exported: true,
                 is_async: false,
-                type_param_rows: Vec::new(),
-                behavior_attr_rows: Vec::new(),
-                param_rows: vec!["mode=read:name=pair:ty=Pair[Str, Int]".to_string()],
-                signature_row: "fn echo_pair(read pair: Pair[Str, Int]) -> Pair[Str, Int]:"
-                    .to_string(),
+                type_params: Vec::new(),
+                behavior_attrs: BTreeMap::new(),
+                params: test_params(&["mode=read:name=pair:ty=Pair[Str, Int]".to_string()]),
+                return_type: test_return_type("fn echo_pair(read pair: Pair[Str, Int]) -> Pair[Str, Int]:"),
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
@@ -806,10 +855,10 @@ mod tests {
                 symbol_kind: "fn".to_string(),
                 exported: true,
                 is_async: false,
-                type_param_rows: Vec::new(),
-                behavior_attr_rows: Vec::new(),
-                param_rows: vec!["mode=:name=x:ty=Int".to_string()],
-                signature_row: "fn main(x: Int) -> Int:".to_string(),
+                type_params: Vec::new(),
+                behavior_attrs: BTreeMap::new(),
+                params: test_params(&["mode=:name=x:ty=Int".to_string()]),
+                return_type: test_return_type("fn main(x: Int) -> Int:"),
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
@@ -883,10 +932,10 @@ mod tests {
                 symbol_kind: "fn".to_string(),
                 exported: false,
                 is_async: false,
-                type_param_rows: Vec::new(),
-                behavior_attr_rows: Vec::new(),
-                param_rows: Vec::new(),
-                signature_row: "fn helper() -> Int:".to_string(),
+                type_params: Vec::new(),
+                behavior_attrs: BTreeMap::new(),
+                params: Vec::new(),
+                return_type: test_return_type("fn helper() -> Int:"),
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
@@ -936,10 +985,10 @@ mod tests {
                     symbol_kind: "fn".to_string(),
                     exported: true,
                     is_async: false,
-                    type_param_rows: Vec::new(),
-                    behavior_attr_rows: Vec::new(),
-                    param_rows: Vec::new(),
-                    signature_row: "fn main() -> Int:".to_string(),
+                    type_params: Vec::new(),
+                    behavior_attrs: BTreeMap::new(),
+                    params: Vec::new(),
+                    return_type: test_return_type("fn main() -> Int:"),
                     intrinsic_impl: None,
                     impl_target_type: None,
                     impl_trait_path: None,
@@ -955,10 +1004,10 @@ mod tests {
                     symbol_kind: "fn".to_string(),
                     exported: true,
                     is_async: false,
-                    type_param_rows: Vec::new(),
-                    behavior_attr_rows: Vec::new(),
-                    param_rows: vec!["mode=:name=x:ty=Int".to_string()],
-                    signature_row: "fn main(x: Int) -> Int:".to_string(),
+                    type_params: Vec::new(),
+                    behavior_attrs: BTreeMap::new(),
+                    params: test_params(&["mode=:name=x:ty=Int".to_string()]),
+                    return_type: test_return_type("fn main(x: Int) -> Int:"),
                     intrinsic_impl: None,
                     impl_target_type: None,
                     impl_trait_path: None,
@@ -987,7 +1036,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_package_artifact_rejects_malformed_param_rows() {
+    fn parse_package_artifact_rejects_invalid_structured_params() {
         let mut artifact = compile_package(&IrPackage {
             package_name: "tool".to_string(),
             root_module_id: "tool".to_string(),
@@ -1014,10 +1063,10 @@ mod tests {
                 symbol_kind: "fn".to_string(),
                 exported: false,
                 is_async: false,
-                type_param_rows: Vec::new(),
-                behavior_attr_rows: Vec::new(),
-                param_rows: vec!["mode=read:name=value:ty=Int".to_string()],
-                signature_row: "fn helper(read value: Int) -> Int:".to_string(),
+                type_params: Vec::new(),
+                behavior_attrs: BTreeMap::new(),
+                params: test_params(&["mode=read:name=value:ty=Int".to_string()]),
+                return_type: test_return_type("fn helper(read value: Int) -> Int:"),
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
@@ -1030,11 +1079,15 @@ mod tests {
             }],
             owners: Vec::new(),
         });
-        artifact.routines[0].param_rows = vec!["mode=borrow:name=value:ty=Int".to_string()];
+        artifact.routines[0].params = vec![AotRoutineParamArtifact {
+            mode: Some("invalid".to_string()),
+            name: "value".to_string(),
+            ty: "Int".to_string(),
+        }];
 
         let err = parse_package_artifact(&render_package_artifact(&artifact))
-            .expect_err("artifact should reject malformed param rows");
-        assert!(err.contains("param row has invalid mode"), "{err}");
+            .expect_err("artifact should reject invalid structured params");
+        assert!(err.contains("unsupported mode"), "{err}");
     }
 
     #[test]
@@ -1057,10 +1110,10 @@ mod tests {
                 symbol_kind: "fn".to_string(),
                 exported: false,
                 is_async: false,
-                type_param_rows: Vec::new(),
-                behavior_attr_rows: Vec::new(),
-                param_rows: Vec::new(),
-                signature_row: "fn helper() -> Int:".to_string(),
+                type_params: Vec::new(),
+                behavior_attrs: BTreeMap::new(),
+                params: Vec::new(),
+                return_type: test_return_type("fn helper() -> Int:"),
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
@@ -1128,3 +1181,5 @@ mod tests {
         );
     }
 }
+
+

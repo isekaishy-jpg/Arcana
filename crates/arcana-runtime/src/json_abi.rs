@@ -4,7 +4,8 @@ use serde::Serialize;
 
 use super::{
     RuntimeExecutionState, RuntimeHost, RuntimePackagePlan, RuntimeRoutinePlan, RuntimeValue,
-    execute_routine_with_state, validate_runtime_requirements_supported,
+    execute_routine_with_state, routine_plan::render_runtime_signature_text,
+    validate_runtime_requirements_supported,
 };
 
 pub const RUNTIME_JSON_ABI_FORMAT: &str = "arcana-runtime-json-abi-v1";
@@ -23,7 +24,7 @@ struct JsonAbiRoutine<'a> {
     module_id: &'a str,
     symbol_name: &'a str,
     symbol_kind: &'a str,
-    signature_row: &'a str,
+    signature: String,
     impl_target_type: Option<&'a str>,
     impl_trait_path: Option<&'a [String]>,
 }
@@ -40,7 +41,7 @@ pub fn render_exported_json_abi_manifest(plan: &RuntimePackagePlan) -> Result<St
                 module_id: &routine.module_id,
                 symbol_name: &routine.symbol_name,
                 symbol_kind: &routine.symbol_kind,
-                signature_row: &routine.signature_row,
+                signature: render_runtime_signature_text(routine),
                 impl_target_type: routine.impl_target_type.as_deref(),
                 impl_trait_path: routine.impl_trait_path.as_deref(),
             })

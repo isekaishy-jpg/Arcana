@@ -1,3 +1,5 @@
+import std.collections.list
+
 record Demo:
     smoke_mode: Bool
     ui_smoke_mode: Bool
@@ -43,3 +45,6 @@ record Demo:
     move_size_cycle: Int
     clamp_cycle: Int
     preset_cycle: Int
+    body_page_index: Int
+    body_wrap_width: Int
+    body_lines: List[Str]

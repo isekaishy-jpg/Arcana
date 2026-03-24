@@ -1,9 +1,10 @@
 use std::collections::{BTreeSet, HashMap};
 
 use arcana_hir::{
-    HirDirectiveKind, HirImplDecl, HirResolvedModule, HirResolvedPackage, HirResolvedTarget,
-    HirResolvedWorkspace, HirSymbol, HirSymbolBody, HirSymbolKind, HirWorkspacePackage,
-    HirWorkspaceSummary, render_expr_fingerprint, render_symbol_fingerprint,
+    HirDirectiveKind, HirImplDecl, HirPredicate, HirResolvedModule, HirResolvedPackage,
+    HirResolvedTarget, HirResolvedWorkspace, HirSymbol, HirSymbolBody, HirSymbolKind,
+    HirTraitRef, HirType, HirTypeKind, HirWhereClause, HirWorkspacePackage, HirWorkspaceSummary,
+    collect_hir_type_refs, render_expr_fingerprint, render_symbol_fingerprint,
 };
 use arcana_syntax::is_builtin_type_name;
 use sha2::{Digest, Sha256};
@@ -322,12 +323,7 @@ fn render_symbol_api_fingerprint(
         HirSymbolKind::Behavior => {
             render_behavior_api_fingerprint(workspace, resolved_module, symbol)
         }
-        HirSymbolKind::Const => canonicalize_surface_text(
-            workspace,
-            resolved_module,
-            &TypeScope::default(),
-            &symbol.surface_text,
-        ),
+        HirSymbolKind::Const => format!("const:{}", render_symbol_fingerprint(symbol)),
     };
     append_symbol_contract_metadata(base, workspace, resolved_module, symbol)
 }
@@ -346,7 +342,7 @@ fn render_opaque_type_api_fingerprint(
     rendered.push(']');
     if let Some(where_clause) = &symbol.where_clause {
         rendered.push_str("|where=");
-        rendered.push_str(&canonicalize_surface_text(
+        rendered.push_str(&canonicalize_where_clause(
             workspace,
             resolved_module,
             &scope,
@@ -380,7 +376,7 @@ fn render_callable_symbol_api_fingerprint(
     rendered.push(']');
     if let Some(where_clause) = &symbol.where_clause {
         rendered.push_str("|where=");
-        rendered.push_str(&canonicalize_surface_text(
+        rendered.push_str(&canonicalize_where_clause(
             workspace,
             resolved_module,
             &scope,
@@ -400,7 +396,7 @@ fn render_callable_symbol_api_fingerprint(
                 }
                 part.push_str(&param.name);
                 part.push(':');
-                part.push_str(&canonicalize_surface_text(
+                part.push_str(&canonicalize_surface_type(
                     workspace,
                     resolved_module,
                     &scope,
@@ -414,7 +410,7 @@ fn render_callable_symbol_api_fingerprint(
     rendered.push(')');
     if let Some(return_type) = &symbol.return_type {
         rendered.push_str("->");
-        rendered.push_str(&canonicalize_surface_text(
+        rendered.push_str(&canonicalize_surface_type(
             workspace,
             resolved_module,
             &scope,
@@ -527,7 +523,7 @@ fn render_record_api_fingerprint(
                 format!(
                     "{}:{}",
                     field.name,
-                    canonicalize_surface_text(workspace, resolved_module, &scope, &field.ty)
+                    canonicalize_surface_type(workspace, resolved_module, &scope, &field.ty)
                 )
             })
             .collect::<Vec<_>>()
@@ -537,7 +533,7 @@ fn render_record_api_fingerprint(
     let mut rendered = format!("record:{}[{}]", symbol.name, symbol.type_params.join(","));
     if let Some(where_clause) = &symbol.where_clause {
         rendered.push_str("|where=");
-        rendered.push_str(&canonicalize_surface_text(
+        rendered.push_str(&canonicalize_where_clause(
             workspace,
             resolved_module,
             &scope,
@@ -559,7 +555,7 @@ fn render_object_api_fingerprint(
     let mut rendered = format!("object:{}[{}]", symbol.name, symbol.type_params.join(","));
     if let Some(where_clause) = &symbol.where_clause {
         rendered.push_str("|where=");
-        rendered.push_str(&canonicalize_surface_text(
+        rendered.push_str(&canonicalize_where_clause(
             workspace,
             resolved_module,
             &scope,
@@ -575,7 +571,7 @@ fn render_object_api_fingerprint(
                     format!(
                         "{}:{}",
                         field.name,
-                        canonicalize_surface_text(workspace, resolved_module, &scope, &field.ty)
+                        canonicalize_surface_type(workspace, resolved_module, &scope, &field.ty)
                     )
                 })
                 .collect::<Vec<_>>()
@@ -680,7 +676,7 @@ fn render_enum_api_fingerprint(
                 Some(payload) => format!(
                     "{}({})",
                     variant.name,
-                    canonicalize_surface_text(workspace, resolved_module, &scope, payload)
+                    canonicalize_surface_type(workspace, resolved_module, &scope, payload)
                 ),
                 None => variant.name.clone(),
             })
@@ -691,7 +687,7 @@ fn render_enum_api_fingerprint(
     let mut rendered = format!("enum:{}[{}]", symbol.name, symbol.type_params.join(","));
     if let Some(where_clause) = &symbol.where_clause {
         rendered.push_str("|where=");
-        rendered.push_str(&canonicalize_surface_text(
+        rendered.push_str(&canonicalize_where_clause(
             workspace,
             resolved_module,
             &scope,
@@ -713,7 +709,7 @@ fn render_trait_api_fingerprint(
     let mut rendered = format!("trait:{}[{}]", symbol.name, symbol.type_params.join(","));
     if let Some(where_clause) = &symbol.where_clause {
         rendered.push_str("|where=");
-        rendered.push_str(&canonicalize_surface_text(
+        rendered.push_str(&canonicalize_where_clause(
             workspace,
             resolved_module,
             &scope,
@@ -733,7 +729,7 @@ fn render_trait_api_fingerprint(
                     Some(default_ty) => format!(
                         "{}={}",
                         assoc_type.name,
-                        canonicalize_surface_text(workspace, resolved_module, &scope, default_ty)
+                        canonicalize_surface_type(workspace, resolved_module, &scope, default_ty)
                     ),
                     None => assoc_type.name.clone(),
                 })
@@ -803,11 +799,11 @@ fn render_impl_api_fingerprint(
         .with_self();
     let mut rendered = format!(
         "target={}",
-        canonicalize_surface_text(workspace, resolved_module, &scope, &impl_decl.target_type)
+        canonicalize_surface_type(workspace, resolved_module, &scope, &impl_decl.target_type)
     );
     if let Some(trait_path) = &impl_decl.trait_path {
         rendered.push_str("|trait=");
-        rendered.push_str(&canonicalize_surface_text(
+        rendered.push_str(&canonicalize_surface_trait_ref(
             workspace,
             resolved_module,
             &scope,
@@ -823,7 +819,7 @@ fn render_impl_api_fingerprint(
                 Some(value_ty) => format!(
                     "{}={}",
                     assoc_type.name,
-                    canonicalize_surface_text(workspace, resolved_module, &scope, value_ty)
+                    canonicalize_surface_type(workspace, resolved_module, &scope, value_ty)
                 ),
                 None => assoc_type.name.clone(),
             })
@@ -858,17 +854,11 @@ fn impl_decl_is_public(
     scope: &TypeScope,
     impl_decl: &HirImplDecl,
 ) -> bool {
-    if !surface_text_is_public(
-        package,
-        resolved_module,
-        workspace,
-        scope,
-        &impl_decl.target_type,
-    ) {
+    if !surface_type_is_public(package, resolved_module, workspace, scope, &impl_decl.target_type) {
         return false;
     }
     impl_decl.trait_path.as_ref().is_none_or(|trait_path| {
-        surface_text_is_public(package, resolved_module, workspace, scope, trait_path)
+        surface_trait_ref_is_public(package, resolved_module, workspace, scope, trait_path)
     })
 }
 
@@ -915,22 +905,6 @@ impl TypeScope {
     }
 }
 
-#[derive(Clone, Debug, Default)]
-struct SurfaceRefs {
-    paths: Vec<Vec<String>>,
-}
-
-enum ParsedSurfaceToken {
-    Text(String),
-    Lifetime(String),
-    Path(Vec<String>),
-}
-
-struct ParsedSurface {
-    tokens: Vec<ParsedSurfaceToken>,
-    refs: SurfaceRefs,
-}
-
 fn split_simple_path(text: &str) -> Option<Vec<String>> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -954,30 +928,6 @@ fn split_simple_path(text: &str) -> Option<Vec<String>> {
     (!segments.is_empty()).then_some(segments)
 }
 
-fn canonicalize_surface_text(
-    workspace: &HirWorkspaceSummary,
-    resolved_module: &HirResolvedModule,
-    scope: &TypeScope,
-    text: &str,
-) -> String {
-    let parsed = parse_surface_text(text);
-    let mut out = String::new();
-    for token in parsed.tokens {
-        match token {
-            ParsedSurfaceToken::Text(text) | ParsedSurfaceToken::Lifetime(text) => {
-                out.push_str(&text);
-            }
-            ParsedSurfaceToken::Path(path) => out.push_str(&canonicalize_surface_path(
-                workspace,
-                resolved_module,
-                scope,
-                &path,
-            )),
-        }
-    }
-    out
-}
-
 fn canonicalize_surface_path(
     workspace: &HirWorkspaceSummary,
     resolved_module: &HirResolvedModule,
@@ -993,22 +943,167 @@ fn canonicalize_surface_path(
     path.join(".")
 }
 
-fn surface_text_is_public(
+fn canonicalize_surface_type(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    scope: &TypeScope,
+    ty: &HirType,
+) -> String {
+    match &ty.kind {
+        HirTypeKind::Path(path) => {
+            canonicalize_surface_path(workspace, resolved_module, scope, &path.segments)
+        }
+        HirTypeKind::Apply { base, args } => format!(
+            "{}[{}]",
+            canonicalize_surface_path(workspace, resolved_module, scope, &base.segments),
+            args.iter()
+                .map(|arg| canonicalize_surface_type(workspace, resolved_module, scope, arg))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        HirTypeKind::Ref {
+            lifetime,
+            mutable,
+            inner,
+        } => {
+            let mut rendered = String::from("&");
+            if let Some(lifetime) = lifetime {
+                rendered.push_str(&lifetime.render());
+                rendered.push(' ');
+            }
+            if *mutable {
+                rendered.push_str("mut ");
+            }
+            rendered.push_str(&canonicalize_surface_type(
+                workspace,
+                resolved_module,
+                scope,
+                inner,
+            ));
+            rendered
+        }
+        HirTypeKind::Tuple(items) => format!(
+            "({})",
+            items
+                .iter()
+                .map(|item| canonicalize_surface_type(workspace, resolved_module, scope, item))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        HirTypeKind::Projection(projection) => format!(
+            "{}.{}",
+            canonicalize_surface_trait_ref(workspace, resolved_module, scope, &projection.trait_ref),
+            projection.assoc
+        ),
+    }
+}
+
+fn canonicalize_surface_trait_ref(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    scope: &TypeScope,
+    trait_ref: &HirTraitRef,
+) -> String {
+    let base = canonicalize_surface_path(workspace, resolved_module, scope, &trait_ref.path.segments);
+    if trait_ref.args.is_empty() {
+        base
+    } else {
+        format!(
+            "{}[{}]",
+            base,
+            trait_ref
+                .args
+                .iter()
+                .map(|arg| canonicalize_surface_type(workspace, resolved_module, scope, arg))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+}
+
+fn canonicalize_where_clause(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    scope: &TypeScope,
+    where_clause: &HirWhereClause,
+) -> String {
+    where_clause
+        .predicates
+        .iter()
+        .map(|predicate| canonicalize_predicate(workspace, resolved_module, scope, predicate))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn canonicalize_predicate(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    scope: &TypeScope,
+    predicate: &HirPredicate,
+) -> String {
+    match predicate {
+        HirPredicate::TraitBound { trait_ref, .. } => {
+            canonicalize_surface_trait_ref(workspace, resolved_module, scope, trait_ref)
+        }
+        HirPredicate::ProjectionEq {
+            projection, value, ..
+        } => format!(
+            "{}.{} = {}",
+            canonicalize_surface_trait_ref(workspace, resolved_module, scope, &projection.trait_ref),
+            projection.assoc,
+            canonicalize_surface_type(workspace, resolved_module, scope, value)
+        ),
+        HirPredicate::LifetimeOutlives {
+            longer, shorter, ..
+        } => format!("{}: {}", longer.render(), shorter.render()),
+        HirPredicate::TypeOutlives { ty, lifetime, .. } => format!(
+            "{}: {}",
+            canonicalize_surface_type(workspace, resolved_module, scope, ty),
+            lifetime.render()
+        ),
+    }
+}
+
+fn surface_type_is_public(
     package: &HirWorkspacePackage,
     resolved_module: &HirResolvedModule,
     workspace: &HirWorkspaceSummary,
     scope: &TypeScope,
-    text: &str,
+    ty: &HirType,
 ) -> bool {
-    let refs = parse_surface_text(text).refs;
-    if refs.paths.is_empty() {
-        return true;
-    }
-    for path in refs.paths {
+    surface_refs_are_public(
+        package,
+        resolved_module,
+        workspace,
+        scope,
+        &collect_hir_type_refs(ty).paths,
+    )
+}
+
+fn surface_trait_ref_is_public(
+    package: &HirWorkspacePackage,
+    resolved_module: &HirResolvedModule,
+    workspace: &HirWorkspaceSummary,
+    scope: &TypeScope,
+    trait_ref: &HirTraitRef,
+) -> bool {
+    let mut refs = arcana_syntax::SurfaceRefs::default();
+    trait_ref.collect_refs(&mut refs);
+    surface_refs_are_public(package, resolved_module, workspace, scope, &refs.paths)
+}
+
+fn surface_refs_are_public(
+    package: &HirWorkspacePackage,
+    resolved_module: &HirResolvedModule,
+    workspace: &HirWorkspaceSummary,
+    scope: &TypeScope,
+    paths: &[Vec<String>],
+) -> bool {
+    for path in paths {
         if path.len() == 1 && (scope.allows_type_name(&path[0]) || is_builtin_type_name(&path[0])) {
             continue;
         }
-        let Some(symbol_ref) = arcana_hir::lookup_symbol_path(workspace, resolved_module, &path)
+        let Some(symbol_ref) = arcana_hir::lookup_symbol_path(workspace, resolved_module, path)
         else {
             return false;
         };
@@ -1019,123 +1114,6 @@ fn surface_text_is_public(
     true
 }
 
-fn parse_surface_text(text: &str) -> ParsedSurface {
-    let chars = text.chars().collect::<Vec<_>>();
-    let mut tokens = Vec::new();
-    let mut refs = SurfaceRefs::default();
-    let mut index = 0usize;
-
-    while index < chars.len() {
-        let ch = chars[index];
-        if ch.is_whitespace() {
-            index += 1;
-            continue;
-        }
-        if ch == '\'' {
-            let start = index;
-            index += 1;
-            while index < chars.len() && is_ident_continue(chars[index]) {
-                index += 1;
-            }
-            let lifetime = chars[start..index].iter().collect::<String>();
-            tokens.push(ParsedSurfaceToken::Lifetime(lifetime));
-            continue;
-        }
-        if is_ident_start(ch) && is_projection_tail(&chars, index) {
-            let start = index;
-            index += 1;
-            while index < chars.len() && is_ident_continue(chars[index]) {
-                index += 1;
-            }
-            tokens.push(ParsedSurfaceToken::Text(
-                chars[start..index].iter().collect::<String>(),
-            ));
-            continue;
-        }
-        if is_ident_start(ch) {
-            let (end, token) = parse_surface_ident(&chars, index);
-            match token {
-                ParsedSurfaceToken::Path(path) => {
-                    refs.paths.push(path.clone());
-                    tokens.push(ParsedSurfaceToken::Path(path));
-                }
-                token => tokens.push(token),
-            }
-            index = end;
-            continue;
-        }
-        tokens.push(ParsedSurfaceToken::Text(ch.to_string()));
-        index += 1;
-    }
-
-    ParsedSurface { tokens, refs }
-}
-
-fn parse_surface_ident(chars: &[char], start: usize) -> (usize, ParsedSurfaceToken) {
-    let mut end = start;
-    let mut segments = Vec::new();
-    let mut keyword = None::<String>;
-    loop {
-        let segment_start = end;
-        end += 1;
-        while end < chars.len() && is_ident_continue(chars[end]) {
-            end += 1;
-        }
-        let segment = chars[segment_start..end].iter().collect::<String>();
-        if is_surface_keyword(&segment) {
-            keyword = Some(segment);
-            segments.clear();
-            break;
-        }
-        segments.push(segment);
-
-        let Some(dot_idx) = next_non_ws_index(chars, end) else {
-            break;
-        };
-        if chars[dot_idx] != '.' {
-            break;
-        }
-        let Some(next_idx) = next_non_ws_index(chars, dot_idx + 1) else {
-            break;
-        };
-        if !is_ident_start(chars[next_idx]) {
-            break;
-        }
-        end = next_idx;
-    }
-
-    if let Some(keyword) = keyword {
-        return (end, ParsedSurfaceToken::Text(keyword));
-    }
-    if !segments.is_empty() {
-        return (end, ParsedSurfaceToken::Path(segments));
-    }
-    (
-        end,
-        ParsedSurfaceToken::Text(chars[start..end].iter().collect::<String>()),
-    )
-}
-
-fn is_projection_tail(chars: &[char], index: usize) -> bool {
-    matches!(
-        chars.get(index + 1..index + 3),
-        Some([first, second]) if *first == ':' && *second == ':'
-    )
-}
-
-fn next_non_ws_index(chars: &[char], mut index: usize) -> Option<usize> {
-    while index < chars.len() {
-        if !chars[index].is_whitespace() {
-            return Some(index);
-        }
-        index += 1;
-    }
-    None
-}
-
-fn is_surface_keyword(segment: &str) -> bool {
-    matches!(segment, "mut" | "read" | "take" | "edit")
-}
 
 fn is_ident_start(ch: char) -> bool {
     ch == '_' || ch.is_ascii_alphabetic()

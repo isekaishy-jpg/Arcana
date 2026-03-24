@@ -1,6 +1,17 @@
 use std::collections::BTreeSet;
 
 pub mod freeze;
+pub mod surface_text;
+pub mod type_surface;
+
+pub use surface_text::{ParsedSurfaceText, SurfaceTextToken, parse_surface_text};
+pub use type_surface::{
+    SurfaceLifetime, SurfacePath, SurfacePredicate, SurfaceProjection, SurfaceRefs,
+    SurfaceTraitRef, SurfaceType, SurfaceTypeKind, SurfaceWhereClause,
+    collect_surface_type_refs, collect_surface_where_clause_refs, parse_surface_path,
+    parse_surface_trait_ref, parse_surface_type, parse_surface_where_clause,
+    surface_type_is_boundary_safe, validate_tuple_type_contract,
+};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Span {
@@ -128,27 +139,27 @@ impl ParamMode {
 pub struct ParamDecl {
     pub mode: Option<ParamMode>,
     pub name: String,
-    pub ty: String,
+    pub ty: SurfaceType,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FieldDecl {
     pub name: String,
-    pub ty: String,
+    pub ty: SurfaceType,
     pub span: Span,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EnumVariantDecl {
     pub name: String,
-    pub payload: Option<String>,
+    pub payload: Option<SurfaceType>,
     pub span: Span,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TraitAssocTypeDecl {
     pub name: String,
-    pub default_ty: Option<String>,
+    pub default_ty: Option<SurfaceType>,
     pub span: Span,
 }
 
@@ -363,7 +374,7 @@ pub enum Expr {
     },
     GenericApply {
         expr: Box<Expr>,
-        type_args: Vec<String>,
+        type_args: Vec<SurfaceType>,
     },
     QualifiedPhrase {
         subject: Box<Expr>,
@@ -530,9 +541,9 @@ pub struct SymbolDecl {
     pub exported: bool,
     pub is_async: bool,
     pub type_params: Vec<String>,
-    pub where_clause: Option<String>,
+    pub where_clause: Option<SurfaceWhereClause>,
     pub params: Vec<ParamDecl>,
-    pub return_type: Option<String>,
+    pub return_type: Option<SurfaceType>,
     pub behavior_attrs: Vec<BehaviorAttr>,
     pub opaque_policy: Option<OpaqueTypePolicy>,
     pub availability: Vec<AvailabilityAttachment>,
@@ -548,15 +559,15 @@ pub struct SymbolDecl {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ImplAssocTypeBinding {
     pub name: String,
-    pub value_ty: Option<String>,
+    pub value_ty: Option<SurfaceType>,
     pub span: Span,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ImplDecl {
     pub type_params: Vec<String>,
-    pub trait_path: Option<String>,
-    pub target_type: String,
+    pub trait_path: Option<SurfaceTraitRef>,
+    pub target_type: SurfaceType,
     pub assoc_types: Vec<ImplAssocTypeBinding>,
     pub methods: Vec<SymbolDecl>,
     pub body_entries: Vec<String>,
@@ -1330,9 +1341,9 @@ fn collect_symbol_surface(trimmed: &str, kind: &SymbolKind, entries: &[RawBlockE
 struct ParsedSymbolSignature {
     name: String,
     type_params: Vec<String>,
-    where_clause: Option<String>,
+    where_clause: Option<SurfaceWhereClause>,
     params: Vec<ParamDecl>,
-    return_type: Option<String>,
+    return_type: Option<SurfaceType>,
 }
 
 fn parse_symbol_signature(kind: SymbolKind, rest: &str) -> Option<ParsedSymbolSignature> {
@@ -1363,7 +1374,12 @@ fn parse_symbol_signature(kind: SymbolKind, rest: &str) -> Option<ParsedSymbolSi
 
 fn parse_function_signature_tail(
     tail: &str,
-) -> Option<(Vec<String>, Option<String>, Vec<ParamDecl>, Option<String>)> {
+) -> Option<(
+    Vec<String>,
+    Option<SurfaceWhereClause>,
+    Vec<ParamDecl>,
+    Option<SurfaceType>,
+)> {
     let tail = tail.trim();
     let (type_params, where_clause, remainder) = parse_type_params_and_where(tail)?;
     let remainder = remainder.trim();
@@ -1373,14 +1389,25 @@ fn parse_function_signature_tail(
     let after_params = remainder[close_idx + 1..].trim();
     let return_type = after_params
         .strip_prefix("->")
-        .map(|ty| ty.trim().to_string())
-        .filter(|ty| !ty.is_empty());
+        .and_then(|ty| {
+            let ty = ty.trim();
+            (!ty.is_empty())
+                .then(|| parse_surface_type(ty))
+                .transpose()
+                .ok()
+                .flatten()
+        });
     Some((type_params, where_clause, params, return_type))
 }
 
 fn parse_named_type_tail(
     tail: &str,
-) -> Option<(Vec<String>, Option<String>, Vec<ParamDecl>, Option<String>)> {
+) -> Option<(
+    Vec<String>,
+    Option<SurfaceWhereClause>,
+    Vec<ParamDecl>,
+    Option<SurfaceType>,
+)> {
     let (type_params, where_clause, remainder) = parse_type_params_and_where(tail.trim())?;
     if !remainder.trim().is_empty() {
         return None;
@@ -1390,12 +1417,23 @@ fn parse_named_type_tail(
 
 fn parse_const_signature_tail(
     tail: &str,
-) -> (Vec<String>, Option<String>, Vec<ParamDecl>, Option<String>) {
+) -> (
+    Vec<String>,
+    Option<SurfaceWhereClause>,
+    Vec<ParamDecl>,
+    Option<SurfaceType>,
+) {
     let return_type = tail
         .trim()
         .strip_prefix(':')
-        .map(|ty| ty.trim().to_string())
-        .filter(|ty| !ty.is_empty());
+        .and_then(|ty| {
+            let ty = ty.trim();
+            (!ty.is_empty())
+                .then(|| parse_surface_type(ty))
+                .transpose()
+                .ok()
+                .flatten()
+        });
     (Vec::new(), None, Vec::new(), return_type)
 }
 
@@ -1429,7 +1467,9 @@ fn parse_owner_signature(rest: &str) -> Option<(String, Vec<OwnerObjectDecl>)> {
     Some((name, objects))
 }
 
-fn parse_type_params_and_where(tail: &str) -> Option<(Vec<String>, Option<String>, &str)> {
+fn parse_type_params_and_where(
+    tail: &str,
+) -> Option<(Vec<String>, Option<SurfaceWhereClause>, &str)> {
     let tail = tail.trim();
     let Some('[') = tail.chars().next() else {
         return Some((Vec::new(), None, tail));
@@ -1437,17 +1477,29 @@ fn parse_type_params_and_where(tail: &str) -> Option<(Vec<String>, Option<String
     let close_idx = find_matching_delim(tail, 0, '[', ']')?;
     let inside = &tail[1..close_idx];
     let mut type_params = Vec::new();
+    let parts = split_top_level(inside, ',')
+        .into_iter()
+        .map(|part| part.trim().to_string())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
     let mut where_clause = None;
-    for part in split_top_level(inside, ',') {
-        let part = part.trim();
+    let mut index = 0usize;
+    while index < parts.len() {
+        let part = parts[index].trim();
         if part.is_empty() {
+            index += 1;
             continue;
         }
         if let Some(clause) = part.strip_prefix("where ") {
-            where_clause = Some(clause.trim().to_string());
+            let mut clause_parts = vec![clause.trim().to_string()];
+            clause_parts.extend(parts[index + 1..].iter().cloned());
+            let combined = clause_parts.join(", ");
+            where_clause = Some(parse_surface_where_clause(&combined).ok()?);
+            break;
         } else {
             type_params.push(part.to_string());
         }
+        index += 1;
     }
     Some((type_params, where_clause, &tail[close_idx + 1..]))
 }
@@ -1486,7 +1538,8 @@ fn parse_param_list(source: &str) -> Result<Vec<ParamDecl>, String> {
         params.push(ParamDecl {
             mode,
             name: name.to_string(),
-            ty: ty.to_string(),
+            ty: parse_surface_type(ty)
+                .map_err(|message| format!("malformed parameter `{part}`: {message}"))?,
         });
     }
 
@@ -1552,17 +1605,17 @@ fn parse_impl_decl(entry: &RawBlockEntry) -> Result<Option<ImplDecl>, String> {
     let header = rest.strip_suffix(':').unwrap_or(rest).trim();
     let (trait_path, target_type) = match header.rsplit_once(" for ") {
         Some((trait_path, target_type)) => (
-            Some(trait_path.trim().to_string()),
-            target_type.trim().to_string(),
+            parse_surface_trait_ref(trait_path.trim()).ok(),
+            parse_surface_type(target_type.trim()).ok(),
         ),
-        None => (None, header.to_string()),
+        None => (None, parse_surface_type(header).ok()),
     };
-    if target_type.is_empty() {
+    let Some(target_type) = target_type else {
         return Err(format!(
             "{}:{}: malformed impl declaration",
             entry.span.line, entry.span.column
         ));
-    }
+    };
     let body_entries = entry
         .children
         .iter()
@@ -3093,7 +3146,7 @@ fn parse_access_expression(text: &str) -> Result<Option<Expr>, String> {
             return Ok(None);
         }
         if is_path_like(base) {
-            if let Some(type_args) = parse_generic_arg_texts(inside) {
+            if let Some(type_args) = parse_generic_arg_types(inside) {
                 return Ok(Some(Expr::GenericApply {
                     expr: Box::new(parse_expression_core(base)?),
                     type_args,
@@ -3212,69 +3265,20 @@ fn should_parse_index_brackets(text: &str) -> bool {
     false
 }
 
-fn parse_generic_arg_texts(text: &str) -> Option<Vec<String>> {
+fn parse_generic_arg_types(text: &str) -> Option<Vec<SurfaceType>> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return None;
     }
-    let args = split_top_level(trimmed, ',')
-        .into_iter()
-        .map(str::trim)
-        .collect::<Vec<_>>();
-    if args.iter().any(|arg| arg.is_empty()) {
-        return None;
-    }
-    if args.iter().all(|arg| looks_like_type_surface_text(arg)) {
-        return Some(args.into_iter().map(str::to_string).collect());
-    }
-    None
-}
-
-fn looks_like_type_surface_text(text: &str) -> bool {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-    if let Some(parts) = tuple_parts_if_whole(trimmed) {
-        return parts.len() == 2
-            && parts
-                .iter()
-                .all(|part| !part.is_empty() && looks_like_type_surface_text(part));
-    }
-    if let Some((base, inside)) = split_trailing_bracket_suffix(trimmed) {
-        let base = base.trim();
-        return looks_like_type_ref_path(base) && parse_generic_arg_texts(inside).is_some();
-    }
-    if let Some(rest) = trimmed.strip_prefix('&') {
-        let mut rest = rest.trim_start();
-        if let Some(stripped) = rest.strip_prefix('\'') {
-            let lifetime_len = stripped
-                .chars()
-                .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
-                .map(char::len_utf8)
-                .sum::<usize>();
-            if lifetime_len == 0 {
-                return false;
-            }
-            rest = stripped[lifetime_len..].trim_start();
+    let mut args = Vec::new();
+    for arg in split_top_level(trimmed, ',').into_iter().map(str::trim) {
+        if arg.is_empty() {
+            return None;
         }
-        if let Some(stripped) = strip_keyword_prefix(rest, "mut") {
-            rest = stripped;
-        }
-        return looks_like_type_surface_text(rest);
+        let parsed = parse_surface_type(arg).ok()?;
+        args.push(parsed);
     }
-    looks_like_type_ref_path(trimmed)
-}
-
-fn looks_like_type_ref_path(text: &str) -> bool {
-    if !is_path_like(text) {
-        return false;
-    }
-    text.rsplit('.')
-        .next()
-        .and_then(|segment| segment.chars().next())
-        .map(|ch| ch.is_ascii_uppercase())
-        .unwrap_or(false)
+    Some(args)
 }
 
 fn split_member_access(text: &str) -> Option<(&str, &str)> {
@@ -3931,7 +3935,7 @@ fn parse_field_decl(trimmed: &str, span: Span) -> Option<FieldDecl> {
     }
     Some(FieldDecl {
         name: name.to_string(),
-        ty: ty.to_string(),
+        ty: parse_surface_type(ty).ok()?,
         span,
     })
 }
@@ -3942,7 +3946,7 @@ fn parse_enum_variant_decl(trimmed: &str, span: Span) -> Option<EnumVariantDecl>
     let payload = if tail.is_empty() {
         None
     } else if tail.starts_with('(') && tail.ends_with(')') {
-        Some(tail[1..tail.len() - 1].trim().to_string())
+        parse_surface_type(tail[1..tail.len() - 1].trim()).ok()
     } else {
         None
     };
@@ -3956,7 +3960,7 @@ fn parse_enum_variant_decl(trimmed: &str, span: Span) -> Option<EnumVariantDecl>
 fn parse_trait_assoc_type_decl(trimmed: &str, span: Span) -> Option<TraitAssocTypeDecl> {
     let rest = trimmed.strip_prefix("type ")?;
     let (name, default_ty) = match rest.split_once('=') {
-        Some((name, value)) => (name.trim(), Some(value.trim().to_string())),
+        Some((name, value)) => (name.trim(), parse_surface_type(value.trim()).ok()),
         None => (rest.trim(), None),
     };
     if !is_identifier(name) {
@@ -3964,7 +3968,7 @@ fn parse_trait_assoc_type_decl(trimmed: &str, span: Span) -> Option<TraitAssocTy
     }
     Some(TraitAssocTypeDecl {
         name: name.to_string(),
-        default_ty: default_ty.filter(|value| !value.is_empty()),
+        default_ty,
         span,
     })
 }
@@ -3972,7 +3976,7 @@ fn parse_trait_assoc_type_decl(trimmed: &str, span: Span) -> Option<TraitAssocTy
 fn parse_impl_assoc_type_binding(trimmed: &str, span: Span) -> Option<ImplAssocTypeBinding> {
     let rest = trimmed.strip_prefix("type ")?;
     let (name, value_ty) = match rest.split_once('=') {
-        Some((name, value)) => (name.trim(), Some(value.trim().to_string())),
+        Some((name, value)) => (name.trim(), parse_surface_type(value.trim()).ok()),
         None => (rest.trim(), None),
     };
     if !is_identifier(name) {
@@ -3980,7 +3984,7 @@ fn parse_impl_assoc_type_binding(trimmed: &str, span: Span) -> Option<ImplAssocT
     }
     Some(ImplAssocTypeBinding {
         name: name.to_string(),
-        value_ty: value_ty.filter(|value| !value.is_empty()),
+        value_ty,
         span,
     })
 }
@@ -4669,7 +4673,8 @@ fn validate_test_contract(symbol: &SymbolDecl, foreword: &ForewordApp) -> Result
         ));
     }
     if let Some(return_type) = &symbol.return_type {
-        let trimmed = return_type.trim();
+        let rendered = return_type.render();
+        let trimmed = rendered.trim();
         if trimmed != "Unit" && trimmed != "Int" {
             return Err(format!(
                 "{}:{}: `#test` functions must return Unit or Int",
@@ -4682,52 +4687,38 @@ fn validate_test_contract(symbol: &SymbolDecl, foreword: &ForewordApp) -> Result
 
 fn validate_boundary_signature(symbol: &SymbolDecl, target: &str) -> Result<(), String> {
     for param in &symbol.params {
-        if matches!(param.mode, Some(ParamMode::Edit)) || type_text_is_mut_ref(&param.ty) {
+        if matches!(param.mode, Some(ParamMode::Edit)) || param.ty.is_mut_ref() {
             return Err(format!(
                 "{}:{}: `#boundary` target `{target}` does not allow mutable borrows",
                 symbol.span.line, symbol.span.column
             ));
         }
-        if !type_text_is_boundary_safe(&param.ty) {
+        if !surface_type_is_boundary_safe(&param.ty) {
             return Err(format!(
                 "{}:{}: type `{}` is not boundary-safe for target `{target}`",
-                symbol.span.line, symbol.span.column, param.ty
+                symbol.span.line,
+                symbol.span.column,
+                param.ty.render()
             ));
         }
     }
     if let Some(return_type) = &symbol.return_type {
-        if type_text_is_ref(return_type) {
+        if return_type.is_ref() {
             return Err(format!(
                 "{}:{}: `#boundary` target `{target}` requires owned return type (no references)",
                 symbol.span.line, symbol.span.column
             ));
         }
-        if !type_text_is_boundary_safe(return_type) {
+        if !surface_type_is_boundary_safe(return_type) {
             return Err(format!(
                 "{}:{}: type `{}` is not boundary-safe for target `{target}`",
-                symbol.span.line, symbol.span.column, return_type
+                symbol.span.line,
+                symbol.span.column,
+                return_type.render()
             ));
         }
     }
     Ok(())
-}
-
-fn type_text_is_ref(text: &str) -> bool {
-    let text = text.trim();
-    if !text.starts_with('&') {
-        return false;
-    }
-    let rest = text[1..].trim_start();
-    rest.starts_with('\'') || !rest.is_empty()
-}
-
-fn type_text_is_mut_ref(text: &str) -> bool {
-    let text = text.trim();
-    if !text.starts_with('&') {
-        return false;
-    }
-    let rest = text[1..].trim_start();
-    rest.starts_with("mut ") || (rest.starts_with('\'') && rest.contains(" mut "))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4867,30 +4858,6 @@ pub fn is_builtin_boundary_unsafe_type_name(name: &str) -> bool {
     builtin_type_info(name).is_some_and(|info| info.boundary_unsafe)
 }
 
-fn type_text_is_boundary_safe(text: &str) -> bool {
-    for token in type_name_tokens(text) {
-        if is_builtin_boundary_unsafe_type_name(token.as_str()) {
-            return false;
-        }
-    }
-    true
-}
-
-fn type_name_tokens(text: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    let mut current = String::new();
-    for ch in text.chars() {
-        if ch == '_' || ch.is_ascii_alphanumeric() {
-            current.push(ch);
-        } else if !current.is_empty() {
-            tokens.push(std::mem::take(&mut current));
-        }
-    }
-    if !current.is_empty() {
-        tokens.push(current);
-    }
-    tokens
-}
 
 fn is_double_quoted_literal(value: &str) -> bool {
     unquote_double_quoted_literal(value).is_some()
@@ -5518,7 +5485,7 @@ fn validate_symbol_tuple_contract(symbol: &SymbolDecl) -> Result<(), String> {
 }
 
 fn validate_impl_tuple_contract(impl_decl: &ImplDecl) -> Result<(), String> {
-    if tuple_parts_if_whole(&impl_decl.target_type).is_some() {
+    if matches!(impl_decl.target_type.kind, SurfaceTypeKind::Tuple(_)) {
         return Err(format!(
             "{}:{}: tuple impl targets are not part of v1",
             impl_decl.span.line, impl_decl.span.column
@@ -5728,7 +5695,7 @@ fn validate_raw_function_header_tuple_contract(text: &str, span: Span) -> Result
     };
     validate_raw_param_list_tuple_contract(params, span)?;
     if let Some(return_type) = return_type {
-        validate_tuple_type_contract(return_type, span, "return type")?;
+        validate_tuple_group_text_contract(return_type, span, "return type")?;
     }
     Ok(())
 }
@@ -5784,14 +5751,14 @@ fn validate_raw_param_list_tuple_contract(source: &str, span: Span) -> Result<()
             }
             let ty = ty.trim();
             if !ty.is_empty() {
-                validate_tuple_type_contract(ty, span, "parameter type")?;
+                validate_tuple_group_text_contract(ty, span, "parameter type")?;
             }
         }
     }
     Ok(())
 }
 
-fn validate_tuple_type_contract(text: &str, span: Span, context: &str) -> Result<(), String> {
+fn validate_tuple_group_text_contract(text: &str, span: Span, context: &str) -> Result<(), String> {
     validate_tuple_groups_in_text(text, span, context, "tuple types")
 }
 
@@ -6042,7 +6009,8 @@ mod tests {
         AssignTarget, BUILTIN_TYPE_INFOS, BinaryOp, ChainConnector, ChainIntroducer, ChainStep,
         DirectiveKind, Expr, ForewordApp, ForewordArg, HeaderAttachment, MatchPattern,
         OpaqueBoundaryPolicy, OpaqueOwnershipPolicy, OpaqueTypePolicy, ParamMode, PhraseArg,
-        Statement, StatementKind, SymbolBody, SymbolKind, UnaryOp, builtin_type_info, parse_module,
+        Statement, StatementKind, SurfaceTraitRef, SurfaceType, SurfaceWhereClause, SymbolBody,
+        SymbolKind, UnaryOp, builtin_type_info, parse_module,
     };
 
     fn expr_is_path(expr: &Expr, name: &str) -> bool {
@@ -6170,7 +6138,7 @@ mod tests {
             SymbolBody::Record { fields } => {
                 assert_eq!(fields.len(), 1);
                 assert_eq!(fields[0].name, "value");
-                assert_eq!(fields[0].ty, "Int");
+                assert_eq!(fields[0].ty.render(), "Int");
             }
             other => panic!("expected record body, got {other:?}"),
         }
@@ -6179,8 +6147,14 @@ mod tests {
             SymbolBody::Enum { variants } => {
                 assert_eq!(variants.len(), 2);
                 assert_eq!(variants[0].name, "Ok");
-                assert_eq!(variants[0].payload, Some("Int".to_string()));
-                assert_eq!(variants[1].payload, Some("Str".to_string()));
+                assert_eq!(
+                    variants[0].payload.as_ref().map(SurfaceType::render),
+                    Some("Int".to_string())
+                );
+                assert_eq!(
+                    variants[1].payload.as_ref().map(SurfaceType::render),
+                    Some("Str".to_string())
+                );
             }
             other => panic!("expected enum body, got {other:?}"),
         }
@@ -6201,7 +6175,10 @@ mod tests {
         assert_eq!(parsed.symbols[3].kind.as_str(), "fn");
         assert!(!parsed.symbols[3].exported);
         assert_eq!(parsed.symbols[3].surface_text, "fn main() -> Int:");
-        assert_eq!(parsed.symbols[3].return_type, Some("Int".to_string()));
+        assert_eq!(
+            parsed.symbols[3].return_type.as_ref().map(SurfaceType::render),
+            Some("Int".to_string())
+        );
         assert!(parsed.symbols[3].statements.is_empty());
     }
 
@@ -6217,15 +6194,18 @@ mod tests {
         assert!(worker.is_async);
         assert_eq!(worker.type_params, vec!["T".to_string()]);
         assert_eq!(
-            worker.where_clause,
+            worker.where_clause.as_ref().map(SurfaceWhereClause::render),
             Some("std.iter.Iterator[T]".to_string())
         );
         assert_eq!(worker.params.len(), 2);
         assert_eq!(worker.params[0].mode, Some(ParamMode::Read));
         assert_eq!(worker.params[0].name, "it");
-        assert_eq!(worker.params[0].ty, "T");
+        assert_eq!(worker.params[0].ty.render(), "T");
         assert_eq!(worker.params[1].mode, None);
-        assert_eq!(worker.return_type, Some("Int".to_string()));
+        assert_eq!(
+            worker.return_type.as_ref().map(SurfaceType::render),
+            Some("Int".to_string())
+        );
         let tick = &parsed.symbols[1];
         assert_eq!(tick.kind, SymbolKind::Behavior);
         assert_eq!(tick.name, "tick");
@@ -6237,16 +6217,22 @@ mod tests {
         assert_eq!(parsed.impls.len(), 1);
         let impl_decl = &parsed.impls[0];
         assert_eq!(
-            impl_decl.trait_path,
+            impl_decl.trait_path.as_ref().map(SurfaceTraitRef::render),
             Some("std.iter.Iterator[T]".to_string())
         );
         assert_eq!(impl_decl.type_params, vec!["T".to_string()]);
-        assert_eq!(impl_decl.target_type, "RangeIter");
+        assert_eq!(impl_decl.target_type.render(), "RangeIter");
         assert_eq!(impl_decl.body_entries.len(), 2);
         assert!(impl_decl.body_entries[0].starts_with("type Item"));
         assert_eq!(impl_decl.assoc_types.len(), 1);
         assert_eq!(impl_decl.assoc_types[0].name, "Item");
-        assert_eq!(impl_decl.assoc_types[0].value_ty, Some("Int".to_string()));
+        assert_eq!(
+            impl_decl.assoc_types[0]
+                .value_ty
+                .as_ref()
+                .map(SurfaceType::render),
+            Some("Int".to_string())
+        );
         assert_eq!(impl_decl.methods.len(), 1);
         assert_eq!(impl_decl.methods[0].name, "next");
     }
@@ -6813,7 +6799,8 @@ mod tests {
                     assert!(matches!(
                         subject.as_ref(),
                         Expr::GenericApply { expr, type_args }
-                            if type_args == &vec!["Str".to_string()]
+                            if type_args.iter().map(SurfaceType::render).collect::<Vec<_>>()
+                                == vec!["Str".to_string()]
                                 && matches!(
                                     expr.as_ref(),
                                     Expr::MemberAccess { member, .. } if member == "print"
@@ -6956,7 +6943,8 @@ mod tests {
                         assert!(matches!(
                                 subject.as_ref(),
                                 Expr::GenericApply { expr, type_args }
-                                if type_args == &vec!["Int".to_string()]
+                                if type_args.iter().map(SurfaceType::render).collect::<Vec<_>>()
+                                    == vec!["Int".to_string()]
                                     && matches!(
                                         expr.as_ref(),
                                         Expr::MemberAccess { member, .. } if member == "print"
@@ -7347,7 +7335,8 @@ mod tests {
                 assert!(matches!(
                     subject.as_ref(),
                     Expr::GenericApply { type_args, .. }
-                        if type_args == &vec!["(K, V)".to_string()]
+                        if type_args.iter().map(SurfaceType::render).collect::<Vec<_>>()
+                            == vec!["(K, V)".to_string()]
                 ));
             }
             other => panic!("expected generic qualified phrase, got {other:?}"),

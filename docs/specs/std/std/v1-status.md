@@ -218,7 +218,7 @@ consumers: `grimoires/owned/libs/arcana-audio`, owned audio-smoke proofs
 current_source: rewrite-owned
 still_needs_rebuild: runtime/backend implementation of audio device/buffer/playback intrinsics
 update_note: keep `std.audio` substrate-level; `default_output`, `buffer_load_wav`, and `play_buffer(edit device, read buffer)` are explicitly fallible (`Result[...]`) acquisition/start operations, `output_close` and playback `stop` are consuming lifecycle operations with explicit `Result[Unit, Str]`, the current bootstrap lane does not implicitly resample or remix so `play_buffer` requires the buffer sample rate/channel count to match the selected device config, output lifecycle/info hooks plus pause/resume/looping/gain/position playback control remain baseline, mixing/streaming policy and ergonomic playback helpers belong in grimoires, and the current source-declared opaque audio handles are bootstrap seams rather than long-term resource-model commitments
-promotion_condition: rewrite-owned runtime provides documented low-level audio support and the first audio facade grimoire builds above it
+promotion_condition: rewrite-owned runtime provides documented low-level audio support and the first audio grimoire builds above it
 
 ## Transitional-Carried
 

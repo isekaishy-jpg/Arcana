@@ -1,10 +1,12 @@
 # Arcana-Owned App/Media Grimoires
 
-This subtree holds rewrite-owned app/media grimoire scaffolds.
+This subtree holds rewrite-owned app/media grimoires.
 
-Current scaffolds:
-- `arcana-desktop`: desktop/window/input/events/run-loop facade above `std.window`, `std.input`, `std.events`, and `std.time`
-- `arcana-audio`: higher-level playback facade above `std.audio`
+Current grimoire lanes:
+- `arcana-desktop`: authoritative desktop/window/input/events/run-loop package above the rewrite-owned substrate
+- `arcana-graphics`: rewrite-owned 2D graphics/image package above `std.canvas`
+- `arcana-text`: rewrite-owned text/layout package above `std.canvas`, `std.text`, and `std.fs`
+- `arcana-audio`: rewrite-owned playback/audio package above `std.audio`
 - `arcana-graphics`: graphics/image convenience above `std.canvas`
 - `arcana-text`: text draw and text-asset convenience above `std.canvas`, `std.text`, and `std.fs`
 

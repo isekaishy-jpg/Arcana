@@ -687,7 +687,7 @@ Recommended app-facing layer:
 - the rewrite still requires first-party window/input/canvas and primitive graphics/text support sufficient for real apps/showcases and eventual selfhost proof
 - low-level `std.time` and `std.audio` substrate are tracked as bootstrap-owned std surface in `docs/specs/selfhost-host/selfhost-host/app-substrate-v1-scope.md` and `docs/specs/std/std/v1-status.md`
 - demo/showcase/game-specific helper logic belongs in showcase or app grimoires unless it is explicitly ratified as general-purpose std surface
-- `std.*` remains the low-level substrate; higher-level facades are expected to be rebuilt for the rewrite architecture rather than copied mechanically from Meadow-era implementation layers
+- `std.*` remains the low-level substrate; higher-level first-party grimoires are expected to be rebuilt for the rewrite architecture rather than copied mechanically from Meadow-era implementation layers
 
 Surface policy:
 

@@ -1,12 +1,12 @@
 use arcana_ir::{
     IrEntrypoint, IrModule, IrOwnerDecl, IrOwnerExit, IrOwnerObject, IrPackage, IrPackageModule,
-    IrRoutine,
+    IrRoutine, IrRoutineParam,
 };
 
 use crate::artifact::{
     AOT_INTERNAL_FORMAT, AotArtifact, AotEntrypointArtifact, AotOwnerArtifact,
     AotOwnerExitArtifact, AotOwnerObjectArtifact, AotPackageArtifact, AotPackageModuleArtifact,
-    AotRoutineArtifact,
+    AotRoutineArtifact, AotRoutineParamArtifact,
 };
 
 pub fn compile_module(module: &IrModule) -> AotArtifact {
@@ -52,10 +52,14 @@ fn compile_routine(routine: &IrRoutine) -> AotRoutineArtifact {
         symbol_kind: routine.symbol_kind.clone(),
         exported: routine.exported,
         is_async: routine.is_async,
-        type_param_rows: routine.type_param_rows.clone(),
-        behavior_attr_rows: routine.behavior_attr_rows.clone(),
-        param_rows: routine.param_rows.clone(),
-        signature_row: routine.signature_row.clone(),
+        type_params: routine.type_params.clone(),
+        behavior_attrs: routine.behavior_attrs.clone(),
+        params: routine
+            .params
+            .iter()
+            .map(compile_routine_param)
+            .collect(),
+        return_type: routine.return_type.clone(),
         intrinsic_impl: routine.intrinsic_impl.clone(),
         impl_target_type: routine.impl_target_type.clone(),
         impl_trait_path: routine.impl_trait_path.clone(),
@@ -63,6 +67,14 @@ fn compile_routine(routine: &IrRoutine) -> AotRoutineArtifact {
         foreword_rows: routine.foreword_rows.clone(),
         rollups: routine.rollups.clone(),
         statements: routine.statements.clone(),
+    }
+}
+
+fn compile_routine_param(param: &IrRoutineParam) -> AotRoutineParamArtifact {
+    AotRoutineParamArtifact {
+        mode: param.mode.clone(),
+        name: param.name.clone(),
+        ty: param.ty.clone(),
     }
 }
 

@@ -14,7 +14,7 @@ use super::{
 use super::NativeProcessHost;
 use arcana_aot::{
     AOT_INTERNAL_FORMAT, AotEntrypointArtifact, AotPackageArtifact, AotPackageModuleArtifact,
-    AotRoutineArtifact, render_package_artifact,
+    AotRoutineArtifact, AotRoutineParamArtifact, render_package_artifact,
 };
 use arcana_frontend::{check_workspace_graph, compute_member_fingerprints_for_checked_workspace};
 use arcana_package::{execute_build, load_workspace_graph, plan_workspace, prepare_build};
@@ -30,6 +30,52 @@ use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetWindowThreadProcessId, IsWindowVisible, SendMessageW, WM_CLOSE,
 };
+
+trait TestParamRow: Sized {
+    fn from_test_row(row: &str) -> Self;
+}
+
+impl TestParamRow for AotRoutineParamArtifact {
+    fn from_test_row(row: &str) -> Self {
+        let parts = row.splitn(3, ':').collect::<Vec<_>>();
+        let mode = parts[0].strip_prefix("mode=").unwrap_or_default();
+        let name = parts[1].strip_prefix("name=").unwrap_or_default();
+        let ty = parts[2].strip_prefix("ty=").unwrap_or_default();
+        Self {
+            mode: (!mode.is_empty()).then(|| mode.to_string()),
+            name: name.to_string(),
+            ty: ty.to_string(),
+        }
+    }
+}
+
+impl TestParamRow for RuntimeParamPlan {
+    fn from_test_row(row: &str) -> Self {
+        let parts = row.splitn(3, ':').collect::<Vec<_>>();
+        let mode = parts[0].strip_prefix("mode=").unwrap_or_default();
+        let name = parts[1].strip_prefix("name=").unwrap_or_default();
+        let ty = parts[2].strip_prefix("ty=").unwrap_or_default();
+        Self {
+            mode: (!mode.is_empty()).then(|| mode.to_string()),
+            name: name.to_string(),
+            ty: ty.to_string(),
+        }
+    }
+}
+
+fn test_params<T, S>(rows: &[S]) -> Vec<T>
+where
+    T: TestParamRow,
+    S: AsRef<str>,
+{
+    rows.iter().map(|row| T::from_test_row(row.as_ref())).collect()
+}
+
+fn test_return_type(signature: &str) -> Option<String> {
+    let (_, tail) = signature.rsplit_once("->")?;
+    let trimmed = tail.trim().trim_end_matches(':').trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
 
 fn temp_artifact_path(label: &str) -> PathBuf {
     let nanos = SystemTime::now()
@@ -391,10 +437,10 @@ fn sample_return_artifact() -> AotPackageArtifact {
             symbol_kind: "fn".to_string(),
             exported: true,
             is_async: false,
-            type_param_rows: Vec::new(),
-            behavior_attr_rows: Vec::new(),
-            param_rows: Vec::new(),
-            signature_row: "fn main() -> Int:".to_string(),
+            type_params: Vec::new(),
+            behavior_attrs: BTreeMap::new(),
+            params: Vec::new(),
+            return_type: test_return_type("fn main() -> Int:"),
             intrinsic_impl: None,
             impl_target_type: None,
             impl_trait_path: None,
@@ -448,10 +494,10 @@ fn sample_print_artifact() -> AotPackageArtifact {
                 symbol_kind: "fn".to_string(),
                 exported: false,
                 is_async: false,
-                type_param_rows: Vec::new(),
-                behavior_attr_rows: Vec::new(),
-                param_rows: Vec::new(),
-                signature_row: "fn main():".to_string(),
+                type_params: Vec::new(),
+                behavior_attrs: BTreeMap::new(),
+                params: Vec::new(),
+                return_type: test_return_type("fn main():"),
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
@@ -504,10 +550,10 @@ fn sample_stmt_metadata_artifact() -> AotPackageArtifact {
                     symbol_kind: "fn".to_string(),
                     exported: true,
                     is_async: false,
-                    type_param_rows: Vec::new(),
-                    behavior_attr_rows: Vec::new(),
-                    param_rows: Vec::new(),
-                    signature_row: "fn main() -> Int:".to_string(),
+                    type_params: Vec::new(),
+                    behavior_attrs: BTreeMap::new(),
+                    params: Vec::new(),
+                    return_type: test_return_type("fn main() -> Int:"),
                     intrinsic_impl: None,
                     impl_target_type: None,
                     impl_trait_path: None,
@@ -527,10 +573,10 @@ fn sample_stmt_metadata_artifact() -> AotPackageArtifact {
                     symbol_kind: "fn".to_string(),
                     exported: false,
                     is_async: false,
-                    type_param_rows: Vec::new(),
-                    behavior_attr_rows: Vec::new(),
-                    param_rows: vec!["mode=:name=scope:ty=Int".to_string()],
-                    signature_row: "fn cleanup(scope: Int) -> Int:".to_string(),
+                    type_params: Vec::new(),
+                    behavior_attrs: BTreeMap::new(),
+                    params: test_params(&["mode=:name=scope:ty=Int".to_string()]),
+                    return_type: test_return_type("fn cleanup(scope: Int) -> Int:"),
                     intrinsic_impl: None,
                     impl_target_type: None,
                     impl_trait_path: None,
@@ -582,10 +628,10 @@ fn sample_attachment_foreword_artifact() -> AotPackageArtifact {
                 symbol_kind: "fn".to_string(),
                 exported: true,
                 is_async: false,
-                type_param_rows: Vec::new(),
-                behavior_attr_rows: Vec::new(),
-                param_rows: Vec::new(),
-                signature_row: "fn main() -> Int:".to_string(),
+                type_params: Vec::new(),
+                behavior_attrs: BTreeMap::new(),
+                params: Vec::new(),
+                return_type: test_return_type("fn main() -> Int:"),
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
@@ -709,8 +755,7 @@ fn load_package_plan_accepts_behavior_attr_values_with_colons() {
 #[test]
 fn plan_from_artifact_rejects_main_with_parameters() {
     let mut artifact = sample_return_artifact();
-    artifact.routines[0].param_rows = vec!["mode=:name=x:ty=Int".to_string()];
-    artifact.routines[0].signature_row = "fn main(x: Int) -> Int:".to_string();
+    artifact.routines[0].params = test_params(&["mode=:name=x:ty=Int".to_string()]);
 
     let err = plan_from_artifact(&artifact).expect_err("parameterized main should fail");
     assert!(
@@ -722,7 +767,7 @@ fn plan_from_artifact_rejects_main_with_parameters() {
 #[test]
 fn plan_from_artifact_rejects_main_with_non_runtime_return_type() {
     let mut artifact = sample_return_artifact();
-    artifact.routines[0].signature_row = "fn main() -> Bool:".to_string();
+    artifact.routines[0].return_type = Some("Bool".to_string());
 
     let err = plan_from_artifact(&artifact).expect_err("bool-returning main should fail");
     assert!(
@@ -735,7 +780,6 @@ fn plan_from_artifact_rejects_main_with_non_runtime_return_type() {
 fn plan_from_artifact_rejects_async_rollup_handler() {
     let mut artifact = sample_stmt_metadata_artifact();
     artifact.routines[1].is_async = true;
-    artifact.routines[1].signature_row = "async fn cleanup(scope: Int) -> Int:".to_string();
 
     let err = plan_from_artifact(&artifact).expect_err("async rollup handler should fail");
     assert!(
@@ -747,8 +791,7 @@ fn plan_from_artifact_rejects_async_rollup_handler() {
 #[test]
 fn plan_from_artifact_rejects_wrong_arity_rollup_handler() {
     let mut artifact = sample_stmt_metadata_artifact();
-    artifact.routines[1].param_rows.clear();
-    artifact.routines[1].signature_row = "fn cleanup() -> Int:".to_string();
+    artifact.routines[1].params.clear();
 
     let err = plan_from_artifact(&artifact).expect_err("wrong-arity rollup handler should fail");
     assert!(
@@ -827,7 +870,7 @@ fn resolve_routine_index_for_call_prefers_lowered_routine_identity() {
                     name: "self".to_string(),
                     ty: "AtomicInt".to_string(),
                 }],
-                signature_row: "fn load(read self: AtomicInt) -> Int:".to_string(),
+                return_type: test_return_type("fn load(read self: AtomicInt) -> Int:"),
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
@@ -850,7 +893,7 @@ fn resolve_routine_index_for_call_prefers_lowered_routine_identity() {
                     name: "self".to_string(),
                     ty: "AtomicBool".to_string(),
                 }],
-                signature_row: "fn load(read self: AtomicBool) -> Bool:".to_string(),
+                return_type: test_return_type("fn load(read self: AtomicBool) -> Bool:"),
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
@@ -908,7 +951,7 @@ fn runtime_dynamic_bare_method_fallback_matches_receiver_type_args() {
                     name: "self".to_string(),
                     ty: "std.concurrent.Channel[T]".to_string(),
                 }],
-                signature_row: "fn send(read self: std.concurrent.Channel[T]) -> Int:".to_string(),
+                return_type: test_return_type("fn send(read self: std.concurrent.Channel[T]) -> Int:"),
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
@@ -931,8 +974,7 @@ fn runtime_dynamic_bare_method_fallback_matches_receiver_type_args() {
                     name: "self".to_string(),
                     ty: "std.concurrent.Channel[Bool]".to_string(),
                 }],
-                signature_row: "fn send(read self: std.concurrent.Channel[Bool]) -> Int:"
-                    .to_string(),
+                return_type: test_return_type("fn send(read self: std.concurrent.Channel[Bool]) -> Int:"),
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
@@ -994,7 +1036,7 @@ fn runtime_dynamic_bare_method_fallback_matches_opaque_family_receiver() {
                 name: "self".to_string(),
                 ty: "desktop.types.Window".to_string(),
             }],
-            signature_row: "fn alive(read self: desktop.types.Window) -> Bool:".to_string(),
+            return_type: test_return_type("fn alive(read self: desktop.types.Window) -> Bool:"),
             intrinsic_impl: None,
             impl_target_type: None,
             impl_trait_path: None,
@@ -1088,7 +1130,7 @@ fn runtime_json_abi_executes_exported_routine() {
                 name: "value".to_string(),
                 ty: "Int".to_string(),
             }],
-            signature_row: "fn answer(value: Int) -> Int:".to_string(),
+            return_type: test_return_type("fn answer(value: Int) -> Int:"),
             intrinsic_impl: None,
             impl_target_type: None,
             impl_trait_path: None,
@@ -1135,7 +1177,7 @@ fn runtime_native_abi_executes_exported_routine() {
                 name: "value".to_string(),
                 ty: "Int".to_string(),
             }],
-            signature_row: "fn answer(value: Int) -> Int:".to_string(),
+            return_type: test_return_type("fn answer(value: Int) -> Int:"),
             intrinsic_impl: None,
             impl_target_type: None,
             impl_trait_path: None,
@@ -1188,7 +1230,7 @@ fn runtime_native_abi_supports_string_and_byte_values() {
                     name: "name".to_string(),
                     ty: "Str".to_string(),
                 }],
-                signature_row: "fn greet(read name: Str) -> Str:".to_string(),
+                return_type: test_return_type("fn greet(read name: Str) -> Str:"),
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
@@ -1217,7 +1259,7 @@ fn runtime_native_abi_supports_string_and_byte_values() {
                     name: "bytes".to_string(),
                     ty: "Array[Int]".to_string(),
                 }],
-                signature_row: "fn tail(read bytes: Array[Int]) -> Array[Int]:".to_string(),
+                return_type: test_return_type("fn tail(read bytes: Array[Int]) -> Array[Int]:"),
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
@@ -1247,8 +1289,7 @@ fn runtime_native_abi_supports_string_and_byte_values() {
                     name: "pair".to_string(),
                     ty: "Pair[Str, Int]".to_string(),
                 }],
-                signature_row: "fn echo_pair(read pair: Pair[Str, Int]) -> Pair[Str, Int]:"
-                    .to_string(),
+                return_type: test_return_type("fn echo_pair(read pair: Pair[Str, Int]) -> Pair[Str, Int]:"),
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
@@ -1533,7 +1574,7 @@ fn execute_main_manual_routine_rollups_run_after_defers() {
                     name: "seed".to_string(),
                     ty: "Int".to_string(),
                 }],
-                signature_row: "fn run(read seed: Int) -> Result[Int, Str]:".to_string(),
+                return_type: test_return_type("fn run(read seed: Int) -> Result[Int, Str]:"),
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
@@ -1602,7 +1643,7 @@ fn execute_main_manual_routine_rollups_run_after_defers() {
                 type_params: Vec::new(),
                 behavior_attrs: BTreeMap::new(),
                 params: Vec::new(),
-                signature_row: "fn main() -> Int:".to_string(),
+                return_type: test_return_type("fn main() -> Int:"),
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
@@ -1645,7 +1686,7 @@ fn execute_main_manual_routine_rollups_run_after_defers() {
                     name: "value".to_string(),
                     ty: "T".to_string(),
                 }],
-                signature_row: "fn print[T](read value: T):".to_string(),
+                return_type: test_return_type("fn print[T](read value: T):"),
                 intrinsic_impl: Some("IoPrint".to_string()),
                 impl_target_type: None,
                 impl_trait_path: None,
@@ -3726,7 +3767,7 @@ fn execute_main_rejects_try_qualifier_arguments() {
             type_params: Vec::new(),
             behavior_attrs: BTreeMap::new(),
             params: Vec::new(),
-            signature_row: "fn main() -> Int:".to_string(),
+            return_type: test_return_type("fn main() -> Int:"),
             intrinsic_impl: None,
             impl_target_type: None,
             impl_trait_path: None,
@@ -4051,7 +4092,7 @@ fn execute_main_rejects_use_after_take_move() {
                     name: "value".to_string(),
                     ty: "Str".to_string(),
                 }],
-                signature_row: "fn consume(take value: Str) -> Int:".to_string(),
+                return_type: test_return_type("fn consume(take value: Str) -> Int:"),
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
@@ -4076,7 +4117,7 @@ fn execute_main_rejects_use_after_take_move() {
                     name: "value".to_string(),
                     ty: "Str".to_string(),
                 }],
-                signature_row: "fn reuse(read value: Str) -> Int:".to_string(),
+                return_type: test_return_type("fn reuse(read value: Str) -> Int:"),
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
@@ -4097,7 +4138,7 @@ fn execute_main_rejects_use_after_take_move() {
                 type_params: Vec::new(),
                 behavior_attrs: BTreeMap::new(),
                 params: Vec::new(),
-                signature_row: "fn main() -> Int:".to_string(),
+                return_type: test_return_type("fn main() -> Int:"),
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
@@ -4179,7 +4220,7 @@ fn execute_main_rejects_direct_intrinsic_take_fallback_reuse() {
             type_params: Vec::new(),
             behavior_attrs: BTreeMap::new(),
             params: Vec::new(),
-            signature_row: "fn main() -> Int:".to_string(),
+            return_type: test_return_type("fn main() -> Int:"),
             intrinsic_impl: None,
             impl_target_type: None,
             impl_trait_path: None,
@@ -6195,7 +6236,7 @@ fn buffered_host_window_close_detaches_session_entries() {
         kinds.push(event.kind);
     }
 
-    assert_eq!(kinds, vec![20, 22, 23]);
+    assert_eq!(kinds, vec![23]);
 }
 
 #[test]
@@ -7488,3 +7529,4 @@ fn execute_main_runs_arcana_desktop_ecs_adapter_workspace() {
 
     let _ = fs::remove_dir_all(dir);
 }
+

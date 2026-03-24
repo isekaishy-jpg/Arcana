@@ -14,7 +14,7 @@ The app is the thing to open and use when checking the grimoire manually. It dem
 - clipboard text and bytes
 - monitor and theme reporting
 - wake/control-flow behavior through the app runner
-- live secondary window open, redraw, resize, and close handling through the public facade
+- live secondary window open, redraw, resize, and close handling through the public desktop shell
 - a simple button-driven settings surface that later UI/settings grimoires can build on
 
 Run it normally:
@@ -27,7 +27,7 @@ For deterministic automated proof, run the packaged exe with:
 - `app.exe --smoke`
 
 That prints:
-- `controls=24`
+- `controls=36`
 - `pages=7`
 - `smoke_score=767`
 

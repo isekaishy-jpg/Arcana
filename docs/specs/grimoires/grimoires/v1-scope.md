@@ -15,21 +15,21 @@ Scope notes:
 ## Required Roles Before Selfhost
 
 - Desktop/app-shell grimoire
-  - rewrite-owned scaffold: `grimoires/owned/libs/arcana-desktop`
+  - rewrite-owned package: `grimoires/owned/libs/arcana-desktop`
   - responsibility: Arcana-owned public desktop/window/event-loop boundary for native desktop apps, with winit-class role breadth over rewrite-owned substrate rather than a thin wrapper above a separately-public raw desktop layer
   - responsibility: may own the canonical session runner, raw window/session/event/wake contracts, blocking wait policy, multi-window coordination, input/timing helpers, monitor/clipboard helpers, event routing, frame-input snapshots, optional ECS-loop adapters, keybind/action helpers, and similar desktop-shell utilities if Arcana's rewrite-native layout folds those into one package
   - note: `std.window`, `std.input`, `std.events`, `std.canvas`, `std.time`, and `std.clipboard` remain rewrite-owned substrate and backend-support layers; future desktop apps and higher grimoires should normally treat `arcana_desktop` as the app-shell package boundary
   - responsibility: must not absorb graphics/text draw policy that belongs in sibling grimoires above the shared low-level substrate
-- Graphics facade grimoire
-  - rewrite-owned scaffold: `grimoires/owned/libs/arcana-graphics`
-  - responsibility: 2D graphics/image convenience above `std.canvas`
-- Text facade grimoire
-  - rewrite-owned scaffold: `grimoires/owned/libs/arcana-text`
-  - responsibility: text draw and text-asset convenience above `std.canvas`, `std.text`, and `std.fs`
+- Graphics grimoire
+  - rewrite-owned package: `grimoires/owned/libs/arcana-graphics`
+  - responsibility: Arcana-owned 2D graphics/image boundary above `std.canvas`, with small skia-class role breadth rather than a thin wrapper over raw canvas primitives
+- Text grimoire
+  - rewrite-owned package: `grimoires/owned/libs/arcana-text`
+  - responsibility: Arcana-owned text draw, shaping, layout, and text-asset boundary above `std.canvas`, `std.text`, and `std.fs`, with cosmic-text-class role breadth rather than label-only wrappers
   - note: file IO remains in `std.fs`; this layer may add text-asset convenience rather than replace host-core file APIs
-- Audio facade grimoire
-  - rewrite-owned scaffold: `grimoires/owned/libs/arcana-audio`
-  - responsibility: miniaudio-style higher-level playback/convenience above `std.audio`
+- Audio grimoire
+  - rewrite-owned package: `grimoires/owned/libs/arcana-audio`
+  - responsibility: Arcana-owned playback/audio boundary above `std.audio`, with miniaudio-class role breadth rather than a bootstrap-only shim
 
 ## Rules
 

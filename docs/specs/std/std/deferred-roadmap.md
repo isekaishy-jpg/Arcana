@@ -36,10 +36,10 @@ status: deferred
 id: STD-D3
 title: higher-level audio engine and streaming support
 reason_deferred: the pre-selfhost plan only needs low-level audio device, buffer, and basic playback substrate.
-target_window: post-first-audio-facade stabilization
-trigger_condition: ready_when=low-level `std.audio` and the first audio facade grimoire are stable; verify=audio smoke demos and facade parity checks pass; blocked_by=missing rewrite-owned runtime audio backend.
+target_window: post-first-audio-grimoire stabilization
+trigger_condition: ready_when=low-level `std.audio` and the first audio grimoire are stable; verify=audio smoke demos and grimoire parity checks pass; blocked_by=missing rewrite-owned runtime audio backend.
 owner: Arcana std/audio team
-acceptance_criteria: any std-side audio growth remains substrate-level and does not absorb mixer/facade policy better owned by grimoires.
+acceptance_criteria: any std-side audio growth remains substrate-level and does not absorb mixer/playback policy better owned by grimoires.
 status: deferred
 
 id: STD-D4

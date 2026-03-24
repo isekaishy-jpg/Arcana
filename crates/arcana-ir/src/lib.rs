@@ -1,5 +1,6 @@
 mod entrypoint;
 mod executable;
+mod routine_signature;
 mod runtime_requirements;
 
 use std::cell::RefCell;
@@ -14,13 +15,13 @@ use arcana_hir::{
     HirStatement, HirStatementKind, HirSymbol, HirSymbolBody, HirSymbolKind, HirUnaryOp,
     HirWorkspacePackage, HirWorkspaceSummary, impl_target_is_public_from_package,
     infer_receiver_expr_type_text, lookup_method_candidates_for_type, lookup_symbol_path,
-    match_name_resolves_to_zero_payload_variant, routine_key_for_impl_method,
+    match_name_resolves_to_zero_payload_variant, render_symbol_signature,
+    routine_key_for_impl_method,
     routine_key_for_object_method, routine_key_for_symbol,
 };
 pub use entrypoint::{
     RUNTIME_MAIN_ENTRYPOINT_NAME, is_runtime_main_entry_symbol,
-    runtime_main_return_type_from_signature, validate_runtime_main_entry_contract,
-    validate_runtime_main_entry_symbol,
+    validate_runtime_main_entry_contract, validate_runtime_main_entry_symbol,
 };
 pub use runtime_requirements::{
     RuntimeRequirementRoots, derive_runtime_requirements, derive_runtime_requirements_with_roots,
@@ -32,6 +33,7 @@ pub use executable::{
     ExecHeaderAttachment, ExecMatchArm, ExecMatchPattern, ExecPageRollup, ExecPhraseArg,
     ExecPhraseQualifierKind, ExecStmt, ExecUnaryOp,
 };
+pub use routine_signature::{IrRoutineParam, render_routine_signature_text};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct IrModule {
@@ -68,10 +70,10 @@ pub struct IrRoutine {
     pub symbol_kind: String,
     pub exported: bool,
     pub is_async: bool,
-    pub type_param_rows: Vec<String>,
-    pub behavior_attr_rows: Vec<String>,
-    pub param_rows: Vec<String>,
-    pub signature_row: String,
+    pub type_params: Vec<String>,
+    pub behavior_attrs: BTreeMap<String, String>,
+    pub params: Vec<IrRoutineParam>,
+    pub return_type: Option<String>,
     pub intrinsic_impl: Option<String>,
     pub impl_target_type: Option<String>,
     pub impl_trait_path: Option<Vec<String>>,
@@ -192,7 +194,7 @@ impl HirLocalTypeLookup for LowerValueScope {
 struct ResolvedRenderScope<'a> {
     workspace: &'a HirWorkspaceSummary,
     resolved_module: &'a HirResolvedModule,
-    current_where_clause: Option<&'a str>,
+    current_where_clause: Option<String>,
     value_scope: LowerValueScope,
     errors: Rc<RefCell<Vec<String>>>,
 }
@@ -201,7 +203,7 @@ impl<'a> ResolvedRenderScope<'a> {
     fn new(
         workspace: &'a HirWorkspaceSummary,
         resolved_module: &'a HirResolvedModule,
-        current_where_clause: Option<&'a str>,
+        current_where_clause: Option<String>,
         _type_params: &[String],
     ) -> Self {
         Self {
@@ -335,15 +337,21 @@ fn render_impl_surface_row(impl_decl: &arcana_hir::HirImplDecl) -> String {
             format!(
                 "{}:{}",
                 method.kind.as_str(),
-                encode_surface_text(&method.surface_text)
+                encode_surface_text(&render_symbol_signature(method))
             )
         })
         .collect::<Vec<_>>()
         .join(",");
     format!(
         "impl:target={}:trait={}:methods=[{}]",
-        encode_surface_text(&impl_decl.target_type),
-        encode_surface_text(impl_decl.trait_path.as_deref().unwrap_or("")),
+        encode_surface_text(&impl_decl.target_type.render()),
+        encode_surface_text(
+            &impl_decl
+                .trait_path
+                .as_ref()
+                .map(|path| path.render())
+                .unwrap_or_default(),
+        ),
         methods
     )
 }
@@ -547,11 +555,8 @@ fn parse_surface_type_application(text: &str) -> Option<(String, Vec<String>)> {
     Some((path.join("."), args))
 }
 
-fn canonical_impl_trait_path(path: &str) -> Vec<String> {
-    let base = parse_surface_type_application(path)
-        .map(|(base, _)| base)
-        .unwrap_or_else(|| path.to_string());
-    base.split('.').map(ToString::to_string).collect()
+fn canonical_impl_trait_path(path: &arcana_hir::HirTraitRef) -> Vec<String> {
+    path.path.segments.clone()
 }
 
 fn flatten_member_expr_path(expr: &HirExpr) -> Option<Vec<String>> {
@@ -661,7 +666,7 @@ fn lookup_trait_method_resolution_from_where_clause<'a>(
     if !is_identifier_text(&wanted) {
         return Ok(Vec::new());
     }
-    let Some(where_clause) = scope.current_where_clause else {
+    let Some(where_clause) = scope.current_where_clause.as_deref() else {
         return Ok(Vec::new());
     };
     let mut candidates = Vec::new();
@@ -698,40 +703,23 @@ fn lookup_trait_method_resolution_from_where_clause<'a>(
     Ok(candidates)
 }
 
-fn render_param_row(symbol: &HirSymbol) -> Vec<String> {
+fn lower_routine_params(symbol: &HirSymbol) -> Vec<IrRoutineParam> {
     symbol
         .params
         .iter()
-        .map(|param| {
-            format!(
-                "mode={}:name={}:ty={}",
-                param.mode.map(|mode| mode.as_str()).unwrap_or(""),
-                param.name,
-                param.ty
-            )
+        .map(|param| IrRoutineParam {
+            mode: param.mode.map(|mode| mode.as_str().to_string()),
+            name: param.name.clone(),
+            ty: param.ty.render(),
         })
         .collect()
 }
 
-fn render_type_param_rows(symbol: &HirSymbol) -> Vec<String> {
-    symbol
-        .type_params
-        .iter()
-        .map(|name| format!("name={name}"))
-        .collect()
-}
-
-fn render_behavior_attr_rows(symbol: &HirSymbol) -> Vec<String> {
+fn lower_behavior_attrs(symbol: &HirSymbol) -> BTreeMap<String, String> {
     symbol
         .behavior_attrs
         .iter()
-        .map(|attr| {
-            format!(
-                "name=\"{}\":value=\"{}\"",
-                quote_text(&attr.name),
-                quote_text(&attr.value)
-            )
-        })
+        .map(|attr| (attr.name.clone(), attr.value.clone()))
         .collect()
 }
 
@@ -1297,7 +1285,7 @@ fn lower_exec_expr(expr: &HirExpr) -> ExecExpr {
         },
         HirExpr::GenericApply { expr, type_args } => ExecExpr::Generic {
             expr: Box::new(lower_exec_expr(expr)),
-            type_args: type_args.clone(),
+            type_args: type_args.iter().map(arcana_hir::HirType::render).collect(),
         },
         HirExpr::QualifiedPhrase {
             subject,
@@ -1424,7 +1412,7 @@ fn lower_exec_expr_resolved(expr: &HirExpr, scope: &ResolvedRenderScope<'_>) -> 
         },
         HirExpr::GenericApply { expr, type_args } => ExecExpr::Generic {
             expr: Box::new(lower_exec_expr_resolved(expr, scope)),
-            type_args: type_args.clone(),
+            type_args: type_args.iter().map(arcana_hir::HirType::render).collect(),
         },
         HirExpr::QualifiedPhrase {
             subject,
@@ -1975,7 +1963,7 @@ fn lower_owner_decl_resolved(
     let scope = ResolvedRenderScope::new(
         workspace,
         resolved_module,
-        symbol.where_clause.as_deref(),
+        symbol.where_clause.as_ref().map(|where_clause| where_clause.render()),
         &symbol.type_params,
     );
     Ok(Some(IrOwnerDecl {
@@ -2034,12 +2022,12 @@ fn lower_routine(
         symbol_kind: symbol.kind.as_str().to_string(),
         exported: symbol.exported,
         is_async: symbol.is_async,
-        type_param_rows: render_type_param_rows(symbol),
-        behavior_attr_rows: render_behavior_attr_rows(symbol),
-        param_rows: render_param_row(symbol),
-        signature_row: symbol.surface_text.clone(),
+        type_params: symbol.type_params.clone(),
+        behavior_attrs: lower_behavior_attrs(symbol),
+        params: lower_routine_params(symbol),
+        return_type: symbol.return_type.as_ref().map(|ty| ty.render()),
         intrinsic_impl: symbol.intrinsic_impl.clone(),
-        impl_target_type: impl_decl.map(|decl| decl.target_type.clone()),
+        impl_target_type: impl_decl.map(|decl| decl.target_type.render()),
         impl_trait_path: impl_decl.and_then(|decl| {
             decl.trait_path
                 .as_ref()
@@ -2069,13 +2057,11 @@ fn lower_routine_resolved(
     let mut scope = ResolvedRenderScope::new(
         workspace,
         resolved_module,
-        symbol.where_clause.as_deref(),
+        symbol.where_clause.as_ref().map(|where_clause| where_clause.render()),
         &symbol.type_params,
     );
     for param in &symbol.params {
-        scope
-            .value_scope
-            .insert(param.name.clone(), param.ty.clone());
+        scope.value_scope.insert(param.name.clone(), param.ty.render());
     }
     let routine = IrRoutine {
         module_id: module_id.to_string(),
@@ -2087,12 +2073,12 @@ fn lower_routine_resolved(
                 impl_target_is_public_from_package(workspace, package, module, &decl.target_type)
             }),
         is_async: symbol.is_async,
-        type_param_rows: render_type_param_rows(symbol),
-        behavior_attr_rows: render_behavior_attr_rows(symbol),
-        param_rows: render_param_row(symbol),
-        signature_row: symbol.surface_text.clone(),
+        type_params: symbol.type_params.clone(),
+        behavior_attrs: lower_behavior_attrs(symbol),
+        params: lower_routine_params(symbol),
+        return_type: symbol.return_type.as_ref().map(|ty| ty.render()),
         intrinsic_impl: symbol.intrinsic_impl.clone(),
-        impl_target_type: impl_decl.map(|decl| decl.target_type.clone()),
+        impl_target_type: impl_decl.map(|decl| decl.target_type.render()),
         impl_trait_path: impl_decl.and_then(|decl| {
             decl.trait_path
                 .as_ref()
@@ -2479,7 +2465,7 @@ mod tests {
         assert!(ir.entrypoints.is_empty());
         assert_eq!(ir.routines.len(), 1);
         assert_eq!(ir.routines[0].symbol_name, "open");
-        assert!(ir.routines[0].param_rows.is_empty());
+        assert!(ir.routines[0].params.is_empty());
         assert_eq!(
             ir.routines[0].statements,
             vec![ExecStmt::ReturnValue {

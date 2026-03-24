@@ -73,6 +73,9 @@ fn default_demo(smoke_mode: Bool) -> demo_types.Demo:
     demo.move_size_cycle = 0
     demo.clamp_cycle = 0
     demo.preset_cycle = 0
+    demo.body_page_index = -1
+    demo.body_wrap_width = 0
+    demo.body_lines = std.collections.list.new[Str] :: :: call
     return demo
 
 fn current_title(read self: demo_types.Demo) -> Str:
@@ -101,6 +104,15 @@ fn maybe_schedule_telemetry_redraw(edit self: demo_types.Demo):
     self.telemetry_dirty = false
     self.next_telemetry_redraw_ms = now + 24
     mark_dirty :: self :: call
+
+fn sync_body_lines(edit self: demo_types.Demo, read win: arcana_desktop.types.Window):
+    let view = layout.for_window :: (arcana_desktop.window.size :: win :: call) :: call
+    let wrap_width = view.center_panel.size.0 - 68
+    if self.body_page_index == self.page_index and self.body_wrap_width == wrap_width:
+        return
+    self.body_page_index = self.page_index
+    self.body_wrap_width = wrap_width
+    self.body_lines = render.wrapped_lines :: (pages.body :: self.page_index :: call), wrap_width :: call
 
 fn device_policy_code(read value: arcana_desktop.types.DeviceEvents) -> Int:
     return match value:
@@ -865,6 +877,7 @@ fn on_main_redraw(edit self: demo_types.Demo, edit cx: arcana_desktop.types.AppC
     refresh_main_monitor :: self, cx :: call
     refresh_second_window_state :: self, cx :: call
     sync_device_policy :: self, cx :: call
+    sync_body_lines :: self, win :: call
     render.draw_main :: self, win :: call
     self.dirty = false
     self.controls_dirty = false

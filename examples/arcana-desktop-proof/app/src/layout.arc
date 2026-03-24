@@ -1,3 +1,5 @@
+import actions
+
 export record Rect:
     pos: (Int, Int)
     size: (Int, Int)
@@ -92,6 +94,6 @@ export fn button_at(read view: layout.ViewLayout, point: (Int, Int)) -> Int:
     if in_button_x >= view.button_size.0 or in_button_y >= view.button_size.1:
         return -1
     let id = row * view.button_cols + col
-    if id < 0 or id >= 36:
+    if id < 0 or id >= (actions.button_count :: :: call):
         return -1
     return id

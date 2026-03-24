@@ -1,4 +1,4 @@
-import layout
+import pages
 
 export fn button_count() -> Int:
     return 36
@@ -83,11 +83,8 @@ export fn button_page(id: Int) -> Int:
         return id - 2
     return -1
 
-export fn button_at(read view: layout.ViewLayout, point: (Int, Int)) -> Int:
-    return layout.button_at :: view, point :: call
-
 export fn next_page_index(current: Int, delta: Int) -> Int:
-    let total = 7
+    let total = pages.count :: :: call
     let mut next = current + delta
     if next < 0:
         next = total - 1

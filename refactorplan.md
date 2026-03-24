@@ -1,0 +1,159 @@
+# Structured Type Surface Refactor With Frontend-Owned Semantics
+
+## Summary
+- Replace string-backed type/trait semantics with structured representations owned by `arcana-syntax`, lowered through structured HIR, then resolved into canonical semantic forms owned only by `arcana-frontend`.
+- Execute as one program in two ordered tranches:
+  - Tranche A: syntax/HIR/frontend/package semantic cleanup and interning.
+  - Tranche B: IR/AOT/runtime metadata replacement.
+- `surface_text` survives only for diagnostics/display. No semantic equality, ordering, hashing, lookup, fingerprint decision, or normalization may depend on rendered text.
+
+## Core Invariants
+- Only `arcana-frontend` creates semantic IDs and owns the canonical semantic arena.
+  - HIR must not create, cache, or persist semantic IDs.
+  - Package, IR, AOT, and runtime may consume exported/canonical views, never frontend arena internals.
+- `Surface*` is syntax-owned and unresolved.
+  - Preserves grammar shape, user spelling choices where needed, and exact spans.
+- `Hir*` is structured and normalized, but not globally resolved.
+  - HIR carries unresolved item paths plus locally-bound generic/lifetime references as local binding IDs, not bare names.
+  - HIR must not own global item IDs, trait IDs, or semantic type IDs.
+- Global resolution and generic/lifetime binding happen only in frontend lowering to semantic forms.
+- Diagnostics provenance is mandatory at every stage.
+  - Every `Surface*` node carries spans.
+  - Every `Hir*` type/predicate/projection node retains a provenance handle of `node_id + primary span + any secondary spans needed for blame`.
+  - Semantic forms retain a provenance link back to originating HIR nodes.
+  - No diagnostic may reconstruct blame from rendered text alone.
+- No fallback path may use text rendering or text comparison for:
+  - projection equality
+  - associated type defaults/bindings
+  - trait application matching
+  - type equality, ordering, hashing, or normalization
+  - predicate equality or normalization
+- Frontend may expose canonical rendered/exported views, but those are derived products only, never semantic inputs.
+
+## Tranche A: Syntax, HIR, Frontend, Package
+- `arcana-syntax`
+  - Add a new seam such as `type_surface.rs`.
+  - Parse and expose structured nodes for:
+    - `SurfaceType`
+    - `SurfacePath`
+    - `SurfaceTraitRef`
+    - `SurfacePredicate`
+    - `SurfaceWhereClause`
+    - `SurfaceProjection`
+    - `SurfaceLifetime`
+    - associated type defaults/bindings
+  - Remove the assumption that later stages will reparse stored text for type-level meaning.
+- `arcana-hir`
+  - Add structured HIR nodes:
+    - `HirType`
+    - `HirTraitRef`
+    - `HirPredicate`
+    - `HirWhereClause`
+    - `HirProjection`
+  - Replace string-backed param/field/return types, impl target types, trait refs, assoc defaults/bindings, and where clauses with structured fields.
+  - Split touched logic out of `lib.rs` into seams such as:
+    - `type_surface.rs`
+    - `signature.rs`
+    - `render.rs`
+  - HIR rendering remains structured/unresolved rendering only; it does not own semantic canonicalization.
+- `arcana-frontend`
+  - Split touched logic out of `lib.rs` into seams such as:
+    - `semantic_types.rs`
+    - `type_validate.rs`
+    - `type_resolve.rs`
+    - `where_clause.rs`
+    - `trait_contracts.rs`
+  - Remove semantic dependence on:
+    - `parse_where_predicates`
+    - `parse_surface_trait_application`
+    - string-based canonicalization for type logic
+  - Introduce frontend-owned semantic forms for:
+    - `TypeId`
+    - `TraitRefId`
+    - `ProjectionId`
+    - `PredicateId`
+    - resolved generic/lifetime/item references
+  - Substitutions are transient structured maps over interned semantic IDs by default, not interned objects unless later profiling proves that necessary.
+  - Type equality, predicate equality, projection normalization, trait contract checks, and where-clause solving must operate on these semantic forms, never on text.
+- `arcana-package`
+  - Remove the duplicate surface parser.
+  - Fingerprints use exactly one declared canonical source per call site:
+    - canonical semantic forms only where resolution is semantically required
+    - canonical structured HIR forms where resolution intentionally must not matter
+  - Each fingerprinted path must declare and test its chosen canonical source so mixed-source drift cannot reappear.
+  - Package/fingerprint code must not depend on frontend arena layout or IDs.
+  - If shared helpers are needed, place them in a lower-level crate/module that avoids dependency cycles.
+- Migration discipline for Tranche A
+  - Short-lived dual fields are allowed only while flipping a subsystem.
+  - Every temporary dual field must name its replacement owner and explicit deletion condition in a comment.
+  - No temporary string-backed semantic field may survive past Tranche A green.
+
+## Tranche B: IR, AOT, Runtime
+- `arcana-ir`
+  - Replace row/text-based routine signature metadata with structured routine metadata in a dedicated seam such as `routine_signature.rs`.
+  - Remove `type_param_rows`, `param_rows`, and `signature_row` as the internal source of truth.
+- Minimum structured routine metadata payload
+  - routine identity: module ID, routine key, symbol identity
+  - type params
+  - value params with names, modes, and structured types
+  - structured return type
+  - impl target and impl trait context when applicable
+  - source provenance handle suitable for diagnostics/debugging
+  - existing non-type runtime fields remain, but type-related semantics must come from this structured payload
+- `arcana-aot`
+  - Bump the internal artifact format after the structured payload is finalized.
+  - Serialize and validate structured routine/type metadata directly.
+  - Human-readable/native boundary text may still be rendered from structured ABI data, but never reparsed for semantics.
+- `arcana-runtime`
+  - Remove row/string parsing helpers for params, return types, and signature metadata.
+  - Load structured routine metadata directly.
+  - Split the touched plan-loading/signature logic out of `lib.rs` into a dedicated seam.
+- End-of-tranche cleanup
+  - delete all remaining row-based routine/type metadata paths
+  - delete any Tranche A migration shims that still survive
+  - keep no hidden string fallback
+
+## Refactor Seams
+- Split only along touched subsystem boundaries.
+- Minimum seams to add:
+  - `arcana-syntax`: `type_surface.rs`
+  - `arcana-hir`: `type_surface.rs`, `signature.rs`, `render.rs`
+  - `arcana-frontend`: `semantic_types.rs`, `type_validate.rs`, `type_resolve.rs`, `where_clause.rs`, `trait_contracts.rs`
+  - `arcana-ir`: `routine_signature.rs`
+  - `arcana-runtime`: routine/signature plan-loading seam
+  - `arcana-package`: structured fingerprint/publicity seam
+- Existing `lib.rs` files keep glue and public re-exports only.
+
+## Test Plan
+- Syntax
+  - parse valid and invalid structured types, trait refs, projections, assoc bindings/defaults, and where predicates
+  - preserve spans for all new nodes
+- HIR/frontend
+  - validate unresolved names, undeclared lifetimes, impl targets, trait-bound predicates, projection equality, and outlives rules using structured nodes only
+  - add regressions that fail if semantic code reads `surface_text`
+  - add regressions that fail if projection or assoc-type handling falls back to text
+  - enforce module visibility so only frontend can construct semantic IDs
+  - verify locally-bound generic/lifetime references survive as stable local IDs through HIR lowering
+- Diagnostics
+  - every semantic type/predicate/projection diagnostic must point to preserved provenance without rendering-based blame reconstruction
+- Package/fingerprint
+  - fingerprint stability tests for canonical structured/semantic sources
+  - explicit tests proving fingerprinting does not use raw text or debug dumps
+  - explicit tests proving each fingerprint path uses its declared canonical source
+- IR/AOT/runtime
+  - round-trip structured routine metadata through IR and AOT
+  - runtime loads structured params/return/impl context with no row parsing
+  - artifact version tests reject stale row-based assumptions
+- Acceptance criteria
+  - no semantic compiler logic compares rendered type/predicate text for equality, ordering, hashing, or normalization
+  - no semantic pass reparses stored type/trait strings
+  - `surface_text` is diagnostic-only
+  - duplicate type-surface parsers are removed
+  - runtime no longer parses signature/type rows from strings
+  - touched monoliths are reduced by the new seams
+
+## Assumptions
+- This is a breaking internal refactor.
+- Tranche A and Tranche B are one program but land in order; Tranche A must be green before Tranche B starts deleting artifact/runtime text paths.
+- Package/fingerprint logic will not depend on frontend semantic arena internals because current crate dependencies do not allow that cleanly.
+- External manifests and native export text may remain string-rendered if they are purely derived output from structured internal forms.

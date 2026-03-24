@@ -1,9 +1,9 @@
 # Arcana-Owned Grimoires
 
-This subtree holds rewrite-owned grimoire scaffolds.
+This subtree holds rewrite-owned grimoires.
 
 Rules:
-- Packages under `grimoires/owned/*` are Arcana-owned scaffolds for the rewrite.
+- Packages under `grimoires/owned/*` are Arcana-owned grimoires for the rewrite.
 - App/media grimoires here should sit above `std` and consume the rewrite-owned substrate without forcing new compiler special cases.
 
 Current contents:

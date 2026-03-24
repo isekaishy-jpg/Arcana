@@ -120,6 +120,18 @@ mod tests {
         dir
     }
 
+    fn repo_temp_dir(label: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos();
+        let dir = repo_root()
+            .join(".tmp-package-workspaces")
+            .join(format!("{label}_{unique}"));
+        fs::create_dir_all(&dir).expect("repo temp dir should be created");
+        dir
+    }
+
     fn write_file(path: &Path, text: &str) {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).expect("parent directories should be created");
@@ -429,29 +441,43 @@ mod tests {
         write_file(&dir.join("src/types.arc"), "// types\n");
     }
 
-    fn desktop_proof_workspace_dir() -> PathBuf {
+    fn desktop_proof_workspace_source_dir() -> PathBuf {
         repo_root().join("examples").join("arcana-desktop-proof")
     }
 
-    struct WorkspaceBuildCleanup {
-        root: PathBuf,
+    fn should_skip_workspace_copy(path: &Path) -> bool {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name == ".arcana" || name == "dist" || name == "Arcana.lock")
     }
 
-    impl WorkspaceBuildCleanup {
-        fn new(root: &Path) -> Self {
-            let _ = fs::remove_file(root.join("Arcana.lock"));
-            let _ = fs::remove_dir_all(root.join(".arcana"));
-            Self {
-                root: root.to_path_buf(),
+    fn copy_dir_filtered(src: &Path, dst: &Path) {
+        fs::create_dir_all(dst).expect("copy target dir should exist");
+        for entry in fs::read_dir(src).expect("source dir should be readable") {
+            let entry = entry.expect("dir entry should read");
+            let src_path = entry.path();
+            if should_skip_workspace_copy(&src_path) {
+                continue;
+            }
+            let dst_path = dst.join(entry.file_name());
+            if src_path.is_dir() {
+                copy_dir_filtered(&src_path, &dst_path);
+            } else {
+                fs::copy(&src_path, &dst_path).unwrap_or_else(|err| {
+                    panic!(
+                        "failed to copy {} to {}: {err}",
+                        src_path.display(),
+                        dst_path.display()
+                    )
+                });
             }
         }
     }
 
-    impl Drop for WorkspaceBuildCleanup {
-        fn drop(&mut self) {
-            let _ = fs::remove_file(self.root.join("Arcana.lock"));
-            let _ = fs::remove_dir_all(self.root.join(".arcana"));
-        }
+    fn desktop_proof_workspace_copy(label: &str) -> PathBuf {
+        let dir = repo_temp_dir(label);
+        copy_dir_filtered(&desktop_proof_workspace_source_dir(), &dir);
+        dir
     }
 
     fn repo_root() -> PathBuf {
@@ -1577,8 +1603,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn package_workspace_runs_large_arcana_desktop_windows_bundle_with_runtime_dll() {
-        let workspace_dir = desktop_proof_workspace_dir();
-        let _cleanup = WorkspaceBuildCleanup::new(&workspace_dir);
+        let workspace_dir = desktop_proof_workspace_copy("windows_large_arcana_desktop_workspace");
         let exe_out_dir = temp_dir("windows_large_arcana_desktop_exe_bundle");
         let exe_bundle = package_workspace(
             workspace_dir.clone(),
@@ -1620,14 +1645,15 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["controls=36", "pages=7", "smoke_score=767"]
         );
+        let _ = fs::remove_dir_all(&workspace_dir);
         let _ = fs::remove_dir_all(&exe_out_dir);
     }
 
     #[cfg(windows)]
     #[test]
     fn package_workspace_closes_arcana_desktop_showcase_from_window_close_button() {
-        let workspace_dir = desktop_proof_workspace_dir();
-        let _cleanup = WorkspaceBuildCleanup::new(&workspace_dir);
+        let workspace_dir =
+            desktop_proof_workspace_copy("windows_large_arcana_desktop_close_workspace");
         let exe_out_dir = temp_dir("windows_large_arcana_desktop_close_bundle");
         let exe_bundle = package_workspace(
             workspace_dir.clone(),
@@ -1651,14 +1677,15 @@ mod tests {
         let status = wait_for_child_exit(&mut child, Duration::from_secs(20))
             .expect("desktop showcase should exit after WM_CLOSE");
         assert_eq!(status.code(), Some(0));
+        let _ = fs::remove_dir_all(&workspace_dir);
         let _ = fs::remove_dir_all(&exe_out_dir);
     }
 
     #[cfg(windows)]
     #[test]
     fn package_workspace_drives_arcana_desktop_showcase_next_page_from_mouse_click() {
-        let workspace_dir = desktop_proof_workspace_dir();
-        let _cleanup = WorkspaceBuildCleanup::new(&workspace_dir);
+        let workspace_dir =
+            desktop_proof_workspace_copy("windows_large_arcana_desktop_click_workspace");
         let exe_out_dir = temp_dir("windows_large_arcana_desktop_click_bundle");
         let exe_bundle = package_workspace(
             workspace_dir.clone(),
@@ -1699,14 +1726,15 @@ mod tests {
             stdout.lines().any(|line| line == "page=Window"),
             "clicking next page should print `page=Window`, got `{stdout}`"
         );
+        let _ = fs::remove_dir_all(&workspace_dir);
         let _ = fs::remove_dir_all(&exe_out_dir);
     }
 
     #[cfg(windows)]
     #[test]
     fn package_workspace_clicking_second_window_does_not_crash_showcase() {
-        let workspace_dir = desktop_proof_workspace_dir();
-        let _cleanup = WorkspaceBuildCleanup::new(&workspace_dir);
+        let workspace_dir =
+            desktop_proof_workspace_copy("windows_large_arcana_desktop_second_window_workspace");
         let exe_out_dir = temp_dir("windows_large_arcana_desktop_second_window_bundle");
         let exe_bundle = package_workspace(
             workspace_dir.clone(),
@@ -1810,6 +1838,7 @@ mod tests {
             stderr.is_empty(),
             "showcase second-window exercise should not write stderr: `{stderr}`"
         );
+        let _ = fs::remove_dir_all(&workspace_dir);
         let _ = fs::remove_dir_all(&exe_out_dir);
     }
 

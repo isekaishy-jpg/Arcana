@@ -1,13 +1,26 @@
 pub mod freeze;
 mod lookup;
+mod render;
+mod signature;
+pub mod type_surface;
 
 pub use lookup::{
     current_workspace_package_for_module, impl_target_is_public_from_package,
-    lookup_method_candidates_for_type, lookup_symbol_path, visible_method_package_names_for_module,
-    visible_package_root_for_module,
+    lookup_method_candidates_for_hir_type, lookup_method_candidates_for_type, lookup_symbol_path,
+    visible_method_package_names_for_module, visible_package_root_for_module,
 };
+pub use signature::render_symbol_signature;
 pub(crate) use lookup::{
     lookup_symbol_path_in_module_context, visible_symbol_refs_in_module_for_package,
+};
+pub use render::{render_expr_fingerprint, render_symbol_fingerprint};
+pub use type_surface::{
+    HirLifetime, HirPath, HirPredicate, HirProjection, HirSurfaceRefs, HirTraitRef, HirType,
+    HirTypeBindingId, HirTypeBindingScope, HirTypeKind, HirTypeSubstitutions, HirWhereClause,
+    collect_hir_type_refs, collect_hir_where_clause_refs, hir_strip_reference_type,
+    hir_type_app_args, hir_type_base_path, hir_type_is_boundary_safe, hir_type_matches,
+    parse_hir_type, render_hir_trait_ref, render_hir_type, render_hir_where_clause,
+    substitute_hir_type, validate_hir_tuple_contract,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -128,9 +141,9 @@ pub struct HirSymbol {
     pub exported: bool,
     pub is_async: bool,
     pub type_params: Vec<String>,
-    pub where_clause: Option<String>,
+    pub where_clause: Option<HirWhereClause>,
     pub params: Vec<HirParam>,
-    pub return_type: Option<String>,
+    pub return_type: Option<HirType>,
     pub behavior_attrs: Vec<HirBehaviorAttr>,
     pub opaque_policy: Option<HirOpaqueTypePolicy>,
     pub availability: Vec<HirAvailabilityAttachment>,
@@ -164,13 +177,13 @@ impl HirParamMode {
 pub struct HirParam {
     pub mode: Option<HirParamMode>,
     pub name: String,
-    pub ty: String,
+    pub ty: HirType,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HirField {
     pub name: String,
-    pub ty: String,
+    pub ty: HirType,
     pub span: Span,
 }
 
@@ -378,7 +391,7 @@ pub enum HirExpr {
     },
     GenericApply {
         expr: Box<HirExpr>,
-        type_args: Vec<String>,
+        type_args: Vec<HirType>,
     },
     QualifiedPhrase {
         subject: Box<HirExpr>,
@@ -518,14 +531,14 @@ pub struct HirStatement {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HirEnumVariant {
     pub name: String,
-    pub payload: Option<String>,
+    pub payload: Option<HirType>,
     pub span: Span,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HirTraitAssocType {
     pub name: String,
-    pub default_ty: Option<String>,
+    pub default_ty: Option<HirType>,
     pub span: Span,
 }
 
@@ -555,8 +568,8 @@ pub enum HirSymbolBody {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HirImplDecl {
     pub type_params: Vec<String>,
-    pub trait_path: Option<String>,
-    pub target_type: String,
+    pub trait_path: Option<HirTraitRef>,
+    pub target_type: HirType,
     pub assoc_types: Vec<HirImplAssocTypeBinding>,
     pub methods: Vec<HirSymbol>,
     pub body_entries: Vec<String>,
@@ -567,7 +580,7 @@ pub struct HirImplDecl {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HirImplAssocTypeBinding {
     pub name: String,
-    pub value_ty: Option<String>,
+    pub value_ty: Option<HirType>,
     pub span: Span,
 }
 
@@ -613,7 +626,7 @@ impl HirModuleSummary {
                     format!(
                         "export:{}:{}",
                         symbol.kind.as_str(),
-                        encode_surface_text(&symbol.api_signature_text())
+                        render::encode_surface_text(&symbol.api_signature_text())
                     )
                 }),
         );
@@ -623,25 +636,17 @@ impl HirModuleSummary {
 
     pub fn hir_fingerprint_rows(&self) -> Vec<String> {
         let mut rows = Vec::new();
-        rows.extend(self.directives.iter().map(render_directive_fingerprint));
-        rows.extend(self.lang_items.iter().map(render_lang_item_fingerprint));
-        rows.extend(self.symbols.iter().map(render_symbol_fingerprint));
-        rows.extend(self.impls.iter().map(render_impl_fingerprint));
+        rows.extend(self.directives.iter().map(render::render_directive_fingerprint));
+        rows.extend(self.lang_items.iter().map(render::render_lang_item_fingerprint));
+        rows.extend(self.symbols.iter().map(render::render_symbol_fingerprint));
+        rows.extend(self.impls.iter().map(render::render_impl_fingerprint));
         rows
     }
 }
 
 impl HirSymbol {
     fn api_signature_text(&self) -> String {
-        match self.kind {
-            HirSymbolKind::Fn | HirSymbolKind::System => render_function_signature(self),
-            HirSymbolKind::Record => render_record_signature(self),
-            HirSymbolKind::Enum => render_enum_signature(self),
-            HirSymbolKind::OpaqueType => render_opaque_signature(self),
-            HirSymbolKind::Trait => render_trait_signature(self),
-            HirSymbolKind::Behavior => render_behavior_signature(self),
-            _ => self.surface_text.clone(),
-        }
+        signature::render_symbol_signature(self)
     }
 }
 
@@ -690,12 +695,12 @@ impl HirPackageSummary {
     pub fn hir_fingerprint_rows(&self) -> Vec<String> {
         let mut rows = vec![format!(
             "package_name={}",
-            quote_fingerprint_text(&self.package_name)
+            render::quote_fingerprint_text(&self.package_name)
         )];
         rows.extend(
             self.dependency_edges
                 .iter()
-                .map(render_dependency_edge_fingerprint),
+                .map(render::render_dependency_edge_fingerprint),
         );
         for module in &self.modules {
             for row in module.hir_fingerprint_rows() {
@@ -882,9 +887,11 @@ impl HirResolvedWorkspace {
 
 #[derive(Clone, Debug)]
 pub struct HirMethodCandidate<'a> {
+    pub package_name: &'a str,
     pub module_id: &'a str,
     pub symbol: &'a HirSymbol,
     pub declared_receiver_type: String,
+    pub declared_receiver_hir: HirType,
     pub routine_key: String,
 }
 
@@ -906,18 +913,6 @@ pub fn routine_key_for_object_method(
     method_index: usize,
 ) -> String {
     format!("{module_id}#obj-{symbol_index}-method-{method_index}")
-}
-
-fn canonicalize_method_lookup_base(
-    workspace: &HirWorkspaceSummary,
-    resolved_module: &HirResolvedModule,
-    text: &str,
-) -> String {
-    split_simple_path(text)
-        .and_then(|path| lookup_symbol_path(workspace, resolved_module, &path))
-        .map(|symbol_ref| format!("{}.{}", symbol_ref.module_id, symbol_ref.symbol.name))
-        .or_else(|| canonical_ambient_type_root(text).map(str::to_string))
-        .unwrap_or_else(|| text.trim().to_string())
 }
 
 fn canonical_ambient_type_root(text: &str) -> Option<&'static str> {
@@ -957,124 +952,92 @@ fn canonicalize_method_lookup_base_in_module(
         .unwrap_or_else(|| text.trim().to_string())
 }
 
-fn canonicalize_method_lookup_type_text_in_module(
+fn canonicalize_hir_path_in_module(
     workspace: &HirWorkspaceSummary,
     package: &HirWorkspacePackage,
     module: &HirModuleSummary,
-    text: &str,
-) -> String {
-    let trimmed = text.trim();
-    if let Some(rest) = trimmed.strip_prefix("&mut") {
-        return format!(
-            "&mut {}",
-            canonicalize_method_lookup_type_text_in_module(workspace, package, module, rest)
-        );
+    path: &HirPath,
+) -> HirPath {
+    let rendered = canonicalize_method_lookup_base_in_module(workspace, package, module, &path.render());
+    HirPath {
+        segments: rendered.split('.').map(str::to_string).collect(),
+        span: path.span,
     }
-    if let Some(rest) = trimmed.strip_prefix('&') {
-        return format!(
-            "& {}",
-            canonicalize_method_lookup_type_text_in_module(workspace, package, module, rest)
-        );
-    }
-    if let Some((base, args)) = parse_surface_type_application(trimmed) {
-        let base = canonicalize_method_lookup_base_in_module(workspace, package, module, &base);
-        if args.is_empty() {
-            return base;
-        }
-        let args = args
-            .into_iter()
-            .map(|arg| {
-                canonicalize_method_lookup_type_text_in_module(workspace, package, module, &arg)
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        return format!("{base}[{args}]");
-    }
-    canonicalize_method_lookup_base_in_module(workspace, package, module, trimmed)
 }
 
-fn canonicalize_method_lookup_type_text(
+fn canonicalize_hir_trait_ref_in_module(
     workspace: &HirWorkspaceSummary,
-    resolved_module: &HirResolvedModule,
-    text: &str,
-) -> String {
-    let trimmed = text.trim();
-    if let Some(rest) = trimmed.strip_prefix("&mut") {
-        return format!(
-            "&mut {}",
-            canonicalize_method_lookup_type_text(workspace, resolved_module, rest)
-        );
+    package: &HirWorkspacePackage,
+    module: &HirModuleSummary,
+    trait_ref: &HirTraitRef,
+) -> HirTraitRef {
+    HirTraitRef {
+        path: canonicalize_hir_path_in_module(workspace, package, module, &trait_ref.path),
+        args: trait_ref
+            .args
+            .iter()
+            .map(|arg| canonicalize_hir_type_in_module(workspace, package, module, arg))
+            .collect(),
+        span: trait_ref.span,
     }
-    if let Some(rest) = trimmed.strip_prefix('&') {
-        return format!(
-            "& {}",
-            canonicalize_method_lookup_type_text(workspace, resolved_module, rest)
-        );
-    }
-    if let Some((base, args)) = parse_surface_type_application(trimmed) {
-        let base = canonicalize_method_lookup_base(workspace, resolved_module, &base);
-        if args.is_empty() {
-            return base;
-        }
-        let args = args
-            .into_iter()
-            .map(|arg| canonicalize_method_lookup_type_text(workspace, resolved_module, &arg))
-            .collect::<Vec<_>>()
-            .join(", ");
-        return format!("{base}[{args}]");
-    }
-    canonicalize_method_lookup_base(workspace, resolved_module, trimmed)
 }
 
-fn is_simple_type_placeholder(text: &str) -> bool {
-    let mut chars = text.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    (first == '_' || first.is_ascii_alphabetic())
-        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
-        && builtin_type_info(text).is_none()
-}
-
-fn method_target_type_matches(
-    declared: &str,
-    actual: &str,
-    substitutions: &mut BTreeMap<String, String>,
-) -> bool {
-    let declared = strip_reference_prefix(declared);
-    let actual = strip_reference_prefix(actual);
-    if declared == actual {
-        return true;
-    }
-    if is_simple_type_placeholder(declared) {
-        if let Some(existing) = substitutions.get(declared) {
-            return existing == actual;
-        }
-        substitutions.insert(declared.to_string(), actual.to_string());
-        return true;
-    }
-    match (
-        parse_surface_type_application(declared),
-        parse_surface_type_application(actual),
-    ) {
-        (Some((decl_base, decl_args)), Some((actual_base, actual_args))) => {
-            if decl_base != actual_base || decl_args.len() != actual_args.len() {
-                return false;
+pub(crate) fn canonicalize_hir_type_in_module(
+    workspace: &HirWorkspaceSummary,
+    package: &HirWorkspacePackage,
+    module: &HirModuleSummary,
+    ty: &HirType,
+) -> HirType {
+    HirType {
+        kind: match &ty.kind {
+            HirTypeKind::Path(path) => {
+                HirTypeKind::Path(canonicalize_hir_path_in_module(workspace, package, module, path))
             }
-            decl_args
-                .iter()
-                .zip(actual_args.iter())
-                .all(|(decl_arg, actual_arg)| {
-                    method_target_type_matches(decl_arg, actual_arg, substitutions)
-                })
-        }
-        _ => declared == actual,
+            HirTypeKind::Apply { base, args } => HirTypeKind::Apply {
+                base: canonicalize_hir_path_in_module(workspace, package, module, base),
+                args: args
+                    .iter()
+                    .map(|arg| canonicalize_hir_type_in_module(workspace, package, module, arg))
+                    .collect(),
+            },
+            HirTypeKind::Ref {
+                lifetime,
+                mutable,
+                inner,
+            } => HirTypeKind::Ref {
+                lifetime: lifetime.clone(),
+                mutable: *mutable,
+                inner: Box::new(canonicalize_hir_type_in_module(
+                    workspace, package, module, inner,
+                )),
+            },
+            HirTypeKind::Tuple(items) => HirTypeKind::Tuple(
+                items
+                    .iter()
+                    .map(|item| canonicalize_hir_type_in_module(workspace, package, module, item))
+                    .collect(),
+            ),
+            HirTypeKind::Projection(projection) => HirTypeKind::Projection(HirProjection {
+                trait_ref: canonicalize_hir_trait_ref_in_module(
+                    workspace,
+                    package,
+                    module,
+                    &projection.trait_ref,
+                ),
+                assoc: projection.assoc.clone(),
+                span: projection.span,
+            }),
+        },
+        span: ty.span,
     }
 }
 
 pub trait HirLocalTypeLookup {
     fn contains_local(&self, name: &str) -> bool;
     fn type_text_of(&self, name: &str) -> Option<&str>;
+    fn type_of(&self, _name: &str) -> Option<&HirType> {
+        None
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1116,188 +1079,6 @@ fn split_simple_path(text: &str) -> Option<Vec<String>> {
     (!segments.is_empty()).then_some(segments)
 }
 
-fn split_top_level_surface_items(text: &str, separator: char) -> Vec<String> {
-    let mut items = Vec::new();
-    let mut current = String::new();
-    let mut square_depth = 0usize;
-    let mut paren_depth = 0usize;
-    for ch in text.chars() {
-        match ch {
-            '[' => {
-                square_depth += 1;
-                current.push(ch);
-            }
-            ']' => {
-                square_depth = square_depth.saturating_sub(1);
-                current.push(ch);
-            }
-            '(' => {
-                paren_depth += 1;
-                current.push(ch);
-            }
-            ')' => {
-                paren_depth = paren_depth.saturating_sub(1);
-                current.push(ch);
-            }
-            _ if ch == separator && square_depth == 0 && paren_depth == 0 => {
-                let item = current.trim();
-                if !item.is_empty() {
-                    items.push(item.to_string());
-                }
-                current.clear();
-            }
-            _ => current.push(ch),
-        }
-    }
-    let tail = current.trim();
-    if !tail.is_empty() {
-        items.push(tail.to_string());
-    }
-    items
-}
-
-fn strip_reference_prefix(text: &str) -> &str {
-    let trimmed = text.trim_start();
-    if let Some(rest) = trimmed.strip_prefix("&mut") {
-        return rest.trim_start();
-    }
-    if let Some(rest) = trimmed.strip_prefix('&') {
-        return rest.trim_start();
-    }
-    trimmed
-}
-
-fn parse_surface_type_application(text: &str) -> Option<(String, Vec<String>)> {
-    let trimmed = text.trim();
-    if let Some(path) = split_simple_path(trimmed) {
-        return Some((path.join("."), Vec::new()));
-    }
-    let mut depth = 0usize;
-    let mut open = None;
-    for (index, ch) in trimmed.char_indices() {
-        match ch {
-            '[' if depth == 0 => {
-                open = Some(index);
-                break;
-            }
-            '[' | '(' => depth += 1,
-            ']' | ')' => depth = depth.saturating_sub(1),
-            _ => {}
-        }
-    }
-    let open = open?;
-    if !trimmed.ends_with(']') || open == 0 {
-        return None;
-    }
-    let base = trimmed[..open].trim();
-    let path = split_simple_path(base)?;
-    let args = split_top_level_surface_items(&trimmed[open + 1..trimmed.len() - 1], ',');
-    Some((path.join("."), args))
-}
-
-fn substitute_type_params(text: &str, substitutions: &BTreeMap<String, String>) -> String {
-    let chars = text.chars().collect::<Vec<_>>();
-    let mut out = String::new();
-    let mut index = 0usize;
-    while index < chars.len() {
-        let ch = chars[index];
-        if ch == '\'' {
-            out.push(ch);
-            index += 1;
-            while index < chars.len() {
-                let current = chars[index];
-                out.push(current);
-                index += 1;
-                if !(current == '_' || current.is_ascii_alphanumeric()) {
-                    break;
-                }
-            }
-            continue;
-        }
-        if ch == '_' || ch.is_ascii_alphabetic() {
-            let start = index;
-            index += 1;
-            while index < chars.len()
-                && (chars[index] == '_' || chars[index].is_ascii_alphanumeric())
-            {
-                index += 1;
-            }
-            let ident = chars[start..index].iter().collect::<String>();
-            if let Some(replacement) = substitutions.get(&ident) {
-                out.push_str(replacement);
-            } else {
-                out.push_str(&ident);
-            }
-            continue;
-        }
-        out.push(ch);
-        index += 1;
-    }
-    out
-}
-
-fn build_receiver_type_substitutions(
-    actual_type: &str,
-    declared_type: &str,
-) -> BTreeMap<String, String> {
-    let mut substitutions = BTreeMap::new();
-    let Some((_, actual_args)) =
-        parse_surface_type_application(strip_reference_prefix(actual_type))
-    else {
-        return substitutions;
-    };
-    let Some((_, declared_args)) =
-        parse_surface_type_application(strip_reference_prefix(declared_type))
-    else {
-        return substitutions;
-    };
-    for (formal, actual) in declared_args.into_iter().zip(actual_args.into_iter()) {
-        substitutions.insert(formal, actual);
-    }
-    substitutions
-}
-
-fn substitute_surface_type_params(text: &str, substitutions: &BTreeMap<String, String>) -> String {
-    let chars = text.chars().collect::<Vec<_>>();
-    let mut out = String::new();
-    let mut index = 0usize;
-    while index < chars.len() {
-        let ch = chars[index];
-        if ch == '\'' {
-            out.push(ch);
-            index += 1;
-            while index < chars.len() {
-                let current = chars[index];
-                out.push(current);
-                index += 1;
-                if !(current == '_' || current.is_ascii_alphanumeric()) {
-                    break;
-                }
-            }
-            continue;
-        }
-        if ch == '_' || ch.is_ascii_alphabetic() {
-            let start = index;
-            index += 1;
-            while index < chars.len()
-                && (chars[index] == '_' || chars[index].is_ascii_alphanumeric())
-            {
-                index += 1;
-            }
-            let ident = chars[start..index].iter().collect::<String>();
-            if let Some(replacement) = substitutions.get(&ident) {
-                out.push_str(replacement);
-            } else {
-                out.push_str(&ident);
-            }
-            continue;
-        }
-        out.push(ch);
-        index += 1;
-    }
-    out
-}
-
 fn flatten_member_expr_path(expr: &HirExpr) -> Option<Vec<String>> {
     match expr {
         HirExpr::Path { segments } => Some(segments.clone()),
@@ -1317,10 +1098,89 @@ fn flatten_callable_expr_path(expr: &HirExpr) -> Option<Vec<String>> {
     }
 }
 
-fn extract_expr_generic_type_args(expr: &HirExpr) -> Vec<String> {
+fn placeholder_binding_scope_for_type(ty: &HirType) -> HirTypeBindingScope {
+    let mut scope = HirTypeBindingScope::default();
+    for path in collect_hir_type_refs(ty).paths {
+        if path.len() == 1 {
+            let name = &path[0];
+            if builtin_type_info(name).is_none() {
+                scope.insert(name.clone());
+            }
+        }
+    }
+    scope
+}
+
+fn substitute_type_params_hir(
+    ty: &HirType,
+    bindings: &HirTypeBindingScope,
+    substitutions: &HirTypeSubstitutions,
+) -> HirType {
+    substitute_hir_type(ty, bindings, substitutions)
+}
+
+fn builtin_hir_type(name: &str) -> HirType {
+    HirType {
+        kind: HirTypeKind::Path(HirPath {
+            segments: vec![name.to_string()],
+            span: Span::default(),
+        }),
+        span: Span::default(),
+    }
+}
+
+fn ambient_apply_hir_type(base: &[&str], args: Vec<HirType>) -> HirType {
+    let base = HirPath {
+        segments: base.iter().map(|segment| segment.to_string()).collect(),
+        span: Span::default(),
+    };
+    HirType {
+        kind: HirTypeKind::Apply { base, args },
+        span: Span::default(),
+    }
+}
+
+fn build_symbol_result_type(
+    module_id: &str,
+    symbol: &HirSymbol,
+    explicit_args: &[HirType],
+) -> HirType {
+    let base = HirPath {
+        segments: vec![module_id.to_string(), symbol.name.clone()],
+        span: symbol.span,
+    };
+    let args = if explicit_args.is_empty() {
+        symbol
+            .type_params
+            .iter()
+            .map(|param| HirType {
+                kind: HirTypeKind::Path(HirPath {
+                    segments: vec![param.clone()],
+                    span: symbol.span,
+                }),
+                span: symbol.span,
+            })
+            .collect::<Vec<_>>()
+    } else {
+        explicit_args.to_vec()
+    };
+    if args.is_empty() {
+        HirType {
+            kind: HirTypeKind::Path(base),
+            span: symbol.span,
+        }
+    } else {
+        HirType {
+            kind: HirTypeKind::Apply { base, args },
+            span: symbol.span,
+        }
+    }
+}
+
+fn extract_expr_generic_hir_type_args(expr: &HirExpr) -> Vec<HirType> {
     match expr {
         HirExpr::GenericApply { expr, type_args } => {
-            let mut inherited = extract_expr_generic_type_args(expr);
+            let mut inherited = extract_expr_generic_hir_type_args(expr);
             inherited.extend(type_args.iter().cloned());
             inherited
         }
@@ -1328,37 +1188,35 @@ fn extract_expr_generic_type_args(expr: &HirExpr) -> Vec<String> {
     }
 }
 
-fn symbol_return_type_text(
+fn symbol_return_type(
     workspace: &HirWorkspaceSummary,
     symbol_ref: HirResolvedSymbolRef<'_>,
-) -> Option<String> {
+) -> Option<HirType> {
+    let package = workspace.package(symbol_ref.package_name)?;
+    let module = package.module(symbol_ref.module_id)?;
     if let Some(return_type) = &symbol_ref.symbol.return_type {
-        let package = workspace.package(symbol_ref.package_name)?;
-        let module = package.module(symbol_ref.module_id)?;
-        return Some(canonicalize_method_lookup_type_text_in_module(
+        return Some(canonicalize_hir_type_in_module(
             workspace,
             package,
             module,
             return_type,
         ));
     }
-    None.or_else(|| {
-        matches!(
-            symbol_ref.symbol.kind,
-            HirSymbolKind::Record
-                | HirSymbolKind::Object
-                | HirSymbolKind::Enum
-                | HirSymbolKind::OpaqueType
-        )
-        .then(|| format!("{}.{}", symbol_ref.module_id, symbol_ref.symbol.name))
-    })
+    matches!(
+        symbol_ref.symbol.kind,
+        HirSymbolKind::Record
+            | HirSymbolKind::Object
+            | HirSymbolKind::Enum
+            | HirSymbolKind::OpaqueType
+    )
+    .then(|| build_symbol_result_type(symbol_ref.module_id, symbol_ref.symbol, &[]))
 }
 
-fn symbol_call_return_type_text(
+fn symbol_call_return_type(
     workspace: &HirWorkspaceSummary,
     symbol_ref: HirResolvedSymbolRef<'_>,
-    generic_args: &[String],
-) -> Option<String> {
+    explicit_args: &[HirType],
+) -> Option<HirType> {
     if matches!(
         symbol_ref.symbol.kind,
         HirSymbolKind::Record
@@ -1366,47 +1224,58 @@ fn symbol_call_return_type_text(
             | HirSymbolKind::Enum
             | HirSymbolKind::OpaqueType
     ) {
-        let base = format!("{}.{}", symbol_ref.module_id, symbol_ref.symbol.name);
-        if generic_args.is_empty() {
-            return Some(base);
-        }
-        return Some(format!("{base}[{}]", generic_args.join(", ")));
+        return Some(build_symbol_result_type(
+            symbol_ref.module_id,
+            symbol_ref.symbol,
+            explicit_args,
+        ));
     }
-    if let Some(return_type) = symbol_return_type_text(workspace, symbol_ref) {
-        if generic_args.is_empty() || symbol_ref.symbol.type_params.is_empty() {
-            return Some(return_type);
-        }
-        let substitutions = symbol_ref
-            .symbol
-            .type_params
-            .iter()
-            .cloned()
-            .zip(generic_args.iter().cloned())
-            .collect::<BTreeMap<_, _>>();
-        return Some(substitute_surface_type_params(&return_type, &substitutions));
+    let package = workspace.package(symbol_ref.package_name)?;
+    let module = package.module(symbol_ref.module_id)?;
+    let return_type = symbol_ref.symbol.return_type.as_ref()?;
+    let canonical_return =
+        canonicalize_hir_type_in_module(workspace, package, module, return_type);
+    if explicit_args.is_empty() || symbol_ref.symbol.type_params.is_empty() {
+        return Some(canonical_return);
     }
-    None
+    let bindings = HirTypeBindingScope::from_names(symbol_ref.symbol.type_params.clone());
+    let substitutions = symbol_ref
+        .symbol
+        .type_params
+        .iter()
+        .zip(explicit_args.iter())
+        .filter_map(|(param, actual)| bindings.binding_id(param).map(|id| (id, actual.clone())))
+        .collect::<HirTypeSubstitutions>();
+    Some(substitute_type_params_hir(
+        &canonical_return,
+        &bindings,
+        &substitutions,
+    ))
 }
 
-fn infer_call_target_return_type<L: HirLocalTypeLookup>(
+fn infer_call_target_return_hir_type<L: HirLocalTypeLookup>(
     workspace: &HirWorkspaceSummary,
     resolved_module: &HirResolvedModule,
     locals: &L,
     subject: &HirExpr,
-) -> Option<String> {
+) -> Option<HirType> {
     let path = flatten_callable_expr_path(subject)?;
-    let generic_args = extract_expr_generic_type_args(subject)
+    let generic_args = extract_expr_generic_hir_type_args(subject)
         .into_iter()
-        .map(|arg| canonicalize_method_lookup_type_text(workspace, resolved_module, &arg))
-        .collect::<Vec<_>>();
+        .map(|arg| {
+            let package = current_workspace_package_for_module(workspace, resolved_module)?;
+            let module = package.module(&resolved_module.module_id)?;
+            Some(canonicalize_hir_type_in_module(workspace, package, module, &arg))
+        })
+        .collect::<Option<Vec<_>>>()?;
     if let Some(symbol_ref) = lookup_symbol_path(workspace, resolved_module, &path) {
-        return symbol_call_return_type_text(workspace, symbol_ref, &generic_args);
+        return symbol_call_return_type(workspace, symbol_ref, &generic_args);
     }
     if path.len() >= 2 {
         let enum_path = path[..path.len() - 1].to_vec();
         if let Some(enum_ref) = lookup_symbol_path(workspace, resolved_module, &enum_path) {
             if matches!(enum_ref.symbol.kind, HirSymbolKind::Enum) {
-                return symbol_call_return_type_text(workspace, enum_ref, &generic_args);
+                return symbol_call_return_type(workspace, enum_ref, &generic_args);
             }
         }
     }
@@ -1414,59 +1283,219 @@ fn infer_call_target_return_type<L: HirLocalTypeLookup>(
     None
 }
 
-fn infer_member_access_type<L: HirLocalTypeLookup>(
+fn infer_member_access_hir_type<L: HirLocalTypeLookup>(
     workspace: &HirWorkspaceSummary,
     resolved_module: &HirResolvedModule,
     locals: &L,
     expr: &HirExpr,
     member: &str,
-) -> Option<String> {
-    let base_ty = infer_receiver_expr_type_text(workspace, resolved_module, locals, expr)?;
-    let (base, _) = parse_surface_type_application(strip_reference_prefix(&base_ty))?;
-    let path = split_simple_path(&base)?;
-    let symbol_ref = lookup_symbol_path(workspace, resolved_module, &path)?;
-    match &symbol_ref.symbol.body {
-        HirSymbolBody::Record { fields } | HirSymbolBody::Object { fields, .. } => fields
-            .iter()
-            .find(|field| field.name == member)
-            .map(|field| field.ty.clone()),
-        _ => None,
+) -> Option<HirType> {
+    let base_ty = infer_receiver_expr_type(workspace, resolved_module, locals, expr)?;
+    let base_path = hir_type_base_path(hir_strip_reference_type(&base_ty))?;
+    let symbol_ref = lookup_symbol_path(workspace, resolved_module, &base_path)?;
+    let field = match &symbol_ref.symbol.body {
+        HirSymbolBody::Record { fields } | HirSymbolBody::Object { fields, .. } => {
+            fields.iter().find(|field| field.name == member)?
+        }
+        _ => return None,
+    };
+    let declared_receiver = build_symbol_result_type(symbol_ref.module_id, symbol_ref.symbol, &[]);
+    let package = workspace.package(symbol_ref.package_name)?;
+    let module = package.module(symbol_ref.module_id)?;
+    let canonical_declared =
+        canonicalize_hir_type_in_module(workspace, package, module, &declared_receiver);
+    let canonical_actual =
+        canonicalize_hir_type_in_module(workspace, package, module, hir_strip_reference_type(&base_ty));
+    let bindings = HirTypeBindingScope::from_names(symbol_ref.symbol.type_params.clone());
+    let mut substitutions = HirTypeSubstitutions::new();
+    if !hir_type_matches(
+        &canonical_declared,
+        &canonical_actual,
+        &bindings,
+        &mut substitutions,
+    ) {
+        return Some(field.ty.clone());
     }
+    Some(substitute_type_params_hir(&field.ty, &bindings, &substitutions))
 }
 
-fn infer_index_type_text<L: HirLocalTypeLookup>(
+fn infer_index_hir_type<L: HirLocalTypeLookup>(
     workspace: &HirWorkspaceSummary,
     resolved_module: &HirResolvedModule,
     locals: &L,
     expr: &HirExpr,
-) -> Option<String> {
-    let base_ty = infer_receiver_expr_type_text(workspace, resolved_module, locals, expr)?;
-    let (base, args) = parse_surface_type_application(strip_reference_prefix(&base_ty))?;
-    match base.as_str() {
-        "List" | "Array" => args.first().cloned(),
-        "Map" => args.get(1).cloned(),
+) -> Option<HirType> {
+    let base_ty = infer_receiver_expr_type(workspace, resolved_module, locals, expr)?;
+    match &hir_strip_reference_type(&base_ty).kind {
+        HirTypeKind::Apply { base, args } => match base.render().as_str() {
+            "List" | "Array" => args.first().cloned(),
+            "Map" => args.get(1).cloned(),
+            _ => None,
+        },
         _ => None,
     }
 }
 
-fn infer_slice_type_text<L: HirLocalTypeLookup>(
+fn infer_slice_hir_type<L: HirLocalTypeLookup>(
     workspace: &HirWorkspaceSummary,
     resolved_module: &HirResolvedModule,
     locals: &L,
     expr: &HirExpr,
-) -> Option<String> {
-    let base_ty = infer_receiver_expr_type_text(workspace, resolved_module, locals, expr)?;
-    let (base, args) = parse_surface_type_application(strip_reference_prefix(&base_ty))?;
-    match base.as_str() {
-        "List" => Some(format!(
-            "List[{}]",
-            args.first().cloned().unwrap_or_else(|| "_".to_string())
-        )),
-        "Array" => Some(format!(
-            "Array[{}]",
-            args.first().cloned().unwrap_or_else(|| "_".to_string())
-        )),
+) -> Option<HirType> {
+    let base_ty = infer_receiver_expr_type(workspace, resolved_module, locals, expr)?;
+    match &hir_strip_reference_type(&base_ty).kind {
+        HirTypeKind::Apply { base, args } => match base.render().as_str() {
+            "List" => Some(ambient_apply_hir_type(
+                &["List"],
+                vec![args.first().cloned().unwrap_or_else(|| builtin_hir_type("_"))],
+            )),
+            "Array" => Some(ambient_apply_hir_type(
+                &["Array"],
+                vec![args.first().cloned().unwrap_or_else(|| builtin_hir_type("_"))],
+            )),
+            _ => Some(base_ty),
+        },
         _ => Some(base_ty),
+    }
+}
+
+pub fn infer_receiver_expr_type<L: HirLocalTypeLookup>(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    locals: &L,
+    expr: &HirExpr,
+) -> Option<HirType> {
+    match expr {
+        HirExpr::BoolLiteral { .. } => Some(builtin_hir_type("Bool")),
+        HirExpr::IntLiteral { .. } => Some(builtin_hir_type("Int")),
+        HirExpr::StrLiteral { .. } => Some(builtin_hir_type("Str")),
+        HirExpr::CollectionLiteral { .. } => Some(ambient_apply_hir_type(
+            &["List"],
+            vec![builtin_hir_type("_")],
+        )),
+        HirExpr::Range { .. } => Some(builtin_hir_type("RangeInt")),
+        HirExpr::Path { segments }
+            if segments.len() == 1 && locals.contains_local(&segments[0]) =>
+        {
+            locals
+                .type_of(&segments[0])
+                .cloned()
+                .or_else(|| locals.type_text_of(&segments[0]).and_then(|text| parse_hir_type(text).ok()))
+        }
+        HirExpr::Path { segments } => {
+            let symbol_ref = lookup_symbol_path(workspace, resolved_module, segments)?;
+            symbol_return_type(workspace, symbol_ref)
+        }
+        HirExpr::Unary { op, expr }
+            if matches!(op, HirUnaryOp::BorrowRead | HirUnaryOp::BorrowMut) =>
+        {
+            infer_receiver_expr_type(workspace, resolved_module, locals, expr).map(|inner| HirType {
+                kind: HirTypeKind::Ref {
+                    lifetime: None,
+                    mutable: matches!(op, HirUnaryOp::BorrowMut),
+                    inner: Box::new(inner),
+                },
+                span: Span::default(),
+            })
+        }
+        HirExpr::Unary {
+            op: HirUnaryOp::Weave,
+            expr,
+        } => infer_receiver_expr_type(workspace, resolved_module, locals, expr)
+            .map(|inner| ambient_apply_hir_type(&["std", "concurrent", "Task"], vec![inner])),
+        HirExpr::Unary {
+            op: HirUnaryOp::Split,
+            expr,
+        } => infer_receiver_expr_type(workspace, resolved_module, locals, expr)
+            .map(|inner| ambient_apply_hir_type(&["std", "concurrent", "Thread"], vec![inner])),
+        HirExpr::Unary {
+            op: HirUnaryOp::Deref,
+            expr,
+        } => infer_receiver_expr_type(workspace, resolved_module, locals, expr).map(|ty| {
+            if let HirTypeKind::Ref { inner, .. } = ty.kind {
+                *inner
+            } else {
+                ty
+            }
+        }),
+        HirExpr::GenericApply { expr, .. } => {
+            infer_receiver_expr_type(workspace, resolved_module, locals, expr)
+        }
+        HirExpr::QualifiedPhrase {
+            subject, qualifier, ..
+        } if qualifier == "call" => {
+            infer_call_target_return_hir_type(workspace, resolved_module, locals, subject)
+        }
+        HirExpr::QualifiedPhrase { qualifier, .. } if qualifier.contains('.') => {
+            let path = split_simple_path(qualifier)?;
+            lookup_symbol_path(workspace, resolved_module, &path)
+                .and_then(|symbol_ref| symbol_return_type(workspace, symbol_ref))
+        }
+        HirExpr::QualifiedPhrase {
+            subject, qualifier, ..
+        } if split_simple_path(qualifier).is_some() => {
+            let subject_ty = infer_receiver_expr_type(workspace, resolved_module, locals, subject)?;
+            let candidates =
+                lookup_method_candidates_for_hir_type(workspace, resolved_module, &subject_ty, qualifier);
+            match candidates.as_slice() {
+                [candidate] => candidate.symbol.return_type.as_ref().map(|return_type| {
+                    let bindings = placeholder_binding_scope_for_type(&candidate.declared_receiver_hir);
+                    let mut substitutions = HirTypeSubstitutions::new();
+                    let package = workspace.package(candidate.package_name).expect("candidate package");
+                    let module = package.module(candidate.module_id).expect("candidate module");
+                    let canonical_declared = canonicalize_hir_type_in_module(
+                        workspace,
+                        package,
+                        module,
+                        &candidate.declared_receiver_hir,
+                    );
+                    let canonical_actual = canonicalize_hir_type_in_module(
+                        workspace,
+                        package,
+                        module,
+                        hir_strip_reference_type(&subject_ty),
+                    );
+                    let _ = hir_type_matches(
+                        &canonical_declared,
+                        &canonical_actual,
+                        &bindings,
+                        &mut substitutions,
+                    );
+                    substitute_type_params_hir(return_type, &bindings, &substitutions)
+                }),
+                _ => None,
+            }
+        }
+        HirExpr::MemberAccess { expr, member } => {
+            infer_member_access_hir_type(workspace, resolved_module, locals, expr, member)
+        }
+        HirExpr::Index { expr, .. } => {
+            infer_index_hir_type(workspace, resolved_module, locals, expr)
+        }
+        HirExpr::Slice { expr, .. } => {
+            infer_slice_hir_type(workspace, resolved_module, locals, expr)
+        }
+        HirExpr::Match { arms, .. } => {
+            let inferred = arms
+                .iter()
+                .filter_map(|arm| infer_receiver_expr_type(workspace, resolved_module, locals, &arm.value))
+                .collect::<Vec<_>>();
+            let first = inferred.first()?.clone();
+            inferred.iter().all(|candidate| candidate == &first).then_some(first)
+        }
+        HirExpr::Await { expr } => {
+            let awaited = infer_receiver_expr_type(workspace, resolved_module, locals, expr)?;
+            match &hir_strip_reference_type(&awaited).kind {
+                HirTypeKind::Apply { base, args } => match base.render().as_str() {
+                    "std.concurrent.Task" | "std.concurrent.Thread" | "Task" | "Thread" => {
+                        args.first().cloned()
+                    }
+                    _ => None,
+                },
+                _ => None,
+            }
+        }
+        _ => None,
     }
 }
 
@@ -1476,117 +1505,7 @@ pub fn infer_receiver_expr_type_text<L: HirLocalTypeLookup>(
     locals: &L,
     expr: &HirExpr,
 ) -> Option<String> {
-    match expr {
-        HirExpr::BoolLiteral { .. } => Some("Bool".to_string()),
-        HirExpr::IntLiteral { .. } => Some("Int".to_string()),
-        HirExpr::StrLiteral { .. } => Some("Str".to_string()),
-        HirExpr::CollectionLiteral { .. } => Some("List[_]".to_string()),
-        HirExpr::Range { .. } => Some("RangeInt".to_string()),
-        HirExpr::Path { segments }
-            if segments.len() == 1 && locals.contains_local(&segments[0]) =>
-        {
-            locals.type_text_of(&segments[0]).map(ToOwned::to_owned)
-        }
-        HirExpr::Path { segments } => {
-            let symbol_ref = lookup_symbol_path(workspace, resolved_module, segments)?;
-            symbol_return_type_text(workspace, symbol_ref)
-        }
-        HirExpr::Unary { op, expr }
-            if matches!(op, HirUnaryOp::BorrowRead | HirUnaryOp::BorrowMut) =>
-        {
-            infer_receiver_expr_type_text(workspace, resolved_module, locals, expr)
-                .map(|text| format!("& {text}"))
-        }
-        HirExpr::Unary {
-            op: HirUnaryOp::Weave,
-            expr,
-        } => infer_receiver_expr_type_text(workspace, resolved_module, locals, expr)
-            .map(|text| format!("std.concurrent.Task[{text}]")),
-        HirExpr::Unary {
-            op: HirUnaryOp::Split,
-            expr,
-        } => infer_receiver_expr_type_text(workspace, resolved_module, locals, expr)
-            .map(|text| format!("std.concurrent.Thread[{text}]")),
-        HirExpr::Unary {
-            op: HirUnaryOp::Deref,
-            expr,
-        } => infer_receiver_expr_type_text(workspace, resolved_module, locals, expr).map(|text| {
-            let stripped = strip_reference_prefix(&text);
-            if stripped == text.trim() {
-                text
-            } else {
-                stripped.to_string()
-            }
-        }),
-        HirExpr::GenericApply { expr, .. } => {
-            infer_receiver_expr_type_text(workspace, resolved_module, locals, expr)
-        }
-        HirExpr::QualifiedPhrase {
-            subject, qualifier, ..
-        } if qualifier == "call" => {
-            infer_call_target_return_type(workspace, resolved_module, locals, subject)
-        }
-        HirExpr::QualifiedPhrase { qualifier, .. } if qualifier.contains('.') => {
-            let path = split_simple_path(qualifier)?;
-            lookup_symbol_path(workspace, resolved_module, &path)
-                .and_then(|symbol_ref| symbol_return_type_text(workspace, symbol_ref))
-        }
-        HirExpr::QualifiedPhrase {
-            subject, qualifier, ..
-        } if split_simple_path(qualifier).is_some() => {
-            let subject_ty =
-                infer_receiver_expr_type_text(workspace, resolved_module, locals, subject)?;
-            let candidates = lookup_method_candidates_for_type(
-                workspace,
-                resolved_module,
-                &subject_ty,
-                qualifier,
-            );
-            match candidates.as_slice() {
-                [candidate] => candidate.symbol.return_type.as_ref().map(|text| {
-                    let substitutions = build_receiver_type_substitutions(
-                        &subject_ty,
-                        &candidate.declared_receiver_type,
-                    );
-                    substitute_type_params(text, &substitutions)
-                }),
-                _ => None,
-            }
-        }
-        HirExpr::MemberAccess { expr, member } => {
-            infer_member_access_type(workspace, resolved_module, locals, expr, member)
-        }
-        HirExpr::Index { expr, .. } => {
-            infer_index_type_text(workspace, resolved_module, locals, expr)
-        }
-        HirExpr::Slice { expr, .. } => {
-            infer_slice_type_text(workspace, resolved_module, locals, expr)
-        }
-        HirExpr::Match { arms, .. } => {
-            let inferred = arms
-                .iter()
-                .filter_map(|arm| {
-                    infer_receiver_expr_type_text(workspace, resolved_module, locals, &arm.value)
-                })
-                .collect::<Vec<_>>();
-            let first = inferred.first()?.clone();
-            inferred
-                .iter()
-                .all(|candidate| candidate == &first)
-                .then_some(first)
-        }
-        HirExpr::Await { expr } => {
-            let awaited = infer_receiver_expr_type_text(workspace, resolved_module, locals, expr)?;
-            let (base, args) = parse_surface_type_application(strip_reference_prefix(&awaited))?;
-            match base.as_str() {
-                "std.concurrent.Task" | "std.concurrent.Thread" | "Task" | "Thread" => {
-                    args.first().cloned()
-                }
-                _ => None,
-            }
-        }
-        _ => None,
-    }
+    infer_receiver_expr_type(workspace, resolved_module, locals, expr).map(|ty| ty.render())
 }
 
 pub fn match_name_resolves_to_zero_payload_variant<L: HirLocalTypeLookup>(
@@ -1599,16 +1518,11 @@ pub fn match_name_resolves_to_zero_payload_variant<L: HirLocalTypeLookup>(
     if name.contains('.') {
         return false;
     }
-    let Some(subject_type) =
-        infer_receiver_expr_type_text(workspace, resolved_module, locals, subject)
-    else {
+    let Some(subject_type) = infer_receiver_expr_type(workspace, resolved_module, locals, subject) else {
         return false;
     };
-    let stripped = strip_reference_prefix(&subject_type);
-    let base = parse_surface_type_application(stripped)
-        .map(|(base, _)| base)
-        .unwrap_or_else(|| stripped.trim().to_string());
-    let Some(path) = split_simple_path(&base) else {
+    let stripped = hir_strip_reference_type(&subject_type);
+    let Some(path) = hir_type_base_path(stripped) else {
         return false;
     };
     let Some(symbol_ref) = lookup_symbol_path(workspace, resolved_module, &path) else {
@@ -1737,902 +1651,6 @@ pub fn lower_parsed_module(
                 span: impl_decl.span,
             })
             .collect(),
-    }
-}
-
-fn encode_surface_text(text: &str) -> String {
-    text.replace('\\', "\\\\").replace('\n', "\\n")
-}
-
-fn quote_fingerprint_text(text: &str) -> String {
-    format!("{text:?}")
-}
-
-fn render_function_signature(symbol: &HirSymbol) -> String {
-    let mut rendered = String::new();
-    if symbol.is_async {
-        rendered.push_str("async ");
-    }
-    rendered.push_str("fn ");
-    rendered.push_str(&symbol.name);
-    if !symbol.type_params.is_empty() || symbol.where_clause.is_some() {
-        rendered.push('[');
-        let mut parts = symbol.type_params.clone();
-        if let Some(where_clause) = &symbol.where_clause {
-            parts.push(format!("where {where_clause}"));
-        }
-        rendered.push_str(&parts.join(", "));
-        rendered.push(']');
-    }
-    rendered.push('(');
-    rendered.push_str(
-        &symbol
-            .params
-            .iter()
-            .map(render_param)
-            .collect::<Vec<_>>()
-            .join(", "),
-    );
-    rendered.push(')');
-    if let Some(return_type) = &symbol.return_type {
-        rendered.push_str(" -> ");
-        rendered.push_str(return_type);
-    }
-    rendered.push(':');
-    rendered
-}
-
-fn render_param(param: &HirParam) -> String {
-    match param.mode {
-        Some(mode) => format!("{} {}: {}", mode.as_str(), param.name, param.ty),
-        None => format!("{}: {}", param.name, param.ty),
-    }
-}
-
-fn render_record_signature(symbol: &HirSymbol) -> String {
-    let mut lines = vec![render_named_type_header("record", symbol)];
-    if let HirSymbolBody::Record { fields } = &symbol.body {
-        lines.extend(
-            fields
-                .iter()
-                .map(|field| format!("{}: {}", field.name, field.ty)),
-        );
-    }
-    lines.join("\n")
-}
-
-fn render_enum_signature(symbol: &HirSymbol) -> String {
-    let mut lines = vec![render_named_type_header("enum", symbol)];
-    if let HirSymbolBody::Enum { variants } = &symbol.body {
-        lines.extend(variants.iter().map(|variant| match &variant.payload {
-            Some(payload) => format!("{}({payload})", variant.name),
-            None => variant.name.clone(),
-        }));
-    }
-    lines.join("\n")
-}
-
-fn render_trait_signature(symbol: &HirSymbol) -> String {
-    let mut lines = vec![render_named_type_header("trait", symbol)];
-    if let HirSymbolBody::Trait {
-        assoc_types,
-        methods,
-    } = &symbol.body
-    {
-        lines.extend(
-            assoc_types
-                .iter()
-                .map(|assoc_type| match &assoc_type.default_ty {
-                    Some(default_ty) => format!("type {} = {default_ty}", assoc_type.name),
-                    None => format!("type {}", assoc_type.name),
-                }),
-        );
-        lines.extend(methods.iter().map(render_function_signature));
-    }
-    lines.join("\n")
-}
-
-fn render_opaque_signature(symbol: &HirSymbol) -> String {
-    let mut rendered = String::new();
-    rendered.push_str("opaque type ");
-    rendered.push_str(&symbol.name);
-    if !symbol.type_params.is_empty() || symbol.where_clause.is_some() {
-        rendered.push('[');
-        let mut parts = symbol.type_params.clone();
-        if let Some(where_clause) = &symbol.where_clause {
-            parts.push(format!("where {where_clause}"));
-        }
-        rendered.push_str(&parts.join(", "));
-        rendered.push(']');
-    }
-    if let Some(policy) = symbol.opaque_policy {
-        rendered.push_str(" as ");
-        rendered.push_str(policy.ownership.as_str());
-        rendered.push_str(", ");
-        rendered.push_str(policy.boundary.as_str());
-    }
-    rendered
-}
-
-fn render_behavior_signature(symbol: &HirSymbol) -> String {
-    let attrs = symbol
-        .behavior_attrs
-        .iter()
-        .map(|attr| format!("{}={}", attr.name, attr.value))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let mut rendered = String::new();
-    rendered.push_str("behavior[");
-    rendered.push_str(&attrs);
-    rendered.push_str("] ");
-    rendered.push_str(&render_function_signature(symbol));
-    rendered
-}
-
-fn render_named_type_header(keyword: &str, symbol: &HirSymbol) -> String {
-    let mut rendered = String::new();
-    rendered.push_str(keyword);
-    rendered.push(' ');
-    rendered.push_str(&symbol.name);
-    if !symbol.type_params.is_empty() || symbol.where_clause.is_some() {
-        rendered.push('[');
-        let mut parts = symbol.type_params.clone();
-        if let Some(where_clause) = &symbol.where_clause {
-            parts.push(format!("where {where_clause}"));
-        }
-        rendered.push_str(&parts.join(", "));
-        rendered.push(']');
-    }
-    rendered.push(':');
-    rendered
-}
-
-fn render_directive_fingerprint(directive: &HirDirective) -> String {
-    format!(
-        "directive(kind={}|path=[{}]|alias={}|forewords=[{}])",
-        directive.kind.as_str(),
-        directive
-            .path
-            .iter()
-            .map(|segment| quote_fingerprint_text(segment))
-            .collect::<Vec<_>>()
-            .join(","),
-        directive
-            .alias
-            .as_ref()
-            .map(|alias| quote_fingerprint_text(alias))
-            .unwrap_or_else(|| "none".to_string()),
-        directive
-            .forewords
-            .iter()
-            .map(render_foreword_fingerprint)
-            .collect::<Vec<_>>()
-            .join(",")
-    )
-}
-
-fn render_lang_item_fingerprint(lang_item: &HirLangItem) -> String {
-    format!(
-        "lang(name={}|target=[{}])",
-        quote_fingerprint_text(&lang_item.name),
-        lang_item
-            .target
-            .iter()
-            .map(|segment| quote_fingerprint_text(segment))
-            .collect::<Vec<_>>()
-            .join(",")
-    )
-}
-
-pub fn render_symbol_fingerprint(symbol: &HirSymbol) -> String {
-    format!(
-        concat!(
-            "symbol(",
-            "kind={}|name={}|exported={}|async={}|signature={}|type_params=[{}]|",
-            "where_clause={}|behavior_attrs=[{}]|availability=[{}]|forewords=[{}]|intrinsic={}|body={}|",
-            "statements=[{}]|rollups=[{}])"
-        ),
-        symbol.kind.as_str(),
-        quote_fingerprint_text(&symbol.name),
-        symbol.exported,
-        symbol.is_async,
-        quote_fingerprint_text(&symbol.api_signature_text()),
-        symbol
-            .type_params
-            .iter()
-            .map(|param| quote_fingerprint_text(param))
-            .collect::<Vec<_>>()
-            .join(","),
-        symbol
-            .where_clause
-            .as_ref()
-            .map(|clause| quote_fingerprint_text(clause))
-            .unwrap_or_else(|| "none".to_string()),
-        symbol
-            .behavior_attrs
-            .iter()
-            .map(render_behavior_attr_fingerprint)
-            .collect::<Vec<_>>()
-            .join(","),
-        symbol
-            .availability
-            .iter()
-            .map(render_availability_attachment_fingerprint)
-            .collect::<Vec<_>>()
-            .join(","),
-        symbol
-            .forewords
-            .iter()
-            .map(render_foreword_fingerprint)
-            .collect::<Vec<_>>()
-            .join(","),
-        symbol
-            .intrinsic_impl
-            .as_ref()
-            .map(|intrinsic| quote_fingerprint_text(intrinsic))
-            .unwrap_or_else(|| "none".to_string()),
-        render_symbol_body_fingerprint(&symbol.body),
-        symbol
-            .statements
-            .iter()
-            .map(render_statement_fingerprint)
-            .collect::<Vec<_>>()
-            .join(","),
-        symbol
-            .rollups
-            .iter()
-            .map(render_rollup_fingerprint)
-            .collect::<Vec<_>>()
-            .join(",")
-    )
-}
-
-fn render_behavior_attr_fingerprint(attr: &HirBehaviorAttr) -> String {
-    format!(
-        "attr(name={}|value={})",
-        quote_fingerprint_text(&attr.name),
-        quote_fingerprint_text(&attr.value)
-    )
-}
-
-fn render_foreword_fingerprint(foreword: &HirForewordApp) -> String {
-    format!(
-        "foreword(name={}|args=[{}])",
-        quote_fingerprint_text(&foreword.name),
-        foreword
-            .args
-            .iter()
-            .map(render_foreword_arg_fingerprint)
-            .collect::<Vec<_>>()
-            .join(",")
-    )
-}
-
-fn render_foreword_arg_fingerprint(arg: &HirForewordArg) -> String {
-    format!(
-        "arg(name={}|value={})",
-        arg.name
-            .as_ref()
-            .map(|name| quote_fingerprint_text(name))
-            .unwrap_or_else(|| "none".to_string()),
-        quote_fingerprint_text(&arg.value)
-    )
-}
-
-fn render_symbol_body_fingerprint(body: &HirSymbolBody) -> String {
-    match body {
-        HirSymbolBody::None => "none".to_string(),
-        HirSymbolBody::Record { fields } => format!(
-            "record([{}])",
-            fields
-                .iter()
-                .map(|field| format!(
-                    "field(name={}|ty={})",
-                    quote_fingerprint_text(&field.name),
-                    quote_fingerprint_text(&field.ty)
-                ))
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
-        HirSymbolBody::Object { fields, methods } => format!(
-            "object(fields=[{}]|methods=[{}])",
-            fields
-                .iter()
-                .map(|field| format!(
-                    "field(name={}|ty={})",
-                    quote_fingerprint_text(&field.name),
-                    quote_fingerprint_text(&field.ty)
-                ))
-                .collect::<Vec<_>>()
-                .join(","),
-            methods
-                .iter()
-                .map(render_symbol_fingerprint)
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
-        HirSymbolBody::Enum { variants } => format!(
-            "enum([{}])",
-            variants
-                .iter()
-                .map(|variant| format!(
-                    "variant(name={}|payload={})",
-                    quote_fingerprint_text(&variant.name),
-                    variant
-                        .payload
-                        .as_ref()
-                        .map(|payload| quote_fingerprint_text(payload))
-                        .unwrap_or_else(|| "none".to_string())
-                ))
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
-        HirSymbolBody::Owner { objects, exits } => format!(
-            "owner(objects=[{}]|exits=[{}])",
-            objects
-                .iter()
-                .map(|object| format!(
-                    "object(type=[{}]|name={})",
-                    object
-                        .type_path
-                        .iter()
-                        .map(|segment| quote_fingerprint_text(segment))
-                        .collect::<Vec<_>>()
-                        .join(","),
-                    quote_fingerprint_text(&object.local_name)
-                ))
-                .collect::<Vec<_>>()
-                .join(","),
-            exits
-                .iter()
-                .map(|owner_exit| format!(
-                    "exit(name={}|condition={}|holds=[{}])",
-                    quote_fingerprint_text(&owner_exit.name),
-                    render_expr_fingerprint(&owner_exit.condition),
-                    owner_exit
-                        .holds
-                        .iter()
-                        .map(|hold| quote_fingerprint_text(hold))
-                        .collect::<Vec<_>>()
-                        .join(",")
-                ))
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
-        HirSymbolBody::Trait {
-            assoc_types,
-            methods,
-        } => format!(
-            "trait(assoc_types=[{}]|methods=[{}])",
-            assoc_types
-                .iter()
-                .map(|assoc_type| format!(
-                    "assoc_type(name={}|default={})",
-                    quote_fingerprint_text(&assoc_type.name),
-                    assoc_type
-                        .default_ty
-                        .as_ref()
-                        .map(|default_ty| quote_fingerprint_text(default_ty))
-                        .unwrap_or_else(|| "none".to_string())
-                ))
-                .collect::<Vec<_>>()
-                .join(","),
-            methods
-                .iter()
-                .map(render_symbol_fingerprint)
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
-    }
-}
-
-fn render_impl_fingerprint(impl_decl: &HirImplDecl) -> String {
-    format!(
-        concat!(
-            "impl(type_params=[{}]|trait={}|target={}|assoc_types=[{}]|methods=[{}]|",
-            "body_entries=[{}]|surface={})"
-        ),
-        impl_decl
-            .type_params
-            .iter()
-            .map(|param| quote_fingerprint_text(param))
-            .collect::<Vec<_>>()
-            .join(","),
-        impl_decl
-            .trait_path
-            .as_ref()
-            .map(|trait_path| quote_fingerprint_text(trait_path))
-            .unwrap_or_else(|| "none".to_string()),
-        quote_fingerprint_text(&impl_decl.target_type),
-        impl_decl
-            .assoc_types
-            .iter()
-            .map(|assoc_type| format!(
-                "assoc(name={}|value={})",
-                quote_fingerprint_text(&assoc_type.name),
-                assoc_type
-                    .value_ty
-                    .as_ref()
-                    .map(|value_ty| quote_fingerprint_text(value_ty))
-                    .unwrap_or_else(|| "none".to_string())
-            ))
-            .collect::<Vec<_>>()
-            .join(","),
-        impl_decl
-            .methods
-            .iter()
-            .map(render_symbol_fingerprint)
-            .collect::<Vec<_>>()
-            .join(","),
-        impl_decl
-            .body_entries
-            .iter()
-            .map(|entry| quote_fingerprint_text(entry))
-            .collect::<Vec<_>>()
-            .join(","),
-        quote_fingerprint_text(&impl_decl.surface_text)
-    )
-}
-
-fn render_rollup_fingerprint(rollup: &HirPageRollup) -> String {
-    format!(
-        "rollup(kind={}|subject={}|handler=[{}])",
-        rollup.kind.as_str(),
-        quote_fingerprint_text(&rollup.subject),
-        rollup
-            .handler_path
-            .iter()
-            .map(|segment| quote_fingerprint_text(segment))
-            .collect::<Vec<_>>()
-            .join(",")
-    )
-}
-
-fn render_statement_fingerprint(statement: &HirStatement) -> String {
-    format!(
-        "stmt(availability=[{}]|forewords=[{}]|rollups=[{}]|kind={})",
-        statement
-            .availability
-            .iter()
-            .map(render_availability_attachment_fingerprint)
-            .collect::<Vec<_>>()
-            .join(","),
-        statement
-            .forewords
-            .iter()
-            .map(render_foreword_fingerprint)
-            .collect::<Vec<_>>()
-            .join(","),
-        statement
-            .rollups
-            .iter()
-            .map(render_rollup_fingerprint)
-            .collect::<Vec<_>>()
-            .join(","),
-        render_statement_kind_fingerprint(&statement.kind)
-    )
-}
-
-fn render_availability_attachment_fingerprint(attachment: &HirAvailabilityAttachment) -> String {
-    format!(
-        "availability(path=[{}])",
-        attachment
-            .path
-            .iter()
-            .map(|segment| quote_fingerprint_text(segment))
-            .collect::<Vec<_>>()
-            .join(",")
-    )
-}
-
-fn render_statement_kind_fingerprint(kind: &HirStatementKind) -> String {
-    match kind {
-        HirStatementKind::Let {
-            mutable,
-            name,
-            value,
-        } => format!(
-            "let(mutable={}|name={}|value={})",
-            mutable,
-            quote_fingerprint_text(name),
-            render_expr_fingerprint(value)
-        ),
-        HirStatementKind::Return { value } => format!(
-            "return({})",
-            value
-                .as_ref()
-                .map(render_expr_fingerprint)
-                .unwrap_or_else(|| "none".to_string())
-        ),
-        HirStatementKind::If {
-            condition,
-            then_branch,
-            else_branch,
-        } => format!(
-            "if(cond={}|then=[{}]|else={})",
-            render_expr_fingerprint(condition),
-            then_branch
-                .iter()
-                .map(render_statement_fingerprint)
-                .collect::<Vec<_>>()
-                .join(","),
-            else_branch
-                .as_ref()
-                .map(|branch| format!(
-                    "[{}]",
-                    branch
-                        .iter()
-                        .map(render_statement_fingerprint)
-                        .collect::<Vec<_>>()
-                        .join(",")
-                ))
-                .unwrap_or_else(|| "none".to_string())
-        ),
-        HirStatementKind::While { condition, body } => format!(
-            "while(cond={}|body=[{}])",
-            render_expr_fingerprint(condition),
-            body.iter()
-                .map(render_statement_fingerprint)
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
-        HirStatementKind::For {
-            binding,
-            iterable,
-            body,
-        } => format!(
-            "for(binding={}|iterable={}|body=[{}])",
-            quote_fingerprint_text(binding),
-            render_expr_fingerprint(iterable),
-            body.iter()
-                .map(render_statement_fingerprint)
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
-        HirStatementKind::Defer { expr } => {
-            format!("defer({})", render_expr_fingerprint(expr))
-        }
-        HirStatementKind::Break => "break".to_string(),
-        HirStatementKind::Continue => "continue".to_string(),
-        HirStatementKind::Assign { target, op, value } => format!(
-            "assign(target={}|op={}|value={})",
-            render_assign_target_fingerprint(target),
-            op.as_str(),
-            render_expr_fingerprint(value)
-        ),
-        HirStatementKind::Expr { expr } => {
-            format!("expr({})", render_expr_fingerprint(expr))
-        }
-    }
-}
-
-fn render_assign_target_fingerprint(target: &HirAssignTarget) -> String {
-    match target {
-        HirAssignTarget::Name { text } => {
-            format!("name({})", quote_fingerprint_text(text))
-        }
-        HirAssignTarget::MemberAccess { target, member } => format!(
-            "member(base={}|member={})",
-            render_assign_target_fingerprint(target),
-            quote_fingerprint_text(member)
-        ),
-        HirAssignTarget::Index { target, index } => format!(
-            "index(base={}|index={})",
-            render_assign_target_fingerprint(target),
-            render_expr_fingerprint(index)
-        ),
-    }
-}
-
-pub fn render_expr_fingerprint(expr: &HirExpr) -> String {
-    match expr {
-        HirExpr::Path { segments } => format!(
-            "path([{}])",
-            segments
-                .iter()
-                .map(|segment| quote_fingerprint_text(segment))
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
-        HirExpr::BoolLiteral { value } => format!("bool({value})"),
-        HirExpr::IntLiteral { text } => format!("int({})", quote_fingerprint_text(text)),
-        HirExpr::StrLiteral { text } => format!("str({})", quote_fingerprint_text(text)),
-        HirExpr::Pair { left, right } => format!(
-            "pair(left={}|right={})",
-            render_expr_fingerprint(left),
-            render_expr_fingerprint(right)
-        ),
-        HirExpr::CollectionLiteral { items } => format!(
-            "collection([{}])",
-            items
-                .iter()
-                .map(render_expr_fingerprint)
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
-        HirExpr::Match { subject, arms } => format!(
-            "match(subject={}|arms=[{}])",
-            render_expr_fingerprint(subject),
-            arms.iter()
-                .map(render_match_arm_fingerprint)
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
-        HirExpr::Chain {
-            style,
-            introducer,
-            steps,
-        } => format!(
-            "chain(style={}|introducer={}|steps=[{}])",
-            quote_fingerprint_text(style),
-            render_chain_introducer_fingerprint(*introducer),
-            steps
-                .iter()
-                .map(render_chain_step_fingerprint)
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
-        HirExpr::MemoryPhrase {
-            family,
-            arena,
-            init_args,
-            constructor,
-            attached,
-        } => format!(
-            "memory(family={}|arena={}|args=[{}]|constructor={}|attached=[{}])",
-            quote_fingerprint_text(family),
-            render_expr_fingerprint(arena),
-            init_args
-                .iter()
-                .map(render_phrase_arg_fingerprint)
-                .collect::<Vec<_>>()
-                .join(","),
-            render_expr_fingerprint(constructor),
-            attached
-                .iter()
-                .map(render_header_attachment_fingerprint)
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
-        HirExpr::GenericApply { expr, type_args } => format!(
-            "generic_apply(expr={}|type_args=[{}])",
-            render_expr_fingerprint(expr),
-            type_args
-                .iter()
-                .map(|arg| quote_fingerprint_text(arg))
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
-        HirExpr::QualifiedPhrase {
-            subject,
-            args,
-            qualifier,
-            attached,
-        } => format!(
-            "qualified(subject={}|args=[{}]|qualifier={}|attached=[{}])",
-            render_expr_fingerprint(subject),
-            args.iter()
-                .map(render_phrase_arg_fingerprint)
-                .collect::<Vec<_>>()
-                .join(","),
-            quote_fingerprint_text(qualifier),
-            attached
-                .iter()
-                .map(render_header_attachment_fingerprint)
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
-        HirExpr::Await { expr } => format!("await({})", render_expr_fingerprint(expr)),
-        HirExpr::Unary { op, expr } => format!(
-            "unary(op={}|expr={})",
-            render_unary_op_fingerprint(*op),
-            render_expr_fingerprint(expr)
-        ),
-        HirExpr::Binary { left, op, right } => format!(
-            "binary(left={}|op={}|right={})",
-            render_expr_fingerprint(left),
-            render_binary_op_fingerprint(*op),
-            render_expr_fingerprint(right)
-        ),
-        HirExpr::MemberAccess { expr, member } => format!(
-            "member(expr={}|member={})",
-            render_expr_fingerprint(expr),
-            quote_fingerprint_text(member)
-        ),
-        HirExpr::Index { expr, index } => format!(
-            "index(expr={}|index={})",
-            render_expr_fingerprint(expr),
-            render_expr_fingerprint(index)
-        ),
-        HirExpr::Slice {
-            expr,
-            start,
-            end,
-            inclusive_end,
-        } => format!(
-            "slice(expr={}|start={}|end={}|inclusive_end={})",
-            render_expr_fingerprint(expr),
-            start
-                .as_ref()
-                .map(|expr| render_expr_fingerprint(expr))
-                .unwrap_or_else(|| "none".to_string()),
-            end.as_ref()
-                .map(|expr| render_expr_fingerprint(expr))
-                .unwrap_or_else(|| "none".to_string()),
-            inclusive_end
-        ),
-        HirExpr::Range {
-            start,
-            end,
-            inclusive_end,
-        } => format!(
-            "range(start={}|end={}|inclusive_end={})",
-            start
-                .as_ref()
-                .map(|expr| render_expr_fingerprint(expr))
-                .unwrap_or_else(|| "none".to_string()),
-            end.as_ref()
-                .map(|expr| render_expr_fingerprint(expr))
-                .unwrap_or_else(|| "none".to_string()),
-            inclusive_end
-        ),
-    }
-}
-
-fn render_match_arm_fingerprint(arm: &HirMatchArm) -> String {
-    format!(
-        "arm(patterns=[{}]|value={})",
-        arm.patterns
-            .iter()
-            .map(render_match_pattern_fingerprint)
-            .collect::<Vec<_>>()
-            .join(","),
-        render_expr_fingerprint(&arm.value)
-    )
-}
-
-fn render_match_pattern_fingerprint(pattern: &HirMatchPattern) -> String {
-    match pattern {
-        HirMatchPattern::Wildcard => "wildcard".to_string(),
-        HirMatchPattern::Literal { text } => {
-            format!("literal({})", quote_fingerprint_text(text))
-        }
-        HirMatchPattern::Name { text } => format!("name({})", quote_fingerprint_text(text)),
-        HirMatchPattern::Variant { path, args } => format!(
-            "variant(path={}|args=[{}])",
-            quote_fingerprint_text(path),
-            args.iter()
-                .map(render_match_pattern_fingerprint)
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
-    }
-}
-
-fn render_chain_step_fingerprint(step: &HirChainStep) -> String {
-    format!(
-        "step(incoming={}|stage={}|bind_args=[{}]|text={})",
-        step.incoming
-            .map(render_chain_connector_fingerprint)
-            .unwrap_or("none"),
-        render_expr_fingerprint(&step.stage),
-        step.bind_args
-            .iter()
-            .map(render_expr_fingerprint)
-            .collect::<Vec<_>>()
-            .join(","),
-        quote_fingerprint_text(&step.text)
-    )
-}
-
-fn render_phrase_arg_fingerprint(arg: &HirPhraseArg) -> String {
-    match arg {
-        HirPhraseArg::Positional(expr) => {
-            format!("pos({})", render_expr_fingerprint(expr))
-        }
-        HirPhraseArg::Named { name, value } => format!(
-            "named(name={}|value={})",
-            quote_fingerprint_text(name),
-            render_expr_fingerprint(value)
-        ),
-    }
-}
-
-fn render_header_attachment_fingerprint(attachment: &HirHeaderAttachment) -> String {
-    match attachment {
-        HirHeaderAttachment::Named {
-            name,
-            value,
-            forewords,
-            ..
-        } => format!(
-            "named(name={}|value={}|forewords=[{}])",
-            quote_fingerprint_text(name),
-            render_expr_fingerprint(value),
-            forewords
-                .iter()
-                .map(render_foreword_fingerprint)
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
-        HirHeaderAttachment::Chain {
-            expr, forewords, ..
-        } => format!(
-            "chain(expr={}|forewords=[{}])",
-            render_expr_fingerprint(expr),
-            forewords
-                .iter()
-                .map(render_foreword_fingerprint)
-                .collect::<Vec<_>>()
-                .join(",")
-        ),
-    }
-}
-
-fn render_dependency_edge_fingerprint(edge: &HirModuleDependency) -> String {
-    format!(
-        "dep(source={}|kind={}|target=[{}]|alias={})",
-        quote_fingerprint_text(&edge.source_module_id),
-        edge.kind.as_str(),
-        edge.target_path
-            .iter()
-            .map(|segment| quote_fingerprint_text(segment))
-            .collect::<Vec<_>>()
-            .join(","),
-        edge.alias
-            .as_ref()
-            .map(|alias| quote_fingerprint_text(alias))
-            .unwrap_or_else(|| "none".to_string())
-    )
-}
-
-fn render_chain_connector_fingerprint(connector: HirChainConnector) -> &'static str {
-    match connector {
-        HirChainConnector::Forward => "forward",
-        HirChainConnector::Reverse => "reverse",
-    }
-}
-
-fn render_chain_introducer_fingerprint(introducer: HirChainIntroducer) -> &'static str {
-    match introducer {
-        HirChainIntroducer::Forward => "forward",
-        HirChainIntroducer::Reverse => "reverse",
-    }
-}
-
-fn render_unary_op_fingerprint(op: HirUnaryOp) -> &'static str {
-    match op {
-        HirUnaryOp::Neg => "neg",
-        HirUnaryOp::Not => "not",
-        HirUnaryOp::BitNot => "bit_not",
-        HirUnaryOp::BorrowRead => "borrow_read",
-        HirUnaryOp::BorrowMut => "borrow_mut",
-        HirUnaryOp::Deref => "deref",
-        HirUnaryOp::Weave => "weave",
-        HirUnaryOp::Split => "split",
-    }
-}
-
-fn render_binary_op_fingerprint(op: HirBinaryOp) -> &'static str {
-    match op {
-        HirBinaryOp::Or => "or",
-        HirBinaryOp::And => "and",
-        HirBinaryOp::EqEq => "eqeq",
-        HirBinaryOp::NotEq => "noteq",
-        HirBinaryOp::Lt => "lt",
-        HirBinaryOp::LtEq => "lteq",
-        HirBinaryOp::Gt => "gt",
-        HirBinaryOp::GtEq => "gteq",
-        HirBinaryOp::BitOr => "bitor",
-        HirBinaryOp::BitXor => "bitxor",
-        HirBinaryOp::BitAnd => "bitand",
-        HirBinaryOp::Shl => "shl",
-        HirBinaryOp::Shr => "shr",
-        HirBinaryOp::Add => "add",
-        HirBinaryOp::Sub => "sub",
-        HirBinaryOp::Mul => "mul",
-        HirBinaryOp::Div => "div",
-        HirBinaryOp::Mod => "mod",
     }
 }
 
@@ -3660,10 +2678,10 @@ mod tests {
         HirAssignOp, HirAssignTarget, HirBinaryOp, HirChainConnector, HirChainIntroducer,
         HirChainStep, HirDirectiveKind, HirExpr, HirForewordApp, HirForewordArg,
         HirHeaderAttachment, HirMatchPattern, HirPhraseArg, HirStatement, HirStatementKind,
-        HirSymbolBody, HirSymbolKind, HirUnaryOp, build_package_layout, build_package_summary,
-        build_workspace_package, build_workspace_summary, derive_source_module_path,
-        lookup_method_candidates_for_type, lookup_symbol_path, lower_module_text,
-        resolve_workspace,
+        HirSymbolBody, HirSymbolKind, HirTraitRef, HirType, HirUnaryOp, HirWhereClause,
+        build_package_layout, build_package_summary, build_workspace_package,
+        build_workspace_summary, derive_source_module_path, lookup_method_candidates_for_type,
+        lookup_symbol_path, lower_module_text, resolve_workspace,
     };
 
     fn expr_is_path(expr: &HirExpr, name: &str) -> bool {
@@ -3752,11 +2770,14 @@ mod tests {
         assert!(worker.is_async);
         assert_eq!(worker.type_params, vec!["T".to_string()]);
         assert_eq!(
-            worker.where_clause,
+            worker.where_clause.as_ref().map(HirWhereClause::render),
             Some("std.iter.Iterator[T]".to_string())
         );
         assert_eq!(worker.params.len(), 2);
-        assert_eq!(worker.return_type, Some("Int".to_string()));
+        assert_eq!(
+            worker.return_type.as_ref().map(HirType::render),
+            Some("Int".to_string())
+        );
         let tick = &module.symbols[1];
         assert_eq!(tick.kind, super::HirSymbolKind::Behavior);
         assert_eq!(tick.behavior_attrs.len(), 2);
@@ -3769,10 +2790,10 @@ mod tests {
         assert_eq!(module.impls.len(), 1);
         assert_eq!(module.impls[0].type_params, vec!["T".to_string()]);
         assert_eq!(
-            module.impls[0].trait_path,
+            module.impls[0].trait_path.as_ref().map(HirTraitRef::render),
             Some("std.iter.Iterator[T]".to_string())
         );
-        assert_eq!(module.impls[0].target_type, "RangeIter");
+        assert_eq!(module.impls[0].target_type.render(), "RangeIter");
         assert_eq!(module.impls[0].methods.len(), 1);
         assert_eq!(module.impls[0].methods[0].name, "next");
     }
@@ -4184,7 +3205,8 @@ mod tests {
                     assert!(matches!(
                         subject.as_ref(),
                         HirExpr::GenericApply { expr, type_args }
-                            if type_args == &vec!["Str".to_string()]
+                            if type_args.iter().map(HirType::render).collect::<Vec<_>>()
+                                == vec!["Str".to_string()]
                                 && matches!(
                                     expr.as_ref(),
                                     HirExpr::MemberAccess { member, .. } if member == "print"
@@ -4325,9 +3347,10 @@ mod tests {
                         assert_eq!(qualifier, "call");
                         assert!(attached.is_empty());
                         assert!(matches!(
-                            subject.as_ref(),
-                            HirExpr::GenericApply { expr, type_args }
-                                if type_args == &vec!["Int".to_string()]
+                                subject.as_ref(),
+                                HirExpr::GenericApply { expr, type_args }
+                                if type_args.iter().map(HirType::render).collect::<Vec<_>>()
+                                    == vec!["Int".to_string()]
                                     && matches!(
                                         expr.as_ref(),
                                         HirExpr::MemberAccess { member, .. } if member == "print"
@@ -4535,7 +3558,8 @@ mod tests {
                 assert!(matches!(
                     subject.as_ref(),
                     HirExpr::GenericApply { type_args, .. }
-                        if type_args == &vec!["(K, V)".to_string()]
+                        if type_args.iter().map(HirType::render).collect::<Vec<_>>()
+                            == vec!["(K, V)".to_string()]
                 ));
             }
             other => panic!("expected generic qualified phrase, got {other:?}"),

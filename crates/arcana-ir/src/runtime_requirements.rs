@@ -425,13 +425,15 @@ fn runtime_requirement_for_intrinsic_impl(intrinsic_impl: &str) -> Option<&'stat
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::{
         RuntimeRequirementRoots, derive_runtime_requirements,
         derive_runtime_requirements_with_roots,
     };
     use crate::{
         ExecExpr, ExecPageRollup, ExecPhraseQualifierKind, ExecStmt, IrEntrypoint, IrPackage,
-        IrPackageModule, IrRoutine,
+        IrPackageModule, IrRoutine, IrRoutineParam,
     };
 
     fn routine(
@@ -448,10 +450,10 @@ mod tests {
             symbol_kind: "fn".to_string(),
             exported: true,
             is_async: false,
-            type_param_rows: Vec::new(),
-            behavior_attr_rows: Vec::new(),
-            param_rows: Vec::new(),
-            signature_row: format!("fn {symbol_name}() -> Int:"),
+            type_params: Vec::new(),
+            behavior_attrs: BTreeMap::new(),
+            params: Vec::new(),
+            return_type: Some("Int".to_string()),
             intrinsic_impl: intrinsic_impl.map(ToString::to_string),
             impl_target_type: None,
             impl_trait_path: None,
@@ -758,10 +760,10 @@ mod tests {
                     symbol_kind: "fn".to_string(),
                     exported: true,
                     is_async: false,
-                    type_param_rows: Vec::new(),
-                    behavior_attr_rows: Vec::new(),
-                    param_rows: Vec::new(),
-                    signature_row: "fn main() -> Int:".to_string(),
+                    type_params: Vec::new(),
+                    behavior_attrs: BTreeMap::new(),
+                    params: Vec::new(),
+                    return_type: Some("Int".to_string()),
                     intrinsic_impl: None,
                     impl_target_type: None,
                     impl_trait_path: None,
@@ -783,10 +785,14 @@ mod tests {
                     symbol_kind: "fn".to_string(),
                     exported: false,
                     is_async: false,
-                    type_param_rows: Vec::new(),
-                    behavior_attr_rows: Vec::new(),
-                    param_rows: vec!["mode=:name=scope:ty=Int".to_string()],
-                    signature_row: "fn cleanup(scope: Int) -> Int:".to_string(),
+                    type_params: Vec::new(),
+                    behavior_attrs: BTreeMap::new(),
+                    params: vec![IrRoutineParam {
+                        mode: None,
+                        name: "scope".to_string(),
+                        ty: "Int".to_string(),
+                    }],
+                    return_type: Some("Int".to_string()),
                     intrinsic_impl: Some("IoPrint".to_string()),
                     impl_target_type: None,
                     impl_trait_path: None,

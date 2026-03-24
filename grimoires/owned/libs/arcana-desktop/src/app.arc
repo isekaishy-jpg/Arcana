@@ -389,13 +389,20 @@ DesktopPendingActions
 fn owner_take_close_ids() -> List[arcana_desktop.types.WindowId]:
     let ids = DesktopPendingActions.close_ids
     DesktopPendingActions.close_ids = std.collections.list.new[arcana_desktop.types.WindowId] :: :: call
-    return ids
+    return arcana_desktop.app.reverse_window_ids :: ids :: call
 
 DesktopPendingActions
 fn owner_take_redraw_ids() -> List[arcana_desktop.types.WindowId]:
     let ids = DesktopPendingActions.redraw_ids
     DesktopPendingActions.redraw_ids = std.collections.list.new[arcana_desktop.types.WindowId] :: :: call
-    return ids
+    return arcana_desktop.app.reverse_window_ids :: ids :: call
+
+fn reverse_window_ids(take ids: List[arcana_desktop.types.WindowId]) -> List[arcana_desktop.types.WindowId]:
+    let mut ids = ids
+    let mut out = std.collections.list.new[arcana_desktop.types.WindowId] :: :: call
+    while not (ids :: :: is_empty):
+        out :: (ids :: :: pop) :: push
+    return out
 
 DesktopPendingActions
 fn owner_take_sync_main_window() -> Bool:

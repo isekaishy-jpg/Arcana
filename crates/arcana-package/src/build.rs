@@ -9,6 +9,7 @@ use arcana_hir::{HirResolvedWorkspace, HirWorkspaceSummary, resolve_workspace};
 use arcana_ir::{
     IrPackage, RuntimeRequirementRoots, derive_runtime_requirements_with_roots,
     lower_workspace_package_with_resolution,
+    render_routine_signature_text,
 };
 
 use crate::build_identity::{
@@ -741,7 +742,24 @@ fn link_ir_packages(
         left.module_id
             .cmp(&right.module_id)
             .then_with(|| left.symbol_name.cmp(&right.symbol_name))
-            .then_with(|| left.signature_row.cmp(&right.signature_row))
+            .then_with(|| {
+                render_routine_signature_text(
+                    &left.symbol_kind,
+                    &left.symbol_name,
+                    left.is_async,
+                    &left.type_params,
+                    &left.params,
+                    left.return_type.as_deref(),
+                )
+                .cmp(&render_routine_signature_text(
+                    &right.symbol_kind,
+                    &right.symbol_name,
+                    right.is_async,
+                    &right.type_params,
+                    &right.params,
+                    right.return_type.as_deref(),
+                ))
+            })
     });
 
     let mut linked_package = IrPackage {

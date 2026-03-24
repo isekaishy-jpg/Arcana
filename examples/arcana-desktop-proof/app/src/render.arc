@@ -18,6 +18,11 @@ record TextBlock:
     layout: (Int, Int)
     text_and_color: (Str, Int)
 
+record WrappedLinesBlock:
+    pos: (Int, Int)
+    max_lines: Int
+    color: Int
+
 record MetricLine:
     pos: (Int, Int)
     text: (Str, Str)
@@ -157,21 +162,20 @@ fn push_wrapped_line(edit out: List[Str], read source: Str, max_width: Int):
     if current != "":
         out :: current :: push
 
-fn wrapped_lines(read text: Str, max_width: Int) -> List[Str]:
+export fn wrapped_lines(read text: Str, max_width: Int) -> List[Str]:
     let mut out = std.collections.list.new[Str] :: :: call
     let lines = std.text.split_lines :: text :: call
     for value in lines:
         push_wrapped_line :: out, value, max_width :: call
     return out
 
-fn draw_text_block(read win: arcana_desktop.types.Window, read block: render.TextBlock):
-    let lines = wrapped_lines :: block.text_and_color.0, block.layout.0 :: call
+fn draw_wrapped_lines(read win: arcana_desktop.types.Window, read lines: List[Str], read block: render.WrappedLinesBlock):
     let mut y = block.pos.1
     let mut shown = 0
     for value in lines:
-        if shown >= block.layout.1:
+        if shown >= block.max_lines:
             return
-        draw_label :: win, (arcana_text.types.LabelSpec :: pos = (block.pos.0, y), text = value, color = block.text_and_color.1 :: call) :: call
+        draw_label :: win, (arcana_text.types.LabelSpec :: pos = (block.pos.0, y), text = value, color = block.color :: call) :: call
         y += 18
         shown += 1
 
@@ -302,7 +306,7 @@ fn draw_center_panel(read self: demo_types.Demo, read win: arcana_desktop.types.
     draw_label :: win, (arcana_text.types.LabelSpec :: pos = (inner_x + 16, inner_y + 14), text = (pages.title :: self.page_index :: call), color = palette.accent :: call) :: call
     draw_label :: win, (arcana_text.types.LabelSpec :: pos = (inner_x + 16, inner_y + 38), text = self.status_tail, color = palette.tones.1.0 :: call) :: call
     fill_rect :: win, (arcana_graphics.types.RectSpec :: pos = (inner_x, body_y), size = (inner_w, view.center_panel.size.1 - 180), color = (rgb :: 18, 23, 33 :: call) :: call) :: call
-    draw_text_block :: win, (render.TextBlock :: pos = (inner_x + 16, body_y + 14), layout = (inner_w - 32, 20), text_and_color = ((pages.body :: self.page_index :: call), palette.tones.1.0) :: call) :: call
+    draw_wrapped_lines :: win, self.body_lines, (render.WrappedLinesBlock :: pos = (inner_x + 16, body_y + 14), max_lines = 20, color = palette.tones.1.0 :: call) :: call
     fill_rect :: win, (arcana_graphics.types.RectSpec :: pos = (inner_x, footer_y), size = (inner_w, 40), color = (rgb :: 17, 27, 39 :: call) :: call) :: call
     draw_label :: win, (arcana_text.types.LabelSpec :: pos = (inner_x + 12, footer_y + 12), text = "Q / E page  |  W wake  |  N second  |  Esc exit", color = palette.tones.1.1 :: call) :: call
 

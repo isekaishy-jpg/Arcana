@@ -61,6 +61,14 @@ fn is_identifier_text(text: &str) -> bool {
         && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
+fn is_generic_param_text(text: &str) -> bool {
+    if let Some(rest) = text.strip_prefix('\'') {
+        !rest.is_empty() && is_identifier_text(rest)
+    } else {
+        is_identifier_text(text)
+    }
+}
+
 fn split_simple_path(text: &str) -> Option<Vec<String>> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -283,74 +291,28 @@ fn validate_package_surface_row(row: &str, module_ids: &BTreeSet<&str>) -> Resul
     validate_surface_row_payload(module_row)
 }
 
-fn validate_param_row(text: &str) -> Result<(), String> {
-    let parts = text.splitn(3, ':').collect::<Vec<_>>();
-    if parts.len() != 3 {
-        return Err(format!("malformed backend artifact param row `{text}`"));
-    }
-    let mode = parts[0]
-        .strip_prefix("mode=")
-        .ok_or_else(|| format!("backend artifact param row missing mode in `{text}`"))?;
-    let name = parts[1]
-        .strip_prefix("name=")
-        .ok_or_else(|| format!("backend artifact param row missing name in `{text}`"))?;
-    let ty = parts[2]
-        .strip_prefix("ty=")
-        .ok_or_else(|| format!("backend artifact param row missing ty in `{text}`"))?;
-    if mode != "read" && mode != "edit" && mode != "take" && !mode.is_empty() {
+fn validate_routine_param(
+    routine_key: &str,
+    index: usize,
+    mode: Option<&str>,
+    name: &str,
+    ty: &str,
+) -> Result<(), String> {
+    if let Some(mode) = mode
+        && !matches!(mode, "read" | "edit" | "take" | "copy" | "borrow" | "move")
+    {
         return Err(format!(
-            "backend artifact param row has invalid mode in `{text}`"
+            "backend artifact routine `{routine_key}` param {index} has unsupported mode `{mode}`"
         ));
     }
-    if name.is_empty() {
+    if !is_identifier_text(name) {
         return Err(format!(
-            "backend artifact param row missing name in `{text}`"
+            "backend artifact routine `{routine_key}` param {index} has invalid name"
         ));
     }
-    if ty.is_empty() {
-        return Err(format!("backend artifact param row missing ty in `{text}`"));
-    }
-    Ok(())
-}
-
-fn validate_type_param_row(text: &str) -> Result<(), String> {
-    let name = text
-        .strip_prefix("name=")
-        .ok_or_else(|| format!("backend artifact type param row missing name in `{text}`"))?;
-    if name.is_empty() {
+    if ty.trim().is_empty() {
         return Err(format!(
-            "backend artifact type param row missing name in `{text}`"
-        ));
-    }
-    Ok(())
-}
-
-fn validate_behavior_attr_row(text: &str) -> Result<(), String> {
-    let payload = text
-        .strip_prefix("name=")
-        .ok_or_else(|| format!("backend artifact behavior attr row missing name in `{text}`"))?;
-    let Some((name, value)) = payload.split_once(":value=") else {
-        return Err(format!(
-            "malformed backend artifact behavior attr row `{text}`"
-        ));
-    };
-    let decode_part = |part: &str| {
-        if part.starts_with('"') {
-            decode_row_string(part)
-        } else {
-            Ok(part.to_string())
-        }
-    };
-    let name = decode_part(name)?;
-    let value = decode_part(value)?;
-    if name.is_empty() {
-        return Err(format!(
-            "backend artifact behavior attr row missing name in `{text}`"
-        ));
-    }
-    if value.is_empty() {
-        return Err(format!(
-            "backend artifact behavior attr row missing value in `{text}`"
+            "backend artifact routine `{routine_key}` param {index} has empty type"
         ));
     }
     Ok(())
@@ -529,12 +491,6 @@ pub fn validate_package_artifact(artifact: &AotPackageArtifact) -> Result<(), St
                 routine.routine_key
             ));
         }
-        if routine.signature_row.is_empty() {
-            return Err(format!(
-                "backend artifact routine `{}` has an empty signature row",
-                routine.routine_key
-            ));
-        }
         if !module_ids.contains(routine.module_id.as_str()) {
             return Err(format!(
                 "backend artifact routine `{}` references undeclared module `{}`",
@@ -567,32 +523,38 @@ pub fn validate_package_artifact(artifact: &AotPackageArtifact) -> Result<(), St
                 ));
             }
         }
-        for row in &routine.type_param_rows {
-            if row.is_empty() {
-                return Err(format!(
-                    "backend artifact routine `{}` contains an empty type param row",
-                    routine.routine_key
-                ));
-            }
-            validate_type_param_row(row)?;
+        if let Some(return_type) = &routine.return_type
+            && return_type.trim().is_empty()
+        {
+            return Err(format!(
+                "backend artifact routine `{}` has an empty return type",
+                routine.routine_key
+            ));
         }
-        for row in &routine.behavior_attr_rows {
-            if row.is_empty() {
+        for name in &routine.type_params {
+            if name.is_empty() || !is_generic_param_text(name) {
                 return Err(format!(
-                    "backend artifact routine `{}` contains an empty behavior attr row",
-                    routine.routine_key
+                    "backend artifact routine `{}` has an invalid type param `{name}`",
+                    routine.routine_key,
                 ));
             }
-            validate_behavior_attr_row(row)?;
         }
-        for row in &routine.param_rows {
-            if row.is_empty() {
+        for (name, value) in &routine.behavior_attrs {
+            if name.is_empty() || value.is_empty() {
                 return Err(format!(
-                    "backend artifact routine `{}` contains an empty param row",
+                    "backend artifact routine `{}` has an empty behavior attr",
                     routine.routine_key
                 ));
             }
-            validate_param_row(row)?;
+        }
+        for (index, param) in routine.params.iter().enumerate() {
+            validate_routine_param(
+                &routine.routine_key,
+                index,
+                param.mode.as_deref(),
+                &param.name,
+                &param.ty,
+            )?;
         }
         for row in &routine.foreword_rows {
             if row.is_empty() {
