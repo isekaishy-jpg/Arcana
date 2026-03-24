@@ -1,4 +1,5 @@
-use crate::artifact::{AotPackageArtifact, AotRoutineArtifact, AotRoutineParamArtifact};
+use crate::artifact::{AotPackageArtifact, AotRoutineArtifact};
+use arcana_ir::{IrRoutineParam, IrRoutineType, IrRoutineTypeKind};
 use std::collections::BTreeSet;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -139,22 +140,22 @@ pub fn native_routine_signature(
             .iter()
             .map(parse_native_param)
             .collect::<Result<Vec<_>, _>>()?,
-        return_type: parse_native_return_type(routine.return_type.as_deref())?,
+        return_type: parse_native_return_type(routine.return_type.as_ref())?,
     })
 }
 
-pub fn parse_native_param(param: &AotRoutineParamArtifact) -> Result<NativeAbiParam, String> {
+pub fn parse_native_param(param: &IrRoutineParam) -> Result<NativeAbiParam, String> {
     Ok(NativeAbiParam {
         name: sanitize_name(&param.name),
         ty: parse_native_type(&param.ty)?,
     })
 }
 
-pub fn parse_native_return_type(return_type: Option<&str>) -> Result<NativeAbiType, String> {
-    match return_type.map(str::trim) {
-        None | Some("") => Ok(NativeAbiType::Unit),
-        Some(return_type) => parse_native_type(return_type),
-    }
+pub fn parse_native_return_type(return_type: Option<&IrRoutineType>) -> Result<NativeAbiType, String> {
+    return_type
+        .map(parse_native_type)
+        .transpose()
+        .map(|ty| ty.unwrap_or(NativeAbiType::Unit))
 }
 
 fn render_export_signature_text(routine: &AotRoutineArtifact) -> String {
@@ -186,7 +187,7 @@ fn render_export_signature_text(routine: &AotRoutineArtifact) -> String {
                 }
                 piece.push_str(&param.name);
                 piece.push_str(": ");
-                piece.push_str(&param.ty);
+                piece.push_str(&param.ty.render());
                 piece
             })
             .collect::<Vec<_>>()
@@ -195,71 +196,37 @@ fn render_export_signature_text(routine: &AotRoutineArtifact) -> String {
     rendered.push(')');
     if let Some(return_type) = &routine.return_type {
         rendered.push_str(" -> ");
-        rendered.push_str(return_type);
+        rendered.push_str(&return_type.render());
     }
     rendered.push(':');
     rendered
 }
 
-fn parse_native_type(text: &str) -> Result<NativeAbiType, String> {
-    let text = text.trim();
-    if let Some(inner) = text
-        .strip_prefix("Pair[")
-        .and_then(|rest| rest.strip_suffix(']'))
-    {
-        let parts = split_top_level_type_items(inner, ',');
-        let [left, right] = parts.as_slice() else {
-            return Err(format!(
-                "pair native abi type must have exactly two items: `{text}`"
-            ));
-        };
-        return Ok(NativeAbiType::Pair(
-            Box::new(parse_native_type(left)?),
-            Box::new(parse_native_type(right)?),
-        ));
-    }
-    if let Some(inner) = text
-        .strip_prefix('(')
-        .and_then(|rest| rest.strip_suffix(')'))
-    {
-        let parts = split_top_level_type_items(inner, ',');
-        let [left, right] = parts.as_slice() else {
-            return Err(format!(
-                "tuple native abi type must have exactly two items: `{text}`"
-            ));
-        };
-        return Ok(NativeAbiType::Pair(
-            Box::new(parse_native_type(left)?),
-            Box::new(parse_native_type(right)?),
-        ));
-    }
-    match text {
-        "Int" => Ok(NativeAbiType::Int),
-        "Bool" => Ok(NativeAbiType::Bool),
-        "Str" => Ok(NativeAbiType::Str),
-        "Array[Int]" => Ok(NativeAbiType::Bytes),
-        "Unit" | "" => Ok(NativeAbiType::Unit),
-        other => Err(format!("unsupported native abi type `{other}`")),
-    }
-}
-
-fn split_top_level_type_items(text: &str, delimiter: char) -> Vec<&str> {
-    let mut items = Vec::new();
-    let mut depth_square = 0usize;
-    let mut start = 0usize;
-    for (index, ch) in text.char_indices() {
-        match ch {
-            '[' => depth_square += 1,
-            ']' => depth_square = depth_square.saturating_sub(1),
-            _ if ch == delimiter && depth_square == 0 => {
-                items.push(text[start..index].trim());
-                start = index + ch.len_utf8();
+fn parse_native_type(ty: &IrRoutineType) -> Result<NativeAbiType, String> {
+    match &ty.kind {
+        IrRoutineTypeKind::Path(path) => match path.root_name() {
+            Some("Int") => Ok(NativeAbiType::Int),
+            Some("Bool") => Ok(NativeAbiType::Bool),
+            Some("Str") => Ok(NativeAbiType::Str),
+            Some("Unit") => Ok(NativeAbiType::Unit),
+            _ => Err(format!("unsupported native abi type `{}`", ty.render())),
+        },
+        IrRoutineTypeKind::Apply { base, args } => match base.root_name() {
+            Some("Pair") if args.len() == 2 => Ok(NativeAbiType::Pair(
+                Box::new(parse_native_type(&args[0])?),
+                Box::new(parse_native_type(&args[1])?),
+            )),
+            Some("Array") if args.len() == 1 && args[0].root_name() == Some("Int") => {
+                Ok(NativeAbiType::Bytes)
             }
-            _ => {}
-        }
+            _ => Err(format!("unsupported native abi type `{}`", ty.render())),
+        },
+        IrRoutineTypeKind::Tuple(items) if items.len() == 2 => Ok(NativeAbiType::Pair(
+            Box::new(parse_native_type(&items[0])?),
+            Box::new(parse_native_type(&items[1])?),
+        )),
+        _ => Err(format!("unsupported native abi type `{}`", ty.render())),
     }
-    items.push(text[start..].trim());
-    items
 }
 
 fn default_export_name(root_module_id: &str, module_id: &str, symbol_name: &str) -> String {

@@ -8226,11 +8226,7 @@ mod tests {
         deps: &[(&str, &str)],
         files: &[(&str, &str)],
     ) -> PathBuf {
-        let root = std::env::temp_dir().join(format!(
-            "arcana-frontend-test-{}-{}",
-            unique_test_id(),
-            name
-        ));
+        let root = test_temp_dir("arcana-frontend-tests", name);
         if root.exists() {
             fs::remove_dir_all(&root).expect("stale temp dir should be removable");
         }
@@ -8257,11 +8253,7 @@ mod tests {
     }
 
     fn make_temp_workspace(name: &str, members: &[&str], files: &[(&str, &str)]) -> PathBuf {
-        let root = std::env::temp_dir().join(format!(
-            "arcana-frontend-workspace-test-{}-{}",
-            unique_test_id(),
-            name
-        ));
+        let root = test_temp_dir("arcana-frontend-workspaces", name);
         if root.exists() {
             fs::remove_dir_all(&root).expect("stale temp dir should be removable");
         }
@@ -8285,6 +8277,20 @@ mod tests {
             }
             fs::write(path, contents).expect("file should be writable");
         }
+        root
+    }
+
+    fn test_temp_dir(prefix: &str, name: &str) -> PathBuf {
+        // Keep frontend fixture workspaces outside the repo tree so implicit std lookup
+        // does not capture the real repository std package during package discovery.
+        let root = repo_root()
+            .parent()
+            .expect("repo root parent should exist")
+            .join("target")
+            .join(prefix)
+            .join(format!("{}-{}", unique_test_id(), name));
+        fs::create_dir_all(root.parent().expect("temp dir parent should exist"))
+            .expect("temp dir parent should be creatable");
         root
     }
 

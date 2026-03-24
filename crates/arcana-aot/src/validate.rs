@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 
 use crate::artifact::AotPackageArtifact;
+use arcana_ir::{IrRoutineType, IrRoutineTypeKind};
 
 fn strip_prefix_suffix<'a>(text: &'a str, prefix: &str, suffix: &str) -> Result<&'a str, String> {
     text.strip_prefix(prefix)
@@ -296,7 +297,7 @@ fn validate_routine_param(
     index: usize,
     mode: Option<&str>,
     name: &str,
-    ty: &str,
+    ty: &IrRoutineType,
 ) -> Result<(), String> {
     if let Some(mode) = mode
         && !matches!(mode, "read" | "edit" | "take" | "copy" | "borrow" | "move")
@@ -310,12 +311,47 @@ fn validate_routine_param(
             "backend artifact routine `{routine_key}` param {index} has invalid name"
         ));
     }
-    if ty.trim().is_empty() {
+    if !validate_routine_type(ty) {
         return Err(format!(
-            "backend artifact routine `{routine_key}` param {index} has empty type"
+            "backend artifact routine `{routine_key}` param {index} has an invalid type"
         ));
     }
     Ok(())
+}
+
+fn validate_routine_type(ty: &IrRoutineType) -> bool {
+    match &ty.kind {
+        IrRoutineTypeKind::Path(path) => {
+            !path.segments.is_empty() && path.segments.iter().all(|segment| !segment.is_empty())
+        }
+        IrRoutineTypeKind::Apply { base, args } => {
+            !base.segments.is_empty()
+                && base.segments.iter().all(|segment| !segment.is_empty())
+                && args.iter().all(validate_routine_type)
+        }
+        IrRoutineTypeKind::Ref {
+            lifetime, inner, ..
+        } => lifetime
+            .as_ref()
+            .is_none_or(|lifetime| !lifetime.name.is_empty())
+            && validate_routine_type(inner),
+        IrRoutineTypeKind::Tuple(items) => items.iter().all(validate_routine_type),
+        IrRoutineTypeKind::Projection(projection) => {
+            !projection.assoc.is_empty()
+                && !projection.trait_ref.path.segments.is_empty()
+                && projection
+                    .trait_ref
+                    .path
+                    .segments
+                    .iter()
+                    .all(|segment| !segment.is_empty())
+                && projection
+                    .trait_ref
+                    .args
+                    .iter()
+                    .all(validate_routine_type)
+        }
+    }
 }
 
 fn validate_foreword_row(text: &str) -> Result<(), String> {
@@ -509,9 +545,13 @@ pub fn validate_package_artifact(artifact: &AotPackageArtifact) -> Result<(), St
                 routine.routine_key
             ));
         }
-        if matches!(routine.impl_target_type.as_deref(), Some("")) {
+        if routine
+            .impl_target_type
+            .as_ref()
+            .is_some_and(|ty| !validate_routine_type(ty))
+        {
             return Err(format!(
-                "backend artifact routine `{}` has an empty impl target type",
+                "backend artifact routine `{}` has an invalid impl target type",
                 routine.routine_key
             ));
         }
@@ -523,11 +563,13 @@ pub fn validate_package_artifact(artifact: &AotPackageArtifact) -> Result<(), St
                 ));
             }
         }
-        if let Some(return_type) = &routine.return_type
-            && return_type.trim().is_empty()
+        if routine
+            .return_type
+            .as_ref()
+            .is_some_and(|ty| !validate_routine_type(ty))
         {
             return Err(format!(
-                "backend artifact routine `{}` has an empty return type",
+                "backend artifact routine `{}` has an invalid return type",
                 routine.routine_key
             ));
         }

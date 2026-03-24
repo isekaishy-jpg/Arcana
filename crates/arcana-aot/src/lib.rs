@@ -45,7 +45,8 @@ mod tests {
     };
     use arcana_ir::{
         ExecExpr, ExecPageRollup, ExecPhraseQualifierKind, ExecStmt, IrEntrypoint, IrModule,
-        IrPackage, IrPackageModule, IrRoutine, IrRoutineParam,
+        IrPackage, IrPackageModule, IrRoutine, IrRoutineParam, IrRoutineType,
+        parse_routine_type_text,
     };
     use std::collections::BTreeMap;
 
@@ -62,29 +63,16 @@ mod tests {
             Self {
                 mode: (!mode.is_empty()).then(|| mode.to_string()),
                 name: name.to_string(),
-                ty: ty.to_string(),
+                ty: parse_routine_type_text(ty).expect("type should parse"),
             }
         }
     }
 
-    impl TestParamRow for AotRoutineParamArtifact {
-        fn from_test_row(row: &str) -> Self {
-            let parts = row.splitn(3, ':').collect::<Vec<_>>();
-            let mode = parts[0].strip_prefix("mode=").unwrap_or_default();
-            let name = parts[1].strip_prefix("name=").unwrap_or_default();
-            let ty = parts[2].strip_prefix("ty=").unwrap_or_default();
-            Self {
-                mode: (!mode.is_empty()).then(|| mode.to_string()),
-                name: name.to_string(),
-                ty: ty.to_string(),
-            }
-        }
-    }
-
-    fn test_return_type(signature: &str) -> Option<String> {
+    fn test_return_type(signature: &str) -> Option<IrRoutineType> {
         let (_, tail) = signature.rsplit_once("->")?;
         let trimmed = tail.trim().trim_end_matches(':').trim();
-        (!trimmed.is_empty()).then(|| trimmed.to_string())
+        (!trimmed.is_empty())
+            .then(|| parse_routine_type_text(trimmed).expect("return type should parse"))
     }
 
     fn test_params<T, S>(rows: &[S]) -> Vec<T>
@@ -339,7 +327,7 @@ mod tests {
                 .iter()
                 .map(|file| file.relative_path.as_str())
                 .collect::<Vec<_>>(),
-            vec!["app.exe.arcana-native.toml"]
+            vec!["app.exe.arcana-bundle.toml"]
         );
         let exe_manifest = parse_native_bundle_manifest(
             std::str::from_utf8(&exe.support_files[0].bytes)
@@ -371,7 +359,7 @@ mod tests {
                 .iter()
                 .map(|file| file.relative_path.as_str())
                 .collect::<Vec<_>>(),
-            vec!["lib.dll.h", "lib.dll.def", "lib.dll.arcana-native.toml"]
+            vec!["lib.dll.h", "lib.dll.def", "lib.dll.arcana-bundle.toml"]
         );
         let dll_text =
             std::str::from_utf8(&dll.support_files[0].bytes).expect("dll header should be utf8");
@@ -1082,7 +1070,7 @@ mod tests {
         artifact.routines[0].params = vec![AotRoutineParamArtifact {
             mode: Some("invalid".to_string()),
             name: "value".to_string(),
-            ty: "Int".to_string(),
+            ty: parse_routine_type_text("Int").expect("type should parse"),
         }];
 
         let err = parse_package_artifact(&render_package_artifact(&artifact))

@@ -749,7 +749,7 @@ fn link_ir_packages(
                     left.is_async,
                     &left.type_params,
                     &left.params,
-                    left.return_type.as_deref(),
+                    left.return_type.as_ref(),
                 )
                 .cmp(&render_routine_signature_text(
                     &right.symbol_kind,
@@ -757,7 +757,7 @@ fn link_ir_packages(
                     right.is_async,
                     &right.type_params,
                     &right.params,
-                    right.return_type.as_deref(),
+                    right.return_type.as_ref(),
                 ))
             })
     });
@@ -957,18 +957,31 @@ fn escape_toml(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use arcana_aot::{AOT_INTERNAL_FORMAT, AotEmissionFile, AotPackageArtifact};
 
     use super::{AotEmitTarget, AotPackageEmission, write_emission_support_files};
 
+    fn repo_root() -> PathBuf {
+        let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        crate_dir
+            .parent()
+            .and_then(Path::parent)
+            .expect("workspace root should exist")
+            .to_path_buf()
+    }
+
     fn temp_dir(label: &str) -> std::path::PathBuf {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system time should be after epoch")
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("arcana_build_{label}_{unique}"));
+        let dir = repo_root()
+            .join("target")
+            .join("arcana-build-tests")
+            .join(format!("{label}_{unique}"));
         fs::create_dir_all(&dir).expect("temp dir should be created");
         dir
     }

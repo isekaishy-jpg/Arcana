@@ -1004,7 +1004,7 @@ fn canonicalize_hir_trait_ref_in_module(
     }
 }
 
-pub(crate) fn canonicalize_hir_type_in_module(
+pub fn canonicalize_hir_type_in_module(
     workspace: &HirWorkspaceSummary,
     package: &HirWorkspacePackage,
     module: &HirModuleSummary,

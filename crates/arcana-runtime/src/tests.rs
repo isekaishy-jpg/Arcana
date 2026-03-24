@@ -17,6 +17,7 @@ use arcana_aot::{
     AotRoutineArtifact, AotRoutineParamArtifact, render_package_artifact,
 };
 use arcana_frontend::{check_workspace_graph, compute_member_fingerprints_for_checked_workspace};
+use arcana_ir::{IrRoutineType, parse_routine_type_text};
 use arcana_package::{execute_build, load_workspace_graph, plan_workspace, prepare_build};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -44,21 +45,7 @@ impl TestParamRow for AotRoutineParamArtifact {
         Self {
             mode: (!mode.is_empty()).then(|| mode.to_string()),
             name: name.to_string(),
-            ty: ty.to_string(),
-        }
-    }
-}
-
-impl TestParamRow for RuntimeParamPlan {
-    fn from_test_row(row: &str) -> Self {
-        let parts = row.splitn(3, ':').collect::<Vec<_>>();
-        let mode = parts[0].strip_prefix("mode=").unwrap_or_default();
-        let name = parts[1].strip_prefix("name=").unwrap_or_default();
-        let ty = parts[2].strip_prefix("ty=").unwrap_or_default();
-        Self {
-            mode: (!mode.is_empty()).then(|| mode.to_string()),
-            name: name.to_string(),
-            ty: ty.to_string(),
+            ty: parse_routine_type_text(ty).expect("type should parse"),
         }
     }
 }
@@ -71,10 +58,10 @@ where
     rows.iter().map(|row| T::from_test_row(row.as_ref())).collect()
 }
 
-fn test_return_type(signature: &str) -> Option<String> {
+fn test_return_type(signature: &str) -> Option<IrRoutineType> {
     let (_, tail) = signature.rsplit_once("->")?;
     let trimmed = tail.trim().trim_end_matches(':').trim();
-    (!trimmed.is_empty()).then(|| trimmed.to_string())
+    (!trimmed.is_empty()).then(|| parse_routine_type_text(trimmed).expect("type should parse"))
 }
 
 fn temp_artifact_path(label: &str) -> PathBuf {
@@ -82,7 +69,14 @@ fn temp_artifact_path(label: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .expect("time should advance")
         .as_nanos();
-    std::env::temp_dir().join(format!("arcana_runtime_{label}_{nanos}.toml"))
+    let path = repo_root()
+        .join("target")
+        .join("arcana-runtime-tests")
+        .join(format!("{label}_{nanos}.toml"));
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("runtime temp dir should exist");
+    }
+    path
 }
 
 fn temp_workspace_dir(label: &str) -> PathBuf {
@@ -767,7 +761,7 @@ fn plan_from_artifact_rejects_main_with_parameters() {
 #[test]
 fn plan_from_artifact_rejects_main_with_non_runtime_return_type() {
     let mut artifact = sample_return_artifact();
-    artifact.routines[0].return_type = Some("Bool".to_string());
+    artifact.routines[0].return_type = Some(parse_routine_type_text("Bool").expect("type"));
 
     let err = plan_from_artifact(&artifact).expect_err("bool-returning main should fail");
     assert!(
@@ -868,7 +862,7 @@ fn resolve_routine_index_for_call_prefers_lowered_routine_identity() {
                 params: vec![RuntimeParamPlan {
                     mode: Some("read".to_string()),
                     name: "self".to_string(),
-                    ty: "AtomicInt".to_string(),
+                    ty: parse_routine_type_text("AtomicInt").expect("type"),
                 }],
                 return_type: test_return_type("fn load(read self: AtomicInt) -> Int:"),
                 intrinsic_impl: None,
@@ -891,7 +885,7 @@ fn resolve_routine_index_for_call_prefers_lowered_routine_identity() {
                 params: vec![RuntimeParamPlan {
                     mode: Some("read".to_string()),
                     name: "self".to_string(),
-                    ty: "AtomicBool".to_string(),
+                    ty: parse_routine_type_text("AtomicBool").expect("type"),
                 }],
                 return_type: test_return_type("fn load(read self: AtomicBool) -> Bool:"),
                 intrinsic_impl: None,
@@ -949,7 +943,7 @@ fn runtime_dynamic_bare_method_fallback_matches_receiver_type_args() {
                 params: vec![RuntimeParamPlan {
                     mode: Some("read".to_string()),
                     name: "self".to_string(),
-                    ty: "std.concurrent.Channel[T]".to_string(),
+                    ty: parse_routine_type_text("std.concurrent.Channel[T]").expect("type"),
                 }],
                 return_type: test_return_type("fn send(read self: std.concurrent.Channel[T]) -> Int:"),
                 intrinsic_impl: None,
@@ -972,7 +966,7 @@ fn runtime_dynamic_bare_method_fallback_matches_receiver_type_args() {
                 params: vec![RuntimeParamPlan {
                     mode: Some("read".to_string()),
                     name: "self".to_string(),
-                    ty: "std.concurrent.Channel[Bool]".to_string(),
+                    ty: parse_routine_type_text("std.concurrent.Channel[Bool]").expect("type"),
                 }],
                 return_type: test_return_type("fn send(read self: std.concurrent.Channel[Bool]) -> Int:"),
                 intrinsic_impl: None,
@@ -1034,7 +1028,7 @@ fn runtime_dynamic_bare_method_fallback_matches_opaque_family_receiver() {
             params: vec![RuntimeParamPlan {
                 mode: Some("read".to_string()),
                 name: "self".to_string(),
-                ty: "desktop.types.Window".to_string(),
+                ty: parse_routine_type_text("desktop.types.Window").expect("type"),
             }],
             return_type: test_return_type("fn alive(read self: desktop.types.Window) -> Bool:"),
             intrinsic_impl: None,
@@ -1128,7 +1122,7 @@ fn runtime_json_abi_executes_exported_routine() {
             params: vec![RuntimeParamPlan {
                 mode: None,
                 name: "value".to_string(),
-                ty: "Int".to_string(),
+                ty: parse_routine_type_text("Int").expect("type"),
             }],
             return_type: test_return_type("fn answer(value: Int) -> Int:"),
             intrinsic_impl: None,
@@ -1175,7 +1169,7 @@ fn runtime_native_abi_executes_exported_routine() {
             params: vec![RuntimeParamPlan {
                 mode: None,
                 name: "value".to_string(),
-                ty: "Int".to_string(),
+                ty: parse_routine_type_text("Int").expect("type"),
             }],
             return_type: test_return_type("fn answer(value: Int) -> Int:"),
             intrinsic_impl: None,
@@ -1228,7 +1222,7 @@ fn runtime_native_abi_supports_string_and_byte_values() {
                 params: vec![RuntimeParamPlan {
                     mode: Some("read".to_string()),
                     name: "name".to_string(),
-                    ty: "Str".to_string(),
+                    ty: parse_routine_type_text("Str").expect("type"),
                 }],
                 return_type: test_return_type("fn greet(read name: Str) -> Str:"),
                 intrinsic_impl: None,
@@ -1257,7 +1251,7 @@ fn runtime_native_abi_supports_string_and_byte_values() {
                 params: vec![RuntimeParamPlan {
                     mode: Some("read".to_string()),
                     name: "bytes".to_string(),
-                    ty: "Array[Int]".to_string(),
+                    ty: parse_routine_type_text("Array[Int]").expect("type"),
                 }],
                 return_type: test_return_type("fn tail(read bytes: Array[Int]) -> Array[Int]:"),
                 intrinsic_impl: None,
@@ -1287,7 +1281,7 @@ fn runtime_native_abi_supports_string_and_byte_values() {
                 params: vec![RuntimeParamPlan {
                     mode: Some("read".to_string()),
                     name: "pair".to_string(),
-                    ty: "Pair[Str, Int]".to_string(),
+                    ty: parse_routine_type_text("Pair[Str, Int]").expect("type"),
                 }],
                 return_type: test_return_type("fn echo_pair(read pair: Pair[Str, Int]) -> Pair[Str, Int]:"),
                 intrinsic_impl: None,
@@ -1572,7 +1566,7 @@ fn execute_main_manual_routine_rollups_run_after_defers() {
                 params: vec![RuntimeParamPlan {
                     mode: Some("read".to_string()),
                     name: "seed".to_string(),
-                    ty: "Int".to_string(),
+                    ty: parse_routine_type_text("Int").expect("type"),
                 }],
                 return_type: test_return_type("fn run(read seed: Int) -> Result[Int, Str]:"),
                 intrinsic_impl: None,
@@ -1684,7 +1678,7 @@ fn execute_main_manual_routine_rollups_run_after_defers() {
                 params: vec![RuntimeParamPlan {
                     mode: Some("read".to_string()),
                     name: "value".to_string(),
-                    ty: "T".to_string(),
+                    ty: parse_routine_type_text("T").expect("type"),
                 }],
                 return_type: test_return_type("fn print[T](read value: T):"),
                 intrinsic_impl: Some("IoPrint".to_string()),
@@ -4090,7 +4084,7 @@ fn execute_main_rejects_use_after_take_move() {
                 params: vec![RuntimeParamPlan {
                     mode: Some("take".to_string()),
                     name: "value".to_string(),
-                    ty: "Str".to_string(),
+                    ty: parse_routine_type_text("Str").expect("type"),
                 }],
                 return_type: test_return_type("fn consume(take value: Str) -> Int:"),
                 intrinsic_impl: None,
@@ -4115,7 +4109,7 @@ fn execute_main_rejects_use_after_take_move() {
                 params: vec![RuntimeParamPlan {
                     mode: Some("read".to_string()),
                     name: "value".to_string(),
-                    ty: "Str".to_string(),
+                    ty: parse_routine_type_text("Str").expect("type"),
                 }],
                 return_type: test_return_type("fn reuse(read value: Str) -> Int:"),
                 intrinsic_impl: None,

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::native_abi::{NativeAbiType, NativeExport};
 use crate::native_plan::{NativeLaunchPlan, NativePackagePlan};
 
-pub const NATIVE_BUNDLE_MANIFEST_FORMAT: &str = "arcana-native-bundle-manifest-v1";
+pub const NATIVE_BUNDLE_MANIFEST_FORMAT: &str = "arcana-native-manifest-v2";
 const EMBEDDED_RUNTIME_PAYLOAD_KIND: &str = "embedded-runtime-package-image";
 const DLL_LAST_ERROR_ALLOC_SYMBOL: &str = "arcana_last_error_alloc";
 const DLL_BYTES_FREE_SYMBOL: &str = "arcana_bytes_free";
@@ -72,7 +72,7 @@ pub fn parse_native_bundle_manifest(text: &str) -> Result<NativeBundleManifest, 
 }
 
 pub fn native_bundle_manifest_file_name(root_artifact_file_name: &str) -> String {
-    format!("{root_artifact_file_name}.arcana-native.toml")
+    format!("{root_artifact_file_name}.arcana-bundle.toml")
 }
 
 pub fn windows_dll_header_file_name(root_artifact_file_name: &str) -> String {

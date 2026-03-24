@@ -798,13 +798,15 @@ mod tests {
     use crate::native_plan::build_native_package_plan;
     use arcana_ir::{
         ExecAssignOp, ExecAssignTarget, ExecExpr, ExecPhraseArg, ExecPhraseQualifierKind, ExecStmt,
-        IrEntrypoint, IrPackage, IrPackageModule, IrRoutine, IrRoutineParam,
+        IrEntrypoint, IrPackage, IrPackageModule, IrRoutine, IrRoutineParam, IrRoutineType,
+        parse_routine_type_text,
     };
 
-    fn test_return_type(signature: &str) -> Option<String> {
+    fn test_return_type(signature: &str) -> Option<IrRoutineType> {
         let (_, tail) = signature.rsplit_once("->")?;
         let trimmed = tail.trim().trim_end_matches(':').trim();
-        (!trimmed.is_empty()).then(|| trimmed.to_string())
+        (!trimmed.is_empty())
+            .then(|| parse_routine_type_text(trimmed).expect("return type should parse"))
     }
 
     fn test_params<S: AsRef<str>>(rows: &[S]) -> Vec<IrRoutineParam> {
@@ -818,7 +820,7 @@ mod tests {
                 IrRoutineParam {
                     mode: (!mode.is_empty()).then(|| mode.to_string()),
                     name: name.to_string(),
-                    ty: ty.to_string(),
+                    ty: parse_routine_type_text(ty).expect("type should parse"),
                 }
             })
             .collect()

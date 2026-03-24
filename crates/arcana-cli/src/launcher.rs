@@ -97,16 +97,27 @@ mod tests {
         AOT_INTERNAL_FORMAT, AotEntrypointArtifact, AotPackageArtifact, AotPackageModuleArtifact,
         AotRoutineArtifact, render_package_artifact,
     };
-    use arcana_ir::{ExecExpr, ExecStmt};
+    use arcana_ir::{ExecExpr, ExecStmt, parse_routine_type_text};
 
     use super::*;
+
+    fn repo_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("repo root should exist")
+            .to_path_buf()
+    }
 
     fn temp_dir(label: &str) -> PathBuf {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system time should be after epoch")
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("arcana_cli_launcher_{label}_{unique}"));
+        let dir = repo_root()
+            .join("target")
+            .join("arcana-cli-launcher-tests")
+            .join(format!("{label}_{unique}"));
         fs::create_dir_all(&dir).expect("temp dir should be created");
         dir
     }
@@ -139,7 +150,7 @@ mod tests {
                 type_params: Vec::new(),
                 behavior_attrs: BTreeMap::new(),
                 params: Vec::new(),
-                return_type: Some("Int".to_string()),
+                return_type: Some(parse_routine_type_text("Int").expect("type should parse")),
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,

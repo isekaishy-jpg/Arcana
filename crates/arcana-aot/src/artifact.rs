@@ -1,7 +1,11 @@
-use arcana_ir::{ExecAvailabilityAttachment, ExecExpr, ExecPageRollup, ExecStmt};
+use arcana_ir::{
+    ExecAvailabilityAttachment, ExecExpr, ExecPageRollup, ExecStmt, IrRoutineParam, IrRoutineType,
+};
 use serde::{Deserialize, Serialize};
 
-pub const AOT_INTERNAL_FORMAT: &str = "arcana-aot-v5";
+pub const AOT_INTERNAL_FORMAT: &str = "arcana-aot-v6";
+
+pub type AotRoutineParamArtifact = IrRoutineParam;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AotArtifact {
@@ -32,14 +36,6 @@ pub struct AotEntrypointArtifact {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AotRoutineParamArtifact {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mode: Option<String>,
-    pub name: String,
-    pub ty: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AotRoutineArtifact {
     pub module_id: String,
     pub routine_key: String,
@@ -49,13 +45,13 @@ pub struct AotRoutineArtifact {
     pub is_async: bool,
     pub type_params: Vec<String>,
     pub behavior_attrs: std::collections::BTreeMap<String, String>,
-    pub params: Vec<AotRoutineParamArtifact>,
+    pub params: Vec<IrRoutineParam>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub return_type: Option<String>,
+    pub return_type: Option<IrRoutineType>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intrinsic_impl: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub impl_target_type: Option<String>,
+    pub impl_target_type: Option<IrRoutineType>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub impl_trait_path: Option<Vec<String>>,
     pub availability: Vec<ExecAvailabilityAttachment>,

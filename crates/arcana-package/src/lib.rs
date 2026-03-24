@@ -1187,12 +1187,24 @@ mod tests {
     use arcana_aot::{AOT_WINDOWS_DLL_FORMAT, AOT_WINDOWS_EXE_FORMAT, parse_package_artifact};
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    fn repo_root() -> PathBuf {
+        let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        crate_dir
+            .parent()
+            .and_then(Path::parent)
+            .expect("workspace root should exist")
+            .to_path_buf()
+    }
+
     fn temp_dir(name: &str) -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        std::env::temp_dir().join(format!("arcana_package_{name}_{nanos}"))
+        repo_root()
+            .join("target")
+            .join("arcana-package-tests")
+            .join(format!("{name}_{nanos}"))
     }
 
     fn write_file(path: &Path, text: &str) {
@@ -1348,7 +1360,7 @@ mod tests {
         assert_eq!(metadata.target_format, AOT_WINDOWS_EXE_FORMAT);
         assert_eq!(
             metadata.support_files,
-            vec!["app.exe.arcana-native.toml".to_string()]
+            vec!["app.exe.arcana-bundle.toml".to_string()]
         );
         assert!(
             !launch_path.exists(),
@@ -1407,7 +1419,7 @@ mod tests {
         assert_eq!(bundle.root_artifact, "app.exe");
         assert_eq!(
             bundle.support_files,
-            vec!["app.exe.arcana-native.toml".to_string()]
+            vec!["app.exe.arcana-bundle.toml".to_string()]
         );
         let manifest_text =
             fs::read_to_string(&bundle.manifest_path).expect("distribution manifest should read");
@@ -1416,7 +1428,7 @@ mod tests {
         assert!(
             bundle
                 .bundle_dir
-                .join("app.exe.arcana-native.toml")
+                .join("app.exe.arcana-bundle.toml")
                 .is_file(),
             "expected staged native manifest beside exe"
         );
@@ -1500,7 +1512,7 @@ mod tests {
         assert!(
             bundle
                 .bundle_dir
-                .join("app.exe.arcana-native.toml")
+                .join("app.exe.arcana-bundle.toml")
                 .is_file(),
             "expected staged native manifest beside exe after cleanup"
         );
@@ -1656,7 +1668,7 @@ mod tests {
             vec![
                 "lib.dll.h".to_string(),
                 "lib.dll.def".to_string(),
-                "lib.dll.arcana-native.toml".to_string()
+                "lib.dll.arcana-bundle.toml".to_string()
             ]
         );
         let header_text = fs::read_to_string(artifact_path.with_file_name("lib.dll.h"))
@@ -1667,9 +1679,9 @@ mod tests {
         assert!(def_text.contains("EXPORTS"));
         assert!(def_text.contains("answer"));
         let native_manifest =
-            fs::read_to_string(artifact_path.with_file_name("lib.dll.arcana-native.toml"))
+            fs::read_to_string(artifact_path.with_file_name("lib.dll.arcana-bundle.toml"))
                 .expect("native dll manifest should read");
-        assert!(native_manifest.contains("format = \"arcana-native-bundle-manifest-v1\""));
+        assert!(native_manifest.contains("format = \"arcana-native-manifest-v2\""));
         assert!(native_manifest.contains("kind = \"dynamic-library\""));
 
         let _ = fs::remove_dir_all(&dir);

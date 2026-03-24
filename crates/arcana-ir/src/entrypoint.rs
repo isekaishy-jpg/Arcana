@@ -1,5 +1,7 @@
 use arcana_hir::{HirSymbol, HirSymbolKind};
 
+use crate::IrRoutineType;
+
 pub const RUNTIME_MAIN_ENTRYPOINT_NAME: &str = "main";
 
 pub fn is_runtime_main_entry_symbol(
@@ -13,21 +15,18 @@ pub fn is_runtime_main_entry_symbol(
 }
 
 pub fn validate_runtime_main_entry_symbol(symbol: &HirSymbol) -> Result<(), String> {
-    let rendered = symbol.return_type.as_ref().map(|ty| ty.render());
-    validate_runtime_main_entry_contract(symbol.params.len(), rendered.as_deref())
+    let return_type = symbol.return_type.as_ref().map(IrRoutineType::from_hir);
+    validate_runtime_main_entry_contract(symbol.params.len(), return_type.as_ref())
 }
 
 pub fn validate_runtime_main_entry_contract(
     param_count: usize,
-    return_type: Option<&str>,
+    return_type: Option<&IrRoutineType>,
 ) -> Result<(), String> {
     if param_count != 0 {
         return Err("main must not take parameters in the current runtime lane".to_string());
     }
-    if !matches!(
-        return_type.map(str::trim),
-        None | Some("Int") | Some("Unit")
-    ) {
+    if !matches!(return_type.and_then(IrRoutineType::root_name), None | Some("Int" | "Unit")) {
         return Err("main must return Int or Unit in the current runtime lane".to_string());
     }
     Ok(())
@@ -36,10 +35,12 @@ pub fn validate_runtime_main_entry_contract(
 #[cfg(test)]
 mod tests {
     use super::validate_runtime_main_entry_contract;
+    use crate::parse_routine_type_text;
 
     #[test]
     fn runtime_main_contract_rejects_parameters() {
-        let err = validate_runtime_main_entry_contract(1, Some("Int"))
+        let return_type = parse_routine_type_text("Int").expect("type should parse");
+        let err = validate_runtime_main_entry_contract(1, Some(&return_type))
             .expect_err("parameterized main should be rejected");
         assert_eq!(
             err,
@@ -49,7 +50,8 @@ mod tests {
 
     #[test]
     fn runtime_main_contract_rejects_non_runtime_return_type() {
-        let err = validate_runtime_main_entry_contract(0, Some("Bool"))
+        let return_type = parse_routine_type_text("Bool").expect("type should parse");
+        let err = validate_runtime_main_entry_contract(0, Some(&return_type))
             .expect_err("non-runtime return should be rejected");
         assert_eq!(
             err,

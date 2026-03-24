@@ -433,8 +433,12 @@ mod tests {
     };
     use crate::{
         ExecExpr, ExecPageRollup, ExecPhraseQualifierKind, ExecStmt, IrEntrypoint, IrPackage,
-        IrPackageModule, IrRoutine, IrRoutineParam,
+        IrPackageModule, IrRoutine, IrRoutineParam, parse_routine_type_text,
     };
+
+    fn ty(text: &str) -> crate::IrRoutineType {
+        parse_routine_type_text(text).expect("type should parse")
+    }
 
     fn routine(
         module_id: &str,
@@ -453,7 +457,7 @@ mod tests {
             type_params: Vec::new(),
             behavior_attrs: BTreeMap::new(),
             params: Vec::new(),
-            return_type: Some("Int".to_string()),
+            return_type: Some(ty("Int")),
             intrinsic_impl: intrinsic_impl.map(ToString::to_string),
             impl_target_type: None,
             impl_trait_path: None,
@@ -763,7 +767,7 @@ mod tests {
                     type_params: Vec::new(),
                     behavior_attrs: BTreeMap::new(),
                     params: Vec::new(),
-                    return_type: Some("Int".to_string()),
+                    return_type: Some(ty("Int")),
                     intrinsic_impl: None,
                     impl_target_type: None,
                     impl_trait_path: None,
@@ -790,9 +794,9 @@ mod tests {
                     params: vec![IrRoutineParam {
                         mode: None,
                         name: "scope".to_string(),
-                        ty: "Int".to_string(),
+                        ty: ty("Int"),
                     }],
-                    return_type: Some("Int".to_string()),
+                    return_type: Some(ty("Int")),
                     intrinsic_impl: Some("IoPrint".to_string()),
                     impl_target_type: None,
                     impl_trait_path: None,

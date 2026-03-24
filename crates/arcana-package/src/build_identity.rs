@@ -428,12 +428,24 @@ mod tests {
 
     use super::*;
 
+    fn repo_root() -> std::path::PathBuf {
+        let crate_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        crate_dir
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("workspace root should exist")
+            .to_path_buf()
+    }
+
     fn temp_dir(label: &str) -> std::path::PathBuf {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system time should be after epoch")
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("arcana_build_identity_{label}_{unique}"));
+        let dir = repo_root()
+            .join("target")
+            .join("arcana-build-identity-tests")
+            .join(format!("{label}_{unique}"));
         fs::create_dir_all(&dir).expect("temp dir should be created");
         dir
     }

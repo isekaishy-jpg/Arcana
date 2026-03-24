@@ -115,7 +115,10 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system time should be after epoch")
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("arcana_cli_package_{label}_{unique}"));
+        let dir = repo_root()
+            .join("target")
+            .join("arcana-cli-package-tests")
+            .join(format!("{label}_{unique}"));
         fs::create_dir_all(&dir).expect("temp dir should be created");
         dir
     }
@@ -126,7 +129,8 @@ mod tests {
             .expect("system time should be after epoch")
             .as_nanos();
         let dir = repo_root()
-            .join(".tmp-package-workspaces")
+            .join("target")
+            .join("arcana-cli-package-workspaces")
             .join(format!("{label}_{unique}"));
         fs::create_dir_all(&dir).expect("repo temp dir should be created");
         dir
@@ -617,12 +621,12 @@ mod tests {
         assert!(bundle.manifest_path.is_file());
         assert_eq!(
             bundle.support_files,
-            vec!["app.exe.arcana-native.toml".to_string()]
+            vec!["app.exe.arcana-bundle.toml".to_string()]
         );
         assert!(
             bundle
                 .bundle_dir
-                .join("app.exe.arcana-native.toml")
+                .join("app.exe.arcana-bundle.toml")
                 .is_file(),
             "expected staged exe native manifest"
         );
@@ -2060,7 +2064,7 @@ mod tests {
             vec![
                 "lib.dll.h".to_string(),
                 "lib.dll.def".to_string(),
-                "lib.dll.arcana-native.toml".to_string()
+                "lib.dll.arcana-bundle.toml".to_string()
             ]
         );
         assert!(
@@ -2070,7 +2074,7 @@ mod tests {
         assert!(
             bundle
                 .bundle_dir
-                .join("lib.dll.arcana-native.toml")
+                .join("lib.dll.arcana-bundle.toml")
                 .is_file(),
             "expected staged dll native manifest"
         );

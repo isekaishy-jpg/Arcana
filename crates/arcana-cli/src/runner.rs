@@ -181,7 +181,10 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system time should be after epoch")
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("arcana_cli_runner_{label}_{unique}"));
+        let dir = repo_root()
+            .join("target")
+            .join("arcana-cli-runner-tests")
+            .join(format!("{label}_{unique}"));
         fs::create_dir_all(&dir).expect("temp dir should be created");
         dir
     }

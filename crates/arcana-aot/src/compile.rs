@@ -1,12 +1,12 @@
 use arcana_ir::{
     IrEntrypoint, IrModule, IrOwnerDecl, IrOwnerExit, IrOwnerObject, IrPackage, IrPackageModule,
-    IrRoutine, IrRoutineParam,
+    IrRoutine,
 };
 
 use crate::artifact::{
     AOT_INTERNAL_FORMAT, AotArtifact, AotEntrypointArtifact, AotOwnerArtifact,
     AotOwnerExitArtifact, AotOwnerObjectArtifact, AotPackageArtifact, AotPackageModuleArtifact,
-    AotRoutineArtifact, AotRoutineParamArtifact,
+    AotRoutineArtifact,
 };
 
 pub fn compile_module(module: &IrModule) -> AotArtifact {
@@ -54,11 +54,7 @@ fn compile_routine(routine: &IrRoutine) -> AotRoutineArtifact {
         is_async: routine.is_async,
         type_params: routine.type_params.clone(),
         behavior_attrs: routine.behavior_attrs.clone(),
-        params: routine
-            .params
-            .iter()
-            .map(compile_routine_param)
-            .collect(),
+        params: routine.params.clone(),
         return_type: routine.return_type.clone(),
         intrinsic_impl: routine.intrinsic_impl.clone(),
         impl_target_type: routine.impl_target_type.clone(),
@@ -67,14 +63,6 @@ fn compile_routine(routine: &IrRoutine) -> AotRoutineArtifact {
         foreword_rows: routine.foreword_rows.clone(),
         rollups: routine.rollups.clone(),
         statements: routine.statements.clone(),
-    }
-}
-
-fn compile_routine_param(param: &IrRoutineParam) -> AotRoutineParamArtifact {
-    AotRoutineParamArtifact {
-        mode: param.mode.clone(),
-        name: param.name.clone(),
-        ty: param.ty.clone(),
     }
 }
 

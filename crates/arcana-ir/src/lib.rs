@@ -11,10 +11,12 @@ use arcana_hir::{
     HirAssignOp, HirAssignTarget, HirBinaryOp, HirChainConnector, HirChainIntroducer, HirChainStep,
     HirDirectiveKind, HirExpr, HirForewordApp, HirForewordArg, HirHeaderAttachment,
     HirLocalTypeLookup, HirMatchPattern, HirModule, HirModuleDependency, HirModuleSummary,
-    HirPackageSummary, HirPageRollup, HirPath, HirPhraseArg, HirResolvedModule,
+    HirPackageSummary, HirPageRollup, HirPath, HirPhraseArg, HirPredicate, HirResolvedModule,
     HirResolvedWorkspace, HirStatement, HirStatementKind, HirSymbol, HirSymbolBody, HirSymbolKind,
-    HirType, HirTypeKind, HirUnaryOp, HirWorkspacePackage, HirWorkspaceSummary,
-    impl_target_is_public_from_package, infer_receiver_expr_type,
+    HirType, HirTypeBindingScope, HirTypeSubstitutions, HirTypeKind, HirUnaryOp, HirWhereClause,
+    HirWorkspacePackage, HirWorkspaceSummary, canonicalize_hir_type_in_module,
+    current_workspace_package_for_module, hir_type_matches, impl_target_is_public_from_package,
+    infer_receiver_expr_type,
     lookup_method_candidates_for_hir_type, lookup_symbol_path,
     match_name_resolves_to_zero_payload_variant, render_symbol_signature,
     routine_key_for_impl_method, routine_key_for_object_method, routine_key_for_symbol,
@@ -33,7 +35,10 @@ pub use executable::{
     ExecHeaderAttachment, ExecMatchArm, ExecMatchPattern, ExecPageRollup, ExecPhraseArg,
     ExecPhraseQualifierKind, ExecStmt, ExecUnaryOp,
 };
-pub use routine_signature::{IrRoutineParam, render_routine_signature_text};
+pub use routine_signature::{
+    IrRoutineParam, IrRoutineProvenance, IrRoutineType, IrRoutineTypeKind, parse_routine_type_text,
+    render_routine_signature_text,
+};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct IrModule {
@@ -73,9 +78,9 @@ pub struct IrRoutine {
     pub type_params: Vec<String>,
     pub behavior_attrs: BTreeMap<String, String>,
     pub params: Vec<IrRoutineParam>,
-    pub return_type: Option<String>,
+    pub return_type: Option<IrRoutineType>,
     pub intrinsic_impl: Option<String>,
-    pub impl_target_type: Option<String>,
+    pub impl_target_type: Option<IrRoutineType>,
     pub impl_trait_path: Option<Vec<String>>,
     pub availability: Vec<ExecAvailabilityAttachment>,
     pub foreword_rows: Vec<String>,
@@ -233,7 +238,8 @@ fn hir_path_matches_any(path: &HirPath, expected: &[&[&str]]) -> bool {
 struct ResolvedRenderScope<'a> {
     workspace: &'a HirWorkspaceSummary,
     resolved_module: &'a HirResolvedModule,
-    current_where_clause: Option<String>,
+    current_where_clause: Option<HirWhereClause>,
+    type_bindings: HirTypeBindingScope,
     value_scope: LowerValueScope,
     errors: Rc<RefCell<Vec<String>>>,
 }
@@ -242,13 +248,14 @@ impl<'a> ResolvedRenderScope<'a> {
     fn new(
         workspace: &'a HirWorkspaceSummary,
         resolved_module: &'a HirResolvedModule,
-        current_where_clause: Option<String>,
-        _type_params: &[String],
+        current_where_clause: Option<HirWhereClause>,
+        type_params: &[String],
     ) -> Self {
         Self {
             workspace,
             resolved_module,
             current_where_clause,
+            type_bindings: HirTypeBindingScope::from_names(type_params.iter().cloned()),
             value_scope: LowerValueScope::default(),
             errors: Rc::new(RefCell::new(Vec::new())),
         }
@@ -493,107 +500,6 @@ fn split_simple_path(text: &str) -> Option<Vec<String>> {
         .then_some(segments)
 }
 
-fn split_top_level_surface_items(text: &str, delimiter: char) -> Vec<String> {
-    let mut items = Vec::new();
-    let mut depth = 0usize;
-    let mut current = String::new();
-    let mut in_string = false;
-    let mut escape = false;
-    for ch in text.chars() {
-        if in_string {
-            current.push(ch);
-            if escape {
-                escape = false;
-            } else if ch == '\\' {
-                escape = true;
-            } else if ch == '"' {
-                in_string = false;
-            }
-            continue;
-        }
-        match ch {
-            '"' => {
-                in_string = true;
-                current.push(ch);
-            }
-            '[' | '(' => {
-                depth += 1;
-                current.push(ch);
-            }
-            ']' | ')' => {
-                depth = depth.saturating_sub(1);
-                current.push(ch);
-            }
-            _ if ch == delimiter && depth == 0 => {
-                let item = current.trim();
-                if !item.is_empty() {
-                    items.push(item.to_string());
-                }
-                current.clear();
-            }
-            _ => current.push(ch),
-        }
-    }
-    let tail = current.trim();
-    if !tail.is_empty() {
-        items.push(tail.to_string());
-    }
-    items
-}
-
-fn erase_type_generics(text: &str) -> String {
-    let mut out = String::new();
-    let mut depth = 0usize;
-    for ch in text.chars() {
-        match ch {
-            '[' => depth += 1,
-            ']' => depth = depth.saturating_sub(1),
-            _ if depth == 0 && !ch.is_whitespace() => out.push(ch),
-            _ => {}
-        }
-    }
-    out
-}
-
-fn strip_reference_prefix(text: &str) -> &str {
-    let trimmed = text.trim_start();
-    if let Some(rest) = trimmed.strip_prefix("&mut") {
-        return rest.trim_start();
-    }
-    if let Some(rest) = trimmed.strip_prefix('&') {
-        return rest.trim_start();
-    }
-    trimmed
-}
-
-fn parse_surface_type_application(text: &str) -> Option<(String, Vec<String>)> {
-    let trimmed = text.trim();
-    if let Some(path) = split_simple_path(trimmed) {
-        return Some((path.join("."), Vec::new()));
-    }
-    let mut depth = 0usize;
-    let mut open = None;
-    for (index, ch) in trimmed.char_indices() {
-        match ch {
-            '[' if depth == 0 => {
-                open = Some(index);
-                break;
-            }
-            '[' | '(' => depth += 1,
-            ']' | ')' => depth = depth.saturating_sub(1),
-            _ => {}
-        }
-    }
-    let open = open?;
-    if !trimmed.ends_with(']') || open == 0 {
-        return None;
-    }
-    let base = trimmed[..open].trim();
-    let path = split_simple_path(base)?;
-    let args = split_top_level_surface_items(&trimmed[open + 1..trimmed.len() - 1], ',');
-    Some((path.join("."), args))
-}
-
 fn canonical_impl_trait_path(path: &arcana_hir::HirTraitRef) -> Vec<String> {
     path.path.segments.clone()
 }
@@ -703,30 +609,22 @@ fn lookup_trait_method_resolution_from_where_clause<'a>(
     ty: &HirType,
     method_name: &str,
 ) -> Result<Vec<ResolvedMethod<'a>>, String> {
-    let rendered = ty.render();
-    let wanted = erase_type_generics(strip_reference_prefix(&rendered));
-    if !is_identifier_text(&wanted) {
-        return Ok(Vec::new());
-    }
-    let Some(where_clause) = scope.current_where_clause.as_deref() else {
+    let Some(where_clause) = scope.current_where_clause.as_ref() else {
         return Ok(Vec::new());
     };
     let mut candidates = Vec::new();
-    for predicate in split_top_level_surface_items(where_clause, ',') {
-        let Some((trait_base, args)) = parse_surface_type_application(&predicate) else {
+    for predicate in &where_clause.predicates {
+        let HirPredicate::TraitBound { trait_ref, .. } = predicate else {
             continue;
         };
-        if !args
-            .iter()
-            .any(|arg| erase_type_generics(strip_reference_prefix(arg)) == wanted)
-        {
+        if !trait_ref.args.iter().any(|arg| {
+            let mut substitutions = HirTypeSubstitutions::default();
+            hir_type_matches(arg, ty, &scope.type_bindings, &mut substitutions)
+        }) {
             continue;
         }
-        let Some(trait_path) = split_simple_path(&trait_base) else {
-            continue;
-        };
         let Some(symbol_ref) =
-            lookup_symbol_path(scope.workspace, scope.resolved_module, &trait_path)
+            lookup_symbol_path(scope.workspace, scope.resolved_module, &trait_ref.path.segments)
         else {
             continue;
         };
@@ -738,11 +636,28 @@ fn lookup_trait_method_resolution_from_where_clause<'a>(
                 module_id: symbol_ref.module_id.to_string(),
                 method,
                 routine_key: String::new(),
-                trait_path: Some(trait_path),
+                trait_path: Some(trait_ref.path.segments.clone()),
             });
         }
     }
     Ok(candidates)
+}
+
+fn lower_symbol_routine_type(ty: &HirType) -> IrRoutineType {
+    IrRoutineType::from_hir(ty)
+}
+
+fn lower_resolved_routine_type(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    ty: &HirType,
+) -> IrRoutineType {
+    current_workspace_package_for_module(workspace, resolved_module)
+        .and_then(|package| package.module(&resolved_module.module_id).map(|module| (package, module)))
+        .map(|(package, module)| {
+            IrRoutineType::from_hir(&canonicalize_hir_type_in_module(workspace, package, module, ty))
+        })
+        .unwrap_or_else(|| IrRoutineType::from_hir(ty))
 }
 
 fn lower_routine_params(symbol: &HirSymbol) -> Vec<IrRoutineParam> {
@@ -752,7 +667,23 @@ fn lower_routine_params(symbol: &HirSymbol) -> Vec<IrRoutineParam> {
         .map(|param| IrRoutineParam {
             mode: param.mode.map(|mode| mode.as_str().to_string()),
             name: param.name.clone(),
-            ty: param.ty.render(),
+            ty: lower_symbol_routine_type(&param.ty),
+        })
+        .collect()
+}
+
+fn lower_routine_params_resolved(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    symbol: &HirSymbol,
+) -> Vec<IrRoutineParam> {
+    symbol
+        .params
+        .iter()
+        .map(|param| IrRoutineParam {
+            mode: param.mode.map(|mode| mode.as_str().to_string()),
+            name: param.name.clone(),
+            ty: lower_resolved_routine_type(workspace, resolved_module, &param.ty),
         })
         .collect()
 }
@@ -2030,10 +1961,7 @@ fn lower_owner_decl_resolved(
     let scope = ResolvedRenderScope::new(
         workspace,
         resolved_module,
-        symbol
-            .where_clause
-            .as_ref()
-            .map(|where_clause| where_clause.render()),
+        symbol.where_clause.clone(),
         &symbol.type_params,
     );
     Ok(Some(IrOwnerDecl {
@@ -2095,9 +2023,9 @@ fn lower_routine(
         type_params: symbol.type_params.clone(),
         behavior_attrs: lower_behavior_attrs(symbol),
         params: lower_routine_params(symbol),
-        return_type: symbol.return_type.as_ref().map(|ty| ty.render()),
+        return_type: symbol.return_type.as_ref().map(lower_symbol_routine_type),
         intrinsic_impl: symbol.intrinsic_impl.clone(),
-        impl_target_type: impl_decl.map(|decl| decl.target_type.render()),
+        impl_target_type: impl_decl.map(|decl| lower_symbol_routine_type(&decl.target_type)),
         impl_trait_path: impl_decl.and_then(|decl| {
             decl.trait_path
                 .as_ref()
@@ -2127,10 +2055,7 @@ fn lower_routine_resolved(
     let mut scope = ResolvedRenderScope::new(
         workspace,
         resolved_module,
-        symbol
-            .where_clause
-            .as_ref()
-            .map(|where_clause| where_clause.render()),
+        symbol.where_clause.clone(),
         &symbol.type_params,
     );
     for param in &symbol.params {
@@ -2150,10 +2075,14 @@ fn lower_routine_resolved(
         is_async: symbol.is_async,
         type_params: symbol.type_params.clone(),
         behavior_attrs: lower_behavior_attrs(symbol),
-        params: lower_routine_params(symbol),
-        return_type: symbol.return_type.as_ref().map(|ty| ty.render()),
+        params: lower_routine_params_resolved(workspace, resolved_module, symbol),
+        return_type: symbol
+            .return_type
+            .as_ref()
+            .map(|ty| lower_resolved_routine_type(workspace, resolved_module, ty)),
         intrinsic_impl: symbol.intrinsic_impl.clone(),
-        impl_target_type: impl_decl.map(|decl| decl.target_type.render()),
+        impl_target_type: impl_decl
+            .map(|decl| lower_resolved_routine_type(workspace, resolved_module, &decl.target_type)),
         impl_trait_path: impl_decl.and_then(|decl| {
             decl.trait_path
                 .as_ref()

@@ -25,7 +25,7 @@ struct JsonAbiRoutine<'a> {
     symbol_name: &'a str,
     symbol_kind: &'a str,
     signature: String,
-    impl_target_type: Option<&'a str>,
+    impl_target_type: Option<String>,
     impl_trait_path: Option<&'a [String]>,
 }
 
@@ -42,7 +42,7 @@ pub fn render_exported_json_abi_manifest(plan: &RuntimePackagePlan) -> Result<St
                 symbol_name: &routine.symbol_name,
                 symbol_kind: &routine.symbol_kind,
                 signature: render_runtime_signature_text(routine),
-                impl_target_type: routine.impl_target_type.as_deref(),
+                impl_target_type: routine.impl_target_type.as_ref().map(|ty| ty.render()),
                 impl_trait_path: routine.impl_trait_path.as_deref(),
             })
             .collect(),

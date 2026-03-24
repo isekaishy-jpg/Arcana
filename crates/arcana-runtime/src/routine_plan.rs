@@ -3,16 +3,12 @@ use std::collections::BTreeMap;
 use arcana_aot::{AotEntrypointArtifact, AotRoutineArtifact};
 use arcana_ir::{
     ExecAvailabilityAttachment as ParsedAvailabilityAttachment, ExecPageRollup as ParsedPageRollup,
-    ExecStmt as ParsedStmt, RUNTIME_MAIN_ENTRYPOINT_NAME, validate_runtime_main_entry_contract,
+    ExecStmt as ParsedStmt, IrRoutineParam, IrRoutineType,
+    RUNTIME_MAIN_ENTRYPOINT_NAME, validate_runtime_main_entry_contract,
 };
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RuntimeParamPlan {
-    pub mode: Option<String>,
-    pub name: String,
-    pub ty: String,
-}
+pub type RuntimeParamPlan = IrRoutineParam;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeRoutinePlan {
@@ -25,9 +21,9 @@ pub struct RuntimeRoutinePlan {
     pub type_params: Vec<String>,
     pub behavior_attrs: BTreeMap<String, String>,
     pub params: Vec<RuntimeParamPlan>,
-    pub return_type: Option<String>,
+    pub return_type: Option<IrRoutineType>,
     pub intrinsic_impl: Option<String>,
-    pub impl_target_type: Option<String>,
+    pub impl_target_type: Option<IrRoutineType>,
     pub impl_trait_path: Option<Vec<String>>,
     pub availability: Vec<ParsedAvailabilityAttachment>,
     pub foreword_rows: Vec<String>,
@@ -55,15 +51,7 @@ pub(crate) fn lower_routine(routine: &AotRoutineArtifact) -> RuntimeRoutinePlan 
         is_async: routine.is_async,
         type_params: routine.type_params.clone(),
         behavior_attrs: routine.behavior_attrs.clone(),
-        params: routine
-            .params
-            .iter()
-            .map(|param| RuntimeParamPlan {
-                mode: param.mode.clone(),
-                name: param.name.clone(),
-                ty: param.ty.clone(),
-            })
-            .collect(),
+        params: routine.params.clone(),
         return_type: routine.return_type.clone(),
         intrinsic_impl: routine.intrinsic_impl.clone(),
         impl_target_type: routine.impl_target_type.clone(),
@@ -94,7 +82,7 @@ pub(crate) fn lower_entrypoint(
             )
         })?;
     if entrypoint.symbol_kind == "fn" && entrypoint.symbol_name == RUNTIME_MAIN_ENTRYPOINT_NAME {
-        validate_runtime_main_entry_contract(routine.params.len(), routine.return_type.as_deref())?;
+        validate_runtime_main_entry_contract(routine.params.len(), routine.return_type.as_ref())?;
     }
     Ok(RuntimeEntrypointPlan {
         module_id: entrypoint.module_id.clone(),
@@ -135,7 +123,7 @@ pub(crate) fn render_runtime_signature_text(routine: &RuntimeRoutinePlan) -> Str
                 }
                 piece.push_str(&param.name);
                 piece.push_str(": ");
-                piece.push_str(&param.ty);
+                piece.push_str(&param.ty.render());
                 piece
             })
             .collect::<Vec<_>>()
@@ -144,7 +132,7 @@ pub(crate) fn render_runtime_signature_text(routine: &RuntimeRoutinePlan) -> Str
     rendered.push(')');
     if let Some(return_type) = &routine.return_type {
         rendered.push_str(" -> ");
-        rendered.push_str(return_type);
+        rendered.push_str(&return_type.render());
     }
     rendered.push(':');
     rendered

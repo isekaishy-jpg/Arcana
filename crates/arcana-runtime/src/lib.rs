@@ -13,10 +13,11 @@ use arcana_ir::{
     ExecChainConnector as ParsedChainConnector, ExecChainIntroducer as ParsedChainIntroducer,
     ExecChainStep as ParsedChainStep, ExecDynamicDispatch as ParsedDynamicDispatch,
     ExecExpr as ParsedExpr, ExecHeaderAttachment as ParsedHeaderAttachment,
+    IrRoutineType, IrRoutineTypeKind,
     ExecMatchArm as ParsedMatchArm, ExecMatchPattern as ParsedMatchPattern,
     ExecPageRollup as ParsedPageRollup, ExecPhraseArg as ParsedPhraseArg,
     ExecPhraseQualifierKind as ParsedPhraseQualifierKind, ExecStmt as ParsedStmt,
-    ExecUnaryOp as ParsedUnaryOp, validate_runtime_main_entry_contract,
+    ExecUnaryOp as ParsedUnaryOp, parse_routine_type_text, validate_runtime_main_entry_contract,
 };
 use pathdiff::diff_paths;
 use serde::{Deserialize, Serialize};
@@ -4579,31 +4580,6 @@ fn parse_runtime_value_type_args(type_name: &str) -> Vec<String> {
     split_runtime_type_args(&type_name[start + 1..type_name.len() - 1])
 }
 
-fn strip_runtime_reference_prefix(text: &str) -> &str {
-    let trimmed = text.trim_start();
-    if let Some(rest) = trimmed.strip_prefix("&mut") {
-        return rest.trim_start();
-    }
-    if let Some(rest) = trimmed.strip_prefix('&') {
-        return rest.trim_start();
-    }
-    trimmed
-}
-
-fn parse_runtime_type_application(type_name: &str) -> Option<(String, Vec<String>)> {
-    let trimmed = strip_runtime_reference_prefix(type_name).trim();
-    let Some(start) = trimmed.find('[') else {
-        return Some((trimmed.to_string(), Vec::new()));
-    };
-    if !trimmed.ends_with(']') {
-        return None;
-    }
-    Some((
-        trimmed[..start].trim().to_string(),
-        split_runtime_type_args(&trimmed[start + 1..trimmed.len() - 1]),
-    ))
-}
-
 fn runtime_type_root_name(type_name: &str) -> String {
     let base = type_name
         .split_once('[')
@@ -4611,91 +4587,6 @@ fn runtime_type_root_name(type_name: &str) -> String {
         .unwrap_or(type_name)
         .trim();
     base.rsplit('.').next().unwrap_or(base).to_string()
-}
-
-fn runtime_type_name_matches(expected: &str, actual: &str) -> bool {
-    expected == actual
-        || expected.ends_with(&format!(".{actual}"))
-        || actual.ends_with(&format!(".{expected}"))
-}
-
-fn runtime_opaque_family_for_type(
-    plan: &RuntimePackagePlan,
-    type_name: &str,
-) -> Option<RuntimeOpaqueFamily> {
-    RuntimeOpaqueFamily::from_lang_item_name(type_name).or_else(|| {
-        [
-            RuntimeOpaqueFamily::FileStream,
-            RuntimeOpaqueFamily::Window,
-            RuntimeOpaqueFamily::Image,
-            RuntimeOpaqueFamily::AppFrame,
-            RuntimeOpaqueFamily::AppSession,
-            RuntimeOpaqueFamily::Wake,
-            RuntimeOpaqueFamily::AudioDevice,
-            RuntimeOpaqueFamily::AudioBuffer,
-            RuntimeOpaqueFamily::AudioPlayback,
-            RuntimeOpaqueFamily::Channel,
-            RuntimeOpaqueFamily::Mutex,
-            RuntimeOpaqueFamily::AtomicInt,
-            RuntimeOpaqueFamily::AtomicBool,
-            RuntimeOpaqueFamily::Arena,
-            RuntimeOpaqueFamily::ArenaId,
-            RuntimeOpaqueFamily::FrameArena,
-            RuntimeOpaqueFamily::FrameId,
-            RuntimeOpaqueFamily::PoolArena,
-            RuntimeOpaqueFamily::PoolId,
-            RuntimeOpaqueFamily::Task,
-            RuntimeOpaqueFamily::Thread,
-        ]
-        .into_iter()
-        .find(|family| {
-            runtime_type_name_matches(family.canonical_type_name(), type_name)
-                || plan
-                    .opaque_family_types
-                    .get(family.lang_item_name())
-                    .is_some_and(|bound| {
-                        bound
-                            .iter()
-                            .any(|candidate| runtime_type_name_matches(candidate, type_name))
-                    })
-        })
-    })
-}
-
-fn runtime_declared_type_matches_actual(
-    plan: &RuntimePackagePlan,
-    declared_type: &str,
-    actual_type: &str,
-    type_params: &BTreeSet<String>,
-) -> bool {
-    let Some((declared_base, declared_args)) = parse_runtime_type_application(declared_type) else {
-        return false;
-    };
-    let Some((actual_base, actual_args)) = parse_runtime_type_application(actual_type) else {
-        return false;
-    };
-    if !runtime_type_name_matches(&declared_base, &actual_base) {
-        match (
-            runtime_opaque_family_for_type(plan, &declared_base),
-            runtime_opaque_family_for_type(plan, &actual_base),
-        ) {
-            (Some(declared_family), Some(actual_family)) if declared_family == actual_family => {}
-            _ => return false,
-        }
-    }
-    if declared_args.len() != actual_args.len() {
-        return declared_args.is_empty() && actual_args.is_empty();
-    }
-    declared_args
-        .iter()
-        .zip(actual_args.iter())
-        .all(|(declared_arg, actual_arg)| {
-            let trimmed = declared_arg.trim();
-            if type_params.contains(trimmed) {
-                return true;
-            }
-            runtime_declared_type_matches_actual(plan, trimmed, actual_arg, type_params)
-        })
 }
 
 fn runtime_variant_enum_name(variant_name: &str) -> String {
@@ -9715,52 +9606,66 @@ fn runtime_receiver_type_args(
     }
 }
 
-fn runtime_value_type_text(
+fn runtime_simple_type(name: &str) -> Option<IrRoutineType> {
+    parse_routine_type_text(name).ok()
+}
+
+fn runtime_type_with_args(base: &str, type_args: &[String]) -> Option<IrRoutineType> {
+    if type_args.is_empty() {
+        return runtime_simple_type(base);
+    }
+    let base = runtime_simple_type(base)?;
+    let IrRoutineTypeKind::Path(base_path) = base.kind else {
+        return None;
+    };
+    let args = type_args
+        .iter()
+        .map(|arg| parse_routine_type_text(arg).ok())
+        .collect::<Option<Vec<_>>>()?;
+    Some(IrRoutineType {
+        kind: IrRoutineTypeKind::Apply {
+            base: base_path,
+            args,
+        },
+    })
+}
+
+fn runtime_value_type(
     receiver: &RuntimeValue,
     state: &RuntimeExecutionState,
-) -> Option<String> {
+) -> Option<IrRoutineType> {
     match receiver {
-        RuntimeValue::OwnerHandle(owner_key) => Some(format!("Owner<{owner_key}>")),
-        RuntimeValue::Record { name, .. } => Some(name.clone()),
-        RuntimeValue::Opaque(RuntimeOpaqueValue::Channel(_)) => {
-            let type_args = runtime_receiver_type_args(receiver, state);
-            Some(if type_args.is_empty() {
-                opaque_type_name(match receiver {
-                    RuntimeValue::Opaque(value) => value,
-                    _ => unreachable!(),
-                })
-                .to_string()
-            } else {
-                format!(
-                    "{}[{}]",
-                    opaque_type_name(match receiver {
-                        RuntimeValue::Opaque(value) => value,
-                        _ => unreachable!(),
-                    }),
-                    type_args.join(", ")
-                )
-            })
-        }
+        RuntimeValue::OwnerHandle(_) => runtime_simple_type("Owner"),
+        RuntimeValue::Record { name, .. } => parse_routine_type_text(name)
+            .ok()
+            .or_else(|| runtime_simple_type(runtime_type_root_name(name).as_str())),
+        RuntimeValue::Opaque(RuntimeOpaqueValue::Channel(_)) => runtime_type_with_args(
+            opaque_type_name(match receiver {
+                RuntimeValue::Opaque(value) => value,
+                _ => unreachable!(),
+            }),
+            &runtime_receiver_type_args(receiver, state),
+        ),
         RuntimeValue::Opaque(RuntimeOpaqueValue::Mutex(_))
         | RuntimeValue::Opaque(RuntimeOpaqueValue::Arena(_))
         | RuntimeValue::Opaque(RuntimeOpaqueValue::FrameArena(_))
         | RuntimeValue::Opaque(RuntimeOpaqueValue::PoolArena(_))
         | RuntimeValue::Opaque(RuntimeOpaqueValue::Task(_))
-        | RuntimeValue::Opaque(RuntimeOpaqueValue::Thread(_)) => {
-            let type_args = runtime_receiver_type_args(receiver, state);
-            let opaque_name = match receiver {
+        | RuntimeValue::Opaque(RuntimeOpaqueValue::Thread(_)) => runtime_type_with_args(
+            match receiver {
                 RuntimeValue::Opaque(value) => opaque_type_name(value),
                 _ => unreachable!(),
-            };
-            Some(if type_args.is_empty() {
-                opaque_name.to_string()
-            } else {
-                format!("{opaque_name}[{}]", type_args.join(", "))
-            })
+            },
+            &runtime_receiver_type_args(receiver, state),
+        ),
+        RuntimeValue::Opaque(value) => runtime_simple_type(opaque_type_name(value)),
+        RuntimeValue::Variant { name, .. } => {
+            let enum_name = runtime_variant_enum_name(name);
+            parse_routine_type_text(&enum_name)
+                .ok()
+                .or_else(|| runtime_simple_type(runtime_type_root_name(&enum_name).as_str()))
         }
-        RuntimeValue::Opaque(value) => Some(opaque_type_name(value).to_string()),
-        RuntimeValue::Variant { name, .. } => Some(runtime_variant_enum_name(name)),
-        _ => runtime_value_type_root(receiver),
+        _ => runtime_value_type_root(receiver).and_then(|name| runtime_simple_type(&name)),
     }
 }
 
@@ -10895,10 +10800,11 @@ fn resolve_routine_index_for_call(
             callable.join(".")
         ));
     };
-    let receiver_type_text = state.and_then(|state| runtime_value_type_text(receiver, state));
-    let Some(receiver_root) = receiver_type_text
-        .as_deref()
-        .map(runtime_type_root_name)
+    let receiver_type = state.and_then(|state| runtime_value_type(receiver, state));
+    let Some(receiver_root) = receiver_type
+        .as_ref()
+        .and_then(IrRoutineType::root_name)
+        .map(str::to_string)
         .or_else(|| runtime_value_type_root(receiver))
     else {
         return Err(format!(
@@ -10914,26 +10820,22 @@ fn resolve_routine_index_for_call(
                 .map(|routine| {
                     let declared = routine
                         .impl_target_type
-                        .as_deref()
-                        .or_else(|| routine.params.first().map(|param| param.ty.as_str()));
+                        .as_ref()
+                        .or_else(|| routine.params.first().map(|param| &param.ty));
                     let Some(declared) = declared else {
                         return false;
                     };
-                    let type_params = routine.type_params.iter().cloned().collect::<BTreeSet<_>>();
-                    receiver_type_text
-                        .as_deref()
+                    receiver_type
+                        .as_ref()
                         .map(|actual| {
-                            runtime_declared_type_matches_actual(
-                                plan,
+                            IrRoutineType::matches_declared(
                                 declared,
                                 actual,
-                                &type_params,
-                            ) || parse_runtime_type_application(actual)
-                                .map(|(_, args)| args.is_empty())
-                                .unwrap_or(false)
-                                && runtime_type_root_name(declared) == receiver_root
+                                &routine.type_params,
+                            ) || matches!(&actual.kind, IrRoutineTypeKind::Path(_))
+                                && declared.root_name() == Some(receiver_root.as_str())
                         })
-                        .unwrap_or_else(|| runtime_type_root_name(declared) == receiver_root)
+                        .unwrap_or_else(|| declared.root_name() == Some(receiver_root.as_str()))
                 })
                 .unwrap_or(false)
         })
@@ -17080,7 +16982,7 @@ pub fn execute_entrypoint_routine(
         .routines
         .get(entry.routine_index)
         .ok_or_else(|| format!("invalid routine index `{}`", entry.routine_index))?;
-    validate_runtime_main_entry_contract(routine.params.len(), routine.return_type.as_deref())?;
+    validate_runtime_main_entry_contract(routine.params.len(), routine.return_type.as_ref())?;
     let mut state = RuntimeExecutionState::default();
     if state.next_scheduler_thread_id <= 0 {
         state.next_scheduler_thread_id = 1;

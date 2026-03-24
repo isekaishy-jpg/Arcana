@@ -163,17 +163,24 @@ fn target_output_path(target_dir: &Path, output_name: &str, target: AotEmitTarge
     }
 }
 
+fn repo_root() -> PathBuf {
+    let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    crate_dir
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root should exist")
+        .to_path_buf()
+}
+
 pub fn default_native_project_dir(target: AotEmitTarget, package_name: &str) -> PathBuf {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system time should be after epoch")
         .as_nanos();
-    std::env::temp_dir().join(format!(
-        "arcana_native_project_{}_{}_{}",
-        target.format(),
-        package_name,
-        unique
-    ))
+    repo_root()
+        .join("target")
+        .join("arcana-native-projects")
+        .join(format!("{}_{}_{}", target.format(), package_name, unique))
 }
 
 fn collect_runtime_dynamic_libraries(
