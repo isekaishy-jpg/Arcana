@@ -326,9 +326,8 @@ fn boundary_symbol_is_safe(
         .and_then(|package| package.module(symbol_ref.module_id))
         .unwrap_or(resolved_module);
     match &symbol_ref.symbol.body {
-        HirSymbolBody::Record { fields } | HirSymbolBody::Object { fields, .. } => fields
-            .iter()
-            .all(|field| {
+        HirSymbolBody::Record { fields } | HirSymbolBody::Object { fields, .. } => {
+            fields.iter().all(|field| {
                 boundary_type_is_safe(
                     workspace,
                     resolved_workspace,
@@ -339,7 +338,8 @@ fn boundary_symbol_is_safe(
                     assoc_bindings,
                     visited_symbols,
                 )
-            }),
+            })
+        }
         HirSymbolBody::Enum { variants } => variants.iter().all(|variant| {
             variant.payload.as_ref().is_none_or(|payload| {
                 boundary_type_is_safe(
@@ -374,7 +374,7 @@ fn validate_surface_refs(
     resolved_module: &HirResolvedModule,
     module_path: &Path,
     scope: &TypeScope,
-    refs: &arcana_syntax::SurfaceRefs,
+    refs: &arcana_hir::HirSurfaceRefs,
     span: Span,
     context: &str,
     expected_use: SurfaceSymbolUse,

@@ -6,14 +6,14 @@ pub mod type_surface;
 
 pub use lookup::{
     current_workspace_package_for_module, impl_target_is_public_from_package,
-    lookup_method_candidates_for_hir_type, lookup_method_candidates_for_type, lookup_symbol_path,
+    lookup_method_candidates_for_hir_type, lookup_symbol_path,
     visible_method_package_names_for_module, visible_package_root_for_module,
 };
-pub use signature::render_symbol_signature;
 pub(crate) use lookup::{
     lookup_symbol_path_in_module_context, visible_symbol_refs_in_module_for_package,
 };
 pub use render::{render_expr_fingerprint, render_symbol_fingerprint};
+pub use signature::render_symbol_signature;
 pub use type_surface::{
     HirLifetime, HirPath, HirPredicate, HirProjection, HirSurfaceRefs, HirTraitRef, HirType,
     HirTypeBindingId, HirTypeBindingScope, HirTypeKind, HirTypeSubstitutions, HirWhereClause,
@@ -152,7 +152,6 @@ pub struct HirSymbol {
     pub body: HirSymbolBody,
     pub statements: Vec<HirStatement>,
     pub rollups: Vec<HirPageRollup>,
-    pub surface_text: String,
     pub span: Span,
 }
 
@@ -573,7 +572,6 @@ pub struct HirImplDecl {
     pub assoc_types: Vec<HirImplAssocTypeBinding>,
     pub methods: Vec<HirSymbol>,
     pub body_entries: Vec<String>,
-    pub surface_text: String,
     pub span: Span,
 }
 
@@ -636,8 +634,16 @@ impl HirModuleSummary {
 
     pub fn hir_fingerprint_rows(&self) -> Vec<String> {
         let mut rows = Vec::new();
-        rows.extend(self.directives.iter().map(render::render_directive_fingerprint));
-        rows.extend(self.lang_items.iter().map(render::render_lang_item_fingerprint));
+        rows.extend(
+            self.directives
+                .iter()
+                .map(render::render_directive_fingerprint),
+        );
+        rows.extend(
+            self.lang_items
+                .iter()
+                .map(render::render_lang_item_fingerprint),
+        );
         rows.extend(self.symbols.iter().map(render::render_symbol_fingerprint));
         rows.extend(self.impls.iter().map(render::render_impl_fingerprint));
         rows
@@ -890,7 +896,6 @@ pub struct HirMethodCandidate<'a> {
     pub package_name: &'a str,
     pub module_id: &'a str,
     pub symbol: &'a HirSymbol,
-    pub declared_receiver_type: String,
     pub declared_receiver_hir: HirType,
     pub routine_key: String,
 }
@@ -915,26 +920,29 @@ pub fn routine_key_for_object_method(
     format!("{module_id}#obj-{symbol_index}-method-{method_index}")
 }
 
-fn canonical_ambient_type_root(text: &str) -> Option<&'static str> {
-    match text.trim() {
-        "List" => Some("std.collections.list.List"),
-        "Array" => Some("std.collections.array.Array"),
-        "Map" => Some("std.collections.map.Map"),
-        "Set" => Some("std.collections.set.Set"),
-        "Option" => Some("std.option.Option"),
-        "Result" => Some("std.result.Result"),
-        "Arena" => Some("std.memory.Arena"),
-        "ArenaId" => Some("std.memory.ArenaId"),
-        "FrameArena" => Some("std.memory.FrameArena"),
-        "FrameId" => Some("std.memory.FrameId"),
-        "PoolArena" => Some("std.memory.PoolArena"),
-        "PoolId" => Some("std.memory.PoolId"),
-        "Task" => Some("std.concurrent.Task"),
-        "Thread" => Some("std.concurrent.Thread"),
-        "Channel" => Some("std.concurrent.Channel"),
-        "Mutex" => Some("std.concurrent.Mutex"),
-        "AtomicInt" => Some("std.concurrent.AtomicInt"),
-        "AtomicBool" => Some("std.concurrent.AtomicBool"),
+fn canonical_ambient_type_root(path: &[String]) -> Option<&'static str> {
+    match path {
+        [name] => match name.as_str() {
+            "List" => Some("std.collections.list.List"),
+            "Array" => Some("std.collections.array.Array"),
+            "Map" => Some("std.collections.map.Map"),
+            "Set" => Some("std.collections.set.Set"),
+            "Option" => Some("std.option.Option"),
+            "Result" => Some("std.result.Result"),
+            "Arena" => Some("std.memory.Arena"),
+            "ArenaId" => Some("std.memory.ArenaId"),
+            "FrameArena" => Some("std.memory.FrameArena"),
+            "FrameId" => Some("std.memory.FrameId"),
+            "PoolArena" => Some("std.memory.PoolArena"),
+            "PoolId" => Some("std.memory.PoolId"),
+            "Task" => Some("std.concurrent.Task"),
+            "Thread" => Some("std.concurrent.Thread"),
+            "Channel" => Some("std.concurrent.Channel"),
+            "Mutex" => Some("std.concurrent.Mutex"),
+            "AtomicInt" => Some("std.concurrent.AtomicInt"),
+            "AtomicBool" => Some("std.concurrent.AtomicBool"),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -943,13 +951,23 @@ fn canonicalize_method_lookup_base_in_module(
     workspace: &HirWorkspaceSummary,
     package: &HirWorkspacePackage,
     module: &HirModuleSummary,
-    text: &str,
-) -> String {
-    split_simple_path(text)
-        .and_then(|path| lookup_symbol_path_in_module_context(workspace, package, module, &path))
-        .map(|symbol_ref| format!("{}.{}", symbol_ref.module_id, symbol_ref.symbol.name))
-        .or_else(|| canonical_ambient_type_root(text).map(str::to_string))
-        .unwrap_or_else(|| text.trim().to_string())
+    path: &[String],
+) -> Vec<String> {
+    lookup_symbol_path_in_module_context(workspace, package, module, path)
+        .map(|symbol_ref| {
+            let mut canonical = symbol_ref
+                .module_id
+                .split('.')
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            canonical.push(symbol_ref.symbol.name.clone());
+            canonical
+        })
+        .or_else(|| {
+            canonical_ambient_type_root(path)
+                .map(|canonical| canonical.split('.').map(str::to_string).collect::<Vec<_>>())
+        })
+        .unwrap_or_else(|| path.to_vec())
 }
 
 fn canonicalize_hir_path_in_module(
@@ -958,9 +976,13 @@ fn canonicalize_hir_path_in_module(
     module: &HirModuleSummary,
     path: &HirPath,
 ) -> HirPath {
-    let rendered = canonicalize_method_lookup_base_in_module(workspace, package, module, &path.render());
     HirPath {
-        segments: rendered.split('.').map(str::to_string).collect(),
+        segments: canonicalize_method_lookup_base_in_module(
+            workspace,
+            package,
+            module,
+            &path.segments,
+        ),
         span: path.span,
     }
 }
@@ -990,9 +1012,9 @@ pub(crate) fn canonicalize_hir_type_in_module(
 ) -> HirType {
     HirType {
         kind: match &ty.kind {
-            HirTypeKind::Path(path) => {
-                HirTypeKind::Path(canonicalize_hir_path_in_module(workspace, package, module, path))
-            }
+            HirTypeKind::Path(path) => HirTypeKind::Path(canonicalize_hir_path_in_module(
+                workspace, package, module, path,
+            )),
             HirTypeKind::Apply { base, args } => HirTypeKind::Apply {
                 base: canonicalize_hir_path_in_module(workspace, package, module, base),
                 args: args
@@ -1034,7 +1056,6 @@ pub(crate) fn canonicalize_hir_type_in_module(
 
 pub trait HirLocalTypeLookup {
     fn contains_local(&self, name: &str) -> bool;
-    fn type_text_of(&self, name: &str) -> Option<&str>;
     fn type_of(&self, _name: &str) -> Option<&HirType> {
         None
     }
@@ -1077,6 +1098,19 @@ fn split_simple_path(text: &str) -> Option<Vec<String>> {
     }
 
     (!segments.is_empty()).then_some(segments)
+}
+
+fn hir_path_matches(path: &HirPath, expected: &[&str]) -> bool {
+    path.segments
+        .iter()
+        .map(String::as_str)
+        .eq(expected.iter().copied())
+}
+
+fn hir_path_matches_any(path: &HirPath, expected: &[&[&str]]) -> bool {
+    expected
+        .iter()
+        .any(|candidate| hir_path_matches(path, candidate))
 }
 
 fn flatten_member_expr_path(expr: &HirExpr) -> Option<Vec<String>> {
@@ -1146,7 +1180,11 @@ fn build_symbol_result_type(
     explicit_args: &[HirType],
 ) -> HirType {
     let base = HirPath {
-        segments: vec![module_id.to_string(), symbol.name.clone()],
+        segments: module_id
+            .split('.')
+            .map(str::to_string)
+            .chain(std::iter::once(symbol.name.clone()))
+            .collect(),
         span: symbol.span,
     };
     let args = if explicit_args.is_empty() {
@@ -1233,8 +1271,7 @@ fn symbol_call_return_type(
     let package = workspace.package(symbol_ref.package_name)?;
     let module = package.module(symbol_ref.module_id)?;
     let return_type = symbol_ref.symbol.return_type.as_ref()?;
-    let canonical_return =
-        canonicalize_hir_type_in_module(workspace, package, module, return_type);
+    let canonical_return = canonicalize_hir_type_in_module(workspace, package, module, return_type);
     if explicit_args.is_empty() || symbol_ref.symbol.type_params.is_empty() {
         return Some(canonical_return);
     }
@@ -1265,7 +1302,9 @@ fn infer_call_target_return_hir_type<L: HirLocalTypeLookup>(
         .map(|arg| {
             let package = current_workspace_package_for_module(workspace, resolved_module)?;
             let module = package.module(&resolved_module.module_id)?;
-            Some(canonicalize_hir_type_in_module(workspace, package, module, &arg))
+            Some(canonicalize_hir_type_in_module(
+                workspace, package, module, &arg,
+            ))
         })
         .collect::<Option<Vec<_>>>()?;
     if let Some(symbol_ref) = lookup_symbol_path(workspace, resolved_module, &path) {
@@ -1304,8 +1343,12 @@ fn infer_member_access_hir_type<L: HirLocalTypeLookup>(
     let module = package.module(symbol_ref.module_id)?;
     let canonical_declared =
         canonicalize_hir_type_in_module(workspace, package, module, &declared_receiver);
-    let canonical_actual =
-        canonicalize_hir_type_in_module(workspace, package, module, hir_strip_reference_type(&base_ty));
+    let canonical_actual = canonicalize_hir_type_in_module(
+        workspace,
+        package,
+        module,
+        hir_strip_reference_type(&base_ty),
+    );
     let bindings = HirTypeBindingScope::from_names(symbol_ref.symbol.type_params.clone());
     let mut substitutions = HirTypeSubstitutions::new();
     if !hir_type_matches(
@@ -1316,7 +1359,11 @@ fn infer_member_access_hir_type<L: HirLocalTypeLookup>(
     ) {
         return Some(field.ty.clone());
     }
-    Some(substitute_type_params_hir(&field.ty, &bindings, &substitutions))
+    Some(substitute_type_params_hir(
+        &field.ty,
+        &bindings,
+        &substitutions,
+    ))
 }
 
 fn infer_index_hir_type<L: HirLocalTypeLookup>(
@@ -1327,11 +1374,24 @@ fn infer_index_hir_type<L: HirLocalTypeLookup>(
 ) -> Option<HirType> {
     let base_ty = infer_receiver_expr_type(workspace, resolved_module, locals, expr)?;
     match &hir_strip_reference_type(&base_ty).kind {
-        HirTypeKind::Apply { base, args } => match base.render().as_str() {
-            "List" | "Array" => args.first().cloned(),
-            "Map" => args.get(1).cloned(),
-            _ => None,
-        },
+        HirTypeKind::Apply { base, args }
+            if hir_path_matches_any(
+                base,
+                &[
+                    &["List"],
+                    &["Array"],
+                    &["std", "collections", "list", "List"],
+                    &["std", "collections", "array", "Array"],
+                ],
+            ) =>
+        {
+            args.first().cloned()
+        }
+        HirTypeKind::Apply { base, args }
+            if hir_path_matches_any(base, &[&["Map"], &["std", "collections", "map", "Map"]]) =>
+        {
+            args.get(1).cloned()
+        }
         _ => None,
     }
 }
@@ -1344,17 +1404,37 @@ fn infer_slice_hir_type<L: HirLocalTypeLookup>(
 ) -> Option<HirType> {
     let base_ty = infer_receiver_expr_type(workspace, resolved_module, locals, expr)?;
     match &hir_strip_reference_type(&base_ty).kind {
-        HirTypeKind::Apply { base, args } => match base.render().as_str() {
-            "List" => Some(ambient_apply_hir_type(
+        HirTypeKind::Apply { base, args }
+            if hir_path_matches_any(
+                base,
+                &[&["List"], &["std", "collections", "list", "List"]],
+            ) =>
+        {
+            Some(ambient_apply_hir_type(
                 &["List"],
-                vec![args.first().cloned().unwrap_or_else(|| builtin_hir_type("_"))],
-            )),
-            "Array" => Some(ambient_apply_hir_type(
+                vec![
+                    args.first()
+                        .cloned()
+                        .unwrap_or_else(|| builtin_hir_type("_")),
+                ],
+            ))
+        }
+        HirTypeKind::Apply { base, args }
+            if hir_path_matches_any(
+                base,
+                &[&["Array"], &["std", "collections", "array", "Array"]],
+            ) =>
+        {
+            Some(ambient_apply_hir_type(
                 &["Array"],
-                vec![args.first().cloned().unwrap_or_else(|| builtin_hir_type("_"))],
-            )),
-            _ => Some(base_ty),
-        },
+                vec![
+                    args.first()
+                        .cloned()
+                        .unwrap_or_else(|| builtin_hir_type("_")),
+                ],
+            ))
+        }
+        HirTypeKind::Apply { .. } => Some(base_ty),
         _ => Some(base_ty),
     }
 }
@@ -1377,10 +1457,7 @@ pub fn infer_receiver_expr_type<L: HirLocalTypeLookup>(
         HirExpr::Path { segments }
             if segments.len() == 1 && locals.contains_local(&segments[0]) =>
         {
-            locals
-                .type_of(&segments[0])
-                .cloned()
-                .or_else(|| locals.type_text_of(&segments[0]).and_then(|text| parse_hir_type(text).ok()))
+            locals.type_of(&segments[0]).cloned()
         }
         HirExpr::Path { segments } => {
             let symbol_ref = lookup_symbol_path(workspace, resolved_module, segments)?;
@@ -1389,13 +1466,15 @@ pub fn infer_receiver_expr_type<L: HirLocalTypeLookup>(
         HirExpr::Unary { op, expr }
             if matches!(op, HirUnaryOp::BorrowRead | HirUnaryOp::BorrowMut) =>
         {
-            infer_receiver_expr_type(workspace, resolved_module, locals, expr).map(|inner| HirType {
-                kind: HirTypeKind::Ref {
-                    lifetime: None,
-                    mutable: matches!(op, HirUnaryOp::BorrowMut),
-                    inner: Box::new(inner),
-                },
-                span: Span::default(),
+            infer_receiver_expr_type(workspace, resolved_module, locals, expr).map(|inner| {
+                HirType {
+                    kind: HirTypeKind::Ref {
+                        lifetime: None,
+                        mutable: matches!(op, HirUnaryOp::BorrowMut),
+                        inner: Box::new(inner),
+                    },
+                    span: Span::default(),
+                }
             })
         }
         HirExpr::Unary {
@@ -1435,14 +1514,23 @@ pub fn infer_receiver_expr_type<L: HirLocalTypeLookup>(
             subject, qualifier, ..
         } if split_simple_path(qualifier).is_some() => {
             let subject_ty = infer_receiver_expr_type(workspace, resolved_module, locals, subject)?;
-            let candidates =
-                lookup_method_candidates_for_hir_type(workspace, resolved_module, &subject_ty, qualifier);
+            let candidates = lookup_method_candidates_for_hir_type(
+                workspace,
+                resolved_module,
+                &subject_ty,
+                qualifier,
+            );
             match candidates.as_slice() {
                 [candidate] => candidate.symbol.return_type.as_ref().map(|return_type| {
-                    let bindings = placeholder_binding_scope_for_type(&candidate.declared_receiver_hir);
+                    let bindings =
+                        placeholder_binding_scope_for_type(&candidate.declared_receiver_hir);
                     let mut substitutions = HirTypeSubstitutions::new();
-                    let package = workspace.package(candidate.package_name).expect("candidate package");
-                    let module = package.module(candidate.module_id).expect("candidate module");
+                    let package = workspace
+                        .package(candidate.package_name)
+                        .expect("candidate package");
+                    let module = package
+                        .module(candidate.module_id)
+                        .expect("candidate module");
                     let canonical_declared = canonicalize_hir_type_in_module(
                         workspace,
                         package,
@@ -1478,20 +1566,32 @@ pub fn infer_receiver_expr_type<L: HirLocalTypeLookup>(
         HirExpr::Match { arms, .. } => {
             let inferred = arms
                 .iter()
-                .filter_map(|arm| infer_receiver_expr_type(workspace, resolved_module, locals, &arm.value))
+                .filter_map(|arm| {
+                    infer_receiver_expr_type(workspace, resolved_module, locals, &arm.value)
+                })
                 .collect::<Vec<_>>();
             let first = inferred.first()?.clone();
-            inferred.iter().all(|candidate| candidate == &first).then_some(first)
+            inferred
+                .iter()
+                .all(|candidate| candidate == &first)
+                .then_some(first)
         }
         HirExpr::Await { expr } => {
             let awaited = infer_receiver_expr_type(workspace, resolved_module, locals, expr)?;
             match &hir_strip_reference_type(&awaited).kind {
-                HirTypeKind::Apply { base, args } => match base.render().as_str() {
-                    "std.concurrent.Task" | "std.concurrent.Thread" | "Task" | "Thread" => {
-                        args.first().cloned()
-                    }
-                    _ => None,
-                },
+                HirTypeKind::Apply { base, args }
+                    if hir_path_matches_any(
+                        base,
+                        &[
+                            &["Task"],
+                            &["Thread"],
+                            &["std", "concurrent", "Task"],
+                            &["std", "concurrent", "Thread"],
+                        ],
+                    ) =>
+                {
+                    args.first().cloned()
+                }
                 _ => None,
             }
         }
@@ -1518,7 +1618,8 @@ pub fn match_name_resolves_to_zero_payload_variant<L: HirLocalTypeLookup>(
     if name.contains('.') {
         return false;
     }
-    let Some(subject_type) = infer_receiver_expr_type(workspace, resolved_module, locals, subject) else {
+    let Some(subject_type) = infer_receiver_expr_type(workspace, resolved_module, locals, subject)
+    else {
         return false;
     };
     let stripped = hir_strip_reference_type(&subject_type);
@@ -1595,17 +1696,23 @@ pub fn lower_parsed_module(
                 exported: symbol.exported,
                 is_async: symbol.is_async,
                 type_params: symbol.type_params.clone(),
-                where_clause: symbol.where_clause.clone(),
+                where_clause: symbol
+                    .where_clause
+                    .as_ref()
+                    .map(type_surface::lower_surface_where_clause),
                 params: symbol
                     .params
                     .iter()
                     .map(|param| HirParam {
                         mode: param.mode.as_ref().map(lower_param_mode),
                         name: param.name.clone(),
-                        ty: param.ty.clone(),
+                        ty: type_surface::lower_surface_type(&param.ty),
                     })
                     .collect(),
-                return_type: symbol.return_type.clone(),
+                return_type: symbol
+                    .return_type
+                    .as_ref()
+                    .map(type_surface::lower_surface_type),
                 behavior_attrs: symbol
                     .behavior_attrs
                     .iter()
@@ -1621,7 +1728,6 @@ pub fn lower_parsed_module(
                 body: lower_symbol_body(&symbol.body),
                 statements: lower_statements(&symbol.statements),
                 rollups: lower_rollups(&symbol.rollups),
-                surface_text: symbol.surface_text.clone(),
                 span: symbol.span,
             })
             .collect(),
@@ -1630,14 +1736,20 @@ pub fn lower_parsed_module(
             .iter()
             .map(|impl_decl| HirImplDecl {
                 type_params: impl_decl.type_params.clone(),
-                trait_path: impl_decl.trait_path.clone(),
-                target_type: impl_decl.target_type.clone(),
+                trait_path: impl_decl
+                    .trait_path
+                    .as_ref()
+                    .map(type_surface::lower_surface_trait_ref),
+                target_type: type_surface::lower_surface_type(&impl_decl.target_type),
                 assoc_types: impl_decl
                     .assoc_types
                     .iter()
                     .map(|assoc_type| HirImplAssocTypeBinding {
                         name: assoc_type.name.clone(),
-                        value_ty: assoc_type.value_ty.clone(),
+                        value_ty: assoc_type
+                            .value_ty
+                            .as_ref()
+                            .map(type_surface::lower_surface_type),
                         span: assoc_type.span,
                     })
                     .collect(),
@@ -1647,7 +1759,6 @@ pub fn lower_parsed_module(
                     .map(lower_trait_or_impl_method)
                     .collect(),
                 body_entries: impl_decl.body_entries.clone(),
-                surface_text: impl_decl.surface_text.clone(),
                 span: impl_decl.span,
             })
             .collect(),
@@ -2211,7 +2322,7 @@ fn lower_symbol_body(body: &arcana_syntax::SymbolBody) -> HirSymbolBody {
                 .iter()
                 .map(|field| HirField {
                     name: field.name.clone(),
-                    ty: field.ty.clone(),
+                    ty: type_surface::lower_surface_type(&field.ty),
                     span: field.span,
                 })
                 .collect(),
@@ -2221,7 +2332,7 @@ fn lower_symbol_body(body: &arcana_syntax::SymbolBody) -> HirSymbolBody {
                 .iter()
                 .map(|field| HirField {
                     name: field.name.clone(),
-                    ty: field.ty.clone(),
+                    ty: type_surface::lower_surface_type(&field.ty),
                     span: field.span,
                 })
                 .collect(),
@@ -2232,7 +2343,10 @@ fn lower_symbol_body(body: &arcana_syntax::SymbolBody) -> HirSymbolBody {
                 .iter()
                 .map(|variant| HirEnumVariant {
                     name: variant.name.clone(),
-                    payload: variant.payload.clone(),
+                    payload: variant
+                        .payload
+                        .as_ref()
+                        .map(type_surface::lower_surface_type),
                     span: variant.span,
                 })
                 .collect(),
@@ -2264,7 +2378,10 @@ fn lower_symbol_body(body: &arcana_syntax::SymbolBody) -> HirSymbolBody {
                 .iter()
                 .map(|assoc_type| HirTraitAssocType {
                     name: assoc_type.name.clone(),
-                    default_ty: assoc_type.default_ty.clone(),
+                    default_ty: assoc_type
+                        .default_ty
+                        .as_ref()
+                        .map(type_surface::lower_surface_type),
                     span: assoc_type.span,
                 })
                 .collect(),
@@ -2280,17 +2397,23 @@ fn lower_trait_or_impl_method(method: &arcana_syntax::SymbolDecl) -> HirSymbol {
         exported: method.exported,
         is_async: method.is_async,
         type_params: method.type_params.clone(),
-        where_clause: method.where_clause.clone(),
+        where_clause: method
+            .where_clause
+            .as_ref()
+            .map(type_surface::lower_surface_where_clause),
         params: method
             .params
             .iter()
             .map(|param| HirParam {
                 mode: param.mode.as_ref().map(lower_param_mode),
                 name: param.name.clone(),
-                ty: param.ty.clone(),
+                ty: type_surface::lower_surface_type(&param.ty),
             })
             .collect(),
-        return_type: method.return_type.clone(),
+        return_type: method
+            .return_type
+            .as_ref()
+            .map(type_surface::lower_surface_type),
         behavior_attrs: method
             .behavior_attrs
             .iter()
@@ -2306,7 +2429,6 @@ fn lower_trait_or_impl_method(method: &arcana_syntax::SymbolDecl) -> HirSymbol {
         body: lower_symbol_body(&method.body),
         statements: lower_statements(&method.statements),
         rollups: lower_rollups(&method.rollups),
-        surface_text: method.surface_text.clone(),
         span: method.span,
     }
 }
@@ -2467,7 +2589,10 @@ fn lower_expr(expr: &ParsedExpr) -> HirExpr {
         },
         ParsedExpr::GenericApply { expr, type_args } => HirExpr::GenericApply {
             expr: Box::new(lower_expr(expr)),
-            type_args: type_args.clone(),
+            type_args: type_args
+                .iter()
+                .map(type_surface::lower_surface_type)
+                .collect(),
         },
         ParsedExpr::QualifiedPhrase {
             subject,
@@ -2680,8 +2805,8 @@ mod tests {
         HirHeaderAttachment, HirMatchPattern, HirPhraseArg, HirStatement, HirStatementKind,
         HirSymbolBody, HirSymbolKind, HirTraitRef, HirType, HirUnaryOp, HirWhereClause,
         build_package_layout, build_package_summary, build_workspace_package,
-        build_workspace_summary, derive_source_module_path, lookup_method_candidates_for_type,
-        lookup_symbol_path, lower_module_text, resolve_workspace,
+        build_workspace_summary, derive_source_module_path, lookup_method_candidates_for_hir_type,
+        lookup_symbol_path, lower_module_text, parse_hir_type, resolve_workspace,
     };
 
     fn expr_is_path(expr: &HirExpr, name: &str) -> bool {
@@ -4350,8 +4475,9 @@ mod tests {
             .and_then(|package| package.module("app"))
             .expect("resolved app module should exist");
 
+        let receiver = parse_hir_type("Counter").expect("receiver should parse");
         let candidates =
-            lookup_method_candidates_for_type(&workspace, resolved_module, "Counter", "tap");
+            lookup_method_candidates_for_hir_type(&workspace, resolved_module, &receiver, "tap");
         assert!(
             candidates.is_empty(),
             "receiver-shaped free function should not appear as method candidate"
@@ -4583,8 +4709,9 @@ mod tests {
             .and_then(|package| package.module("app"))
             .expect("resolved app module should exist");
 
+        let receiver = parse_hir_type("Counter").expect("receiver should parse");
         let candidates =
-            lookup_method_candidates_for_type(&workspace, resolved_module, "Counter", "tap");
+            lookup_method_candidates_for_hir_type(&workspace, resolved_module, &receiver, "tap");
         assert_eq!(candidates.len(), 1);
     }
 
@@ -4665,8 +4792,9 @@ mod tests {
             .and_then(|package| package.module("app"))
             .expect("resolved app module should exist");
 
+        let receiver = parse_hir_type("Counter").expect("receiver should parse");
         let candidates =
-            lookup_method_candidates_for_type(&workspace, resolved_module, "Counter", "tap");
+            lookup_method_candidates_for_hir_type(&workspace, resolved_module, &receiver, "tap");
         assert_eq!(candidates.len(), 1);
     }
 
@@ -4729,8 +4857,9 @@ mod tests {
             .and_then(|package| package.module("app"))
             .expect("resolved app module should exist");
 
+        let receiver = parse_hir_type("core.Hidden").expect("receiver should parse");
         let candidates =
-            lookup_method_candidates_for_type(&workspace, resolved_module, "core.Hidden", "tap");
+            lookup_method_candidates_for_hir_type(&workspace, resolved_module, &receiver, "tap");
         assert!(
             candidates.is_empty(),
             "private dependency receiver type should not contribute method candidates"

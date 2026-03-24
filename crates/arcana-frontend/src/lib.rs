@@ -14,11 +14,10 @@ use arcana_hir::{
     HirAssignTarget, HirBinaryOp, HirChainStep, HirExpr, HirHeaderAttachment, HirImplDecl,
     HirLocalTypeLookup, HirMatchPattern, HirModule, HirModuleSummary, HirPhraseArg,
     HirResolvedModule, HirResolvedTarget, HirResolvedWorkspace, HirStatement, HirStatementKind,
-    HirSymbol, HirSymbolBody, HirSymbolKind, HirType, HirUnaryOp,
-    HirWorkspacePackage, HirWorkspaceSummary, collect_hir_type_refs,
-    current_workspace_package_for_module, infer_receiver_expr_type,
-    lookup_method_candidates_for_hir_type, lower_module_text,
-    match_name_resolves_to_zero_payload_variant, resolve_workspace,
+    HirSymbol, HirSymbolBody, HirSymbolKind, HirType, HirUnaryOp, HirWorkspacePackage,
+    HirWorkspaceSummary, collect_hir_type_refs, current_workspace_package_for_module,
+    infer_receiver_expr_type, lookup_method_candidates_for_hir_type, lower_module_text,
+    match_name_resolves_to_zero_payload_variant, render_symbol_signature, resolve_workspace,
     visible_package_root_for_module,
 };
 use arcana_ir::{is_runtime_main_entry_symbol, validate_runtime_main_entry_symbol};
@@ -26,13 +25,9 @@ use arcana_package::{
     WorkspaceFingerprints, WorkspaceGraph, load_workspace_hir as load_package_workspace_hir,
     load_workspace_hir_from_graph as load_package_workspace_hir_from_graph,
 };
-use arcana_syntax::{
-    BuiltinOwnershipClass, Span, builtin_ownership_class, is_builtin_type_name,
-};
+use arcana_syntax::{BuiltinOwnershipClass, Span, builtin_ownership_class, is_builtin_type_name};
 use semantic_types::{SemanticArena, SemanticLocalBindingId, TypeId};
-use surface::{
-    SurfaceSymbolUse, lookup_symbol_path, split_simple_path,
-};
+use surface::{SurfaceSymbolUse, lookup_symbol_path, split_simple_path};
 use trait_contracts::validate_impl_trait_where_requirements_structured;
 use type_resolve::{canonical_symbol_path, canonical_type_from_path};
 use type_validate::{
@@ -360,12 +355,7 @@ impl ValueScope {
                 inserted.push(object.local_name.clone());
             }
         }
-        self.insert_typed(
-            &owner.local_name,
-            false,
-            OwnershipClass::Copy,
-            None,
-        );
+        self.insert_typed(&owner.local_name, false, OwnershipClass::Copy, None);
         self.owner_member_types
             .insert(owner.local_name.clone(), owner_members.clone());
         inserted.push(owner.local_name.clone());
@@ -387,11 +377,6 @@ impl ValueScope {
 impl HirLocalTypeLookup for ValueScope {
     fn contains_local(&self, name: &str) -> bool {
         ValueScope::contains(self, name)
-    }
-
-    fn type_text_of(&self, name: &str) -> Option<&str> {
-        let _ = name;
-        None
     }
 
     fn type_of(&self, name: &str) -> Option<&HirType> {
@@ -796,7 +781,11 @@ fn validate_package_lang_item_semantics(
             };
             if let Some((prev_path, prev_line, prev_column)) = seen.insert(
                 lang_item.name.clone(),
-                (module_path.clone(), lang_item.span.line, lang_item.span.column),
+                (
+                    module_path.clone(),
+                    lang_item.span.line,
+                    lang_item.span.column,
+                ),
             ) {
                 diagnostics.push(Diagnostic {
                     path: module_path.clone(),
@@ -922,14 +911,10 @@ fn flatten_callable_expr_path(expr: &HirExpr) -> Option<Vec<String>> {
     }
 }
 
-fn format_bare_method_ambiguity(
-    ty: &HirType,
-    method_name: &str,
-    symbols: &[&HirSymbol],
-) -> String {
+fn format_bare_method_ambiguity(ty: &HirType, method_name: &str, symbols: &[&HirSymbol]) -> String {
     let rendered = symbols
         .iter()
-        .map(|symbol| symbol.surface_text.as_str())
+        .map(|symbol| render_symbol_signature(symbol))
         .collect::<Vec<_>>()
         .join(", ");
     format!(
@@ -944,10 +929,11 @@ fn lookup_method_symbol_for_type<'a>(
     ty: &HirType,
     method_name: &str,
 ) -> Result<Option<&'a HirSymbol>, String> {
-    let candidates = lookup_method_candidates_for_hir_type(workspace, resolved_module, ty, method_name)
-        .into_iter()
-        .map(|candidate| candidate.symbol)
-        .collect::<Vec<_>>();
+    let candidates =
+        lookup_method_candidates_for_hir_type(workspace, resolved_module, ty, method_name)
+            .into_iter()
+            .map(|candidate| candidate.symbol)
+            .collect::<Vec<_>>();
     match candidates.as_slice() {
         [] => Ok(None),
         [symbol] => Ok(Some(*symbol)),
@@ -1051,7 +1037,8 @@ fn validate_owner_activation_context(
     let Some(context) = owner_activation.context else {
         return;
     };
-    let Some(expected_context_type) = owner_activation.owner.activation_context_type.as_ref() else {
+    let Some(expected_context_type) = owner_activation.owner.activation_context_type.as_ref()
+    else {
         diagnostics.push(Diagnostic {
             path: module_path.to_path_buf(),
             line: span.line,
@@ -1069,8 +1056,12 @@ fn validate_owner_activation_context(
         return;
     };
     let mut semantics = SemanticArena::default();
-    let expected_context_id =
-        semantics.type_id_for_hir(workspace, resolved_module, type_scope, expected_context_type);
+    let expected_context_id = semantics.type_id_for_hir(
+        workspace,
+        resolved_module,
+        type_scope,
+        expected_context_type,
+    );
     let actual_context_id =
         semantics.type_id_for_hir(workspace, resolved_module, type_scope, &actual_context_type);
     if actual_context_id != expected_context_id {
@@ -1137,7 +1128,8 @@ fn validate_bare_method_resolution(
     if !is_identifier_text(qualifier) || qualifier == "call" {
         return;
     }
-    let Some(subject_ty) = infer_receiver_expr_type(workspace, resolved_module, scope, subject) else {
+    let Some(subject_ty) = infer_receiver_expr_type(workspace, resolved_module, scope, subject)
+    else {
         return;
     };
     if let Err(message) =
@@ -2784,7 +2776,9 @@ fn validate_module_semantics(
         .unwrap_or_else(|| package.root_dir.join("src").join("unknown.arc"));
 
     for lang_item in &module.lang_items {
-        let Some(symbol_ref) = lookup_symbol_path(workspace, resolved_module, lang_item.target.as_slice()) else {
+        let Some(symbol_ref) =
+            lookup_symbol_path(workspace, resolved_module, lang_item.target.as_slice())
+        else {
             diagnostics.push(Diagnostic {
                 path: module_path.clone(),
                 line: lang_item.span.line,
@@ -3427,7 +3421,8 @@ fn classify_object_lifecycle_method(
         span: method.span,
     };
     let expected_self = render_object_declared_type(object_symbol);
-    let actual_self = semantics.type_id_for_hir(workspace, resolved_module, object_scope, &receiver.ty);
+    let actual_self =
+        semantics.type_id_for_hir(workspace, resolved_module, object_scope, &receiver.ty);
     let self_id = semantics.type_id_for_hir(workspace, resolved_module, object_scope, &self_ty);
     let expected_self_id =
         semantics.type_id_for_hir(workspace, resolved_module, object_scope, &expected_self);
@@ -3722,12 +3717,7 @@ fn validate_symbol_value_semantics(
     if let HirSymbolBody::Owner { objects, exits } = &symbol.body {
         let owner_path = canonical_symbol_path(&resolved_module.module_id, &symbol.name);
         let mut owner_scope = scope.clone();
-        owner_scope.insert_typed(
-            &symbol.name,
-            false,
-            OwnershipClass::Copy,
-            None,
-        );
+        owner_scope.insert_typed(&symbol.name, false, OwnershipClass::Copy, None);
         let available_owner = AvailableOwnerBinding {
             local_name: symbol.name.clone(),
             owner_path,
@@ -7715,7 +7705,10 @@ mod tests {
                         "lang window_handle = AltWindow\n",
                     ),
                 ),
-                ("src/book.arc", "reexport desktop.types\nreexport desktop.extra\n"),
+                (
+                    "src/book.arc",
+                    "reexport desktop.types\nreexport desktop.extra\n",
+                ),
             ],
         );
 

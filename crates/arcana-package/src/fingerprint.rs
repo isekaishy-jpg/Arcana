@@ -2,8 +2,8 @@ use std::collections::{BTreeSet, HashMap};
 
 use arcana_hir::{
     HirDirectiveKind, HirImplDecl, HirPredicate, HirResolvedModule, HirResolvedPackage,
-    HirResolvedTarget, HirResolvedWorkspace, HirSymbol, HirSymbolBody, HirSymbolKind,
-    HirTraitRef, HirType, HirTypeKind, HirWhereClause, HirWorkspacePackage, HirWorkspaceSummary,
+    HirResolvedTarget, HirResolvedWorkspace, HirSymbol, HirSymbolBody, HirSymbolKind, HirTraitRef,
+    HirType, HirTypeKind, HirWhereClause, HirWorkspacePackage, HirWorkspaceSummary,
     collect_hir_type_refs, render_expr_fingerprint, render_symbol_fingerprint,
 };
 use arcana_syntax::is_builtin_type_name;
@@ -854,7 +854,13 @@ fn impl_decl_is_public(
     scope: &TypeScope,
     impl_decl: &HirImplDecl,
 ) -> bool {
-    if !surface_type_is_public(package, resolved_module, workspace, scope, &impl_decl.target_type) {
+    if !surface_type_is_public(
+        package,
+        resolved_module,
+        workspace,
+        scope,
+        &impl_decl.target_type,
+    ) {
         return false;
     }
     impl_decl.trait_path.as_ref().is_none_or(|trait_path| {
@@ -992,7 +998,12 @@ fn canonicalize_surface_type(
         ),
         HirTypeKind::Projection(projection) => format!(
             "{}.{}",
-            canonicalize_surface_trait_ref(workspace, resolved_module, scope, &projection.trait_ref),
+            canonicalize_surface_trait_ref(
+                workspace,
+                resolved_module,
+                scope,
+                &projection.trait_ref
+            ),
             projection.assoc
         ),
     }
@@ -1004,7 +1015,8 @@ fn canonicalize_surface_trait_ref(
     scope: &TypeScope,
     trait_ref: &HirTraitRef,
 ) -> String {
-    let base = canonicalize_surface_path(workspace, resolved_module, scope, &trait_ref.path.segments);
+    let base =
+        canonicalize_surface_path(workspace, resolved_module, scope, &trait_ref.path.segments);
     if trait_ref.args.is_empty() {
         base
     } else {
@@ -1049,7 +1061,12 @@ fn canonicalize_predicate(
             projection, value, ..
         } => format!(
             "{}.{} = {}",
-            canonicalize_surface_trait_ref(workspace, resolved_module, scope, &projection.trait_ref),
+            canonicalize_surface_trait_ref(
+                workspace,
+                resolved_module,
+                scope,
+                &projection.trait_ref
+            ),
             projection.assoc,
             canonicalize_surface_type(workspace, resolved_module, scope, value)
         ),
@@ -1087,7 +1104,7 @@ fn surface_trait_ref_is_public(
     scope: &TypeScope,
     trait_ref: &HirTraitRef,
 ) -> bool {
-    let mut refs = arcana_syntax::SurfaceRefs::default();
+    let mut refs = arcana_hir::HirSurfaceRefs::default();
     trait_ref.collect_refs(&mut refs);
     surface_refs_are_public(package, resolved_module, workspace, scope, &refs.paths)
 }
@@ -1113,7 +1130,6 @@ fn surface_refs_are_public(
     }
     true
 }
-
 
 fn is_ident_start(ch: char) -> bool {
     ch == '_' || ch.is_ascii_alphabetic()

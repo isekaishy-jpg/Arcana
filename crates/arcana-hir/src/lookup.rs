@@ -424,37 +424,29 @@ pub fn impl_target_is_public_from_package(
     module: &HirModuleSummary,
     target_type: &HirType,
 ) -> bool {
-    let base = hir_type_base_path(hir_strip_reference_type(target_type))
-        .map(|path| path.join("."))
-        .unwrap_or_else(|| target_type.render());
-    if builtin_type_info(&base).is_some() || canonical_ambient_type_root(&base).is_some() {
-        return true;
-    }
-    let Some(path) = split_simple_path(&base) else {
+    let Some(base_path) = hir_type_base_path(hir_strip_reference_type(target_type)) else {
         return true;
     };
-    let Some(symbol_ref) = lookup_symbol_path_in_module_context(workspace, package, module, &path)
+    if matches!(base_path.as_slice(), [name] if builtin_type_info(name).is_some())
+        || canonical_ambient_type_root(&base_path).is_some()
+    {
+        return true;
+    }
+    let Some(symbol_ref) =
+        lookup_symbol_path_in_module_context(workspace, package, module, &base_path)
     else {
         return false;
     };
     symbol_ref.package_name != package.summary.package_name || symbol_ref.symbol.exported
 }
 
-pub fn lookup_method_candidates_for_type<'a>(
-    workspace: &'a HirWorkspaceSummary,
-    resolved_module: &HirResolvedModule,
-    type_text: &str,
-    method_name: &str,
-) -> Vec<HirMethodCandidate<'a>> {
-    let Ok(wanted) = parse_hir_type(type_text) else {
-        return Vec::new();
-    };
-    lookup_method_candidates_for_hir_type(workspace, resolved_module, &wanted, method_name)
-}
-
 fn object_declared_receiver_type(module_id: &str, symbol: &HirSymbol) -> HirType {
     let base = HirPath {
-        segments: vec![module_id.to_string(), symbol.name.clone()],
+        segments: module_id
+            .split('.')
+            .map(str::to_string)
+            .chain(std::iter::once(symbol.name.clone()))
+            .collect(),
         span: symbol.span,
     };
     if symbol.type_params.is_empty() {
@@ -523,12 +515,8 @@ pub fn lookup_method_candidates_for_hir_type<'a>(
                     continue;
                 }
                 let declared_hir = object_declared_receiver_type(&module.module_id, symbol);
-                let canonical_declared = canonicalize_hir_type_in_module(
-                    workspace,
-                    package,
-                    module,
-                    &declared_hir,
-                );
+                let canonical_declared =
+                    canonicalize_hir_type_in_module(workspace, package, module, &declared_hir);
                 let bindings = placeholder_binding_scope_for_type(&declared_hir);
                 if !hir_type_matches(
                     &canonical_declared,
@@ -554,7 +542,6 @@ pub fn lookup_method_candidates_for_hir_type<'a>(
                         package_name: &package.summary.package_name,
                         module_id: &module.module_id,
                         symbol: method,
-                        declared_receiver_type: declared_hir.render(),
                         declared_receiver_hir: declared_hir.clone(),
                         routine_key,
                     });
@@ -599,7 +586,6 @@ pub fn lookup_method_candidates_for_hir_type<'a>(
                         package_name: &package.summary.package_name,
                         module_id: &module.module_id,
                         symbol: method,
-                        declared_receiver_type: impl_decl.target_type.render(),
                         declared_receiver_hir: impl_decl.target_type.clone(),
                         routine_key,
                     });

@@ -11,13 +11,13 @@ use arcana_hir::{
     HirAssignOp, HirAssignTarget, HirBinaryOp, HirChainConnector, HirChainIntroducer, HirChainStep,
     HirDirectiveKind, HirExpr, HirForewordApp, HirForewordArg, HirHeaderAttachment,
     HirLocalTypeLookup, HirMatchPattern, HirModule, HirModuleDependency, HirModuleSummary,
-    HirPackageSummary, HirPageRollup, HirPhraseArg, HirResolvedModule, HirResolvedWorkspace,
-    HirStatement, HirStatementKind, HirSymbol, HirSymbolBody, HirSymbolKind, HirUnaryOp,
-    HirWorkspacePackage, HirWorkspaceSummary, impl_target_is_public_from_package,
-    infer_receiver_expr_type_text, lookup_method_candidates_for_type, lookup_symbol_path,
+    HirPackageSummary, HirPageRollup, HirPath, HirPhraseArg, HirResolvedModule,
+    HirResolvedWorkspace, HirStatement, HirStatementKind, HirSymbol, HirSymbolBody, HirSymbolKind,
+    HirType, HirTypeKind, HirUnaryOp, HirWorkspacePackage, HirWorkspaceSummary,
+    impl_target_is_public_from_package, infer_receiver_expr_type,
+    lookup_method_candidates_for_hir_type, lookup_symbol_path,
     match_name_resolves_to_zero_payload_variant, render_symbol_signature,
-    routine_key_for_impl_method,
-    routine_key_for_object_method, routine_key_for_symbol,
+    routine_key_for_impl_method, routine_key_for_object_method, routine_key_for_symbol,
 };
 pub use entrypoint::{
     RUNTIME_MAIN_ENTRYPOINT_NAME, is_runtime_main_entry_symbol,
@@ -132,8 +132,8 @@ impl IrPackage {
 
 #[derive(Clone, Debug, Default)]
 struct LowerValueScope {
-    locals: BTreeMap<String, String>,
-    owner_member_types: BTreeMap<String, BTreeMap<String, String>>,
+    locals: BTreeMap<String, HirType>,
+    owner_member_types: BTreeMap<String, BTreeMap<String, HirType>>,
 }
 
 impl LowerValueScope {
@@ -141,39 +141,38 @@ impl LowerValueScope {
         self.locals.contains_key(name)
     }
 
-    fn type_text_of(&self, name: &str) -> Option<&str> {
-        self.locals.get(name).map(String::as_str)
+    fn type_of(&self, name: &str) -> Option<&HirType> {
+        self.locals.get(name)
     }
 
-    fn insert(&mut self, name: impl Into<String>, type_text: impl Into<String>) {
-        self.locals.insert(name.into(), type_text.into());
+    fn insert(&mut self, name: impl Into<String>, ty: HirType) {
+        self.locals.insert(name.into(), ty);
     }
 
-    fn owner_member_type_text(&self, owner_name: &str, member: &str) -> Option<&str> {
+    fn owner_member_type(&self, owner_name: &str, member: &str) -> Option<&HirType> {
         self.owner_member_types
             .get(owner_name)
             .and_then(|members| members.get(member))
-            .map(String::as_str)
     }
 
     fn activate_owner(
         &mut self,
         owner_local_name: &str,
         owner_path: &[String],
-        objects: &[(String, String)],
+        objects: &[(String, HirType)],
         explicit_binding: Option<&str>,
     ) {
-        let owner_type_text = format!("Owner<{}>", owner_path.join("."));
+        let owner_type = synthetic_hir_type(format!("Owner<{}>", owner_path.join(".")));
         let mut owner_members = BTreeMap::new();
-        self.insert(owner_local_name.to_string(), owner_type_text.clone());
-        for (local_name, type_text) in objects {
-            self.insert(local_name.clone(), type_text.clone());
-            owner_members.insert(local_name.clone(), type_text.clone());
+        self.insert(owner_local_name.to_string(), owner_type.clone());
+        for (local_name, ty) in objects {
+            self.insert(local_name.clone(), ty.clone());
+            owner_members.insert(local_name.clone(), ty.clone());
         }
         self.owner_member_types
             .insert(owner_local_name.to_string(), owner_members.clone());
         if let Some(binding) = explicit_binding {
-            self.insert(binding.to_string(), owner_type_text);
+            self.insert(binding.to_string(), owner_type);
             self.owner_member_types
                 .insert(binding.to_string(), owner_members);
         }
@@ -185,9 +184,49 @@ impl HirLocalTypeLookup for LowerValueScope {
         LowerValueScope::contains(self, name)
     }
 
-    fn type_text_of(&self, name: &str) -> Option<&str> {
-        LowerValueScope::type_text_of(self, name)
+    fn type_of(&self, name: &str) -> Option<&HirType> {
+        LowerValueScope::type_of(self, name)
     }
+}
+
+fn simple_hir_type(name: &str) -> HirType {
+    synthetic_hir_type(name.to_string())
+}
+
+fn synthetic_hir_type(name: String) -> HirType {
+    HirType {
+        kind: HirTypeKind::Path(HirPath {
+            segments: vec![name],
+            span: Default::default(),
+        }),
+        span: Default::default(),
+    }
+}
+
+fn pair_hir_type(left: HirType, right: HirType) -> HirType {
+    HirType {
+        kind: HirTypeKind::Apply {
+            base: HirPath {
+                segments: vec!["Pair".to_string()],
+                span: Default::default(),
+            },
+            args: vec![left, right],
+        },
+        span: Default::default(),
+    }
+}
+
+fn hir_path_matches(path: &HirPath, expected: &[&str]) -> bool {
+    path.segments
+        .iter()
+        .map(String::as_str)
+        .eq(expected.iter().copied())
+}
+
+fn hir_path_matches_any(path: &HirPath, expected: &[&[&str]]) -> bool {
+    expected
+        .iter()
+        .any(|candidate| hir_path_matches(path, candidate))
 }
 
 #[derive(Clone, Debug)]
@@ -593,7 +632,7 @@ fn resolved_symbol_routine_key(symbol_ref: &arcana_hir::HirResolvedSymbolRef<'_>
 }
 
 fn format_method_ambiguity(
-    type_text: &str,
+    ty: &HirType,
     method_name: &str,
     candidates: &[ResolvedMethod<'_>],
 ) -> String {
@@ -602,13 +641,15 @@ fn format_method_ambiguity(
         .map(|candidate| {
             format!(
                 "{} [{}]",
-                candidate.method.surface_text, candidate.routine_key
+                render_symbol_signature(candidate.method),
+                candidate.routine_key
             )
         })
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "bare-method qualifier `{method_name}` on `{type_text}` is ambiguous; candidates: {rendered}"
+        "bare-method qualifier `{method_name}` on `{}` is ambiguous; candidates: {rendered}",
+        ty.render()
     )
 }
 
@@ -630,18 +671,18 @@ struct ResolvedPhraseTarget {
 struct ResolvedOwnerActivation<'a> {
     owner_path: Vec<String>,
     owner_local_name: String,
-    objects: Vec<(String, String)>,
+    objects: Vec<(String, HirType)>,
     context: Option<&'a HirExpr>,
 }
 
 fn lookup_method_resolution_for_type<'a>(
     scope: &'a ResolvedRenderScope<'a>,
     workspace: &'a HirWorkspaceSummary,
-    type_text: &str,
+    ty: &HirType,
     method_name: &str,
 ) -> Result<Option<ResolvedMethod<'a>>, String> {
     let candidates =
-        lookup_method_candidates_for_type(workspace, scope.resolved_module, type_text, method_name)
+        lookup_method_candidates_for_hir_type(workspace, scope.resolved_module, ty, method_name)
             .into_iter()
             .map(|candidate| ResolvedMethod {
                 module_id: candidate.module_id.to_string(),
@@ -653,16 +694,17 @@ fn lookup_method_resolution_for_type<'a>(
     match candidates.as_slice() {
         [] => Ok(None),
         [resolved] => Ok(Some(resolved.clone())),
-        _ => Err(format_method_ambiguity(type_text, method_name, &candidates)),
+        _ => Err(format_method_ambiguity(ty, method_name, &candidates)),
     }
 }
 
 fn lookup_trait_method_resolution_from_where_clause<'a>(
     scope: &'a ResolvedRenderScope<'a>,
-    type_text: &str,
+    ty: &HirType,
     method_name: &str,
 ) -> Result<Vec<ResolvedMethod<'a>>, String> {
-    let wanted = erase_type_generics(strip_reference_prefix(type_text));
+    let rendered = ty.render();
+    let wanted = erase_type_generics(strip_reference_prefix(&rendered));
     if !is_identifier_text(&wanted) {
         return Ok(Vec::new());
     }
@@ -723,19 +765,36 @@ fn lower_behavior_attrs(symbol: &HirSymbol) -> BTreeMap<String, String> {
         .collect()
 }
 
-fn infer_iterable_binding_type_text(
+fn infer_iterable_binding_type(
     scope: &ResolvedRenderScope<'_>,
     iterable: &HirExpr,
-) -> Option<String> {
-    let iterable_ty = infer_expr_type_text(scope, iterable)?;
-    let (base, args) = parse_surface_type_application(strip_reference_prefix(&iterable_ty))?;
-    match base.as_str() {
-        "RangeInt" => Some("Int".to_string()),
-        "List" | "Array" => args.first().cloned(),
-        "Map" => match (args.first(), args.get(1)) {
-            (Some(key), Some(value)) => Some(format!("Pair[{key}, {value}]")),
-            _ => None,
-        },
+) -> Option<HirType> {
+    let iterable_ty = infer_expr_hir_type(scope, iterable)?;
+    match &iterable_ty.kind {
+        HirTypeKind::Path(path) if hir_path_matches(path, &["RangeInt"]) => {
+            Some(simple_hir_type("Int"))
+        }
+        HirTypeKind::Apply { base, args }
+            if hir_path_matches_any(
+                base,
+                &[
+                    &["List"],
+                    &["Array"],
+                    &["std", "collections", "list", "List"],
+                    &["std", "collections", "array", "Array"],
+                ],
+            ) =>
+        {
+            args.first().cloned()
+        }
+        HirTypeKind::Apply { base, args }
+            if hir_path_matches_any(base, &[&["Map"], &["std", "collections", "map", "Map"]]) =>
+        {
+            match (args.first(), args.get(1)) {
+                (Some(key), Some(value)) => Some(pair_hir_type(key.clone(), value.clone())),
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
@@ -775,7 +834,7 @@ fn resolve_bare_method_target(
     subject: &HirExpr,
     qualifier: &str,
 ) -> Option<ResolvedPhraseTarget> {
-    let subject_ty = infer_receiver_expr_type_text(
+    let subject_ty = infer_receiver_expr_type(
         scope.workspace,
         scope.resolved_module,
         &scope.value_scope,
@@ -805,7 +864,8 @@ fn resolve_bare_method_target(
         Ok(candidates) => {
             if candidates.len() > 1 {
                 scope.note_error(format!(
-                    "bare-method qualifier `{qualifier}` on `{subject_ty}` is ambiguous across trait bounds"
+                    "bare-method qualifier `{qualifier}` on `{}` is ambiguous across trait bounds",
+                    subject_ty.render()
                 ));
                 return None;
             }
@@ -831,20 +891,17 @@ fn resolve_bare_method_target(
     }
 }
 
-fn infer_expr_type_text(scope: &ResolvedRenderScope<'_>, expr: &HirExpr) -> Option<String> {
+fn infer_expr_hir_type(scope: &ResolvedRenderScope<'_>, expr: &HirExpr) -> Option<HirType> {
     if let HirExpr::MemberAccess { expr, member } = expr {
         if let HirExpr::Path { segments } = expr.as_ref() {
             if segments.len() == 1 && scope.value_scope.contains(&segments[0]) {
-                if let Some(type_text) = scope
-                    .value_scope
-                    .owner_member_type_text(&segments[0], member)
-                {
-                    return Some(type_text.to_string());
+                if let Some(ty) = scope.value_scope.owner_member_type(&segments[0], member) {
+                    return Some(ty.clone());
                 }
             }
         }
     }
-    if let Some(inferred) = infer_receiver_expr_type_text(
+    if let Some(inferred) = infer_receiver_expr_type(
         scope.workspace,
         scope.resolved_module,
         &scope.value_scope,
@@ -853,10 +910,9 @@ fn infer_expr_type_text(scope: &ResolvedRenderScope<'_>, expr: &HirExpr) -> Opti
         return Some(inferred);
     }
     match expr {
-        HirExpr::Pair { left, right } => Some(format!(
-            "Pair[{}, {}]",
-            infer_expr_type_text(scope, left)?,
-            infer_expr_type_text(scope, right)?
+        HirExpr::Pair { left, right } => Some(pair_hir_type(
+            infer_expr_hir_type(scope, left)?,
+            infer_expr_hir_type(scope, right)?,
         )),
         _ => None,
     }
@@ -1126,7 +1182,18 @@ fn resolve_owner_activation_expr<'a>(
         owner_local_name: resolved.symbol.name.clone(),
         objects: objects
             .iter()
-            .map(|object| (object.local_name.clone(), object.type_path.join(".")))
+            .map(|object| {
+                (
+                    object.local_name.clone(),
+                    HirType {
+                        kind: HirTypeKind::Path(HirPath {
+                            segments: object.type_path.clone(),
+                            span: object.span,
+                        }),
+                        span: object.span,
+                    },
+                )
+            })
             .collect(),
         context: args.first().and_then(|arg| match arg {
             HirPhraseArg::Positional(expr) => Some(expr),
@@ -1621,8 +1688,8 @@ fn lower_exec_stmt_resolved(
                 name: name.clone(),
                 value: lower_exec_expr_resolved(value, scope),
             };
-            if let Some(type_text) = infer_expr_type_text(scope, value) {
-                scope.value_scope.insert(name.clone(), type_text);
+            if let Some(ty) = infer_expr_hir_type(scope, value) {
+                scope.value_scope.insert(name.clone(), ty);
             }
             lowered
         }
@@ -1725,8 +1792,8 @@ fn lower_exec_stmt_resolved(
             body,
         } => {
             let mut body_scope = scope.clone();
-            if let Some(type_text) = infer_iterable_binding_type_text(scope, iterable) {
-                body_scope.value_scope.insert(binding.clone(), type_text);
+            if let Some(ty) = infer_iterable_binding_type(scope, iterable) {
+                body_scope.value_scope.insert(binding.clone(), ty);
             }
             let body = lower_exec_stmt_block_resolved(body, &mut body_scope)?;
             ExecStmt::For {
@@ -1760,8 +1827,8 @@ fn lower_exec_stmt_resolved(
             };
             if matches!(op, HirAssignOp::Assign) {
                 if let HirAssignTarget::Name { text } = target {
-                    if let Some(type_text) = infer_expr_type_text(scope, value) {
-                        scope.value_scope.insert(text.clone(), type_text);
+                    if let Some(ty) = infer_expr_hir_type(scope, value) {
+                        scope.value_scope.insert(text.clone(), ty);
                     }
                 }
             }
@@ -1963,7 +2030,10 @@ fn lower_owner_decl_resolved(
     let scope = ResolvedRenderScope::new(
         workspace,
         resolved_module,
-        symbol.where_clause.as_ref().map(|where_clause| where_clause.render()),
+        symbol
+            .where_clause
+            .as_ref()
+            .map(|where_clause| where_clause.render()),
         &symbol.type_params,
     );
     Ok(Some(IrOwnerDecl {
@@ -2057,11 +2127,16 @@ fn lower_routine_resolved(
     let mut scope = ResolvedRenderScope::new(
         workspace,
         resolved_module,
-        symbol.where_clause.as_ref().map(|where_clause| where_clause.render()),
+        symbol
+            .where_clause
+            .as_ref()
+            .map(|where_clause| where_clause.render()),
         &symbol.type_params,
     );
     for param in &symbol.params {
-        scope.value_scope.insert(param.name.clone(), param.ty.render());
+        scope
+            .value_scope
+            .insert(param.name.clone(), param.ty.clone());
     }
     let routine = IrRoutine {
         module_id: module_id.to_string(),
@@ -2374,7 +2449,9 @@ pub fn lower_workspace_package_with_resolution(
                     module
                         .lang_items
                         .iter()
-                        .map(|item| render_lang_item_row(&module.module_id, &item.name, &item.target))
+                        .map(|item| {
+                            render_lang_item_row(&module.module_id, &item.name, &item.target)
+                        })
                         .collect()
                 });
             (module.module_id.clone(), rows)
