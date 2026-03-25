@@ -7,24 +7,24 @@ use std::ptr::null_mut;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use font8x8::{BASIC_FONTS, UnicodeFonts};
+use font8x8::{UnicodeFonts, BASIC_FONTS};
 use windows_sys::Win32::Devices::HumanInterfaceDevice::{
     HID_USAGE_GENERIC_MOUSE, HID_USAGE_PAGE_GENERIC,
 };
 use windows_sys::Win32::Foundation::{
     GlobalFree, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
 };
-use windows_sys::Win32::Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute};
+use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE};
 use windows_sys::Win32::Graphics::Gdi::{
-    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, ClientToScreen, DIB_RGB_COLORS, EndPaint,
-    EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITORINFO,
-    MONITORINFOEXW, MonitorFromWindow, PAINTSTRUCT, ReleaseDC, SRCCOPY, StretchDIBits,
+    BeginPaint, ClientToScreen, EndPaint, EnumDisplayMonitors, GetMonitorInfoW, MonitorFromWindow,
+    ReleaseDC, StretchDIBits, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HDC, HMONITOR,
+    MONITORINFO, MONITORINFOEXW, MONITOR_DEFAULTTONEAREST, PAINTSTRUCT, SRCCOPY,
 };
 use windows_sys::Win32::Media::Audio::{
-    HWAVEOUT, WAVE_FORMAT_PCM, WAVE_FORMAT_QUERY, WAVE_MAPPER, WAVEFORMATEX, WAVEHDR,
-    WHDR_BEGINLOOP, WHDR_DONE, WHDR_ENDLOOP, waveOutClose, waveOutGetErrorTextW,
-    waveOutGetPosition, waveOutOpen, waveOutPause, waveOutPrepareHeader, waveOutReset,
-    waveOutRestart, waveOutSetVolume, waveOutUnprepareHeader, waveOutWrite,
+    waveOutClose, waveOutGetErrorTextW, waveOutGetPosition, waveOutOpen, waveOutPause,
+    waveOutPrepareHeader, waveOutReset, waveOutRestart, waveOutSetVolume, waveOutUnprepareHeader,
+    waveOutWrite, HWAVEOUT, WAVEFORMATEX, WAVEHDR, WAVE_FORMAT_PCM, WAVE_FORMAT_QUERY, WAVE_MAPPER,
+    WHDR_BEGINLOOP, WHDR_DONE, WHDR_ENDLOOP,
 };
 use windows_sys::Win32::Media::{MMSYSERR_NOERROR, MMTIME, TIME_SAMPLES};
 use windows_sys::Win32::System::DataExchange::{
@@ -32,56 +32,56 @@ use windows_sys::Win32::System::DataExchange::{
     RegisterClipboardFormatW, SetClipboardData,
 };
 use windows_sys::Win32::System::LibraryLoader::{
-    GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-    GetModuleHandleExW,
+    GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+    GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
 };
 use windows_sys::Win32::System::Memory::{
-    GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
+    GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE,
 };
 use windows_sys::Win32::System::Ole::CF_UNICODETEXT;
-use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
+use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
 use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI};
 use windows_sys::Win32::UI::Input::Ime::{
-    CANDIDATEFORM, CFS_CANDIDATEPOS, CFS_FORCE_POSITION, COMPOSITIONFORM, GCS_COMPSTR,
-    GCS_CURSORPOS, GCS_RESULTSTR, HIMC, ImmGetCompositionStringW, ImmGetContext, ImmReleaseContext,
-    ImmSetCandidateWindow, ImmSetCompositionWindow,
+    ImmGetCompositionStringW, ImmGetContext, ImmReleaseContext, ImmSetCandidateWindow,
+    ImmSetCompositionWindow, CANDIDATEFORM, CFS_CANDIDATEPOS, CFS_FORCE_POSITION, COMPOSITIONFORM,
+    GCS_COMPSTR, GCS_CURSORPOS, GCS_RESULTSTR, HIMC,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    MAPVK_VK_TO_CHAR, MAPVK_VSC_TO_VK_EX, MapVirtualKeyW, TME_LEAVE, TRACKMOUSEEVENT,
-    TrackMouseEvent,
+    MapVirtualKeyW, TrackMouseEvent, MAPVK_VK_TO_CHAR, MAPVK_VSC_TO_VK_EX, TME_LEAVE,
+    TRACKMOUSEEVENT,
 };
 use windows_sys::Win32::UI::Input::{
-    GetRawInputData, HRAWINPUT, MOUSE_MOVE_RELATIVE, RAWINPUT, RAWINPUTDEVICE, RID_INPUT,
-    RIDEV_INPUTSINK, RIDEV_REMOVE, RIM_TYPEKEYBOARD, RIM_TYPEMOUSE, RegisterRawInputDevices,
+    GetRawInputData, RegisterRawInputDevices, HRAWINPUT, MOUSE_MOVE_RELATIVE, RAWINPUT,
+    RAWINPUTDEVICE, RIDEV_INPUTSINK, RIDEV_REMOVE, RID_INPUT, RIM_TYPEKEYBOARD, RIM_TYPEMOUSE,
 };
 use windows_sys::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    AdjustWindowRectEx, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, ClipCursor,
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, FLASHW_STOP, FLASHW_TRAY,
-    FLASHWINFO, FlashWindowEx, GWL_EXSTYLE, GWL_STYLE, GWLP_USERDATA, GetClientRect,
-    GetWindowLongPtrW, GetWindowRect, HCURSOR, HTCLIENT, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST,
-    IDC_ARROW, IDC_CROSS, IDC_HAND, IDC_HELP, IDC_IBEAM, IDC_NO, IDC_SIZEALL, IDC_SIZENESW,
-    IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, IDC_WAIT, IsWindow, LWA_ALPHA, LoadCursorW, MINMAXINFO,
-    MSG, MWMO_INPUTAVAILABLE, MsgWaitForMultipleObjectsEx, PM_NOREMOVE, PM_REMOVE, PeekMessageW,
-    PostMessageW, QS_ALLINPUT, RegisterClassW, SIZE_MAXIMIZED, SIZE_MINIMIZED, SW_HIDE,
-    SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOOWNERZORDER, SWP_NOSIZE, SetCursor, SetCursorPos, SetLayeredWindowAttributes,
-    SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage, WM_CHAR,
+    AdjustWindowRectEx, ClipCursor, CreateWindowExW, DefWindowProcW, DestroyWindow,
+    DispatchMessageW, FlashWindowEx, GetClientRect, GetWindowLongPtrW, GetWindowRect, IsWindow,
+    LoadCursorW, MsgWaitForMultipleObjectsEx, PeekMessageW, PostMessageW, RegisterClassW,
+    SetCursor, SetCursorPos, SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos,
+    SetWindowTextW, ShowWindow, TranslateMessage, WaitMessage, CREATESTRUCTW, CS_HREDRAW,
+    CS_VREDRAW, CW_USEDEFAULT, FLASHWINFO, FLASHW_STOP, FLASHW_TRAY, GWLP_USERDATA, GWL_EXSTYLE,
+    GWL_STYLE, HCURSOR, HTCLIENT, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST, IDC_ARROW, IDC_CROSS,
+    IDC_HAND, IDC_HELP, IDC_IBEAM, IDC_NO, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE,
+    IDC_SIZEWE, IDC_WAIT, LWA_ALPHA, MINMAXINFO, MSG, MWMO_INPUTAVAILABLE, PM_NOREMOVE, PM_REMOVE,
+    QS_ALLINPUT, SIZE_MAXIMIZED, SIZE_MINIMIZED, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOOWNERZORDER, SWP_NOSIZE, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, WM_CHAR,
     WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_DROPFILES, WM_GETMINMAXINFO, WM_IME_COMPOSITION,
     WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_INPUT, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS,
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
     WM_MOVE, WM_NCCREATE, WM_NCDESTROY, WM_NULL, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP,
     WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_THEMECHANGED,
     WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSW, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_MAXIMIZEBOX,
-    WS_OVERLAPPEDWINDOW, WS_SIZEBOX, WaitMessage,
+    WS_OVERLAPPEDWINDOW, WS_SIZEBOX,
 };
 
 use crate::{
+    common_named_key_code, common_named_mouse_button_code, ensure_audio_buffer_matches_device,
     BufferedAppFrame, BufferedEvent, BufferedFrameInput, BufferedHost, RuntimeAppFrameHandle,
     RuntimeAppSessionHandle, RuntimeAudioBufferHandle, RuntimeAudioDeviceHandle,
     RuntimeAudioPlaybackHandle, RuntimeEventRecord, RuntimeHost, RuntimeImageHandle,
-    RuntimeWakeHandle, RuntimeWindowHandle, common_named_key_code, common_named_mouse_button_code,
-    ensure_audio_buffer_matches_device,
+    RuntimeWakeHandle, RuntimeWindowHandle,
 };
 
 const WINDOW_CLASS_NAME: &str = "ArcanaNativeRuntimeWindow";
@@ -887,13 +887,21 @@ impl NativeProcessHost {
                 usUsagePage: HID_USAGE_PAGE_GENERIC,
                 usUsage: HID_USAGE_GENERIC_MOUSE,
                 dwFlags: flags,
-                hwndTarget: if flags == RIDEV_REMOVE { null_mut() } else { hwnd },
+                hwndTarget: if flags == RIDEV_REMOVE {
+                    null_mut()
+                } else {
+                    hwnd
+                },
             },
             RAWINPUTDEVICE {
                 usUsagePage: HID_USAGE_PAGE_GENERIC,
                 usUsage: 0x06,
                 dwFlags: flags,
-                hwndTarget: if flags == RIDEV_REMOVE { null_mut() } else { hwnd },
+                hwndTarget: if flags == RIDEV_REMOVE {
+                    null_mut()
+                } else {
+                    hwnd
+                },
             },
         ];
         if unsafe {
@@ -1362,7 +1370,8 @@ impl RuntimeHost for NativeProcessHost {
 
     fn window_id(&mut self, window: RuntimeWindowHandle) -> Result<i64, String> {
         self.window_ref(window)?;
-        i64::try_from(window.0).map_err(|_| format!("Window handle `{}` does not fit in Int", window.0))
+        i64::try_from(window.0)
+            .map_err(|_| format!("Window handle `{}` does not fit in Int", window.0))
     }
 
     fn window_position(&mut self, window: RuntimeWindowHandle) -> Result<(i64, i64), String> {
@@ -3356,7 +3365,11 @@ fn read_ime_cursor_position(himc: HIMC) -> Result<i64, String> {
 }
 
 fn theme_code_from_registry_value(light_theme: u32) -> i64 {
-    if light_theme == 0 { 2 } else { 1 }
+    if light_theme == 0 {
+        2
+    } else {
+        1
+    }
 }
 
 fn current_windows_theme_code() -> i64 {
@@ -4655,23 +4668,23 @@ mod tests {
     use std::ptr::null_mut;
 
     use super::{
-        DEVICE_EVENTS_ALWAYS, DEVICE_EVENTS_NEVER, DEVICE_EVENTS_WHEN_FOCUSED,
-        EVENT_ABOUT_TO_WAIT, EVENT_APP_RESUMED, EVENT_APP_SUSPENDED, EVENT_RAW_MOUSE_MOTION,
-        EVENT_TEXT_COMPOSITION_CANCELLED, EVENT_TEXT_COMPOSITION_COMMITTED,
-        EVENT_TEXT_COMPOSITION_STARTED, EVENT_TEXT_INPUT, EVENT_WINDOW_CLOSE_REQUESTED,
-        EVENT_WINDOW_FOCUSED, EVENT_WINDOW_MOVED, EVENT_WINDOW_REDRAW_REQUESTED,
-        EVENT_WINDOW_RESIZED, NativeAudioPlayback, NativeWindowState, RIDEV_INPUTSINK,
-        RuntimeAudioDeviceHandle, RuntimeAudioPlaybackHandle, RuntimeHost,
         clipboard_payload_from_bytes, decode_bmp_bytes, decode_clipboard_bytes_payload,
         decode_wav_bytes, native_window_class_name_text, release_playback_resources,
+        NativeAudioPlayback, NativeWindowState, RuntimeAudioDeviceHandle,
+        RuntimeAudioPlaybackHandle, RuntimeHost, DEVICE_EVENTS_ALWAYS, DEVICE_EVENTS_NEVER,
+        DEVICE_EVENTS_WHEN_FOCUSED, EVENT_ABOUT_TO_WAIT, EVENT_APP_RESUMED, EVENT_APP_SUSPENDED,
+        EVENT_RAW_MOUSE_MOTION, EVENT_TEXT_COMPOSITION_CANCELLED, EVENT_TEXT_COMPOSITION_COMMITTED,
+        EVENT_TEXT_COMPOSITION_STARTED, EVENT_TEXT_INPUT, EVENT_WINDOW_CLOSE_REQUESTED,
+        EVENT_WINDOW_FOCUSED, EVENT_WINDOW_MOVED, EVENT_WINDOW_REDRAW_REQUESTED,
+        EVENT_WINDOW_RESIZED, RIDEV_INPUTSINK,
     };
     use crate::{BufferedEvent, NativeProcessHost};
     use windows_sys::Win32::Foundation::HWND;
     use windows_sys::Win32::Media::Audio::{HWAVEOUT, WHDR_DONE};
     use windows_sys::Win32::UI::Input::Ime::{
-        CPS_COMPLETE, GCS_COMPSTR, GCS_RESULTSTR, HIMC, ImmAssociateContext, ImmCreateContext,
-        ImmDestroyContext, ImmGetContext, ImmNotifyIME, ImmReleaseContext,
-        ImmSetCompositionStringW, NI_COMPOSITIONSTR, SCS_SETSTR,
+        ImmAssociateContext, ImmCreateContext, ImmDestroyContext, ImmGetContext, ImmNotifyIME,
+        ImmReleaseContext, ImmSetCompositionStringW, CPS_COMPLETE, GCS_COMPSTR, GCS_RESULTSTR,
+        HIMC, NI_COMPOSITIONSTR, SCS_SETSTR,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         GetWindowTextLengthW, GetWindowTextW, SendMessageW, WM_CHAR, WM_CLOSE, WM_IME_COMPOSITION,
@@ -4946,16 +4959,13 @@ mod tests {
 
         RuntimeHost::window_close(&mut host, window).expect("explicit close should succeed");
         assert!(host.window_ref(window).is_err());
-        assert!(
-            !RuntimeHost::window_alive(&mut host, window)
-                .expect("closed window should report not alive")
-        );
-        assert!(
-            host.session_ref(session)
-                .expect("session should still exist")
-                .windows
-                .is_empty()
-        );
+        assert!(!RuntimeHost::window_alive(&mut host, window)
+            .expect("closed window should report not alive"));
+        assert!(host
+            .session_ref(session)
+            .expect("session should still exist")
+            .windows
+            .is_empty());
 
         let frame = RuntimeHost::events_session_pump(&mut host, session).expect("session pump");
         let mut kinds = Vec::new();
@@ -4991,13 +5001,15 @@ mod tests {
             kinds.push(event.kind);
         }
 
-        assert_eq!(kinds, vec![EVENT_WINDOW_CLOSE_REQUESTED, EVENT_ABOUT_TO_WAIT]);
-        assert!(
-            host.session_ref(session)
-                .expect("session should still exist")
-                .windows
-                .is_empty()
+        assert_eq!(
+            kinds,
+            vec![EVENT_WINDOW_CLOSE_REQUESTED, EVENT_ABOUT_TO_WAIT]
         );
+        assert!(host
+            .session_ref(session)
+            .expect("session should still exist")
+            .windows
+            .is_empty());
         assert!(host.window_ref(window).is_err());
     }
 
@@ -5303,10 +5315,8 @@ mod tests {
         let window =
             RuntimeHost::window_open(&mut host, "Arcana Desktop Proof :: Overview", 320, 200)
                 .expect("window should open");
-        assert!(
-            !RuntimeHost::window_text_input_enabled(&mut host, window)
-                .expect("text input state should be readable")
-        );
+        assert!(!RuntimeHost::window_text_input_enabled(&mut host, window)
+            .expect("text input state should be readable"));
         RuntimeHost::window_close(&mut host, window).expect("window should close");
     }
 

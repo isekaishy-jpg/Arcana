@@ -3,6 +3,7 @@ use arcana_ir::IrPackage;
 use crate::artifact::{AOT_INTERNAL_FORMAT, AotPackageArtifact};
 use crate::codec::render_package_artifact;
 use crate::compile::compile_package;
+use crate::validate::validate_package_artifact;
 use crate::windows_bundle::emit_windows_exe_bundle;
 use crate::windows_dll::emit_windows_dll_bundle;
 
@@ -69,6 +70,7 @@ pub fn emit_package_with_context(
     match target {
         AotEmitTarget::InternalArtifact => {
             let artifact = compile_package(package);
+            validate_package_artifact(&artifact)?;
             let primary_artifact_body = render_package_artifact(&artifact);
             Ok(AotPackageEmission {
                 target,

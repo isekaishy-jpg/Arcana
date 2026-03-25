@@ -3,9 +3,9 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 
 use super::{
-    RuntimeExecutionState, RuntimeHost, RuntimePackagePlan, RuntimeRoutinePlan, RuntimeValue,
     execute_routine_with_state, routine_plan::render_runtime_signature_text,
-    validate_runtime_requirements_supported,
+    validate_runtime_requirements_supported, RuntimeExecutionState, RuntimeHost,
+    RuntimePackagePlan, RuntimeRoutinePlan, RuntimeValue,
 };
 
 pub const RUNTIME_JSON_ABI_FORMAT: &str = "arcana-runtime-json-abi-v1";

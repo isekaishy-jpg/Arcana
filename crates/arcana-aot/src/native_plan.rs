@@ -3,6 +3,7 @@ use arcana_ir::IrPackage;
 use crate::artifact::AotPackageArtifact;
 use crate::emit::{AotEmitContext, AotEmitTarget, AotRuntimeBinding};
 use crate::native_abi::{NativeExport, collect_native_exports};
+use crate::validate::validate_package_artifact;
 use crate::{compile_package, render_package_artifact};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -33,6 +34,7 @@ pub fn build_native_package_plan(
         )
     })?;
     let artifact = compile_package(package);
+    validate_package_artifact(&artifact)?;
     let artifact_text = render_package_artifact(&artifact);
     let launch = match target {
         AotEmitTarget::WindowsExeBundle => NativeLaunchPlan::Executable {

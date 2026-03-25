@@ -374,7 +374,13 @@ pub fn execute_build_with_context(
             root_package,
             linked_packages,
             context,
-        )?;
+        )
+        .map_err(|e| {
+            format!(
+                "failed to emit `{}` for target `{}`: {e}",
+                status.member, status.target
+            )
+        })?;
         let artifact = &emission.artifact;
         if status.format != emission.target.format() {
             return Err(format!(

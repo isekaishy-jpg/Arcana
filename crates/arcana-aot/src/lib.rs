@@ -46,7 +46,7 @@ mod tests {
     use arcana_ir::{
         ExecExpr, ExecPageRollup, ExecPhraseQualifierKind, ExecStmt, IrEntrypoint, IrModule,
         IrPackage, IrPackageModule, IrRoutine, IrRoutineParam, IrRoutineType,
-        parse_routine_type_text,
+        parse_routine_type_text, render_routine_signature_text,
     };
     use std::collections::BTreeMap;
 
@@ -85,6 +85,52 @@ mod tests {
             .collect()
     }
 
+    fn sync_exported_function_surface_rows(package: &mut IrPackage) {
+        let exported_routines = package
+            .routines
+            .iter()
+            .filter(|routine| routine.exported && routine.impl_target_type.is_none())
+            .collect::<Vec<_>>();
+        package.exported_surface_rows = exported_routines
+            .iter()
+            .map(|routine| {
+                format!(
+                    "module={}:export:{}:{}",
+                    routine.module_id,
+                    routine.symbol_kind,
+                    render_routine_signature_text(
+                        &routine.symbol_kind,
+                        &routine.symbol_name,
+                        routine.is_async,
+                        &routine.type_params,
+                        &routine.params,
+                        routine.return_type.as_ref(),
+                    )
+                )
+            })
+            .collect();
+        for module in &mut package.modules {
+            module.exported_surface_rows = exported_routines
+                .iter()
+                .filter(|routine| routine.module_id == module.module_id)
+                .map(|routine| {
+                    format!(
+                        "export:{}:{}",
+                        routine.symbol_kind,
+                        render_routine_signature_text(
+                            &routine.symbol_kind,
+                            &routine.symbol_name,
+                            routine.is_async,
+                            &routine.type_params,
+                            &routine.params,
+                            routine.return_type.as_ref(),
+                        )
+                    )
+                })
+                .collect();
+        }
+    }
+
     fn base_surface_validation_artifact() -> AotPackageArtifact {
         AotPackageArtifact {
             format: AOT_INTERNAL_FORMAT.to_string(),
@@ -97,7 +143,25 @@ mod tests {
             exported_surface_rows: vec!["module=tool:export:fn:fn main() -> Int:".to_string()],
             runtime_requirements: Vec::new(),
             entrypoints: Vec::new(),
-            routines: Vec::new(),
+            routines: vec![AotRoutineArtifact {
+                module_id: "tool".to_string(),
+                routine_key: "tool#fn-0".to_string(),
+                symbol_name: "main".to_string(),
+                symbol_kind: "fn".to_string(),
+                exported: true,
+                is_async: false,
+                type_params: Vec::new(),
+                behavior_attrs: BTreeMap::new(),
+                params: Vec::new(),
+                return_type: test_return_type("fn main() -> Int:"),
+                intrinsic_impl: None,
+                impl_target_type: None,
+                impl_trait_path: None,
+                availability: Vec::new(),
+                foreword_rows: Vec::new(),
+                rollups: Vec::new(),
+                statements: Vec::new(),
+            }],
             owners: Vec::new(),
             modules: vec![AotPackageModuleArtifact {
                 module_id: "tool".to_string(),
@@ -193,7 +257,7 @@ mod tests {
 
     #[test]
     fn emit_package_internal_artifact_matches_rendered_body() {
-        let package = IrPackage {
+        let mut package = IrPackage {
             package_name: "tool".to_string(),
             root_module_id: "tool".to_string(),
             direct_deps: Vec::new(),
@@ -236,6 +300,7 @@ mod tests {
             owners: Vec::new(),
         };
 
+        sync_exported_function_surface_rows(&mut package);
         let emission =
             emit_package(AotEmitTarget::InternalArtifact, &package).expect("emit should succeed");
         assert_eq!(emission.target, AotEmitTarget::InternalArtifact);
@@ -263,11 +328,11 @@ mod tests {
                 non_empty_line_count: 0,
                 directive_rows: Vec::new(),
                 lang_item_rows: Vec::new(),
-                exported_surface_rows: Vec::new(),
+                exported_surface_rows: vec!["export:fn:fn main() -> Int:".to_string()],
             }],
             dependency_edge_count: 0,
             dependency_rows: Vec::new(),
-            exported_surface_rows: Vec::new(),
+            exported_surface_rows: vec!["module=tool:export:fn:fn main() -> Int:".to_string()],
             runtime_requirements: Vec::new(),
             entrypoints: vec![IrEntrypoint {
                 module_id: "tool".to_string(),
@@ -386,7 +451,7 @@ mod tests {
 
     #[test]
     fn native_package_plan_resolves_main_routine_key() {
-        let package = IrPackage {
+        let mut package = IrPackage {
             package_name: "tool".to_string(),
             root_module_id: "tool".to_string(),
             direct_deps: Vec::new(),
@@ -435,6 +500,7 @@ mod tests {
             owners: Vec::new(),
         };
 
+        sync_exported_function_surface_rows(&mut package);
         let plan = build_native_package_plan(
             AotEmitTarget::WindowsExeBundle,
             &package,
@@ -495,7 +561,7 @@ mod tests {
 
     #[test]
     fn native_bundle_manifest_roundtrips_windows_dll_export_contract() {
-        let package = IrPackage {
+        let mut package = IrPackage {
             package_name: "core".to_string(),
             root_module_id: "core".to_string(),
             direct_deps: Vec::new(),
@@ -538,6 +604,7 @@ mod tests {
             owners: Vec::new(),
         };
 
+        sync_exported_function_surface_rows(&mut package);
         let plan = build_native_package_plan(
             AotEmitTarget::WindowsDllBundle,
             &package,
@@ -572,7 +639,7 @@ mod tests {
 
     #[test]
     fn native_bundle_manifest_preserves_string_and_byte_exports() {
-        let package = IrPackage {
+        let mut package = IrPackage {
             package_name: "core".to_string(),
             root_module_id: "core".to_string(),
             direct_deps: Vec::new(),
@@ -638,6 +705,7 @@ mod tests {
             owners: Vec::new(),
         };
 
+        sync_exported_function_surface_rows(&mut package);
         let plan = build_native_package_plan(
             AotEmitTarget::WindowsDllBundle,
             &package,
@@ -754,7 +822,7 @@ mod tests {
 
     #[test]
     fn native_bundle_manifest_preserves_pair_exports() {
-        let package = IrPackage {
+        let mut package = IrPackage {
             package_name: "core".to_string(),
             root_module_id: "core".to_string(),
             direct_deps: Vec::new(),
@@ -797,6 +865,7 @@ mod tests {
             owners: Vec::new(),
         };
 
+        sync_exported_function_surface_rows(&mut package);
         let plan = build_native_package_plan(
             AotEmitTarget::WindowsDllBundle,
             &package,
@@ -827,7 +896,7 @@ mod tests {
             module_count: 1,
             dependency_edge_count: 1,
             dependency_rows: vec!["source=tool:import:std.io:".to_string()],
-            exported_surface_rows: vec!["module=tool:export:fn:fn main() -> Int:".to_string()],
+            exported_surface_rows: vec!["module=tool:export:fn:fn main(x: Int) -> Int:".to_string()],
             runtime_requirements: vec!["std.io".to_string()],
             entrypoints: vec![AotEntrypointArtifact {
                 module_id: "tool".to_string(),
@@ -884,7 +953,7 @@ mod tests {
                 non_empty_line_count: 2,
                 directive_rows: Vec::new(),
                 lang_item_rows: Vec::new(),
-                exported_surface_rows: vec!["export:fn:fn main() -> Int:".to_string()],
+                exported_surface_rows: vec!["export:fn:fn main(x: Int) -> Int:".to_string()],
             }],
         };
         let rendered = render_package_artifact(&artifact);
@@ -956,7 +1025,10 @@ mod tests {
             module_count: 1,
             dependency_edge_count: 0,
             dependency_rows: Vec::new(),
-            exported_surface_rows: Vec::new(),
+            exported_surface_rows: vec![
+                "module=tool:export:fn:fn main() -> Int:".to_string(),
+                "module=tool:export:fn:fn main(x: Int) -> Int:".to_string(),
+            ],
             runtime_requirements: Vec::new(),
             entrypoints: vec![AotEntrypointArtifact {
                 module_id: "tool".to_string(),
@@ -1014,7 +1086,10 @@ mod tests {
                 non_empty_line_count: 1,
                 directive_rows: Vec::new(),
                 lang_item_rows: Vec::new(),
-                exported_surface_rows: Vec::new(),
+                exported_surface_rows: vec![
+                    "export:fn:fn main() -> Int:".to_string(),
+                    "export:fn:fn main(x: Int) -> Int:".to_string(),
+                ],
             }],
         };
 
@@ -1165,6 +1240,52 @@ mod tests {
             .expect_err("artifact should reject package surface rows for undeclared modules");
         assert!(
             err.contains("references undeclared module `ghost`"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn parse_package_artifact_rejects_invalid_surface_text_escape_sequences() {
+        let mut artifact = base_surface_validation_artifact();
+        artifact.exported_surface_rows =
+            vec!["module=tool:export:fn:fn main() -> Int:\\".to_string()];
+
+        let err = parse_package_artifact(&render_package_artifact(&artifact))
+            .expect_err("artifact should reject malformed surface text escapes");
+        assert!(err.contains("unterminated escape"), "{err}");
+    }
+
+    #[test]
+    fn collect_native_exports_rejects_stale_declared_export_rows() {
+        let mut artifact = base_surface_validation_artifact();
+        artifact.routines = vec![AotRoutineArtifact {
+            module_id: "tool".to_string(),
+            routine_key: "tool#fn-0".to_string(),
+            symbol_name: "answer".to_string(),
+            symbol_kind: "fn".to_string(),
+            exported: true,
+            is_async: false,
+            type_params: Vec::new(),
+            behavior_attrs: BTreeMap::new(),
+            params: Vec::new(),
+            return_type: test_return_type("fn answer() -> Int:"),
+            intrinsic_impl: None,
+            impl_target_type: None,
+            impl_trait_path: None,
+            availability: Vec::new(),
+            foreword_rows: Vec::new(),
+            rollups: Vec::new(),
+            statements: Vec::new(),
+        }];
+        artifact.exported_surface_rows =
+            vec!["module=tool:export:fn:fn stale() -> Int:".to_string()];
+        artifact.modules[0].exported_surface_rows =
+            vec!["export:fn:fn stale() -> Int:".to_string()];
+
+        let err = crate::native_abi::collect_native_exports(&artifact)
+            .expect_err("native exports should reject stale declared rows");
+        assert!(
+            err.contains("native export rows do not match structured routines"),
             "{err}"
         );
     }

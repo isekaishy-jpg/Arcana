@@ -40,8 +40,8 @@ fn decode_row_string(text: &str) -> Result<String, String> {
     decode_escaped_row_text(text, true)
 }
 
-fn decode_surface_text(text: &str) -> Result<String, String> {
-    decode_escaped_row_text(text, false)
+fn validate_surface_text_encoding(text: &str) -> Result<(), String> {
+    decode_escaped_row_text(text, false).map(|_| ())
 }
 
 fn decode_source_string_literal(text: &str) -> Result<String, String> {
@@ -222,12 +222,12 @@ fn validate_surface_row_payload(row: &str) -> Result<(), String> {
         if parts.len() != 2 || parts[0].is_empty() {
             return Err(format!("malformed exported surface row `{row}`"));
         }
-        let signature = decode_surface_text(parts[1])?;
-        if signature.is_empty() {
+        if parts[1].is_empty() {
             return Err(format!(
                 "exported surface row `{row}` is missing a signature"
             ));
         }
+        validate_surface_text_encoding(parts[1])?;
         return Ok(());
     }
     if let Some(payload) = row.strip_prefix("impl:target=") {
@@ -237,11 +237,11 @@ fn validate_surface_row_payload(row: &str) -> Result<(), String> {
         let Some((trait_path, methods)) = rest.split_once(":methods=") else {
             return Err(format!("malformed impl surface row `{row}`"));
         };
-        let target = decode_surface_text(target)?;
         if target.is_empty() {
             return Err(format!("impl surface row `{row}` is missing a target type"));
         }
-        let _trait_path = decode_surface_text(trait_path)?;
+        validate_surface_text_encoding(target)?;
+        validate_surface_text_encoding(trait_path)?;
         let methods = strip_prefix_suffix(methods, "[", "]")
             .map_err(|_| format!("malformed impl surface row `{row}`"))?;
         for method in split_top_level_items(methods, ',') {
@@ -253,12 +253,12 @@ fn validate_surface_row_payload(row: &str) -> Result<(), String> {
                     "impl surface row `{row}` has a method with no kind"
                 ));
             }
-            let signature = decode_surface_text(signature)?;
             if signature.is_empty() {
                 return Err(format!(
                     "impl surface row `{row}` has a method with no signature"
                 ));
             }
+            validate_surface_text_encoding(signature)?;
         }
         return Ok(());
     }

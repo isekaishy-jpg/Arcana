@@ -330,6 +330,10 @@ export fn close_target_window(edit cx: arcana_desktop.types.AppContext, read tar
         Option.Some(win) => arcana_desktop.app.queue_window_close :: win :: call
         Option.None => Result.Ok[arcana_desktop.types.ControlFlow, Str] :: (arcana_desktop.types.ControlFlow.Wait :: :: call) :: call
 
+export fn close_window(edit cx: arcana_desktop.types.AppContext, read win: arcana_desktop.types.Window) -> Result[arcana_desktop.types.ControlFlow, Str]:
+    let _ = cx
+    return arcana_desktop.app.queue_window_close :: win :: call
+
 export fn close_current_window(edit cx: arcana_desktop.types.AppContext) -> Result[arcana_desktop.types.ControlFlow, Str]:
     return match (arcana_desktop.app.current_window :: cx :: call):
         Option.Some(win) => queue_window_close :: win :: call

@@ -3,7 +3,7 @@ use arcana_ir::{
 };
 use serde::{Deserialize, Serialize};
 
-pub const AOT_INTERNAL_FORMAT: &str = "arcana-aot-v6";
+pub const AOT_INTERNAL_FORMAT: &str = "arcana-aot-v7";
 
 pub type AotRoutineParamArtifact = IrRoutineParam;
 

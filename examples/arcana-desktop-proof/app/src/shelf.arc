@@ -616,12 +616,14 @@ fn toggle_second_window_visible_ready(edit self: demo_types.Demo, take win: arca
 fn close_second_window_direct(edit self: demo_types.Demo, edit cx: arcana_desktop.types.AppContext):
     let found = second_window_action :: self, cx, "second close" :: call
     return match found:
-        Option.Some(win) => close_second_window_direct_ready :: self, win :: call
+        Option.Some(win) => close_second_window_direct_ready :: self, cx, win :: call
         Option.None => 0
 
-fn close_second_window_direct_ready(edit self: demo_types.Demo, take win: arcana_desktop.types.Window):
-    let mut win = win
-    let _ = arcana_desktop.window.close :: win :: call
+fn close_second_window_direct_ready(edit self: demo_types.Demo, edit cx: arcana_desktop.types.AppContext, take win: arcana_desktop.types.Window):
+    let queued = arcana_desktop.app.close_window :: cx, win :: call
+    if queued :: :: is_err:
+        set_status :: self, "second close", "close request failed" :: call
+        return
     self.second_window_id = -1
     self.second_window_seen = false
     self.second_window_dirty = false

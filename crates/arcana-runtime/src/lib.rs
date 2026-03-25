@@ -4,20 +4,20 @@ use std::io::{Read, Seek, Write};
 use std::path::{Component, Path, PathBuf};
 
 use arcana_aot::{
-    AotOwnerArtifact, AotPackageArtifact, parse_package_artifact, validate_package_artifact,
+    parse_package_artifact, validate_package_artifact, AotOwnerArtifact, AotPackageArtifact,
 };
 use arcana_ir::{
-    ExecAssignOp as ParsedAssignOp, ExecAssignTarget as ParsedAssignTarget,
+    parse_routine_type_text, validate_runtime_main_entry_contract, ExecAssignOp as ParsedAssignOp,
+    ExecAssignTarget as ParsedAssignTarget,
     ExecAvailabilityAttachment as ParsedAvailabilityAttachment,
     ExecAvailabilityKind as ParsedAvailabilityKind, ExecBinaryOp as ParsedBinaryOp,
     ExecChainConnector as ParsedChainConnector, ExecChainIntroducer as ParsedChainIntroducer,
     ExecChainStep as ParsedChainStep, ExecDynamicDispatch as ParsedDynamicDispatch,
     ExecExpr as ParsedExpr, ExecHeaderAttachment as ParsedHeaderAttachment,
-    IrRoutineType, IrRoutineTypeKind,
     ExecMatchArm as ParsedMatchArm, ExecMatchPattern as ParsedMatchPattern,
     ExecPageRollup as ParsedPageRollup, ExecPhraseArg as ParsedPhraseArg,
     ExecPhraseQualifierKind as ParsedPhraseQualifierKind, ExecStmt as ParsedStmt,
-    ExecUnaryOp as ParsedUnaryOp, parse_routine_type_text, validate_runtime_main_entry_contract,
+    ExecUnaryOp as ParsedUnaryOp, IrRoutineType, IrRoutineTypeKind,
 };
 use pathdiff::diff_paths;
 use serde::{Deserialize, Serialize};
@@ -30,16 +30,16 @@ mod native_host;
 mod package_image;
 mod routine_plan;
 pub use json_abi::{
-    RUNTIME_JSON_ABI_FORMAT, execute_exported_json_abi_routine, render_exported_json_abi_manifest,
+    execute_exported_json_abi_routine, render_exported_json_abi_manifest, RUNTIME_JSON_ABI_FORMAT,
 };
-pub use native_abi::{RuntimeAbiValue, execute_exported_abi_routine};
+pub use native_abi::{execute_exported_abi_routine, RuntimeAbiValue};
 #[cfg(windows)]
 pub use native_host::NativeProcessHost;
 pub use package_image::{
-    RUNTIME_PACKAGE_IMAGE_FORMAT, parse_runtime_package_image, render_runtime_package_image,
+    parse_runtime_package_image, render_runtime_package_image, RUNTIME_PACKAGE_IMAGE_FORMAT,
 };
-pub use routine_plan::{RuntimeEntrypointPlan, RuntimeParamPlan, RuntimeRoutinePlan};
 use routine_plan::{lower_entrypoint, lower_routine};
+pub use routine_plan::{RuntimeEntrypointPlan, RuntimeParamPlan, RuntimeRoutinePlan};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeOwnerObjectPlan {
@@ -3140,9 +3140,12 @@ impl RuntimeHost for BufferedHost {
         let mut window_events = Vec::new();
         let mut input = std::mem::take(&mut self.next_frame_input);
         let session_windows = self.session_ref(session)?.windows.clone();
-        let any_window_focused = session_windows
-            .iter()
-            .any(|window| self.windows.get(window).map(|state| state.focused).unwrap_or(false));
+        let any_window_focused = session_windows.iter().any(|window| {
+            self.windows
+                .get(window)
+                .map(|state| state.focused)
+                .unwrap_or(false)
+        });
         for window in &session_windows {
             if let Ok(state) = self.window_mut(*window) {
                 state.resized = false;
@@ -5846,13 +5849,12 @@ fn owner_object_matches_attachment(
         .split('.')
         .map(ToString::to_string)
         .collect::<Vec<_>>();
-    let owner = lookup_runtime_owner_plan(plan, &owner_path)
-        .ok_or_else(|| format!("runtime owner `{owner_key}` is not declared in the package plan"))?;
+    let owner = lookup_runtime_owner_plan(plan, &owner_path).ok_or_else(|| {
+        format!("runtime owner `{owner_key}` is not declared in the package plan")
+    })?;
     let object = lookup_runtime_owner_object_plan(owner, object_name)?;
-    Ok(
-        object.local_name == attached_object.local_name
-            && object.type_path == attached_object.object_path,
-    )
+    Ok(object.local_name == attached_object.local_name
+        && object.type_path == attached_object.object_path)
 }
 
 fn inherited_attached_object_value(
@@ -5881,10 +5883,9 @@ fn inherited_attached_object_value(
         }
         if owner_object_matches_attachment(plan, owner_key, object_name, attached_object)? {
             let pair = (owner_key.clone(), object_name.clone(), local.value.clone());
-            if !matches
-                .iter()
-                .any(|(seen_owner, seen_object, _)| seen_owner == owner_key && seen_object == object_name)
-            {
+            if !matches.iter().any(|(seen_owner, seen_object, _)| {
+                seen_owner == owner_key && seen_object == object_name
+            }) {
                 matches.push(pair);
             }
         }
@@ -6899,7 +6900,10 @@ struct ArcanaDesktopTargetEventSpec {
     is_main_window: bool,
 }
 
-fn expect_arcana_window_id_option(value: RuntimeValue, context: &str) -> Result<Option<i64>, String> {
+fn expect_arcana_window_id_option(
+    value: RuntimeValue,
+    context: &str,
+) -> Result<Option<i64>, String> {
     match value {
         RuntimeValue::Variant { name, payload }
             if name == "Option.Some" || name == "std.option.Option.Some" =>
@@ -6910,7 +6914,10 @@ fn expect_arcana_window_id_option(value: RuntimeValue, context: &str) -> Result<
                 ));
             }
             Ok(Some(expect_arcana_window_id_value(
-                payload.into_iter().next().expect("validated payload length"),
+                payload
+                    .into_iter()
+                    .next()
+                    .expect("validated payload length"),
                 context,
             )?))
         }
@@ -8251,34 +8258,42 @@ fn try_execute_arcana_owned_api_call(
                 values[1].clone(),
                 "arcana_desktop.app.window_for_id",
             )?;
-            Ok(Some(match arcana_desktop_lookup_window_for_id(&context, window_id, host)? {
-                Some(window) => some_variant(arcana_desktop_window_value(window)),
-                None => none_variant(),
-            }))
+            Ok(Some(
+                match arcana_desktop_lookup_window_for_id(&context, window_id, host)? {
+                    Some(window) => some_variant(arcana_desktop_window_value(window)),
+                    None => none_variant(),
+                },
+            ))
         }
         [a, b, c] if a == "arcana_desktop" && b == "app" && c == "main_window_id" => {
             let context = expect_arcana_desktop_app_context(
                 expect_single_arg(values, "arcana_desktop.app.main_window_id")?,
                 "arcana_desktop.app.main_window_id",
             )?;
-            Ok(Some(arcana_window_id_record(context.runtime.main_window_id)))
+            Ok(Some(arcana_window_id_record(
+                context.runtime.main_window_id,
+            )))
         }
         [a, b, c] if a == "arcana_desktop" && b == "app" && c == "main_window" => {
             let context = expect_arcana_desktop_app_context(
                 expect_single_arg(values, "arcana_desktop.app.main_window")?,
                 "arcana_desktop.app.main_window",
             )?;
-            Ok(Some(match arcana_desktop_best_main_window(&context, host)? {
-                Some(window) => ok_variant(arcana_desktop_window_value(window)),
-                None => err_variant("missing main window".to_string()),
-            }))
+            Ok(Some(
+                match arcana_desktop_best_main_window(&context, host)? {
+                    Some(window) => ok_variant(arcana_desktop_window_value(window)),
+                    None => err_variant("missing main window".to_string()),
+                },
+            ))
         }
         [a, b, c] if a == "arcana_desktop" && b == "app" && c == "cached_main_window" => {
             let context = expect_arcana_desktop_app_context(
                 expect_single_arg(values, "arcana_desktop.app.cached_main_window")?,
                 "arcana_desktop.app.cached_main_window",
             )?;
-            Ok(Some(arcana_desktop_window_value(context.runtime.main_window)))
+            Ok(Some(arcana_desktop_window_value(
+                context.runtime.main_window,
+            )))
         }
         [a, b, c] if a == "arcana_desktop" && b == "app" && c == "main_window_or_cached" => {
             let context = expect_arcana_desktop_app_context(
@@ -8294,10 +8309,12 @@ fn try_execute_arcana_owned_api_call(
                 expect_single_arg(values, "arcana_desktop.app.require_main_window")?,
                 "arcana_desktop.app.require_main_window",
             )?;
-            Ok(Some(match arcana_desktop_best_main_window(&context, host)? {
-                Some(window) => ok_variant(arcana_desktop_window_value(window)),
-                None => err_variant("missing main window".to_string()),
-            }))
+            Ok(Some(
+                match arcana_desktop_best_main_window(&context, host)? {
+                    Some(window) => ok_variant(arcana_desktop_window_value(window)),
+                    None => err_variant("missing main window".to_string()),
+                },
+            ))
         }
         [a, b, c] if a == "arcana_desktop" && b == "app" && c == "target_window" => {
             if values.len() != 2 {
@@ -9610,6 +9627,14 @@ fn runtime_simple_type(name: &str) -> Option<IrRoutineType> {
     parse_routine_type_text(name).ok()
 }
 
+fn runtime_synthetic_owner_type(owner_key: &str) -> IrRoutineType {
+    let mut ty = runtime_simple_type("Owner").expect("synthetic Owner type should parse");
+    if let IrRoutineTypeKind::Path(path) = &mut ty.kind {
+        path.segments[0] = format!("Owner<{owner_key}>");
+    }
+    ty
+}
+
 fn runtime_type_with_args(base: &str, type_args: &[String]) -> Option<IrRoutineType> {
     if type_args.is_empty() {
         return runtime_simple_type(base);
@@ -9635,7 +9660,7 @@ fn runtime_value_type(
     state: &RuntimeExecutionState,
 ) -> Option<IrRoutineType> {
     match receiver {
-        RuntimeValue::OwnerHandle(_) => runtime_simple_type("Owner"),
+        RuntimeValue::OwnerHandle(owner_key) => Some(runtime_synthetic_owner_type(owner_key)),
         RuntimeValue::Record { name, .. } => parse_routine_type_text(name)
             .ok()
             .or_else(|| runtime_simple_type(runtime_type_root_name(name).as_str())),
@@ -9666,6 +9691,16 @@ fn runtime_value_type(
                 .or_else(|| runtime_simple_type(runtime_type_root_name(&enum_name).as_str()))
         }
         _ => runtime_value_type_root(receiver).and_then(|name| runtime_simple_type(&name)),
+    }
+}
+
+fn runtime_receiver_root_fallback_allowed(actual: &IrRoutineType) -> bool {
+    match &actual.kind {
+        IrRoutineTypeKind::Path(path) => path
+            .segments
+            .last()
+            .is_some_and(|segment| !segment.contains('<')),
+        _ => false,
     }
 }
 
@@ -10828,12 +10863,9 @@ fn resolve_routine_index_for_call(
                     receiver_type
                         .as_ref()
                         .map(|actual| {
-                            IrRoutineType::matches_declared(
-                                declared,
-                                actual,
-                                &routine.type_params,
-                            ) || matches!(&actual.kind, IrRoutineTypeKind::Path(_))
-                                && declared.root_name() == Some(receiver_root.as_str())
+                            IrRoutineType::matches_declared(declared, actual, &routine.type_params)
+                                || runtime_receiver_root_fallback_allowed(actual)
+                                    && declared.root_name() == Some(receiver_root.as_str())
                         })
                         .unwrap_or_else(|| declared.root_name() == Some(receiver_root.as_str()))
                 })
@@ -11093,11 +11125,20 @@ fn execute_runtime_method_call(
     state: &mut RuntimeExecutionState,
     host: &mut dyn RuntimeHost,
 ) -> RuntimeEvalResult<RuntimeValue> {
-    let receiver = eval_expr(
-        subject,
+    let receiver = read_runtime_value_if_ref(
+        eval_expr(
+            subject,
+            plan,
+            current_module_id,
+            scopes,
+            aliases,
+            type_bindings,
+            state,
+            host,
+        )?,
+        scopes,
         plan,
         current_module_id,
-        scopes,
         aliases,
         type_bindings,
         state,
@@ -11152,11 +11193,20 @@ fn execute_runtime_named_qualifier_call(
     state: &mut RuntimeExecutionState,
     host: &mut dyn RuntimeHost,
 ) -> RuntimeEvalResult<RuntimeValue> {
-    let receiver = eval_expr(
-        subject,
+    let receiver = read_runtime_value_if_ref(
+        eval_expr(
+            subject,
+            plan,
+            current_module_id,
+            scopes,
+            aliases,
+            type_bindings,
+            state,
+            host,
+        )?,
+        scopes,
         plan,
         current_module_id,
-        scopes,
         aliases,
         type_bindings,
         state,
@@ -11923,7 +11973,9 @@ fn execute_runtime_app_shell_intrinsic(
                 expect_single_arg(args, "events_session_device_events")?,
                 "events_session_device_events",
             )?;
-            Ok(RuntimeValue::Int(host.events_session_device_events(session)?))
+            Ok(RuntimeValue::Int(
+                host.events_session_device_events(session)?,
+            ))
         }
         RuntimeIntrinsic::EventsSessionSetDeviceEvents => {
             if args.len() != 2 {
@@ -13058,7 +13110,9 @@ fn execute_runtime_core_intrinsic(
                 expect_single_arg(args, "events_session_device_events")?,
                 "events_session_device_events",
             )?;
-            Ok(RuntimeValue::Int(host.events_session_device_events(session)?))
+            Ok(RuntimeValue::Int(
+                host.events_session_device_events(session)?,
+            ))
         }
         RuntimeIntrinsic::EventsSessionSetDeviceEvents => {
             if args.len() != 2 {

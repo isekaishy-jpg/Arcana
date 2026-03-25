@@ -1,5 +1,7 @@
 use crate::artifact::{AotPackageArtifact, AotRoutineArtifact};
-use arcana_ir::{IrRoutineParam, IrRoutineType, IrRoutineTypeKind};
+use arcana_ir::{
+    IrRoutineParam, IrRoutineType, IrRoutineTypeKind, render_routine_signature_text,
+};
 use std::collections::BTreeSet;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -33,8 +35,8 @@ pub struct NativeRoutineSignature {
 }
 
 pub fn collect_native_exports(artifact: &AotPackageArtifact) -> Result<Vec<NativeExport>, String> {
+    validate_declared_native_export_rows(artifact)?;
     let root_prefix = format!("{}.", artifact.root_module_id);
-    let exported_surface = exported_function_surface_rows(artifact);
     let mut exports = Vec::new();
     let mut used_names = std::collections::BTreeSet::new();
 
@@ -42,20 +44,7 @@ pub fn collect_native_exports(artifact: &AotPackageArtifact) -> Result<Vec<Nativ
         if !routine.exported {
             continue;
         }
-        let surface_exported = exported_surface
-            .as_ref()
-            .map(|rows| {
-                rows.contains(&(
-                    routine.module_id.as_str(),
-                    routine.symbol_kind.as_str(),
-                    render_export_signature_text(routine).as_str(),
-                ))
-            })
-            .unwrap_or_else(|| {
-                routine.module_id == artifact.root_module_id
-                    || routine.module_id.starts_with(&root_prefix)
-            });
-        if !surface_exported {
+        if routine.module_id != artifact.root_module_id && !routine.module_id.starts_with(&root_prefix) {
             continue;
         }
         if routine.symbol_kind != "fn" {
@@ -109,26 +98,63 @@ pub fn collect_native_exports(artifact: &AotPackageArtifact) -> Result<Vec<Nativ
     Ok(exports)
 }
 
-fn exported_function_surface_rows(
-    artifact: &AotPackageArtifact,
-) -> Option<BTreeSet<(&str, &str, &str)>> {
-    let mut rows = BTreeSet::new();
-    for row in &artifact.exported_surface_rows {
-        let Some(payload) = row.strip_prefix("module=") else {
+fn parse_package_function_export_row(row: &str) -> Option<(&str, &str, &str)> {
+    let payload = row.strip_prefix("module=")?;
+    let (module_id, module_row) = payload.split_once(':')?;
+    let surface_payload = module_row.strip_prefix("export:")?;
+    let (kind, signature) = surface_payload.split_once(':')?;
+    Some((module_id, kind, signature))
+}
+
+fn validate_declared_native_export_rows(artifact: &AotPackageArtifact) -> Result<(), String> {
+    let root_prefix = format!("{}.", artifact.root_module_id);
+    let declared = artifact
+        .exported_surface_rows
+        .iter()
+        .filter_map(|row| parse_package_function_export_row(row))
+        .filter(|(module_id, kind, _)| {
+            *kind == "fn"
+                && (*module_id == artifact.root_module_id
+                    || module_id.starts_with(&root_prefix))
+        })
+        .map(|(module_id, kind, signature)| (module_id, kind, signature))
+        .collect::<BTreeSet<_>>();
+
+    for routine in &artifact.routines {
+        if !routine.exported {
             continue;
-        };
-        let Some((module_id, surface_row)) = payload.split_once(':') else {
+        }
+        if routine.module_id != artifact.root_module_id && !routine.module_id.starts_with(&root_prefix)
+        {
             continue;
-        };
-        let Some(surface_payload) = surface_row.strip_prefix("export:") else {
+        }
+        if routine.symbol_kind != "fn"
+            || routine.impl_target_type.is_some()
+            || routine.is_async
+            || !routine.type_params.is_empty()
+        {
             continue;
-        };
-        let Some((kind, signature)) = surface_payload.split_once(':') else {
+        }
+        if native_routine_signature(routine).is_err() {
             continue;
-        };
-        rows.insert((module_id, kind, signature));
+        }
+        let signature = render_routine_signature_text(
+            &routine.symbol_kind,
+            &routine.symbol_name,
+            routine.is_async,
+            &routine.type_params,
+            &routine.params,
+            routine.return_type.as_ref(),
+        );
+        if !declared.contains(&(routine.module_id.as_str(), routine.symbol_kind.as_str(), signature.as_str()))
+        {
+            return Err(
+                "backend artifact native export rows do not match structured routines"
+                    .to_string(),
+            );
+        }
     }
-    if rows.is_empty() { None } else { Some(rows) }
+    Ok(())
 }
 
 pub fn native_routine_signature(
@@ -156,50 +182,6 @@ pub fn parse_native_return_type(return_type: Option<&IrRoutineType>) -> Result<N
         .map(parse_native_type)
         .transpose()
         .map(|ty| ty.unwrap_or(NativeAbiType::Unit))
-}
-
-fn render_export_signature_text(routine: &AotRoutineArtifact) -> String {
-    let mut rendered = String::new();
-    if routine.is_async {
-        rendered.push_str("async ");
-    }
-    if routine.symbol_kind == "system" {
-        rendered.push_str("system ");
-    } else {
-        rendered.push_str("fn ");
-    }
-    rendered.push_str(&routine.symbol_name);
-    if !routine.type_params.is_empty() {
-        rendered.push('[');
-        rendered.push_str(&routine.type_params.join(", "));
-        rendered.push(']');
-    }
-    rendered.push('(');
-    rendered.push_str(
-        &routine
-            .params
-            .iter()
-            .map(|param| {
-                let mut piece = String::new();
-                if let Some(mode) = &param.mode {
-                    piece.push_str(mode);
-                    piece.push(' ');
-                }
-                piece.push_str(&param.name);
-                piece.push_str(": ");
-                piece.push_str(&param.ty.render());
-                piece
-            })
-            .collect::<Vec<_>>()
-            .join(", "),
-    );
-    rendered.push(')');
-    if let Some(return_type) = &routine.return_type {
-        rendered.push_str(" -> ");
-        rendered.push_str(&return_type.render());
-    }
-    rendered.push(':');
-    rendered
 }
 
 fn parse_native_type(ty: &IrRoutineType) -> Result<NativeAbiType, String> {

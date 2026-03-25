@@ -709,36 +709,31 @@ fn read_lockfile_v1(
             .and_then(toml::Value::as_str)
             .ok_or_else(|| format!("missing format for `{name}`"))?
             .to_string();
-        let (target, explicit_target) = match targets
+        let target = match targets
             .and_then(|target_rows| target_rows.get(&name))
             .and_then(toml::Value::as_str)
         {
-            Some(target) => (BuildTarget::from_storage_key(target), true),
-            None => (
-                infer_build_target_from_format(&format).ok_or_else(|| {
-                    format!(
-                        "missing target for `{name}` and unable to infer one from format `{format}`"
-                    )
-                })?,
-                false,
-            ),
+            Some(target) => BuildTarget::from_storage_key(target),
+            None => infer_build_target_from_format(&format).ok_or_else(|| {
+                format!(
+                    "missing target for `{name}` and unable to infer one from format `{format}`"
+                )
+            })?,
         };
-        if explicit_target {
-            validate_lock_target_format(&name, &target, &format)?;
-        }
-
         let mut target_entries = BTreeMap::new();
-        target_entries.insert(
-            target,
-            LockTargetEntry {
-                fingerprint,
-                api_fingerprint,
-                artifact,
-                artifact_hash,
-                format,
-                toolchain: toolchain.clone(),
-            },
-        );
+        if lock_target_format_matches(&target, &format) {
+            target_entries.insert(
+                target,
+                LockTargetEntry {
+                    fingerprint,
+                    api_fingerprint,
+                    artifact,
+                    artifact_hash,
+                    format,
+                    toolchain: toolchain.clone(),
+                },
+            );
+        }
         members.insert(
             name,
             LockMember {
@@ -844,7 +839,9 @@ fn read_lock_target_entries(
             read_lock_target_field(member_name, target_key, build_table, "artifact_hash")?;
         let format = read_lock_target_field(member_name, target_key, build_table, "format")?;
         let toolchain = read_lock_target_field(member_name, target_key, build_table, "toolchain")?;
-        validate_lock_target_format(member_name, &target, &format)?;
+        if !lock_target_format_matches(&target, &format) {
+            continue;
+        }
         targets.insert(
             target,
             LockTargetEntry {
@@ -877,19 +874,8 @@ fn read_lock_target_field(
         })
 }
 
-fn validate_lock_target_format(
-    member_name: &str,
-    target: &BuildTarget,
-    format: &str,
-) -> PackageResult<()> {
-    if let Some(expected) = target.format() {
-        if format != expected {
-            return Err(format!(
-                "lockfile format `{format}` does not match target `{target}` for `{member_name}`"
-            ));
-        }
-    }
-    Ok(())
+fn lock_target_format_matches(target: &BuildTarget, format: &str) -> bool {
+    target.format().map(|expected| format == expected).unwrap_or(true)
 }
 
 pub fn validate_path(path: &Path) -> PackageResult<()> {
@@ -2089,8 +2075,50 @@ mod tests {
     }
 
     #[test]
-    fn read_lockfile_infers_legacy_internal_aot_target() {
+    fn read_lockfile_infers_internal_aot_target() {
         let dir = temp_dir("legacy_lock_target");
+        let lock_path = dir.join("Arcana.lock");
+        write_file(
+            &lock_path,
+            &format!(
+                concat!(
+                "version = 1\n",
+                "workspace = \"ws\"\n",
+                "toolchain = \"binary-sha256:abc\"\n",
+                "order = [\"app\"]\n\n",
+                "[paths]\n",
+                "\"app\" = \"app\"\n\n",
+                "[deps]\n",
+                "\"app\" = []\n\n",
+                "[kinds]\n",
+                "\"app\" = \"app\"\n\n",
+                "[formats]\n",
+                "\"app\" = \"{}\"\n\n",
+                "[fingerprints]\n",
+                "\"app\" = \"fp\"\n\n",
+                "[api_fingerprints]\n",
+                "\"app\" = \"api\"\n\n",
+                "[artifacts]\n",
+                "\"app\" = \".arcana/artifacts/app/internal-aot/fp/app.artifact.toml\"\n\n",
+                "[artifact_hashes]\n",
+                "\"app\" = \"sha256:deadbeef\"\n",
+                ),
+                AOT_INTERNAL_FORMAT
+            ),
+        );
+
+        let lock = read_lockfile(&lock_path)
+            .expect("lockfile should parse")
+            .expect("lockfile should exist");
+        let app = lock.members.get("app").expect("app member should exist");
+        assert!(app.target(&BuildTarget::internal_aot()).is_some());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_lockfile_skips_stale_internal_aot_target_format() {
+        let dir = temp_dir("stale_lock_target");
         let lock_path = dir.join("Arcana.lock");
         write_file(
             &lock_path,
@@ -2106,7 +2134,7 @@ mod tests {
                 "[kinds]\n",
                 "\"app\" = \"app\"\n\n",
                 "[formats]\n",
-                "\"app\" = \"arcana-aot-v2\"\n\n",
+                "\"app\" = \"arcana-aot-v6\"\n\n",
                 "[fingerprints]\n",
                 "\"app\" = \"fp\"\n\n",
                 "[api_fingerprints]\n",
@@ -2119,10 +2147,10 @@ mod tests {
         );
 
         let lock = read_lockfile(&lock_path)
-            .expect("legacy lockfile should parse")
+            .expect("stale lockfile should parse")
             .expect("lockfile should exist");
         let app = lock.members.get("app").expect("app member should exist");
-        assert!(app.target(&BuildTarget::internal_aot()).is_some());
+        assert!(app.target(&BuildTarget::internal_aot()).is_none());
 
         let _ = fs::remove_dir_all(&dir);
     }

@@ -1,30 +1,30 @@
-use super::{
-    BufferedEvent, BufferedFrameInput, BufferedHost, ParsedExpr, ParsedPageRollup, ParsedPhraseArg,
-    ParsedPhraseQualifierKind, ParsedStmt, RuntimeCallArg, RuntimeEntrypointPlan,
-    RuntimeExecutionState, RuntimeHost, RuntimeOpaqueValue, RuntimePackagePlan, RuntimeParamPlan,
-    RuntimeRoutinePlan, RuntimeValue, arcana_desktop_session_record, arcana_desktop_wake_record,
-    arcana_desktop_window_value, arcana_window_id_record, err_variant, execute_entrypoint_routine,
-    execute_exported_abi_routine, execute_exported_json_abi_routine, execute_main,
-    execute_routine, insert_runtime_channel, load_package_plan, none_variant, ok_variant,
-    parse_rollup_row, parse_runtime_package_image, parse_stmt, plan_from_artifact,
-    render_exported_json_abi_manifest, render_runtime_package_image, resolve_routine_index,
-    resolve_routine_index_for_call, some_variant, try_execute_arcana_owned_api_call,
-};
 #[cfg(windows)]
 use super::NativeProcessHost;
+use super::{
+    arcana_desktop_session_record, arcana_desktop_wake_record, arcana_desktop_window_value,
+    arcana_window_id_record, err_variant, execute_entrypoint_routine, execute_exported_abi_routine,
+    execute_exported_json_abi_routine, execute_main, execute_routine, insert_runtime_channel,
+    load_package_plan, none_variant, ok_variant, parse_rollup_row, parse_runtime_package_image,
+    parse_stmt, plan_from_artifact, render_exported_json_abi_manifest,
+    render_runtime_package_image, resolve_routine_index, resolve_routine_index_for_call,
+    some_variant, try_execute_arcana_owned_api_call, BufferedEvent, BufferedFrameInput,
+    BufferedHost, ParsedExpr, ParsedPageRollup, ParsedPhraseArg, ParsedPhraseQualifierKind,
+    ParsedStmt, RuntimeCallArg, RuntimeEntrypointPlan, RuntimeExecutionState, RuntimeHost,
+    RuntimeOpaqueValue, RuntimePackagePlan, RuntimeParamPlan, RuntimeRoutinePlan, RuntimeValue,
+};
 use arcana_aot::{
-    AOT_INTERNAL_FORMAT, AotEntrypointArtifact, AotPackageArtifact, AotPackageModuleArtifact,
-    AotRoutineArtifact, AotRoutineParamArtifact, render_package_artifact,
+    render_package_artifact, AotEntrypointArtifact, AotPackageArtifact, AotPackageModuleArtifact,
+    AotRoutineArtifact, AotRoutineParamArtifact, AOT_INTERNAL_FORMAT,
 };
 use arcana_frontend::{check_workspace_graph, compute_member_fingerprints_for_checked_workspace};
-use arcana_ir::{IrRoutineType, parse_routine_type_text};
+use arcana_ir::{parse_routine_type_text, IrRoutineType, IrRoutineTypeKind};
 use arcana_package::{execute_build, load_workspace_graph, plan_workspace, prepare_build};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 #[cfg(windows)]
 use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::HWND;
 #[cfg(windows)]
@@ -55,7 +55,9 @@ where
     T: TestParamRow,
     S: AsRef<str>,
 {
-    rows.iter().map(|row| T::from_test_row(row.as_ref())).collect()
+    rows.iter()
+        .map(|row| T::from_test_row(row.as_ref()))
+        .collect()
 }
 
 fn test_return_type(signature: &str) -> Option<IrRoutineType> {
@@ -215,7 +217,10 @@ fn arcana_desktop_app_context_value(
     current_is_main_window: bool,
 ) -> RuntimeValue {
     let mut runtime_fields = BTreeMap::new();
-    runtime_fields.insert("session".to_string(), arcana_desktop_session_record(session));
+    runtime_fields.insert(
+        "session".to_string(),
+        arcana_desktop_session_record(session),
+    );
     runtime_fields.insert("wake".to_string(), arcana_desktop_wake_record(wake));
     runtime_fields.insert(
         "main_window_id".to_string(),
@@ -945,7 +950,9 @@ fn runtime_dynamic_bare_method_fallback_matches_receiver_type_args() {
                     name: "self".to_string(),
                     ty: parse_routine_type_text("std.concurrent.Channel[T]").expect("type"),
                 }],
-                return_type: test_return_type("fn send(read self: std.concurrent.Channel[T]) -> Int:"),
+                return_type: test_return_type(
+                    "fn send(read self: std.concurrent.Channel[T]) -> Int:",
+                ),
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
@@ -968,7 +975,9 @@ fn runtime_dynamic_bare_method_fallback_matches_receiver_type_args() {
                     name: "self".to_string(),
                     ty: parse_routine_type_text("std.concurrent.Channel[Bool]").expect("type"),
                 }],
-                return_type: test_return_type("fn send(read self: std.concurrent.Channel[Bool]) -> Int:"),
+                return_type: test_return_type(
+                    "fn send(read self: std.concurrent.Channel[Bool]) -> Int:",
+                ),
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
@@ -1054,6 +1063,98 @@ fn runtime_dynamic_bare_method_fallback_matches_opaque_family_receiver() {
             name: None,
             value: RuntimeValue::Opaque(RuntimeOpaqueValue::Window(window)),
             source_expr: ParsedExpr::Path(vec!["win".to_string()]),
+        }],
+        None,
+        None,
+        true,
+        Some(&state),
+    )
+    .expect("dynamic bare method should resolve")
+    .expect("call should resolve");
+
+    assert_eq!(index, 0);
+}
+
+#[test]
+fn runtime_dynamic_bare_method_fallback_keeps_owner_identity() {
+    fn synthetic_owner_type(owner_key: &str) -> IrRoutineType {
+        let mut ty = parse_routine_type_text("Owner").expect("type");
+        if let IrRoutineTypeKind::Path(path) = &mut ty.kind {
+            path.segments[0] = format!("Owner<{owner_key}>");
+        }
+        ty
+    }
+
+    let owner_counter = synthetic_owner_type("app.Counter");
+    let owner_timer = synthetic_owner_type("app.Timer");
+    let plan = RuntimePackagePlan {
+        package_name: "app".to_string(),
+        root_module_id: "app".to_string(),
+        direct_deps: Vec::new(),
+        runtime_requirements: Vec::new(),
+        module_aliases: BTreeMap::new(),
+        opaque_family_types: BTreeMap::new(),
+        entrypoints: Vec::new(),
+        owners: Vec::new(),
+        routines: vec![
+            RuntimeRoutinePlan {
+                module_id: "app".to_string(),
+                routine_key: "app#impl-0-method-0".to_string(),
+                symbol_name: "tick".to_string(),
+                symbol_kind: "fn".to_string(),
+                exported: false,
+                is_async: false,
+                type_params: Vec::new(),
+                behavior_attrs: BTreeMap::new(),
+                params: vec![RuntimeParamPlan {
+                    mode: Some("read".to_string()),
+                    name: "self".to_string(),
+                    ty: owner_counter.clone(),
+                }],
+                return_type: Some(parse_routine_type_text("Int").expect("type")),
+                intrinsic_impl: None,
+                impl_target_type: Some(owner_counter),
+                impl_trait_path: None,
+                availability: Vec::new(),
+                foreword_rows: Vec::new(),
+                rollups: Vec::new(),
+                statements: Vec::new(),
+            },
+            RuntimeRoutinePlan {
+                module_id: "app".to_string(),
+                routine_key: "app#impl-1-method-0".to_string(),
+                symbol_name: "tick".to_string(),
+                symbol_kind: "fn".to_string(),
+                exported: false,
+                is_async: false,
+                type_params: Vec::new(),
+                behavior_attrs: BTreeMap::new(),
+                params: vec![RuntimeParamPlan {
+                    mode: Some("read".to_string()),
+                    name: "self".to_string(),
+                    ty: owner_timer.clone(),
+                }],
+                return_type: Some(parse_routine_type_text("Int").expect("type")),
+                intrinsic_impl: None,
+                impl_target_type: Some(owner_timer),
+                impl_trait_path: None,
+                availability: Vec::new(),
+                foreword_rows: Vec::new(),
+                rollups: Vec::new(),
+                statements: Vec::new(),
+            },
+        ],
+    };
+    let state = RuntimeExecutionState::default();
+
+    let index = resolve_routine_index_for_call(
+        &plan,
+        "app",
+        &["tick".to_string()],
+        &[RuntimeCallArg {
+            name: None,
+            value: RuntimeValue::OwnerHandle("app.Counter".to_string()),
+            source_expr: ParsedExpr::Path(vec!["self".to_string()]),
         }],
         None,
         None,
@@ -1283,7 +1384,9 @@ fn runtime_native_abi_supports_string_and_byte_values() {
                     name: "pair".to_string(),
                     ty: parse_routine_type_text("Pair[Str, Int]").expect("type"),
                 }],
-                return_type: test_return_type("fn echo_pair(read pair: Pair[Str, Int]) -> Pair[Str, Int]:"),
+                return_type: test_return_type(
+                    "fn echo_pair(read pair: Pair[Str, Int]) -> Pair[Str, Int]:",
+                ),
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
@@ -2359,6 +2462,52 @@ fn execute_main_runs_linked_std_memory_borrow_routines() {
 
     assert_eq!(code, 0);
     assert_eq!(host.stdout, vec!["9".to_string(), "10".to_string()]);
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn execute_main_resolves_overloaded_method_on_borrowed_receiver() {
+    let dir = temp_workspace_dir("borrowed_receiver_method");
+    write_file(
+        &dir.join("book.toml"),
+        "name = \"runtime_borrowed_receiver_method\"\nkind = \"app\"\n",
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "import std.io\n",
+            "import std.memory\n",
+            "record Counter:\n",
+            "    value: Int\n",
+            "record Gauge:\n",
+            "    value: Int\n",
+            "impl Counter:\n",
+            "    fn bump(edit self: Counter) -> Int:\n",
+            "        self.value += 1\n",
+            "        return self.value\n",
+            "impl Gauge:\n",
+            "    fn bump(read self: Gauge) -> Int:\n",
+            "        return self.value + 100\n",
+            "fn main() -> Int:\n",
+            "    let mut arena_store = std.memory.new[Counter] :: 1 :: call\n",
+            "    let counter_id = arena: arena_store :> value = 9 <: Counter\n",
+            "    let mut slot = arena_store :: counter_id :: borrow_edit\n",
+            "    let bumped = slot :: :: bump\n",
+            "    std.io.print[Int] :: bumped :: call\n",
+            "    let updated = arena_store :: counter_id :: get\n",
+            "    std.io.print[Int] :: updated.value :: call\n",
+            "    return 0\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let plan = build_workspace_plan_for_member(&dir, "runtime_borrowed_receiver_method");
+    let mut host = BufferedHost::default();
+    let code = execute_main(&plan, &mut host).expect("runtime should dispatch borrowed receiver");
+
+    assert_eq!(code, 0);
+    assert_eq!(host.stdout, vec!["10".to_string(), "10".to_string()]);
 
     let _ = fs::remove_dir_all(dir);
 }
@@ -6117,13 +6266,11 @@ fn buffered_host_session_close_removes_windows_and_wakes() {
 #[test]
 fn buffered_host_window_text_input_is_disabled_by_default() {
     let mut host = BufferedHost::default();
-    let window = RuntimeHost::window_open(&mut host, "Arcana", 320, 200)
-        .expect("window should open");
+    let window =
+        RuntimeHost::window_open(&mut host, "Arcana", 320, 200).expect("window should open");
 
-    assert!(
-        !RuntimeHost::window_text_input_enabled(&mut host, window)
-            .expect("text input state should be readable")
-    );
+    assert!(!RuntimeHost::window_text_input_enabled(&mut host, window)
+        .expect("text input state should be readable"));
 }
 
 #[test]
@@ -6171,9 +6318,7 @@ fn buffered_host_window_and_text_input_settings_roundtrip() {
         RuntimeHost::window_cursor_position(&mut host, window).expect("cursor position"),
         (12, 34)
     );
-    assert!(
-        !RuntimeHost::window_text_input_enabled(&mut host, window).expect("text input enabled")
-    );
+    assert!(!RuntimeHost::window_text_input_enabled(&mut host, window).expect("text input enabled"));
     assert!(
         RuntimeHost::text_input_composition_area_active(&mut host, window)
             .expect("composition area active")
@@ -6217,12 +6362,11 @@ fn buffered_host_window_close_detaches_session_entries() {
         .expect("window should attach");
 
     RuntimeHost::window_close(&mut host, window).expect("window close should succeed");
-    assert!(
-        host.session_ref(session)
-            .expect("session should still exist")
-            .windows
-            .is_empty()
-    );
+    assert!(host
+        .session_ref(session)
+        .expect("session should still exist")
+        .windows
+        .is_empty());
 
     let frame = RuntimeHost::events_session_pump(&mut host, session).expect("session pump");
     let mut kinds = Vec::new();
@@ -6395,7 +6539,10 @@ fn execute_main_keeps_arcana_desktop_secondary_window_non_main_after_direct_main
     );
     write_file(&dir.join("src").join("types.arc"), "// test types\n");
 
-    let plan = build_workspace_plan_for_member(&dir, "runtime_desktop_keep_secondary_non_main_after_close");
+    let plan = build_workspace_plan_for_member(
+        &dir,
+        "runtime_desktop_keep_secondary_non_main_after_close",
+    );
     let mut host = BufferedHost::default();
     let code = execute_main(&plan, &mut host).expect("runtime should execute");
 
@@ -6794,7 +6941,8 @@ fn execute_main_runs_arcana_desktop_exiting_with_live_context_workspace() {
     );
     write_file(&dir.join("src").join("types.arc"), "// test types\n");
 
-    let plan = build_workspace_plan_for_member(&dir, "runtime_desktop_app_runner_exiting_live_context");
+    let plan =
+        build_workspace_plan_for_member(&dir, "runtime_desktop_app_runner_exiting_live_context");
     let fixture_root = dir.join("fixture");
     fs::create_dir_all(&fixture_root).expect("fixture root should exist");
     let mut host = synthetic_window_canvas_host(&fixture_root);
@@ -6871,7 +7019,8 @@ fn execute_main_runs_arcana_desktop_native_close_request_workspace() {
     );
     write_file(&dir.join("src").join("types.arc"), "// test types\n");
 
-    let plan = build_workspace_plan_for_member(&dir, "runtime_desktop_app_runner_native_close_request");
+    let plan =
+        build_workspace_plan_for_member(&dir, "runtime_desktop_app_runner_native_close_request");
     let sender = thread::spawn(|| {
         let hwnd = wait_for_process_window(std::process::id(), Duration::from_secs(10))
             .expect("desktop window should appear");
@@ -7523,4 +7672,3 @@ fn execute_main_runs_arcana_desktop_ecs_adapter_workspace() {
 
     let _ = fs::remove_dir_all(dir);
 }
-

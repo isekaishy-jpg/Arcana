@@ -799,7 +799,7 @@ mod tests {
     use arcana_ir::{
         ExecAssignOp, ExecAssignTarget, ExecExpr, ExecPhraseArg, ExecPhraseQualifierKind, ExecStmt,
         IrEntrypoint, IrPackage, IrPackageModule, IrRoutine, IrRoutineParam, IrRoutineType,
-        parse_routine_type_text,
+        parse_routine_type_text, render_routine_signature_text,
     };
 
     fn test_return_type(signature: &str) -> Option<IrRoutineType> {
@@ -824,6 +824,52 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    fn sync_exported_function_surface_rows(package: &mut IrPackage) {
+        let exported_routines = package
+            .routines
+            .iter()
+            .filter(|routine| routine.exported && routine.impl_target_type.is_none())
+            .collect::<Vec<_>>();
+        package.exported_surface_rows = exported_routines
+            .iter()
+            .map(|routine| {
+                format!(
+                    "module={}:export:{}:{}",
+                    routine.module_id,
+                    routine.symbol_kind,
+                    render_routine_signature_text(
+                        &routine.symbol_kind,
+                        &routine.symbol_name,
+                        routine.is_async,
+                        &routine.type_params,
+                        &routine.params,
+                        routine.return_type.as_ref(),
+                    )
+                )
+            })
+            .collect();
+        for module in &mut package.modules {
+            module.exported_surface_rows = exported_routines
+                .iter()
+                .filter(|routine| routine.module_id == module.module_id)
+                .map(|routine| {
+                    format!(
+                        "export:{}:{}",
+                        routine.symbol_kind,
+                        render_routine_signature_text(
+                            &routine.symbol_kind,
+                            &routine.symbol_name,
+                            routine.is_async,
+                            &routine.type_params,
+                            &routine.params,
+                            routine.return_type.as_ref(),
+                        )
+                    )
+                })
+                .collect();
+        }
     }
 
     fn base_package() -> IrPackage {
@@ -883,6 +929,7 @@ mod tests {
             }],
         });
 
+        sync_exported_function_surface_rows(&mut package);
         let package_plan = build_native_package_plan(
             AotEmitTarget::WindowsExeBundle,
             &package,
@@ -978,6 +1025,7 @@ mod tests {
             },
         ]);
 
+        sync_exported_function_surface_rows(&mut package);
         let package_plan = build_native_package_plan(
             AotEmitTarget::WindowsExeBundle,
             &package,
@@ -1166,6 +1214,7 @@ mod tests {
             },
         ]);
 
+        sync_exported_function_surface_rows(&mut package);
         let package_plan = build_native_package_plan(
             AotEmitTarget::WindowsDllBundle,
             &package,
@@ -1249,6 +1298,7 @@ mod tests {
             ],
         });
 
+        sync_exported_function_surface_rows(&mut package);
         let package_plan = build_native_package_plan(
             AotEmitTarget::WindowsExeBundle,
             &package,
@@ -1376,6 +1426,7 @@ mod tests {
             },
         ]);
 
+        sync_exported_function_surface_rows(&mut package);
         let package_plan = build_native_package_plan(
             AotEmitTarget::WindowsExeBundle,
             &package,
@@ -1487,6 +1538,7 @@ mod tests {
             },
         ]);
 
+        sync_exported_function_surface_rows(&mut package);
         let package_plan = build_native_package_plan(
             AotEmitTarget::WindowsDllBundle,
             &package,
@@ -1572,6 +1624,7 @@ mod tests {
             },
         ]);
 
+        sync_exported_function_surface_rows(&mut package);
         let package_plan = build_native_package_plan(
             AotEmitTarget::WindowsDllBundle,
             &package,
@@ -1678,6 +1731,7 @@ mod tests {
             ],
         });
 
+        sync_exported_function_surface_rows(&mut package);
         let package_plan = build_native_package_plan(
             AotEmitTarget::WindowsExeBundle,
             &package,
@@ -1832,6 +1886,7 @@ mod tests {
             },
         ]);
 
+        sync_exported_function_surface_rows(&mut package);
         let package_plan = build_native_package_plan(
             AotEmitTarget::WindowsExeBundle,
             &package,

@@ -130,8 +130,7 @@ mod tests {
             .as_nanos();
         let dir = repo_root()
             .join("target")
-            .join("arcana-cli-package-workspaces")
-            .join(format!("{label}_{unique}"));
+            .join(format!("arcana-cli-package-workspace-{label}_{unique}"));
         fs::create_dir_all(&dir).expect("repo temp dir should be created");
         dir
     }
@@ -1841,6 +1840,89 @@ mod tests {
         assert!(
             stderr.is_empty(),
             "showcase second-window exercise should not write stderr: `{stderr}`"
+        );
+        let _ = fs::remove_dir_all(&workspace_dir);
+        let _ = fs::remove_dir_all(&exe_out_dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn package_workspace_main_button_closes_showcase_second_window() {
+        let workspace_dir =
+            desktop_proof_workspace_copy("windows_large_arcana_desktop_close_second_workspace");
+        let exe_out_dir = temp_dir("windows_large_arcana_desktop_close_second_bundle");
+        let exe_bundle = package_workspace(
+            workspace_dir.clone(),
+            BuildTarget::windows_exe(),
+            Some("app".to_string()),
+            Some(exe_out_dir.clone()),
+        )
+        .expect("large desktop exe package should succeed");
+        let exe_path = exe_bundle.bundle_dir.join(&exe_bundle.root_artifact);
+        let mut child = Command::new(&exe_path)
+            .current_dir(&exe_bundle.bundle_dir)
+            .arg("--exercise-second-window")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("large desktop exe bundle should launch");
+        let (main_hwnd, _title) = wait_for_process_window(child.id(), Duration::from_secs(20))
+            .expect("desktop showcase window should appear");
+        let (second_hwnd, _title) =
+            wait_for_additional_process_window(child.id(), main_hwnd, Duration::from_secs(20))
+                .expect("secondary showcase window should appear");
+        thread::sleep(Duration::from_millis(200));
+        let (x, y) = desktop_showcase_button_center(35);
+        send_left_click(main_hwnd, x, y);
+        let start = Instant::now();
+        let mut windows = process_windows(child.id());
+        while start.elapsed() < Duration::from_secs(10) {
+            windows = process_windows(child.id());
+            if windows.iter().all(|(hwnd, _)| *hwnd != second_hwnd) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            windows.iter().all(|(hwnd, _)| *hwnd != second_hwnd),
+            "main-button second-window close should remove the secondary window, got windows={windows:?}"
+        );
+        assert!(
+            child
+                .try_wait()
+                .expect("desktop showcase child state should be observable")
+                .is_none(),
+            "desktop showcase should stay alive after closing the secondary window from the main window"
+        );
+        unsafe {
+            SendMessageW(main_hwnd, WM_CLOSE, 0, 0);
+        }
+        let status = wait_for_child_exit(&mut child, Duration::from_secs(20))
+            .expect("desktop showcase should exit after main window closes");
+        let mut stdout = String::new();
+        child
+            .stdout
+            .take()
+            .expect("stdout should be captured")
+            .read_to_string(&mut stdout)
+            .expect("stdout should read");
+        let mut stderr = String::new();
+        child
+            .stderr
+            .take()
+            .expect("stderr should be captured")
+            .read_to_string(&mut stderr)
+            .expect("stderr should read");
+        assert_eq!(status.code(), Some(0));
+        assert!(
+            stdout
+                .lines()
+                .any(|line| line.starts_with("second_window=open:")),
+            "exercise mode should print the opened second window id, got `{stdout}`"
+        );
+        assert!(
+            stderr.is_empty(),
+            "showcase close-second-window path should not write stderr: `{stderr}`"
         );
         let _ = fs::remove_dir_all(&workspace_dir);
         let _ = fs::remove_dir_all(&exe_out_dir);
