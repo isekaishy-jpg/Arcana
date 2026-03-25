@@ -236,17 +236,10 @@ fn target_window_for_id(read cx: arcana_desktop.types.AppContext, read id: arcan
     return arcana_desktop.app.window_for_id :: cx, id :: call
 
 fn cached_main_window_if_live(read cx: arcana_desktop.types.AppContext) -> Option[arcana_desktop.types.Window]:
-    let ids = arcana_desktop.events.window_ids :: cx.runtime.session :: call
-    for id in ids:
-        if id.value == cx.runtime.main_window_id.value:
-            return Option.Some[arcana_desktop.types.Window] :: cx.runtime.main_window :: call
-    return Option.None[arcana_desktop.types.Window] :: :: call
+    return arcana_desktop.app.window_for_id :: cx, cx.runtime.main_window_id :: call
 
 fn live_main_window(read cx: arcana_desktop.types.AppContext) -> Option[arcana_desktop.types.Window]:
-    let cached = arcana_desktop.app.cached_main_window_if_live :: cx :: call
-    if cached :: :: is_some:
-        return cached
-    return arcana_desktop.app.window_for_id :: cx, cx.runtime.main_window_id :: call
+    return arcana_desktop.app.cached_main_window_if_live :: cx :: call
 
 fn best_main_window(read cx: arcana_desktop.types.AppContext) -> Option[arcana_desktop.types.Window]:
     return arcana_desktop.app.live_main_window :: cx :: call
@@ -269,10 +262,16 @@ fn sync_main_window(edit cx: arcana_desktop.types.AppContext) -> Bool:
     let live_main = arcana_desktop.app.live_main_window :: cx :: call
     return match live_main:
         Option.Some(win) => sync_main_window_live_ready :: cx, win :: call
-        Option.None => false
+        Option.None => sync_main_window_missing :: cx :: call
 
 fn sync_main_window_live_ready(edit cx: arcana_desktop.types.AppContext, take win: arcana_desktop.types.Window) -> Bool:
     return arcana_desktop.app.assign_main_window :: cx, win :: call
+
+fn sync_main_window_missing(edit cx: arcana_desktop.types.AppContext) -> Bool:
+    let live_window = arcana_desktop.app.first_live_window :: cx :: call
+    return match live_window:
+        Option.Some(win) => arcana_desktop.app.assign_main_window :: cx, win :: call
+        Option.None => false
 
 export fn event_targets_window(read event: arcana_desktop.types.AppEvent, read win: arcana_desktop.types.Window) -> Bool:
     return match (arcana_desktop.app.event_window_id :: event :: call):

@@ -875,7 +875,10 @@ fn read_lock_target_field(
 }
 
 fn lock_target_format_matches(target: &BuildTarget, format: &str) -> bool {
-    target.format().map(|expected| format == expected).unwrap_or(true)
+    target
+        .format()
+        .map(|expected| format == expected)
+        .unwrap_or(true)
 }
 
 pub fn validate_path(path: &Path) -> PackageResult<()> {
@@ -2082,26 +2085,26 @@ mod tests {
             &lock_path,
             &format!(
                 concat!(
-                "version = 1\n",
-                "workspace = \"ws\"\n",
-                "toolchain = \"binary-sha256:abc\"\n",
-                "order = [\"app\"]\n\n",
-                "[paths]\n",
-                "\"app\" = \"app\"\n\n",
-                "[deps]\n",
-                "\"app\" = []\n\n",
-                "[kinds]\n",
-                "\"app\" = \"app\"\n\n",
-                "[formats]\n",
-                "\"app\" = \"{}\"\n\n",
-                "[fingerprints]\n",
-                "\"app\" = \"fp\"\n\n",
-                "[api_fingerprints]\n",
-                "\"app\" = \"api\"\n\n",
-                "[artifacts]\n",
-                "\"app\" = \".arcana/artifacts/app/internal-aot/fp/app.artifact.toml\"\n\n",
-                "[artifact_hashes]\n",
-                "\"app\" = \"sha256:deadbeef\"\n",
+                    "version = 1\n",
+                    "workspace = \"ws\"\n",
+                    "toolchain = \"binary-sha256:abc\"\n",
+                    "order = [\"app\"]\n\n",
+                    "[paths]\n",
+                    "\"app\" = \"app\"\n\n",
+                    "[deps]\n",
+                    "\"app\" = []\n\n",
+                    "[kinds]\n",
+                    "\"app\" = \"app\"\n\n",
+                    "[formats]\n",
+                    "\"app\" = \"{}\"\n\n",
+                    "[fingerprints]\n",
+                    "\"app\" = \"fp\"\n\n",
+                    "[api_fingerprints]\n",
+                    "\"app\" = \"api\"\n\n",
+                    "[artifacts]\n",
+                    "\"app\" = \".arcana/artifacts/app/internal-aot/fp/app.artifact.toml\"\n\n",
+                    "[artifact_hashes]\n",
+                    "\"app\" = \"sha256:deadbeef\"\n",
                 ),
                 AOT_INTERNAL_FORMAT
             ),

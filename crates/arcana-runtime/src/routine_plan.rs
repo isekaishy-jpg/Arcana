@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 
 use arcana_aot::{AotEntrypointArtifact, AotRoutineArtifact};
 use arcana_ir::{
-    validate_runtime_main_entry_contract,
     ExecAvailabilityAttachment as ParsedAvailabilityAttachment, ExecPageRollup as ParsedPageRollup,
     ExecStmt as ParsedStmt, IrRoutineParam, IrRoutineType, RUNTIME_MAIN_ENTRYPOINT_NAME,
+    validate_runtime_main_entry_contract,
 };
 use serde::{Deserialize, Serialize};
 

@@ -36,7 +36,10 @@ enum SemanticTypeKey {
     TypeParam(SemanticLocalBindingId),
     AssocType(SemanticLocalBindingId),
     Path(Vec<String>),
-    Apply { base: Vec<String>, args: Vec<TypeId> },
+    Apply {
+        base: Vec<String>,
+        args: Vec<TypeId>,
+    },
     Ref {
         lifetime: Option<SemanticLifetimeKey>,
         mutable: bool,
@@ -48,18 +51,29 @@ enum SemanticTypeKey {
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum SemanticTraitRefKey {
-    Path { path: Vec<String>, args: Vec<TypeId> },
+    Path {
+        path: Vec<String>,
+        args: Vec<TypeId>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum SemanticProjectionKey {
-    TraitRef { trait_ref: TraitRefId, assoc: String },
+    TraitRef {
+        trait_ref: TraitRefId,
+        assoc: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum SemanticPredicateKey {
-    TraitBound { trait_ref: TraitRefId },
-    ProjectionEq { projection: ProjectionId, value: TypeId },
+    TraitBound {
+        trait_ref: TraitRefId,
+    },
+    ProjectionEq {
+        projection: ProjectionId,
+        value: TypeId,
+    },
     LifetimeOutlives {
         longer: SemanticLifetimeKey,
         shorter: SemanticLifetimeKey,

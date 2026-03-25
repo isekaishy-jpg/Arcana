@@ -38,10 +38,10 @@ mod tests {
         AOT_INTERNAL_FORMAT, AOT_WINDOWS_DLL_FORMAT, AOT_WINDOWS_EXE_FORMAT, AotEmitContext,
         AotEmitTarget, AotEntrypointArtifact, AotPackageArtifact, AotPackageModuleArtifact,
         AotRoutineArtifact, AotRoutineParamArtifact, AotRuntimeBinding,
-        NATIVE_BUNDLE_MANIFEST_FORMAT, NativeLaunchPlan,
-        build_native_package_plan, compile_module, compile_package, emit_package,
-        emit_package_with_context, parse_native_bundle_manifest, parse_package_artifact,
-        render_native_bundle_manifest, render_package_artifact, validate_package_artifact,
+        NATIVE_BUNDLE_MANIFEST_FORMAT, NativeLaunchPlan, build_native_package_plan, compile_module,
+        compile_package, emit_package, emit_package_with_context, parse_native_bundle_manifest,
+        parse_package_artifact, render_native_bundle_manifest, render_package_artifact,
+        validate_package_artifact,
     };
     use arcana_ir::{
         ExecExpr, ExecPageRollup, ExecPhraseQualifierKind, ExecStmt, IrEntrypoint, IrModule,
@@ -690,7 +690,9 @@ mod tests {
                     type_params: Vec::new(),
                     behavior_attrs: BTreeMap::new(),
                     params: test_params(&["mode=read:name=bytes:ty=Array[Int]".to_string()]),
-                    return_type: test_return_type("fn prefix(read bytes: Array[Int]) -> Array[Int]:"),
+                    return_type: test_return_type(
+                        "fn prefix(read bytes: Array[Int]) -> Array[Int]:",
+                    ),
                     intrinsic_impl: None,
                     impl_target_type: None,
                     impl_trait_path: None,
@@ -851,7 +853,9 @@ mod tests {
                 type_params: Vec::new(),
                 behavior_attrs: BTreeMap::new(),
                 params: test_params(&["mode=read:name=pair:ty=Pair[Str, Int]".to_string()]),
-                return_type: test_return_type("fn echo_pair(read pair: Pair[Str, Int]) -> Pair[Str, Int]:"),
+                return_type: test_return_type(
+                    "fn echo_pair(read pair: Pair[Str, Int]) -> Pair[Str, Int]:",
+                ),
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
@@ -896,7 +900,9 @@ mod tests {
             module_count: 1,
             dependency_edge_count: 1,
             dependency_rows: vec!["source=tool:import:std.io:".to_string()],
-            exported_surface_rows: vec!["module=tool:export:fn:fn main(x: Int) -> Int:".to_string()],
+            exported_surface_rows: vec![
+                "module=tool:export:fn:fn main(x: Int) -> Int:".to_string(),
+            ],
             runtime_requirements: vec!["std.io".to_string()],
             entrypoints: vec![AotEntrypointArtifact {
                 module_id: "tool".to_string(),
@@ -1256,6 +1262,22 @@ mod tests {
     }
 
     #[test]
+    fn parse_package_artifact_allows_unknown_surface_text_escape_sequences() {
+        let mut artifact = base_surface_validation_artifact();
+        artifact.exported_surface_rows =
+            vec!["module=tool:export:fn:fn main() -> Int:\\q".to_string()];
+        artifact.modules[0].exported_surface_rows =
+            vec!["export:fn:fn main() -> Int:\\q".to_string()];
+
+        let parsed = parse_package_artifact(&render_package_artifact(&artifact))
+            .expect("artifact should allow unknown surface text escapes");
+        assert_eq!(
+            parsed.exported_surface_rows,
+            vec!["module=tool:export:fn:fn main() -> Int:\\q".to_string()]
+        );
+    }
+
+    #[test]
     fn collect_native_exports_rejects_stale_declared_export_rows() {
         let mut artifact = base_surface_validation_artifact();
         artifact.routines = vec![AotRoutineArtifact {
@@ -1289,6 +1311,19 @@ mod tests {
             "{err}"
         );
     }
+
+    #[test]
+    fn collect_native_exports_allows_non_native_package_surface_rows() {
+        let mut artifact = base_surface_validation_artifact();
+        artifact.exported_surface_rows = vec![
+            "module=tool:export:fn:fn main() -> Int:".to_string(),
+            "module=tool:export:fn:async fn worker() -> Int:".to_string(),
+            "module=tool:export:fn:fn len[T](read values: Array[T]) -> Int:".to_string(),
+        ];
+
+        let exports = crate::native_abi::collect_native_exports(&artifact)
+            .expect("native exports should ignore async and generic package surface rows");
+        assert_eq!(exports.len(), 1);
+        assert_eq!(exports[0].routine_key, "tool#fn-0");
+    }
 }
-
-

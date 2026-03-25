@@ -4,11 +4,10 @@ use std::io::{Read, Seek, Write};
 use std::path::{Component, Path, PathBuf};
 
 use arcana_aot::{
-    parse_package_artifact, validate_package_artifact, AotOwnerArtifact, AotPackageArtifact,
+    AotOwnerArtifact, AotPackageArtifact, parse_package_artifact, validate_package_artifact,
 };
 use arcana_ir::{
-    parse_routine_type_text, validate_runtime_main_entry_contract, ExecAssignOp as ParsedAssignOp,
-    ExecAssignTarget as ParsedAssignTarget,
+    ExecAssignOp as ParsedAssignOp, ExecAssignTarget as ParsedAssignTarget,
     ExecAvailabilityAttachment as ParsedAvailabilityAttachment,
     ExecAvailabilityKind as ParsedAvailabilityKind, ExecBinaryOp as ParsedBinaryOp,
     ExecChainConnector as ParsedChainConnector, ExecChainIntroducer as ParsedChainIntroducer,
@@ -17,7 +16,8 @@ use arcana_ir::{
     ExecMatchArm as ParsedMatchArm, ExecMatchPattern as ParsedMatchPattern,
     ExecPageRollup as ParsedPageRollup, ExecPhraseArg as ParsedPhraseArg,
     ExecPhraseQualifierKind as ParsedPhraseQualifierKind, ExecStmt as ParsedStmt,
-    ExecUnaryOp as ParsedUnaryOp, IrRoutineType, IrRoutineTypeKind,
+    ExecUnaryOp as ParsedUnaryOp, IrRoutineType, IrRoutineTypeKind, parse_routine_type_text,
+    validate_runtime_main_entry_contract,
 };
 use pathdiff::diff_paths;
 use serde::{Deserialize, Serialize};
@@ -30,16 +30,16 @@ mod native_host;
 mod package_image;
 mod routine_plan;
 pub use json_abi::{
-    execute_exported_json_abi_routine, render_exported_json_abi_manifest, RUNTIME_JSON_ABI_FORMAT,
+    RUNTIME_JSON_ABI_FORMAT, execute_exported_json_abi_routine, render_exported_json_abi_manifest,
 };
-pub use native_abi::{execute_exported_abi_routine, RuntimeAbiValue};
+pub use native_abi::{RuntimeAbiCallOutcome, RuntimeAbiValue, execute_exported_abi_routine};
 #[cfg(windows)]
 pub use native_host::NativeProcessHost;
 pub use package_image::{
-    parse_runtime_package_image, render_runtime_package_image, RUNTIME_PACKAGE_IMAGE_FORMAT,
+    RUNTIME_PACKAGE_IMAGE_FORMAT, parse_runtime_package_image, render_runtime_package_image,
 };
-use routine_plan::{lower_entrypoint, lower_routine};
 pub use routine_plan::{RuntimeEntrypointPlan, RuntimeParamPlan, RuntimeRoutinePlan};
+use routine_plan::{lower_entrypoint, lower_routine};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeOwnerObjectPlan {
@@ -284,6 +284,30 @@ enum RuntimeOpaqueFamily {
 }
 
 impl RuntimeOpaqueFamily {
+    const ALL: [Self; 21] = [
+        Self::FileStream,
+        Self::Window,
+        Self::Image,
+        Self::AppFrame,
+        Self::AppSession,
+        Self::Wake,
+        Self::AudioDevice,
+        Self::AudioBuffer,
+        Self::AudioPlayback,
+        Self::Channel,
+        Self::Mutex,
+        Self::AtomicInt,
+        Self::AtomicBool,
+        Self::Arena,
+        Self::ArenaId,
+        Self::FrameArena,
+        Self::FrameId,
+        Self::PoolArena,
+        Self::PoolId,
+        Self::Task,
+        Self::Thread,
+    ];
+
     const fn lang_item_name(self) -> &'static str {
         match self {
             Self::FileStream => "file_stream_handle",
@@ -1707,6 +1731,30 @@ impl BufferedHost {
         Ok(Some(normalize_lexical_path(Path::new(&self.sandbox_root))))
     }
 
+    fn sandbox_checked_real_path(&self, path: &Path) -> Result<PathBuf, String> {
+        let mut current = Some(path);
+        while let Some(candidate) = current {
+            if candidate.exists() {
+                let real = fs::canonicalize(candidate).map_err(|err| {
+                    format!(
+                        "failed to canonicalize `{}`: {err}",
+                        runtime_path_string(candidate)
+                    )
+                })?;
+                let suffix = path.strip_prefix(candidate).map_err(|_| {
+                    format!(
+                        "failed to make `{}` relative to checked ancestor `{}`",
+                        runtime_path_string(path),
+                        runtime_path_string(candidate)
+                    )
+                })?;
+                return Ok(normalize_lexical_path(&real.join(suffix)));
+            }
+            current = candidate.parent();
+        }
+        Ok(normalize_lexical_path(path))
+    }
+
     fn resolve_fs_path(&self, path: &str) -> Result<PathBuf, String> {
         let requested = PathBuf::from(path);
         let candidate = if requested.is_absolute() {
@@ -1720,6 +1768,16 @@ impl BufferedHost {
                     "path `{}` escapes sandbox root `{}`",
                     runtime_path_string(&candidate),
                     runtime_path_string(&root)
+                ));
+            }
+            let real_root = self.sandbox_checked_real_path(&root)?;
+            let real_candidate = self.sandbox_checked_real_path(&candidate)?;
+            if !real_candidate.starts_with(&real_root) {
+                return Err(format!(
+                    "path `{}` escapes sandbox root `{}` via real path `{}`",
+                    runtime_path_string(&candidate),
+                    runtime_path_string(&root),
+                    runtime_path_string(&real_candidate)
                 ));
             }
         }
@@ -1906,6 +1964,23 @@ impl BufferedHost {
         Ok(())
     }
 
+    fn session_window_ids(
+        &self,
+        session: RuntimeAppSessionHandle,
+    ) -> Result<BTreeSet<i64>, String> {
+        let mut ids = BTreeSet::new();
+        for window in &self.session_ref(session)?.windows {
+            if !self.windows.contains_key(window) {
+                continue;
+            }
+            let Ok(id) = i64::try_from(window.0) else {
+                continue;
+            };
+            ids.insert(id);
+        }
+        Ok(ids)
+    }
+
     fn session_has_ready_events(&self, session: RuntimeAppSessionHandle) -> Result<bool, String> {
         let session_state = self.session_ref(session)?;
         if !session_state.resumed || session_state.pending_wakes > 0 {
@@ -1914,7 +1989,11 @@ impl BufferedHost {
         if session_state.resumed && !session_state.suspended && session_state.windows.is_empty() {
             return Ok(true);
         }
-        Ok(!self.next_frame_events.is_empty())
+        let session_window_ids = self.session_window_ids(session)?;
+        Ok(self
+            .next_frame_events
+            .iter()
+            .any(|event| event.window_id == 0 || session_window_ids.contains(&event.window_id)))
     }
 
     fn insert_wake(&mut self, session: RuntimeAppSessionHandle) -> RuntimeWakeHandle {
@@ -3138,8 +3217,9 @@ impl RuntimeHost for BufferedHost {
     ) -> Result<RuntimeAppFrameHandle, String> {
         self.prune_missing_session_windows(session)?;
         let mut window_events = Vec::new();
-        let mut input = std::mem::take(&mut self.next_frame_input);
+        let mut input = self.next_frame_input.clone();
         let session_windows = self.session_ref(session)?.windows.clone();
+        let session_window_ids = self.session_window_ids(session)?;
         let any_window_focused = session_windows.iter().any(|window| {
             self.windows
                 .get(window)
@@ -3152,7 +3232,16 @@ impl RuntimeHost for BufferedHost {
                 state.redraw_pending = false;
             }
         }
-        let mut pending_events = std::mem::take(&mut self.next_frame_events);
+        let mut remaining_events = Vec::new();
+        let mut pending_events = Vec::new();
+        for event in std::mem::take(&mut self.next_frame_events) {
+            if event.window_id == 0 || session_window_ids.contains(&event.window_id) {
+                pending_events.push(event);
+            } else {
+                remaining_events.push(event);
+            }
+        }
+        self.next_frame_events = remaining_events;
         prioritize_buffered_close_requested(&mut pending_events);
         let device_events_policy = self.session_ref(session)?.device_events_policy;
         pending_events.retain(|event| {
@@ -7010,24 +7099,14 @@ fn arcana_desktop_cached_main_window_if_live(
     context: &ArcanaDesktopAppContextSpec,
     host: &mut dyn RuntimeHost,
 ) -> Result<Option<RuntimeWindowHandle>, String> {
-    let ids = host.events_session_window_ids(context.runtime.session)?;
-    if ids
-        .into_iter()
-        .any(|candidate| candidate == context.runtime.main_window_id)
-    {
-        return Ok(Some(context.runtime.main_window));
-    }
-    Ok(None)
+    arcana_desktop_lookup_window_for_id(context, context.runtime.main_window_id, host)
 }
 
 fn arcana_desktop_best_main_window(
     context: &ArcanaDesktopAppContextSpec,
     host: &mut dyn RuntimeHost,
 ) -> Result<Option<RuntimeWindowHandle>, String> {
-    if let Some(window) = arcana_desktop_cached_main_window_if_live(context, host)? {
-        return Ok(Some(window));
-    }
-    arcana_desktop_lookup_window_for_id(context, context.runtime.main_window_id, host)
+    arcana_desktop_cached_main_window_if_live(context, host)
 }
 
 fn arcana_desktop_target_window_value(
@@ -9655,15 +9734,28 @@ fn runtime_type_with_args(base: &str, type_args: &[String]) -> Option<IrRoutineT
     })
 }
 
-fn runtime_value_type(
-    receiver: &RuntimeValue,
-    state: &RuntimeExecutionState,
-) -> Option<IrRoutineType> {
+fn runtime_value_type_without_state(receiver: &RuntimeValue) -> Option<IrRoutineType> {
     match receiver {
         RuntimeValue::OwnerHandle(owner_key) => Some(runtime_synthetic_owner_type(owner_key)),
         RuntimeValue::Record { name, .. } => parse_routine_type_text(name)
             .ok()
             .or_else(|| runtime_simple_type(runtime_type_root_name(name).as_str())),
+        RuntimeValue::Opaque(value) => runtime_simple_type(opaque_type_name(value)),
+        RuntimeValue::Variant { name, .. } => {
+            let enum_name = runtime_variant_enum_name(name);
+            parse_routine_type_text(&enum_name)
+                .ok()
+                .or_else(|| runtime_simple_type(runtime_type_root_name(&enum_name).as_str()))
+        }
+        _ => runtime_value_type_root(receiver).and_then(|name| runtime_simple_type(&name)),
+    }
+}
+
+fn runtime_value_type(
+    receiver: &RuntimeValue,
+    state: &RuntimeExecutionState,
+) -> Option<IrRoutineType> {
+    match receiver {
         RuntimeValue::Opaque(RuntimeOpaqueValue::Channel(_)) => runtime_type_with_args(
             opaque_type_name(match receiver {
                 RuntimeValue::Opaque(value) => value,
@@ -9683,25 +9775,94 @@ fn runtime_value_type(
             },
             &runtime_receiver_type_args(receiver, state),
         ),
-        RuntimeValue::Opaque(value) => runtime_simple_type(opaque_type_name(value)),
-        RuntimeValue::Variant { name, .. } => {
-            let enum_name = runtime_variant_enum_name(name);
-            parse_routine_type_text(&enum_name)
-                .ok()
-                .or_else(|| runtime_simple_type(runtime_type_root_name(&enum_name).as_str()))
-        }
-        _ => runtime_value_type_root(receiver).and_then(|name| runtime_simple_type(&name)),
+        _ => runtime_value_type_without_state(receiver),
     }
 }
 
-fn runtime_receiver_root_fallback_allowed(actual: &IrRoutineType) -> bool {
-    match &actual.kind {
-        IrRoutineTypeKind::Path(path) => path
-            .segments
-            .last()
-            .is_some_and(|segment| !segment.contains('<')),
+fn runtime_simple_root_fallback_allowed(ty: &IrRoutineType) -> bool {
+    match &ty.kind {
+        IrRoutineTypeKind::Path(path) => {
+            path.segments.len() == 1
+                && path
+                    .segments
+                    .last()
+                    .is_some_and(|segment| !segment.contains('<'))
+        }
         _ => false,
     }
+}
+
+fn runtime_opaque_family_for_type_name(
+    plan: &RuntimePackagePlan,
+    type_name: &str,
+) -> Option<RuntimeOpaqueFamily> {
+    RuntimeOpaqueFamily::ALL.into_iter().find(|family| {
+        family.canonical_type_name() == type_name
+            || plan
+                .opaque_family_types
+                .get(family.lang_item_name())
+                .is_some_and(|entries| entries.iter().any(|entry| entry == type_name))
+    })
+}
+
+fn runtime_opaque_family_for_type(
+    plan: &RuntimePackagePlan,
+    ty: &IrRoutineType,
+) -> Option<RuntimeOpaqueFamily> {
+    let type_name = ty.base_path().map(|path| path.render())?;
+    runtime_opaque_family_for_type_name(plan, &type_name)
+}
+
+fn runtime_opaque_family_type_args(ty: &IrRoutineType) -> Option<&[IrRoutineType]> {
+    match &ty.kind {
+        IrRoutineTypeKind::Path(_) => Some(&[]),
+        IrRoutineTypeKind::Apply { args, .. } => Some(args.as_slice()),
+        _ => None,
+    }
+}
+
+fn runtime_opaque_family_matches(
+    plan: &RuntimePackagePlan,
+    declared: &IrRoutineType,
+    actual: &IrRoutineType,
+    type_params: &[String],
+) -> bool {
+    let Some(declared_family) = runtime_opaque_family_for_type(plan, declared) else {
+        return false;
+    };
+    let Some(actual_family) = runtime_opaque_family_for_type(plan, actual) else {
+        return false;
+    };
+    if declared_family != actual_family {
+        return false;
+    }
+    let Some(declared_args) = runtime_opaque_family_type_args(declared) else {
+        return false;
+    };
+    let Some(actual_args) = runtime_opaque_family_type_args(actual) else {
+        return false;
+    };
+    declared_args.len() == actual_args.len()
+        && declared_args
+            .iter()
+            .zip(actual_args)
+            .all(|(declared_arg, actual_arg)| {
+                IrRoutineType::matches_declared(declared_arg, actual_arg, type_params)
+            })
+}
+
+fn runtime_receiver_matches_declared_type(
+    plan: &RuntimePackagePlan,
+    declared: &IrRoutineType,
+    actual: &IrRoutineType,
+    type_params: &[String],
+    receiver_root: &str,
+) -> bool {
+    IrRoutineType::matches_declared(declared, actual, type_params)
+        || runtime_opaque_family_matches(plan, declared, actual, type_params)
+        || runtime_simple_root_fallback_allowed(actual)
+            && runtime_simple_root_fallback_allowed(declared)
+            && declared.root_name() == Some(receiver_root)
 }
 
 fn runtime_value_type_root(receiver: &RuntimeValue) -> Option<String> {
@@ -10783,6 +10944,8 @@ fn resolve_routine_index_for_call(
     allow_receiver_root_fallback: bool,
     state: Option<&RuntimeExecutionState>,
 ) -> Result<Option<usize>, String> {
+    let bare_receiver_lookup =
+        dynamic_dispatch.is_none() && allow_receiver_root_fallback && callable.len() == 1;
     let candidates = match dynamic_dispatch {
         Some(ParsedDynamicDispatch::TraitMethod { trait_path }) => {
             let Some(method_name) = callable.last() else {
@@ -10790,7 +10953,7 @@ fn resolve_routine_index_for_call(
             };
             resolve_dynamic_method_candidate_indices(plan, method_name, trait_path)
         }
-        None if allow_receiver_root_fallback && callable.len() == 1 => {
+        None if bare_receiver_lookup => {
             resolve_method_candidate_indices_by_name(plan, &callable[0])
         }
         None => resolve_routine_candidate_indices(plan, current_module_id, callable),
@@ -10820,7 +10983,7 @@ fn resolve_routine_index_for_call(
             )),
         };
     }
-    if dynamic_dispatch.is_none() && candidates.len() == 1 {
+    if dynamic_dispatch.is_none() && candidates.len() == 1 && !bare_receiver_lookup {
         return Ok(candidates.into_iter().next());
     }
     if !allow_receiver_root_fallback && dynamic_dispatch.is_none() {
@@ -10835,7 +10998,9 @@ fn resolve_routine_index_for_call(
             callable.join(".")
         ));
     };
-    let receiver_type = state.and_then(|state| runtime_value_type(receiver, state));
+    let receiver_type = state
+        .and_then(|state| runtime_value_type(receiver, state))
+        .or_else(|| runtime_value_type_without_state(receiver));
     let Some(receiver_root) = receiver_type
         .as_ref()
         .and_then(IrRoutineType::root_name)
@@ -10863,9 +11028,13 @@ fn resolve_routine_index_for_call(
                     receiver_type
                         .as_ref()
                         .map(|actual| {
-                            IrRoutineType::matches_declared(declared, actual, &routine.type_params)
-                                || runtime_receiver_root_fallback_allowed(actual)
-                                    && declared.root_name() == Some(receiver_root.as_str())
+                            runtime_receiver_matches_declared_type(
+                                plan,
+                                declared,
+                                actual,
+                                &routine.type_params,
+                                &receiver_root,
+                            )
                         })
                         .unwrap_or_else(|| declared.root_name() == Some(receiver_root.as_str()))
                 })

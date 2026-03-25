@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use arcana_hir::{
-    HirImplDecl, HirPredicate, HirResolvedModule, HirResolvedWorkspace, HirResolvedSymbolRef,
+    HirImplDecl, HirPredicate, HirResolvedModule, HirResolvedSymbolRef, HirResolvedWorkspace,
     HirSymbolKind, HirTraitRef, HirType, HirTypeBindingScope, HirTypeSubstitutions,
     HirWorkspaceSummary, current_workspace_package_for_module, impl_target_is_public_from_package,
     lookup_symbol_path, substitute_hir_type, visible_method_package_names_for_module,

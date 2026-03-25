@@ -1,14 +1,15 @@
 use std::collections::BTreeMap;
 
+use arcana_ir::{IrRoutineType, IrRoutineTypeKind};
 use serde::Serialize;
 
 use super::{
-    execute_routine_with_state, routine_plan::render_runtime_signature_text,
-    validate_runtime_requirements_supported, RuntimeExecutionState, RuntimeHost,
-    RuntimePackagePlan, RuntimeRoutinePlan, RuntimeValue,
+    RuntimeExecutionState, RuntimeHost, RuntimeOpaqueFamily, RuntimePackagePlan,
+    RuntimeRoutinePlan, RuntimeValue, execute_routine_call_with_state,
+    routine_plan::render_runtime_signature_text, validate_runtime_requirements_supported,
 };
 
-pub const RUNTIME_JSON_ABI_FORMAT: &str = "arcana-runtime-json-abi-v1";
+pub const RUNTIME_JSON_ABI_FORMAT: &str = "arcana-runtime-json-abi-v2";
 
 #[derive(Serialize)]
 struct JsonAbiManifest<'a> {
@@ -66,7 +67,7 @@ pub fn execute_exported_json_abi_routine(
         .routines
         .iter()
         .enumerate()
-        .find(|(_, routine)| json_abi_callable(routine) && routine.routine_key == routine_key)
+        .find(|(_, routine)| json_abi_callable(plan, routine) && routine.routine_key == routine_key)
         .map(|(index, _)| index)
         .ok_or_else(|| format!("json abi routine `{routine_key}` is not exported or callable"))?;
     validate_runtime_requirements_supported(plan, host)?;
@@ -75,15 +76,24 @@ pub fn execute_exported_json_abi_routine(
         .map(json_value_to_runtime_value)
         .collect::<Result<Vec<_>, _>>()?;
     let mut state = RuntimeExecutionState::default();
-    let value = execute_routine_with_state(
+    let outcome = execute_routine_call_with_state(
         plan,
         routine_index,
         Vec::new(),
         converted_args,
+        &[],
         &mut state,
         host,
+        false,
     )?;
-    let rendered = runtime_value_to_json_value(value)?;
+    let rendered = serde_json::json!({
+        "result": runtime_value_to_json_value(outcome.value)?,
+        "final_args": outcome
+            .final_args
+            .into_iter()
+            .map(runtime_value_to_json_value)
+            .collect::<Result<Vec<_>, _>>()?,
+    });
     serde_json::to_string(&rendered)
         .map_err(|e| format!("failed to render runtime json abi result: {e}"))
 }
@@ -91,15 +101,58 @@ pub fn execute_exported_json_abi_routine(
 fn exported_json_abi_routines(plan: &RuntimePackagePlan) -> Vec<&RuntimeRoutinePlan> {
     plan.routines
         .iter()
-        .filter(|routine| json_abi_callable(routine))
+        .filter(|routine| json_abi_callable(plan, routine))
         .collect()
 }
 
-fn json_abi_callable(routine: &RuntimeRoutinePlan) -> bool {
+fn json_abi_callable(plan: &RuntimePackagePlan, routine: &RuntimeRoutinePlan) -> bool {
     routine.exported
         && routine.symbol_kind == "fn"
         && !routine.is_async
         && routine.type_params.is_empty()
+        && routine
+            .params
+            .iter()
+            .all(|param| json_abi_supported_type(plan, &param.ty))
+        && routine
+            .return_type
+            .as_ref()
+            .is_none_or(|ty| json_abi_supported_type(plan, ty))
+}
+
+fn json_abi_supported_type(plan: &RuntimePackagePlan, ty: &IrRoutineType) -> bool {
+    match &ty.kind {
+        IrRoutineTypeKind::Path(path) => {
+            !json_abi_blocks_path(plan, &path.render(), path.root_name())
+        }
+        IrRoutineTypeKind::Apply { base, args } => {
+            !json_abi_blocks_path(plan, &base.render(), base.root_name())
+                && args.iter().all(|arg| json_abi_supported_type(plan, arg))
+        }
+        IrRoutineTypeKind::Ref { .. } => false,
+        IrRoutineTypeKind::Tuple(items) => {
+            items.len() == 2 && items.iter().all(|item| json_abi_supported_type(plan, item))
+        }
+        IrRoutineTypeKind::Projection(_) => false,
+    }
+}
+
+fn json_abi_blocks_path(
+    plan: &RuntimePackagePlan,
+    rendered: &str,
+    root_name: Option<&str>,
+) -> bool {
+    root_name == Some("Owner") || json_abi_path_is_runtime_opaque(plan, rendered)
+}
+
+fn json_abi_path_is_runtime_opaque(plan: &RuntimePackagePlan, rendered: &str) -> bool {
+    RuntimeOpaqueFamily::ALL.into_iter().any(|family| {
+        family.canonical_type_name() == rendered
+            || plan
+                .opaque_family_types
+                .get(family.lang_item_name())
+                .is_some_and(|entries| entries.iter().any(|entry| entry == &rendered))
+    })
 }
 
 fn json_value_to_runtime_value(value: &serde_json::Value) -> Result<RuntimeValue, String> {

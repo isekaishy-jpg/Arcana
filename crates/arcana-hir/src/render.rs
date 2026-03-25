@@ -1,10 +1,10 @@
 use super::{
-    signature::render_symbol_signature, HirAssignTarget, HirAvailabilityAttachment,
-    HirBehaviorAttr, HirBinaryOp, HirChainConnector, HirChainIntroducer, HirChainStep,
-    HirDirective, HirEnumVariant, HirExpr, HirForewordApp, HirForewordArg, HirHeaderAttachment,
-    HirImplAssocTypeBinding, HirImplDecl, HirLangItem, HirMatchArm, HirMatchPattern,
-    HirModuleDependency, HirOwnerExit, HirOwnerObject, HirPageRollup, HirPhraseArg, HirStatement,
-    HirStatementKind, HirSymbol, HirSymbolBody, HirUnaryOp,
+    HirAssignTarget, HirAvailabilityAttachment, HirBehaviorAttr, HirBinaryOp, HirChainConnector,
+    HirChainIntroducer, HirChainStep, HirDirective, HirEnumVariant, HirExpr, HirForewordApp,
+    HirForewordArg, HirHeaderAttachment, HirImplAssocTypeBinding, HirImplDecl, HirLangItem,
+    HirMatchArm, HirMatchPattern, HirModuleDependency, HirOwnerExit, HirOwnerObject, HirPageRollup,
+    HirPhraseArg, HirStatement, HirStatementKind, HirSymbol, HirSymbolBody, HirUnaryOp,
+    signature::render_symbol_signature,
 };
 
 pub(crate) fn encode_surface_text(text: &str) -> String {
@@ -607,7 +607,8 @@ pub fn render_expr_fingerprint(expr: &HirExpr) -> String {
             "chain(style={}|introducer={}|steps=[{}])",
             quote_fingerprint_text(style),
             render_chain_introducer_fingerprint(*introducer),
-            steps.iter()
+            steps
+                .iter()
                 .map(render_chain_step_fingerprint)
                 .collect::<Vec<_>>()
                 .join(",")

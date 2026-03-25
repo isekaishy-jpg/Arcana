@@ -18,6 +18,7 @@ Scope notes:
   - rewrite-owned package: `grimoires/owned/libs/arcana-desktop`
   - responsibility: Arcana-owned public desktop/window/event-loop boundary for native desktop apps, with winit-class role breadth over rewrite-owned substrate rather than a thin wrapper above a separately-public raw desktop layer
   - responsibility: may own the canonical session runner, raw window/session/event/wake contracts, blocking wait policy, multi-window coordination, input/timing helpers, monitor/clipboard helpers, event routing, frame-input snapshots, optional ECS-loop adapters, keybind/action helpers, and similar desktop-shell utilities if Arcana's rewrite-native layout folds those into one package
+  - note: window events remain window-ID centric; `TargetedEvent.window_id` is the authoritative routing identity, and any higher-level "main window" convenience must stay phase-separated from callback dispatch and may only promote another live window after the callback/reconcile phase
   - note: `std.window`, `std.input`, `std.events`, `std.canvas`, `std.time`, and `std.clipboard` remain rewrite-owned substrate and backend-support layers; future desktop apps and higher grimoires should normally treat `arcana_desktop` as the app-shell package boundary
   - responsibility: must not absorb graphics/text draw policy that belongs in sibling grimoires above the shared low-level substrate
 - Graphics grimoire

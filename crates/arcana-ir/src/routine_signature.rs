@@ -1,6 +1,6 @@
 use arcana_hir::{
-    HirLifetime, HirPath, HirProjection, HirTraitRef, HirType, HirTypeBindingScope,
-    HirTypeKind, HirTypeSubstitutions, hir_type_matches, parse_hir_type,
+    HirLifetime, HirPath, HirProjection, HirTraitRef, HirType, HirTypeBindingScope, HirTypeKind,
+    HirTypeSubstitutions, hir_type_matches, parse_hir_type,
 };
 use serde::{Deserialize, Serialize};
 
@@ -66,10 +66,12 @@ impl IrRoutinePath {
     }
 
     pub fn root_name(&self) -> Option<&str> {
-        self.segments
-            .last()
-            .map(String::as_str)
-            .map(|segment| segment.split_once('<').map(|(head, _)| head).unwrap_or(segment))
+        self.segments.last().map(String::as_str).map(|segment| {
+            segment
+                .split_once('<')
+                .map(|(head, _)| head)
+                .unwrap_or(segment)
+        })
     }
 
     pub fn is_well_formed(&self) -> bool {
@@ -235,8 +237,12 @@ impl IrRoutineType {
             }
             IrRoutineTypeKind::Ref {
                 lifetime, inner, ..
-            } => lifetime.as_ref().is_none_or(IrRoutineLifetime::is_well_formed)
-                && inner.is_well_formed(),
+            } => {
+                lifetime
+                    .as_ref()
+                    .is_none_or(IrRoutineLifetime::is_well_formed)
+                    && inner.is_well_formed()
+            }
             IrRoutineTypeKind::Tuple(items) => items.iter().all(IrRoutineType::is_well_formed),
             IrRoutineTypeKind::Projection(projection) => projection.is_well_formed(),
         }

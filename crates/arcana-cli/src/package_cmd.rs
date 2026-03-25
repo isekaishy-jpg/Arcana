@@ -1930,6 +1930,105 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn package_workspace_main_button_reopens_showcase_second_window_after_close() {
+        let workspace_dir =
+            desktop_proof_workspace_copy("windows_large_arcana_desktop_reopen_second_workspace");
+        let exe_out_dir = temp_dir("windows_large_arcana_desktop_reopen_second_bundle");
+        let exe_bundle = package_workspace(
+            workspace_dir.clone(),
+            BuildTarget::windows_exe(),
+            Some("app".to_string()),
+            Some(exe_out_dir.clone()),
+        )
+        .expect("large desktop exe package should succeed");
+        let exe_path = exe_bundle.bundle_dir.join(&exe_bundle.root_artifact);
+        let mut child = Command::new(&exe_path)
+            .current_dir(&exe_bundle.bundle_dir)
+            .arg("--exercise-second-window")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("large desktop exe bundle should launch");
+        let (main_hwnd, _title) = wait_for_process_window(child.id(), Duration::from_secs(20))
+            .expect("desktop showcase window should appear");
+        let (first_second_hwnd, _title) =
+            wait_for_additional_process_window(child.id(), main_hwnd, Duration::from_secs(20))
+                .expect("secondary showcase window should appear");
+
+        thread::sleep(Duration::from_millis(200));
+        let (close_x, close_y) = desktop_showcase_button_center(35);
+        send_left_click(main_hwnd, close_x, close_y);
+
+        let start = Instant::now();
+        let mut windows = process_windows(child.id());
+        while start.elapsed() < Duration::from_secs(10) {
+            windows = process_windows(child.id());
+            if windows.iter().all(|(hwnd, _)| *hwnd != first_second_hwnd) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            windows.iter().all(|(hwnd, _)| *hwnd != first_second_hwnd),
+            "main-button close should remove the original secondary window before reopen, got windows={windows:?}"
+        );
+
+        let (open_x, open_y) = desktop_showcase_button_center(22);
+        send_left_click(main_hwnd, open_x, open_y);
+        let (reopened_hwnd, _title) =
+            wait_for_additional_process_window(child.id(), main_hwnd, Duration::from_secs(20))
+                .expect("secondary showcase window should reopen after close");
+
+        assert!(
+            child
+                .try_wait()
+                .expect("desktop showcase child state should be observable")
+                .is_none(),
+            "desktop showcase should stay alive after reopening the secondary window"
+        );
+
+        unsafe {
+            SendMessageW(reopened_hwnd, WM_CLOSE, 0, 0);
+        }
+        unsafe {
+            SendMessageW(main_hwnd, WM_CLOSE, 0, 0);
+        }
+        let status = wait_for_child_exit(&mut child, Duration::from_secs(20)).expect(
+            "desktop showcase should exit after closing reopened secondary and main windows",
+        );
+        let mut stdout = String::new();
+        child
+            .stdout
+            .take()
+            .expect("stdout should be captured")
+            .read_to_string(&mut stdout)
+            .expect("stdout should read");
+        let mut stderr = String::new();
+        child
+            .stderr
+            .take()
+            .expect("stderr should be captured")
+            .read_to_string(&mut stderr)
+            .expect("stderr should read");
+        assert_eq!(status.code(), Some(0));
+        assert!(
+            stdout
+                .lines()
+                .filter(|line| line.starts_with("second_window=open:"))
+                .count()
+                >= 2,
+            "exercise mode should report the initial and reopened second-window opens, got `{stdout}`"
+        );
+        assert!(
+            stderr.is_empty(),
+            "showcase reopen path should not write stderr: `{stderr}`"
+        );
+        let _ = fs::remove_dir_all(&workspace_dir);
+        let _ = fs::remove_dir_all(&exe_out_dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn package_workspace_stages_windows_exe_bundle_with_owner_activation() {
         let dir = temp_dir("windows_exe_owner");
         write_app_workspace(
@@ -2629,8 +2728,3 @@ mod tests {
         .map_err(|e| format!("utf8 decode failed: {e}"))
     }
 }
-
-
-
-
-

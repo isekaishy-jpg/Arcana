@@ -4,27 +4,27 @@ use std::io::{self, BufRead, Write};
 use std::mem::{size_of, zeroed};
 use std::path::Path;
 use std::ptr::null_mut;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use font8x8::{UnicodeFonts, BASIC_FONTS};
+use font8x8::{BASIC_FONTS, UnicodeFonts};
 use windows_sys::Win32::Devices::HumanInterfaceDevice::{
     HID_USAGE_GENERIC_MOUSE, HID_USAGE_PAGE_GENERIC,
 };
 use windows_sys::Win32::Foundation::{
     GlobalFree, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
 };
-use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE};
+use windows_sys::Win32::Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute};
 use windows_sys::Win32::Graphics::Gdi::{
-    BeginPaint, ClientToScreen, EndPaint, EnumDisplayMonitors, GetMonitorInfoW, MonitorFromWindow,
-    ReleaseDC, StretchDIBits, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HDC, HMONITOR,
-    MONITORINFO, MONITORINFOEXW, MONITOR_DEFAULTTONEAREST, PAINTSTRUCT, SRCCOPY,
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, ClientToScreen, DIB_RGB_COLORS, EndPaint,
+    EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITORINFO,
+    MONITORINFOEXW, MonitorFromWindow, PAINTSTRUCT, ReleaseDC, SRCCOPY, StretchDIBits,
 };
 use windows_sys::Win32::Media::Audio::{
-    waveOutClose, waveOutGetErrorTextW, waveOutGetPosition, waveOutOpen, waveOutPause,
-    waveOutPrepareHeader, waveOutReset, waveOutRestart, waveOutSetVolume, waveOutUnprepareHeader,
-    waveOutWrite, HWAVEOUT, WAVEFORMATEX, WAVEHDR, WAVE_FORMAT_PCM, WAVE_FORMAT_QUERY, WAVE_MAPPER,
-    WHDR_BEGINLOOP, WHDR_DONE, WHDR_ENDLOOP,
+    HWAVEOUT, WAVE_FORMAT_PCM, WAVE_FORMAT_QUERY, WAVE_MAPPER, WAVEFORMATEX, WAVEHDR,
+    WHDR_BEGINLOOP, WHDR_DONE, WHDR_ENDLOOP, waveOutClose, waveOutGetErrorTextW,
+    waveOutGetPosition, waveOutOpen, waveOutPause, waveOutPrepareHeader, waveOutReset,
+    waveOutRestart, waveOutSetVolume, waveOutUnprepareHeader, waveOutWrite,
 };
 use windows_sys::Win32::Media::{MMSYSERR_NOERROR, MMTIME, TIME_SAMPLES};
 use windows_sys::Win32::System::DataExchange::{
@@ -32,56 +32,56 @@ use windows_sys::Win32::System::DataExchange::{
     RegisterClipboardFormatW, SetClipboardData,
 };
 use windows_sys::Win32::System::LibraryLoader::{
-    GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
-    GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+    GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+    GetModuleHandleExW,
 };
 use windows_sys::Win32::System::Memory::{
-    GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE,
+    GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
 };
 use windows_sys::Win32::System::Ole::CF_UNICODETEXT;
-use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
+use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
 use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI};
 use windows_sys::Win32::UI::Input::Ime::{
-    ImmGetCompositionStringW, ImmGetContext, ImmReleaseContext, ImmSetCandidateWindow,
-    ImmSetCompositionWindow, CANDIDATEFORM, CFS_CANDIDATEPOS, CFS_FORCE_POSITION, COMPOSITIONFORM,
-    GCS_COMPSTR, GCS_CURSORPOS, GCS_RESULTSTR, HIMC,
+    CANDIDATEFORM, CFS_CANDIDATEPOS, CFS_FORCE_POSITION, COMPOSITIONFORM, GCS_COMPSTR,
+    GCS_CURSORPOS, GCS_RESULTSTR, HIMC, ImmGetCompositionStringW, ImmGetContext, ImmReleaseContext,
+    ImmSetCandidateWindow, ImmSetCompositionWindow,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    MapVirtualKeyW, TrackMouseEvent, MAPVK_VK_TO_CHAR, MAPVK_VSC_TO_VK_EX, TME_LEAVE,
-    TRACKMOUSEEVENT,
+    MAPVK_VK_TO_CHAR, MAPVK_VSC_TO_VK_EX, MapVirtualKeyW, TME_LEAVE, TRACKMOUSEEVENT,
+    TrackMouseEvent,
 };
 use windows_sys::Win32::UI::Input::{
-    GetRawInputData, RegisterRawInputDevices, HRAWINPUT, MOUSE_MOVE_RELATIVE, RAWINPUT,
-    RAWINPUTDEVICE, RIDEV_INPUTSINK, RIDEV_REMOVE, RID_INPUT, RIM_TYPEKEYBOARD, RIM_TYPEMOUSE,
+    GetRawInputData, HRAWINPUT, MOUSE_MOVE_RELATIVE, RAWINPUT, RAWINPUTDEVICE, RID_INPUT,
+    RIDEV_INPUTSINK, RIDEV_REMOVE, RIM_TYPEKEYBOARD, RIM_TYPEMOUSE, RegisterRawInputDevices,
 };
 use windows_sys::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    AdjustWindowRectEx, ClipCursor, CreateWindowExW, DefWindowProcW, DestroyWindow,
-    DispatchMessageW, FlashWindowEx, GetClientRect, GetWindowLongPtrW, GetWindowRect, IsWindow,
-    LoadCursorW, MsgWaitForMultipleObjectsEx, PeekMessageW, PostMessageW, RegisterClassW,
-    SetCursor, SetCursorPos, SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos,
-    SetWindowTextW, ShowWindow, TranslateMessage, WaitMessage, CREATESTRUCTW, CS_HREDRAW,
-    CS_VREDRAW, CW_USEDEFAULT, FLASHWINFO, FLASHW_STOP, FLASHW_TRAY, GWLP_USERDATA, GWL_EXSTYLE,
-    GWL_STYLE, HCURSOR, HTCLIENT, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST, IDC_ARROW, IDC_CROSS,
-    IDC_HAND, IDC_HELP, IDC_IBEAM, IDC_NO, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE,
-    IDC_SIZEWE, IDC_WAIT, LWA_ALPHA, MINMAXINFO, MSG, MWMO_INPUTAVAILABLE, PM_NOREMOVE, PM_REMOVE,
-    QS_ALLINPUT, SIZE_MAXIMIZED, SIZE_MINIMIZED, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOOWNERZORDER, SWP_NOSIZE, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, WM_CHAR,
-    WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_DROPFILES, WM_GETMINMAXINFO, WM_IME_COMPOSITION,
-    WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_INPUT, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-    WM_MOVE, WM_NCCREATE, WM_NCDESTROY, WM_NULL, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP,
-    WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_THEMECHANGED,
-    WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSW, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_MAXIMIZEBOX,
-    WS_OVERLAPPEDWINDOW, WS_SIZEBOX,
+    AdjustWindowRectEx, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, ClipCursor,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, FLASHW_CAPTION, FLASHW_STOP,
+    FLASHW_TIMERNOFG, FLASHW_TRAY, FLASHWINFO, FlashWindowEx, GWL_EXSTYLE, GWL_STYLE,
+    GWLP_USERDATA, GetClientRect, GetWindowLongPtrW, GetWindowRect, HCURSOR, HTCLIENT,
+    HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST, IDC_ARROW, IDC_CROSS, IDC_HAND, IDC_HELP, IDC_IBEAM,
+    IDC_NO, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, IDC_WAIT, IsWindow,
+    LWA_ALPHA, LoadCursorW, MINMAXINFO, MSG, MWMO_INPUTAVAILABLE, MsgWaitForMultipleObjectsEx,
+    PM_NOREMOVE, PM_REMOVE, PeekMessageW, PostMessageW, QS_ALLINPUT, RegisterClassW,
+    SIZE_MAXIMIZED, SIZE_MINIMIZED, SW_HIDE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SetCursor,
+    SetCursorPos, SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos, SetWindowTextW,
+    ShowWindow, TranslateMessage, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_DROPFILES,
+    WM_GETMINMAXINFO, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_INPUT,
+    WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MOVE, WM_NCCREATE, WM_NCDESTROY, WM_NULL, WM_PAINT,
+    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    WM_THEMECHANGED, WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSW, WS_EX_APPWINDOW, WS_EX_LAYERED,
+    WS_MAXIMIZEBOX, WS_OVERLAPPEDWINDOW, WS_SIZEBOX, WaitMessage,
 };
 
 use crate::{
-    common_named_key_code, common_named_mouse_button_code, ensure_audio_buffer_matches_device,
     BufferedAppFrame, BufferedEvent, BufferedFrameInput, BufferedHost, RuntimeAppFrameHandle,
     RuntimeAppSessionHandle, RuntimeAudioBufferHandle, RuntimeAudioDeviceHandle,
     RuntimeAudioPlaybackHandle, RuntimeEventRecord, RuntimeHost, RuntimeImageHandle,
-    RuntimeWakeHandle, RuntimeWindowHandle,
+    RuntimeWakeHandle, RuntimeWindowHandle, common_named_key_code, common_named_mouse_button_code,
+    ensure_audio_buffer_matches_device,
 };
 
 const WINDOW_CLASS_NAME: &str = "ArcanaNativeRuntimeWindow";
@@ -136,6 +136,7 @@ const ARCANA_BYTES_CLIPBOARD_FORMAT_NAME: &str = "ArcanaRuntimeBytes";
 
 static REGISTERED_WINDOW_CLASS: OnceLock<Result<NativeWindowClass, String>> = OnceLock::new();
 static REGISTERED_BYTES_CLIPBOARD_FORMAT: OnceLock<Result<u32, String>> = OnceLock::new();
+static PENDING_RAW_INPUT_EVENTS: OnceLock<Mutex<Vec<PendingRawInputEvent>>> = OnceLock::new();
 
 struct NativeWindowClass {
     module_handle: usize,
@@ -143,6 +144,34 @@ struct NativeWindowClass {
 }
 
 struct ClipboardGuard;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PendingRawInputEvent {
+    MouseMotion {
+        device_id: i64,
+        dx: i64,
+        dy: i64,
+    },
+    MouseButton {
+        device_id: i64,
+        button: i64,
+        pressed: bool,
+    },
+    MouseWheel {
+        device_id: i64,
+        dx: i64,
+        dy: i64,
+    },
+    Key {
+        device_id: i64,
+        key_code: i64,
+        physical_key: i64,
+        logical_key: i64,
+        key_location: i64,
+        pressed: bool,
+        text: String,
+    },
+}
 
 impl ClipboardGuard {
     fn open() -> Result<Self, String> {
@@ -158,6 +187,52 @@ impl Drop for ClipboardGuard {
         unsafe {
             CloseClipboard();
         }
+    }
+}
+
+fn pending_raw_input_events() -> &'static Mutex<Vec<PendingRawInputEvent>> {
+    PENDING_RAW_INPUT_EVENTS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn desktop_temp_probe_enabled() -> bool {
+    std::env::var_os("ARCANA_DESKTOP_TEMP_PROBES").is_some()
+}
+
+fn desktop_temp_probe(label: &str, detail: String) {
+    if desktop_temp_probe_enabled() {
+        eprintln!("[arcana-desktop-probe] {label}: {detail}");
+    }
+}
+
+fn push_pending_raw_input_event(
+    pending: &mut Vec<PendingRawInputEvent>,
+    event: PendingRawInputEvent,
+) {
+    match event {
+        PendingRawInputEvent::MouseMotion { device_id, dx, dy } => {
+            if let Some(PendingRawInputEvent::MouseMotion {
+                device_id: last_device_id,
+                dx: last_dx,
+                dy: last_dy,
+            }) = pending.last_mut()
+            {
+                if *last_device_id == device_id {
+                    *last_dx = last_dx.saturating_add(dx);
+                    *last_dy = last_dy.saturating_add(dy);
+                    return;
+                }
+            }
+            pending.push(PendingRawInputEvent::MouseMotion { device_id, dx, dy });
+        }
+        other => pending.push(other),
+    }
+}
+
+fn attention_flash_flags(enabled: bool) -> u32 {
+    if enabled {
+        FLASHW_CAPTION | FLASHW_TRAY | FLASHW_TIMERNOFG
+    } else {
+        FLASHW_STOP
     }
 }
 
@@ -206,6 +281,7 @@ struct NativeWindowState {
     cursor_position: (i64, i64),
     suppress_cursor_move: bool,
     message_loop_signaled: bool,
+    attention_requested: bool,
     redraw_pending: bool,
     text_input_enabled: bool,
     composition_area_active: bool,
@@ -332,14 +408,27 @@ impl NativeProcessHost {
         handle
     }
 
-    fn window_ref(&self, handle: RuntimeWindowHandle) -> Result<&NativeWindowState, String> {
+    fn window_state_live(window: &NativeWindowState) -> bool {
+        !window.closed && !window.hwnd.is_null() && unsafe { IsWindow(window.hwnd) != 0 }
+    }
+
+    fn window_state_ref(&self, handle: RuntimeWindowHandle) -> Result<&NativeWindowState, String> {
         self.windows
             .get(&handle)
             .map(Box::as_ref)
             .ok_or_else(|| format!("invalid Window handle `{}`", handle.0))
     }
 
-    fn window_mut(
+    fn window_ref(&self, handle: RuntimeWindowHandle) -> Result<&NativeWindowState, String> {
+        let window = self.window_state_ref(handle)?;
+        if Self::window_state_live(window) {
+            Ok(window)
+        } else {
+            Err(format!("invalid Window handle `{}`", handle.0))
+        }
+    }
+
+    fn window_state_mut(
         &mut self,
         handle: RuntimeWindowHandle,
     ) -> Result<&mut NativeWindowState, String> {
@@ -347,6 +436,18 @@ impl NativeProcessHost {
             .get_mut(&handle)
             .map(Box::as_mut)
             .ok_or_else(|| format!("invalid Window handle `{}`", handle.0))
+    }
+
+    fn window_mut(
+        &mut self,
+        handle: RuntimeWindowHandle,
+    ) -> Result<&mut NativeWindowState, String> {
+        let window = self.window_state_mut(handle)?;
+        if Self::window_state_live(window) {
+            Ok(window)
+        } else {
+            Err(format!("invalid Window handle `{}`", handle.0))
+        }
     }
 
     fn insert_image(&mut self, image: NativeImage) -> RuntimeImageHandle {
@@ -465,7 +566,7 @@ impl NativeProcessHost {
             return Err(format!("invalid Window handle `{}`", window.0));
         }
         let (hwnd, keep_attached) = {
-            let window_state = self.window_mut(window)?;
+            let window_state = self.window_state_mut(window)?;
             if window_state.closed || window_state.hwnd.is_null() {
                 self.detach_window_from_sessions(window);
                 self.prune_closed_windows();
@@ -681,6 +782,7 @@ impl NativeProcessHost {
                 DispatchMessageW(&msg);
             }
         }
+        self.dispatch_pending_raw_input_events()?;
         self.sync_process_raw_input_registration()?;
         Ok(())
     }
@@ -759,13 +861,13 @@ impl NativeProcessHost {
         let mut live_windows = 0usize;
         for window in &session_state.windows {
             if let Some(state) = self.windows.get(window) {
-                if state.closed || state.hwnd.is_null() {
+                if !Self::window_state_live(state) {
                     continue;
                 }
-                live_windows += 1;
                 if !state.events.is_empty() {
                     return Ok(true);
                 }
+                live_windows += 1;
             }
         }
         if live_windows == 0 && session_state.resumed && !session_state.suspended {
@@ -779,43 +881,79 @@ impl NativeProcessHost {
         session: RuntimeAppSessionHandle,
         timeout_ms: i64,
     ) -> Result<(), String> {
-        if self.session_has_ready_events(session)? {
-            return Ok(());
-        }
-        let mut queued = unsafe { zeroed::<MSG>() };
-        if unsafe { PeekMessageW(&mut queued, null_mut(), 0, 0, PM_NOREMOVE) } != 0 {
-            return Ok(());
-        }
-        let live_window_count = self
-            .session_ref(session)?
-            .windows
-            .iter()
-            .filter_map(|handle| self.windows.get(handle))
-            .filter(|window| !window.closed && unsafe { IsWindow(window.hwnd) != 0 })
-            .count();
-        if live_window_count == 0 {
-            return Ok(());
-        }
-        if timeout_ms < 0 {
-            if unsafe { WaitMessage() } == 0 {
-                return Err("failed to wait for native session message".to_string());
+        let started_wait = Instant::now();
+        let mut blocked = false;
+        let deadline = (timeout_ms >= 0).then(|| {
+            Instant::now()
+                .checked_add(Duration::from_millis(
+                    u64::try_from(timeout_ms).unwrap_or(u64::MAX),
+                ))
+                .unwrap_or_else(Instant::now)
+        });
+        loop {
+            if self.session_has_ready_events(session)? {
+                let waited_ms = started_wait.elapsed().as_millis();
+                if blocked && waited_ms >= 16 {
+                    desktop_temp_probe(
+                        "wait-session",
+                        format!("session {:?} ready after {} ms", session, waited_ms),
+                    );
+                }
+                return Ok(());
             }
-        } else {
-            let timeout = u32::try_from(timeout_ms).unwrap_or(u32::MAX);
-            let wait_result = unsafe {
-                MsgWaitForMultipleObjectsEx(
-                    0,
-                    std::ptr::null(),
-                    timeout,
-                    QS_ALLINPUT,
-                    MWMO_INPUTAVAILABLE,
-                )
-            };
-            if wait_result == u32::MAX {
-                return Err("failed to wait for native session message".to_string());
+            let live_window_count = self
+                .session_ref(session)?
+                .windows
+                .iter()
+                .filter_map(|handle| self.windows.get(handle))
+                .filter(|window| Self::window_state_live(window))
+                .count();
+            if live_window_count == 0 {
+                return Ok(());
             }
+            let mut queued = unsafe { zeroed::<MSG>() };
+            if unsafe { PeekMessageW(&mut queued, null_mut(), 0, 0, PM_NOREMOVE) } != 0 {
+                self.pump_messages()?;
+                continue;
+            }
+            if let Some(deadline) = deadline {
+                let now = Instant::now();
+                if now >= deadline {
+                    desktop_temp_probe(
+                        "wait-session",
+                        format!("session {:?} timed out before readiness", session),
+                    );
+                    return Ok(());
+                }
+                let remaining = deadline.saturating_duration_since(now);
+                let timeout = u32::try_from(remaining.as_millis()).unwrap_or(u32::MAX);
+                let wait_result = unsafe {
+                    MsgWaitForMultipleObjectsEx(
+                        0,
+                        std::ptr::null(),
+                        timeout,
+                        QS_ALLINPUT,
+                        MWMO_INPUTAVAILABLE,
+                    )
+                };
+                blocked = true;
+                if wait_result == u32::MAX {
+                    return Err("failed to wait for native session message".to_string());
+                }
+                if wait_result == windows_sys::Win32::Foundation::WAIT_TIMEOUT {
+                    desktop_temp_probe(
+                        "wait-session",
+                        format!("session {:?} wait timeout expired", session),
+                    );
+                    return Ok(());
+                }
+            } else if unsafe { WaitMessage() } == 0 {
+                return Err("failed to wait for native session message".to_string());
+            } else {
+                blocked = true;
+            }
+            self.pump_messages()?;
         }
-        Ok(())
     }
 
     fn notify_session_queue(&mut self, session: RuntimeAppSessionHandle) {
@@ -828,6 +966,9 @@ impl NativeProcessHost {
             let Some(state) = self.windows.get_mut(&window).map(Box::as_mut) else {
                 continue;
             };
+            if !Self::window_state_live(state) {
+                continue;
+            }
             state.signal_message_loop();
             break;
         }
@@ -846,7 +987,7 @@ impl NativeProcessHost {
                 let Some(state) = self.windows.get(window) else {
                     continue;
                 };
-                if state.closed || state.hwnd.is_null() {
+                if !Self::window_state_live(state) {
                     continue;
                 }
                 if wants_always {
@@ -868,6 +1009,127 @@ impl NativeProcessHost {
             return Some((window, 0));
         }
         None
+    }
+
+    fn session_raw_input_target(
+        &self,
+        session: &NativeSessionState,
+    ) -> Option<RuntimeWindowHandle> {
+        let mut first_live = None;
+        for window in &session.windows {
+            let Some(state) = self.windows.get(window) else {
+                continue;
+            };
+            if !Self::window_state_live(state) {
+                continue;
+            }
+            if state.focused {
+                return Some(*window);
+            }
+            if first_live.is_none() {
+                first_live = Some(*window);
+            }
+        }
+        match session.device_events_policy {
+            DEVICE_EVENTS_ALWAYS => first_live,
+            DEVICE_EVENTS_WHEN_FOCUSED => None,
+            _ => None,
+        }
+    }
+
+    fn dispatch_pending_raw_input_events(&mut self) -> Result<(), String> {
+        let pending = {
+            let mut pending = pending_raw_input_events()
+                .lock()
+                .map_err(|_| "failed to lock pending raw input queue".to_string())?;
+            std::mem::take(&mut *pending)
+        };
+        if pending.is_empty() {
+            return Ok(());
+        }
+        let targets = self
+            .sessions
+            .values()
+            .filter_map(|session| self.session_raw_input_target(session))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        if targets.is_empty() {
+            return Ok(());
+        }
+        if pending.len() >= 64 || targets.len() > 1 {
+            let mut motion = 0usize;
+            let mut button = 0usize;
+            let mut wheel = 0usize;
+            let mut key = 0usize;
+            for event in &pending {
+                match event {
+                    PendingRawInputEvent::MouseMotion { .. } => motion += 1,
+                    PendingRawInputEvent::MouseButton { .. } => button += 1,
+                    PendingRawInputEvent::MouseWheel { .. } => wheel += 1,
+                    PendingRawInputEvent::Key { .. } => key += 1,
+                }
+            }
+            desktop_temp_probe(
+                "raw-input",
+                format!(
+                    "dispatching {} event(s) to {:?} [motion={}, button={}, wheel={}, key={}]",
+                    pending.len(),
+                    targets,
+                    motion,
+                    button,
+                    wheel,
+                    key
+                ),
+            );
+        }
+        for event in pending {
+            for window in &targets {
+                let Ok(state) = self.window_mut(*window) else {
+                    continue;
+                };
+                match &event {
+                    PendingRawInputEvent::MouseMotion { device_id, dx, dy } => {
+                        state.push_device_event(EVENT_RAW_MOUSE_MOTION, *device_id, *dx, *dy);
+                    }
+                    PendingRawInputEvent::MouseButton {
+                        device_id,
+                        button,
+                        pressed,
+                    } => {
+                        state.push_device_event(
+                            EVENT_RAW_MOUSE_BUTTON,
+                            *device_id,
+                            *button,
+                            if *pressed { 1 } else { 0 },
+                        );
+                    }
+                    PendingRawInputEvent::MouseWheel { device_id, dx, dy } => {
+                        state.push_device_event(EVENT_RAW_MOUSE_WHEEL, *device_id, *dx, *dy);
+                    }
+                    PendingRawInputEvent::Key {
+                        device_id,
+                        key_code,
+                        physical_key,
+                        logical_key,
+                        key_location,
+                        pressed,
+                        text,
+                    } => {
+                        state.push_raw_key_event(
+                            *device_id,
+                            *key_code,
+                            *physical_key,
+                            *logical_key,
+                            *key_location,
+                            *pressed,
+                            text.clone(),
+                        );
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     fn sync_process_raw_input_registration(&mut self) -> Result<(), String> {
@@ -1818,11 +2080,21 @@ impl RuntimeHost for NativeProcessHost {
         window: RuntimeWindowHandle,
         enabled: bool,
     ) -> Result<(), String> {
-        let window = self.window_mut(window)?;
-        if window.cursor_visible == enabled {
-            return Ok(());
+        let (hwnd, mouse_in_window, cursor_icon_code) = {
+            let window = self.window_mut(window)?;
+            if window.cursor_visible == enabled {
+                return Ok(());
+            }
+            window.cursor_visible = enabled;
+            (window.hwnd, window.mouse_in_window, window.cursor_icon_code)
+        };
+        if mouse_in_window {
+            desktop_temp_probe(
+                "cursor",
+                format!("hwnd={hwnd:?} visible={enabled} icon={cursor_icon_code}"),
+            );
+            apply_window_cursor_state(hwnd, enabled, cursor_icon_code);
         }
-        window.cursor_visible = enabled;
         Ok(())
     }
 
@@ -1877,11 +2149,21 @@ impl RuntimeHost for NativeProcessHost {
         window: RuntimeWindowHandle,
         code: i64,
     ) -> Result<(), String> {
-        let window = self.window_mut(window)?;
-        if window.cursor_icon_code == code {
-            return Ok(());
+        let (hwnd, mouse_in_window, cursor_visible) = {
+            let window = self.window_mut(window)?;
+            if window.cursor_icon_code == code {
+                return Ok(());
+            }
+            window.cursor_icon_code = code;
+            (window.hwnd, window.mouse_in_window, window.cursor_visible)
+        };
+        if mouse_in_window {
+            desktop_temp_probe(
+                "cursor",
+                format!("hwnd={hwnd:?} visible={cursor_visible} icon={code}"),
+            );
+            apply_window_cursor_state(hwnd, cursor_visible, code);
         }
-        window.cursor_icon_code = code;
         Ok(())
     }
 
@@ -1984,16 +2266,30 @@ impl RuntimeHost for NativeProcessHost {
         window: RuntimeWindowHandle,
         enabled: bool,
     ) -> Result<(), String> {
-        let window = self.window_ref(window)?;
+        let hwnd = {
+            let window = self.window_mut(window)?;
+            if enabled && window.focused {
+                window.attention_requested = false;
+                return Ok(());
+            }
+            if window.attention_requested == enabled {
+                return Ok(());
+            }
+            window.attention_requested = enabled;
+            if window.hwnd.is_null() || window.closed || unsafe { IsWindow(window.hwnd) } == 0 {
+                return Ok(());
+            }
+            window.hwnd
+        };
         let info = FLASHWINFO {
             cbSize: size_of::<FLASHWINFO>() as u32,
-            hwnd: window.hwnd,
-            dwFlags: if enabled { FLASHW_TRAY } else { FLASHW_STOP },
-            uCount: 1,
+            hwnd,
+            dwFlags: attention_flash_flags(enabled),
+            uCount: 0,
             dwTimeout: 0,
         };
-        if unsafe { FlashWindowEx(&info) } == 0 {
-            return Err("failed to update native window attention request".to_string());
+        unsafe {
+            FlashWindowEx(&info);
         }
         Ok(())
     }
@@ -2251,6 +2547,7 @@ impl RuntimeHost for NativeProcessHost {
         session: RuntimeAppSessionHandle,
         window_id: i64,
     ) -> Result<Option<RuntimeWindowHandle>, String> {
+        self.prune_closed_windows();
         let session_windows = self.session_ref(session)?.windows.clone();
         for window in session_windows {
             let Ok(id) = self.window_id(window) else {
@@ -2283,6 +2580,7 @@ impl RuntimeHost for NativeProcessHost {
         &mut self,
         session: RuntimeAppSessionHandle,
     ) -> Result<RuntimeAppFrameHandle, String> {
+        let started = Instant::now();
         self.pump_messages()?;
         self.prune_closed_windows();
         let session_windows = self.session_ref(session)?.windows.clone();
@@ -2291,24 +2589,24 @@ impl RuntimeHost for NativeProcessHost {
         let mut live_windows = 0usize;
         let mut any_window_focused = false;
         for window in session_windows {
-            let Ok(state) = self.window_mut(window) else {
+            let Ok(state) = self.window_state_mut(window) else {
                 continue;
             };
-            let is_live = !state.closed && !state.hwnd.is_null();
-            if is_live {
-                live_windows += 1;
-                state.redraw_pending = false;
-                any_window_focused = any_window_focused || state.focused;
+            let is_live = Self::window_state_live(state);
+            if !is_live {
+                state.events.clear();
+                continue;
             }
+            live_windows += 1;
+            state.redraw_pending = false;
+            any_window_focused = any_window_focused || state.focused;
             let mut state_events = std::mem::take(&mut state.events)
                 .into_iter()
                 .map(|event| Self::event_with_window_id(window, event))
                 .collect::<Vec<_>>();
             prioritize_close_requested_events(&mut state_events);
-            if is_live {
-                let state_input = Self::snapshot_frame_input(state);
-                Self::merge_frame_input(&mut input, state_input);
-            }
+            let state_input = Self::snapshot_frame_input(state);
+            Self::merge_frame_input(&mut input, state_input);
             window_events.extend(state_events);
         }
         let device_events_policy = self.session_ref(session)?.device_events_policy;
@@ -2372,6 +2670,19 @@ impl RuntimeHost for NativeProcessHost {
             text: String::new(),
             ..BufferedEvent::default()
         });
+        let elapsed = started.elapsed();
+        if events.len() >= 128 || elapsed >= Duration::from_millis(16) {
+            desktop_temp_probe(
+                "frame",
+                format!(
+                    "session {:?} produced {} event(s) across {} live window(s) in {} ms",
+                    session,
+                    events.len(),
+                    live_windows,
+                    elapsed.as_millis()
+                ),
+            );
+        }
         let frame = self.insert_frame(BufferedAppFrame {
             events: VecDeque::from(events),
             input,
@@ -2819,6 +3130,7 @@ impl NativeWindowState {
             cursor_position: (0, 0),
             suppress_cursor_move: false,
             message_loop_signaled: false,
+            attention_requested: false,
             redraw_pending: false,
             text_input_enabled: false,
             composition_area_active: false,
@@ -3227,6 +3539,17 @@ fn native_cursor_handle(code: i64) -> HCURSOR {
     unsafe { LoadCursorW(null_mut(), name) as HCURSOR }
 }
 
+fn apply_window_cursor_state(hwnd: HWND, cursor_visible: bool, cursor_icon_code: i64) {
+    if hwnd.is_null() {
+        return;
+    }
+    if !cursor_visible {
+        unsafe { SetCursor(null_mut()) };
+        return;
+    }
+    unsafe { SetCursor(native_cursor_handle(cursor_icon_code)) };
+}
+
 fn client_rect_screen(hwnd: HWND) -> Result<RECT, String> {
     let mut rect = unsafe { zeroed::<RECT>() };
     if unsafe { GetClientRect(hwnd, &mut rect) } == 0 {
@@ -3365,11 +3688,7 @@ fn read_ime_cursor_position(himc: HIMC) -> Result<i64, String> {
 }
 
 fn theme_code_from_registry_value(light_theme: u32) -> i64 {
-    if light_theme == 0 {
-        2
-    } else {
-        1
-    }
+    if light_theme == 0 { 2 } else { 1 }
 }
 
 fn current_windows_theme_code() -> i64 {
@@ -3688,6 +4007,7 @@ unsafe extern "system" fn arcana_window_proc(
         }
         WM_SETFOCUS => {
             state.focused = true;
+            state.attention_requested = false;
             if state.cursor_grab_mode != 0 {
                 let _ = apply_cursor_grab(hwnd, state.cursor_grab_mode);
             }
@@ -4002,28 +4322,42 @@ unsafe extern "system" fn arcana_window_proc(
             }
             let raw = unsafe { &*(buffer.as_ptr() as *const RAWINPUT) };
             let device_id = raw_input_device_id(raw.header.hDevice);
+            let mut pending = pending_raw_input_events().lock().ok();
             if raw.header.dwType == RIM_TYPEMOUSE {
                 let mouse = unsafe { raw.data.mouse };
                 if mouse.usFlags == MOUSE_MOVE_RELATIVE || mouse.lLastX != 0 || mouse.lLastY != 0 {
-                    state.push_device_event(
-                        EVENT_RAW_MOUSE_MOTION,
-                        device_id,
-                        i64::from(mouse.lLastX),
-                        i64::from(mouse.lLastY),
-                    );
+                    if let Some(pending) = pending.as_mut() {
+                        push_pending_raw_input_event(
+                            pending,
+                            PendingRawInputEvent::MouseMotion {
+                                device_id,
+                                dx: i64::from(mouse.lLastX),
+                                dy: i64::from(mouse.lLastY),
+                            },
+                        );
+                    }
                 }
                 let button_flags = unsafe { mouse.Anonymous.Anonymous.usButtonFlags };
                 let button_data = unsafe { mouse.Anonymous.Anonymous.usButtonData };
                 for (button, pressed) in raw_mouse_button_events(button_flags) {
-                    state.push_device_event(
-                        EVENT_RAW_MOUSE_BUTTON,
-                        device_id,
-                        button,
-                        if pressed { 1 } else { 0 },
-                    );
+                    if let Some(pending) = pending.as_mut() {
+                        push_pending_raw_input_event(
+                            pending,
+                            PendingRawInputEvent::MouseButton {
+                                device_id,
+                                button,
+                                pressed,
+                            },
+                        );
+                    }
                 }
                 if let Some((dx, dy)) = raw_mouse_wheel_delta(button_flags, button_data) {
-                    state.push_device_event(EVENT_RAW_MOUSE_WHEEL, device_id, dx, dy);
+                    if let Some(pending) = pending.as_mut() {
+                        push_pending_raw_input_event(
+                            pending,
+                            PendingRawInputEvent::MouseWheel { device_id, dx, dy },
+                        );
+                    }
                 }
             } else if raw.header.dwType == RIM_TYPEKEYBOARD {
                 let keyboard = unsafe { raw.data.keyboard };
@@ -4034,15 +4368,20 @@ unsafe extern "system" fn arcana_window_proc(
                         raw_key_location_code(vkey, keyboard.MakeCode, keyboard.Flags);
                     let (logical_key, text) = key_logical_value_and_text(vkey);
                     let pressed = keyboard.Flags & RAW_KEY_BREAK == 0;
-                    state.push_raw_key_event(
-                        device_id,
-                        i64::from(vkey),
-                        physical_key,
-                        logical_key,
-                        key_location,
-                        pressed,
-                        text,
-                    );
+                    if let Some(pending) = pending.as_mut() {
+                        push_pending_raw_input_event(
+                            pending,
+                            PendingRawInputEvent::Key {
+                                device_id,
+                                key_code: i64::from(vkey),
+                                physical_key,
+                                logical_key,
+                                key_location,
+                                pressed,
+                                text,
+                            },
+                        );
+                    }
                 }
             }
             0
@@ -4666,29 +5005,32 @@ fn mmresult_text(code: u32) -> String {
 mod tests {
     use std::path::Path;
     use std::ptr::null_mut;
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     use super::{
-        clipboard_payload_from_bytes, decode_bmp_bytes, decode_clipboard_bytes_payload,
-        decode_wav_bytes, native_window_class_name_text, release_playback_resources,
-        NativeAudioPlayback, NativeWindowState, RuntimeAudioDeviceHandle,
-        RuntimeAudioPlaybackHandle, RuntimeHost, DEVICE_EVENTS_ALWAYS, DEVICE_EVENTS_NEVER,
-        DEVICE_EVENTS_WHEN_FOCUSED, EVENT_ABOUT_TO_WAIT, EVENT_APP_RESUMED, EVENT_APP_SUSPENDED,
-        EVENT_RAW_MOUSE_MOTION, EVENT_TEXT_COMPOSITION_CANCELLED, EVENT_TEXT_COMPOSITION_COMMITTED,
+        DEVICE_EVENTS_ALWAYS, DEVICE_EVENTS_NEVER, DEVICE_EVENTS_WHEN_FOCUSED, EVENT_ABOUT_TO_WAIT,
+        EVENT_APP_RESUMED, EVENT_APP_SUSPENDED, EVENT_RAW_MOUSE_MOTION,
+        EVENT_TEXT_COMPOSITION_CANCELLED, EVENT_TEXT_COMPOSITION_COMMITTED,
         EVENT_TEXT_COMPOSITION_STARTED, EVENT_TEXT_INPUT, EVENT_WINDOW_CLOSE_REQUESTED,
         EVENT_WINDOW_FOCUSED, EVENT_WINDOW_MOVED, EVENT_WINDOW_REDRAW_REQUESTED,
-        EVENT_WINDOW_RESIZED, RIDEV_INPUTSINK,
+        EVENT_WINDOW_RESIZED, NativeAudioPlayback, PendingRawInputEvent, RIDEV_INPUTSINK,
+        RuntimeAudioDeviceHandle, RuntimeAudioPlaybackHandle, RuntimeHost, attention_flash_flags,
+        clipboard_payload_from_bytes, decode_bmp_bytes, decode_clipboard_bytes_payload,
+        decode_wav_bytes, native_cursor_handle, native_window_class_name_text,
+        pending_raw_input_events, push_pending_raw_input_event, release_playback_resources,
     };
     use crate::{BufferedEvent, NativeProcessHost};
-    use windows_sys::Win32::Foundation::HWND;
     use windows_sys::Win32::Media::Audio::{HWAVEOUT, WHDR_DONE};
     use windows_sys::Win32::UI::Input::Ime::{
-        ImmAssociateContext, ImmCreateContext, ImmDestroyContext, ImmGetContext, ImmNotifyIME,
-        ImmReleaseContext, ImmSetCompositionStringW, CPS_COMPLETE, GCS_COMPSTR, GCS_RESULTSTR,
-        HIMC, NI_COMPOSITIONSTR, SCS_SETSTR,
+        CPS_COMPLETE, GCS_COMPSTR, GCS_RESULTSTR, HIMC, ImmAssociateContext, ImmCreateContext,
+        ImmDestroyContext, ImmGetContext, ImmNotifyIME, ImmReleaseContext,
+        ImmSetCompositionStringW, NI_COMPOSITIONSTR, SCS_SETSTR,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetWindowTextLengthW, GetWindowTextW, SendMessageW, WM_CHAR, WM_CLOSE, WM_IME_COMPOSITION,
-        WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION,
+        FLASHW_CAPTION, FLASHW_STOP, FLASHW_TIMERNOFG, FLASHW_TRAY, GetCursor,
+        GetWindowTextLengthW, GetWindowTextW, PostMessageW, SendMessageW, WM_CHAR, WM_CLOSE,
+        WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_NULL,
     };
 
     fn read_window_title(hwnd: super::HWND) -> String {
@@ -4959,13 +5301,16 @@ mod tests {
 
         RuntimeHost::window_close(&mut host, window).expect("explicit close should succeed");
         assert!(host.window_ref(window).is_err());
-        assert!(!RuntimeHost::window_alive(&mut host, window)
-            .expect("closed window should report not alive"));
-        assert!(host
-            .session_ref(session)
-            .expect("session should still exist")
-            .windows
-            .is_empty());
+        assert!(
+            !RuntimeHost::window_alive(&mut host, window)
+                .expect("closed window should report not alive")
+        );
+        assert!(
+            host.session_ref(session)
+                .expect("session should still exist")
+                .windows
+                .is_empty()
+        );
 
         let frame = RuntimeHost::events_session_pump(&mut host, session).expect("session pump");
         let mut kinds = Vec::new();
@@ -4977,7 +5322,7 @@ mod tests {
     }
 
     #[test]
-    fn native_close_request_survives_close_before_pump() {
+    fn native_close_request_backlog_is_dropped_after_explicit_close_before_pump() {
         let mut host = NativeProcessHost::current().expect("native host should construct");
         let window =
             RuntimeHost::window_open(&mut host, "Arcana", 320, 200).expect("window should open");
@@ -5001,15 +5346,13 @@ mod tests {
             kinds.push(event.kind);
         }
 
-        assert_eq!(
-            kinds,
-            vec![EVENT_WINDOW_CLOSE_REQUESTED, EVENT_ABOUT_TO_WAIT]
+        assert_eq!(kinds, vec![EVENT_ABOUT_TO_WAIT]);
+        assert!(
+            host.session_ref(session)
+                .expect("session should still exist")
+                .windows
+                .is_empty()
         );
-        assert!(host
-            .session_ref(session)
-            .expect("session should still exist")
-            .windows
-            .is_empty());
         assert!(host.window_ref(window).is_err());
     }
 
@@ -5068,6 +5411,93 @@ mod tests {
             RuntimeHost::events_session_window_by_id(&mut host, session, window_id)
                 .expect("closed lookup should succeed"),
             None
+        );
+    }
+
+    #[test]
+    fn native_session_window_lookup_ignores_closed_windows_with_pending_events() {
+        let mut host = NativeProcessHost::current().expect("native host should construct");
+        let window =
+            RuntimeHost::window_open(&mut host, "Arcana", 320, 200).expect("window should open");
+        let session = RuntimeHost::events_session_open(&mut host).expect("session should open");
+        RuntimeHost::events_session_attach_window(&mut host, session, window)
+            .expect("window should attach");
+
+        RuntimeHost::window_request_redraw(&mut host, window)
+            .expect("redraw should queue before close");
+        let window_id = RuntimeHost::window_id(&mut host, window).expect("window id");
+
+        RuntimeHost::window_close(&mut host, window).expect("window close should succeed");
+        assert_eq!(
+            RuntimeHost::events_session_window_by_id(&mut host, session, window_id)
+                .expect("closed lookup should succeed"),
+            None
+        );
+        assert!(
+            RuntimeHost::events_session_window_ids(&mut host, session)
+                .expect("window ids should succeed")
+                .is_empty(),
+            "closed windows with queued events must not stay externally visible"
+        );
+
+        let frame = RuntimeHost::events_session_pump(&mut host, session).expect("session pump");
+        let mut kinds = Vec::new();
+        while let Some(event) = RuntimeHost::events_poll(&mut host, frame).expect("event poll") {
+            kinds.push(event.kind);
+        }
+        assert_eq!(kinds, vec![EVENT_ABOUT_TO_WAIT]);
+    }
+
+    #[test]
+    fn native_session_ready_events_report_suspend_after_close() {
+        let mut host = NativeProcessHost::current().expect("native host should construct");
+        let window =
+            RuntimeHost::window_open(&mut host, "Arcana", 320, 200).expect("window should open");
+        let session = RuntimeHost::events_session_open(&mut host).expect("session should open");
+        RuntimeHost::events_session_attach_window(&mut host, session, window)
+            .expect("window should attach");
+        let frame = RuntimeHost::events_session_pump(&mut host, session).expect("session pump");
+        while RuntimeHost::events_poll(&mut host, frame)
+            .expect("event poll should succeed")
+            .is_some()
+        {}
+
+        RuntimeHost::window_request_redraw(&mut host, window)
+            .expect("redraw should queue before close");
+        RuntimeHost::window_close(&mut host, window).expect("window close should succeed");
+
+        assert!(
+            host.session_has_ready_events(session)
+                .expect("ready-event probe should succeed"),
+            "closing the final live window must still make the session ready for suspension"
+        );
+    }
+
+    #[test]
+    fn native_session_notifications_skip_closed_attached_windows() {
+        let mut host = NativeProcessHost::current().expect("native host should construct");
+        let first = RuntimeHost::window_open(&mut host, "First", 320, 200).expect("first window");
+        let second =
+            RuntimeHost::window_open(&mut host, "Second", 320, 200).expect("second window");
+        let session = RuntimeHost::events_session_open(&mut host).expect("session should open");
+        RuntimeHost::events_session_attach_window(&mut host, session, first)
+            .expect("first window should attach");
+        RuntimeHost::events_session_attach_window(&mut host, session, second)
+            .expect("second window should attach");
+        host.pump_messages()
+            .expect("native message loop should settle initial WM_NULL signals");
+
+        RuntimeHost::window_request_redraw(&mut host, first)
+            .expect("first redraw should queue before close");
+        RuntimeHost::window_close(&mut host, first).expect("first window should close");
+
+        host.notify_session_queue(session);
+
+        assert!(
+            host.window_state_ref(second)
+                .expect("second window state should exist")
+                .message_loop_signaled,
+            "session notifications must wake a live sibling window even if the first attached window is already closed"
         );
     }
 
@@ -5152,68 +5582,65 @@ mod tests {
     #[test]
     fn native_raw_input_registration_uses_focused_window_for_when_focused_policy() {
         let mut host = NativeProcessHost::current().expect("native host should construct");
-        let session = host.insert_session();
-        let mut window = Box::new(NativeWindowState::new("Arcana", 320, 200));
-        window.hwnd = 1 as HWND;
-        window.focused = true;
-        let handle = host.insert_window(window);
-        host.session_mut(session)
-            .expect("session should exist")
-            .windows
-            .push(handle);
+        let handle =
+            RuntimeHost::window_open(&mut host, "Arcana", 320, 200).expect("window should open");
+        let session = RuntimeHost::events_session_open(&mut host).expect("session should open");
+        RuntimeHost::events_session_attach_window(&mut host, session, handle)
+            .expect("window should attach");
+        host.window_mut(handle).expect("window state").focused = true;
 
         assert_eq!(host.desired_raw_input_registration(), Some((handle, 0)));
+
+        RuntimeHost::window_close(&mut host, handle).expect("window should close");
     }
 
     #[test]
     fn native_raw_input_registration_prefers_always_policy_with_input_sink() {
         let mut host = NativeProcessHost::current().expect("native host should construct");
-        let focused_session = host.insert_session();
-        let always_session = host.insert_session();
-        host.session_mut(always_session)
-            .expect("session should exist")
-            .device_events_policy = DEVICE_EVENTS_ALWAYS;
-
-        let mut focused_window = Box::new(NativeWindowState::new("Focused", 320, 200));
-        focused_window.hwnd = 1 as HWND;
-        focused_window.focused = true;
-        let focused_handle = host.insert_window(focused_window);
-        host.session_mut(focused_session)
-            .expect("session should exist")
-            .windows
-            .push(focused_handle);
-
-        let mut always_window = Box::new(NativeWindowState::new("Always", 320, 200));
-        always_window.hwnd = 2 as HWND;
-        let always_handle = host.insert_window(always_window);
-        host.session_mut(always_session)
-            .expect("session should exist")
-            .windows
-            .push(always_handle);
+        let focused_handle =
+            RuntimeHost::window_open(&mut host, "Focused", 320, 200).expect("focused window");
+        let always_handle =
+            RuntimeHost::window_open(&mut host, "Always", 320, 200).expect("always window");
+        let focused_session = RuntimeHost::events_session_open(&mut host).expect("session");
+        let always_session = RuntimeHost::events_session_open(&mut host).expect("session");
+        RuntimeHost::events_session_attach_window(&mut host, focused_session, focused_handle)
+            .expect("focused attach");
+        RuntimeHost::events_session_attach_window(&mut host, always_session, always_handle)
+            .expect("always attach");
+        RuntimeHost::events_session_set_device_events(
+            &mut host,
+            always_session,
+            DEVICE_EVENTS_ALWAYS,
+        )
+        .expect("always policy should update");
+        host.window_mut(focused_handle)
+            .expect("focused state should exist")
+            .focused = true;
 
         assert_eq!(
             host.desired_raw_input_registration(),
             Some((always_handle, RIDEV_INPUTSINK))
         );
+
+        RuntimeHost::window_close(&mut host, focused_handle).expect("focused close");
+        RuntimeHost::window_close(&mut host, always_handle).expect("always close");
     }
 
     #[test]
     fn native_raw_input_registration_returns_none_when_device_events_are_disabled() {
         let mut host = NativeProcessHost::current().expect("native host should construct");
-        let session = host.insert_session();
-        host.session_mut(session)
-            .expect("session should exist")
-            .device_events_policy = DEVICE_EVENTS_NEVER;
-        let mut window = Box::new(NativeWindowState::new("Arcana", 320, 200));
-        window.hwnd = 1 as HWND;
-        window.focused = true;
-        let handle = host.insert_window(window);
-        host.session_mut(session)
-            .expect("session should exist")
-            .windows
-            .push(handle);
+        let handle =
+            RuntimeHost::window_open(&mut host, "Arcana", 320, 200).expect("window should open");
+        let session = RuntimeHost::events_session_open(&mut host).expect("session should open");
+        RuntimeHost::events_session_attach_window(&mut host, session, handle)
+            .expect("window should attach");
+        RuntimeHost::events_session_set_device_events(&mut host, session, DEVICE_EVENTS_NEVER)
+            .expect("device events policy should update");
+        host.window_mut(handle).expect("window state").focused = true;
 
         assert_eq!(host.desired_raw_input_registration(), None);
+
+        RuntimeHost::window_close(&mut host, handle).expect("window should close");
     }
 
     #[test]
@@ -5257,6 +5684,262 @@ mod tests {
                 (EVENT_ABOUT_TO_WAIT, 0, 0, 0),
             ]
         );
+    }
+
+    #[test]
+    fn native_pending_raw_input_events_fan_out_per_session_policy() {
+        let mut host = NativeProcessHost::current().expect("native host should construct");
+        let focused_window =
+            RuntimeHost::window_open(&mut host, "Focused", 320, 200).expect("focused window");
+        let always_window =
+            RuntimeHost::window_open(&mut host, "Always", 320, 200).expect("always window");
+        let focused_session = RuntimeHost::events_session_open(&mut host).expect("session");
+        let always_session = RuntimeHost::events_session_open(&mut host).expect("session");
+        RuntimeHost::events_session_attach_window(&mut host, focused_session, focused_window)
+            .expect("focused attach");
+        RuntimeHost::events_session_attach_window(&mut host, always_session, always_window)
+            .expect("always attach");
+        RuntimeHost::events_session_set_device_events(
+            &mut host,
+            always_session,
+            DEVICE_EVENTS_ALWAYS,
+        )
+        .expect("always policy should update");
+
+        let frame = RuntimeHost::events_session_pump(&mut host, focused_session).expect("pump");
+        while RuntimeHost::events_poll(&mut host, frame)
+            .expect("event poll should succeed")
+            .is_some()
+        {}
+        let frame = RuntimeHost::events_session_pump(&mut host, always_session).expect("pump");
+        while RuntimeHost::events_poll(&mut host, frame)
+            .expect("event poll should succeed")
+            .is_some()
+        {}
+
+        host.window_mut(focused_window)
+            .expect("focused state should exist")
+            .focused = true;
+        host.window_mut(always_window)
+            .expect("always state should exist")
+            .focused = false;
+
+        let mut pending = pending_raw_input_events()
+            .lock()
+            .expect("pending raw input queue should lock");
+        pending.clear();
+        pending.push(PendingRawInputEvent::MouseMotion {
+            device_id: 41,
+            dx: 7,
+            dy: 8,
+        });
+        drop(pending);
+
+        host.dispatch_pending_raw_input_events()
+            .expect("raw input dispatch should succeed");
+
+        let frame = RuntimeHost::events_session_pump(&mut host, focused_session).expect("pump");
+        let mut focused_seen = Vec::new();
+        while let Some(event) = RuntimeHost::events_poll(&mut host, frame).expect("event poll") {
+            focused_seen.push((event.kind, event.window_id, event.a, event.b));
+        }
+        assert_eq!(
+            focused_seen,
+            vec![
+                (EVENT_RAW_MOUSE_MOTION, 41, 7, 8),
+                (EVENT_ABOUT_TO_WAIT, 0, 0, 0),
+            ]
+        );
+
+        let frame = RuntimeHost::events_session_pump(&mut host, always_session).expect("pump");
+        let mut always_seen = Vec::new();
+        while let Some(event) = RuntimeHost::events_poll(&mut host, frame).expect("event poll") {
+            always_seen.push((event.kind, event.window_id, event.a, event.b));
+        }
+        assert_eq!(
+            always_seen,
+            vec![
+                (EVENT_RAW_MOUSE_MOTION, 41, 7, 8),
+                (EVENT_ABOUT_TO_WAIT, 0, 0, 0),
+            ]
+        );
+
+        pending_raw_input_events()
+            .lock()
+            .expect("pending raw input queue should lock")
+            .clear();
+        RuntimeHost::window_close(&mut host, focused_window).expect("focused close");
+        RuntimeHost::window_close(&mut host, always_window).expect("always close");
+    }
+
+    #[test]
+    fn native_pending_raw_input_events_coalesce_consecutive_motion() {
+        let mut pending = Vec::new();
+        push_pending_raw_input_event(
+            &mut pending,
+            PendingRawInputEvent::MouseMotion {
+                device_id: 7,
+                dx: 5,
+                dy: -3,
+            },
+        );
+        push_pending_raw_input_event(
+            &mut pending,
+            PendingRawInputEvent::MouseMotion {
+                device_id: 7,
+                dx: 4,
+                dy: 6,
+            },
+        );
+        push_pending_raw_input_event(
+            &mut pending,
+            PendingRawInputEvent::MouseButton {
+                device_id: 7,
+                button: 1,
+                pressed: true,
+            },
+        );
+        push_pending_raw_input_event(
+            &mut pending,
+            PendingRawInputEvent::MouseMotion {
+                device_id: 7,
+                dx: -2,
+                dy: 1,
+            },
+        );
+
+        assert_eq!(
+            pending,
+            vec![
+                PendingRawInputEvent::MouseMotion {
+                    device_id: 7,
+                    dx: 9,
+                    dy: 3,
+                },
+                PendingRawInputEvent::MouseButton {
+                    device_id: 7,
+                    button: 1,
+                    pressed: true,
+                },
+                PendingRawInputEvent::MouseMotion {
+                    device_id: 7,
+                    dx: -2,
+                    dy: 1,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn native_attention_flash_flags_match_header_and_taskbar_until_focus() {
+        assert_eq!(
+            attention_flash_flags(true),
+            FLASHW_CAPTION | FLASHW_TRAY | FLASHW_TIMERNOFG
+        );
+        assert_eq!(attention_flash_flags(false), FLASHW_STOP);
+    }
+
+    #[test]
+    fn native_repeated_attention_requests_do_not_fail() {
+        let mut host = NativeProcessHost::current().expect("native host should construct");
+        let window =
+            RuntimeHost::window_open(&mut host, "Attention", 320, 200).expect("window should open");
+
+        RuntimeHost::window_request_attention(&mut host, window, true)
+            .expect("first attention request should succeed");
+        RuntimeHost::window_request_attention(&mut host, window, true)
+            .expect("repeated attention request should succeed");
+        RuntimeHost::window_request_attention(&mut host, window, false)
+            .expect("attention reset should succeed");
+        RuntimeHost::window_request_attention(&mut host, window, false)
+            .expect("repeated attention reset should succeed");
+
+        RuntimeHost::window_close(&mut host, window).expect("window should close");
+    }
+
+    #[test]
+    fn native_wait_for_session_activity_ignores_other_session_messages() {
+        let mut host = NativeProcessHost::current().expect("native host should construct");
+        let first = RuntimeHost::window_open(&mut host, "First", 320, 200).expect("first window");
+        let second =
+            RuntimeHost::window_open(&mut host, "Second", 320, 200).expect("second window");
+        let first_session = RuntimeHost::events_session_open(&mut host).expect("session");
+        let second_session = RuntimeHost::events_session_open(&mut host).expect("session");
+        RuntimeHost::events_session_attach_window(&mut host, first_session, first)
+            .expect("first attach");
+        RuntimeHost::events_session_attach_window(&mut host, second_session, second)
+            .expect("second attach");
+
+        let frame = RuntimeHost::events_session_pump(&mut host, first_session).expect("pump");
+        while RuntimeHost::events_poll(&mut host, frame)
+            .expect("event poll should succeed")
+            .is_some()
+        {}
+        let frame = RuntimeHost::events_session_pump(&mut host, second_session).expect("pump");
+        while RuntimeHost::events_poll(&mut host, frame)
+            .expect("event poll should succeed")
+            .is_some()
+        {}
+
+        let first_hwnd = host
+            .window_ref(first)
+            .expect("first state should exist")
+            .hwnd as usize;
+        let second_hwnd = host
+            .window_ref(second)
+            .expect("second state should exist")
+            .hwnd;
+        let closer = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(40));
+            unsafe {
+                PostMessageW(first_hwnd as super::HWND, WM_CLOSE, 0, 0);
+            }
+        });
+
+        unsafe {
+            PostMessageW(second_hwnd, WM_NULL, 0, 0);
+        }
+        let start = Instant::now();
+        host.wait_for_session_activity(first_session, 200)
+            .expect("session wait should succeed");
+        closer.join().expect("closer thread should finish");
+
+        assert!(
+            start.elapsed() >= Duration::from_millis(25),
+            "waiting session should ignore unrelated window messages"
+        );
+        assert!(
+            host.session_has_ready_events(first_session)
+                .expect("ready probe should succeed"),
+            "target session should become ready only after its own close request arrives"
+        );
+
+        RuntimeHost::window_close(&mut host, first).expect("first window should close");
+        RuntimeHost::window_close(&mut host, second).expect("second window should close");
+    }
+
+    #[test]
+    fn native_cursor_setters_apply_immediately_while_pointer_is_inside() {
+        let mut host = NativeProcessHost::current().expect("native host should construct");
+        let window =
+            RuntimeHost::window_open(&mut host, "Arcana", 320, 200).expect("window should open");
+        host.window_mut(window)
+            .expect("window state should exist")
+            .mouse_in_window = true;
+
+        RuntimeHost::window_set_cursor_icon_code(&mut host, window, 3)
+            .expect("cursor icon should update");
+        assert_eq!(unsafe { GetCursor() }, native_cursor_handle(3));
+
+        RuntimeHost::window_set_cursor_visible(&mut host, window, false)
+            .expect("cursor visibility should update");
+        assert!(unsafe { GetCursor() }.is_null());
+
+        RuntimeHost::window_set_cursor_visible(&mut host, window, true)
+            .expect("cursor visibility should restore");
+        assert_eq!(unsafe { GetCursor() }, native_cursor_handle(3));
+
+        RuntimeHost::window_close(&mut host, window).expect("window should close");
     }
 
     #[test]
@@ -5315,8 +5998,10 @@ mod tests {
         let window =
             RuntimeHost::window_open(&mut host, "Arcana Desktop Proof :: Overview", 320, 200)
                 .expect("window should open");
-        assert!(!RuntimeHost::window_text_input_enabled(&mut host, window)
-            .expect("text input state should be readable"));
+        assert!(
+            !RuntimeHost::window_text_input_enabled(&mut host, window)
+                .expect("text input state should be readable")
+        );
         RuntimeHost::window_close(&mut host, window).expect("window should close");
     }
 

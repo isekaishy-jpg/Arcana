@@ -13,11 +13,10 @@ use arcana_hir::{
     HirLocalTypeLookup, HirMatchPattern, HirModule, HirModuleDependency, HirModuleSummary,
     HirPackageSummary, HirPageRollup, HirPath, HirPhraseArg, HirPredicate, HirResolvedModule,
     HirResolvedWorkspace, HirStatement, HirStatementKind, HirSymbol, HirSymbolBody, HirSymbolKind,
-    HirType, HirTypeBindingScope, HirTypeSubstitutions, HirTypeKind, HirUnaryOp, HirWhereClause,
+    HirType, HirTypeBindingScope, HirTypeKind, HirTypeSubstitutions, HirUnaryOp, HirWhereClause,
     HirWorkspacePackage, HirWorkspaceSummary, canonicalize_hir_type_in_module,
     current_workspace_package_for_module, hir_type_matches, impl_target_is_public_from_package,
-    infer_receiver_expr_type,
-    lookup_method_candidates_for_hir_type, lookup_symbol_path,
+    infer_receiver_expr_type, lookup_method_candidates_for_hir_type, lookup_symbol_path,
     match_name_resolves_to_zero_payload_variant, render_symbol_signature,
     routine_key_for_impl_method, routine_key_for_object_method, routine_key_for_symbol,
 };
@@ -623,9 +622,11 @@ fn lookup_trait_method_resolution_from_where_clause<'a>(
         }) {
             continue;
         }
-        let Some(symbol_ref) =
-            lookup_symbol_path(scope.workspace, scope.resolved_module, &trait_ref.path.segments)
-        else {
+        let Some(symbol_ref) = lookup_symbol_path(
+            scope.workspace,
+            scope.resolved_module,
+            &trait_ref.path.segments,
+        ) else {
             continue;
         };
         let HirSymbolBody::Trait { methods, .. } = &symbol_ref.symbol.body else {
@@ -653,9 +654,15 @@ fn lower_resolved_routine_type(
     ty: &HirType,
 ) -> IrRoutineType {
     current_workspace_package_for_module(workspace, resolved_module)
-        .and_then(|package| package.module(&resolved_module.module_id).map(|module| (package, module)))
+        .and_then(|package| {
+            package
+                .module(&resolved_module.module_id)
+                .map(|module| (package, module))
+        })
         .map(|(package, module)| {
-            IrRoutineType::from_hir(&canonicalize_hir_type_in_module(workspace, package, module, ty))
+            IrRoutineType::from_hir(&canonicalize_hir_type_in_module(
+                workspace, package, module, ty,
+            ))
         })
         .unwrap_or_else(|| IrRoutineType::from_hir(ty))
 }

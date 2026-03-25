@@ -1,5 +1,5 @@
 pub use arcana_runtime::{
-    NativeProcessHost, RuntimeAbiValue, RuntimeHost, RuntimePackagePlan,
+    NativeProcessHost, RuntimeAbiCallOutcome, RuntimeAbiValue, RuntimeHost, RuntimePackagePlan,
     execute_entrypoint_routine, execute_exported_abi_routine, parse_runtime_package_image,
     plan_from_artifact, render_runtime_package_image,
 };

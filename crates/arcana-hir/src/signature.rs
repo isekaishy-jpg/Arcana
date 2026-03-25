@@ -65,7 +65,11 @@ pub(crate) fn render_function_signature(symbol: &HirSymbol) -> String {
 fn render_record_signature(symbol: &HirSymbol) -> String {
     let mut lines = vec![render_named_type_header("record", symbol)];
     if let HirSymbolBody::Record { fields } = &symbol.body {
-        lines.extend(fields.iter().map(|field| format!("{}: {}", field.name, field.ty)));
+        lines.extend(
+            fields
+                .iter()
+                .map(|field| format!("{}: {}", field.name, field.ty)),
+        );
     }
     lines.join("\n")
 }
@@ -73,7 +77,11 @@ fn render_record_signature(symbol: &HirSymbol) -> String {
 fn render_object_signature(symbol: &HirSymbol) -> String {
     let mut lines = vec![render_named_type_header("obj", symbol)];
     if let HirSymbolBody::Object { fields, methods } = &symbol.body {
-        lines.extend(fields.iter().map(|field| format!("{}: {}", field.name, field.ty)));
+        lines.extend(
+            fields
+                .iter()
+                .map(|field| format!("{}: {}", field.name, field.ty)),
+        );
         lines.extend(methods.iter().map(render_function_signature));
     }
     lines.join("\n")

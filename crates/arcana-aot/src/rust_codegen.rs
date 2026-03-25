@@ -372,7 +372,7 @@ fn render_dll_lib_rs(
             "use std::cell::RefCell;\n",
             "use std::ptr;\n",
             "use std::sync::OnceLock;\n\n",
-            "use arcana_runtime::{RuntimeAbiValue, RuntimePackagePlan, current_process_runtime_host, execute_exported_abi_routine, parse_runtime_package_image};\n\n",
+            "use arcana_runtime::{RuntimeAbiCallOutcome, RuntimeAbiValue, RuntimePackagePlan, current_process_runtime_host, execute_exported_abi_routine, parse_runtime_package_image};\n\n",
             "thread_local! {\n",
             "    static LAST_ERROR: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };\n",
             "}\n\n",
@@ -448,6 +448,10 @@ fn render_dll_lib_rs(
 
 fn render_export_fn(export: &NativeExportLowering, layout: &NativeLayoutCatalog) -> String {
     let api = &export.export;
+    let needs_final_args = api
+        .params
+        .iter()
+        .any(|param| param.is_edit && !matches!(param.ty, NativeAbiType::Unit));
     let mut params = api
         .params
         .iter()
@@ -459,6 +463,15 @@ fn render_export_fn(export: &NativeExportLowering, layout: &NativeLayoutCatalog)
             )
         })
         .collect::<Vec<_>>();
+    for param in &api.params {
+        if param.is_edit && !matches!(param.ty, NativeAbiType::Unit) {
+            params.push(format!(
+                "out_{}: *mut {}",
+                param.name,
+                layout.rust_type_ref(&param.ty, NativeAbiRole::Return)
+            ));
+        }
+    }
     if let Some(out_ty) = layout.rust_out_type_ref(&api.return_type) {
         params.push(format!("out_result: *mut {out_ty}"));
     }
@@ -480,6 +493,9 @@ fn render_export_fn(export: &NativeExportLowering, layout: &NativeLayoutCatalog)
             body.push_str("        Ok(value) => value,\n");
             body.push_str("        Err(err) => { set_last_error(err); return 0; }\n");
             body.push_str("    };\n");
+            if needs_final_args {
+                body.push_str("    let final_args: Vec<RuntimeAbiValue> = Vec::new();\n");
+            }
         }
         NativeRoutineLowering::RuntimeDispatch => {
             body.push_str("    let plan = match load_plan() {\n");
@@ -490,7 +506,7 @@ fn render_export_fn(export: &NativeExportLowering, layout: &NativeLayoutCatalog)
             body.push_str("        Ok(host) => host,\n");
             body.push_str("        Err(err) => { set_last_error(err); return 0; }\n");
             body.push_str("    };\n");
-            body.push_str("    let result = match execute_exported_abi_routine(plan, ");
+            body.push_str("    let outcome = match execute_exported_abi_routine(plan, ");
             body.push_str(&format!("{:?}", api.routine_key));
             body.push_str(", vec![");
             body.push_str(
@@ -504,7 +520,44 @@ fn render_export_fn(export: &NativeExportLowering, layout: &NativeLayoutCatalog)
             body.push_str("        Ok(value) => value,\n");
             body.push_str("        Err(err) => { set_last_error(err); return 0; }\n");
             body.push_str("    };\n");
+            body.push_str("    let result = outcome.result;\n");
+            if needs_final_args {
+                body.push_str("    let final_args = outcome.final_args;\n");
+            }
         }
+    }
+    for (index, param) in api.params.iter().enumerate() {
+        if !param.is_edit || matches!(param.ty, NativeAbiType::Unit) {
+            continue;
+        }
+        let out_name = format!("out_{}", param.name);
+        let final_arg_name = format!("{}_final_arg", param.name);
+        let out_value_name = format!("{}_out_value", param.name);
+        body.push_str(&format!(
+            "    if {out_name}.is_null() {{ set_last_error(\"null {out_name}\".to_string()); return 0; }}\n"
+        ));
+        body.push_str(&format!(
+            "    let {final_arg_name} = match final_args.get({index}) {{\n"
+        ));
+        body.push_str("        Some(value) => value.clone(),\n");
+        body.push_str(&format!(
+            "        None => {{ set_last_error(\"missing final arg `{}`\".to_string()); return 0; }}\n",
+            param.name
+        ));
+        body.push_str("    };\n");
+        body.push_str(&format!(
+            "    let {out_value_name}: {};\n",
+            layout.rust_type_ref(&param.ty, NativeAbiRole::Return)
+        ));
+        body.push_str(&render_store_runtime_abi_value(
+            &param.ty,
+            &final_arg_name,
+            &out_value_name,
+            layout,
+        ));
+        body.push_str(&format!(
+            "    unsafe {{ *{out_name} = {out_value_name}; }}\n"
+        ));
     }
     if let Some(out_ty) = layout.rust_out_type_ref(&api.return_type) {
         body.push_str("    if out_result.is_null() { set_last_error(\"null out_result\".to_string()); return 0; }\n");
@@ -552,6 +605,15 @@ fn render_dll_header(exports: &[NativeExport], layout: &NativeLayoutCatalog) -> 
                 )
             })
             .collect::<Vec<_>>();
+        for param in &export.params {
+            if param.is_edit && !matches!(param.ty, NativeAbiType::Unit) {
+                params.push(format!(
+                    "{}* out_{}",
+                    layout.c_type_ref(&param.ty, NativeAbiRole::Return),
+                    param.name
+                ));
+            }
+        }
         if let Some(c_out_ty) = layout.c_out_type_ref(&export.return_type) {
             params.push(format!("{c_out_ty}* out_result"));
         }

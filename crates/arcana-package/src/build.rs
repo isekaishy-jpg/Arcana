@@ -8,8 +8,7 @@ use arcana_aot::{
 use arcana_hir::{HirResolvedWorkspace, HirWorkspaceSummary, resolve_workspace};
 use arcana_ir::{
     IrPackage, RuntimeRequirementRoots, derive_runtime_requirements_with_roots,
-    lower_workspace_package_with_resolution,
-    render_routine_signature_text,
+    lower_workspace_package_with_resolution, render_routine_signature_text,
 };
 
 use crate::build_identity::{
@@ -437,8 +436,12 @@ pub fn execute_build_with_context(
         .join(LOGS_DIR)
         .join("build-last.txt");
     if let Some(parent) = summary_path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("failed to create cache logs directory `{}`: {e}", parent.display()))?;
+        fs::create_dir_all(parent).map_err(|e| {
+            format!(
+                "failed to create cache logs directory `{}`: {e}",
+                parent.display()
+            )
+        })?;
     }
     fs::write(&summary_path, render_build_summary(statuses, graph))
         .map_err(|e| format!("failed to write `{}`: {e}", summary_path.display()))?;

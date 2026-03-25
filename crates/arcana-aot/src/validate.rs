@@ -27,6 +27,8 @@ fn decode_escaped_row_text(text: &str, quoted: bool) -> Result<String, String> {
                 '"' => out.push('"'),
                 'n' => out.push('\n'),
                 't' => out.push('\t'),
+                'r' => out.push('\r'),
+                '|' => out.push('|'),
                 other => out.push(other),
             }
         } else {
@@ -331,10 +333,12 @@ fn validate_routine_type(ty: &IrRoutineType) -> bool {
         }
         IrRoutineTypeKind::Ref {
             lifetime, inner, ..
-        } => lifetime
-            .as_ref()
-            .is_none_or(|lifetime| !lifetime.name.is_empty())
-            && validate_routine_type(inner),
+        } => {
+            lifetime
+                .as_ref()
+                .is_none_or(|lifetime| !lifetime.name.is_empty())
+                && validate_routine_type(inner)
+        }
         IrRoutineTypeKind::Tuple(items) => items.iter().all(validate_routine_type),
         IrRoutineTypeKind::Projection(projection) => {
             !projection.assoc.is_empty()
@@ -345,11 +349,7 @@ fn validate_routine_type(ty: &IrRoutineType) -> bool {
                     .segments
                     .iter()
                     .all(|segment| !segment.is_empty())
-                && projection
-                    .trait_ref
-                    .args
-                    .iter()
-                    .all(validate_routine_type)
+                && projection.trait_ref.args.iter().all(validate_routine_type)
         }
     }
 }

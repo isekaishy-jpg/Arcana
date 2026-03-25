@@ -7,10 +7,10 @@ pub mod type_surface;
 pub use surface_text::{ParsedSurfaceText, SurfaceTextToken, parse_surface_text};
 pub use type_surface::{
     SurfaceLifetime, SurfacePath, SurfacePredicate, SurfaceProjection, SurfaceRefs,
-    SurfaceTraitRef, SurfaceType, SurfaceTypeKind, SurfaceWhereClause,
-    collect_surface_type_refs, collect_surface_where_clause_refs, parse_surface_path,
-    parse_surface_trait_ref, parse_surface_type, parse_surface_where_clause,
-    surface_type_is_boundary_safe, validate_tuple_type_contract,
+    SurfaceTraitRef, SurfaceType, SurfaceTypeKind, SurfaceWhereClause, collect_surface_type_refs,
+    collect_surface_where_clause_refs, parse_surface_path, parse_surface_trait_ref,
+    parse_surface_type, parse_surface_where_clause, surface_type_is_boundary_safe,
+    validate_tuple_type_contract,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1387,16 +1387,14 @@ fn parse_function_signature_tail(
     let close_idx = find_matching_delim(remainder, open_idx, '(', ')')?;
     let params = parse_param_list(&remainder[open_idx + 1..close_idx]).ok()?;
     let after_params = remainder[close_idx + 1..].trim();
-    let return_type = after_params
-        .strip_prefix("->")
-        .and_then(|ty| {
-            let ty = ty.trim();
-            (!ty.is_empty())
-                .then(|| parse_surface_type(ty))
-                .transpose()
-                .ok()
-                .flatten()
-        });
+    let return_type = after_params.strip_prefix("->").and_then(|ty| {
+        let ty = ty.trim();
+        (!ty.is_empty())
+            .then(|| parse_surface_type(ty))
+            .transpose()
+            .ok()
+            .flatten()
+    });
     Some((type_params, where_clause, params, return_type))
 }
 
@@ -1423,17 +1421,14 @@ fn parse_const_signature_tail(
     Vec<ParamDecl>,
     Option<SurfaceType>,
 ) {
-    let return_type = tail
-        .trim()
-        .strip_prefix(':')
-        .and_then(|ty| {
-            let ty = ty.trim();
-            (!ty.is_empty())
-                .then(|| parse_surface_type(ty))
-                .transpose()
-                .ok()
-                .flatten()
-        });
+    let return_type = tail.trim().strip_prefix(':').and_then(|ty| {
+        let ty = ty.trim();
+        (!ty.is_empty())
+            .then(|| parse_surface_type(ty))
+            .transpose()
+            .ok()
+            .flatten()
+    });
     (Vec::new(), None, Vec::new(), return_type)
 }
 
@@ -4858,7 +4853,6 @@ pub fn is_builtin_boundary_unsafe_type_name(name: &str) -> bool {
     builtin_type_info(name).is_some_and(|info| info.boundary_unsafe)
 }
 
-
 fn is_double_quoted_literal(value: &str) -> bool {
     unquote_double_quoted_literal(value).is_some()
 }
@@ -6176,7 +6170,10 @@ mod tests {
         assert!(!parsed.symbols[3].exported);
         assert_eq!(parsed.symbols[3].surface_text, "fn main() -> Int:");
         assert_eq!(
-            parsed.symbols[3].return_type.as_ref().map(SurfaceType::render),
+            parsed.symbols[3]
+                .return_type
+                .as_ref()
+                .map(SurfaceType::render),
             Some("Int".to_string())
         );
         assert!(parsed.symbols[3].statements.is_empty());

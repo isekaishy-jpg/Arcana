@@ -1,7 +1,5 @@
 use crate::artifact::{AotPackageArtifact, AotRoutineArtifact};
-use arcana_ir::{
-    IrRoutineParam, IrRoutineType, IrRoutineTypeKind, render_routine_signature_text,
-};
+use arcana_ir::{IrRoutineParam, IrRoutineType, IrRoutineTypeKind, render_routine_signature_text};
 use std::collections::BTreeSet;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -18,6 +16,7 @@ pub enum NativeAbiType {
 pub struct NativeAbiParam {
     pub name: String,
     pub ty: NativeAbiType,
+    pub is_edit: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,7 +43,9 @@ pub fn collect_native_exports(artifact: &AotPackageArtifact) -> Result<Vec<Nativ
         if !routine.exported {
             continue;
         }
-        if routine.module_id != artifact.root_module_id && !routine.module_id.starts_with(&root_prefix) {
+        if routine.module_id != artifact.root_module_id
+            && !routine.module_id.starts_with(&root_prefix)
+        {
             continue;
         }
         if routine.symbol_kind != "fn" {
@@ -106,6 +107,16 @@ fn parse_package_function_export_row(row: &str) -> Option<(&str, &str, &str)> {
     Some((module_id, kind, signature))
 }
 
+fn declared_native_signature_eligible(signature: &str) -> bool {
+    let Some(rest) = signature.strip_prefix("fn ") else {
+        return false;
+    };
+    let Some((head, _)) = rest.split_once('(') else {
+        return false;
+    };
+    !head.contains('[')
+}
+
 fn validate_declared_native_export_rows(artifact: &AotPackageArtifact) -> Result<(), String> {
     let root_prefix = format!("{}.", artifact.root_module_id);
     let declared = artifact
@@ -114,45 +125,47 @@ fn validate_declared_native_export_rows(artifact: &AotPackageArtifact) -> Result
         .filter_map(|row| parse_package_function_export_row(row))
         .filter(|(module_id, kind, _)| {
             *kind == "fn"
-                && (*module_id == artifact.root_module_id
-                    || module_id.starts_with(&root_prefix))
+                && (*module_id == artifact.root_module_id || module_id.starts_with(&root_prefix))
         })
-        .map(|(module_id, kind, signature)| (module_id, kind, signature))
+        .map(|(module_id, _, signature)| (module_id.to_string(), signature.to_string()))
+        .collect::<BTreeSet<_>>();
+    let declared_eligible = declared
+        .iter()
+        .filter(|(_, signature)| declared_native_signature_eligible(signature))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let structured = artifact
+        .routines
+        .iter()
+        .filter(|routine| {
+            routine.exported
+                && (routine.module_id == artifact.root_module_id
+                    || routine.module_id.starts_with(&root_prefix))
+                && routine.symbol_kind == "fn"
+                && routine.impl_target_type.is_none()
+                && !routine.is_async
+                && routine.type_params.is_empty()
+                && native_routine_signature(routine).is_ok()
+        })
+        .map(|routine| {
+            (
+                routine.module_id.clone(),
+                render_routine_signature_text(
+                    &routine.symbol_kind,
+                    &routine.symbol_name,
+                    routine.is_async,
+                    &routine.type_params,
+                    &routine.params,
+                    routine.return_type.as_ref(),
+                ),
+            )
+        })
         .collect::<BTreeSet<_>>();
 
-    for routine in &artifact.routines {
-        if !routine.exported {
-            continue;
-        }
-        if routine.module_id != artifact.root_module_id && !routine.module_id.starts_with(&root_prefix)
-        {
-            continue;
-        }
-        if routine.symbol_kind != "fn"
-            || routine.impl_target_type.is_some()
-            || routine.is_async
-            || !routine.type_params.is_empty()
-        {
-            continue;
-        }
-        if native_routine_signature(routine).is_err() {
-            continue;
-        }
-        let signature = render_routine_signature_text(
-            &routine.symbol_kind,
-            &routine.symbol_name,
-            routine.is_async,
-            &routine.type_params,
-            &routine.params,
-            routine.return_type.as_ref(),
+    if structured != declared_eligible {
+        return Err(
+            "backend artifact native export rows do not match structured routines".to_string(),
         );
-        if !declared.contains(&(routine.module_id.as_str(), routine.symbol_kind.as_str(), signature.as_str()))
-        {
-            return Err(
-                "backend artifact native export rows do not match structured routines"
-                    .to_string(),
-            );
-        }
     }
     Ok(())
 }
@@ -171,13 +184,26 @@ pub fn native_routine_signature(
 }
 
 pub fn parse_native_param(param: &IrRoutineParam) -> Result<NativeAbiParam, String> {
+    let is_edit = match param.mode.as_deref() {
+        None | Some("read") | Some("take") => false,
+        Some("edit") => true,
+        Some(other) => {
+            return Err(format!(
+                "unsupported native abi parameter mode `{other}` for `{}`",
+                param.name
+            ));
+        }
+    };
     Ok(NativeAbiParam {
         name: sanitize_name(&param.name),
         ty: parse_native_type(&param.ty)?,
+        is_edit,
     })
 }
 
-pub fn parse_native_return_type(return_type: Option<&IrRoutineType>) -> Result<NativeAbiType, String> {
+pub fn parse_native_return_type(
+    return_type: Option<&IrRoutineType>,
+) -> Result<NativeAbiType, String> {
     return_type
         .map(parse_native_type)
         .transpose()

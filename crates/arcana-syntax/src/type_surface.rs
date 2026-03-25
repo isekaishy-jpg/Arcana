@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::{is_builtin_boundary_unsafe_type_name, Span};
+use crate::{Span, is_builtin_boundary_unsafe_type_name};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SurfaceRefs {
@@ -217,13 +217,7 @@ impl SurfaceType {
     }
 
     pub fn is_mut_ref(&self) -> bool {
-        matches!(
-            self.kind,
-            SurfaceTypeKind::Ref {
-                mutable: true,
-                ..
-            }
-        )
+        matches!(self.kind, SurfaceTypeKind::Ref { mutable: true, .. })
     }
 }
 
@@ -791,7 +785,12 @@ mod tests {
         let ty = parse_surface_type("&'a mut std.iter.Iterator[I].Item").expect("type");
         assert_eq!(ty.render(), "&'a mut std.iter.Iterator[I].Item");
         let refs = ty.refs();
-        assert!(refs.paths.iter().any(|path| path == &["std".to_string(), "iter".to_string(), "Iterator".to_string()]));
+        assert!(refs.paths.iter().any(|path| path
+            == &[
+                "std".to_string(),
+                "iter".to_string(),
+                "Iterator".to_string()
+            ]));
         assert!(refs.lifetimes.iter().any(|lifetime| lifetime == "'a"));
 
         let where_clause =

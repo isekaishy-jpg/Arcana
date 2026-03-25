@@ -1,6 +1,4 @@
-use arcana_hir::{
-    HirResolvedModule, HirResolvedSymbolRef, HirSymbolKind, HirWorkspaceSummary,
-};
+use arcana_hir::{HirResolvedModule, HirResolvedSymbolRef, HirSymbolKind, HirWorkspaceSummary};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SurfaceSymbolUse {
     TypeLike,
@@ -77,4 +75,3 @@ fn is_ident_start(ch: char) -> bool {
 fn is_ident_continue(ch: char) -> bool {
     ch == '_' || ch.is_ascii_alphanumeric()
 }
-

@@ -26,7 +26,10 @@ pub fn validate_runtime_main_entry_contract(
     if param_count != 0 {
         return Err("main must not take parameters in the current runtime lane".to_string());
     }
-    if !matches!(return_type.and_then(IrRoutineType::root_name), None | Some("Int" | "Unit")) {
+    if !matches!(
+        return_type.and_then(IrRoutineType::root_name),
+        None | Some("Int" | "Unit")
+    ) {
         return Err("main must return Int or Unit in the current runtime lane".to_string());
     }
     Ok(())

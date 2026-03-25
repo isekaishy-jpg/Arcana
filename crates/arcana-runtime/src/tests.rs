@@ -1,23 +1,24 @@
 #[cfg(windows)]
 use super::NativeProcessHost;
 use super::{
+    BufferedEvent, BufferedFrameInput, BufferedHost, ParsedAssignOp, ParsedAssignTarget,
+    ParsedExpr, ParsedPageRollup, ParsedPhraseArg, ParsedPhraseQualifierKind, ParsedStmt,
+    RuntimeCallArg, RuntimeEntrypointPlan, RuntimeExecutionState, RuntimeHost, RuntimeOpaqueValue,
+    RuntimePackagePlan, RuntimeParamPlan, RuntimeRoutinePlan, RuntimeValue,
     arcana_desktop_session_record, arcana_desktop_wake_record, arcana_desktop_window_value,
     arcana_window_id_record, err_variant, execute_entrypoint_routine, execute_exported_abi_routine,
     execute_exported_json_abi_routine, execute_main, execute_routine, insert_runtime_channel,
     load_package_plan, none_variant, ok_variant, parse_rollup_row, parse_runtime_package_image,
     parse_stmt, plan_from_artifact, render_exported_json_abi_manifest,
     render_runtime_package_image, resolve_routine_index, resolve_routine_index_for_call,
-    some_variant, try_execute_arcana_owned_api_call, BufferedEvent, BufferedFrameInput,
-    BufferedHost, ParsedExpr, ParsedPageRollup, ParsedPhraseArg, ParsedPhraseQualifierKind,
-    ParsedStmt, RuntimeCallArg, RuntimeEntrypointPlan, RuntimeExecutionState, RuntimeHost,
-    RuntimeOpaqueValue, RuntimePackagePlan, RuntimeParamPlan, RuntimeRoutinePlan, RuntimeValue,
+    some_variant, try_execute_arcana_owned_api_call,
 };
 use arcana_aot::{
-    render_package_artifact, AotEntrypointArtifact, AotPackageArtifact, AotPackageModuleArtifact,
-    AotRoutineArtifact, AotRoutineParamArtifact, AOT_INTERNAL_FORMAT,
+    AOT_INTERNAL_FORMAT, AotEntrypointArtifact, AotPackageArtifact, AotPackageModuleArtifact,
+    AotRoutineArtifact, AotRoutineParamArtifact, render_package_artifact,
 };
 use arcana_frontend::{check_workspace_graph, compute_member_fingerprints_for_checked_workspace};
-use arcana_ir::{parse_routine_type_text, IrRoutineType, IrRoutineTypeKind};
+use arcana_ir::{IrRoutineType, IrRoutineTypeKind, parse_routine_type_text};
 use arcana_package::{execute_build, load_workspace_graph, plan_workspace, prepare_build};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -91,6 +92,26 @@ fn temp_workspace_dir(label: &str) -> PathBuf {
         .join(format!("arcana_runtime_{label}_{nanos}"))
 }
 
+#[cfg(unix)]
+fn create_test_symlink_file(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(windows)]
+fn create_test_symlink_file(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_file(target, link)
+}
+
+#[cfg(unix)]
+fn create_test_symlink_dir(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(windows)]
+fn create_test_symlink_dir(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_dir(target, link)
+}
+
 fn repo_root() -> PathBuf {
     let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     crate_dir
@@ -107,6 +128,85 @@ fn owned_grimoire_root() -> PathBuf {
     } else {
         repo_root().join("grimoires").join("owned").join("app")
     }
+}
+
+#[test]
+fn buffered_host_sandbox_rejects_symlink_file_escape() {
+    let dir = temp_workspace_dir("sandbox_symlink_file_escape");
+    let sandbox = dir.join("sandbox");
+    let outside = dir.join("outside");
+    fs::create_dir_all(&sandbox).expect("sandbox root should exist");
+    fs::create_dir_all(&outside).expect("outside dir should exist");
+    fs::write(outside.join("secret.txt"), "arcana").expect("outside file should exist");
+
+    let link = sandbox.join("secret.txt");
+    match create_test_symlink_file(&outside.join("secret.txt"), &link) {
+        Ok(()) => {}
+        Err(err)
+            if err.kind() == std::io::ErrorKind::PermissionDenied
+                || err.raw_os_error() == Some(1314) =>
+        {
+            let _ = fs::remove_dir_all(dir);
+            return;
+        }
+        Err(err) => panic!("symlink should create: {err}"),
+    }
+
+    let sandbox_text = sandbox.to_string_lossy().replace('\\', "/");
+    let mut host = BufferedHost {
+        cwd: sandbox_text.clone(),
+        sandbox_root: sandbox_text,
+        ..BufferedHost::default()
+    };
+
+    let err = RuntimeHost::fs_read_text(&mut host, "secret.txt")
+        .expect_err("sandbox should reject file symlink escape");
+    assert!(err.contains("escapes sandbox root"), "{err}");
+
+    let err = RuntimeHost::path_canonicalize(&mut host, "secret.txt")
+        .expect_err("sandbox canonicalize should reject file symlink escape");
+    assert!(err.contains("escapes sandbox root"), "{err}");
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn buffered_host_sandbox_rejects_symlink_parent_escape_for_write() {
+    let dir = temp_workspace_dir("sandbox_symlink_parent_escape");
+    let sandbox = dir.join("sandbox");
+    let outside = dir.join("outside");
+    fs::create_dir_all(&sandbox).expect("sandbox root should exist");
+    fs::create_dir_all(&outside).expect("outside dir should exist");
+
+    let link = sandbox.join("shared");
+    match create_test_symlink_dir(&outside, &link) {
+        Ok(()) => {}
+        Err(err)
+            if err.kind() == std::io::ErrorKind::PermissionDenied
+                || err.raw_os_error() == Some(1314) =>
+        {
+            let _ = fs::remove_dir_all(dir);
+            return;
+        }
+        Err(err) => panic!("directory symlink should create: {err}"),
+    }
+
+    let sandbox_text = sandbox.to_string_lossy().replace('\\', "/");
+    let mut host = BufferedHost {
+        cwd: sandbox_text.clone(),
+        sandbox_root: sandbox_text,
+        ..BufferedHost::default()
+    };
+
+    let err = RuntimeHost::fs_write_text(&mut host, "shared/escape.txt", "blocked")
+        .expect_err("sandbox should reject write through symlinked parent");
+    assert!(err.contains("escapes sandbox root"), "{err}");
+    assert!(
+        !outside.join("escape.txt").exists(),
+        "write-through symlink must not create outside files"
+    );
+
+    let _ = fs::remove_dir_all(dir);
 }
 
 #[cfg(windows)]
@@ -1168,6 +1268,128 @@ fn runtime_dynamic_bare_method_fallback_keeps_owner_identity() {
 }
 
 #[test]
+fn runtime_dynamic_bare_method_fallback_rejects_wrong_sole_candidate() {
+    let self_type = parse_routine_type_text("AtomicInt").expect("type");
+    let plan = RuntimePackagePlan {
+        package_name: "ops".to_string(),
+        root_module_id: "ops".to_string(),
+        direct_deps: Vec::new(),
+        runtime_requirements: Vec::new(),
+        module_aliases: BTreeMap::new(),
+        opaque_family_types: BTreeMap::new(),
+        entrypoints: Vec::new(),
+        owners: Vec::new(),
+        routines: vec![RuntimeRoutinePlan {
+            module_id: "ops".to_string(),
+            routine_key: "ops#impl-0-method-0".to_string(),
+            symbol_name: "tick".to_string(),
+            symbol_kind: "fn".to_string(),
+            exported: false,
+            is_async: false,
+            type_params: Vec::new(),
+            behavior_attrs: BTreeMap::new(),
+            params: vec![RuntimeParamPlan {
+                mode: Some("read".to_string()),
+                name: "self".to_string(),
+                ty: self_type.clone(),
+            }],
+            return_type: test_return_type("fn tick(read self: AtomicInt) -> Int:"),
+            intrinsic_impl: None,
+            impl_target_type: Some(self_type),
+            impl_trait_path: None,
+            availability: Vec::new(),
+            foreword_rows: Vec::new(),
+            rollups: Vec::new(),
+            statements: Vec::new(),
+        }],
+    };
+
+    let err = resolve_routine_index_for_call(
+        &plan,
+        "ops",
+        &["tick".to_string()],
+        &[RuntimeCallArg {
+            name: None,
+            value: RuntimeValue::Bool(true),
+            source_expr: ParsedExpr::Bool(true),
+        }],
+        None,
+        None,
+        true,
+        None,
+    )
+    .expect_err("bare method fallback should validate the sole candidate receiver");
+
+    assert!(
+        err.contains("no overload matching receiver `Bool`"),
+        "{err}"
+    );
+}
+
+#[test]
+fn runtime_dynamic_bare_method_fallback_rejects_qualified_leaf_collision() {
+    let self_type = parse_routine_type_text("pkg_a.Counter").expect("type");
+    let receiver = RuntimeValue::Record {
+        name: "pkg_b.Counter".to_string(),
+        fields: BTreeMap::new(),
+    };
+    let plan = RuntimePackagePlan {
+        package_name: "app".to_string(),
+        root_module_id: "app".to_string(),
+        direct_deps: Vec::new(),
+        runtime_requirements: Vec::new(),
+        module_aliases: BTreeMap::new(),
+        opaque_family_types: BTreeMap::new(),
+        entrypoints: Vec::new(),
+        owners: Vec::new(),
+        routines: vec![RuntimeRoutinePlan {
+            module_id: "app".to_string(),
+            routine_key: "app#impl-0-method-0".to_string(),
+            symbol_name: "tick".to_string(),
+            symbol_kind: "fn".to_string(),
+            exported: false,
+            is_async: false,
+            type_params: Vec::new(),
+            behavior_attrs: BTreeMap::new(),
+            params: vec![RuntimeParamPlan {
+                mode: Some("read".to_string()),
+                name: "self".to_string(),
+                ty: self_type.clone(),
+            }],
+            return_type: test_return_type("fn tick(read self: pkg_a.Counter) -> Int:"),
+            intrinsic_impl: None,
+            impl_target_type: Some(self_type),
+            impl_trait_path: None,
+            availability: Vec::new(),
+            foreword_rows: Vec::new(),
+            rollups: Vec::new(),
+            statements: Vec::new(),
+        }],
+    };
+
+    let err = resolve_routine_index_for_call(
+        &plan,
+        "app",
+        &["tick".to_string()],
+        &[RuntimeCallArg {
+            name: None,
+            value: receiver,
+            source_expr: ParsedExpr::Path(vec!["counter".to_string()]),
+        }],
+        None,
+        None,
+        true,
+        None,
+    )
+    .expect_err("qualified receiver collisions should not match by leaf name");
+
+    assert!(
+        err.contains("no overload matching receiver `Counter`"),
+        "{err}"
+    );
+}
+
+#[test]
 fn execute_main_returns_exit_code() {
     let plan = plan_from_artifact(&sample_return_artifact()).expect("runtime plan should build");
     let mut host = BufferedHost::default();
@@ -1192,7 +1414,7 @@ fn runtime_json_abi_manifest_lists_exported_callable_routines() {
     let value = manifest
         .parse::<serde_json::Value>()
         .expect("manifest should parse as json");
-    assert_eq!(value["format"].as_str(), Some("arcana-runtime-json-abi-v1"));
+    assert_eq!(value["format"].as_str(), Some("arcana-runtime-json-abi-v2"));
     let routines = value["routines"]
         .as_array()
         .expect("manifest routines should be an array");
@@ -1244,7 +1466,234 @@ fn runtime_json_abi_executes_exported_routine() {
     let mut host = BufferedHost::default();
     let result = execute_exported_json_abi_routine(&plan, "tool#fn-0", "[5]", &mut host)
         .expect("json abi invoke should succeed");
-    assert_eq!(result, "7");
+    let result = result
+        .parse::<serde_json::Value>()
+        .expect("json abi result should parse");
+    assert_eq!(result["result"], serde_json::Value::from(7));
+    assert_eq!(result["final_args"], serde_json::json!([5]));
+}
+
+#[test]
+fn runtime_json_abi_writes_back_edit_arguments() {
+    let plan = RuntimePackagePlan {
+        package_name: "tool".to_string(),
+        root_module_id: "tool".to_string(),
+        direct_deps: Vec::new(),
+        runtime_requirements: Vec::new(),
+        module_aliases: BTreeMap::new(),
+        opaque_family_types: BTreeMap::new(),
+        entrypoints: Vec::new(),
+        owners: Vec::new(),
+        routines: vec![RuntimeRoutinePlan {
+            module_id: "tool".to_string(),
+            routine_key: "tool#fn-0".to_string(),
+            symbol_name: "bump".to_string(),
+            symbol_kind: "fn".to_string(),
+            exported: true,
+            is_async: false,
+            type_params: Vec::new(),
+            behavior_attrs: BTreeMap::new(),
+            params: vec![RuntimeParamPlan {
+                mode: Some("edit".to_string()),
+                name: "value".to_string(),
+                ty: parse_routine_type_text("Int").expect("type"),
+            }],
+            return_type: test_return_type("fn bump(edit value: Int) -> Int:"),
+            intrinsic_impl: None,
+            impl_target_type: None,
+            impl_trait_path: None,
+            availability: Vec::new(),
+            foreword_rows: Vec::new(),
+            rollups: Vec::new(),
+            statements: vec![
+                ParsedStmt::Assign {
+                    target: ParsedAssignTarget::Name("value".to_string()),
+                    op: ParsedAssignOp::AddAssign,
+                    value: ParsedExpr::Int(2),
+                },
+                ParsedStmt::ReturnValue {
+                    value: ParsedExpr::Path(vec!["value".to_string()]),
+                },
+            ],
+        }],
+    };
+    let mut host = BufferedHost::default();
+    let result = execute_exported_json_abi_routine(&plan, "tool#fn-0", "[5]", &mut host)
+        .expect("json abi invoke should succeed");
+    let result = result
+        .parse::<serde_json::Value>()
+        .expect("json abi result should parse");
+    assert_eq!(result["result"], serde_json::Value::from(7));
+    assert_eq!(result["final_args"], serde_json::json!([7]));
+}
+
+#[test]
+fn runtime_json_abi_manifest_omits_unsupported_owner_reference_and_opaque_routines() {
+    let plan = RuntimePackagePlan {
+        package_name: "tool".to_string(),
+        root_module_id: "tool".to_string(),
+        direct_deps: Vec::new(),
+        runtime_requirements: Vec::new(),
+        module_aliases: BTreeMap::new(),
+        opaque_family_types: BTreeMap::from([(
+            "window_handle".to_string(),
+            vec!["desktop.types.Window".to_string()],
+        )]),
+        entrypoints: Vec::new(),
+        owners: Vec::new(),
+        routines: vec![
+            RuntimeRoutinePlan {
+                module_id: "tool".to_string(),
+                routine_key: "tool#fn-0".to_string(),
+                symbol_name: "answer".to_string(),
+                symbol_kind: "fn".to_string(),
+                exported: true,
+                is_async: false,
+                type_params: Vec::new(),
+                behavior_attrs: BTreeMap::new(),
+                params: vec![RuntimeParamPlan {
+                    mode: None,
+                    name: "value".to_string(),
+                    ty: parse_routine_type_text("Int").expect("type"),
+                }],
+                return_type: test_return_type("fn answer(value: Int) -> Int:"),
+                intrinsic_impl: None,
+                impl_target_type: None,
+                impl_trait_path: None,
+                availability: Vec::new(),
+                foreword_rows: Vec::new(),
+                rollups: Vec::new(),
+                statements: vec![ParsedStmt::ReturnValue {
+                    value: ParsedExpr::Path(vec!["value".to_string()]),
+                }],
+            },
+            RuntimeRoutinePlan {
+                module_id: "tool".to_string(),
+                routine_key: "tool#fn-1".to_string(),
+                symbol_name: "borrowed".to_string(),
+                symbol_kind: "fn".to_string(),
+                exported: true,
+                is_async: false,
+                type_params: Vec::new(),
+                behavior_attrs: BTreeMap::new(),
+                params: vec![RuntimeParamPlan {
+                    mode: Some("read".to_string()),
+                    name: "value".to_string(),
+                    ty: parse_routine_type_text("&Int").expect("type"),
+                }],
+                return_type: test_return_type("fn borrowed(read value: &Int) -> Int:"),
+                intrinsic_impl: None,
+                impl_target_type: None,
+                impl_trait_path: None,
+                availability: Vec::new(),
+                foreword_rows: Vec::new(),
+                rollups: Vec::new(),
+                statements: Vec::new(),
+            },
+            RuntimeRoutinePlan {
+                module_id: "tool".to_string(),
+                routine_key: "tool#fn-2".to_string(),
+                symbol_name: "window_title".to_string(),
+                symbol_kind: "fn".to_string(),
+                exported: true,
+                is_async: false,
+                type_params: Vec::new(),
+                behavior_attrs: BTreeMap::new(),
+                params: vec![RuntimeParamPlan {
+                    mode: Some("read".to_string()),
+                    name: "window".to_string(),
+                    ty: parse_routine_type_text("desktop.types.Window").expect("type"),
+                }],
+                return_type: test_return_type(
+                    "fn window_title(read window: desktop.types.Window) -> Int:",
+                ),
+                intrinsic_impl: None,
+                impl_target_type: None,
+                impl_trait_path: None,
+                availability: Vec::new(),
+                foreword_rows: Vec::new(),
+                rollups: Vec::new(),
+                statements: Vec::new(),
+            },
+            RuntimeRoutinePlan {
+                module_id: "tool".to_string(),
+                routine_key: "tool#fn-3".to_string(),
+                symbol_name: "owner_only".to_string(),
+                symbol_kind: "fn".to_string(),
+                exported: true,
+                is_async: false,
+                type_params: Vec::new(),
+                behavior_attrs: BTreeMap::new(),
+                params: vec![RuntimeParamPlan {
+                    mode: Some("read".to_string()),
+                    name: "owner".to_string(),
+                    ty: parse_routine_type_text("Owner").expect("type"),
+                }],
+                return_type: test_return_type("fn owner_only(read owner: Owner) -> Int:"),
+                intrinsic_impl: None,
+                impl_target_type: None,
+                impl_trait_path: None,
+                availability: Vec::new(),
+                foreword_rows: Vec::new(),
+                rollups: Vec::new(),
+                statements: Vec::new(),
+            },
+        ],
+    };
+
+    let manifest = render_exported_json_abi_manifest(&plan).expect("json abi manifest");
+    let value = manifest
+        .parse::<serde_json::Value>()
+        .expect("manifest should parse as json");
+    let routines = value["routines"]
+        .as_array()
+        .expect("manifest routines should be an array");
+
+    assert_eq!(routines.len(), 1);
+    assert_eq!(routines[0]["routine_key"].as_str(), Some("tool#fn-0"));
+}
+
+#[test]
+fn runtime_json_abi_rejects_executing_unsupported_exported_routine() {
+    let plan = RuntimePackagePlan {
+        package_name: "tool".to_string(),
+        root_module_id: "tool".to_string(),
+        direct_deps: Vec::new(),
+        runtime_requirements: Vec::new(),
+        module_aliases: BTreeMap::new(),
+        opaque_family_types: BTreeMap::new(),
+        entrypoints: Vec::new(),
+        owners: Vec::new(),
+        routines: vec![RuntimeRoutinePlan {
+            module_id: "tool".to_string(),
+            routine_key: "tool#fn-0".to_string(),
+            symbol_name: "borrowed".to_string(),
+            symbol_kind: "fn".to_string(),
+            exported: true,
+            is_async: false,
+            type_params: Vec::new(),
+            behavior_attrs: BTreeMap::new(),
+            params: vec![RuntimeParamPlan {
+                mode: Some("read".to_string()),
+                name: "value".to_string(),
+                ty: parse_routine_type_text("&Int").expect("type"),
+            }],
+            return_type: test_return_type("fn borrowed(read value: &Int) -> Int:"),
+            intrinsic_impl: None,
+            impl_target_type: None,
+            impl_trait_path: None,
+            availability: Vec::new(),
+            foreword_rows: Vec::new(),
+            rollups: Vec::new(),
+            statements: Vec::new(),
+        }],
+    };
+    let mut host = BufferedHost::default();
+
+    let err = execute_exported_json_abi_routine(&plan, "tool#fn-0", "[5]", &mut host)
+        .expect_err("json abi should reject unsupported exported routine signatures");
+
+    assert!(err.contains("not exported or callable"), "{err}");
 }
 
 #[test]
@@ -1296,7 +1745,8 @@ fn runtime_native_abi_executes_exported_routine() {
         &mut host,
     )
     .expect("native abi invoke should succeed");
-    assert_eq!(result, super::RuntimeAbiValue::Int(7));
+    assert_eq!(result.result, super::RuntimeAbiValue::Int(7));
+    assert_eq!(result.final_args, vec![super::RuntimeAbiValue::Int(5)]);
 }
 
 #[test]
@@ -1407,7 +1857,14 @@ fn runtime_native_abi_supports_string_and_byte_values() {
         &mut host,
     )
     .expect("string abi invoke should succeed");
-    assert_eq!(greet, super::RuntimeAbiValue::Str("hi arcana".to_string()));
+    assert_eq!(
+        greet.result,
+        super::RuntimeAbiValue::Str("hi arcana".to_string())
+    );
+    assert_eq!(
+        greet.final_args,
+        vec![super::RuntimeAbiValue::Str("arcana".to_string())]
+    );
 
     let tail = execute_exported_abi_routine(
         &plan,
@@ -1416,7 +1873,11 @@ fn runtime_native_abi_supports_string_and_byte_values() {
         &mut host,
     )
     .expect("byte abi invoke should succeed");
-    assert_eq!(tail, super::RuntimeAbiValue::Bytes(b"rc".to_vec()));
+    assert_eq!(tail.result, super::RuntimeAbiValue::Bytes(b"rc".to_vec()));
+    assert_eq!(
+        tail.final_args,
+        vec![super::RuntimeAbiValue::Bytes(b"arc".to_vec())]
+    );
 
     let echoed = execute_exported_abi_routine(
         &plan,
@@ -1429,12 +1890,75 @@ fn runtime_native_abi_supports_string_and_byte_values() {
     )
     .expect("pair abi invoke should succeed");
     assert_eq!(
-        echoed,
+        echoed.result,
         super::RuntimeAbiValue::Pair(
             Box::new(super::RuntimeAbiValue::Str("arcana".to_string())),
             Box::new(super::RuntimeAbiValue::Int(7)),
         )
     );
+    assert_eq!(
+        echoed.final_args,
+        vec![super::RuntimeAbiValue::Pair(
+            Box::new(super::RuntimeAbiValue::Str("arcana".to_string())),
+            Box::new(super::RuntimeAbiValue::Int(7)),
+        )]
+    );
+}
+
+#[test]
+fn runtime_native_abi_writes_back_edit_arguments() {
+    let plan = RuntimePackagePlan {
+        package_name: "tool".to_string(),
+        root_module_id: "tool".to_string(),
+        direct_deps: Vec::new(),
+        runtime_requirements: Vec::new(),
+        module_aliases: BTreeMap::new(),
+        opaque_family_types: BTreeMap::new(),
+        entrypoints: Vec::new(),
+        owners: Vec::new(),
+        routines: vec![RuntimeRoutinePlan {
+            module_id: "tool".to_string(),
+            routine_key: "tool#fn-0".to_string(),
+            symbol_name: "bump".to_string(),
+            symbol_kind: "fn".to_string(),
+            exported: true,
+            is_async: false,
+            type_params: Vec::new(),
+            behavior_attrs: BTreeMap::new(),
+            params: vec![RuntimeParamPlan {
+                mode: Some("edit".to_string()),
+                name: "value".to_string(),
+                ty: parse_routine_type_text("Int").expect("type"),
+            }],
+            return_type: test_return_type("fn bump(edit value: Int) -> Int:"),
+            intrinsic_impl: None,
+            impl_target_type: None,
+            impl_trait_path: None,
+            availability: Vec::new(),
+            foreword_rows: Vec::new(),
+            rollups: Vec::new(),
+            statements: vec![
+                ParsedStmt::Assign {
+                    target: ParsedAssignTarget::Name("value".to_string()),
+                    op: ParsedAssignOp::AddAssign,
+                    value: ParsedExpr::Int(2),
+                },
+                ParsedStmt::ReturnValue {
+                    value: ParsedExpr::Path(vec!["value".to_string()]),
+                },
+            ],
+        }],
+    };
+    let mut host = BufferedHost::default();
+    let result = execute_exported_abi_routine(
+        &plan,
+        "tool#fn-0",
+        vec![super::RuntimeAbiValue::Int(5)],
+        &mut host,
+    )
+    .expect("native abi invoke should succeed");
+    assert_eq!(result.result, super::RuntimeAbiValue::Int(7));
+    assert_eq!(result.final_args, vec![super::RuntimeAbiValue::Int(7)]);
 }
 
 #[test]
@@ -5973,6 +6497,60 @@ fn buffered_host_session_window_lookup_finds_attached_windows_by_id() {
 }
 
 #[test]
+fn buffered_host_session_pump_keeps_other_session_window_backlog() {
+    let mut host = BufferedHost::default();
+    let first =
+        RuntimeHost::window_open(&mut host, "First", 320, 200).expect("first window should open");
+    let second =
+        RuntimeHost::window_open(&mut host, "Second", 320, 200).expect("second window should open");
+    let first_session = RuntimeHost::events_session_open(&mut host).expect("session should open");
+    let second_session = RuntimeHost::events_session_open(&mut host).expect("session should open");
+    RuntimeHost::events_session_attach_window(&mut host, first_session, first)
+        .expect("first window should attach");
+    RuntimeHost::events_session_attach_window(&mut host, second_session, second)
+        .expect("second window should attach");
+
+    let frame = RuntimeHost::events_session_pump(&mut host, first_session).expect("session pump");
+    while RuntimeHost::events_poll(&mut host, frame)
+        .expect("event poll should succeed")
+        .is_some()
+    {}
+    let frame = RuntimeHost::events_session_pump(&mut host, second_session).expect("session pump");
+    while RuntimeHost::events_poll(&mut host, frame)
+        .expect("event poll should succeed")
+        .is_some()
+    {}
+
+    RuntimeHost::window_request_redraw(&mut host, second).expect("redraw should queue");
+
+    assert!(
+        !host
+            .session_has_ready_events(first_session)
+            .expect("first-session ready probe should succeed"),
+        "first session must not wake on second session backlog"
+    );
+    assert!(
+        host.session_has_ready_events(second_session)
+            .expect("second-session ready probe should succeed"),
+        "second session should still observe its own backlog"
+    );
+
+    let frame = RuntimeHost::events_session_pump(&mut host, first_session).expect("session pump");
+    let mut first_kinds = Vec::new();
+    while let Some(event) = RuntimeHost::events_poll(&mut host, frame).expect("event poll") {
+        first_kinds.push(event.kind);
+    }
+    assert_eq!(first_kinds, vec![23]);
+
+    let frame = RuntimeHost::events_session_pump(&mut host, second_session).expect("session pump");
+    let mut second_kinds = Vec::new();
+    while let Some(event) = RuntimeHost::events_poll(&mut host, frame).expect("event poll") {
+        second_kinds.push(event.kind);
+    }
+    assert_eq!(second_kinds, vec![13, 23]);
+}
+
+#[test]
 fn arcana_owned_desktop_app_current_window_helpers_resolve_live_window() {
     let mut host = BufferedHost::default();
     let window =
@@ -6113,6 +6691,69 @@ fn arcana_owned_desktop_app_current_window_helpers_follow_main_window_path() {
 }
 
 #[test]
+#[cfg(windows)]
+fn arcana_owned_desktop_app_current_window_helpers_ignore_closed_native_window_backlog() {
+    let mut host = NativeProcessHost::current().expect("native host should construct");
+    let window =
+        RuntimeHost::window_open(&mut host, "Arcana", 320, 200).expect("window should open");
+    let session = RuntimeHost::events_session_open(&mut host).expect("session should open");
+    RuntimeHost::events_session_attach_window(&mut host, session, window)
+        .expect("window should attach");
+    let wake = RuntimeHost::events_session_create_wake(&mut host, session)
+        .expect("wake handle should create");
+    let window_id = RuntimeHost::window_id(&mut host, window).expect("window id");
+
+    RuntimeHost::window_request_redraw(&mut host, window)
+        .expect("redraw should queue before close");
+    RuntimeHost::window_close(&mut host, window).expect("window should close");
+
+    let context =
+        arcana_desktop_app_context_value(session, wake, window_id, window, Some(window_id), true);
+
+    let current = try_execute_arcana_owned_api_call(
+        &[
+            "arcana_desktop".to_string(),
+            "app".to_string(),
+            "current_window".to_string(),
+        ],
+        &[runtime_call_arg(context.clone(), "cx")],
+        &mut host,
+    )
+    .expect("fast path should execute")
+    .expect("current_window should be handled");
+    assert_eq!(current, none_variant());
+
+    let required = try_execute_arcana_owned_api_call(
+        &[
+            "arcana_desktop".to_string(),
+            "app".to_string(),
+            "require_current_window".to_string(),
+        ],
+        &[runtime_call_arg(context.clone(), "cx")],
+        &mut host,
+    )
+    .expect("fast path should execute")
+    .expect("require_current_window should be handled");
+    assert_eq!(
+        required,
+        err_variant("missing current event window".to_string())
+    );
+
+    let main = try_execute_arcana_owned_api_call(
+        &[
+            "arcana_desktop".to_string(),
+            "app".to_string(),
+            "main_window".to_string(),
+        ],
+        &[runtime_call_arg(context, "cx")],
+        &mut host,
+    )
+    .expect("fast path should execute")
+    .expect("main_window should be handled");
+    assert_eq!(main, err_variant("missing main window".to_string()));
+}
+
+#[test]
 fn buffered_host_session_reattach_emits_resumed_again() {
     let mut host = BufferedHost::default();
     let first =
@@ -6225,8 +6866,12 @@ fn buffered_host_session_wait_reports_monitor_defaults_and_timeout() {
     assert!(RuntimeHost::window_monitor_is_primary(&mut host, 0).expect("monitor primary flag"));
     RuntimeHost::window_request_attention(&mut host, window, true)
         .expect("attention request should succeed");
+    RuntimeHost::window_request_attention(&mut host, window, true)
+        .expect("repeated attention request should succeed");
     RuntimeHost::window_request_attention(&mut host, window, false)
         .expect("attention reset should succeed");
+    RuntimeHost::window_request_attention(&mut host, window, false)
+        .expect("repeated attention reset should succeed");
 
     let frame = RuntimeHost::events_session_wait(&mut host, session, 25).expect("session wait");
     let mut kinds = Vec::new();
@@ -6269,8 +6914,10 @@ fn buffered_host_window_text_input_is_disabled_by_default() {
     let window =
         RuntimeHost::window_open(&mut host, "Arcana", 320, 200).expect("window should open");
 
-    assert!(!RuntimeHost::window_text_input_enabled(&mut host, window)
-        .expect("text input state should be readable"));
+    assert!(
+        !RuntimeHost::window_text_input_enabled(&mut host, window)
+            .expect("text input state should be readable")
+    );
 }
 
 #[test]
@@ -6318,7 +6965,9 @@ fn buffered_host_window_and_text_input_settings_roundtrip() {
         RuntimeHost::window_cursor_position(&mut host, window).expect("cursor position"),
         (12, 34)
     );
-    assert!(!RuntimeHost::window_text_input_enabled(&mut host, window).expect("text input enabled"));
+    assert!(
+        !RuntimeHost::window_text_input_enabled(&mut host, window).expect("text input enabled")
+    );
     assert!(
         RuntimeHost::text_input_composition_area_active(&mut host, window)
             .expect("composition area active")
@@ -6362,11 +7011,12 @@ fn buffered_host_window_close_detaches_session_entries() {
         .expect("window should attach");
 
     RuntimeHost::window_close(&mut host, window).expect("window close should succeed");
-    assert!(host
-        .session_ref(session)
-        .expect("session should still exist")
-        .windows
-        .is_empty());
+    assert!(
+        host.session_ref(session)
+            .expect("session should still exist")
+            .windows
+            .is_empty()
+    );
 
     let frame = RuntimeHost::events_session_pump(&mut host, session).expect("session pump");
     let mut kinds = Vec::new();
@@ -6456,7 +7106,7 @@ fn execute_main_runs_arcana_desktop_main_window_id_after_direct_main_close() {
 }
 
 #[test]
-fn execute_main_keeps_arcana_desktop_secondary_window_non_main_after_direct_main_close() {
+fn execute_main_promotes_arcana_desktop_surviving_window_after_direct_main_close() {
     let dir = temp_workspace_dir("desktop_retarget_main_after_close");
     let desktop_dep = owned_grimoire_root()
         .join("arcana-desktop")
@@ -6466,7 +7116,7 @@ fn execute_main_keeps_arcana_desktop_secondary_window_non_main_after_direct_main
         &dir.join("book.toml"),
         &format!(
             concat!(
-                "name = \"runtime_desktop_keep_secondary_non_main_after_close\"\n",
+                "name = \"runtime_desktop_promote_secondary_after_main_close\"\n",
                 "kind = \"app\"\n",
                 "[deps]\n",
                 "arcana_desktop = {desktop_dep:?}\n",
@@ -6524,8 +7174,12 @@ fn execute_main_keeps_arcana_desktop_secondary_window_non_main_after_direct_main
             "fn on_redraw(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read target: arcana_desktop.types.TargetedEvent) -> arcana_desktop.types.ControlFlow:\n",
             "    let id = target.window_id.value\n",
             "    if id == self.second_window:\n",
+            "        let main_window = (arcana_desktop.app.main_window_or_cached :: cx :: call)\n",
             "        if target.is_main_window:\n",
-            "            std.io.print[Int] :: 1 :: call\n",
+            "            if ((arcana_desktop.window.id :: main_window :: call).value) == self.second_window:\n",
+            "                std.io.print[Int] :: 1 :: call\n",
+            "            else:\n",
+            "                std.io.print[Int] :: 2 :: call\n",
             "        else:\n",
             "            std.io.print[Int] :: 0 :: call\n",
             "        let closed = arcana_desktop.app.close_current_window :: cx :: call\n",
@@ -6539,15 +7193,13 @@ fn execute_main_keeps_arcana_desktop_secondary_window_non_main_after_direct_main
     );
     write_file(&dir.join("src").join("types.arc"), "// test types\n");
 
-    let plan = build_workspace_plan_for_member(
-        &dir,
-        "runtime_desktop_keep_secondary_non_main_after_close",
-    );
+    let plan =
+        build_workspace_plan_for_member(&dir, "runtime_desktop_promote_secondary_after_main_close");
     let mut host = BufferedHost::default();
     let code = execute_main(&plan, &mut host).expect("runtime should execute");
 
     assert_eq!(code, 0);
-    assert_eq!(host.stdout, vec!["0".to_string()]);
+    assert_eq!(host.stdout, vec!["1".to_string()]);
 
     let _ = fs::remove_dir_all(dir);
 }

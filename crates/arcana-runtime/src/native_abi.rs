@@ -1,7 +1,8 @@
 use super::{
-    execute_routine_with_state, validate_runtime_requirements_supported, RuntimeExecutionState,
-    RuntimeHost, RuntimePackagePlan, RuntimeValue,
+    RuntimeExecutionState, RuntimeHost, RuntimePackagePlan, RuntimeRoutinePlan, RuntimeValue,
+    execute_routine_call_with_state, validate_runtime_requirements_supported,
 };
+use arcana_ir::{IrRoutineType, IrRoutineTypeKind};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RuntimeAbiValue {
@@ -13,22 +14,23 @@ pub enum RuntimeAbiValue {
     Unit,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeAbiCallOutcome {
+    pub result: RuntimeAbiValue,
+    pub final_args: Vec<RuntimeAbiValue>,
+}
+
 pub fn execute_exported_abi_routine(
     plan: &RuntimePackagePlan,
     routine_key: &str,
     args: Vec<RuntimeAbiValue>,
     host: &mut dyn RuntimeHost,
-) -> Result<RuntimeAbiValue, String> {
+) -> Result<RuntimeAbiCallOutcome, String> {
     let routine_index = plan
         .routines
         .iter()
         .enumerate()
-        .find(|(_, routine)| {
-            routine.exported
-                && routine.symbol_kind == "fn"
-                && !routine.is_async
-                && routine.routine_key == routine_key
-        })
+        .find(|(_, routine)| native_abi_callable(routine) && routine.routine_key == routine_key)
         .map(|(index, _)| index)
         .ok_or_else(|| format!("abi routine `{routine_key}` is not exported or callable"))?;
     validate_runtime_requirements_supported(plan, host)?;
@@ -37,15 +39,57 @@ pub fn execute_exported_abi_routine(
         .into_iter()
         .map(runtime_value_from_abi)
         .collect::<Vec<_>>();
-    let value = execute_routine_with_state(
+    let outcome = execute_routine_call_with_state(
         plan,
         routine_index,
         Vec::new(),
         runtime_args,
+        &[],
         &mut state,
         host,
+        false,
     )?;
-    abi_value_from_runtime(value)
+    Ok(RuntimeAbiCallOutcome {
+        result: abi_value_from_runtime(outcome.value)?,
+        final_args: outcome
+            .final_args
+            .into_iter()
+            .map(abi_value_from_runtime)
+            .collect::<Result<Vec<_>, _>>()?,
+    })
+}
+
+fn native_abi_callable(routine: &RuntimeRoutinePlan) -> bool {
+    routine.exported
+        && routine.symbol_kind == "fn"
+        && !routine.is_async
+        && routine.type_params.is_empty()
+        && routine
+            .params
+            .iter()
+            .all(|param| native_abi_supported_type(&param.ty))
+        && routine
+            .return_type
+            .as_ref()
+            .is_none_or(native_abi_supported_type)
+}
+
+fn native_abi_supported_type(ty: &IrRoutineType) -> bool {
+    match &ty.kind {
+        IrRoutineTypeKind::Path(path) => matches!(
+            path.root_name(),
+            Some("Int") | Some("Bool") | Some("Str") | Some("Unit")
+        ),
+        IrRoutineTypeKind::Apply { base, args } => match base.root_name() {
+            Some("Pair") if args.len() == 2 => args.iter().all(native_abi_supported_type),
+            Some("Array") if args.len() == 1 => args[0].root_name() == Some("Int"),
+            _ => false,
+        },
+        IrRoutineTypeKind::Tuple(items) if items.len() == 2 => {
+            items.iter().all(native_abi_supported_type)
+        }
+        _ => false,
+    }
 }
 
 fn runtime_value_from_abi(value: RuntimeAbiValue) -> RuntimeValue {

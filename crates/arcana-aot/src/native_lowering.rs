@@ -192,6 +192,9 @@ impl<'a> NativeLoweringBuilder<'a> {
         expected_params: &[NativeAbiParam],
         expected_return_type: &NativeAbiType,
     ) -> NativeRoutineLowering {
+        if expected_params.iter().any(|param| param.is_edit) {
+            return NativeRoutineLowering::RuntimeDispatch;
+        }
         let Some(signature) = self.signature_for(routine_key) else {
             return NativeRoutineLowering::RuntimeDispatch;
         };
@@ -1150,7 +1153,9 @@ mod tests {
                 type_params: Vec::new(),
                 behavior_attrs: BTreeMap::new(),
                 params: test_params(&["mode=read:name=pair:ty=Pair[Str, Int]".to_string()]),
-                return_type: test_return_type("fn echo_pair(read pair: Pair[Str, Int]) -> Pair[Str, Int]:"),
+                return_type: test_return_type(
+                    "fn echo_pair(read pair: Pair[Str, Int]) -> Pair[Str, Int]:",
+                ),
                 intrinsic_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
@@ -1925,5 +1930,3 @@ mod tests {
         }));
     }
 }
-
-

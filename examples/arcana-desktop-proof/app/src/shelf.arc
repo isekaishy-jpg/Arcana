@@ -247,9 +247,15 @@ fn refresh_second_window_state_ready(edit self: demo_types.Demo, read win: arcan
     self.second_window_alive = arcana_desktop.window.alive :: win :: call
     self.second_window_visible = arcana_desktop.window.visible :: win :: call
 
-fn refresh_second_window_state_missing(edit self: demo_types.Demo):
-    self.second_window_alive = false
+fn clear_second_window_state(edit self: demo_types.Demo):
+    self.second_window_id = -1
+    self.second_window_seen = false
+    self.second_window_dirty = false
     self.second_window_visible = false
+    self.second_window_alive = false
+
+fn refresh_second_window_state_missing(edit self: demo_types.Demo):
+    clear_second_window_state :: self :: call
 
 fn set_page(edit self: demo_types.Demo, edit cx: arcana_desktop.types.AppContext, next: Int) -> arcana_desktop.types.ControlFlow:
     self.page_index = next
@@ -624,12 +630,9 @@ fn close_second_window_direct_ready(edit self: demo_types.Demo, edit cx: arcana_
     if queued :: :: is_err:
         set_status :: self, "second close", "close request failed" :: call
         return
-    self.second_window_id = -1
-    self.second_window_seen = false
     self.second_window_dirty = false
-    self.second_window_visible = false
-    self.second_window_alive = false
-    set_status :: self, "second close", "closed directly" :: call
+    request_main_redraw :: cx :: call
+    set_status :: self, "second close", "close requested" :: call
 
 fn copy_text(edit self: demo_types.Demo):
     let payload = "Arcana Desktop :: " + (pages.title :: self.page_index :: call)
@@ -691,6 +694,7 @@ fn second_window_action(edit self: demo_types.Demo, edit cx: arcana_desktop.type
         Option.None => second_window_missing :: self, head :: call
 
 fn second_window_missing(edit self: demo_types.Demo, head: Str) -> Option[arcana_desktop.types.Window]:
+    clear_second_window_state :: self :: call
     set_status :: self, head, "open second window first" :: call
     return Option.None[arcana_desktop.types.Window] :: :: call
 
@@ -698,19 +702,19 @@ fn request_second_window_redraw(edit self: demo_types.Demo, edit cx: arcana_desk
     let found = second_window :: self, cx :: call
     return match found:
         Option.Some(win) => request_second_window_redraw_ready :: self, win :: call
-        Option.None => request_second_window_redraw_missing :: self :: call
+        Option.None => request_second_window_redraw_missing :: self, cx :: call
 
 fn request_second_window_redraw_ready(edit self: demo_types.Demo, take win: arcana_desktop.types.Window):
     let mut win = win
     arcana_desktop.window.request_redraw :: win :: call
     self.second_window_dirty = false
 
-fn request_second_window_redraw_missing(edit self: demo_types.Demo):
-    self.second_window_id = -1
-    self.second_window_seen = false
-    self.second_window_dirty = false
-    self.second_window_visible = false
-    self.second_window_alive = false
+fn request_second_window_redraw_missing(edit self: demo_types.Demo, edit cx: arcana_desktop.types.AppContext):
+    clear_second_window_state :: self :: call
+    request_main_redraw :: cx :: call
+
+fn target_is_second_window(read self: demo_types.Demo, read target: arcana_desktop.types.TargetedEvent) -> Bool:
+    return target.window_id.value == self.second_window_id
 
 fn update_hover(edit self: demo_types.Demo, read win: arcana_desktop.types.Window, point: (Int, Int)) -> Bool:
     self.mouse_pos = point
@@ -723,10 +727,13 @@ fn update_hover(edit self: demo_types.Demo, read win: arcana_desktop.types.Windo
 
 fn open_second_window(edit self: demo_types.Demo, edit cx: arcana_desktop.types.AppContext):
     if self.second_window_id >= 0:
-        self.status_head = "second window"
-        self.status_tail = "already open"
-        mark_dirty :: self :: call
-        return
+        let found = second_window :: self, cx :: call
+        if found :: :: is_some:
+            self.status_head = "second window"
+            self.status_tail = "already open"
+            mark_dirty :: self :: call
+            return
+        clear_second_window_state :: self :: call
     let mut cfg = arcana_desktop.window.default_config :: :: call
     cfg.title = "Arcana Desktop Proof :: Second Window"
     cfg.bounds.size = (460, 300)
@@ -754,11 +761,7 @@ fn open_second_window_ready(edit self: demo_types.Demo, take win: arcana_desktop
 fn open_second_window_failed(edit self: demo_types.Demo, err: Str):
     self.status_head = "second window"
     self.status_tail = ("open failed: " + err)
-    self.second_window_id = -1
-    self.second_window_seen = false
-    self.second_window_dirty = false
-    self.second_window_visible = false
-    self.second_window_alive = false
+    clear_second_window_state :: self :: call
     if self.exercise_second_window:
         std.io.print_line[Str] :: ("second_window=failed:" + err) :: call
         std.io.flush_stdout :: :: call
@@ -898,17 +901,14 @@ fn on_second_redraw(edit self: demo_types.Demo, read win: arcana_desktop.types.W
 fn on_close_requested(edit self: demo_types.Demo, edit cx: arcana_desktop.types.AppContext, read target: arcana_desktop.types.TargetedEvent) -> arcana_desktop.types.ControlFlow:
     self.close_requests += 1
     self.last_event = "WindowCloseRequested"
-    if target.is_main_window:
-        self.status_head = "close"
-        self.status_tail = "main window closing"
-    else:
+    if target_is_second_window :: self, target :: call:
         self.status_head = "close"
         self.status_tail = "second window closing"
-        self.second_window_id = -1
-        self.second_window_seen = false
-        self.second_window_dirty = false
-        self.second_window_visible = false
-        self.second_window_alive = false
+        clear_second_window_state :: self :: call
+        request_main_redraw :: cx :: call
+    else:
+        self.status_head = "close"
+        self.status_tail = "main window closing"
     let handled = arcana_desktop.app.close_current_window :: cx :: call
     return handled :: (arcana_desktop.types.ControlFlow.Wait :: :: call) :: unwrap_or
 
@@ -1048,7 +1048,7 @@ impl arcana_desktop.app.Application[demo_types.Demo] for demo_types.Demo:
         self.status_tail = "application suspended"
 
     fn window_event(edit self: demo_types.Demo, edit cx: arcana_desktop.types.AppContext, read target: arcana_desktop.types.TargetedEvent) -> arcana_desktop.types.ControlFlow:
-        if not target.is_main_window:
+        if target_is_second_window :: self, target :: call:
             return match target.event:
                 arcana_desktop.types.WindowEvent.WindowRedrawRequested(_) => on_second_redraw_current :: self, cx :: call
                 arcana_desktop.types.WindowEvent.WindowCloseRequested(_) => on_close_requested :: self, cx, target :: call
