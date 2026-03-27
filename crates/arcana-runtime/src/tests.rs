@@ -1476,6 +1476,112 @@ fn runtime_json_abi_executes_exported_routine() {
 }
 
 #[test]
+fn runtime_json_abi_manifest_records_cabi_param_metadata() {
+    let plan = RuntimePackagePlan {
+        package_name: "tool".to_string(),
+        root_module_id: "tool".to_string(),
+        direct_deps: Vec::new(),
+        runtime_requirements: Vec::new(),
+        module_aliases: BTreeMap::new(),
+        opaque_family_types: BTreeMap::new(),
+        entrypoints: Vec::new(),
+        owners: Vec::new(),
+        routines: vec![RuntimeRoutinePlan {
+            module_id: "tool".to_string(),
+            routine_key: "tool#fn-0".to_string(),
+            symbol_name: "bump".to_string(),
+            symbol_kind: "fn".to_string(),
+            exported: true,
+            is_async: false,
+            type_params: Vec::new(),
+            behavior_attrs: BTreeMap::new(),
+            params: vec![RuntimeParamPlan {
+                mode: Some("edit".to_string()),
+                name: "value".to_string(),
+                ty: parse_routine_type_text("Int").expect("type"),
+            }],
+            return_type: test_return_type("fn bump(edit value: Int) -> Int:"),
+            intrinsic_impl: None,
+            impl_target_type: None,
+            impl_trait_path: None,
+            availability: Vec::new(),
+            foreword_rows: Vec::new(),
+            rollups: Vec::new(),
+            statements: vec![ParsedStmt::ReturnValue {
+                value: ParsedExpr::Path(vec!["value".to_string()]),
+            }],
+        }],
+    };
+    let manifest = render_exported_json_abi_manifest(&plan).expect("json abi manifest");
+    let value = manifest
+        .parse::<serde_json::Value>()
+        .expect("manifest should parse as json");
+    let params = value["routines"][0]["params"]
+        .as_array()
+        .expect("manifest params should be an array");
+    assert_eq!(params.len(), 1);
+    assert_eq!(params[0]["name"], serde_json::Value::from("value"));
+    assert_eq!(params[0]["source_mode"], serde_json::Value::from("edit"));
+    assert_eq!(params[0]["input_type"], serde_json::Value::from("Int"));
+    assert_eq!(
+        params[0]["pass_mode"],
+        serde_json::Value::from("in_with_write_back")
+    );
+    assert_eq!(params[0]["write_back_type"], serde_json::Value::from("Int"));
+}
+
+#[test]
+fn runtime_json_abi_manifest_projects_default_read_source_mode() {
+    let plan = RuntimePackagePlan {
+        package_name: "tool".to_string(),
+        root_module_id: "tool".to_string(),
+        direct_deps: Vec::new(),
+        runtime_requirements: Vec::new(),
+        module_aliases: BTreeMap::new(),
+        opaque_family_types: BTreeMap::new(),
+        entrypoints: Vec::new(),
+        owners: Vec::new(),
+        routines: vec![RuntimeRoutinePlan {
+            module_id: "tool".to_string(),
+            routine_key: "tool#fn-0".to_string(),
+            symbol_name: "answer".to_string(),
+            symbol_kind: "fn".to_string(),
+            exported: true,
+            is_async: false,
+            type_params: Vec::new(),
+            behavior_attrs: BTreeMap::new(),
+            params: vec![RuntimeParamPlan {
+                mode: None,
+                name: "value".to_string(),
+                ty: parse_routine_type_text("Int").expect("type"),
+            }],
+            return_type: test_return_type("fn answer(value: Int) -> Int:"),
+            intrinsic_impl: None,
+            impl_target_type: None,
+            impl_trait_path: None,
+            availability: Vec::new(),
+            foreword_rows: Vec::new(),
+            rollups: Vec::new(),
+            statements: vec![ParsedStmt::ReturnValue {
+                value: ParsedExpr::Path(vec!["value".to_string()]),
+            }],
+        }],
+    };
+    let manifest = render_exported_json_abi_manifest(&plan).expect("json abi manifest");
+    let value = manifest
+        .parse::<serde_json::Value>()
+        .expect("manifest should parse as json");
+    let params = value["routines"][0]["params"]
+        .as_array()
+        .expect("manifest params should be an array");
+    assert_eq!(params.len(), 1);
+    assert_eq!(params[0]["source_mode"], serde_json::Value::from("read"));
+    assert_eq!(params[0]["pass_mode"], serde_json::Value::from("in"));
+    assert_eq!(params[0]["input_type"], serde_json::Value::from("Int"));
+    assert!(params[0]["write_back_type"].is_null());
+}
+
+#[test]
 fn runtime_json_abi_writes_back_edit_arguments() {
     let plan = RuntimePackagePlan {
         package_name: "tool".to_string(),

@@ -370,10 +370,22 @@ pub struct LockTargetEntry {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LockNativeProductEntry {
+    pub kind: String,
+    pub role: String,
+    pub producer: String,
+    pub file: String,
+    pub contract: String,
+    pub rust_cdylib_crate: Option<String>,
+    pub sidecars: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LockMember {
     pub path: String,
     pub deps: Vec<String>,
     pub kind: GrimoireKind,
+    pub native_products: BTreeMap<String, LockNativeProductEntry>,
     pub targets: BTreeMap<BuildOutputKey, LockTargetEntry>,
 }
 
@@ -736,6 +748,7 @@ fn read_lockfile_build_table(
     let workspace = read_lockfile_workspace(table, path)?;
     let order = read_lockfile_order(table)?;
     let base_members = read_lockfile_member_bases(table, path)?;
+    let native_products = read_lockfile_native_products(table, path)?;
     let builds = table
         .get("builds")
         .and_then(toml::Value::as_table)
@@ -743,6 +756,7 @@ fn read_lockfile_build_table(
 
     let mut members = BTreeMap::new();
     for (name, base) in base_members {
+        let member_native_products = native_products.get(&name).cloned().unwrap_or_default();
         let targets = builds
             .get(&name)
             .map(|value| {
@@ -759,6 +773,7 @@ fn read_lockfile_build_table(
                 path: base.path,
                 deps: base.deps,
                 kind: base.kind,
+                native_products: member_native_products,
                 targets,
             },
         );
@@ -867,6 +882,7 @@ fn read_lockfile_v1(
                 path: base.path,
                 deps: base.deps,
                 kind: base.kind,
+                native_products: BTreeMap::new(),
                 targets: target_entries,
             },
         );
@@ -878,6 +894,86 @@ fn read_lockfile_v1(
         order,
         members,
     })
+}
+
+fn read_lockfile_native_products(
+    table: &toml::value::Table,
+    path: &Path,
+) -> PackageResult<BTreeMap<String, BTreeMap<String, LockNativeProductEntry>>> {
+    let Some(member_table) = table.get("native_products").and_then(toml::Value::as_table) else {
+        return Ok(BTreeMap::new());
+    };
+    let mut members = BTreeMap::new();
+    for (member_name, value) in member_table {
+        let product_table = value.as_table().ok_or_else(|| {
+            format!(
+                "lockfile native product entry for `{member_name}` in `{}` must be a table",
+                path.display()
+            )
+        })?;
+        let mut products = BTreeMap::new();
+        for (product_name, value) in product_table {
+            let entry = value.as_table().ok_or_else(|| {
+                format!(
+                    "lockfile native product `{member_name}:{product_name}` in `{}` must be a table",
+                    path.display()
+                )
+            })?;
+            products.insert(
+                product_name.clone(),
+                LockNativeProductEntry {
+                    kind: required_lockfile_string_field(
+                        entry,
+                        path,
+                        &format!("native_products.{member_name}.{product_name}.kind"),
+                    )?,
+                    role: required_lockfile_string_field(
+                        entry,
+                        path,
+                        &format!("native_products.{member_name}.{product_name}.role"),
+                    )?,
+                    producer: required_lockfile_string_field(
+                        entry,
+                        path,
+                        &format!("native_products.{member_name}.{product_name}.producer"),
+                    )?,
+                    file: required_lockfile_string_field(
+                        entry,
+                        path,
+                        &format!("native_products.{member_name}.{product_name}.file"),
+                    )?,
+                    contract: required_lockfile_string_field(
+                        entry,
+                        path,
+                        &format!("native_products.{member_name}.{product_name}.contract"),
+                    )?,
+                    rust_cdylib_crate: entry
+                        .get("rust_cdylib_crate")
+                        .and_then(toml::Value::as_str)
+                        .map(ToString::to_string),
+                    sidecars: entry
+                        .get("sidecars")
+                        .map(parse_string_array)
+                        .transpose()?
+                        .unwrap_or_default(),
+                },
+            );
+        }
+        members.insert(member_name.clone(), products);
+    }
+    Ok(members)
+}
+
+fn required_lockfile_string_field(
+    table: &toml::value::Table,
+    path: &Path,
+    field: &str,
+) -> PackageResult<String> {
+    table
+        .get(field.rsplit('.').next().unwrap_or(field))
+        .and_then(toml::Value::as_str)
+        .map(ToString::to_string)
+        .ok_or_else(|| format!("missing `{field}` in `{}`", path.display()))
 }
 
 fn read_lockfile_workspace(table: &toml::value::Table, path: &Path) -> PackageResult<String> {
@@ -1735,20 +1831,20 @@ mod tests {
         )
         .expect("distribution staging should succeed");
         assert_eq!(bundle.root_artifact, "app.exe");
-        assert_eq!(
-            bundle.support_files,
-            vec!["app.exe.arcana-bundle.toml".to_string()]
-        );
-        let manifest_text =
-            fs::read_to_string(&bundle.manifest_path).expect("distribution manifest should read");
+        assert!(bundle.support_files.is_empty());
+        let manifest_text = &bundle.manifest_text;
         assert!(manifest_text.contains("format = \"arcana-distribution-bundle-v1\""));
         assert!(bundle.bundle_dir.join("app.exe").is_file());
         assert!(
-            bundle
+            !bundle.bundle_dir.join("arcana.bundle.toml").exists(),
+            "did not expect staged distribution manifest beside exe"
+        );
+        assert!(
+            !bundle
                 .bundle_dir
                 .join("app.exe.arcana-bundle.toml")
-                .is_file(),
-            "expected staged native manifest beside exe"
+                .exists(),
+            "did not expect staged native manifest beside exe"
         );
         assert!(
             !bundle.bundle_dir.join("app.exe.artifact.toml").exists(),
@@ -1838,8 +1934,7 @@ mod tests {
             &bundle_dir,
         )
         .expect("distribution staging should succeed");
-        let manifest_text =
-            fs::read_to_string(&bundle.manifest_path).expect("distribution manifest should read");
+        let manifest_text = &bundle.manifest_text;
 
         assert!(bundle.bundle_dir.join("desktop_child.dll").is_file());
         assert!(bundle.bundle_dir.join("desktop_tools.dll").is_file());
@@ -1858,9 +1953,84 @@ mod tests {
         assert!(manifest_text.contains("contract_id = \"arcana.cabi.plugin.v1\""));
         assert!(manifest_text.contains("file = \"desktop_tools.dll\""));
         assert!(manifest_text.contains("native_product_closure = \"sha256:"));
-        assert!(manifest_text.contains("[[child_bindings]]"));
+        assert!(manifest_text.contains("[runtime_child_binding]"));
         assert!(manifest_text.contains("consumer_member = \"app\""));
         assert!(manifest_text.contains("dependency_alias = \"desktop\""));
+        assert!(manifest_text.contains("package_name = \"desktop\""));
+        assert!(manifest_text.contains("product_name = \"default\""));
+        assert!(manifest_text.contains("[[child_bindings]]"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_exe_build_rejects_ambiguous_root_native_child_runtime_providers() {
+        let dir = temp_dir("ambiguous_root_native_child_runtime_providers");
+        write_file(
+            &dir.join("book.toml"),
+            concat!(
+                "name = \"app\"\n",
+                "kind = \"app\"\n",
+                "[deps]\n",
+                "desktop = { path = \"desktop\", native_child = \"default\" }\n",
+                "input = { path = \"input\", native_child = \"default\" }\n",
+            ),
+        );
+        write_file(
+            &dir.join("src").join("shelf.arc"),
+            "fn main() -> Int:\n    return 0\n",
+        );
+        write_file(&dir.join("src").join("types.arc"), "// types\n");
+
+        for (member, file_name) in [
+            ("desktop", "desktop_child.dll"),
+            ("input", "input_child.dll"),
+        ] {
+            write_file(
+                &dir.join(member).join("book.toml"),
+                &format!(
+                    concat!(
+                        "name = \"{member}\"\n",
+                        "kind = \"lib\"\n",
+                        "\n[native.products.default]\n",
+                        "kind = \"dll\"\n",
+                        "role = \"child\"\n",
+                        "producer = \"arcana-source\"\n",
+                        "file = \"{file_name}\"\n",
+                        "contract = \"arcana.cabi.child.v1\"\n",
+                        "sidecars = []\n",
+                    ),
+                    member = member,
+                    file_name = file_name
+                ),
+            );
+            write_file(
+                &dir.join(member).join("src").join("book.arc"),
+                "export fn ready() -> Int:\n    return 1\n",
+            );
+            write_file(
+                &dir.join(member).join("src").join("types.arc"),
+                "// types\n",
+            );
+        }
+
+        let graph = load_workspace_graph(&dir).expect("load graph");
+        let order = plan_workspace(&graph).expect("plan");
+        let prepared = prepare_test_build(&graph);
+        let err = plan_build_for_target_with_context(
+            &graph,
+            &order,
+            &prepared,
+            None,
+            BuildTarget::windows_exe(),
+            &BuildExecutionContext::default(),
+        )
+        .expect_err("ambiguous root runtime child bindings should fail planning");
+        assert!(
+            err.contains("multiple native child runtime providers"),
+            "{err}"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1928,11 +2098,15 @@ mod tests {
         );
         assert!(bundle.bundle_dir.join("app.exe").is_file());
         assert!(
-            bundle
+            !bundle.bundle_dir.join("arcana.bundle.toml").exists(),
+            "did not expect staged distribution manifest beside exe after cleanup"
+        );
+        assert!(
+            !bundle
                 .bundle_dir
                 .join("app.exe.arcana-bundle.toml")
-                .is_file(),
-            "expected staged native manifest beside exe after cleanup"
+                .exists(),
+            "did not expect staged native manifest beside exe after cleanup"
         );
 
         let _ = fs::remove_dir_all(&dir);
@@ -3575,6 +3749,255 @@ toolchain = \"future-toolchain\"\n"
             first, second,
             "dependency native delivery changes should affect the source fingerprint"
         );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dependency_native_selection_changes_update_source_fingerprint() {
+        fn member_source_fingerprint(dir: &Path, member: &str) -> String {
+            let graph = load_workspace_graph(dir).expect("graph should load");
+            let workspace = load_workspace_hir_from_graph(dir, &graph).expect("workspace");
+            let resolved_workspace = arcana_hir::resolve_workspace(&workspace).expect("resolve");
+            compute_workspace_fingerprints(&graph, &workspace, &resolved_workspace)
+                .expect("fingerprints")
+                .member(member)
+                .expect("member fingerprint should exist")
+                .source()
+                .to_string()
+        }
+
+        let dir = temp_dir("dependency_native_selection_fingerprint");
+        write_file(
+            &dir.join("book.toml"),
+            "name = \"ws\"\nkind = \"app\"\n[workspace]\nmembers = [\"app\"]\n",
+        );
+        write_file(
+            &dir.join("app/book.toml"),
+            "name = \"app\"\nkind = \"app\"\n[deps]\ndesktop = { path = \"../desktop\" }\n",
+        );
+        write_file(
+            &dir.join("app/src/shelf.arc"),
+            "fn main() -> Int:\n    return 0\n",
+        );
+        write_file(&dir.join("app/src/types.arc"), "// app types\n");
+        write_file(
+            &dir.join("desktop/book.toml"),
+            concat!(
+                "name = \"arcana_desktop\"\n",
+                "kind = \"lib\"\n",
+                "\n[native.products.default]\n",
+                "kind = \"dll\"\n",
+                "role = \"child\"\n",
+                "producer = \"arcana-source\"\n",
+                "file = \"arcwin.dll\"\n",
+                "contract = \"arcana.cabi.child.v1\"\n",
+                "\n[native.products.tools]\n",
+                "kind = \"dll\"\n",
+                "role = \"plugin\"\n",
+                "producer = \"arcana-source\"\n",
+                "file = \"arcana_tools.dll\"\n",
+                "contract = \"arcana.cabi.plugin.v1\"\n",
+            ),
+        );
+        write_file(
+            &dir.join("desktop/src/book.arc"),
+            "export fn ready() -> Int:\n    return 1\n",
+        );
+        write_file(&dir.join("desktop/src/types.arc"), "// desktop types\n");
+
+        let first = member_source_fingerprint(&dir, "app");
+        write_file(
+            &dir.join("app/book.toml"),
+            concat!(
+                "name = \"app\"\n",
+                "kind = \"app\"\n",
+                "[deps]\n",
+                "desktop = { path = \"../desktop\", native_child = \"default\", native_plugins = [\"tools\"] }\n",
+            ),
+        );
+        let second = member_source_fingerprint(&dir, "app");
+
+        assert_ne!(
+            first, second,
+            "dependency native child/plugin selection changes should affect the source fingerprint"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn native_product_manifest_changes_update_source_fingerprint() {
+        fn member_source_fingerprint(dir: &Path, member: &str) -> String {
+            let graph = load_workspace_graph(dir).expect("graph should load");
+            let workspace = load_workspace_hir_from_graph(dir, &graph).expect("workspace");
+            let resolved_workspace = arcana_hir::resolve_workspace(&workspace).expect("resolve");
+            compute_workspace_fingerprints(&graph, &workspace, &resolved_workspace)
+                .expect("fingerprints")
+                .member(member)
+                .expect("member fingerprint should exist")
+                .source()
+                .to_string()
+        }
+
+        let dir = temp_dir("native_product_manifest_fingerprint");
+        write_file(
+            &dir.join("book.toml"),
+            "name = \"desktop\"\nkind = \"lib\"\n",
+        );
+        write_file(
+            &dir.join("src/book.arc"),
+            "export fn ready() -> Int:\n    return 1\n",
+        );
+        write_file(&dir.join("src/types.arc"), "// desktop types\n");
+        write_file(
+            &dir.join("book.toml"),
+            concat!(
+                "name = \"desktop\"\n",
+                "kind = \"lib\"\n",
+                "\n[native.products.default]\n",
+                "kind = \"dll\"\n",
+                "role = \"child\"\n",
+                "producer = \"arcana-source\"\n",
+                "file = \"arcwin.dll\"\n",
+                "contract = \"arcana.cabi.child.v1\"\n",
+            ),
+        );
+
+        let first = member_source_fingerprint(&dir, "desktop");
+        write_file(
+            &dir.join("book.toml"),
+            concat!(
+                "name = \"desktop\"\n",
+                "kind = \"lib\"\n",
+                "\n[native.products.default]\n",
+                "kind = \"dll\"\n",
+                "role = \"child\"\n",
+                "producer = \"arcana-source\"\n",
+                "file = \"arcana_runtime_provider.dll\"\n",
+                "contract = \"arcana.cabi.child.v1\"\n",
+            ),
+        );
+        let second = member_source_fingerprint(&dir, "desktop");
+
+        assert_ne!(
+            first, second,
+            "native product manifest changes should affect the source fingerprint"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn native_product_sidecar_content_changes_update_source_fingerprint() {
+        fn member_source_fingerprint(dir: &Path, member: &str) -> String {
+            let graph = load_workspace_graph(dir).expect("graph should load");
+            let workspace = load_workspace_hir_from_graph(dir, &graph).expect("workspace");
+            let resolved_workspace = arcana_hir::resolve_workspace(&workspace).expect("resolve");
+            compute_workspace_fingerprints(&graph, &workspace, &resolved_workspace)
+                .expect("fingerprints")
+                .member(member)
+                .expect("member fingerprint should exist")
+                .source()
+                .to_string()
+        }
+
+        let dir = temp_dir("native_product_sidecar_fingerprint");
+        write_file(
+            &dir.join("book.toml"),
+            concat!(
+                "name = \"desktop\"\n",
+                "kind = \"lib\"\n",
+                "\n[native.products.default]\n",
+                "kind = \"dll\"\n",
+                "role = \"plugin\"\n",
+                "producer = \"rust-cdylib\"\n",
+                "file = \"desktop_tools.dll\"\n",
+                "contract = \"arcana.cabi.plugin.v1\"\n",
+                "rust_cdylib_crate = \"../../crates/plugin\"\n",
+                "sidecars = [\"assets/runtime.txt\"]\n",
+            ),
+        );
+        write_file(
+            &dir.join("src/book.arc"),
+            "export fn ready() -> Int:\n    return 1\n",
+        );
+        write_file(&dir.join("src/types.arc"), "// desktop types\n");
+        write_file(&dir.join("assets/runtime.txt"), "alpha\n");
+
+        let first = member_source_fingerprint(&dir, "desktop");
+        write_file(&dir.join("assets/runtime.txt"), "beta\n");
+        let second = member_source_fingerprint(&dir, "desktop");
+
+        assert_ne!(
+            first, second,
+            "native product sidecar content changes should affect the source fingerprint"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn render_and_read_lockfile_preserve_native_product_metadata() {
+        let dir = temp_dir("lockfile_native_products");
+        write_file(
+            &dir.join("book.toml"),
+            "name = \"ws\"\nkind = \"app\"\n[workspace]\nmembers = [\"app\", \"desktop\"]\n",
+        );
+        write_file(
+            &dir.join("app/book.toml"),
+            "name = \"app\"\nkind = \"app\"\n[deps]\ndesktop = { path = \"../desktop\", native_child = \"default\" }\n",
+        );
+        write_file(
+            &dir.join("app/src/shelf.arc"),
+            "fn main() -> Int:\n    return 0\n",
+        );
+        write_file(&dir.join("app/src/types.arc"), "// app types\n");
+        write_file(
+            &dir.join("desktop/book.toml"),
+            concat!(
+                "name = \"desktop\"\n",
+                "kind = \"lib\"\n",
+                "\n[native.products.default]\n",
+                "kind = \"dll\"\n",
+                "role = \"child\"\n",
+                "producer = \"arcana-source\"\n",
+                "file = \"arcwin.dll\"\n",
+                "contract = \"arcana.cabi.child.v1\"\n",
+                "sidecars = [\"assets/runtime.txt\"]\n",
+            ),
+        );
+        write_file(
+            &dir.join("desktop/src/book.arc"),
+            "export fn ready() -> Int:\n    return 1\n",
+        );
+        write_file(&dir.join("desktop/src/types.arc"), "// desktop types\n");
+        write_file(&dir.join("desktop/assets/runtime.txt"), "desktop-runtime\n");
+
+        let graph = load_workspace_graph(&dir).expect("graph should load");
+        let order = plan_workspace(&graph).expect("plan");
+        let (prepared, statuses) = plan_test_build(&graph, &order, None);
+        execute_planned_build(&graph, &prepared, &statuses).expect("build should execute");
+        let lock_text = render_lockfile(&graph, &order, &statuses, None).expect("render lockfile");
+        let lock_path = dir.join("Arcana.lock");
+        write_file(&lock_path, &lock_text);
+
+        let lock = read_lockfile(&lock_path)
+            .expect("lockfile should read")
+            .expect("lockfile should exist");
+        let desktop = lock
+            .members
+            .get("desktop")
+            .expect("desktop member should exist");
+        let product = desktop
+            .native_products
+            .get("default")
+            .expect("desktop native product should persist");
+        assert_eq!(product.role, "child");
+        assert_eq!(product.producer, "arcana-source");
+        assert_eq!(product.file, "arcwin.dll");
+        assert_eq!(product.contract, "arcana.cabi.child.v1");
+        assert_eq!(product.sidecars, vec!["assets/runtime.txt".to_string()]);
 
         let _ = fs::remove_dir_all(&dir);
     }

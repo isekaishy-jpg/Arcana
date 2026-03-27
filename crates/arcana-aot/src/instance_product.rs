@@ -380,7 +380,7 @@ fn render_plugin_instance_product_lib_rs(spec: &AotInstanceProductSpec) -> Strin
     ));
     out.push_str(
         concat!(
-            "use arcana_cabi::{ArcanaCabiInstanceOpsV1, ArcanaCabiPluginOpsV1};\n\n",
+            "use arcana_cabi::{ArcanaCabiInstanceOpsV1, ArcanaCabiPluginOpsV1, ArcanaCabiPluginUseInstanceFn};\n\n",
             "unsafe extern \"system\" fn describe_instance(instance: *mut c_void, out_len: *mut usize) -> *mut u8 {\n",
             "    if instance.is_null() {\n",
             "        set_last_error(\"plugin instance must not be null\".to_string());\n",
@@ -388,6 +388,26 @@ fn render_plugin_instance_product_lib_rs(spec: &AotInstanceProductSpec) -> Strin
             "        return ptr::null_mut();\n",
             "    }\n",
             "    let (ptr, len) = allocated_bytes_parts(PLUGIN_DESCRIPTION.as_bytes().to_vec());\n",
+            "    if !out_len.is_null() { unsafe { *out_len = len; } }\n",
+            "    ptr\n",
+            "}\n\n",
+            "unsafe extern \"system\" fn use_instance(instance: *mut c_void, request_ptr: *const u8, request_len: usize, out_len: *mut usize) -> *mut u8 {\n",
+            "    if instance.is_null() {\n",
+            "        set_last_error(\"plugin instance must not be null\".to_string());\n",
+            "        if !out_len.is_null() { unsafe { *out_len = 0; } }\n",
+            "        return ptr::null_mut();\n",
+            "    }\n",
+            "    if request_ptr.is_null() && request_len != 0 {\n",
+            "        set_last_error(\"plugin use_instance received null request with non-zero length\".to_string());\n",
+            "        if !out_len.is_null() { unsafe { *out_len = 0; } }\n",
+            "        return ptr::null_mut();\n",
+            "    }\n",
+            "    let mut response = PLUGIN_DESCRIPTION.as_bytes().to_vec();\n",
+            "    if request_len != 0 {\n",
+            "        response.push(b'\\n');\n",
+            "        response.extend_from_slice(unsafe { std::slice::from_raw_parts(request_ptr, request_len) });\n",
+            "    }\n",
+            "    let (ptr, len) = allocated_bytes_parts(response);\n",
             "    if !out_len.is_null() { unsafe { *out_len = len; } }\n",
             "    ptr\n",
             "}\n\n",
@@ -400,6 +420,7 @@ fn render_plugin_instance_product_lib_rs(spec: &AotInstanceProductSpec) -> Strin
             "        reserved1: ptr::null(),\n",
             "    },\n",
             "    describe_instance,\n",
+            "    use_instance: use_instance as ArcanaCabiPluginUseInstanceFn,\n",
             "    last_error_alloc: last_error_alloc as ArcanaCabiLastErrorAllocFn,\n",
             "    owned_bytes_free: owned_bytes_free as ArcanaCabiOwnedBytesFreeFn,\n",
             "    reserved0: ptr::null(),\n",
@@ -486,7 +507,9 @@ mod tests {
     use super::{
         AotInstanceProductSpec, render_instance_product_cargo_toml, render_instance_product_lib_rs,
     };
-    use arcana_cabi::{ARCANA_CABI_CHILD_CONTRACT_ID, ArcanaCabiProductRole};
+    use arcana_cabi::{
+        ARCANA_CABI_CHILD_CONTRACT_ID, ARCANA_CABI_PLUGIN_CONTRACT_ID, ArcanaCabiProductRole,
+    };
 
     fn child_spec() -> AotInstanceProductSpec {
         AotInstanceProductSpec {
@@ -494,7 +517,17 @@ mod tests {
             product_name: "default".to_string(),
             role: ArcanaCabiProductRole::Child,
             contract_id: ARCANA_CABI_CHILD_CONTRACT_ID.to_string(),
-            output_file_name: "arcana_desktop.dll".to_string(),
+            output_file_name: "arcwin.dll".to_string(),
+        }
+    }
+
+    fn plugin_spec() -> AotInstanceProductSpec {
+        AotInstanceProductSpec {
+            package_name: "tooling".to_string(),
+            product_name: "tools".to_string(),
+            role: ArcanaCabiProductRole::Plugin,
+            contract_id: ARCANA_CABI_PLUGIN_CONTRACT_ID.to_string(),
+            output_file_name: "tooling_tools.dll".to_string(),
         }
     }
 
@@ -512,5 +545,14 @@ mod tests {
         assert!(lib_rs.contains("ArcanaCabiChildOpsV1"));
         assert!(lib_rs.contains("run_entrypoint"));
         assert!(lib_rs.contains("\"child\\0\""));
+    }
+
+    #[test]
+    fn generated_plugin_instance_product_project_exposes_use_instance() {
+        let lib_rs = render_instance_product_lib_rs(&plugin_spec());
+        assert!(lib_rs.contains("ArcanaCabiPluginOpsV1"));
+        assert!(lib_rs.contains("describe_instance"));
+        assert!(lib_rs.contains("use_instance"));
+        assert!(lib_rs.contains("\"plugin\\0\""));
     }
 }

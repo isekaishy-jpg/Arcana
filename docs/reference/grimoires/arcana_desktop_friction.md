@@ -4,12 +4,12 @@ This note is reference-only. Authority for the desktop surface still lives in ap
 
 ## Purpose
 
-Record the real friction found while bringing `arcana_desktop` up to the current Windows-first parity bar, including the large native proof workspace and the real `app.exe + arcana_desktop.dll` validation lane.
+Record the real friction found while bringing `arcana_desktop` up to the current Windows-first parity bar, including the large native proof workspace and the real `app.exe + arcwin.dll` validation lane.
 
 The large proof now lives as a normal checked-in workspace at `examples/arcana-desktop-proof`.
 It is packaged through the standard member/target flow:
 - `app` as `windows-exe`
-- `arcana_desktop.dll` as a staged child product selected by `native_child = "default"` on the desktop dependency
+- `arcwin.dll` as a staged child product selected by `native_child = "default"` on the desktop dependency
 
 The CLI integration proof packages that exact workspace instead of generating a special test-only source tree.
 
@@ -66,7 +66,7 @@ Problem:
 
 Resolution:
 - The real sibling DLL boundary was moved under the grimoire, to the native runtime/provider layer.
-- Apps still compile their Arcana-facing `arcana_desktop` source usage normally, but native bundles can now stage `arcana_desktop.dll` as a declared child product chosen through dependency metadata.
+- Apps still compile their Arcana-facing `arcana_desktop` source usage normally, but native bundles can now stage `arcwin.dll` as a declared child product chosen through dependency metadata.
 
 Implication for future grimoires:
 - There is a hard distinction between:
@@ -78,7 +78,7 @@ Implication for future grimoires:
 ### 5. Runtime-DLL bundles originally depended on a Rust `dylib` closure
 
 Problem:
-- Once `native_delivery = "dll"` moved the desktop runtime boundary into a real sibling `arcana_desktop.dll`, the initial implementation staged a Rust `dylib` provider.
+- Once `native_delivery = "dll"` moved the desktop runtime boundary into a real sibling `arcwin.dll`, the initial implementation staged a Rust `dylib` provider.
 - On Windows that also dragged in a toolchain `std-*.dll` closure, which was the wrong long-term packaging shape.
 
 Resolution:

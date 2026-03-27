@@ -4,7 +4,7 @@ This is the checked-in `arcana_desktop` proof workspace.
 
 It packages as a normal native desktop bundle:
 - `app.exe`
-- `arcana_desktop.dll`
+- `arcwin.dll`
 
 The app is the thing to open and use when checking the grimoire manually. It demonstrates:
 - window shell controls: resize, minimize, maximize, fullscreen, resizable, decorated, transparent, topmost, theme override
@@ -19,7 +19,7 @@ The app is the thing to open and use when checking the grimoire manually. It dem
 
 Run it normally:
 - `arcana package --member app --target windows-exe`
-- launch the staged `app.exe` from the bundle directory beside `arcana_desktop.dll`
+- launch the staged `app.exe` from the bundle directory beside `arcwin.dll`
 
 The packaged app should stay open until you close it. The window close button should exit cleanly.
 
@@ -34,7 +34,7 @@ That prints:
 The desktop runtime DLL is selected through the normal dependency metadata on `app/book.toml`:
 - `arcana_desktop = { path = "../../../grimoires/owned/libs/arcana-desktop", native_child = "default" }`
 
-That keeps the Arcana source-level desktop APIs in the app package while staging the sibling `arcana_desktop.dll` child product through declared native product metadata.
+That keeps the Arcana source-level desktop APIs in the app package while staging the sibling `arcwin.dll` child product through declared native product metadata.
 
 Bundle note:
-- the staged native bundle includes the declared `arcana_desktop.dll` child product only; it does not scavenge Rust toolchain `std-*.dll` files
+- the staged native bundle includes the declared `arcwin.dll` child product only; it does not scavenge Rust toolchain `std-*.dll` files

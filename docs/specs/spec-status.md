@@ -66,6 +66,7 @@ This document defines how Arcana spec files are interpreted during the rewrite.
 - `docs/specs/page-rollups/page-rollups/v1-scope.md`
 - `docs/specs/tuples/tuples/v1-scope.md`
 - `docs/specs/backend/anybox-policy.md`
+- `docs/specs/backend/native-products-cabi-v1-scope.md`
 
 `reserved-post-selfhost`
 - `docs/specs/callables/callables/v1-status.md`

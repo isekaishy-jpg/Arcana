@@ -8,6 +8,6 @@ std = { path = "../../../../std" }
 kind = "dll"
 role = "child"
 producer = "arcana-source"
-file = "arcana_desktop.dll"
+file = "arcwin.dll"
 contract = "arcana.cabi.child.v1"
 sidecars = []

@@ -248,6 +248,8 @@ fn render_exe_main_rs(
             concat!(
                 "#![windows_subsystem = \"windows\"]\n\n",
                 "use arcana_runtime::{{activate_current_bundle_native_products, RuntimeAbiValue}};\n\n",
+                "static PACKAGE_IMAGE_TEXT: &str = include_str!(concat!(env!(\"OUT_DIR\"), \"/runtime-package.json\"));\n\n",
+                "static MAIN_ROUTINE_KEY: &str = __ARCANA_MAIN_ROUTINE_KEY__;\n\n",
                 "{}",
                 "fn main() {{\n",
                 "    let code = match run() {{\n",
@@ -260,7 +262,10 @@ fn render_exe_main_rs(
                 "    std::process::exit(code);\n",
                 "}}\n\n",
                 "fn run() -> Result<i32, String> {{\n",
-                "    let _native_products = activate_current_bundle_native_products()?;\n",
+                "    let mut native_products = activate_current_bundle_native_products()?;\n",
+                "    if let Some(code) = native_products.run_child_entrypoint(PACKAGE_IMAGE_TEXT, MAIN_ROUTINE_KEY)? {{\n",
+                "        return Ok(code);\n",
+                "    }}\n",
                 "    let result = {}?;\n",
                 "    match result {{\n",
                 "        RuntimeAbiValue::Int(code) => i32::try_from(code)\n",
@@ -273,6 +278,10 @@ fn render_exe_main_rs(
             render_direct_routine_helpers(plan),
             render_direct_routine_call_from_values(routine_key, &[], &[]),
             main_routine_key,
+        )
+        .replace(
+            "__ARCANA_MAIN_ROUTINE_KEY__",
+            &format!("{main_routine_key:?}"),
         ),
         NativeRoutineLowering::RuntimeDispatch => {
             let template = concat!(
@@ -474,18 +483,18 @@ fn render_export_fn(export: &NativeExportLowering, layout: &NativeLayoutCatalog)
             format!(
                 "{}: {}",
                 param.name,
-                layout.rust_type_ref(&param.ty, NativeAbiRole::Param)
+                layout.rust_type_ref(&param.input_type, NativeAbiRole::Param)
             )
         })
         .collect::<Vec<_>>();
     for param in &api.params {
         if matches!(param.pass_mode, ArcanaCabiPassMode::InWithWriteBack)
-            && !matches!(param.ty, NativeAbiType::Unit)
+            && !matches!(param.input_type, NativeAbiType::Unit)
         {
             params.push(format!(
                 "out_{}: *mut {}",
                 param.name,
-                layout.rust_type_ref(&param.ty, NativeAbiRole::Return)
+                layout.rust_type_ref(&param.input_type, NativeAbiRole::Return)
             ));
         }
     }
@@ -543,7 +552,7 @@ fn render_export_fn(export: &NativeExportLowering, layout: &NativeLayoutCatalog)
     }
     for (index, param) in api.params.iter().enumerate() {
         if !matches!(param.pass_mode, ArcanaCabiPassMode::InWithWriteBack)
-            || matches!(param.ty, NativeAbiType::Unit)
+            || matches!(param.input_type, NativeAbiType::Unit)
         {
             continue;
         }
@@ -574,10 +583,10 @@ fn render_export_fn(export: &NativeExportLowering, layout: &NativeLayoutCatalog)
         }
         body.push_str(&format!(
             "    let {out_value_name}: {};\n",
-            layout.rust_type_ref(&param.ty, NativeAbiRole::Return)
+            layout.rust_type_ref(&param.input_type, NativeAbiRole::Return)
         ));
         body.push_str(&render_store_runtime_abi_value(
-            &param.ty,
+            &param.input_type,
             &source_value_name,
             &out_value_name,
             layout,
@@ -640,18 +649,18 @@ fn render_dll_header(exports: &[NativeExport], layout: &NativeLayoutCatalog) -> 
             .map(|param| {
                 format!(
                     "{} {}",
-                    layout.c_type_ref(&param.ty, NativeAbiRole::Param),
+                    layout.c_type_ref(&param.input_type, NativeAbiRole::Param),
                     param.name
                 )
             })
             .collect::<Vec<_>>();
         for param in &export.params {
             if matches!(param.pass_mode, ArcanaCabiPassMode::InWithWriteBack)
-                && !matches!(param.ty, NativeAbiType::Unit)
+                && !matches!(param.input_type, NativeAbiType::Unit)
             {
                 params.push(format!(
                     "{}* out_{}",
-                    layout.c_type_ref(&param.ty, NativeAbiRole::Return),
+                    layout.c_type_ref(&param.input_type, NativeAbiRole::Return),
                     param.name
                 ));
             }
@@ -693,7 +702,7 @@ fn render_export_descriptor(plan: &NativePackagePlan, exports: &[NativeExportLow
                 name = render_c_string_ptr(&param.name),
                 source_mode = render_c_string_ptr(param.source_mode.as_str()),
                 pass_mode = render_c_string_ptr(param.pass_mode.as_str()),
-                input_type = render_c_string_ptr(&param.ty.render()),
+                input_type = render_c_string_ptr(&param.input_type.render()),
                 write_back_type = param
                     .write_back_type
                     .as_ref()
@@ -805,7 +814,7 @@ fn render_native_param_binding(
         "    let {mut_kw}{name}_value = match {expr} {{\n        Ok(value) => value,\n        Err(err) => {{ set_last_error(err); return 0; }}\n    }};\n",
         mut_kw = mut_kw,
         name = param.name,
-        expr = render_runtime_abi_expr_from_native(&param.ty, &param.name, &context),
+        expr = render_runtime_abi_expr_from_native(&param.input_type, &param.name, &context),
     )
 }
 

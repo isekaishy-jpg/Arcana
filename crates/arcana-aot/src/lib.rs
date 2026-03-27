@@ -656,8 +656,8 @@ mod tests {
         assert_eq!(manifest.launch.exports[0].params[0].name, "value");
         assert_eq!(manifest.launch.exports[0].params[0].source_mode, "read");
         assert_eq!(manifest.launch.exports[0].params[0].pass_mode, "in");
-        assert_eq!(manifest.launch.exports[0].params[0].ty, "Int");
-        assert_eq!(manifest.launch.exports[0].params[0].write_back_ty, None);
+        assert_eq!(manifest.launch.exports[0].params[0].input_type, "Int");
+        assert_eq!(manifest.launch.exports[0].params[0].write_back_type, None);
     }
 
     #[test]
@@ -746,12 +746,15 @@ mod tests {
         assert_eq!(manifest.launch.exports[0].export_name, "greet");
         assert_eq!(manifest.launch.exports[0].params[0].source_mode, "read");
         assert_eq!(manifest.launch.exports[0].params[0].pass_mode, "in");
-        assert_eq!(manifest.launch.exports[0].params[0].ty, "Str");
+        assert_eq!(manifest.launch.exports[0].params[0].input_type, "Str");
         assert_eq!(manifest.launch.exports[0].return_type, "Str");
         assert_eq!(manifest.launch.exports[1].export_name, "prefix");
         assert_eq!(manifest.launch.exports[1].params[0].source_mode, "read");
         assert_eq!(manifest.launch.exports[1].params[0].pass_mode, "in");
-        assert_eq!(manifest.launch.exports[1].params[0].ty, "Array[Int]");
+        assert_eq!(
+            manifest.launch.exports[1].params[0].input_type,
+            "Array[Int]"
+        );
         assert_eq!(manifest.launch.exports[1].return_type, "Array[Int]");
     }
 
@@ -909,7 +912,10 @@ mod tests {
         assert_eq!(manifest.launch.exports[0].export_name, "echo_pair");
         assert_eq!(manifest.launch.exports[0].params[0].source_mode, "read");
         assert_eq!(manifest.launch.exports[0].params[0].pass_mode, "in");
-        assert_eq!(manifest.launch.exports[0].params[0].ty, "Pair[Str, Int]");
+        assert_eq!(
+            manifest.launch.exports[0].params[0].input_type,
+            "Pair[Str, Int]"
+        );
         assert_eq!(manifest.launch.exports[0].return_type, "Pair[Str, Int]");
     }
 

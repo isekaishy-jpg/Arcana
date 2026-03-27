@@ -1,0 +1,40 @@
+{
+  "name": "arcana-language",
+  "displayName": "Arcana Language",
+  "description": "VS Code language support for Arcana .arc files.",
+  "version": "0.0.1",
+  "publisher": "arcana-local",
+  "license": "Apache-2.0",
+  "engines": {
+    "vscode": "^1.60.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "keywords": [
+    "arcana",
+    "syntax-highlighting",
+    "language"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "arcana",
+        "aliases": [
+          "Arcana"
+        ],
+        "extensions": [
+          ".arc"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "arcana",
+        "scopeName": "source.arcana",
+        "path": "./syntaxes/arcana.tmLanguage.json"
+      }
+    ]
+  }
+}

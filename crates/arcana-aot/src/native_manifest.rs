@@ -68,9 +68,11 @@ pub struct NativeBundleParamManifest {
     pub name: String,
     pub source_mode: String,
     pub pass_mode: String,
-    pub ty: String,
+    #[serde(alias = "ty")]
+    pub input_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub write_back_ty: Option<String>,
+    #[serde(alias = "write_back_ty")]
+    pub write_back_type: Option<String>,
 }
 
 pub fn render_native_bundle_manifest(plan: &NativePackagePlan) -> Result<String, String> {
@@ -198,8 +200,8 @@ fn native_export_manifest(export: &NativeExport) -> NativeBundleExportManifest {
                 name: param.name.clone(),
                 source_mode: param.source_mode.as_str().to_string(),
                 pass_mode: param.pass_mode.as_str().to_string(),
-                ty: native_type_name(&param.ty),
-                write_back_ty: param.write_back_type.as_ref().map(native_type_name),
+                input_type: native_type_name(&param.input_type),
+                write_back_type: param.write_back_type.as_ref().map(native_type_name),
             })
             .collect(),
     }

@@ -21,7 +21,7 @@ The end state is:
 kind = "dll"
 role = "child"
 producer = "arcana-source"
-file = "arcana_desktop.dll"
+file = "arcwin.dll"
 contract = "arcana.cabi.child.v1"
 sidecars = []
 
@@ -83,7 +83,7 @@ native_plugins = ["tools"]
 - `child` and `plugin` products share an instance-bearing base shape:
   - `ArcanaCabiInstanceOpsV1 { ops_size, create_instance, destroy_instance, reserved }`
   - `role_ops` for `child` points at `ArcanaCabiChildOpsV1`, whose first field is that shared base and which adds `run_entrypoint`, `last_error_alloc`, and `owned_bytes_free`
-  - `role_ops` for `plugin` points at `ArcanaCabiPluginOpsV1`, whose first field is that shared base and which adds `describe_instance`, `last_error_alloc`, and `owned_bytes_free`
+  - `role_ops` for `plugin` points at `ArcanaCabiPluginOpsV1`, whose first field is that shared base and which adds `describe_instance`, `use_instance` (bytes request to owned-bytes response), `last_error_alloc`, and `owned_bytes_free`
   - `child` and `plugin` still differ in loader and packaging semantics, not in the existence of instances
   - `arcana-source` child/plugin products are emitted through one generic instance-product backend; no desktop-specific runtime crate is required
 
@@ -112,6 +112,8 @@ native_plugins = ["tools"]
   - a provider DLL is staged once per bundle
   - `create_instance` is called once per dependency binding
   - instance registration key is `(consumer_member, dependency_alias)`
+  - distribution manifests may include an explicit `[runtime_child_binding]` naming the root child binding that should handle `windows-exe` entrypoint execution
+  - packaging fails if the bundle root selects more than one direct child binding because runtime-provider selection would be ambiguous
   - distribution bundles record explicit `[[native_products]]` and `[[child_bindings]]` entries so startup activation is manifest-driven instead of inferred from directory contents
   - `windows-exe` runtime-dispatch entry now resolves through the activated child-provider table first and only falls back to the in-process host when no child runtime provider is present
 
@@ -162,7 +164,7 @@ native_plugins = ["tools"]
 - Upgrade AOT export metadata from `is_edit` to explicit `source_mode`, `pass_mode`, `input_type`, and `write_back_type`.
 - Remove the root-level `RuntimeDispatch` bailout for exported `edit`.
 - Extend direct lowering so direct export roots and direct callee chains can propagate edit write-backs through the current direct subset.
-- Keep runtime-dispatch fallback only for direct-subset limitations such as non-`Name` write-back targets.
+- Keep runtime-dispatch fallback only for documented current direct-subset limitations, including unsupported routine shapes, recursion/in-progress lowering, attached/rollup forms, signature mismatch, and non-`Name` write-back targets.
 - Generated headers, manifests, and codegen all consume the same `arcana-cabi` export metadata.
 
 2. Phase 2: full native product system and removal of Rust `dylib` dependency
@@ -172,6 +174,7 @@ native_plugins = ["tools"]
 - Make build and lockfile identity fully product-aware.
 - Require `child` and `plugin` providers to be real `cdylib` system DLLs.
 - Packaging stages only the product DLL plus declared sidecars.
+- Packaging validates `rust-cdylib` products against their declared cabi package/product/role/contract/version before staging succeeds.
 - If a produced DLL requires undeclared non-system dependencies, packaging fails.
 - Never scavenge or stage Rust `std-*.dll` as a workaround.
 
@@ -192,9 +195,11 @@ native_plugins = ["tools"]
 - Export product builds are keyed by `(member, target, product)`.
 - App/exe builds remain target-rooted but include a native-product closure digest.
 - Release-grade bundle identity includes:
+  - optional `root_native_product`
   - selected child bindings
   - selected plugin products
   - `native_product_closure`
+  - optional `runtime_child_binding`
   - product role, contract id/version, output filename, producer kind
   - declared sidecars
   - produced DLL hashes
@@ -214,7 +219,7 @@ native_plugins = ["tools"]
   - `Int`, `Bool`, `Str`, `Bytes`, nested `Pair`, and `Unit`
 - JSON ABI v3 and runtime native ABI tests that return only explicit `write_backs`.
 - Direct-lowering tests for exported `edit` roots and direct caller-to-callee write-back propagation.
-- Fallback tests proving non-`Name` write-back targets fall back only because they are outside the direct subset.
+- Fallback tests proving the documented current direct-subset boundaries, including non-`Name` write-back targets, stay on runtime dispatch.
 - C harness test that compiles against the generated header and calls an `edit` export.
 - Ownership tests for `ArcanaOwnedStr` and `ArcanaOwnedBytes` using cabi free helpers.
 - Export DLL emission still produces correct header, definition, descriptor, and manifest outputs.

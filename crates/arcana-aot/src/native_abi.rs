@@ -1,27 +1,14 @@
 use crate::artifact::{AotPackageArtifact, AotRoutineArtifact};
-use arcana_cabi::{ArcanaCabiParamSourceMode, ArcanaCabiPassMode, ArcanaCabiType};
+use arcana_cabi::{
+    ArcanaCabiExport, ArcanaCabiExportParam, ArcanaCabiParamSourceMode, ArcanaCabiPassMode,
+    ArcanaCabiType,
+};
 use arcana_ir::{IrRoutineParam, IrRoutineType, IrRoutineTypeKind, parse_routine_type_text};
 use std::collections::BTreeSet;
 
 pub type NativeAbiType = ArcanaCabiType;
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NativeAbiParam {
-    pub name: String,
-    pub ty: NativeAbiType,
-    pub source_mode: ArcanaCabiParamSourceMode,
-    pub pass_mode: ArcanaCabiPassMode,
-    pub write_back_type: Option<NativeAbiType>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NativeExport {
-    pub routine_key: String,
-    pub export_name: String,
-    pub symbol_name: String,
-    pub params: Vec<NativeAbiParam>,
-    pub return_type: NativeAbiType,
-}
+pub type NativeAbiParam = ArcanaCabiExportParam;
+pub type NativeExport = ArcanaCabiExport;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NativeRoutineSignature {
@@ -285,7 +272,7 @@ fn native_signature_key(symbol_name: &str, signature: &NativeRoutineSignature) -
                 "{}:{}:{}:{}",
                 param.source_mode.as_str(),
                 param.name,
-                canonical_native_type_name(&param.ty),
+                canonical_native_type_name(&param.input_type),
                 param
                     .write_back_type
                     .as_ref()
@@ -348,7 +335,7 @@ pub fn parse_native_param(param: &IrRoutineParam) -> Result<NativeAbiParam, Stri
     };
     Ok(NativeAbiParam {
         name: sanitize_name(&param.name),
-        ty: ty.clone(),
+        input_type: ty.clone(),
         source_mode,
         pass_mode: match source_mode {
             ArcanaCabiParamSourceMode::Edit => ArcanaCabiPassMode::InWithWriteBack,

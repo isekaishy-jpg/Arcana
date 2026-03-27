@@ -3,8 +3,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use arcana_aot::{
-    ARCANA_NATIVE_PRODUCT_TEMP_PROBES_ENV, AotEmitContext, AotEmitTarget, AotNativeProduct,
-    AotPackageEmission, AotRuntimeBinding, emit_package_with_context,
+    ARCANA_NATIVE_PRODUCT_TEMP_PROBES_ENV, AotEmissionFile, AotEmitContext, AotEmitTarget,
+    AotNativeProduct, AotPackageEmission, AotRuntimeBinding, compile_package,
+    emit_package_with_context, render_package_artifact, validate_package_artifact,
 };
 use arcana_cabi::{
     ARCANA_CABI_CONTRACT_VERSION_V1, ARCANA_CABI_EXPORT_CONTRACT_ID, ArcanaCabiProductRole,
@@ -20,13 +21,14 @@ use crate::build_identity::{
     cached_emission_hash_for_path, current_build_toolchain_for_target_with_context,
     render_cached_artifact,
 };
+use crate::distribution::resolve_native_product_files;
 use crate::fingerprint::{
     WorkspaceFingerprints, compute_workspace_fingerprints, package_uses_implicit_std,
 };
 use crate::{
     ARTIFACT_DIR, BuildOutputKey, BuildTarget, CACHE_DIR, GrimoireKind, LOCKFILE_VERSION, LOGS_DIR,
-    LockTargetEntry, Lockfile, NativeProductProducer, NativeProductSpec, PackageResult,
-    WorkspaceGraph, collect_validated_support_file_paths,
+    LockNativeProductEntry, LockTargetEntry, Lockfile, NativeProductProducer, NativeProductSpec,
+    PackageResult, WorkspaceGraph, collect_validated_support_file_paths,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -256,6 +258,7 @@ where
         let existing = existing_lock
             .and_then(|lock| lock.members.get(name))
             .and_then(|member| member.build(&member_build_key));
+        let existing_member = existing_lock.and_then(|lock| lock.members.get(name));
         let format = member_target
             .format()
             .ok_or_else(|| format!("unsupported build target `{member_target}`"))?
@@ -274,6 +277,11 @@ where
         let native_product_closure_changed = existing
             .map(|entry| entry.native_product_closure != native_product_closure)
             .unwrap_or(native_product_closure.is_some());
+        let native_products_changed = existing_member
+            .map(|locked_member| {
+                locked_member.native_products != lock_native_product_entries(member)
+            })
+            .unwrap_or(!member.native_products.is_empty());
         let dependency_built = member
             .deps
             .iter()
@@ -283,6 +291,7 @@ where
             || dependency_built
             || format_changed
             || toolchain_changed
+            || native_products_changed
             || native_product_closure_changed
             || !cached_artifact_matches_status(
                 &artifact_abs_path,
@@ -565,6 +574,42 @@ pub fn render_lockfile(
     }
     out.push('\n');
 
+    out.push_str("[native_products]\n\n");
+    for name in &names {
+        let member = graph
+            .member(name)
+            .ok_or_else(|| format!("missing workspace member `{name}`"))?;
+        let native_products = lock_native_product_entries(member);
+        if native_products.is_empty() {
+            continue;
+        }
+        for (product_name, entry) in native_products {
+            out.push_str(&format!(
+                "[native_products.\"{}\".\"{}\"]\n",
+                escape_toml(name),
+                escape_toml(&product_name)
+            ));
+            out.push_str(&format!("kind = \"{}\"\n", escape_toml(&entry.kind)));
+            out.push_str(&format!("role = \"{}\"\n", escape_toml(&entry.role)));
+            out.push_str(&format!(
+                "producer = \"{}\"\n",
+                escape_toml(&entry.producer)
+            ));
+            out.push_str(&format!("file = \"{}\"\n", escape_toml(&entry.file)));
+            out.push_str(&format!(
+                "contract = \"{}\"\n",
+                escape_toml(&entry.contract)
+            ));
+            if let Some(path) = &entry.rust_cdylib_crate {
+                out.push_str(&format!("rust_cdylib_crate = \"{}\"\n", escape_toml(path)));
+            }
+            out.push_str(&format!(
+                "sidecars = {}\n\n",
+                format_string_array(&entry.sidecars)
+            ));
+        }
+    }
+
     let merged_builds = merge_lock_build_entries(graph, &names, statuses, existing_lock)?;
     out.push_str("[builds]\n\n");
     for name in &names {
@@ -655,6 +700,29 @@ fn merge_lock_build_entries(
         merged.insert(name.clone(), entries);
     }
     Ok(merged)
+}
+
+fn lock_native_product_entries(
+    member: &crate::WorkspaceMember,
+) -> BTreeMap<String, LockNativeProductEntry> {
+    member
+        .native_products
+        .iter()
+        .map(|(name, product)| {
+            (
+                name.clone(),
+                LockNativeProductEntry {
+                    kind: product.kind.clone(),
+                    role: product.role.as_str().to_string(),
+                    producer: product.producer.as_str().to_string(),
+                    file: product.file.clone(),
+                    contract: product.contract.clone(),
+                    rust_cdylib_crate: product.rust_cdylib_crate.clone(),
+                    sidecars: product.sidecars.clone(),
+                },
+            )
+        })
+        .collect()
 }
 
 pub fn render_build_summary(statuses: &[BuildStatus], graph: &WorkspaceGraph) -> String {
@@ -810,28 +878,101 @@ fn emit_artifact_for_target(
     linked_packages: Vec<IrPackage>,
     build_context: &BuildExecutionContext,
 ) -> PackageResult<AotPackageEmission> {
+    let linked_package = link_ir_packages(root_kind, root, linked_packages);
+    if let BuildTarget::WindowsDll = build_key.target_ref() {
+        if let Some(selected_product) = selected_native_product_for_build(
+            root_member,
+            build_key.target_ref(),
+            build_key.product(),
+        )? {
+            if !uses_arcana_source_export_bundle(&selected_product) {
+                return emit_root_native_product_bundle(
+                    graph,
+                    root_member,
+                    &linked_package,
+                    &selected_product,
+                );
+            }
+        }
+    }
     let context = emit_context_for_target(graph, root_member, build_key, root_kind, build_context)?;
     match build_key.target_ref() {
-        BuildTarget::InternalAot => emit_package_with_context(
-            AotEmitTarget::InternalArtifact,
-            &link_ir_packages(root_kind, root, linked_packages),
-            &context,
-        ),
-        BuildTarget::WindowsExe => emit_package_with_context(
-            AotEmitTarget::WindowsExeBundle,
-            &link_ir_packages(root_kind, root, linked_packages),
-            &context,
-        ),
-        BuildTarget::WindowsDll => emit_package_with_context(
-            AotEmitTarget::WindowsDllBundle,
-            &link_ir_packages(root_kind, root, linked_packages),
-            &context,
-        ),
+        BuildTarget::InternalAot => {
+            emit_package_with_context(AotEmitTarget::InternalArtifact, &linked_package, &context)
+        }
+        BuildTarget::WindowsExe => {
+            emit_package_with_context(AotEmitTarget::WindowsExeBundle, &linked_package, &context)
+        }
+        BuildTarget::WindowsDll => {
+            emit_package_with_context(AotEmitTarget::WindowsDllBundle, &linked_package, &context)
+        }
         BuildTarget::Other(_) => Err(format!(
             "unsupported build target `{}`",
             build_key.target_ref()
         )),
     }
+}
+
+fn emit_root_native_product_bundle(
+    graph: &WorkspaceGraph,
+    root_member: &crate::WorkspaceMember,
+    linked_package: &IrPackage,
+    product: &NativeProductSpec,
+) -> PackageResult<AotPackageEmission> {
+    native_product_probe(
+        "emit_root_native_product",
+        format!(
+            "member={} product={} role={} producer={}",
+            root_member.name,
+            product.name,
+            product.role.as_str(),
+            product.producer.as_str()
+        ),
+    );
+    let files = resolve_native_product_files(graph, root_member, product)?;
+    let root_file = files
+        .iter()
+        .find(|file| file.relative_path == product.file)
+        .ok_or_else(|| {
+            format!(
+                "root native product `{}` on `{}` did not resolve its primary file `{}`",
+                product.name, root_member.name, product.file
+            )
+        })?;
+    let root_artifact_bytes = fs::read(&root_file.source_path).map_err(|e| {
+        format!(
+            "failed to read root native product artifact `{}`: {e}",
+            root_file.source_path.display()
+        )
+    })?;
+    let support_files = files
+        .into_iter()
+        .filter(|file| file.relative_path != product.file)
+        .map(|file| {
+            fs::read(&file.source_path)
+                .map(|bytes| AotEmissionFile {
+                    relative_path: file.relative_path,
+                    bytes,
+                })
+                .map_err(|e| {
+                    format!(
+                        "failed to read native product support file `{}`: {e}",
+                        file.source_path.display()
+                    )
+                })
+        })
+        .collect::<PackageResult<Vec<_>>>()?;
+    let artifact = compile_package(linked_package);
+    validate_package_artifact(&artifact)
+        .map_err(|e| format!("root native product artifact validation failed: {e}"))?;
+    let primary_artifact_body = render_package_artifact(&artifact);
+    Ok(AotPackageEmission {
+        target: AotEmitTarget::WindowsDllBundle,
+        artifact,
+        primary_artifact_body,
+        root_artifact_bytes: Some(root_artifact_bytes),
+        support_files,
+    })
 }
 
 fn emit_context_for_target(
@@ -853,15 +994,17 @@ fn emit_context_for_target(
     let _ = graph;
     let _ = build_context;
     let runtime_binding = AotRuntimeBinding::Baked;
+    let native_product = selected_native_product
+        .as_ref()
+        .filter(|product| uses_arcana_source_export_bundle(product))
+        .map(export_native_product_metadata_from_spec)
+        .transpose()?;
     match build_key.target_ref() {
         BuildTarget::InternalAot | BuildTarget::WindowsExe | BuildTarget::WindowsDll => {
             Ok(AotEmitContext {
                 root_artifact_file_name: Some(root_artifact_file_name),
                 runtime_binding,
-                native_product: selected_native_product
-                    .as_ref()
-                    .map(native_product_metadata_from_spec)
-                    .transpose()?,
+                native_product,
             })
         }
         BuildTarget::Other(_) => Err(format!(
@@ -970,30 +1113,37 @@ fn resolve_member_build_key(
     }
 }
 
-fn selected_native_product_for_build(
+pub(crate) fn selected_native_product_for_build(
     member: &crate::WorkspaceMember,
     target: &BuildTarget,
     requested_product: Option<&str>,
 ) -> PackageResult<Option<NativeProductSpec>> {
     match target {
-        BuildTarget::WindowsDll => select_export_product_spec(member, requested_product).map(Some),
+        BuildTarget::WindowsDll => {
+            select_root_windows_dll_product_spec(member, requested_product).map(Some)
+        }
         BuildTarget::InternalAot | BuildTarget::WindowsExe | BuildTarget::Other(_) => Ok(None),
     }
 }
 
-fn select_export_product_spec(
+fn select_root_windows_dll_product_spec(
     member: &crate::WorkspaceMember,
     requested_product: Option<&str>,
 ) -> PackageResult<NativeProductSpec> {
-    let export_products = member
-        .native_products
-        .values()
-        .filter(|product| product.role == ArcanaCabiProductRole::Export)
-        .cloned()
-        .collect::<Vec<_>>();
+    let products = member.native_products.values().cloned().collect::<Vec<_>>();
 
-    if export_products.is_empty() {
+    if products.is_empty() {
         let requested_name = requested_product.unwrap_or("default");
+        if requested_product.is_some() && requested_name != "default" {
+            native_product_probe(
+                "missing_implicit_export_product",
+                format!("member={} requested_product={requested_name}", member.name),
+            );
+            return Err(format!(
+                "workspace member `{}` has no named native product `{requested_name}`",
+                member.name
+            ));
+        }
         native_product_probe(
             "implicit_export_product",
             format!(
@@ -1016,20 +1166,38 @@ fn select_export_product_spec(
     }
 
     let selected = match requested_product {
-        Some(name) => export_products
+        Some(name) => products
             .into_iter()
             .find(|product| product.name == name)
             .ok_or_else(|| {
                 native_product_probe(
-                    "missing_export_product",
+                    "missing_root_native_product",
                     format!("member={} requested_product={name}", member.name),
                 );
                 format!(
-                    "workspace member `{}` has no export native product `{name}`",
+                    "workspace member `{}` has no native product `{name}`",
                     member.name
                 )
             })?,
         None => {
+            let export_products = products
+                .into_iter()
+                .filter(|product| product.role == ArcanaCabiProductRole::Export)
+                .collect::<Vec<_>>();
+            if export_products.is_empty() {
+                native_product_probe(
+                    "missing_default_export_product",
+                    format!(
+                        "member={} declared_products={}",
+                        member.name,
+                        member.native_products.len()
+                    ),
+                );
+                return Err(format!(
+                    "workspace member `{}` has no default export native product; pass `--product <name>`",
+                    member.name
+                ));
+            }
             let [product] = export_products.as_slice() else {
                 native_product_probe(
                     "ambiguous_export_product",
@@ -1052,36 +1220,24 @@ fn select_export_product_spec(
         }
     };
 
-    if selected.producer != NativeProductProducer::ArcanaSource {
-        native_product_probe(
-            "unsupported_export_producer",
-            format!(
-                "member={} product={} producer={}",
-                member.name,
-                selected.name,
-                selected.producer.as_str()
-            ),
-        );
-        return Err(format!(
-            "export native product `{}` on `{}` uses producer `{}`, but only `arcana-source` is supported for root `windows-dll` builds in Phase 1",
-            selected.name,
-            member.name,
-            selected.producer.as_str()
-        ));
-    }
-
     native_product_probe(
-        "selected_export_product",
+        "selected_root_native_product",
         format!(
-            "member={} product={} contract={}",
-            member.name, selected.name, selected.contract
+            "member={} product={} role={} producer={} contract={}",
+            member.name,
+            selected.name,
+            selected.role.as_str(),
+            selected.producer.as_str(),
+            selected.contract
         ),
     );
 
     Ok(selected)
 }
 
-fn native_product_metadata_from_spec(spec: &NativeProductSpec) -> PackageResult<AotNativeProduct> {
+fn export_native_product_metadata_from_spec(
+    spec: &NativeProductSpec,
+) -> PackageResult<AotNativeProduct> {
     if spec.role != ArcanaCabiProductRole::Export {
         return Err(format!(
             "native product `{}` uses role `{}` but `windows-dll` requires `role = \"export\"`",
@@ -1096,6 +1252,11 @@ fn native_product_metadata_from_spec(spec: &NativeProductSpec) -> PackageResult<
         contract_id: spec.contract.clone(),
         contract_version: ARCANA_CABI_CONTRACT_VERSION_V1,
     })
+}
+
+fn uses_arcana_source_export_bundle(spec: &NativeProductSpec) -> bool {
+    spec.role == ArcanaCabiProductRole::Export
+        && spec.producer == NativeProductProducer::ArcanaSource
 }
 
 fn validate_prepared_snapshot_with_context(

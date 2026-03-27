@@ -106,6 +106,8 @@ fn default_package_member(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    use std::ffi::{CStr, c_char, c_void};
     use std::fs;
     use std::io::Read;
     use std::path::Path;
@@ -523,6 +525,197 @@ mod tests {
         .expect("book manifest should write");
     }
 
+    #[cfg(windows)]
+    fn compile_c_header_smoke(bundle_dir: &Path, header_name: &str) {
+        let source_path = bundle_dir.join("consumer.c");
+        let object_path = bundle_dir.join("consumer.obj");
+        let header_include = format!(
+            concat!(
+                "#include <stddef.h>\n",
+                "#include <stdint.h>\n",
+                "#include \"{header_name}\"\n",
+                "\n",
+                "static uint8_t smoke(void) {{\n",
+                "    int64_t answer_result = 0;\n",
+                "    int64_t len_result = 0;\n",
+                "    const uint8_t label_bytes[] = {{ 'a', 'r', 'c', 'a', 'n', 'a' }};\n",
+                "    ArcanaStrView name = {{ label_bytes, 6 }};\n",
+                "    ArcanaOwnedStr out_text = {{ 0 }};\n",
+                "    ArcanaOwnedBytes out_bytes = {{ 0 }};\n",
+                "    ArcanaPairView__Pair__Str__Int pair = {{ name, 7 }};\n",
+                "    answer(&answer_result);\n",
+                "    greet(name, &out_text);\n",
+                "    prefix(&out_bytes);\n",
+                "    byte_len((ArcanaBytesView){{ label_bytes, 6 }}, &len_result);\n",
+                "    echo_pair(pair, (ArcanaPairOwned__Pair__Str__Int*)0);\n",
+                "    return 0;\n",
+                "}}\n"
+            ),
+            header_name = header_name
+        );
+        write_file(&source_path, &header_include);
+
+        let mut attempts = Vec::new();
+
+        let cl_result = Command::new("cl")
+            .arg("/nologo")
+            .arg("/c")
+            .arg("/TC")
+            .arg(&source_path)
+            .arg(format!("/I{}", bundle_dir.display()))
+            .arg(format!("/Fo{}", object_path.display()))
+            .current_dir(bundle_dir)
+            .output();
+        match cl_result {
+            Ok(output) if output.status.success() => return,
+            Ok(output) => attempts.push(format!(
+                "cl from PATH failed:\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            )),
+            Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
+                attempts.push(format!("cl from PATH failed to launch: {err}"));
+            }
+            Err(_) => {}
+        }
+
+        if let Some(result) =
+            try_compile_c_header_with_vcvars(&source_path, bundle_dir, &object_path)
+        {
+            match result {
+                Ok(()) => return,
+                Err(err) => attempts.push(err),
+            }
+        }
+
+        for compiler in ["clang", "gcc"] {
+            match Command::new(compiler)
+                .arg("-std=c11")
+                .arg("-c")
+                .arg(&source_path)
+                .arg("-I")
+                .arg(bundle_dir)
+                .arg("-o")
+                .arg(&object_path)
+                .current_dir(bundle_dir)
+                .output()
+            {
+                Ok(output) if output.status.success() => return,
+                Ok(output) => attempts.push(format!(
+                    "{compiler} failed:\nstdout:\n{}\nstderr:\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                )),
+                Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
+                    attempts.push(format!("{compiler} failed to launch: {err}"));
+                }
+                Err(_) => {}
+            }
+        }
+
+        if !attempts.is_empty() {
+            panic!(
+                "C header smoke failed for `{}`:\n\n{}",
+                source_path.display(),
+                attempts.join("\n\n")
+            );
+        }
+        eprintln!(
+            "skipping C header smoke for `{}`: no usable C compiler found on PATH",
+            source_path.display()
+        );
+    }
+
+    #[cfg(windows)]
+    fn try_compile_c_header_with_vcvars(
+        source_path: &Path,
+        include_dir: &Path,
+        object_path: &Path,
+    ) -> Option<Result<(), String>> {
+        let Some(vcvars_path) = find_msvc_vcvars64() else {
+            return None;
+        };
+        let script_path = include_dir.join("compile_consumer_msvc.bat");
+        let script = format!(
+            concat!(
+                "@echo off\n",
+                "call \"{}\" >nul\n",
+                "if errorlevel 1 exit /b %errorlevel%\n",
+                "cl /nologo /c /TC \"{}\" /I\"{}\" /Fo\"{}\"\n"
+            ),
+            cmd_compatible_path(&vcvars_path),
+            cmd_compatible_path(source_path),
+            cmd_compatible_path(include_dir),
+            cmd_compatible_path(object_path)
+        );
+        write_file(&script_path, &script);
+        let script_cmd = cmd_compatible_path(&script_path);
+        Some(
+            match Command::new("cmd")
+                .args(["/d", "/s", "/c", script_cmd.as_str()])
+                .current_dir(include_dir)
+                .output()
+            {
+                Ok(output) if output.status.success() => Ok(()),
+                Ok(output) => Err(format!(
+                    "MSVC vcvars64 compile failed:\nstdout:\n{}\nstderr:\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                )),
+                Err(err) => Err(format!("MSVC vcvars64 compile failed to launch: {err}")),
+            },
+        )
+    }
+
+    #[cfg(windows)]
+    fn find_msvc_vcvars64() -> Option<PathBuf> {
+        let program_files = [
+            PathBuf::from(r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"),
+            PathBuf::from(r"C:\Program Files\Microsoft Visual Studio\Installer\vswhere.exe"),
+        ];
+        for vswhere in program_files {
+            if !vswhere.is_file() {
+                continue;
+            }
+            let Ok(output) = Command::new(&vswhere)
+                .args([
+                    "-latest",
+                    "-products",
+                    "*",
+                    "-requires",
+                    "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+                    "-property",
+                    "installationPath",
+                ])
+                .output()
+            else {
+                continue;
+            };
+            if !output.status.success() {
+                continue;
+            }
+            let installation = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if installation.is_empty() {
+                continue;
+            }
+            let vcvars = PathBuf::from(installation).join(r"VC\Auxiliary\Build\vcvars64.bat");
+            if vcvars.is_file() {
+                return Some(vcvars);
+            }
+        }
+        None
+    }
+
+    #[cfg(windows)]
+    fn cmd_compatible_path(path: &Path) -> String {
+        let rendered = path.display().to_string();
+        if let Some(stripped) = rendered.strip_prefix(r"\\?\") {
+            stripped.to_string()
+        } else {
+            rendered
+        }
+    }
+
     fn write_std_bytes_grimoire(dir: &Path) {
         write_file(
             &dir.join("std/book.toml"),
@@ -601,6 +794,27 @@ mod tests {
     }
 
     #[cfg(windows)]
+    #[repr(C)]
+    struct TestArcanaCabiProductApiV1 {
+        descriptor_size: usize,
+        package_name: *const c_char,
+        product_name: *const c_char,
+        role: *const c_char,
+        contract_id: *const c_char,
+        contract_version: u32,
+        role_ops: *const c_void,
+        reserved0: *const c_void,
+        reserved1: *const c_void,
+    }
+
+    #[cfg(windows)]
+    unsafe fn read_cabi_utf8_field(ptr: *const c_char) -> String {
+        unsafe { CStr::from_ptr(ptr) }
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    #[cfg(windows)]
     #[test]
     fn package_workspace_stages_runnable_windows_exe_bundle() {
         let dir = temp_dir("windows_exe");
@@ -634,17 +848,17 @@ mod tests {
             .status()
             .expect("staged bundle should launch");
         assert_eq!(status.code(), Some(9));
-        assert!(bundle.manifest_path.is_file());
-        assert_eq!(
-            bundle.support_files,
-            vec!["app.exe.arcana-bundle.toml".to_string()]
-        );
+        assert!(bundle.support_files.is_empty());
         assert!(
-            bundle
+            !bundle
                 .bundle_dir
                 .join("app.exe.arcana-bundle.toml")
-                .is_file(),
-            "expected staged exe native manifest"
+                .exists(),
+            "did not expect staged exe native manifest"
+        );
+        assert!(
+            !bundle.bundle_dir.join("arcana.bundle.toml").exists(),
+            "did not expect staged distribution manifest"
         );
 
         let _ = fs::remove_dir_all(&dir);
@@ -1633,7 +1847,7 @@ mod tests {
         )
         .expect("large desktop exe package should succeed");
         let exe_path = exe_bundle.bundle_dir.join(&exe_bundle.root_artifact);
-        let runtime_dll_path = exe_bundle.bundle_dir.join("arcana_desktop.dll");
+        let runtime_dll_path = exe_bundle.bundle_dir.join("arcwin.dll");
         assert!(
             runtime_dll_path.is_file(),
             "expected staged desktop runtime DLL at {}",
@@ -1655,6 +1869,7 @@ mod tests {
         );
         let output = Command::new(&exe_path)
             .current_dir(&exe_bundle.bundle_dir)
+            .env("ARCANA_NATIVE_PRODUCT_TEMP_PROBES", "1")
             .arg("--smoke")
             .output()
             .expect("large desktop exe bundle should launch");
@@ -1664,6 +1879,11 @@ mod tests {
                 .lines()
                 .collect::<Vec<_>>(),
             vec!["controls=36", "pages=7", "smoke_score=767"]
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("child_runtime_provider_entrypoint"),
+            "expected probe-confirmed child runtime provider handoff, stderr was: {stderr}"
         );
         let _ = fs::remove_dir_all(&workspace_dir);
         let _ = fs::remove_dir_all(&exe_out_dir);
@@ -2259,23 +2479,82 @@ mod tests {
         );
         assert_eq!(
             bundle.support_files,
-            vec![
-                "lib.dll.h".to_string(),
-                "lib.dll.def".to_string(),
-                "lib.dll.arcana-bundle.toml".to_string()
-            ]
+            vec!["lib.dll.h".to_string(), "lib.dll.def".to_string()]
         );
         assert!(
             bundle.bundle_dir.join("lib.dll.def").is_file(),
             "expected staged dll definition file"
         );
         assert!(
-            bundle
+            !bundle
                 .bundle_dir
                 .join("lib.dll.arcana-bundle.toml")
-                .is_file(),
-            "expected staged dll native manifest"
+                .exists(),
+            "did not expect staged dll native manifest"
         );
+        assert!(
+            !bundle.bundle_dir.join("arcana.bundle.toml").exists(),
+            "did not expect staged distribution manifest beside dll"
+        );
+        let manifest = bundle
+            .manifest_text
+            .parse::<toml::Value>()
+            .expect("distribution manifest should parse");
+        let root_native_product = manifest
+            .get("root_native_product")
+            .and_then(toml::Value::as_table)
+            .expect("root_native_product table should exist");
+        assert_eq!(
+            root_native_product
+                .get("package_name")
+                .and_then(toml::Value::as_str),
+            Some("core")
+        );
+        assert_eq!(
+            root_native_product
+                .get("product_name")
+                .and_then(toml::Value::as_str),
+            Some("default")
+        );
+        assert_eq!(
+            root_native_product
+                .get("role")
+                .and_then(toml::Value::as_str),
+            Some("export")
+        );
+        assert_eq!(
+            root_native_product
+                .get("contract_id")
+                .and_then(toml::Value::as_str),
+            Some("arcana.cabi.export.v1")
+        );
+        assert_eq!(
+            root_native_product
+                .get("contract_version")
+                .and_then(toml::Value::as_integer),
+            Some(1)
+        );
+        assert_eq!(
+            root_native_product
+                .get("producer")
+                .and_then(toml::Value::as_str),
+            Some("arcana-source")
+        );
+        assert_eq!(
+            root_native_product
+                .get("file")
+                .and_then(toml::Value::as_str),
+            Some("lib.dll")
+        );
+        assert!(
+            root_native_product
+                .get("file_hash")
+                .and_then(toml::Value::as_str)
+                .is_some_and(|hash| hash.starts_with("sha256:")),
+            "expected root dll hash in manifest: {}",
+            bundle.manifest_text
+        );
+        compile_c_header_smoke(&bundle.bundle_dir, "lib.dll.h");
 
         unsafe {
             let library = Library::new(&dll_path).expect("dll should load");
@@ -2389,6 +2668,233 @@ mod tests {
             assert_eq!(echoed_left, "pair");
             assert_eq!(echoed_pair.right, 17);
         }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn package_workspace_stages_named_child_root_windows_dll_product() {
+        let dir = temp_dir("windows_dll_child_root_product");
+        write_file(
+            &dir.join("book.toml"),
+            concat!(
+                "name = \"desktop\"\n",
+                "kind = \"lib\"\n\n",
+                "[native.products.default]\n",
+                "kind = \"dll\"\n",
+                "role = \"child\"\n",
+                "producer = \"arcana-source\"\n",
+                "file = \"desktop_runtime.dll\"\n",
+                "contract = \"arcana.cabi.child.v1\"\n",
+                "sidecars = []\n",
+            ),
+        );
+        write_file(&dir.join("src/book.arc"), "fn touch():\n    return\n");
+        write_file(&dir.join("src/types.arc"), "// types\n");
+
+        let bundle = package_workspace_with_product(
+            dir.clone(),
+            BuildTarget::windows_dll(),
+            Some("default".to_string()),
+            None,
+            None,
+        )
+        .expect("named child root product should package");
+        assert_eq!(bundle.root_artifact, "desktop_runtime.dll");
+        assert!(
+            bundle.support_files.is_empty(),
+            "root child product should not emit export support files: {:?}",
+            bundle.support_files
+        );
+        let dll_path = bundle.bundle_dir.join(&bundle.root_artifact);
+        assert!(
+            dll_path.is_file(),
+            "expected staged dll at {}",
+            dll_path.display()
+        );
+        assert!(
+            !bundle.bundle_dir.join("desktop_runtime.dll.h").exists(),
+            "child root product should not emit export header support files"
+        );
+        assert!(
+            !bundle.bundle_dir.join("desktop_runtime.dll.def").exists(),
+            "child root product should not emit export definition support files"
+        );
+        assert!(
+            !bundle.bundle_dir.join("arcana.bundle.toml").exists(),
+            "did not expect staged distribution manifest beside root child product"
+        );
+        let manifest = bundle
+            .manifest_text
+            .parse::<toml::Value>()
+            .expect("distribution manifest should parse");
+        let root_native_product = manifest
+            .get("root_native_product")
+            .and_then(toml::Value::as_table)
+            .expect("root_native_product table should exist");
+        assert_eq!(
+            root_native_product
+                .get("package_name")
+                .and_then(toml::Value::as_str),
+            Some("desktop")
+        );
+        assert_eq!(
+            root_native_product
+                .get("product_name")
+                .and_then(toml::Value::as_str),
+            Some("default")
+        );
+        assert_eq!(
+            root_native_product
+                .get("role")
+                .and_then(toml::Value::as_str),
+            Some("child")
+        );
+        assert_eq!(
+            root_native_product
+                .get("contract_id")
+                .and_then(toml::Value::as_str),
+            Some("arcana.cabi.child.v1")
+        );
+        assert_eq!(
+            root_native_product
+                .get("contract_version")
+                .and_then(toml::Value::as_integer),
+            Some(1)
+        );
+        assert_eq!(
+            root_native_product
+                .get("producer")
+                .and_then(toml::Value::as_str),
+            Some("arcana-source")
+        );
+        assert_eq!(
+            root_native_product
+                .get("file")
+                .and_then(toml::Value::as_str),
+            Some("desktop_runtime.dll")
+        );
+        assert!(
+            root_native_product
+                .get("file_hash")
+                .and_then(toml::Value::as_str)
+                .is_some_and(|hash| hash.starts_with("sha256:")),
+            "expected root child dll hash in manifest: {}",
+            bundle.manifest_text
+        );
+
+        unsafe {
+            let library = Library::new(&dll_path).expect("child dll should load");
+            let get_api = library
+                .get::<unsafe extern "system" fn() -> *const TestArcanaCabiProductApiV1>(
+                    b"arcana_cabi_get_product_api_v1",
+                )
+                .expect("child product descriptor export should exist");
+            let api = &*get_api();
+            assert_eq!(read_cabi_utf8_field(api.package_name), "desktop");
+            assert_eq!(read_cabi_utf8_field(api.product_name), "default");
+            assert_eq!(read_cabi_utf8_field(api.role), "child");
+            assert_eq!(
+                read_cabi_utf8_field(api.contract_id),
+                "arcana.cabi.child.v1"
+            );
+            assert!(
+                !api.role_ops.is_null(),
+                "child role_ops should be populated"
+            );
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn package_workspace_rejects_invalid_rust_cdylib_native_product_descriptor() {
+        let dir = temp_dir("windows_dll_invalid_rust_cdylib_descriptor");
+        write_file(
+            &dir.join("book.toml"),
+            concat!(
+                "name = \"desktop\"\n",
+                "kind = \"lib\"\n\n",
+                "[native.products.default]\n",
+                "kind = \"dll\"\n",
+                "role = \"plugin\"\n",
+                "producer = \"rust-cdylib\"\n",
+                "file = \"desktop_tools.dll\"\n",
+                "contract = \"arcana.cabi.plugin.v1\"\n",
+                "rust_cdylib_crate = \"plugin\"\n",
+                "sidecars = []\n",
+            ),
+        );
+        write_file(&dir.join("src/book.arc"), "fn touch():\n    return\n");
+        write_file(&dir.join("src/types.arc"), "// types\n");
+        write_file(
+            &dir.join("plugin/Cargo.toml"),
+            concat!(
+                "[package]\n",
+                "name = \"desktop_tools\"\n",
+                "version = \"0.0.0\"\n",
+                "edition = \"2021\"\n\n",
+                "[lib]\n",
+                "name = \"desktop_tools\"\n",
+                "crate-type = [\"cdylib\"]\n\n",
+                "[workspace]\n",
+            ),
+        );
+        write_file(
+            &dir.join("plugin/src/lib.rs"),
+            concat!(
+                "#[no_mangle]\n",
+                "pub extern \"system\" fn unrelated_symbol() -> u8 {\n",
+                "    1\n",
+                "}\n",
+            ),
+        );
+
+        let err = package_workspace_with_product(
+            dir.clone(),
+            BuildTarget::windows_dll(),
+            Some("default".to_string()),
+            None,
+            None,
+        )
+        .expect_err("invalid rust-cdylib descriptor should fail packaging");
+        assert!(
+            err.contains("arcana_cabi_get_product_api_v1"),
+            "unexpected error: {err}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn package_workspace_requires_product_for_non_export_windows_dll_roots() {
+        let dir = temp_dir("windows_dll_child_root_requires_product");
+        write_file(
+            &dir.join("book.toml"),
+            concat!(
+                "name = \"desktop\"\n",
+                "kind = \"lib\"\n\n",
+                "[native.products.default]\n",
+                "kind = \"dll\"\n",
+                "role = \"child\"\n",
+                "producer = \"arcana-source\"\n",
+                "file = \"desktop_runtime.dll\"\n",
+                "contract = \"arcana.cabi.child.v1\"\n",
+                "sidecars = []\n",
+            ),
+        );
+        write_file(&dir.join("src/book.arc"), "fn touch():\n    return\n");
+        write_file(&dir.join("src/types.arc"), "// types\n");
+
+        let err = package_workspace(dir.clone(), BuildTarget::windows_dll(), None, None)
+            .expect_err("non-export root windows-dll build should require --product");
+        assert!(
+            err.contains("default export native product"),
+            "unexpected error: {err}"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

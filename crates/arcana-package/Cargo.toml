@@ -13,3 +13,6 @@ goblin = "0.9"
 pathdiff.workspace = true
 sha2.workspace = true
 toml.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+libloading.workspace = true

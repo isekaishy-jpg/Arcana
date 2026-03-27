@@ -78,6 +78,7 @@ dependencies = [
  "arcana-ir",
  "arcana-syntax",
  "goblin",
+ "libloading",
  "pathdiff",
  "sha2",
  "toml",

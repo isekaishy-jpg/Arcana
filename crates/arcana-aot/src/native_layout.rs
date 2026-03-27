@@ -20,7 +20,7 @@ impl NativeLayoutCatalog {
         let mut pair_types = BTreeSet::new();
         for export in exports {
             for param in &export.params {
-                collect_pair_types(&param.ty, &mut pair_types);
+                collect_pair_types(&param.input_type, &mut pair_types);
             }
             collect_pair_types(&export.return_type, &mut pair_types);
         }

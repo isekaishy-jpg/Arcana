@@ -274,7 +274,7 @@ impl<'a> NativeLoweringBuilder<'a> {
                 (
                     param.name.clone(),
                     NativeBinding {
-                        ty: param.ty.clone(),
+                        ty: param.input_type.clone(),
                         mutable: matches!(param.pass_mode, ArcanaCabiPassMode::InWithWriteBack),
                     },
                 )
@@ -370,6 +370,8 @@ impl<'a> NativeLoweringBuilder<'a> {
                 })
             }
             ExecStmt::Assign { target, op, value } => {
+                // The current direct subset only supports writes back into simple local bindings.
+                // Structured targets such as member/index assignment stay on runtime dispatch.
                 let ExecAssignTarget::Name(name) = target else {
                     return None;
                 };
@@ -589,9 +591,11 @@ impl<'a> NativeLoweringBuilder<'a> {
                 .iter()
                 .zip(params)
                 .map(|(arg, param)| match param.pass_mode {
-                    ArcanaCabiPassMode::In => self.lower_expr(&arg.value, bindings, &param.ty),
+                    ArcanaCabiPassMode::In => {
+                        self.lower_expr(&arg.value, bindings, &param.input_type)
+                    }
                     ArcanaCabiPassMode::InWithWriteBack => {
-                        let lowered = self.lower_expr(&arg.value, bindings, &param.ty)?;
+                        let lowered = self.lower_expr(&arg.value, bindings, &param.input_type)?;
                         let NativeDirectExpr::Binding(name) = lowered else {
                             return None;
                         };
@@ -613,9 +617,11 @@ impl<'a> NativeLoweringBuilder<'a> {
                     .iter()
                     .find(|arg| arg.name.as_deref() == Some(param.name.as_str()))?;
                 match param.pass_mode {
-                    ArcanaCabiPassMode::In => self.lower_expr(&arg.value, bindings, &param.ty),
+                    ArcanaCabiPassMode::In => {
+                        self.lower_expr(&arg.value, bindings, &param.input_type)
+                    }
                     ArcanaCabiPassMode::InWithWriteBack => {
-                        let lowered = self.lower_expr(&arg.value, bindings, &param.ty)?;
+                        let lowered = self.lower_expr(&arg.value, bindings, &param.input_type)?;
                         let NativeDirectExpr::Binding(name) = lowered else {
                             return None;
                         };
@@ -1286,6 +1292,240 @@ mod tests {
                         if routine_key == "core#fn-5" && args.is_empty()
                 )
         }));
+    }
+
+    #[test]
+    fn lowering_directly_exports_edit_root_routines() {
+        let mut package = base_package();
+        package.routines.push(IrRoutine {
+            module_id: "core".to_string(),
+            routine_key: "core#fn-0".to_string(),
+            symbol_name: "bump".to_string(),
+            symbol_kind: "fn".to_string(),
+            exported: true,
+            is_async: false,
+            type_params: Vec::new(),
+            behavior_attrs: BTreeMap::new(),
+            params: test_params(&["mode=edit:name=value:ty=Int".to_string()]),
+            return_type: test_return_type("fn bump(edit value: Int) -> Int:"),
+            intrinsic_impl: None,
+            impl_target_type: None,
+            impl_trait_path: None,
+            availability: Vec::new(),
+            foreword_rows: Vec::new(),
+            rollups: Vec::new(),
+            statements: vec![
+                ExecStmt::Assign {
+                    target: ExecAssignTarget::Name("value".to_string()),
+                    op: ExecAssignOp::AddAssign,
+                    value: ExecExpr::Int(1),
+                },
+                ExecStmt::ReturnValue {
+                    value: ExecExpr::Path(vec!["value".to_string()]),
+                },
+            ],
+        });
+
+        sync_exported_function_surface_rows(&mut package);
+        let package_plan = build_native_package_plan(
+            AotEmitTarget::WindowsDllBundle,
+            &package,
+            &test_emit_context("lib.dll"),
+        )
+        .expect("native package plan should build");
+        let lowering_plan =
+            build_native_lowering_plan(&package_plan).expect("native lowering should build");
+
+        let NativeLaunchLowering::DynamicLibrary { exports } = lowering_plan.launch else {
+            panic!("expected dynamic-library lowering");
+        };
+        assert_eq!(exports.len(), 1);
+        assert!(matches!(
+            exports[0].lowering,
+            NativeRoutineLowering::Direct { ref routine_key } if routine_key == "core#fn-0"
+        ));
+        assert_eq!(lowering_plan.direct_routines.len(), 1);
+        assert_eq!(
+            lowering_plan.direct_routines[0].body.statements,
+            vec![NativeDirectStmt::Assign {
+                name: "value".to_string(),
+                value: NativeDirectExpr::IntBinary {
+                    op: NativeDirectIntBinaryOp::Add,
+                    left: Box::new(NativeDirectExpr::Binding("value".to_string())),
+                    right: Box::new(NativeDirectExpr::Int(1)),
+                },
+            }]
+        );
+        assert_eq!(
+            lowering_plan.direct_routines[0].body.return_expr,
+            NativeDirectExpr::Binding("value".to_string())
+        );
+    }
+
+    #[test]
+    fn lowering_supports_direct_edit_write_back_call_chains() {
+        let mut package = base_package();
+        package.routines.extend([
+            IrRoutine {
+                module_id: "core".to_string(),
+                routine_key: "core#fn-0".to_string(),
+                symbol_name: "outer".to_string(),
+                symbol_kind: "fn".to_string(),
+                exported: true,
+                is_async: false,
+                type_params: Vec::new(),
+                behavior_attrs: BTreeMap::new(),
+                params: test_params(&["mode=edit:name=value:ty=Int".to_string()]),
+                return_type: test_return_type("fn outer(edit value: Int) -> Int:"),
+                intrinsic_impl: None,
+                impl_target_type: None,
+                impl_trait_path: None,
+                availability: Vec::new(),
+                foreword_rows: Vec::new(),
+                rollups: Vec::new(),
+                statements: vec![ExecStmt::ReturnValue {
+                    value: ExecExpr::Phrase {
+                        subject: Box::new(ExecExpr::Path(vec!["helper".to_string()])),
+                        args: vec![ExecPhraseArg {
+                            name: None,
+                            value: ExecExpr::Path(vec!["value".to_string()]),
+                        }],
+                        qualifier_kind: ExecPhraseQualifierKind::Call,
+                        qualifier: "call".to_string(),
+                        resolved_callable: Some(vec!["core".to_string(), "helper".to_string()]),
+                        resolved_routine: Some("core#fn-1".to_string()),
+                        dynamic_dispatch: None,
+                        attached: Vec::new(),
+                    },
+                }],
+            },
+            IrRoutine {
+                module_id: "core".to_string(),
+                routine_key: "core#fn-1".to_string(),
+                symbol_name: "helper".to_string(),
+                symbol_kind: "fn".to_string(),
+                exported: false,
+                is_async: false,
+                type_params: Vec::new(),
+                behavior_attrs: BTreeMap::new(),
+                params: test_params(&["mode=edit:name=value:ty=Int".to_string()]),
+                return_type: test_return_type("fn helper(edit value: Int) -> Int:"),
+                intrinsic_impl: None,
+                impl_target_type: None,
+                impl_trait_path: None,
+                availability: Vec::new(),
+                foreword_rows: Vec::new(),
+                rollups: Vec::new(),
+                statements: vec![
+                    ExecStmt::Assign {
+                        target: ExecAssignTarget::Name("value".to_string()),
+                        op: ExecAssignOp::AddAssign,
+                        value: ExecExpr::Int(2),
+                    },
+                    ExecStmt::ReturnValue {
+                        value: ExecExpr::Path(vec!["value".to_string()]),
+                    },
+                ],
+            },
+        ]);
+
+        sync_exported_function_surface_rows(&mut package);
+        let package_plan = build_native_package_plan(
+            AotEmitTarget::WindowsDllBundle,
+            &package,
+            &test_emit_context("lib.dll"),
+        )
+        .expect("native package plan should build");
+        let lowering_plan =
+            build_native_lowering_plan(&package_plan).expect("native lowering should build");
+
+        let NativeLaunchLowering::DynamicLibrary { exports } = lowering_plan.launch else {
+            panic!("expected dynamic-library lowering");
+        };
+        assert_eq!(exports.len(), 1);
+        assert!(matches!(
+            exports[0].lowering,
+            NativeRoutineLowering::Direct { ref routine_key } if routine_key == "core#fn-0"
+        ));
+        assert_eq!(lowering_plan.direct_routines.len(), 2);
+        assert!(lowering_plan.direct_routines.iter().any(|routine| {
+            routine.routine_key == "core#fn-0"
+                && matches!(
+                    &routine.body.return_expr,
+                    NativeDirectExpr::Call { routine_key, args, .. }
+                        if routine_key == "core#fn-1"
+                            && args == &vec![NativeDirectExpr::Binding("value".to_string())]
+                )
+        }));
+        assert!(lowering_plan.direct_routines.iter().any(|routine| {
+            routine.routine_key == "core#fn-1"
+                && routine.body.statements
+                    == vec![NativeDirectStmt::Assign {
+                        name: "value".to_string(),
+                        value: NativeDirectExpr::IntBinary {
+                            op: NativeDirectIntBinaryOp::Add,
+                            left: Box::new(NativeDirectExpr::Binding("value".to_string())),
+                            right: Box::new(NativeDirectExpr::Int(2)),
+                        },
+                    }]
+                && routine.body.return_expr == NativeDirectExpr::Binding("value".to_string())
+        }));
+    }
+
+    #[test]
+    fn lowering_keeps_non_name_edit_write_back_targets_on_runtime_dispatch() {
+        let mut package = base_package();
+        package.routines.push(IrRoutine {
+            module_id: "core".to_string(),
+            routine_key: "core#fn-0".to_string(),
+            symbol_name: "touch_first".to_string(),
+            symbol_kind: "fn".to_string(),
+            exported: true,
+            is_async: false,
+            type_params: Vec::new(),
+            behavior_attrs: BTreeMap::new(),
+            params: test_params(&["mode=edit:name=bytes:ty=Array[Int]".to_string()]),
+            return_type: test_return_type("fn touch_first(edit bytes: Array[Int]) -> Array[Int]:"),
+            intrinsic_impl: None,
+            impl_target_type: None,
+            impl_trait_path: None,
+            availability: Vec::new(),
+            foreword_rows: Vec::new(),
+            rollups: Vec::new(),
+            statements: vec![
+                ExecStmt::Assign {
+                    target: ExecAssignTarget::Index {
+                        target: Box::new(ExecAssignTarget::Name("bytes".to_string())),
+                        index: ExecExpr::Int(0),
+                    },
+                    op: ExecAssignOp::Assign,
+                    value: ExecExpr::Int(1),
+                },
+                ExecStmt::ReturnValue {
+                    value: ExecExpr::Path(vec!["bytes".to_string()]),
+                },
+            ],
+        });
+
+        sync_exported_function_surface_rows(&mut package);
+        let package_plan = build_native_package_plan(
+            AotEmitTarget::WindowsDllBundle,
+            &package,
+            &test_emit_context("lib.dll"),
+        )
+        .expect("native package plan should build");
+        let lowering_plan =
+            build_native_lowering_plan(&package_plan).expect("native lowering should build");
+
+        let NativeLaunchLowering::DynamicLibrary { exports } = lowering_plan.launch else {
+            panic!("expected dynamic-library lowering");
+        };
+        assert_eq!(exports.len(), 1);
+        assert_eq!(exports[0].lowering, NativeRoutineLowering::RuntimeDispatch);
+        assert!(
+            lowering_plan.direct_routines.is_empty(),
+            "non-name edit write-back targets should stay outside the current direct subset"
+        );
     }
 
     #[test]

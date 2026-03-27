@@ -208,7 +208,9 @@ fn print_help() {
     println!(
         "  arcana package <workspace-dir> [--target <target>] [--product <name>] [--member <member>] [--out-dir <dir>]"
     );
-    println!("    targets: internal-aot, windows-exe, windows-dll (export compatibility target)");
+    println!(
+        "    targets: internal-aot, windows-exe, windows-dll (native product target; legacy export name)"
+    );
 }
 
 fn parse_run_args(args: &[String]) -> Result<(BuildTarget, Option<String>, Vec<String>), String> {

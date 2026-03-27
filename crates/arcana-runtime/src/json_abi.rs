@@ -38,12 +38,11 @@ struct JsonAbiRoutine<'a> {
 #[derive(Serialize)]
 struct JsonAbiParam<'a> {
     name: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    mode: Option<&'a str>,
-    ty: String,
+    source_mode: &'static str,
+    input_type: String,
     pass_mode: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    write_back_ty: Option<String>,
+    write_back_type: Option<String>,
 }
 
 pub fn render_exported_json_abi_manifest(plan: &RuntimePackagePlan) -> Result<String, String> {
@@ -64,10 +63,10 @@ pub fn render_exported_json_abi_manifest(plan: &RuntimePackagePlan) -> Result<St
                     .iter()
                     .map(|param| JsonAbiParam {
                         name: &param.name,
-                        mode: param.mode.as_deref(),
-                        ty: param.ty.render(),
+                        source_mode: json_abi_source_mode(param.mode.as_deref()),
+                        input_type: param.ty.render(),
                         pass_mode: json_abi_pass_mode(param.mode.as_deref()).as_str(),
-                        write_back_ty: (param.mode.as_deref() == Some("edit"))
+                        write_back_type: (param.mode.as_deref() == Some("edit"))
                             .then(|| param.ty.render()),
                     })
                     .collect(),
@@ -198,6 +197,14 @@ fn json_abi_pass_mode(mode: Option<&str>) -> ArcanaCabiPassMode {
     match mode {
         Some("edit") => ArcanaCabiPassMode::InWithWriteBack,
         _ => ArcanaCabiPassMode::In,
+    }
+}
+
+fn json_abi_source_mode(mode: Option<&str>) -> &'static str {
+    match mode {
+        Some("take") => "take",
+        Some("edit") => "edit",
+        _ => "read",
     }
 }
 

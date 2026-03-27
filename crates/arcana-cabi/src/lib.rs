@@ -156,6 +156,12 @@ pub type ArcanaCabiChildRunEntrypointFn = unsafe extern "system" fn(
 ) -> i32;
 pub type ArcanaCabiPluginDescribeInstanceFn =
     unsafe extern "system" fn(instance: *mut c_void, out_len: *mut usize) -> *mut u8;
+pub type ArcanaCabiPluginUseInstanceFn = unsafe extern "system" fn(
+    instance: *mut c_void,
+    request_ptr: *const u8,
+    request_len: usize,
+    out_len: *mut usize,
+) -> *mut u8;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -240,6 +246,7 @@ unsafe impl Sync for ArcanaCabiChildOpsV1 {}
 pub struct ArcanaCabiPluginOpsV1 {
     pub base: ArcanaCabiInstanceOpsV1,
     pub describe_instance: ArcanaCabiPluginDescribeInstanceFn,
+    pub use_instance: ArcanaCabiPluginUseInstanceFn,
     pub last_error_alloc: ArcanaCabiLastErrorAllocFn,
     pub owned_bytes_free: ArcanaCabiOwnedBytesFreeFn,
     pub reserved0: *const c_void,
@@ -325,6 +332,7 @@ pub fn render_c_descriptor_type_defs() -> String {
         "typedef struct ArcanaCabiPluginOpsV1 {\n",
         "    ArcanaCabiInstanceOpsV1 base;\n",
         "    uint8_t* (*describe_instance)(void* instance, size_t* out_len);\n",
+        "    uint8_t* (*use_instance)(void* instance, const uint8_t* request_ptr, size_t request_len, size_t* out_len);\n",
         "    uint8_t* (*last_error_alloc)(size_t* out_len);\n",
         "    void (*owned_bytes_free)(uint8_t* ptr, size_t len);\n",
         "    const void* reserved0;\n",
@@ -353,6 +361,7 @@ mod tests {
         assert!(text.contains("typedef struct ArcanaCabiInstanceOpsV1"));
         assert!(text.contains("typedef struct ArcanaCabiChildOpsV1"));
         assert!(text.contains("typedef struct ArcanaCabiPluginOpsV1"));
+        assert!(text.contains("use_instance"));
         assert!(text.contains("owned_str_free"));
     }
 }

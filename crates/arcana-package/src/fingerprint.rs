@@ -1,4 +1,5 @@
 use std::collections::{BTreeSet, HashMap};
+use std::fs;
 
 use arcana_hir::{
     HirDirectiveKind, HirImplDecl, HirPredicate, HirResolvedModule, HirResolvedPackage,
@@ -115,6 +116,10 @@ pub fn compute_workspace_snapshot_id(
             hasher.update(row.as_bytes());
             hasher.update(b"\n");
         }
+        for row in render_member_native_product_rows(member)? {
+            hasher.update(row.as_bytes());
+            hasher.update(b"\n");
+        }
     }
 
     for (name, package) in &workspace.packages {
@@ -185,6 +190,10 @@ fn compute_member_source_fingerprint(
         hasher.update(row.as_bytes());
         hasher.update(b"\n");
     }
+    for row in render_member_native_product_rows(member)? {
+        hasher.update(row.as_bytes());
+        hasher.update(b"\n");
+    }
     for row in package.summary.hir_fingerprint_rows() {
         hasher.update(row.as_bytes());
         hasher.update(b"\n");
@@ -211,15 +220,65 @@ fn render_member_dependency_setting_rows(member: &WorkspaceMember) -> Vec<String
                 .get(alias)
                 .map(String::as_str)
                 .unwrap_or("");
+            let mut native_plugins = spec.native_plugins.clone();
+            native_plugins.sort();
             format!(
-                "dep_setting:alias={alias}|package={package_name}|source={:?}|native_delivery={}",
+                "dep_setting:alias={alias}|package={package_name}|source={:?}|native_delivery={}|native_child={}|native_plugins={}",
                 spec.source,
-                spec.native_delivery.as_str()
+                spec.native_delivery.as_str(),
+                spec.native_child.as_deref().unwrap_or(""),
+                native_plugins.join(",")
             )
         })
         .collect::<Vec<_>>();
     rows.sort();
     rows
+}
+
+fn render_member_native_product_rows(member: &WorkspaceMember) -> PackageResult<Vec<String>> {
+    let mut rows = Vec::new();
+    for (name, product) in &member.native_products {
+        rows.push(format!(
+            "native_product:name={name}|kind={}|role={}|producer={}|file={}|contract={}|rust_cdylib_crate={}",
+            product.kind,
+            product.role.as_str(),
+            product.producer.as_str(),
+            product.file,
+            product.contract,
+            product.rust_cdylib_crate.as_deref().unwrap_or("")
+        ));
+        for sidecar in &product.sidecars {
+            rows.push(format!(
+                "native_product_sidecar:name={name}|path={sidecar}|hash={}",
+                render_native_product_sidecar_hash(member, sidecar)?
+            ));
+        }
+    }
+    rows.sort();
+    Ok(rows)
+}
+
+fn render_native_product_sidecar_hash(
+    member: &WorkspaceMember,
+    relative_path: &str,
+) -> PackageResult<String> {
+    let sidecar_path = member.abs_dir.join(relative_path);
+    match fs::read(&sidecar_path) {
+        Ok(bytes) => {
+            let mut hasher = Sha256::new();
+            hasher.update(b"arcana_native_product_sidecar_v1\n");
+            hasher.update(relative_path.as_bytes());
+            hasher.update(b"\n");
+            hasher.update(&bytes);
+            Ok(format!("sha256:{:x}", hasher.finalize()))
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok("missing".to_string()),
+        Err(err) => Err(format!(
+            "failed to read native product sidecar `{}` for `{}`: {err}",
+            sidecar_path.display(),
+            member.name
+        )),
+    }
 }
 
 fn resolved_package_api_rows(

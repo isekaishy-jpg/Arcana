@@ -6,8 +6,7 @@ pub(crate) fn build_execution_context_for_target(
 ) -> Result<BuildExecutionContext, String> {
     if product.is_some() && !matches!(target, BuildTarget::WindowsDll) {
         return Err(
-            "`--product` is only supported for the `windows-dll` export compatibility target"
-                .to_string(),
+            "`--product` is only supported for the `windows-dll` native product target".to_string(),
         );
     }
     match target {
