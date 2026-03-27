@@ -3,7 +3,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use arcana_aot::{
-    AotEmitContext, AotEmitTarget, AotPackageEmission, AotRuntimeBinding, emit_package_with_context,
+    ARCANA_NATIVE_PRODUCT_TEMP_PROBES_ENV, AotEmitContext, AotEmitTarget, AotNativeProduct,
+    AotPackageEmission, AotRuntimeBinding, emit_package_with_context,
+};
+use arcana_cabi::{
+    ARCANA_CABI_CONTRACT_VERSION_V1, ARCANA_CABI_EXPORT_CONTRACT_ID, ArcanaCabiProductRole,
 };
 use arcana_hir::{HirResolvedWorkspace, HirWorkspaceSummary, resolve_workspace};
 use arcana_ir::{
@@ -20,9 +24,9 @@ use crate::fingerprint::{
     WorkspaceFingerprints, compute_workspace_fingerprints, package_uses_implicit_std,
 };
 use crate::{
-    ARTIFACT_DIR, BuildTarget, CACHE_DIR, GrimoireKind, LOCKFILE_VERSION, LOGS_DIR,
-    LockTargetEntry, Lockfile, NativeDependencyDelivery, PackageResult, WorkspaceGraph,
-    collect_validated_support_file_paths,
+    ARTIFACT_DIR, BuildOutputKey, BuildTarget, CACHE_DIR, GrimoireKind, LOCKFILE_VERSION, LOGS_DIR,
+    LockTargetEntry, Lockfile, NativeProductProducer, NativeProductSpec, PackageResult,
+    WorkspaceGraph, collect_validated_support_file_paths,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,11 +43,14 @@ pub struct BuildStatus {
     pub(crate) fingerprint_set_id: String,
     pub(crate) fingerprint: String,
     pub(crate) api_fingerprint: String,
+    pub(crate) build_key: BuildOutputKey,
     pub(crate) target: BuildTarget,
+    pub(crate) product: Option<String>,
     pub(crate) artifact_rel_path: String,
     pub(crate) kind: GrimoireKind,
     pub(crate) format: String,
     pub(crate) toolchain: String,
+    pub(crate) native_product_closure: Option<String>,
 }
 
 impl BuildStatus {
@@ -63,6 +70,14 @@ impl BuildStatus {
         &self.target
     }
 
+    pub fn product(&self) -> Option<&str> {
+        self.product.as_deref()
+    }
+
+    pub fn build_key(&self) -> &BuildOutputKey {
+        &self.build_key
+    }
+
     pub fn artifact_rel_path(&self) -> &str {
         &self.artifact_rel_path
     }
@@ -78,7 +93,19 @@ pub struct PreparedBuild {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct BuildExecutionContext;
+pub struct BuildExecutionContext {
+    pub selected_product: Option<String>,
+}
+
+impl BuildExecutionContext {
+    pub fn with_selected_product(selected_product: Option<String>) -> Self {
+        Self { selected_product }
+    }
+
+    pub fn selected_product(&self) -> Option<&str> {
+        self.selected_product.as_deref()
+    }
+}
 
 pub fn prepare_build(graph: &WorkspaceGraph) -> PackageResult<PreparedBuild> {
     let workspace = crate::load_workspace_hir_from_graph(&graph.root_dir, graph)?;
@@ -153,7 +180,13 @@ pub fn plan_build_for_target_with_context(
         prepared,
         existing_lock,
         context,
-        |member| Some(planned_target_for_member(&target, &member.kind)),
+        |member| {
+            Ok(Some(resolve_member_build_key(
+                member,
+                planned_target_for_member(&target, &member.kind),
+                context.selected_product(),
+            )?))
+        },
     )
 }
 
@@ -175,13 +208,13 @@ pub fn plan_package_build_for_target_with_context(
         context,
         |member| {
             if packaged_names.contains(&member.name) {
-                Some(planned_package_target_for_member(
-                    &target,
-                    packaged_member,
-                    &member.name,
-                ))
+                Ok(Some(resolve_member_build_key(
+                    member,
+                    planned_package_target_for_member(&target, packaged_member, &member.name),
+                    context.selected_product(),
+                )?))
             } else {
-                None
+                Ok(None)
             }
         },
     )
@@ -196,7 +229,7 @@ fn plan_build_for_member_targets_with_context<F>(
     mut target_for_member: F,
 ) -> PackageResult<Vec<BuildStatus>>
 where
-    F: FnMut(&crate::WorkspaceMember) -> Option<BuildTarget>,
+    F: FnMut(&crate::WorkspaceMember) -> PackageResult<Option<BuildOutputKey>>,
 {
     let mut statuses = Vec::new();
     let mut upstream_built = HashMap::<String, bool>::new();
@@ -205,22 +238,24 @@ where
         let member = graph
             .member(name)
             .ok_or_else(|| format!("workspace planner missing member `{name}`"))?;
-        let Some(member_target) = target_for_member(member) else {
+        let Some(member_build_key) = target_for_member(member)? else {
             continue;
         };
+        let member_target = member_build_key.target.clone();
         let member_fingerprints = prepared
             .fingerprints
             .member(name)
             .ok_or_else(|| format!("missing fingerprint for member `{name}`"))?;
         let planned_toolchain =
             current_build_toolchain_for_target_with_context(&member_target, context)?;
+        let native_product_closure =
+            crate::distribution::native_product_closure_digest(graph, name, &member_build_key)?;
         let fingerprint = member_fingerprints.source().to_string();
         let api_fingerprint = member_fingerprints.api().to_string();
-        let artifact_rel_path =
-            artifact_rel_path(name, &fingerprint, &member.kind, &member_target)?;
+        let artifact_rel_path = artifact_rel_path(member, &fingerprint, &member_build_key)?;
         let existing = existing_lock
             .and_then(|lock| lock.members.get(name))
-            .and_then(|member| member.target(&member_target));
+            .and_then(|member| member.build(&member_build_key));
         let format = member_target
             .format()
             .ok_or_else(|| format!("unsupported build target `{member_target}`"))?
@@ -236,6 +271,9 @@ where
         let toolchain_changed = existing
             .map(|entry| entry.toolchain != planned_toolchain)
             .unwrap_or(true);
+        let native_product_closure_changed = existing
+            .map(|entry| entry.native_product_closure != native_product_closure)
+            .unwrap_or(native_product_closure.is_some());
         let dependency_built = member
             .deps
             .iter()
@@ -245,6 +283,7 @@ where
             || dependency_built
             || format_changed
             || toolchain_changed
+            || native_product_closure_changed
             || !cached_artifact_matches_status(
                 &artifact_abs_path,
                 name,
@@ -257,6 +296,7 @@ where
                 existing
                     .map(|entry| entry.artifact_hash.as_str())
                     .unwrap_or(""),
+                native_product_closure.as_deref(),
             );
         upstream_built.insert(name.clone(), built);
         statuses.push(BuildStatus {
@@ -270,11 +310,14 @@ where
             fingerprint_set_id: prepared.fingerprint_set_id.clone(),
             fingerprint,
             api_fingerprint,
+            build_key: member_build_key.clone(),
             target: member_target,
+            product: member_build_key.product.clone(),
             artifact_rel_path,
             kind: member.kind.clone(),
             format,
             toolchain: planned_toolchain.clone(),
+            native_product_closure,
         });
     }
 
@@ -368,7 +411,7 @@ pub fn execute_build_with_context(
         let emission = emit_artifact_for_target(
             graph,
             member,
-            &status.target,
+            &status.build_key,
             &member.kind,
             root_package,
             linked_packages,
@@ -401,7 +444,7 @@ pub fn execute_build_with_context(
         write_root_emission_artifact(&artifact_path, &emission)?;
         write_emission_support_files(&artifact_path, &emission)?;
         let artifact_hash = cached_emission_hash(
-            status.target.key(),
+            &status.build_key.storage_key(),
             &status.format,
             artifact,
             emission.root_artifact_bytes.as_deref(),
@@ -420,6 +463,7 @@ pub fn execute_build_with_context(
                 &status.toolchain,
                 &emission,
                 &artifact_hash,
+                status.native_product_closure.as_deref(),
             ),
         )
         .map_err(|e| {
@@ -530,11 +574,11 @@ pub fn render_lockfile(
         if builds.is_empty() {
             continue;
         }
-        for (target, entry) in builds {
+        for (build_key, entry) in builds {
             out.push_str(&format!(
                 "[builds.\"{}\".\"{}\"]\n",
                 escape_toml(name),
-                escape_toml(target.key())
+                escape_toml(&build_key.storage_key())
             ));
             out.push_str(&format!(
                 "fingerprint = \"{}\"\n",
@@ -553,6 +597,15 @@ pub fn render_lockfile(
                 escape_toml(&entry.artifact_hash)
             ));
             out.push_str(&format!("format = \"{}\"\n", escape_toml(&entry.format)));
+            if let Some(product) = &entry.product {
+                out.push_str(&format!("product = \"{}\"\n", escape_toml(product)));
+            }
+            if let Some(closure) = &entry.native_product_closure {
+                out.push_str(&format!(
+                    "native_product_closure = \"{}\"\n",
+                    escape_toml(closure)
+                ));
+            }
             out.push_str(&format!(
                 "toolchain = \"{}\"\n\n",
                 escape_toml(&entry.toolchain)
@@ -568,13 +621,13 @@ fn merge_lock_build_entries(
     names: &[String],
     statuses: &[BuildStatus],
     existing_lock: Option<&Lockfile>,
-) -> PackageResult<BTreeMap<String, BTreeMap<BuildTarget, LockTargetEntry>>> {
-    let mut updates = HashMap::<(String, BuildTarget), LockTargetEntry>::new();
+) -> PackageResult<BTreeMap<String, BTreeMap<BuildOutputKey, LockTargetEntry>>> {
+    let mut updates = HashMap::<(String, BuildOutputKey), LockTargetEntry>::new();
     for status in statuses {
         let artifact_path = graph.root_dir.join(&status.artifact_rel_path);
         let artifact_hash = cached_emission_hash_for_path(&artifact_path, &status.target)?;
         updates.insert(
-            (status.member.clone(), status.target.clone()),
+            (status.member.clone(), status.build_key.clone()),
             LockTargetEntry {
                 fingerprint: status.fingerprint.clone(),
                 api_fingerprint: status.api_fingerprint.clone(),
@@ -582,6 +635,8 @@ fn merge_lock_build_entries(
                 artifact_hash,
                 format: status.format.clone(),
                 toolchain: status.toolchain.clone(),
+                product: status.product.clone(),
+                native_product_closure: status.native_product_closure.clone(),
             },
         );
     }
@@ -592,9 +647,9 @@ fn merge_lock_build_entries(
             .and_then(|lock| lock.members.get(name))
             .map(|member| member.targets.clone())
             .unwrap_or_default();
-        for ((member_name, target), entry) in &updates {
+        for ((member_name, build_key), entry) in &updates {
             if member_name == name {
-                entries.insert(target.clone(), entry.clone());
+                entries.insert(build_key.clone(), entry.clone());
             }
         }
         merged.insert(name.clone(), entries);
@@ -606,9 +661,9 @@ pub fn render_build_summary(statuses: &[BuildStatus], graph: &WorkspaceGraph) ->
     let mut out = String::from("summary-v1\n");
     for status in statuses {
         out.push_str(&format!(
-            "BUILD_STATUS member={} target={} disposition={} fingerprint={}\n",
+            "BUILD_STATUS member={} build={} disposition={} fingerprint={}\n",
             status.member,
-            status.target(),
+            status.build_key.storage_key(),
             match status.disposition {
                 BuildDisposition::Built => "built",
                 BuildDisposition::CacheHit => "cache_hit",
@@ -659,51 +714,6 @@ fn collect_transitive_member_names(
         }
     }
     Ok(visited)
-}
-
-fn select_native_runtime_binding(
-    graph: &WorkspaceGraph,
-    root_member: &str,
-) -> PackageResult<AotRuntimeBinding> {
-    let closure = collect_transitive_member_names(graph, root_member)?;
-    let mut binding = AotRuntimeBinding::Baked;
-    for member_name in closure {
-        let member = graph
-            .member(&member_name)
-            .ok_or_else(|| format!("missing workspace member `{member_name}`"))?;
-        for (alias, spec) in &member.direct_dep_specs {
-            if spec.native_delivery != NativeDependencyDelivery::Dll {
-                continue;
-            }
-            let package_name = member.direct_dep_packages.get(alias).ok_or_else(|| {
-                format!(
-                    "workspace member `{}` is missing direct dependency package metadata for alias `{alias}`",
-                    member.name
-                )
-            })?;
-            let requested = native_runtime_binding_for_package(package_name).ok_or_else(|| {
-                format!(
-                    "dependency `{}` (package `{package_name}`) in `{}` requests `native_delivery = \"dll\"`, but that package does not define a supported native runtime DLL lane",
-                    alias,
-                    member.name
-                )
-            })?;
-            if binding != AotRuntimeBinding::Baked && binding != requested {
-                return Err(format!(
-                    "native bundle for `{root_member}` requires incompatible DLL runtime bindings"
-                ));
-            }
-            binding = requested;
-        }
-    }
-    Ok(binding)
-}
-
-fn native_runtime_binding_for_package(package_name: &str) -> Option<AotRuntimeBinding> {
-    match package_name {
-        "arcana_desktop" => Some(AotRuntimeBinding::DesktopRuntimeDll),
-        _ => None,
-    }
 }
 
 fn runtime_requirement_roots_for_kind(kind: &GrimoireKind) -> RuntimeRequirementRoots {
@@ -794,14 +804,14 @@ fn link_ir_packages(
 fn emit_artifact_for_target(
     graph: &WorkspaceGraph,
     root_member: &crate::WorkspaceMember,
-    target: &BuildTarget,
+    build_key: &BuildOutputKey,
     root_kind: &GrimoireKind,
     root: IrPackage,
     linked_packages: Vec<IrPackage>,
     build_context: &BuildExecutionContext,
 ) -> PackageResult<AotPackageEmission> {
-    let context = emit_context_for_target(graph, root_member, target, root_kind, build_context)?;
-    match target {
+    let context = emit_context_for_target(graph, root_member, build_key, root_kind, build_context)?;
+    match build_key.target_ref() {
         BuildTarget::InternalAot => emit_package_with_context(
             AotEmitTarget::InternalArtifact,
             &link_ir_packages(root_kind, root, linked_packages),
@@ -817,33 +827,47 @@ fn emit_artifact_for_target(
             &link_ir_packages(root_kind, root, linked_packages),
             &context,
         ),
-        BuildTarget::Other(_) => Err(format!("unsupported build target `{target}`")),
+        BuildTarget::Other(_) => Err(format!(
+            "unsupported build target `{}`",
+            build_key.target_ref()
+        )),
     }
 }
 
 fn emit_context_for_target(
     graph: &WorkspaceGraph,
     root_member: &crate::WorkspaceMember,
-    target: &BuildTarget,
+    build_key: &BuildOutputKey,
     kind: &GrimoireKind,
     build_context: &BuildExecutionContext,
 ) -> PackageResult<AotEmitContext> {
-    let root_artifact_file_name = target.artifact_file_name(kind)?.to_string();
-    let _ = build_context;
-    let runtime_binding = match target {
-        BuildTarget::WindowsExe | BuildTarget::WindowsDll => {
-            select_native_runtime_binding(graph, &root_member.name)?
-        }
-        BuildTarget::InternalAot | BuildTarget::Other(_) => AotRuntimeBinding::Baked,
+    let selected_native_product = selected_native_product_for_build(
+        root_member,
+        build_key.target_ref(),
+        build_key.product(),
+    )?;
+    let root_artifact_file_name = match &selected_native_product {
+        Some(product) => product.file.clone(),
+        None => build_key.target_ref().artifact_file_name(kind)?.to_string(),
     };
-    match target {
+    let _ = graph;
+    let _ = build_context;
+    let runtime_binding = AotRuntimeBinding::Baked;
+    match build_key.target_ref() {
         BuildTarget::InternalAot | BuildTarget::WindowsExe | BuildTarget::WindowsDll => {
             Ok(AotEmitContext {
                 root_artifact_file_name: Some(root_artifact_file_name),
                 runtime_binding,
+                native_product: selected_native_product
+                    .as_ref()
+                    .map(native_product_metadata_from_spec)
+                    .transpose()?,
             })
         }
-        BuildTarget::Other(_) => Err(format!("unsupported build target `{target}`")),
+        BuildTarget::Other(_) => Err(format!(
+            "unsupported build target `{}`",
+            build_key.target_ref()
+        )),
     }
 }
 
@@ -901,21 +925,177 @@ fn write_emission_support_files(
 }
 
 fn artifact_rel_path(
-    name: &str,
+    member: &crate::WorkspaceMember,
     fingerprint: &str,
-    kind: &GrimoireKind,
-    target: &BuildTarget,
+    build_key: &BuildOutputKey,
 ) -> PackageResult<String> {
+    let artifact_file_name = match selected_native_product_for_build(
+        member,
+        build_key.target_ref(),
+        build_key.product(),
+    )? {
+        Some(product) => product.file,
+        None => build_key
+            .target_ref()
+            .artifact_file_name(&member.kind)?
+            .to_string(),
+    };
     Ok(format!(
         "{CACHE_DIR}/{ARTIFACT_DIR}/{name}/{}/{}/{}",
-        target.key(),
+        build_key.storage_key(),
         sanitize_fingerprint(fingerprint),
-        target.artifact_file_name(kind)?
+        artifact_file_name,
+        name = member.name
     ))
 }
 
 fn sanitize_fingerprint(text: &str) -> String {
     text.replace(':', "_")
+}
+
+fn resolve_member_build_key(
+    member: &crate::WorkspaceMember,
+    target: BuildTarget,
+    requested_product: Option<&str>,
+) -> PackageResult<BuildOutputKey> {
+    match target {
+        BuildTarget::WindowsDll => {
+            let selected = selected_native_product_for_build(member, &target, requested_product)?;
+            let product_name = selected
+                .map(|product| product.name)
+                .unwrap_or_else(|| "default".to_string());
+            Ok(BuildOutputKey::new(target, Some(product_name)))
+        }
+        _ => Ok(BuildOutputKey::target(target)),
+    }
+}
+
+fn selected_native_product_for_build(
+    member: &crate::WorkspaceMember,
+    target: &BuildTarget,
+    requested_product: Option<&str>,
+) -> PackageResult<Option<NativeProductSpec>> {
+    match target {
+        BuildTarget::WindowsDll => select_export_product_spec(member, requested_product).map(Some),
+        BuildTarget::InternalAot | BuildTarget::WindowsExe | BuildTarget::Other(_) => Ok(None),
+    }
+}
+
+fn select_export_product_spec(
+    member: &crate::WorkspaceMember,
+    requested_product: Option<&str>,
+) -> PackageResult<NativeProductSpec> {
+    let export_products = member
+        .native_products
+        .values()
+        .filter(|product| product.role == ArcanaCabiProductRole::Export)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if export_products.is_empty() {
+        let requested_name = requested_product.unwrap_or("default");
+        native_product_probe(
+            "implicit_export_product",
+            format!(
+                "member={} requested_product={} synthesized_default=true",
+                member.name, requested_name
+            ),
+        );
+        return Ok(NativeProductSpec {
+            name: requested_name.to_string(),
+            kind: "dll".to_string(),
+            role: ArcanaCabiProductRole::Export,
+            producer: NativeProductProducer::ArcanaSource,
+            file: BuildTarget::WindowsDll
+                .artifact_file_name(&member.kind)?
+                .to_string(),
+            contract: ARCANA_CABI_EXPORT_CONTRACT_ID.to_string(),
+            rust_cdylib_crate: None,
+            sidecars: Vec::new(),
+        });
+    }
+
+    let selected = match requested_product {
+        Some(name) => export_products
+            .into_iter()
+            .find(|product| product.name == name)
+            .ok_or_else(|| {
+                native_product_probe(
+                    "missing_export_product",
+                    format!("member={} requested_product={name}", member.name),
+                );
+                format!(
+                    "workspace member `{}` has no export native product `{name}`",
+                    member.name
+                )
+            })?,
+        None => {
+            let [product] = export_products.as_slice() else {
+                native_product_probe(
+                    "ambiguous_export_product",
+                    format!(
+                        "member={} export_products={}",
+                        member.name,
+                        export_products
+                            .iter()
+                            .map(|product| product.name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    ),
+                );
+                return Err(format!(
+                    "workspace member `{}` has multiple export native products; pass `--product <name>`",
+                    member.name
+                ));
+            };
+            product.clone()
+        }
+    };
+
+    if selected.producer != NativeProductProducer::ArcanaSource {
+        native_product_probe(
+            "unsupported_export_producer",
+            format!(
+                "member={} product={} producer={}",
+                member.name,
+                selected.name,
+                selected.producer.as_str()
+            ),
+        );
+        return Err(format!(
+            "export native product `{}` on `{}` uses producer `{}`, but only `arcana-source` is supported for root `windows-dll` builds in Phase 1",
+            selected.name,
+            member.name,
+            selected.producer.as_str()
+        ));
+    }
+
+    native_product_probe(
+        "selected_export_product",
+        format!(
+            "member={} product={} contract={}",
+            member.name, selected.name, selected.contract
+        ),
+    );
+
+    Ok(selected)
+}
+
+fn native_product_metadata_from_spec(spec: &NativeProductSpec) -> PackageResult<AotNativeProduct> {
+    if spec.role != ArcanaCabiProductRole::Export {
+        return Err(format!(
+            "native product `{}` uses role `{}` but `windows-dll` requires `role = \"export\"`",
+            spec.name,
+            spec.role.as_str()
+        ));
+    }
+
+    Ok(AotNativeProduct {
+        name: spec.name.clone(),
+        role: spec.role,
+        contract_id: spec.contract.clone(),
+        contract_version: ARCANA_CABI_CONTRACT_VERSION_V1,
+    })
 }
 
 fn validate_prepared_snapshot_with_context(
@@ -948,6 +1128,15 @@ fn validate_prepared_snapshot_with_context(
         }
     }
     Ok(())
+}
+
+fn native_product_probe(event: &str, message: impl AsRef<str>) {
+    if std::env::var_os(ARCANA_NATIVE_PRODUCT_TEMP_PROBES_ENV).is_some() {
+        eprintln!(
+            "[arcana-native-product-probe] {event}: {}",
+            message.as_ref()
+        );
+    }
 }
 
 fn format_string_array(items: &[String]) -> String {

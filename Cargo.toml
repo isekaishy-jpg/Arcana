@@ -1,8 +1,8 @@
 [workspace]
 members = [
     "crates/arcana-aot",
+    "crates/arcana-cabi",
     "crates/arcana-cli",
-    "crates/arcana-desktop-runtime",
     "crates/arcana-frontend",
     "crates/arcana-hir",
     "crates/arcana-ir",
@@ -20,7 +20,7 @@ license = "MIT"
 
 [workspace.dependencies]
 arcana-aot = { path = "crates/arcana-aot" }
-arcana-desktop-runtime = { path = "crates/arcana-desktop-runtime" }
+arcana-cabi = { path = "crates/arcana-cabi" }
 arcana-frontend = { path = "crates/arcana-frontend" }
 arcana-hir = { path = "crates/arcana-hir" }
 arcana-ir = { path = "crates/arcana-ir" }

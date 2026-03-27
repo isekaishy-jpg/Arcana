@@ -2,6 +2,7 @@ mod artifact;
 mod codec;
 mod compile;
 mod emit;
+mod instance_product;
 mod native_abi;
 mod native_backend;
 mod native_layout;
@@ -23,7 +24,12 @@ pub use codec::{parse_package_artifact, render_package_artifact};
 pub use compile::{compile_module, compile_package};
 pub use emit::{
     AOT_WINDOWS_DLL_FORMAT, AOT_WINDOWS_EXE_FORMAT, AotEmissionFile, AotEmitContext, AotEmitTarget,
-    AotPackageEmission, AotRuntimeBinding, emit_package, emit_package_with_context,
+    AotNativeProduct, AotPackageEmission, AotRuntimeBinding, emit_package,
+    emit_package_with_context,
+};
+pub use instance_product::{
+    ARCANA_NATIVE_PRODUCT_TEMP_PROBES_ENV, AotCompiledInstanceProduct, AotInstanceProductSpec,
+    compile_instance_product,
 };
 pub use native_manifest::{
     NATIVE_BUNDLE_MANIFEST_FORMAT, NativeBundleLaunchManifest, NativeBundleManifest,
@@ -83,6 +89,14 @@ mod tests {
         rows.iter()
             .map(|row| T::from_test_row(row.as_ref()))
             .collect()
+    }
+
+    fn test_emit_context(file_name: &str) -> AotEmitContext {
+        AotEmitContext {
+            root_artifact_file_name: Some(file_name.to_string()),
+            runtime_binding: AotRuntimeBinding::Baked,
+            native_product: None,
+        }
     }
 
     fn sync_exported_function_surface_rows(package: &mut IrPackage) {
@@ -376,10 +390,7 @@ mod tests {
         let exe = emit_package_with_context(
             AotEmitTarget::WindowsExeBundle,
             &package,
-            &AotEmitContext {
-                root_artifact_file_name: Some("app.exe".to_string()),
-                runtime_binding: AotRuntimeBinding::Baked,
-            },
+            &test_emit_context("app.exe"),
         )
         .expect("windows exe emit should succeed");
         assert!(
@@ -408,10 +419,7 @@ mod tests {
         let dll = emit_package_with_context(
             AotEmitTarget::WindowsDllBundle,
             &package,
-            &AotEmitContext {
-                root_artifact_file_name: Some("lib.dll".to_string()),
-                runtime_binding: AotRuntimeBinding::Baked,
-            },
+            &test_emit_context("lib.dll"),
         )
         .expect("windows dll emit should succeed");
         assert!(
@@ -428,7 +436,8 @@ mod tests {
         );
         let dll_text =
             std::str::from_utf8(&dll.support_files[0].bytes).expect("dll header should be utf8");
-        assert!(dll_text.contains("arcana_last_error_alloc"));
+        assert!(dll_text.contains("arcana_cabi_last_error_alloc_v1"));
+        assert!(dll_text.contains("arcana_cabi_get_product_api_v1"));
         let dll_def =
             std::str::from_utf8(&dll.support_files[1].bytes).expect("dll def should be utf8");
         assert!(dll_def.contains("EXPORTS"));
@@ -504,10 +513,7 @@ mod tests {
         let plan = build_native_package_plan(
             AotEmitTarget::WindowsExeBundle,
             &package,
-            &AotEmitContext {
-                root_artifact_file_name: Some("app.exe".to_string()),
-                runtime_binding: AotRuntimeBinding::Baked,
-            },
+            &test_emit_context("app.exe"),
         )
         .expect("native plan should build");
         assert_eq!(plan.root_artifact_file_name, "app.exe");
@@ -547,10 +553,7 @@ mod tests {
         let err = build_native_package_plan(
             AotEmitTarget::WindowsExeBundle,
             &package,
-            &AotEmitContext {
-                root_artifact_file_name: Some("app.exe".to_string()),
-                runtime_binding: AotRuntimeBinding::Baked,
-            },
+            &test_emit_context("app.exe"),
         )
         .expect_err("native plan should reject missing main");
         assert!(
@@ -608,10 +611,7 @@ mod tests {
         let plan = build_native_package_plan(
             AotEmitTarget::WindowsDllBundle,
             &package,
-            &AotEmitContext {
-                root_artifact_file_name: Some("lib.dll".to_string()),
-                runtime_binding: AotRuntimeBinding::Baked,
-            },
+            &test_emit_context("lib.dll"),
         )
         .expect("native plan should build");
         let manifest_text =
@@ -622,19 +622,42 @@ mod tests {
         assert_eq!(manifest.format, NATIVE_BUNDLE_MANIFEST_FORMAT);
         assert_eq!(manifest.target, "windows-dll");
         assert_eq!(manifest.root_artifact, "lib.dll");
+        assert_eq!(manifest.product_name.as_deref(), Some("default"));
+        assert_eq!(manifest.product_role.as_deref(), Some("export"));
+        assert_eq!(
+            manifest.contract_id.as_deref(),
+            Some("arcana.cabi.export.v1")
+        );
+        assert_eq!(manifest.contract_version, Some(1));
         assert_eq!(manifest.launch.kind, "dynamic-library");
         assert_eq!(manifest.launch.header.as_deref(), Some("lib.dll.h"));
         assert_eq!(
             manifest.launch.definition_file.as_deref(),
             Some("lib.dll.def")
         );
+        assert_eq!(
+            manifest.launch.last_error_alloc_symbol.as_deref(),
+            Some("arcana_cabi_last_error_alloc_v1")
+        );
+        assert_eq!(
+            manifest.launch.owned_bytes_free_symbol.as_deref(),
+            Some("arcana_cabi_owned_bytes_free_v1")
+        );
+        assert_eq!(
+            manifest.launch.owned_str_free_symbol.as_deref(),
+            Some("arcana_cabi_owned_str_free_v1")
+        );
         assert_eq!(manifest.launch.exports.len(), 1);
         assert_eq!(manifest.launch.exports[0].export_name, "answer");
         assert_eq!(manifest.launch.exports[0].routine_key, "core#fn-0");
+        assert_eq!(manifest.launch.exports[0].symbol_name, "answer");
         assert_eq!(manifest.launch.exports[0].return_type, "Bool");
         assert_eq!(manifest.launch.exports[0].params.len(), 1);
         assert_eq!(manifest.launch.exports[0].params[0].name, "value");
+        assert_eq!(manifest.launch.exports[0].params[0].source_mode, "read");
+        assert_eq!(manifest.launch.exports[0].params[0].pass_mode, "in");
         assert_eq!(manifest.launch.exports[0].params[0].ty, "Int");
+        assert_eq!(manifest.launch.exports[0].params[0].write_back_ty, None);
     }
 
     #[test]
@@ -711,10 +734,7 @@ mod tests {
         let plan = build_native_package_plan(
             AotEmitTarget::WindowsDllBundle,
             &package,
-            &AotEmitContext {
-                root_artifact_file_name: Some("lib.dll".to_string()),
-                runtime_binding: AotRuntimeBinding::Baked,
-            },
+            &test_emit_context("lib.dll"),
         )
         .expect("native plan should build");
         let manifest_text =
@@ -724,9 +744,13 @@ mod tests {
 
         assert_eq!(manifest.launch.exports.len(), 2);
         assert_eq!(manifest.launch.exports[0].export_name, "greet");
+        assert_eq!(manifest.launch.exports[0].params[0].source_mode, "read");
+        assert_eq!(manifest.launch.exports[0].params[0].pass_mode, "in");
         assert_eq!(manifest.launch.exports[0].params[0].ty, "Str");
         assert_eq!(manifest.launch.exports[0].return_type, "Str");
         assert_eq!(manifest.launch.exports[1].export_name, "prefix");
+        assert_eq!(manifest.launch.exports[1].params[0].source_mode, "read");
+        assert_eq!(manifest.launch.exports[1].params[0].pass_mode, "in");
         assert_eq!(manifest.launch.exports[1].params[0].ty, "Array[Int]");
         assert_eq!(manifest.launch.exports[1].return_type, "Array[Int]");
     }
@@ -873,10 +897,7 @@ mod tests {
         let plan = build_native_package_plan(
             AotEmitTarget::WindowsDllBundle,
             &package,
-            &AotEmitContext {
-                root_artifact_file_name: Some("lib.dll".to_string()),
-                runtime_binding: AotRuntimeBinding::Baked,
-            },
+            &test_emit_context("lib.dll"),
         )
         .expect("native plan should build");
         let manifest_text =
@@ -886,6 +907,8 @@ mod tests {
 
         assert_eq!(manifest.launch.exports.len(), 1);
         assert_eq!(manifest.launch.exports[0].export_name, "echo_pair");
+        assert_eq!(manifest.launch.exports[0].params[0].source_mode, "read");
+        assert_eq!(manifest.launch.exports[0].params[0].pass_mode, "in");
         assert_eq!(manifest.launch.exports[0].params[0].ty, "Pair[Str, Int]");
         assert_eq!(manifest.launch.exports[0].return_type, "Pair[Str, Int]");
     }

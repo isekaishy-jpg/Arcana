@@ -27,14 +27,22 @@ mod json_abi;
 mod native_abi;
 #[cfg(windows)]
 mod native_host;
+mod native_product_loader;
 mod package_image;
 mod routine_plan;
 pub use json_abi::{
     RUNTIME_JSON_ABI_FORMAT, execute_exported_json_abi_routine, render_exported_json_abi_manifest,
 };
-pub use native_abi::{RuntimeAbiCallOutcome, RuntimeAbiValue, execute_exported_abi_routine};
+pub use native_abi::{
+    RuntimeAbiExportOutcome, RuntimeAbiValue, RuntimeAbiWriteBack, execute_exported_abi_routine,
+};
 #[cfg(windows)]
 pub use native_host::NativeProcessHost;
+pub use native_product_loader::{
+    RuntimeChildBindingInfo, RuntimeNativePluginHandle, RuntimeNativeProductCatalog,
+    RuntimeNativeProductInfo, activate_current_bundle_native_products, load_bundle_native_products,
+    load_current_bundle_native_products,
+};
 pub use package_image::{
     RUNTIME_PACKAGE_IMAGE_FORMAT, parse_runtime_package_image, render_runtime_package_image,
 };
@@ -17241,6 +17249,19 @@ pub fn execute_entrypoint_routine(
             Err("main must return Int or Unit in the current runtime lane".to_string())
         }
     }
+}
+
+pub fn execute_current_bundle_entrypoint(
+    package_image_text: &str,
+    routine_key: &str,
+) -> Result<i32, String> {
+    let mut native_products = activate_current_bundle_native_products()?;
+    if let Some(code) = native_products.run_child_entrypoint(package_image_text, routine_key)? {
+        return Ok(code);
+    }
+    let plan = parse_runtime_package_image(package_image_text)?;
+    let mut host = current_process_runtime_host()?;
+    execute_entrypoint_routine(&plan, routine_key, host.as_mut())
 }
 
 pub fn current_process_runtime_host() -> Result<Box<dyn RuntimeHost>, String> {

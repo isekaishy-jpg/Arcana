@@ -1,3 +1,4 @@
+use arcana_cabi::ArcanaCabiProductRole;
 use arcana_ir::IrPackage;
 
 use crate::artifact::{AOT_INTERNAL_FORMAT, AotPackageArtifact};
@@ -31,7 +32,6 @@ impl AotEmitTarget {
 pub enum AotRuntimeBinding {
     #[default]
     Baked,
-    DesktopRuntimeDll,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,6 +44,15 @@ pub struct AotEmissionFile {
 pub struct AotEmitContext {
     pub root_artifact_file_name: Option<String>,
     pub runtime_binding: AotRuntimeBinding,
+    pub native_product: Option<AotNativeProduct>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AotNativeProduct {
+    pub name: String,
+    pub role: ArcanaCabiProductRole,
+    pub contract_id: String,
+    pub contract_version: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

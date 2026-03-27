@@ -9,7 +9,7 @@ Record the real friction found while bringing `arcana_desktop` up to the current
 The large proof now lives as a normal checked-in workspace at `examples/arcana-desktop-proof`.
 It is packaged through the standard member/target flow:
 - `app` as `windows-exe`
-- `arcana_desktop.dll` as a staged runtime provider selected by `native_delivery = "dll"` on the desktop dependency
+- `arcana_desktop.dll` as a staged child product selected by `native_child = "default"` on the desktop dependency
 
 The CLI integration proof packages that exact workspace instead of generating a special test-only source tree.
 
@@ -66,7 +66,7 @@ Problem:
 
 Resolution:
 - The real sibling DLL boundary was moved under the grimoire, to the native runtime/provider layer.
-- Apps still compile their Arcana-facing `arcana_desktop` source usage normally, but native bundles can now stage `arcana_desktop.dll` as the runtime host/session provider chosen through dependency metadata.
+- Apps still compile their Arcana-facing `arcana_desktop` source usage normally, but native bundles can now stage `arcana_desktop.dll` as a declared child product chosen through dependency metadata.
 
 Implication for future grimoires:
 - There is a hard distinction between:
@@ -75,20 +75,19 @@ Implication for future grimoires:
   - native `windows-dll` ABI exports for source-level Arcana libraries
 - Desktop/window/input/text records are appropriate for Arcana package boundaries, not for the narrow native ABI boundary used by `windows-dll`.
 
-### 5. Runtime-DLL bundles originally missed the Rust std DLL closure
+### 5. Runtime-DLL bundles originally depended on a Rust `dylib` closure
 
 Problem:
-- Once `native_delivery = "dll"` moved the desktop runtime boundary into a real sibling `arcana_desktop.dll`, the staged bundle still only copied that provider DLL itself.
-- On Windows, the Rust `dylib` provider also depends on the toolchain `std-*.dll`.
-- The result was a bundle that staged `app.exe` and `arcana_desktop.dll` but failed to launch with a loader error before `main` ran.
+- Once `native_delivery = "dll"` moved the desktop runtime boundary into a real sibling `arcana_desktop.dll`, the initial implementation staged a Rust `dylib` provider.
+- On Windows that also dragged in a toolchain `std-*.dll` closure, which was the wrong long-term packaging shape.
 
 Resolution:
-- Native bundle staging now includes the Rust toolchain `std-*.dll` closure whenever runtime-provider DLL delivery is selected.
-- The checked-in showcase bundle now launches and passes its packaged `--smoke` proof with the staged sibling DLL set only.
+- The desktop sibling DLL is now built as a real declared `cdylib` child product from manifest metadata.
+- Bundle staging resolves declared child products directly and no longer scavenges Rust toolchain `std-*.dll` files.
 
 Implication for future grimoires:
-- Native grimoire/runtime DLL delivery is now a real runnable bundle shape instead of a fake sibling-DLL proof.
-- Any future runtime-provider DLL lane must stage its full native loader closure, not only the top-level provider DLL.
+- Dependency-scoped native products now have an honest declared bundle shape.
+- Future child/plugin products must keep their non-system closure explicit through declared sidecars, not through toolchain scavenging.
 
 ## Current Practical Guidance
 
@@ -99,7 +98,7 @@ When building native desktop libraries:
 
 When building large desktop workspaces:
 - Prefer a root app member for native `.exe` proof.
-- Select `native_delivery = "dll"` on the desktop dependency when you want a sibling runtime DLL instead of baking the desktop runtime seam into the bundle executable.
+- Select `native_child = "default"` on the desktop dependency when you want a sibling runtime DLL instead of baking the desktop runtime seam into the bundle executable.
 - Treat `windows-dll` as a separate source-library ABI lane, not as the desktop runtime-provider lane.
 
 ## Remaining Friction

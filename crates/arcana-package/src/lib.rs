@@ -2,7 +2,11 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use arcana_aot::{AOT_INTERNAL_FORMAT, AOT_WINDOWS_DLL_FORMAT, AOT_WINDOWS_EXE_FORMAT};
+use arcana_aot::{
+    AOT_INTERNAL_FORMAT, AOT_WINDOWS_DLL_FORMAT, AOT_WINDOWS_EXE_FORMAT,
+    ARCANA_NATIVE_PRODUCT_TEMP_PROBES_ENV,
+};
+use arcana_cabi::ArcanaCabiProductRole;
 use arcana_hir::{
     HirWorkspacePackage, HirWorkspaceSummary, build_package_layout, build_package_summary,
     build_workspace_summary, derive_source_module_path, lower_module_text,
@@ -24,15 +28,17 @@ pub use build::{
 };
 pub use distribution::{
     DISTRIBUTION_BUNDLE_FORMAT, DistributionBundle, default_distribution_dir,
-    stage_distribution_bundle,
+    default_distribution_dir_for_build, stage_distribution_bundle,
+    stage_distribution_bundle_for_build,
 };
 pub use fingerprint::{
     MemberFingerprints, WorkspaceFingerprints, compute_workspace_fingerprints,
     compute_workspace_snapshot_id,
 };
 
-pub(crate) const LOCKFILE_VERSION: i64 = 2;
-pub(crate) const LEGACY_LOCKFILE_VERSION: i64 = 1;
+pub(crate) const LOCKFILE_VERSION: i64 = 3;
+pub(crate) const LEGACY_LOCKFILE_VERSION: i64 = 2;
+pub(crate) const OLDER_LOCKFILE_VERSION: i64 = 1;
 pub(crate) const CACHE_DIR: &str = ".arcana";
 pub(crate) const ARTIFACT_DIR: &str = "artifacts";
 pub(crate) const LOGS_DIR: &str = "logs";
@@ -154,6 +160,50 @@ pub fn parse_build_target(text: &str) -> PackageResult<BuildTarget> {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BuildOutputKey {
+    pub target: BuildTarget,
+    pub product: Option<String>,
+}
+
+impl BuildOutputKey {
+    pub fn new(target: BuildTarget, product: Option<String>) -> Self {
+        Self { target, product }
+    }
+
+    pub fn target(target: BuildTarget) -> Self {
+        Self {
+            target,
+            product: None,
+        }
+    }
+
+    pub fn target_ref(&self) -> &BuildTarget {
+        &self.target
+    }
+
+    pub fn product(&self) -> Option<&str> {
+        self.product.as_deref()
+    }
+
+    pub fn storage_key(&self) -> String {
+        match &self.product {
+            Some(product) => format!("{}@{}", self.target.key(), product),
+            None => self.target.key().to_string(),
+        }
+    }
+
+    pub fn from_storage_key(text: &str) -> Self {
+        match text.split_once('@') {
+            Some((target, product)) => Self {
+                target: BuildTarget::from_storage_key(target),
+                product: Some(product.to_string()),
+            },
+            None => Self::target(BuildTarget::from_storage_key(text)),
+        }
+    }
+}
+
 fn infer_build_target_from_format(format: &str) -> Option<BuildTarget> {
     match format {
         AOT_INTERNAL_FORMAT => Some(BuildTarget::InternalAot),
@@ -219,10 +269,58 @@ impl NativeDependencyDelivery {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NativeProductProducer {
+    ArcanaSource,
+    RustCdylib,
+}
+
+impl NativeProductProducer {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ArcanaSource => "arcana-source",
+            Self::RustCdylib => "rust-cdylib",
+        }
+    }
+
+    fn parse(text: &str) -> PackageResult<Self> {
+        match text {
+            "arcana-source" => Ok(Self::ArcanaSource),
+            "rust-cdylib" => Ok(Self::RustCdylib),
+            other => Err(format!(
+                "`producer` must be \"arcana-source\" or \"rust-cdylib\" (found `{other}`)"
+            )),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeProductSpec {
+    pub name: String,
+    pub kind: String,
+    pub role: ArcanaCabiProductRole,
+    pub producer: NativeProductProducer,
+    pub file: String,
+    pub contract: String,
+    pub rust_cdylib_crate: Option<String>,
+    pub sidecars: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DependencySpec {
     pub source: DependencySource,
     pub location: String,
     pub native_delivery: NativeDependencyDelivery,
+    pub native_child: Option<String>,
+    pub native_plugins: Vec<String>,
+}
+
+impl DependencySpec {
+    pub fn selected_native_child(&self) -> Option<&str> {
+        self.native_child.as_deref().or(match self.native_delivery {
+            NativeDependencyDelivery::Dll => Some("default"),
+            NativeDependencyDelivery::Baked => None,
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -231,6 +329,7 @@ pub struct Manifest {
     pub kind: GrimoireKind,
     pub workspace_members: Vec<String>,
     pub deps: BTreeMap<String, DependencySpec>,
+    pub native_products: BTreeMap<String, NativeProductSpec>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -242,6 +341,7 @@ pub struct WorkspaceMember {
     pub deps: Vec<String>,
     pub direct_dep_packages: BTreeMap<String, String>,
     pub direct_dep_specs: BTreeMap<String, DependencySpec>,
+    pub native_products: BTreeMap<String, NativeProductSpec>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -265,6 +365,8 @@ pub struct LockTargetEntry {
     pub artifact_hash: String,
     pub format: String,
     pub toolchain: String,
+    pub product: Option<String>,
+    pub native_product_closure: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -272,12 +374,28 @@ pub struct LockMember {
     pub path: String,
     pub deps: Vec<String>,
     pub kind: GrimoireKind,
-    pub targets: BTreeMap<BuildTarget, LockTargetEntry>,
+    pub targets: BTreeMap<BuildOutputKey, LockTargetEntry>,
 }
 
 impl LockMember {
     pub fn target(&self, target: &BuildTarget) -> Option<&LockTargetEntry> {
-        self.targets.get(target)
+        if let Some(entry) = self.targets.get(&BuildOutputKey::target(target.clone())) {
+            return Some(entry);
+        }
+        let mut matching = self
+            .targets
+            .iter()
+            .filter(|(build_key, _)| build_key.target_ref() == target)
+            .map(|(_, entry)| entry);
+        let first = matching.next()?;
+        if matching.next().is_some() {
+            return None;
+        }
+        Some(first)
+    }
+
+    pub fn build(&self, build_key: &BuildOutputKey) -> Option<&LockTargetEntry> {
+        self.targets.get(build_key)
     }
 }
 
@@ -296,6 +414,7 @@ struct PendingMember {
     abs_dir: PathBuf,
     rel_dir: String,
     dep_bindings: Vec<(String, PathBuf, DependencySpec)>,
+    native_products: BTreeMap<String, NativeProductSpec>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -359,12 +478,14 @@ pub fn parse_manifest(path: &Path) -> PackageResult<Manifest> {
             deps.insert(name.clone(), spec);
         }
     }
+    let native_products = parse_native_products(table, path)?;
 
     Ok(Manifest {
         name,
         kind,
         workspace_members,
         deps,
+        native_products,
     })
 }
 
@@ -423,6 +544,7 @@ pub fn load_workspace_graph(root_dir: &Path) -> PackageResult<WorkspaceGraph> {
                 abs_dir,
                 rel_dir,
                 dep_bindings,
+                native_products: manifest.native_products,
             },
         );
     }
@@ -452,6 +574,7 @@ pub fn load_workspace_graph(root_dir: &Path) -> PackageResult<WorkspaceGraph> {
                 deps: deps.into_iter().collect(),
                 direct_dep_packages,
                 direct_dep_specs,
+                native_products: member.native_products.clone(),
             })
         })
         .collect::<PackageResult<Vec<_>>>()?;
@@ -591,11 +714,13 @@ pub fn read_lockfile(path: &Path) -> PackageResult<Option<Lockfile>> {
         .and_then(toml::Value::as_integer)
         .ok_or_else(|| format!("missing `version` in `{}`", path.display()))?;
     let lockfile = match version {
-        LOCKFILE_VERSION => read_lockfile_v2(table, path, version)?,
-        LEGACY_LOCKFILE_VERSION => read_lockfile_v1(table, path, version)?,
+        LOCKFILE_VERSION | LEGACY_LOCKFILE_VERSION => {
+            read_lockfile_build_table(table, path, version)?
+        }
+        OLDER_LOCKFILE_VERSION => read_lockfile_v1(table, path, version)?,
         _ => {
             return Err(format!(
-                "unsupported lockfile version `{version}` in `{}`; expected {LOCKFILE_VERSION} or {LEGACY_LOCKFILE_VERSION}",
+                "unsupported lockfile version `{version}` in `{}`; expected {LOCKFILE_VERSION}, {LEGACY_LOCKFILE_VERSION}, or {OLDER_LOCKFILE_VERSION}",
                 path.display()
             ));
         }
@@ -603,7 +728,7 @@ pub fn read_lockfile(path: &Path) -> PackageResult<Option<Lockfile>> {
     Ok(Some(lockfile))
 }
 
-fn read_lockfile_v2(
+fn read_lockfile_build_table(
     table: &toml::value::Table,
     path: &Path,
     version: i64,
@@ -723,7 +848,7 @@ fn read_lockfile_v1(
         let mut target_entries = BTreeMap::new();
         if lock_target_format_matches(&target, &format) {
             target_entries.insert(
-                target,
+                BuildOutputKey::target(target),
                 LockTargetEntry {
                     fingerprint,
                     api_fingerprint,
@@ -731,6 +856,8 @@ fn read_lockfile_v1(
                     artifact_hash,
                     format,
                     toolchain: toolchain.clone(),
+                    product: None,
+                    native_product_closure: None,
                 },
             );
         }
@@ -821,7 +948,7 @@ fn read_lockfile_member_bases(
 fn read_lock_target_entries(
     member_name: &str,
     target_table: &toml::value::Table,
-) -> PackageResult<BTreeMap<BuildTarget, LockTargetEntry>> {
+) -> PackageResult<BTreeMap<BuildOutputKey, LockTargetEntry>> {
     let mut targets = BTreeMap::new();
     for (target_key, value) in target_table {
         let build_table = value.as_table().ok_or_else(|| {
@@ -829,7 +956,8 @@ fn read_lock_target_entries(
                 "lockfile build entry for `{member_name}` target `{target_key}` must be a table"
             )
         })?;
-        let target = BuildTarget::from_storage_key(target_key);
+        let build_key = BuildOutputKey::from_storage_key(target_key);
+        let target = build_key.target.clone();
         let fingerprint =
             read_lock_target_field(member_name, target_key, build_table, "fingerprint")?;
         let api_fingerprint =
@@ -839,11 +967,20 @@ fn read_lock_target_entries(
             read_lock_target_field(member_name, target_key, build_table, "artifact_hash")?;
         let format = read_lock_target_field(member_name, target_key, build_table, "format")?;
         let toolchain = read_lock_target_field(member_name, target_key, build_table, "toolchain")?;
+        let product = build_table
+            .get("product")
+            .and_then(toml::Value::as_str)
+            .map(ToString::to_string)
+            .or_else(|| build_key.product.clone());
+        let native_product_closure = build_table
+            .get("native_product_closure")
+            .and_then(toml::Value::as_str)
+            .map(ToString::to_string);
         if !lock_target_format_matches(&target, &format) {
             continue;
         }
         targets.insert(
-            target,
+            BuildOutputKey::new(target, product.clone()),
             LockTargetEntry {
                 fingerprint,
                 api_fingerprint,
@@ -851,6 +988,8 @@ fn read_lock_target_entries(
                 artifact_hash,
                 format,
                 toolchain,
+                product,
+                native_product_closure,
             },
         );
     }
@@ -915,6 +1054,15 @@ fn parse_string_array(value: &toml::Value) -> PackageResult<Vec<String>> {
     Ok(out)
 }
 
+fn native_product_probe(event: &str, message: impl AsRef<str>) {
+    if std::env::var_os(ARCANA_NATIVE_PRODUCT_TEMP_PROBES_ENV).is_some() {
+        eprintln!(
+            "[arcana-native-product-probe] {event}: {}",
+            message.as_ref()
+        );
+    }
+}
+
 fn parse_dependency_spec(
     name: &str,
     value: &toml::Value,
@@ -925,6 +1073,8 @@ fn parse_dependency_spec(
             source: DependencySource::Path,
             location: path.to_string(),
             native_delivery: NativeDependencyDelivery::Baked,
+            native_child: None,
+            native_plugins: Vec::new(),
         });
     }
     let Some(table) = value.as_table() else {
@@ -942,11 +1092,59 @@ fn parse_dependency_spec(
         })?)?,
         None => NativeDependencyDelivery::Baked,
     };
+    let native_child = table
+        .get("native_child")
+        .map(|value| {
+            value.as_str().map(ToString::to_string).ok_or_else(|| {
+                format!(
+                    "dependency `{name}` in `{}` must set `native_child` as a string",
+                    manifest_path.display()
+                )
+            })
+        })
+        .transpose()?;
+    let native_plugins = table
+        .get("native_plugins")
+        .map(parse_string_array)
+        .transpose()?
+        .unwrap_or_default();
+    if native_delivery == NativeDependencyDelivery::Dll
+        && native_child
+            .as_deref()
+            .is_some_and(|child| child != "default")
+    {
+        native_product_probe(
+            "invalid_legacy_child_selection",
+            format!(
+                "dependency={} manifest={} native_child={}",
+                name,
+                manifest_path.display(),
+                native_child.as_deref().unwrap_or_default()
+            ),
+        );
+        return Err(format!(
+            "dependency `{name}` in `{}` cannot mix `native_delivery = \"dll\"` with non-default `native_child = \"{}\"`",
+            manifest_path.display(),
+            native_child.as_deref().unwrap_or_default()
+        ));
+    }
+    if native_delivery == NativeDependencyDelivery::Dll && native_child.is_none() {
+        native_product_probe(
+            "legacy_native_delivery_alias",
+            format!(
+                "dependency={} manifest={} selected_child=default",
+                name,
+                manifest_path.display()
+            ),
+        );
+    }
     if let Some(path) = table.get("path").and_then(toml::Value::as_str) {
         return Ok(DependencySpec {
             source: DependencySource::Path,
             location: path.to_string(),
             native_delivery,
+            native_child,
+            native_plugins,
         });
     }
     if let Some(git) = table.get("git").and_then(toml::Value::as_str) {
@@ -954,6 +1152,8 @@ fn parse_dependency_spec(
             source: DependencySource::Git,
             location: git.to_string(),
             native_delivery,
+            native_child,
+            native_plugins,
         });
     }
     if let Some(registry) = table.get("registry").and_then(toml::Value::as_str) {
@@ -961,12 +1161,141 @@ fn parse_dependency_spec(
             source: DependencySource::Registry,
             location: registry.to_string(),
             native_delivery,
+            native_child,
+            native_plugins,
         });
     }
     Err(format!(
         "dependency `{name}` in `{}` must set `path`, `git`, or `registry`",
         manifest_path.display()
     ))
+}
+
+fn parse_native_products(
+    table: &toml::value::Table,
+    manifest_path: &Path,
+) -> PackageResult<BTreeMap<String, NativeProductSpec>> {
+    let Some(products) = table
+        .get("native")
+        .and_then(toml::Value::as_table)
+        .and_then(|native| native.get("products"))
+        .and_then(toml::Value::as_table)
+    else {
+        return Ok(BTreeMap::new());
+    };
+    let mut parsed = BTreeMap::new();
+    for (name, value) in products {
+        let product = value.as_table().ok_or_else(|| {
+            format!(
+                "native product `{name}` in `{}` must be a table",
+                manifest_path.display()
+            )
+        })?;
+        let kind = product
+            .get("kind")
+            .and_then(toml::Value::as_str)
+            .ok_or_else(|| {
+                format!(
+                    "native product `{name}` in `{}` is missing `kind`",
+                    manifest_path.display()
+                )
+            })?
+            .to_string();
+        if kind != "dll" {
+            return Err(format!(
+                "native product `{name}` in `{}` must set `kind = \"dll\"` for now",
+                manifest_path.display()
+            ));
+        }
+        let role = ArcanaCabiProductRole::parse(
+            product
+                .get("role")
+                .and_then(toml::Value::as_str)
+                .ok_or_else(|| {
+                    format!(
+                        "native product `{name}` in `{}` is missing `role`",
+                        manifest_path.display()
+                    )
+                })?,
+        )?;
+        let producer = NativeProductProducer::parse(
+            product
+                .get("producer")
+                .and_then(toml::Value::as_str)
+                .ok_or_else(|| {
+                    format!(
+                        "native product `{name}` in `{}` is missing `producer`",
+                        manifest_path.display()
+                    )
+                })?,
+        )?;
+        let file = product
+            .get("file")
+            .and_then(toml::Value::as_str)
+            .ok_or_else(|| {
+                format!(
+                    "native product `{name}` in `{}` is missing `file`",
+                    manifest_path.display()
+                )
+            })?
+            .to_string();
+        validate_support_file_relative_path(&file)?;
+        let contract = product
+            .get("contract")
+            .and_then(toml::Value::as_str)
+            .ok_or_else(|| {
+                format!(
+                    "native product `{name}` in `{}` is missing `contract`",
+                    manifest_path.display()
+                )
+            })?
+            .to_string();
+        let rust_cdylib_crate = product
+            .get("rust_cdylib_crate")
+            .map(|value| {
+                value.as_str().map(ToString::to_string).ok_or_else(|| {
+                    format!(
+                        "native product `{name}` in `{}` must set `rust_cdylib_crate` as a string",
+                        manifest_path.display()
+                    )
+                })
+            })
+            .transpose()?;
+        let sidecars = product
+            .get("sidecars")
+            .map(parse_string_array)
+            .transpose()?
+            .unwrap_or_default();
+        for sidecar in &sidecars {
+            validate_support_file_relative_path(sidecar)?;
+        }
+        if producer == NativeProductProducer::RustCdylib && rust_cdylib_crate.is_none() {
+            return Err(format!(
+                "native product `{name}` in `{}` must set `rust_cdylib_crate` for `producer = \"rust-cdylib\"`",
+                manifest_path.display()
+            ));
+        }
+        if producer == NativeProductProducer::ArcanaSource && rust_cdylib_crate.is_some() {
+            return Err(format!(
+                "native product `{name}` in `{}` cannot set `rust_cdylib_crate` for `producer = \"arcana-source\"`",
+                manifest_path.display()
+            ));
+        }
+        parsed.insert(
+            name.clone(),
+            NativeProductSpec {
+                name: name.clone(),
+                kind,
+                role,
+                producer,
+                file,
+                contract,
+                rust_cdylib_crate,
+                sidecars,
+            },
+        );
+    }
+    Ok(parsed)
 }
 
 fn validate_grimoire_layout(dir: &Path, kind: &GrimoireKind) -> PackageResult<()> {
@@ -1438,6 +1767,106 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn stage_distribution_bundle_records_native_products_and_child_bindings() {
+        let dir = temp_dir("dist_windows_exe_native_products");
+        write_file(
+            &dir.join("book.toml"),
+            "name = \"app\"\nkind = \"app\"\n[deps]\ndesktop = { path = \"desktop\", native_child = \"default\", native_plugins = [\"tools\"] }\n",
+        );
+        write_file(
+            &dir.join("src").join("shelf.arc"),
+            "fn main() -> Int:\n    return 0\n",
+        );
+        write_file(&dir.join("src").join("types.arc"), "// types\n");
+
+        write_file(
+            &dir.join("desktop").join("book.toml"),
+            concat!(
+                "name = \"desktop\"\n",
+                "kind = \"lib\"\n",
+                "\n[native.products.default]\n",
+                "kind = \"dll\"\n",
+                "role = \"child\"\n",
+                "producer = \"arcana-source\"\n",
+                "file = \"desktop_child.dll\"\n",
+                "contract = \"arcana.cabi.child.v1\"\n",
+                "sidecars = []\n",
+                "\n[native.products.tools]\n",
+                "kind = \"dll\"\n",
+                "role = \"plugin\"\n",
+                "producer = \"arcana-source\"\n",
+                "file = \"desktop_tools.dll\"\n",
+                "contract = \"arcana.cabi.plugin.v1\"\n",
+                "sidecars = []\n",
+            ),
+        );
+        write_file(
+            &dir.join("desktop").join("src").join("book.arc"),
+            "export fn ready() -> Int:\n    return 1\n",
+        );
+        write_file(
+            &dir.join("desktop").join("src").join("types.arc"),
+            "// types\n",
+        );
+
+        let graph = load_workspace_graph(&dir).expect("load graph");
+        let order = plan_workspace(&graph).expect("plan");
+        let prepared = prepare_test_build(&graph);
+        let statuses = plan_build_for_target_with_context(
+            &graph,
+            &order,
+            &prepared,
+            None,
+            BuildTarget::windows_exe(),
+            &BuildExecutionContext::default(),
+        )
+        .expect("windows exe plan should build");
+        execute_build_with_context(
+            &graph,
+            &prepared,
+            &statuses,
+            &BuildExecutionContext::default(),
+        )
+        .expect("windows exe build should succeed");
+
+        let bundle_dir = default_distribution_dir(&graph, "app", &BuildTarget::windows_exe());
+        let bundle = stage_distribution_bundle(
+            &graph,
+            &statuses,
+            "app",
+            &BuildTarget::windows_exe(),
+            &bundle_dir,
+        )
+        .expect("distribution staging should succeed");
+        let manifest_text =
+            fs::read_to_string(&bundle.manifest_path).expect("distribution manifest should read");
+
+        assert!(bundle.bundle_dir.join("desktop_child.dll").is_file());
+        assert!(bundle.bundle_dir.join("desktop_tools.dll").is_file());
+        assert!(manifest_text.contains("[[native_products]]"));
+        assert!(manifest_text.contains("package_name = \"desktop\""));
+        assert!(manifest_text.contains("product_name = \"default\""));
+        assert!(manifest_text.contains("role = \"child\""));
+        assert!(manifest_text.contains("contract_id = \"arcana.cabi.child.v1\""));
+        assert!(manifest_text.contains("contract_version = 1"));
+        assert!(manifest_text.contains("producer = \"arcana-source\""));
+        assert!(manifest_text.contains("sidecars = []"));
+        assert!(manifest_text.contains("file_hash = \"sha256:"));
+        assert!(manifest_text.contains("file = \"desktop_child.dll\""));
+        assert!(manifest_text.contains("product_name = \"tools\""));
+        assert!(manifest_text.contains("role = \"plugin\""));
+        assert!(manifest_text.contains("contract_id = \"arcana.cabi.plugin.v1\""));
+        assert!(manifest_text.contains("file = \"desktop_tools.dll\""));
+        assert!(manifest_text.contains("native_product_closure = \"sha256:"));
+        assert!(manifest_text.contains("[[child_bindings]]"));
+        assert!(manifest_text.contains("consumer_member = \"app\""));
+        assert!(manifest_text.contains("dependency_alias = \"desktop\""));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn stage_distribution_bundle_removes_stale_files_before_copying() {
         let dir = temp_dir("dist_windows_exe_clean");
         write_file(&dir.join("book.toml"), "name = \"app\"\nkind = \"app\"\n");
@@ -1663,6 +2092,9 @@ mod tests {
         let header_text = fs::read_to_string(artifact_path.with_file_name("lib.dll.h"))
             .expect("typed dll header should read");
         assert!(header_text.contains("uint8_t answer(int64_t* out_result);"));
+        assert!(header_text.contains("typedef struct ArcanaCabiProductApiV1"));
+        assert!(header_text.contains("typedef struct ArcanaCabiInstanceOpsV1"));
+        assert!(header_text.contains("arcana_cabi_owned_str_free_v1"));
         let def_text = fs::read_to_string(artifact_path.with_file_name("lib.dll.def"))
             .expect("dll definition file should read");
         assert!(def_text.contains("EXPORTS"));
@@ -1670,8 +2102,11 @@ mod tests {
         let native_manifest =
             fs::read_to_string(artifact_path.with_file_name("lib.dll.arcana-bundle.toml"))
                 .expect("native dll manifest should read");
-        assert!(native_manifest.contains("format = \"arcana-native-manifest-v2\""));
+        assert!(native_manifest.contains("format = \"arcana-native-manifest-v3\""));
         assert!(native_manifest.contains("kind = \"dynamic-library\""));
+        assert!(
+            native_manifest.contains("owned_str_free_symbol = \"arcana_cabi_owned_str_free_v1\"")
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -2069,7 +2504,7 @@ mod tests {
         let first = render_lockfile(&graph, &order, &statuses, None).expect("render");
         let second = render_lockfile(&graph, &order, &statuses, None).expect("render");
         assert_eq!(first, second);
-        assert!(first.contains("version = 2"));
+        assert!(first.contains("version = 3"));
         assert!(first.contains("[builds]"));
         assert!(first.contains("internal-aot"));
         assert!(first.contains("[builds.\"app\".\"internal-aot\"]"));

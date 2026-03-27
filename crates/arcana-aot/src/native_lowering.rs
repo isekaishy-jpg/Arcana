@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use arcana_cabi::ArcanaCabiPassMode;
 use arcana_ir::{
     ExecAssignOp, ExecAssignTarget, ExecBinaryOp, ExecExpr, ExecPhraseQualifierKind, ExecStmt,
 };
@@ -39,6 +40,7 @@ pub enum NativeDirectExpr {
     },
     Call {
         routine_key: String,
+        params: Vec<NativeAbiParam>,
         args: Vec<NativeDirectExpr>,
     },
     If {
@@ -192,9 +194,6 @@ impl<'a> NativeLoweringBuilder<'a> {
         expected_params: &[NativeAbiParam],
         expected_return_type: &NativeAbiType,
     ) -> NativeRoutineLowering {
-        if expected_params.iter().any(|param| param.is_edit) {
-            return NativeRoutineLowering::RuntimeDispatch;
-        }
         let Some(signature) = self.signature_for(routine_key) else {
             return NativeRoutineLowering::RuntimeDispatch;
         };
@@ -276,7 +275,7 @@ impl<'a> NativeLoweringBuilder<'a> {
                     param.name.clone(),
                     NativeBinding {
                         ty: param.ty.clone(),
-                        mutable: false,
+                        mutable: matches!(param.pass_mode, ArcanaCabiPassMode::InWithWriteBack),
                     },
                 )
             })
@@ -569,6 +568,7 @@ impl<'a> NativeLoweringBuilder<'a> {
                 Some(LoweredDirectExpr {
                     expr: NativeDirectExpr::Call {
                         routine_key,
+                        params: callee_signature.params.clone(),
                         args: lowered_args,
                     },
                     ty: callee_signature.return_type,
@@ -588,7 +588,19 @@ impl<'a> NativeLoweringBuilder<'a> {
             return args
                 .iter()
                 .zip(params)
-                .map(|(arg, param)| self.lower_expr(&arg.value, bindings, &param.ty))
+                .map(|(arg, param)| match param.pass_mode {
+                    ArcanaCabiPassMode::In => self.lower_expr(&arg.value, bindings, &param.ty),
+                    ArcanaCabiPassMode::InWithWriteBack => {
+                        let lowered = self.lower_expr(&arg.value, bindings, &param.ty)?;
+                        let NativeDirectExpr::Binding(name) = lowered else {
+                            return None;
+                        };
+                        bindings
+                            .get(&name)?
+                            .mutable
+                            .then_some(NativeDirectExpr::Binding(name))
+                    }
+                })
                 .collect();
         }
         if !args.iter().all(|arg| arg.name.is_some()) {
@@ -600,7 +612,19 @@ impl<'a> NativeLoweringBuilder<'a> {
                 let arg = args
                     .iter()
                     .find(|arg| arg.name.as_deref() == Some(param.name.as_str()))?;
-                self.lower_expr(&arg.value, bindings, &param.ty)
+                match param.pass_mode {
+                    ArcanaCabiPassMode::In => self.lower_expr(&arg.value, bindings, &param.ty),
+                    ArcanaCabiPassMode::InWithWriteBack => {
+                        let lowered = self.lower_expr(&arg.value, bindings, &param.ty)?;
+                        let NativeDirectExpr::Binding(name) = lowered else {
+                            return None;
+                        };
+                        bindings
+                            .get(&name)?
+                            .mutable
+                            .then_some(NativeDirectExpr::Binding(name))
+                    }
+                }
             })
             .collect()
     }
@@ -900,6 +924,14 @@ mod tests {
         }
     }
 
+    fn test_emit_context(file_name: &str) -> AotEmitContext {
+        AotEmitContext {
+            root_artifact_file_name: Some(file_name.to_string()),
+            runtime_binding: AotRuntimeBinding::Baked,
+            native_product: None,
+        }
+    }
+
     #[test]
     fn lowering_marks_simple_main_as_direct() {
         let mut package = base_package();
@@ -936,10 +968,7 @@ mod tests {
         let package_plan = build_native_package_plan(
             AotEmitTarget::WindowsExeBundle,
             &package,
-            &AotEmitContext {
-                root_artifact_file_name: Some("app.exe".to_string()),
-                runtime_binding: AotRuntimeBinding::Baked,
-            },
+            &test_emit_context("app.exe"),
         )
         .expect("native package plan should build");
         let lowering_plan =
@@ -1032,10 +1061,7 @@ mod tests {
         let package_plan = build_native_package_plan(
             AotEmitTarget::WindowsExeBundle,
             &package,
-            &AotEmitContext {
-                root_artifact_file_name: Some("app.exe".to_string()),
-                runtime_binding: AotRuntimeBinding::Baked,
-            },
+            &test_emit_context("app.exe"),
         )
         .expect("native package plan should build");
         let lowering_plan =
@@ -1055,11 +1081,12 @@ mod tests {
         }));
         assert!(lowering_plan.direct_routines.iter().any(|routine| {
             routine.routine_key == "core#fn-0"
-                && routine.body.return_expr
-                    == NativeDirectExpr::Call {
-                        routine_key: "core#fn-1".to_string(),
-                        args: vec![NativeDirectExpr::Int(9)],
-                    }
+                && matches!(
+                    &routine.body.return_expr,
+                    NativeDirectExpr::Call { routine_key, args, .. }
+                        if routine_key == "core#fn-1"
+                            && args == &vec![NativeDirectExpr::Int(9)]
+                )
         }));
     }
 
@@ -1223,10 +1250,7 @@ mod tests {
         let package_plan = build_native_package_plan(
             AotEmitTarget::WindowsDllBundle,
             &package,
-            &AotEmitContext {
-                root_artifact_file_name: Some("lib.dll".to_string()),
-                runtime_binding: AotRuntimeBinding::Baked,
-            },
+            &test_emit_context("lib.dll"),
         )
         .expect("native package plan should build");
         let lowering_plan =
@@ -1256,11 +1280,11 @@ mod tests {
         assert_eq!(lowering_plan.direct_routines.len(), 5);
         assert!(lowering_plan.direct_routines.iter().any(|routine| {
             routine.routine_key == "core#fn-4"
-                && routine.body.return_expr
-                    == NativeDirectExpr::Call {
-                        routine_key: "core#fn-5".to_string(),
-                        args: Vec::new(),
-                    }
+                && matches!(
+                    &routine.body.return_expr,
+                    NativeDirectExpr::Call { routine_key, args, .. }
+                        if routine_key == "core#fn-5" && args.is_empty()
+                )
         }));
     }
 
@@ -1307,10 +1331,7 @@ mod tests {
         let package_plan = build_native_package_plan(
             AotEmitTarget::WindowsExeBundle,
             &package,
-            &AotEmitContext {
-                root_artifact_file_name: Some("app.exe".to_string()),
-                runtime_binding: AotRuntimeBinding::Baked,
-            },
+            &test_emit_context("app.exe"),
         )
         .expect("native package plan should build");
         let lowering_plan =
@@ -1435,10 +1456,7 @@ mod tests {
         let package_plan = build_native_package_plan(
             AotEmitTarget::WindowsExeBundle,
             &package,
-            &AotEmitContext {
-                root_artifact_file_name: Some("app.exe".to_string()),
-                runtime_binding: AotRuntimeBinding::Baked,
-            },
+            &test_emit_context("app.exe"),
         )
         .expect("native package plan should build");
         let lowering_plan =
@@ -1460,26 +1478,43 @@ mod tests {
                 && routine.body.return_expr == NativeDirectExpr::Binding("bumped".to_string())
         }));
         assert!(lowering_plan.direct_routines.iter().any(|routine| {
-            routine.routine_key == "core#fn-0"
-                && routine.body.return_expr
-                    == NativeDirectExpr::If {
-                        condition: Box::new(NativeDirectExpr::IntCompare {
-                            op: NativeDirectIntCompareOp::GtEq,
-                            left: Box::new(NativeDirectExpr::Binding("base".to_string())),
-                            right: Box::new(NativeDirectExpr::Int(8)),
-                        }),
-                        then_block: Box::new(super::NativeDirectBlock {
-                            statements: Vec::new(),
-                            return_expr: NativeDirectExpr::Call {
-                                routine_key: "core#fn-1".to_string(),
-                                args: vec![NativeDirectExpr::Binding("base".to_string())],
-                            },
-                        }),
-                        else_block: Box::new(super::NativeDirectBlock {
-                            statements: Vec::new(),
-                            return_expr: NativeDirectExpr::Int(0),
-                        }),
-                    }
+            if routine.routine_key != "core#fn-0" {
+                return false;
+            }
+            let NativeDirectExpr::If {
+                condition,
+                then_block,
+                else_block,
+            } = &routine.body.return_expr
+            else {
+                return false;
+            };
+            if condition.as_ref()
+                != &(NativeDirectExpr::IntCompare {
+                    op: NativeDirectIntCompareOp::GtEq,
+                    left: Box::new(NativeDirectExpr::Binding("base".to_string())),
+                    right: Box::new(NativeDirectExpr::Int(8)),
+                })
+            {
+                return false;
+            }
+            if !then_block.statements.is_empty() {
+                return false;
+            }
+            if else_block.as_ref()
+                != &(super::NativeDirectBlock {
+                    statements: Vec::new(),
+                    return_expr: NativeDirectExpr::Int(0),
+                })
+            {
+                return false;
+            }
+            matches!(
+                &then_block.return_expr,
+                NativeDirectExpr::Call { routine_key, args, .. }
+                    if routine_key == "core#fn-1"
+                        && args == &vec![NativeDirectExpr::Binding("base".to_string())]
+            )
         }));
     }
 
@@ -1547,10 +1582,7 @@ mod tests {
         let package_plan = build_native_package_plan(
             AotEmitTarget::WindowsDllBundle,
             &package,
-            &AotEmitContext {
-                root_artifact_file_name: Some("lib.dll".to_string()),
-                runtime_binding: AotRuntimeBinding::Baked,
-            },
+            &test_emit_context("lib.dll"),
         )
         .expect("native package plan should build");
         let lowering_plan =
@@ -1633,10 +1665,7 @@ mod tests {
         let package_plan = build_native_package_plan(
             AotEmitTarget::WindowsDllBundle,
             &package,
-            &AotEmitContext {
-                root_artifact_file_name: Some("lib.dll".to_string()),
-                runtime_binding: AotRuntimeBinding::Baked,
-            },
+            &test_emit_context("lib.dll"),
         )
         .expect("native package plan should build");
         let lowering_plan =
@@ -1740,10 +1769,7 @@ mod tests {
         let package_plan = build_native_package_plan(
             AotEmitTarget::WindowsExeBundle,
             &package,
-            &AotEmitContext {
-                root_artifact_file_name: Some("app.exe".to_string()),
-                runtime_binding: AotRuntimeBinding::Baked,
-            },
+            &test_emit_context("app.exe"),
         )
         .expect("native package plan should build");
         let lowering_plan =
@@ -1895,10 +1921,7 @@ mod tests {
         let package_plan = build_native_package_plan(
             AotEmitTarget::WindowsExeBundle,
             &package,
-            &AotEmitContext {
-                root_artifact_file_name: Some("app.exe".to_string()),
-                runtime_binding: AotRuntimeBinding::Baked,
-            },
+            &test_emit_context("app.exe"),
         )
         .expect("native package plan should build");
         let lowering_plan =
@@ -1915,6 +1938,7 @@ mod tests {
                         NativeDirectStmt::Expr {
                             value: NativeDirectExpr::Call {
                                 routine_key: "core#fn-1".to_string(),
+                                params: Vec::new(),
                                 args: Vec::new(),
                             },
                         },

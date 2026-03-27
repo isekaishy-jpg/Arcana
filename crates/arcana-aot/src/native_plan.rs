@@ -1,7 +1,10 @@
+use arcana_cabi::{
+    ARCANA_CABI_CONTRACT_VERSION_V1, ARCANA_CABI_EXPORT_CONTRACT_ID, ArcanaCabiProductRole,
+};
 use arcana_ir::IrPackage;
 
 use crate::artifact::AotPackageArtifact;
-use crate::emit::{AotEmitContext, AotEmitTarget, AotRuntimeBinding};
+use crate::emit::{AotEmitContext, AotEmitTarget, AotNativeProduct, AotRuntimeBinding};
 use crate::native_abi::{NativeExport, collect_native_exports};
 use crate::validate::validate_package_artifact;
 use crate::{compile_package, render_package_artifact};
@@ -17,6 +20,7 @@ pub struct NativePackagePlan {
     pub target: AotEmitTarget,
     pub root_artifact_file_name: String,
     pub runtime_binding: AotRuntimeBinding,
+    pub native_product: Option<AotNativeProduct>,
     pub artifact: AotPackageArtifact,
     pub artifact_text: String,
     pub launch: NativeLaunchPlan,
@@ -51,6 +55,17 @@ pub fn build_native_package_plan(
         target,
         root_artifact_file_name,
         runtime_binding: context.runtime_binding,
+        native_product: match target {
+            AotEmitTarget::WindowsDllBundle => {
+                Some(context.native_product.clone().unwrap_or(AotNativeProduct {
+                    name: "default".to_string(),
+                    role: ArcanaCabiProductRole::Export,
+                    contract_id: ARCANA_CABI_EXPORT_CONTRACT_ID.to_string(),
+                    contract_version: ARCANA_CABI_CONTRACT_VERSION_V1,
+                }))
+            }
+            AotEmitTarget::WindowsExeBundle | AotEmitTarget::InternalArtifact => None,
+        },
         artifact,
         artifact_text,
         launch,

@@ -1,5 +1,7 @@
 use std::collections::BTreeSet;
 
+use arcana_cabi::render_c_value_type_defs;
+
 use crate::native_abi::{NativeAbiType, NativeExport};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -69,33 +71,8 @@ impl NativeLayoutCatalog {
         }
     }
 
-    pub fn render_rust_type_defs(&self) -> String {
-        let mut out = String::from(concat!(
-            "#[repr(C)]\n",
-            "#[derive(Clone, Copy, Default)]\n",
-            "pub struct ArcanaBytesView {\n",
-            "    pub ptr: *const u8,\n",
-            "    pub len: usize,\n",
-            "}\n\n",
-            "#[repr(C)]\n",
-            "#[derive(Clone, Copy, Default)]\n",
-            "pub struct ArcanaStrView {\n",
-            "    pub ptr: *const u8,\n",
-            "    pub len: usize,\n",
-            "}\n\n",
-            "#[repr(C)]\n",
-            "#[derive(Clone, Copy, Default)]\n",
-            "pub struct ArcanaOwnedBytes {\n",
-            "    pub ptr: *mut u8,\n",
-            "    pub len: usize,\n",
-            "}\n\n",
-            "#[repr(C)]\n",
-            "#[derive(Clone, Copy, Default)]\n",
-            "pub struct ArcanaOwnedStr {\n",
-            "    pub ptr: *mut u8,\n",
-            "    pub len: usize,\n",
-            "}\n\n",
-        ));
+    pub fn render_rust_pair_type_defs(&self) -> String {
+        let mut out = String::new();
         for ty in &self.pair_types {
             out.push_str(&render_rust_pair_struct(ty, NativeAbiRole::Param));
             out.push_str(&render_rust_pair_struct(ty, NativeAbiRole::Return));
@@ -104,24 +81,13 @@ impl NativeLayoutCatalog {
     }
 
     pub fn render_c_type_defs(&self) -> String {
-        let mut out = String::from(concat!(
-            "typedef struct ArcanaBytesView {\n",
-            "    const uint8_t* ptr;\n",
-            "    size_t len;\n",
-            "} ArcanaBytesView;\n\n",
-            "typedef struct ArcanaStrView {\n",
-            "    const uint8_t* ptr;\n",
-            "    size_t len;\n",
-            "} ArcanaStrView;\n\n",
-            "typedef struct ArcanaOwnedBytes {\n",
-            "    uint8_t* ptr;\n",
-            "    size_t len;\n",
-            "} ArcanaOwnedBytes;\n\n",
-            "typedef struct ArcanaOwnedStr {\n",
-            "    uint8_t* ptr;\n",
-            "    size_t len;\n",
-            "} ArcanaOwnedStr;\n\n",
-        ));
+        let mut out = render_c_value_type_defs();
+        out.push_str(&self.render_c_pair_type_defs());
+        out
+    }
+
+    pub fn render_c_pair_type_defs(&self) -> String {
+        let mut out = String::new();
         for ty in &self.pair_types {
             out.push_str(&render_c_pair_struct(ty, NativeAbiRole::Param));
             out.push_str(&render_c_pair_struct(ty, NativeAbiRole::Return));

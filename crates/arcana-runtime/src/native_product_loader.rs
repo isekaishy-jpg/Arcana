@@ -1,0 +1,1326 @@
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::{CStr, CString, c_char, c_void};
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use arcana_cabi::{
+    ARCANA_CABI_CONTRACT_VERSION_V1, ARCANA_CABI_GET_PRODUCT_API_V1_SYMBOL, ArcanaCabiChildOpsV1,
+    ArcanaCabiChildRunEntrypointFn, ArcanaCabiCreateInstanceFn, ArcanaCabiDestroyInstanceFn,
+    ArcanaCabiInstanceOpsV1, ArcanaCabiLastErrorAllocFn, ArcanaCabiOwnedBytesFreeFn,
+    ArcanaCabiPluginDescribeInstanceFn, ArcanaCabiPluginOpsV1, ArcanaCabiProductApiV1,
+    ArcanaCabiProductRole,
+};
+use serde::Deserialize;
+
+const DISTRIBUTION_BUNDLE_FORMAT: &str = "arcana-distribution-bundle-v1";
+const DISTRIBUTION_MANIFEST_FILE: &str = "arcana.bundle.toml";
+const NATIVE_PRODUCT_TEMP_PROBES_ENV: &str = "ARCANA_NATIVE_PRODUCT_TEMP_PROBES";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeNativeProductInfo {
+    pub package_name: String,
+    pub product_name: String,
+    pub role: ArcanaCabiProductRole,
+    pub contract_id: String,
+    pub contract_version: u32,
+    pub file: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeChildBindingInfo {
+    pub consumer_member: String,
+    pub dependency_alias: String,
+    pub package_name: String,
+    pub product_name: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RuntimeNativePluginHandle(u64);
+
+pub struct RuntimeNativeProductCatalog {
+    bundle_dir: PathBuf,
+    root_member: Option<String>,
+    products: Vec<RuntimeNativeProductInfo>,
+    child_bindings: Vec<RuntimeChildBindingInfo>,
+    next_plugin_handle: u64,
+    #[cfg(windows)]
+    loaded_children: BTreeMap<(String, String), LoadedNativeLibrary>,
+    #[cfg(windows)]
+    active_child_bindings: BTreeMap<(String, String), ActiveChildBinding>,
+    #[cfg(windows)]
+    open_plugins: BTreeMap<RuntimeNativePluginHandle, OpenPluginInstance>,
+}
+
+impl RuntimeNativeProductCatalog {
+    fn empty(bundle_dir: PathBuf) -> Self {
+        Self {
+            bundle_dir,
+            root_member: None,
+            products: Vec::new(),
+            child_bindings: Vec::new(),
+            next_plugin_handle: 1,
+            #[cfg(windows)]
+            loaded_children: BTreeMap::new(),
+            #[cfg(windows)]
+            active_child_bindings: BTreeMap::new(),
+            #[cfg(windows)]
+            open_plugins: BTreeMap::new(),
+        }
+    }
+
+    pub fn bundle_dir(&self) -> &Path {
+        &self.bundle_dir
+    }
+
+    pub fn root_member(&self) -> Option<&str> {
+        self.root_member.as_deref()
+    }
+
+    pub fn products(&self) -> &[RuntimeNativeProductInfo] {
+        &self.products
+    }
+
+    pub fn child_bindings(&self) -> &[RuntimeChildBindingInfo] {
+        &self.child_bindings
+    }
+
+    pub fn plugin_products(&self) -> Vec<&RuntimeNativeProductInfo> {
+        self.products
+            .iter()
+            .filter(|product| product.role == ArcanaCabiProductRole::Plugin)
+            .collect()
+    }
+
+    pub fn plugin_products_for_contract(
+        &self,
+        contract_id: &str,
+    ) -> Vec<&RuntimeNativeProductInfo> {
+        self.products
+            .iter()
+            .filter(|product| {
+                product.role == ArcanaCabiProductRole::Plugin && product.contract_id == contract_id
+            })
+            .collect()
+    }
+
+    #[cfg(windows)]
+    pub fn active_child_binding_count(&self) -> usize {
+        self.active_child_bindings.len()
+    }
+
+    #[cfg(not(windows))]
+    pub fn active_child_binding_count(&self) -> usize {
+        0
+    }
+
+    #[cfg(windows)]
+    pub fn open_plugin_count(&self) -> usize {
+        self.open_plugins.len()
+    }
+
+    #[cfg(not(windows))]
+    pub fn open_plugin_count(&self) -> usize {
+        0
+    }
+
+    pub fn run_child_entrypoint(
+        &mut self,
+        package_image_text: &str,
+        main_routine_key: &str,
+    ) -> Result<Option<i32>, String> {
+        #[cfg(windows)]
+        {
+            if self.active_child_bindings.is_empty() {
+                return Ok(None);
+            }
+            let candidate_bindings = self
+                .active_child_bindings
+                .iter()
+                .filter(|((consumer, _alias), _binding)| {
+                    self.root_member
+                        .as_deref()
+                        .map(|root| consumer == root)
+                        .unwrap_or(true)
+                })
+                .collect::<Vec<_>>();
+            if candidate_bindings.is_empty() {
+                native_product_probe(
+                    "root_child_runtime_provider_missing",
+                    format!(
+                        "root_member={} active_bindings={}",
+                        self.root_member.as_deref().unwrap_or("<unknown>"),
+                        self.active_child_bindings.len()
+                    ),
+                );
+                return Ok(None);
+            }
+            if candidate_bindings.len() != 1 {
+                let bindings = candidate_bindings
+                    .iter()
+                    .map(|((consumer, alias), binding)| {
+                        format!(
+                            "{}:{}=>{}:{}",
+                            consumer,
+                            alias,
+                            binding.product.package_name,
+                            binding.product.product_name
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                native_product_probe(
+                    "ambiguous_child_runtime_provider",
+                    format!(
+                        "root_member={} bindings={bindings}",
+                        self.root_member.as_deref().unwrap_or("<unknown>")
+                    ),
+                );
+                return Err(format!(
+                    "bundle root `{}` has multiple active child bindings and runtime provider selection is ambiguous: {bindings}",
+                    self.root_member.as_deref().unwrap_or("<unknown>")
+                ));
+            }
+            let ((_binding_key_consumer, _binding_key_alias), binding) = candidate_bindings[0];
+            let routine_key = CString::new(main_routine_key).map_err(|_| {
+                format!("main routine key `{main_routine_key}` contains an interior NUL byte")
+            })?;
+            let mut exit_code = 0i32;
+            let ok = unsafe {
+                (binding.run_entrypoint)(
+                    binding.instance.instance,
+                    package_image_text.as_bytes().as_ptr(),
+                    package_image_text.len(),
+                    routine_key.as_ptr(),
+                    &mut exit_code,
+                )
+            };
+            if ok == 0 {
+                let err = read_allocated_utf8_bytes(
+                    binding.last_error_alloc,
+                    binding.owned_bytes_free,
+                    "child last_error_alloc",
+                )?
+                .filter(|text| !text.is_empty())
+                .unwrap_or_else(|| {
+                    format!(
+                        "child runtime provider `{}:{}` failed without an error message",
+                        binding.product.package_name, binding.product.product_name
+                    )
+                });
+                native_product_probe(
+                    "child_runtime_provider_error",
+                    format!(
+                        "package={} product={} error={}",
+                        binding.product.package_name, binding.product.product_name, err
+                    ),
+                );
+                return Err(err);
+            }
+            native_product_probe(
+                "child_runtime_provider_entrypoint",
+                format!(
+                    "package={} product={} routine={} exit_code={}",
+                    binding.product.package_name,
+                    binding.product.product_name,
+                    main_routine_key,
+                    exit_code
+                ),
+            );
+            return Ok(Some(exit_code));
+        }
+
+        #[cfg(not(windows))]
+        {
+            let _ = (package_image_text, main_routine_key);
+            Ok(None)
+        }
+    }
+
+    pub fn activate_children(&mut self) -> Result<(), String> {
+        #[cfg(windows)]
+        {
+            for binding in self.child_bindings.clone() {
+                let binding_key = (
+                    binding.consumer_member.clone(),
+                    binding.dependency_alias.clone(),
+                );
+                if self.active_child_bindings.contains_key(&binding_key) {
+                    native_product_probe(
+                        "duplicate_child_binding_activation",
+                        format!(
+                            "consumer={} alias={} package={} product={}",
+                            binding.consumer_member,
+                            binding.dependency_alias,
+                            binding.package_name,
+                            binding.product_name
+                        ),
+                    );
+                    continue;
+                }
+                let product = self
+                    .find_product(&binding.package_name, &binding.product_name)
+                    .cloned()
+                    .ok_or_else(|| {
+                        format!(
+                            "child binding `{}` -> `{}` references missing native product `{}:{}`",
+                            binding.consumer_member,
+                            binding.dependency_alias,
+                            binding.package_name,
+                            binding.product_name
+                        )
+                    })?;
+                if product.role != ArcanaCabiProductRole::Child {
+                    return Err(format!(
+                        "child binding `{}` -> `{}` references `{}`:`{}` with role `{}` instead of `child`",
+                        binding.consumer_member,
+                        binding.dependency_alias,
+                        binding.package_name,
+                        binding.product_name,
+                        product.role.as_str()
+                    ));
+                }
+                let product_key = (product.package_name.clone(), product.product_name.clone());
+                if !self.loaded_children.contains_key(&product_key) {
+                    let library = LoadedNativeLibrary::load(&self.bundle_dir, &product)?;
+                    self.loaded_children.insert(product_key.clone(), library);
+                }
+                let library = self.loaded_children.get(&product_key).ok_or_else(|| {
+                    format!(
+                        "loaded child library entry missing for `{}:{}`",
+                        product.package_name, product.product_name
+                    )
+                })?;
+                let instance = library.create_instance()?;
+                native_product_probe(
+                    "activate_child_binding",
+                    format!(
+                        "consumer={} alias={} package={} product={} file={}",
+                        binding.consumer_member,
+                        binding.dependency_alias,
+                        product.package_name,
+                        product.product_name,
+                        product.file
+                    ),
+                );
+                self.active_child_bindings.insert(
+                    binding_key,
+                    ActiveChildBinding {
+                        product,
+                        instance: ActiveNativeInstance {
+                            instance,
+                            destroy_instance: library.destroy_instance,
+                        },
+                        run_entrypoint: library.child_run_entrypoint.ok_or_else(|| {
+                            format!(
+                                "native child product `{}:{}` is missing `run_entrypoint` ops",
+                                library.package_name, library.product_name
+                            )
+                        })?,
+                        last_error_alloc: library.last_error_alloc.ok_or_else(|| {
+                            format!(
+                                "native child product `{}:{}` is missing `last_error_alloc` ops",
+                                library.package_name, library.product_name
+                            )
+                        })?,
+                        owned_bytes_free: library.owned_bytes_free.ok_or_else(|| {
+                            format!(
+                                "native child product `{}:{}` is missing `owned_bytes_free` ops",
+                                library.package_name, library.product_name
+                            )
+                        })?,
+                    },
+                );
+            }
+            return Ok(());
+        }
+
+        #[cfg(not(windows))]
+        {
+            if self
+                .products
+                .iter()
+                .any(|product| product.role == ArcanaCabiProductRole::Child)
+            {
+                return Err("native child products currently require a Windows host".to_string());
+            }
+            Ok(())
+        }
+    }
+
+    pub fn open_plugin(
+        &mut self,
+        package_name: &str,
+        product_name: &str,
+    ) -> Result<RuntimeNativePluginHandle, String> {
+        #[cfg(windows)]
+        {
+            let product = self
+                .find_product(package_name, product_name)
+                .cloned()
+                .ok_or_else(|| {
+                    format!(
+                        "bundle does not declare native product `{package_name}:{product_name}`"
+                    )
+                })?;
+            if product.role != ArcanaCabiProductRole::Plugin {
+                return Err(format!(
+                    "native product `{package_name}:{product_name}` uses role `{}` instead of `plugin`",
+                    product.role.as_str()
+                ));
+            }
+            let library = LoadedNativeLibrary::load(&self.bundle_dir, &product)?;
+            let instance = library.create_instance()?;
+            let destroy_instance = library.destroy_instance;
+            let describe_instance = library.plugin_describe_instance.ok_or_else(|| {
+                format!(
+                    "native plugin product `{package_name}:{product_name}` is missing `describe_instance` ops"
+                )
+            })?;
+            let owned_bytes_free = library.owned_bytes_free.ok_or_else(|| {
+                format!(
+                    "native plugin product `{package_name}:{product_name}` is missing `owned_bytes_free` ops"
+                )
+            })?;
+            let handle = RuntimeNativePluginHandle(self.next_plugin_handle);
+            self.next_plugin_handle += 1;
+            native_product_probe(
+                "open_plugin",
+                format!(
+                    "handle={} package={} product={} contract={}",
+                    handle.0, product.package_name, product.product_name, product.contract_id
+                ),
+            );
+            self.open_plugins.insert(
+                handle,
+                OpenPluginInstance {
+                    product,
+                    active: ActiveNativeInstance {
+                        instance,
+                        destroy_instance,
+                    },
+                    describe_instance,
+                    owned_bytes_free,
+                    _library: library,
+                },
+            );
+            return Ok(handle);
+        }
+
+        #[cfg(not(windows))]
+        {
+            let _ = (package_name, product_name);
+            Err("native plugin products currently require a Windows host".to_string())
+        }
+    }
+
+    pub fn release_plugin(&mut self, handle: RuntimeNativePluginHandle) -> Result<(), String> {
+        #[cfg(windows)]
+        {
+            let plugin = self
+                .open_plugins
+                .remove(&handle)
+                .ok_or_else(|| format!("invalid RuntimeNativePluginHandle `{}`", handle.0))?;
+            drop(plugin);
+            native_product_probe("release_plugin", format!("handle={}", handle.0));
+            return Ok(());
+        }
+
+        #[cfg(not(windows))]
+        {
+            let _ = handle;
+            Err("native plugin products currently require a Windows host".to_string())
+        }
+    }
+
+    pub fn describe_open_plugin(
+        &self,
+        handle: RuntimeNativePluginHandle,
+    ) -> Result<String, String> {
+        #[cfg(windows)]
+        {
+            let plugin = self
+                .open_plugins
+                .get(&handle)
+                .ok_or_else(|| format!("invalid RuntimeNativePluginHandle `{}`", handle.0))?;
+            let description = read_plugin_description(plugin)?.ok_or_else(|| {
+                format!(
+                    "plugin `{}:{}` returned no description",
+                    plugin.product.package_name, plugin.product.product_name
+                )
+            })?;
+            native_product_probe(
+                "describe_plugin",
+                format!(
+                    "handle={} package={} product={} description={}",
+                    handle.0, plugin.product.package_name, plugin.product.product_name, description
+                ),
+            );
+            return Ok(description);
+        }
+
+        #[cfg(not(windows))]
+        {
+            let _ = handle;
+            Err("native plugin products currently require a Windows host".to_string())
+        }
+    }
+
+    fn find_product(
+        &self,
+        package_name: &str,
+        product_name: &str,
+    ) -> Option<&RuntimeNativeProductInfo> {
+        self.products.iter().find(|product| {
+            product.package_name == package_name && product.product_name == product_name
+        })
+    }
+}
+
+impl Drop for RuntimeNativeProductCatalog {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        {
+            self.open_plugins.clear();
+            self.active_child_bindings.clear();
+            self.loaded_children.clear();
+        }
+    }
+}
+
+pub fn load_current_bundle_native_products() -> Result<RuntimeNativeProductCatalog, String> {
+    let exe_path = std::env::current_exe().map_err(|e| {
+        format!("failed to resolve current executable for native product loading: {e}")
+    })?;
+    let bundle_dir = exe_path.parent().unwrap_or_else(|| Path::new("."));
+    load_bundle_native_products(bundle_dir)
+}
+
+pub fn activate_current_bundle_native_products() -> Result<RuntimeNativeProductCatalog, String> {
+    let mut catalog = load_current_bundle_native_products()?;
+    catalog.activate_children()?;
+    Ok(catalog)
+}
+
+pub fn load_bundle_native_products(
+    bundle_dir: &Path,
+) -> Result<RuntimeNativeProductCatalog, String> {
+    let manifest_path = bundle_dir.join(DISTRIBUTION_MANIFEST_FILE);
+    if !manifest_path.is_file() {
+        native_product_probe(
+            "bundle_manifest_missing",
+            format!("bundle_dir={}", bundle_dir.display()),
+        );
+        return Ok(RuntimeNativeProductCatalog::empty(bundle_dir.to_path_buf()));
+    }
+    let text = fs::read_to_string(&manifest_path).map_err(|e| {
+        format!(
+            "failed to read distribution bundle manifest `{}`: {e}",
+            manifest_path.display()
+        )
+    })?;
+    let manifest = toml::from_str::<DistributionBundleManifest>(&text).map_err(|e| {
+        format!(
+            "failed to parse distribution bundle manifest `{}`: {e}",
+            manifest_path.display()
+        )
+    })?;
+    if manifest.format != DISTRIBUTION_BUNDLE_FORMAT {
+        return Err(format!(
+            "unsupported distribution bundle format `{}` in `{}`",
+            manifest.format,
+            manifest_path.display()
+        ));
+    }
+
+    let support_files = manifest
+        .support_files
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut products = manifest
+        .native_products
+        .into_iter()
+        .map(|product| {
+            let role = ArcanaCabiProductRole::parse(&product.role)?;
+            if !support_files.contains(&product.file) {
+                native_product_probe(
+                    "bundle_manifest_product_missing_support_file",
+                    format!(
+                        "package={} product={} file={}",
+                        product.package_name, product.product_name, product.file
+                    ),
+                );
+                return Err(format!(
+                    "distribution bundle manifest `{}` declares native product `{}:{}` at `{}`, but that file is not listed in `support_files`",
+                    manifest_path.display(),
+                    product.package_name,
+                    product.product_name,
+                    product.file
+                ));
+            }
+            Ok(RuntimeNativeProductInfo {
+                package_name: product.package_name,
+                product_name: product.product_name,
+                role,
+                contract_id: product.contract_id,
+                contract_version: product
+                    .contract_version
+                    .unwrap_or(ARCANA_CABI_CONTRACT_VERSION_V1),
+                file: product.file,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    products.sort_by(|left, right| {
+        left.package_name
+            .cmp(&right.package_name)
+            .then_with(|| left.product_name.cmp(&right.product_name))
+    });
+
+    let child_bindings = manifest
+        .child_bindings
+        .into_iter()
+        .map(|binding| RuntimeChildBindingInfo {
+            consumer_member: binding.consumer_member,
+            dependency_alias: binding.dependency_alias,
+            package_name: binding.package_name,
+            product_name: binding.product_name,
+        })
+        .collect::<Vec<_>>();
+
+    for binding in &child_bindings {
+        let product = products
+            .iter()
+            .find(|product| {
+                product.package_name == binding.package_name
+                    && product.product_name == binding.product_name
+            })
+            .ok_or_else(|| {
+                format!(
+                    "distribution bundle manifest `{}` references missing child product `{}:{}` for binding `{}` -> `{}`",
+                    manifest_path.display(),
+                    binding.package_name,
+                    binding.product_name,
+                    binding.consumer_member,
+                    binding.dependency_alias
+                )
+            })?;
+        if product.role != ArcanaCabiProductRole::Child {
+            return Err(format!(
+                "distribution bundle manifest `{}` references `{}`:`{}` as a child binding, but its role is `{}`",
+                manifest_path.display(),
+                binding.package_name,
+                binding.product_name,
+                product.role.as_str()
+            ));
+        }
+    }
+
+    native_product_probe(
+        "bundle_manifest_loaded",
+        format!(
+            "bundle_dir={} root_member={} products={} child_bindings={}",
+            bundle_dir.display(),
+            manifest.member.as_deref().unwrap_or("<unknown>"),
+            products.len(),
+            child_bindings.len()
+        ),
+    );
+
+    Ok(RuntimeNativeProductCatalog {
+        bundle_dir: bundle_dir.to_path_buf(),
+        root_member: manifest.member,
+        products,
+        child_bindings,
+        next_plugin_handle: 1,
+        #[cfg(windows)]
+        loaded_children: BTreeMap::new(),
+        #[cfg(windows)]
+        active_child_bindings: BTreeMap::new(),
+        #[cfg(windows)]
+        open_plugins: BTreeMap::new(),
+    })
+}
+
+#[derive(Debug, Deserialize)]
+struct DistributionBundleManifest {
+    format: String,
+    #[serde(default)]
+    member: Option<String>,
+    #[serde(default)]
+    support_files: Vec<String>,
+    #[serde(default)]
+    native_products: Vec<DistributionBundleNativeProduct>,
+    #[serde(default)]
+    child_bindings: Vec<DistributionBundleChildBinding>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DistributionBundleNativeProduct {
+    package_name: String,
+    product_name: String,
+    role: String,
+    contract_id: String,
+    #[serde(default)]
+    contract_version: Option<u32>,
+    file: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct DistributionBundleChildBinding {
+    consumer_member: String,
+    dependency_alias: String,
+    package_name: String,
+    product_name: String,
+}
+
+#[cfg(windows)]
+struct ActiveNativeInstance {
+    instance: *mut c_void,
+    destroy_instance: ArcanaCabiDestroyInstanceFn,
+}
+
+#[cfg(windows)]
+struct ActiveChildBinding {
+    product: RuntimeNativeProductInfo,
+    instance: ActiveNativeInstance,
+    run_entrypoint: ArcanaCabiChildRunEntrypointFn,
+    last_error_alloc: ArcanaCabiLastErrorAllocFn,
+    owned_bytes_free: ArcanaCabiOwnedBytesFreeFn,
+}
+
+#[cfg(windows)]
+impl Drop for ActiveNativeInstance {
+    fn drop(&mut self) {
+        if !self.instance.is_null() {
+            unsafe {
+                (self.destroy_instance)(self.instance);
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+struct OpenPluginInstance {
+    product: RuntimeNativeProductInfo,
+    active: ActiveNativeInstance,
+    _library: LoadedNativeLibrary,
+    describe_instance: ArcanaCabiPluginDescribeInstanceFn,
+    owned_bytes_free: ArcanaCabiOwnedBytesFreeFn,
+}
+
+#[cfg(windows)]
+struct LoadedNativeLibrary {
+    module: windows_sys::Win32::Foundation::HMODULE,
+    package_name: String,
+    product_name: String,
+    destroy_instance: ArcanaCabiDestroyInstanceFn,
+    create_instance: ArcanaCabiCreateInstanceFn,
+    child_run_entrypoint: Option<ArcanaCabiChildRunEntrypointFn>,
+    plugin_describe_instance: Option<ArcanaCabiPluginDescribeInstanceFn>,
+    last_error_alloc: Option<ArcanaCabiLastErrorAllocFn>,
+    owned_bytes_free: Option<ArcanaCabiOwnedBytesFreeFn>,
+}
+
+#[cfg(windows)]
+impl LoadedNativeLibrary {
+    fn load(bundle_dir: &Path, product: &RuntimeNativeProductInfo) -> Result<Self, String> {
+        use std::os::windows::ffi::OsStrExt;
+
+        let dll_path = bundle_dir.join(&product.file);
+        if !dll_path.is_file() {
+            native_product_probe(
+                "native_product_file_missing",
+                format!(
+                    "package={} product={} path={}",
+                    product.package_name,
+                    product.product_name,
+                    dll_path.display()
+                ),
+            );
+            return Err(format!(
+                "bundle-native product `{}:{}` is missing staged file `{}`",
+                product.package_name,
+                product.product_name,
+                dll_path.display()
+            ));
+        }
+
+        let wide = dll_path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let module =
+            unsafe { windows_sys::Win32::System::LibraryLoader::LoadLibraryW(wide.as_ptr()) };
+        if module.is_null() {
+            return Err(format!(
+                "failed to load native product library `{}`",
+                dll_path.display()
+            ));
+        }
+
+        let get_api_symbol = format!("{ARCANA_CABI_GET_PRODUCT_API_V1_SYMBOL}\0");
+        let proc = unsafe {
+            windows_sys::Win32::System::LibraryLoader::GetProcAddress(
+                module,
+                get_api_symbol.as_ptr(),
+            )
+        };
+        let proc = match proc {
+            Some(proc) => proc,
+            None => {
+                unsafe {
+                    windows_sys::Win32::Foundation::FreeLibrary(module);
+                }
+                return Err(format!(
+                    "native product `{}` does not export `{ARCANA_CABI_GET_PRODUCT_API_V1_SYMBOL}`",
+                    dll_path.display()
+                ));
+            }
+        };
+
+        let get_api: unsafe extern "system" fn() -> *const ArcanaCabiProductApiV1 =
+            unsafe { std::mem::transmute(proc) };
+        let api_ptr = unsafe { get_api() };
+        let api = unsafe { api_ptr.as_ref() }.ok_or_else(|| {
+            unsafe {
+                windows_sys::Win32::Foundation::FreeLibrary(module);
+            }
+            format!(
+                "native product `{}` returned a null product descriptor",
+                dll_path.display()
+            )
+        })?;
+        if api.descriptor_size < std::mem::size_of::<ArcanaCabiProductApiV1>() {
+            unsafe {
+                windows_sys::Win32::Foundation::FreeLibrary(module);
+            }
+            return Err(format!(
+                "native product `{}` reported descriptor_size={} smaller than expected {}",
+                dll_path.display(),
+                api.descriptor_size,
+                std::mem::size_of::<ArcanaCabiProductApiV1>()
+            ));
+        }
+
+        let package_name = unsafe { read_cabi_utf8_field(api.package_name, "package_name") }?;
+        let product_name = unsafe { read_cabi_utf8_field(api.product_name, "product_name") }?;
+        let role_text = unsafe { read_cabi_utf8_field(api.role, "role") }?;
+        let role = ArcanaCabiProductRole::parse(&role_text)?;
+        let contract_id = unsafe { read_cabi_utf8_field(api.contract_id, "contract_id") }?;
+        if package_name != product.package_name
+            || product_name != product.product_name
+            || role != product.role
+            || contract_id != product.contract_id
+        {
+            native_product_probe(
+                "descriptor_manifest_mismatch",
+                format!(
+                    "path={} manifest={}:{}:{}:{} descriptor={}:{}:{}:{}",
+                    dll_path.display(),
+                    product.package_name,
+                    product.product_name,
+                    product.role.as_str(),
+                    product.contract_id,
+                    package_name,
+                    product_name,
+                    role.as_str(),
+                    contract_id
+                ),
+            );
+            unsafe {
+                windows_sys::Win32::Foundation::FreeLibrary(module);
+            }
+            return Err(format!(
+                "native product descriptor mismatch for `{}`; bundle manifest says `{}:{}` role `{}` contract `{}`, descriptor says `{}:{}` role `{}` contract `{}`",
+                dll_path.display(),
+                product.package_name,
+                product.product_name,
+                product.role.as_str(),
+                product.contract_id,
+                package_name,
+                product_name,
+                role.as_str(),
+                contract_id
+            ));
+        }
+        if api.contract_version != product.contract_version {
+            unsafe {
+                windows_sys::Win32::Foundation::FreeLibrary(module);
+            }
+            return Err(format!(
+                "native product `{}` reports contract version `{}` but bundle manifest expected `{}`",
+                dll_path.display(),
+                api.contract_version,
+                product.contract_version
+            ));
+        }
+        if api.role_ops.is_null() {
+            unsafe {
+                windows_sys::Win32::Foundation::FreeLibrary(module);
+            }
+            return Err(format!(
+                "native product `{}` has null role_ops for role `{}`",
+                dll_path.display(),
+                role.as_str()
+            ));
+        }
+
+        let (
+            create_instance,
+            destroy_instance,
+            child_run_entrypoint,
+            plugin_describe_instance,
+            last_error_alloc,
+            owned_bytes_free,
+        ) = match role {
+            ArcanaCabiProductRole::Child => {
+                let child_ops = unsafe { &*(api.role_ops as *const ArcanaCabiChildOpsV1) };
+                if child_ops.base.ops_size < std::mem::size_of::<ArcanaCabiInstanceOpsV1>() {
+                    unsafe {
+                        windows_sys::Win32::Foundation::FreeLibrary(module);
+                    }
+                    return Err(format!(
+                        "native child product `{}` reported instance ops size {} smaller than expected {}",
+                        dll_path.display(),
+                        child_ops.base.ops_size,
+                        std::mem::size_of::<ArcanaCabiInstanceOpsV1>()
+                    ));
+                }
+                (
+                    child_ops.base.create_instance,
+                    child_ops.base.destroy_instance,
+                    Some(child_ops.run_entrypoint),
+                    None,
+                    Some(child_ops.last_error_alloc),
+                    Some(child_ops.owned_bytes_free),
+                )
+            }
+            ArcanaCabiProductRole::Plugin => {
+                let plugin_ops = unsafe { &*(api.role_ops as *const ArcanaCabiPluginOpsV1) };
+                if plugin_ops.base.ops_size < std::mem::size_of::<ArcanaCabiInstanceOpsV1>() {
+                    unsafe {
+                        windows_sys::Win32::Foundation::FreeLibrary(module);
+                    }
+                    return Err(format!(
+                        "native plugin product `{}` reported instance ops size {} smaller than expected {}",
+                        dll_path.display(),
+                        plugin_ops.base.ops_size,
+                        std::mem::size_of::<ArcanaCabiInstanceOpsV1>()
+                    ));
+                }
+                (
+                    plugin_ops.base.create_instance,
+                    plugin_ops.base.destroy_instance,
+                    None,
+                    Some(plugin_ops.describe_instance),
+                    Some(plugin_ops.last_error_alloc),
+                    Some(plugin_ops.owned_bytes_free),
+                )
+            }
+            ArcanaCabiProductRole::Export => {
+                unsafe {
+                    windows_sys::Win32::Foundation::FreeLibrary(module);
+                }
+                return Err(format!(
+                    "runtime native product loader does not support role `export` for `{}`",
+                    dll_path.display()
+                ));
+            }
+        };
+
+        native_product_probe(
+            "load_library",
+            format!(
+                "path={} package={} product={} role={} contract={}",
+                dll_path.display(),
+                package_name,
+                product_name,
+                role.as_str(),
+                contract_id
+            ),
+        );
+
+        Ok(Self {
+            module,
+            package_name,
+            product_name,
+            destroy_instance,
+            create_instance,
+            child_run_entrypoint,
+            plugin_describe_instance,
+            last_error_alloc,
+            owned_bytes_free,
+        })
+    }
+
+    fn create_instance(&self) -> Result<*mut c_void, String> {
+        let instance = unsafe { (self.create_instance)() };
+        if instance.is_null() {
+            return Err("native product instance factory returned null".to_string());
+        }
+        Ok(instance)
+    }
+}
+
+#[cfg(windows)]
+impl Drop for LoadedNativeLibrary {
+    fn drop(&mut self) {
+        unsafe {
+            windows_sys::Win32::Foundation::FreeLibrary(self.module);
+        }
+    }
+}
+
+#[cfg(windows)]
+unsafe fn read_cabi_utf8_field(ptr: *const c_char, field: &str) -> Result<String, String> {
+    if ptr.is_null() {
+        return Err(format!(
+            "native product descriptor field `{field}` must not be null"
+        ));
+    }
+    unsafe { CStr::from_ptr(ptr) }
+        .to_str()
+        .map(ToOwned::to_owned)
+        .map_err(|e| format!("native product descriptor field `{field}` is not utf8: {e}"))
+}
+
+#[cfg(windows)]
+fn read_allocated_utf8_bytes(
+    alloc: ArcanaCabiLastErrorAllocFn,
+    free: ArcanaCabiOwnedBytesFreeFn,
+    context: &str,
+) -> Result<Option<String>, String> {
+    read_allocated_utf8_from_raw(|out_len| unsafe { alloc(out_len) }, free, context)
+}
+
+#[cfg(windows)]
+fn read_plugin_description(plugin: &OpenPluginInstance) -> Result<Option<String>, String> {
+    read_allocated_utf8_from_raw(
+        |out_len| unsafe { (plugin.describe_instance)(plugin.active.instance, out_len) },
+        plugin.owned_bytes_free,
+        "plugin describe_instance",
+    )
+}
+
+#[cfg(windows)]
+fn read_allocated_utf8_from_raw<F>(
+    alloc: F,
+    free: ArcanaCabiOwnedBytesFreeFn,
+    context: &str,
+) -> Result<Option<String>, String>
+where
+    F: FnOnce(*mut usize) -> *mut u8,
+{
+    let mut len = 0usize;
+    let ptr = alloc(&mut len);
+    if ptr.is_null() {
+        if len == 0 {
+            return Ok(None);
+        }
+        return Err(format!(
+            "{context} returned null with non-zero length {len}"
+        ));
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec();
+    unsafe {
+        free(ptr, len);
+    }
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|e| format!("{context} returned invalid utf8: {e}"))
+}
+
+fn native_product_probe(event: &str, message: impl AsRef<str>) {
+    if std::env::var_os(NATIVE_PRODUCT_TEMP_PROBES_ENV).is_some() {
+        eprintln!(
+            "[arcana-native-product-probe] {event}: {}",
+            message.as_ref()
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::load_bundle_native_products;
+    use arcana_aot::{AotInstanceProductSpec, compile_instance_product};
+    use arcana_cabi::{
+        ARCANA_CABI_CHILD_CONTRACT_ID, ARCANA_CABI_PLUGIN_CONTRACT_ID, ArcanaCabiProductRole,
+    };
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn repo_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("workspace root should exist")
+            .to_path_buf()
+    }
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos();
+        let dir = repo_root()
+            .join("target")
+            .join("arcana-runtime-native-product-tests")
+            .join(format!("{label}_{unique}"));
+        fs::create_dir_all(&dir).expect("temp dir should be created");
+        dir
+    }
+
+    fn build_instance_product(
+        dir: &Path,
+        package_name: &str,
+        product_name: &str,
+        role: ArcanaCabiProductRole,
+        contract_id: &str,
+        file: &str,
+    ) -> PathBuf {
+        let project_dir = dir.join("project").join(product_name);
+        let target_dir = dir.join("target").join(product_name);
+        let compiled = compile_instance_product(
+            &AotInstanceProductSpec {
+                package_name: package_name.to_string(),
+                product_name: product_name.to_string(),
+                role,
+                contract_id: contract_id.to_string(),
+                output_file_name: file.to_string(),
+            },
+            &project_dir,
+            &target_dir,
+        )
+        .expect("instance product should compile");
+        let output = dir.join(file);
+        fs::copy(compiled.output_path, &output).expect("compiled output should copy");
+        output
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bundle_native_product_catalog_activates_children_and_opens_plugins() {
+        let dir = temp_dir("bundle_native_products");
+        build_instance_product(
+            &dir,
+            "arcana_desktop",
+            "default",
+            ArcanaCabiProductRole::Child,
+            ARCANA_CABI_CHILD_CONTRACT_ID,
+            "arcana_desktop.dll",
+        );
+        build_instance_product(
+            &dir,
+            "tooling",
+            "tools",
+            ArcanaCabiProductRole::Plugin,
+            ARCANA_CABI_PLUGIN_CONTRACT_ID,
+            "tooling_tools.dll",
+        );
+        fs::write(
+            dir.join("arcana.bundle.toml"),
+            concat!(
+                "format = \"arcana-distribution-bundle-v1\"\n",
+                "member = \"app\"\n",
+                "target = \"windows-exe\"\n",
+                "target_format = \"arcana-native-exe-v1\"\n",
+                "root_artifact = \"app.exe\"\n",
+                "artifact_hash = \"sha256:test\"\n",
+                "toolchain = \"toolchain\"\n",
+                "support_files = [\"arcana_desktop.dll\", \"tooling_tools.dll\"]\n",
+                "\n[[native_products]]\n",
+                "package_name = \"arcana_desktop\"\n",
+                "product_name = \"default\"\n",
+                "role = \"child\"\n",
+                "contract_id = \"arcana.cabi.child.v1\"\n",
+                "file = \"arcana_desktop.dll\"\n",
+                "\n[[native_products]]\n",
+                "package_name = \"tooling\"\n",
+                "product_name = \"tools\"\n",
+                "role = \"plugin\"\n",
+                "contract_id = \"arcana.cabi.plugin.v1\"\n",
+                "file = \"tooling_tools.dll\"\n",
+                "\n[[child_bindings]]\n",
+                "consumer_member = \"app\"\n",
+                "dependency_alias = \"arcana_desktop\"\n",
+                "package_name = \"arcana_desktop\"\n",
+                "product_name = \"default\"\n",
+            ),
+        )
+        .expect("bundle manifest should write");
+
+        let mut catalog = load_bundle_native_products(&dir).expect("catalog should load");
+        assert_eq!(catalog.products().len(), 2);
+        assert_eq!(catalog.child_bindings().len(), 1);
+        assert_eq!(catalog.plugin_products().len(), 1);
+
+        catalog
+            .activate_children()
+            .expect("children should activate");
+        assert_eq!(catalog.active_child_binding_count(), 1);
+        let child_err = catalog
+            .run_child_entrypoint("{}", "main")
+            .expect_err("invalid package image should surface child provider errors");
+        assert!(
+            child_err.contains("runtime package image") || child_err.contains("failed to parse"),
+            "{child_err}"
+        );
+
+        let handle = catalog
+            .open_plugin("tooling", "tools")
+            .expect("plugin should open");
+        assert_eq!(catalog.open_plugin_count(), 1);
+        let description = catalog
+            .describe_open_plugin(handle)
+            .expect("plugin description should resolve");
+        assert!(description.contains("tooling:tools"), "{description}");
+        catalog
+            .release_plugin(handle)
+            .expect("plugin should release cleanly");
+        assert_eq!(catalog.open_plugin_count(), 0);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bundle_native_product_catalog_scopes_child_runtime_provider_to_root_member() {
+        let dir = temp_dir("bundle_native_products_root_scope");
+        build_instance_product(
+            &dir,
+            "arcana_desktop",
+            "default",
+            ArcanaCabiProductRole::Child,
+            ARCANA_CABI_CHILD_CONTRACT_ID,
+            "arcana_desktop.dll",
+        );
+        build_instance_product(
+            &dir,
+            "tooling",
+            "default",
+            ArcanaCabiProductRole::Child,
+            ARCANA_CABI_CHILD_CONTRACT_ID,
+            "tooling_default.dll",
+        );
+        fs::write(
+            dir.join("arcana.bundle.toml"),
+            concat!(
+                "format = \"arcana-distribution-bundle-v1\"\n",
+                "member = \"app\"\n",
+                "target = \"windows-exe\"\n",
+                "target_format = \"arcana-native-exe-v1\"\n",
+                "root_artifact = \"app.exe\"\n",
+                "artifact_hash = \"sha256:test\"\n",
+                "toolchain = \"toolchain\"\n",
+                "support_files = [\"arcana_desktop.dll\", \"tooling_default.dll\"]\n",
+                "\n[[native_products]]\n",
+                "package_name = \"arcana_desktop\"\n",
+                "product_name = \"default\"\n",
+                "role = \"child\"\n",
+                "contract_id = \"arcana.cabi.child.v1\"\n",
+                "file = \"arcana_desktop.dll\"\n",
+                "\n[[native_products]]\n",
+                "package_name = \"tooling\"\n",
+                "product_name = \"default\"\n",
+                "role = \"child\"\n",
+                "contract_id = \"arcana.cabi.child.v1\"\n",
+                "file = \"tooling_default.dll\"\n",
+                "\n[[child_bindings]]\n",
+                "consumer_member = \"app\"\n",
+                "dependency_alias = \"arcana_desktop\"\n",
+                "package_name = \"arcana_desktop\"\n",
+                "product_name = \"default\"\n",
+                "\n[[child_bindings]]\n",
+                "consumer_member = \"tooling\"\n",
+                "dependency_alias = \"tools\"\n",
+                "package_name = \"tooling\"\n",
+                "product_name = \"default\"\n",
+            ),
+        )
+        .expect("bundle manifest should write");
+
+        let mut catalog = load_bundle_native_products(&dir).expect("catalog should load");
+        assert_eq!(catalog.root_member(), Some("app"));
+        catalog
+            .activate_children()
+            .expect("children should activate");
+        assert_eq!(catalog.active_child_binding_count(), 2);
+        let child_err = catalog.run_child_entrypoint("{}", "main").expect_err(
+            "root child provider should run instead of reporting bundle-global ambiguity",
+        );
+        assert!(
+            !child_err.contains("runtime provider selection is ambiguous"),
+            "{child_err}"
+        );
+        assert!(
+            child_err.contains("runtime package image") || child_err.contains("failed to parse"),
+            "{child_err}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bundle_native_product_catalog_falls_back_when_only_transitive_child_bindings_exist() {
+        let dir = temp_dir("bundle_native_products_transitive_only");
+        build_instance_product(
+            &dir,
+            "tooling",
+            "default",
+            ArcanaCabiProductRole::Child,
+            ARCANA_CABI_CHILD_CONTRACT_ID,
+            "tooling_default.dll",
+        );
+        fs::write(
+            dir.join("arcana.bundle.toml"),
+            concat!(
+                "format = \"arcana-distribution-bundle-v1\"\n",
+                "member = \"app\"\n",
+                "target = \"windows-exe\"\n",
+                "target_format = \"arcana-native-exe-v1\"\n",
+                "root_artifact = \"app.exe\"\n",
+                "artifact_hash = \"sha256:test\"\n",
+                "toolchain = \"toolchain\"\n",
+                "support_files = [\"tooling_default.dll\"]\n",
+                "\n[[native_products]]\n",
+                "package_name = \"tooling\"\n",
+                "product_name = \"default\"\n",
+                "role = \"child\"\n",
+                "contract_id = \"arcana.cabi.child.v1\"\n",
+                "file = \"tooling_default.dll\"\n",
+                "\n[[child_bindings]]\n",
+                "consumer_member = \"tooling\"\n",
+                "dependency_alias = \"tools\"\n",
+                "package_name = \"tooling\"\n",
+                "product_name = \"default\"\n",
+            ),
+        )
+        .expect("bundle manifest should write");
+
+        let mut catalog = load_bundle_native_products(&dir).expect("catalog should load");
+        catalog
+            .activate_children()
+            .expect("children should activate");
+        assert_eq!(catalog.active_child_binding_count(), 1);
+        assert_eq!(
+            catalog
+                .run_child_entrypoint("{}", "main")
+                .expect("non-root child bindings should not block fallback"),
+            None
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bundle_native_product_catalog_ignores_missing_manifest() {
+        let dir = temp_dir("bundle_native_products_missing");
+        let catalog = load_bundle_native_products(&dir).expect("missing manifest should not fail");
+        assert!(catalog.products().is_empty());
+        assert!(catalog.child_bindings().is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+}

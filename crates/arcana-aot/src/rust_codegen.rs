@@ -14,6 +14,11 @@ use crate::native_manifest::{
     windows_dll_header_file_name,
 };
 use crate::native_plan::{NativeLaunchPlan, NativePackagePlan};
+use arcana_cabi::{
+    ARCANA_CABI_GET_PRODUCT_API_V1_SYMBOL, ARCANA_CABI_LAST_ERROR_ALLOC_V1_SYMBOL,
+    ARCANA_CABI_OWNED_BYTES_FREE_V1_SYMBOL, ARCANA_CABI_OWNED_STR_FREE_V1_SYMBOL,
+    ArcanaCabiPassMode, render_c_descriptor_type_defs,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RustNativeProject {
@@ -21,7 +26,6 @@ pub struct RustNativeProject {
     pub output_name: String,
     pub artifact_text: String,
     pub support_files: Vec<(String, Vec<u8>)>,
-    pub runtime_dynamic_libraries: Vec<String>,
     pub cargo_toml: String,
     pub build_rs: Option<String>,
     pub lib_rs: Option<String>,
@@ -59,7 +63,6 @@ pub fn generate_windows_exe_project(
             native_bundle_manifest_file_name(&plan.root_artifact_file_name),
             render_native_bundle_manifest(plan)?.into_bytes(),
         )],
-        runtime_dynamic_libraries: runtime_dynamic_libraries(plan.runtime_binding),
         cargo_toml: render_exe_cargo_toml(
             plan.artifact.package_name.as_str(),
             &output_stem,
@@ -121,14 +124,13 @@ pub fn generate_windows_dll_project(
                 render_native_bundle_manifest(plan)?.into_bytes(),
             ),
         ],
-        runtime_dynamic_libraries: runtime_dynamic_libraries(plan.runtime_binding),
         cargo_toml: render_dll_cargo_toml(
             plan.artifact.package_name.as_str(),
             &output_stem,
             plan.runtime_binding,
         ),
         build_rs: Some(render_native_build_rs(Some(&definition_text))),
-        lib_rs: Some(render_dll_lib_rs(lowered_exports, &layout, lowering)),
+        lib_rs: Some(render_dll_lib_rs(plan, lowered_exports, &layout, lowering)),
         main_rs: None,
     })
 }
@@ -140,6 +142,13 @@ fn render_exe_cargo_toml(
 ) -> String {
     let repo_root = repo_root();
     let runtime_dependency = render_runtime_dependency(runtime_binding, &repo_root);
+    let cabi_dependency = escape_toml(
+        &repo_root
+            .join("crates")
+            .join("arcana-cabi")
+            .display()
+            .to_string(),
+    );
     format!(
         concat!(
             "[package]\n",
@@ -150,6 +159,7 @@ fn render_exe_cargo_toml(
             "name = \"{}\"\n",
             "path = \"src/main.rs\"\n\n",
             "[dependencies]\n",
+            "arcana_cabi = {{ package = \"arcana-cabi\", path = \"{}\" }}\n",
             "arcana_runtime = {{ {} }}\n",
             "\n[build-dependencies]\n",
             "arcana-aot = {{ path = \"{}\" }}\n",
@@ -158,6 +168,7 @@ fn render_exe_cargo_toml(
         ),
         sanitize_crate_name(crate_name),
         escape_toml(output_stem),
+        cabi_dependency,
         runtime_dependency,
         escape_toml(
             &repo_root
@@ -177,6 +188,13 @@ fn render_dll_cargo_toml(
 ) -> String {
     let repo_root = repo_root();
     let runtime_dependency = render_runtime_dependency(runtime_binding, &repo_root);
+    let cabi_dependency = escape_toml(
+        &repo_root
+            .join("crates")
+            .join("arcana-cabi")
+            .display()
+            .to_string(),
+    );
     format!(
         concat!(
             "[package]\n",
@@ -187,6 +205,7 @@ fn render_dll_cargo_toml(
             "name = \"{}\"\n",
             "crate-type = [\"cdylib\"]\n\n",
             "[dependencies]\n",
+            "arcana_cabi = {{ package = \"arcana-cabi\", path = \"{}\" }}\n",
             "arcana_runtime = {{ {} }}\n",
             "\n[build-dependencies]\n",
             "arcana-aot = {{ path = \"{}\" }}\n",
@@ -195,6 +214,7 @@ fn render_dll_cargo_toml(
         ),
         sanitize_crate_name(crate_name),
         escape_toml(output_stem),
+        cabi_dependency,
         runtime_dependency,
         escape_toml(
             &repo_root
@@ -208,28 +228,14 @@ fn render_dll_cargo_toml(
 }
 
 fn render_runtime_dependency(runtime_binding: AotRuntimeBinding, repo_root: &Path) -> String {
-    let dependency_path = match runtime_binding {
-        AotRuntimeBinding::Baked => repo_root.join("crates").join("arcana-runtime"),
-        AotRuntimeBinding::DesktopRuntimeDll => {
-            repo_root.join("crates").join("arcana-desktop-runtime")
-        }
-    };
-    let package_name = match runtime_binding {
-        AotRuntimeBinding::Baked => "arcana-runtime",
-        AotRuntimeBinding::DesktopRuntimeDll => "arcana-desktop-runtime",
-    };
+    let _ = runtime_binding;
+    let dependency_path = repo_root.join("crates").join("arcana-runtime");
+    let package_name = "arcana-runtime";
     format!(
         "package = \"{}\", path = \"{}\"",
         escape_toml(package_name),
         escape_toml(&dependency_path.display().to_string())
     )
-}
-
-fn runtime_dynamic_libraries(runtime_binding: AotRuntimeBinding) -> Vec<String> {
-    match runtime_binding {
-        AotRuntimeBinding::Baked => Vec::new(),
-        AotRuntimeBinding::DesktopRuntimeDll => vec!["arcana_desktop.dll".to_string()],
-    }
 }
 
 fn render_exe_main_rs(
@@ -241,7 +247,7 @@ fn render_exe_main_rs(
         NativeRoutineLowering::Direct { routine_key } => format!(
             concat!(
                 "#![windows_subsystem = \"windows\"]\n\n",
-                "use arcana_runtime::RuntimeAbiValue;\n\n",
+                "use arcana_runtime::{{activate_current_bundle_native_products, RuntimeAbiValue}};\n\n",
                 "{}",
                 "fn main() {{\n",
                 "    let code = match run() {{\n",
@@ -254,6 +260,7 @@ fn render_exe_main_rs(
                 "    std::process::exit(code);\n",
                 "}}\n\n",
                 "fn run() -> Result<i32, String> {{\n",
+                "    let _native_products = activate_current_bundle_native_products()?;\n",
                 "    let result = {}?;\n",
                 "    match result {{\n",
                 "        RuntimeAbiValue::Int(code) => i32::try_from(code)\n",
@@ -264,13 +271,13 @@ fn render_exe_main_rs(
                 "}}\n",
             ),
             render_direct_routine_helpers(plan),
-            render_direct_routine_call_from_values(routine_key, &[]),
+            render_direct_routine_call_from_values(routine_key, &[], &[]),
             main_routine_key,
         ),
         NativeRoutineLowering::RuntimeDispatch => {
             let template = concat!(
                 "#![windows_subsystem = \"windows\"]\n\n",
-                "use arcana_runtime::{current_process_runtime_host, execute_entrypoint_routine, parse_runtime_package_image};\n\n",
+                "use arcana_runtime::execute_current_bundle_entrypoint;\n\n",
                 "static PACKAGE_IMAGE_TEXT: &str = include_str!(concat!(env!(\"OUT_DIR\"), \"/runtime-package.json\"));\n\n",
                 "static MAIN_ROUTINE_KEY: &str = __ARCANA_MAIN_ROUTINE_KEY__;\n\n",
                 "fn main() {\n",
@@ -284,10 +291,7 @@ fn render_exe_main_rs(
                 "    std::process::exit(code);\n",
                 "}\n\n",
                 "fn run() -> Result<i32, String> {\n",
-                "    let plan = parse_runtime_package_image(PACKAGE_IMAGE_TEXT)?;\n",
-                "    let mut host = current_process_runtime_host()?;\n",
-                "    let code = execute_entrypoint_routine(&plan, MAIN_ROUTINE_KEY, host.as_mut())?;\n",
-                "    Ok(code)\n",
+                "    execute_current_bundle_entrypoint(PACKAGE_IMAGE_TEXT, MAIN_ROUTINE_KEY)\n",
                 "}\n\n",
             );
             let mut out = String::new();
@@ -361,97 +365,108 @@ fn render_native_build_rs(dll_definition_text: Option<&str>) -> String {
 }
 
 fn render_dll_lib_rs(
+    plan: &NativePackagePlan,
     exports: &[NativeExportLowering],
     layout: &NativeLayoutCatalog,
     lowering: &NativeLoweringPlan,
 ) -> String {
     let mut out = String::new();
-    out.push_str(
+    out.push_str(&format!(
         concat!(
             "#![allow(dead_code, unused_imports)]\n\n",
             "use std::cell::RefCell;\n",
+            "use std::ffi::{{c_char, c_void}};\n",
             "use std::ptr;\n",
             "use std::sync::OnceLock;\n\n",
-            "use arcana_runtime::{RuntimeAbiCallOutcome, RuntimeAbiValue, RuntimePackagePlan, current_process_runtime_host, execute_exported_abi_routine, parse_runtime_package_image};\n\n",
-            "thread_local! {\n",
-            "    static LAST_ERROR: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };\n",
-            "}\n\n",
+            "use arcana_cabi::{{ArcanaBytesView, ArcanaCabiExportEntryV1, ArcanaCabiExportOpsV1, ArcanaCabiExportParamV1, ArcanaCabiProductApiV1, ArcanaOwnedBytes, ArcanaOwnedStr, ArcanaStrView}};\n",
+            "use arcana_runtime::{{RuntimeAbiExportOutcome, RuntimeAbiValue, RuntimeAbiWriteBack, RuntimePackagePlan, current_process_runtime_host, execute_exported_abi_routine, parse_runtime_package_image}};\n\n",
+            "thread_local! {{\n",
+            "    static LAST_ERROR: RefCell<Vec<u8>> = const {{ RefCell::new(Vec::new()) }};\n",
+            "}}\n\n",
             "static PLAN: OnceLock<Result<RuntimePackagePlan, String>> = OnceLock::new();\n",
             "static PACKAGE_IMAGE_TEXT: &str = include_str!(concat!(env!(\"OUT_DIR\"), \"/runtime-package.json\"));\n\n",
             "#[unsafe(no_mangle)]\n",
-            "pub extern \"system\" fn arcana_last_error_alloc(out_len: *mut usize) -> *mut u8 {\n",
+            "pub extern \"system\" fn {last_error_symbol}(out_len: *mut usize) -> *mut u8 {{\n",
             "    let bytes = LAST_ERROR.with(|slot| slot.borrow().clone());\n",
             "    write_allocated_bytes(bytes, out_len)\n",
-            "}\n\n",
+            "}}\n\n",
             "#[unsafe(no_mangle)]\n",
-            "pub extern \"system\" fn arcana_bytes_free(ptr: *mut u8, len: usize) {\n",
-            "    if ptr.is_null() || len == 0 { return; }\n",
-            "    unsafe { drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len))); }\n",
-            "}\n\n",
-            "fn load_plan() -> Result<&'static RuntimePackagePlan, String> {\n",
-            "    match PLAN.get_or_init(|| {\n",
+            "pub extern \"system\" fn {owned_bytes_free_symbol}(ptr: *mut u8, len: usize) {{\n",
+            "    if ptr.is_null() || len == 0 {{ return; }}\n",
+            "    unsafe {{ drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len))); }}\n",
+            "}}\n\n",
+            "#[unsafe(no_mangle)]\n",
+            "pub extern \"system\" fn {owned_str_free_symbol}(ptr: *mut u8, len: usize) {{\n",
+            "    {owned_bytes_free_symbol}(ptr, len);\n",
+            "}}\n\n",
+            "fn load_plan() -> Result<&'static RuntimePackagePlan, String> {{\n",
+            "    match PLAN.get_or_init(|| {{\n",
             "        parse_runtime_package_image(PACKAGE_IMAGE_TEXT)\n",
-            "    }) {\n",
+            "    }}) {{\n",
             "        Ok(plan) => Ok(plan),\n",
             "        Err(err) => Err(err.clone()),\n",
-            "    }\n",
-            "}\n\n",
-            "fn default_host() -> Result<Box<dyn arcana_runtime::RuntimeHost>, String> {\n",
+            "    }}\n",
+            "}}\n\n",
+            "fn default_host() -> Result<Box<dyn arcana_runtime::RuntimeHost>, String> {{\n",
             "    current_process_runtime_host()\n",
-            "}\n\n",
-            "fn set_last_error(err: String) {\n",
+            "}}\n\n",
+            "fn set_last_error(err: String) {{\n",
             "    LAST_ERROR.with(|slot| *slot.borrow_mut() = err.into_bytes());\n",
-            "}\n\n",
-            "fn bytes_from_view(view: ArcanaBytesView, context: &str) -> Result<Vec<u8>, String> {\n",
-            "    if view.ptr.is_null() {\n",
-            "        if view.len == 0 {\n",
+            "}}\n\n",
+            "fn bytes_from_view(view: ArcanaBytesView, context: &str) -> Result<Vec<u8>, String> {{\n",
+            "    if view.ptr.is_null() {{\n",
+            "        if view.len == 0 {{\n",
             "            return Ok(Vec::new());\n",
-            "        }\n",
-            "        return Err(format!(\"{context} received null bytes pointer with len {}\", view.len));\n",
-            "    }\n",
-            "    Ok(unsafe { std::slice::from_raw_parts(view.ptr, view.len) }.to_vec())\n",
-            "}\n\n",
-            "fn string_from_view(view: ArcanaStrView, context: &str) -> Result<String, String> {\n",
-            "    let bytes = bytes_from_view(ArcanaBytesView { ptr: view.ptr, len: view.len }, context)?;\n",
-            "    String::from_utf8(bytes).map_err(|e| format!(\"{context} received invalid utf8: {e}\"))\n",
-            "}\n\n",
-            "fn allocated_bytes_parts(bytes: Vec<u8>) -> (*mut u8, usize) {\n",
-            "    if bytes.is_empty() {\n",
+            "        }}\n",
+            "        return Err(format!(\"{{context}} received null bytes pointer with len {{}}\", view.len));\n",
+            "    }}\n",
+            "    Ok(unsafe {{ std::slice::from_raw_parts(view.ptr, view.len) }}.to_vec())\n",
+            "}}\n\n",
+            "fn string_from_view(view: ArcanaStrView, context: &str) -> Result<String, String> {{\n",
+            "    let bytes = bytes_from_view(ArcanaBytesView {{ ptr: view.ptr, len: view.len }}, context)?;\n",
+            "    String::from_utf8(bytes).map_err(|e| format!(\"{{context}} received invalid utf8: {{e}}\"))\n",
+            "}}\n\n",
+            "fn allocated_bytes_parts(bytes: Vec<u8>) -> (*mut u8, usize) {{\n",
+            "    if bytes.is_empty() {{\n",
             "        return (ptr::null_mut(), 0);\n",
-            "    }\n",
+            "    }}\n",
             "    let len = bytes.len();\n",
             "    (Box::into_raw(bytes.into_boxed_slice()) as *mut u8, len)\n",
-            "}\n\n",
-            "fn owned_bytes_from_vec(bytes: Vec<u8>) -> ArcanaOwnedBytes {\n",
+            "}}\n\n",
+            "fn owned_bytes_from_vec(bytes: Vec<u8>) -> ArcanaOwnedBytes {{\n",
             "    let (ptr, len) = allocated_bytes_parts(bytes);\n",
-            "    ArcanaOwnedBytes { ptr, len }\n",
-            "}\n\n",
-            "fn owned_str_from_string(text: String) -> ArcanaOwnedStr {\n",
+            "    ArcanaOwnedBytes {{ ptr, len }}\n",
+            "}}\n\n",
+            "fn owned_str_from_string(text: String) -> ArcanaOwnedStr {{\n",
             "    let (ptr, len) = allocated_bytes_parts(text.into_bytes());\n",
-            "    ArcanaOwnedStr { ptr, len }\n",
-            "}\n\n",
-            "fn write_allocated_bytes(bytes: Vec<u8>, out_len: *mut usize) -> *mut u8 {\n",
+            "    ArcanaOwnedStr {{ ptr, len }}\n",
+            "}}\n\n",
+            "fn write_allocated_bytes(bytes: Vec<u8>, out_len: *mut usize) -> *mut u8 {{\n",
             "    let (ptr, len) = allocated_bytes_parts(bytes);\n",
-            "    if !out_len.is_null() { unsafe { *out_len = len; } }\n",
+            "    if !out_len.is_null() {{ unsafe {{ *out_len = len; }} }}\n",
             "    ptr\n",
-            "}\n\n",
+            "}}\n\n"
         ),
-    );
-    out.push_str(&layout.render_rust_type_defs());
+        last_error_symbol = ARCANA_CABI_LAST_ERROR_ALLOC_V1_SYMBOL,
+        owned_bytes_free_symbol = ARCANA_CABI_OWNED_BYTES_FREE_V1_SYMBOL,
+        owned_str_free_symbol = ARCANA_CABI_OWNED_STR_FREE_V1_SYMBOL,
+    ));
+    out.push_str(&layout.render_rust_pair_type_defs());
     out.push_str(&render_direct_routine_helpers(lowering));
 
     for export in exports {
         out.push_str(&render_export_fn(export, layout));
     }
+    out.push_str(&render_export_descriptor(plan, exports));
     out
 }
 
 fn render_export_fn(export: &NativeExportLowering, layout: &NativeLayoutCatalog) -> String {
     let api = &export.export;
-    let needs_final_args = api
+    let needs_write_backs = api
         .params
         .iter()
-        .any(|param| param.is_edit && !matches!(param.ty, NativeAbiType::Unit));
+        .any(|param| matches!(param.pass_mode, ArcanaCabiPassMode::InWithWriteBack));
     let mut params = api
         .params
         .iter()
@@ -464,7 +479,9 @@ fn render_export_fn(export: &NativeExportLowering, layout: &NativeLayoutCatalog)
         })
         .collect::<Vec<_>>();
     for param in &api.params {
-        if param.is_edit && !matches!(param.ty, NativeAbiType::Unit) {
+        if matches!(param.pass_mode, ArcanaCabiPassMode::InWithWriteBack)
+            && !matches!(param.ty, NativeAbiType::Unit)
+        {
             params.push(format!(
                 "out_{}: *mut {}",
                 param.name,
@@ -484,6 +501,7 @@ fn render_export_fn(export: &NativeExportLowering, layout: &NativeLayoutCatalog)
             body.push_str("    let result = match ");
             body.push_str(&render_direct_routine_call_from_values(
                 routine_key,
+                &api.params,
                 &api.params
                     .iter()
                     .map(|param| format!("{}_value", param.name))
@@ -493,9 +511,6 @@ fn render_export_fn(export: &NativeExportLowering, layout: &NativeLayoutCatalog)
             body.push_str("        Ok(value) => value,\n");
             body.push_str("        Err(err) => { set_last_error(err); return 0; }\n");
             body.push_str("    };\n");
-            if needs_final_args {
-                body.push_str("    let final_args: Vec<RuntimeAbiValue> = Vec::new();\n");
-            }
         }
         NativeRoutineLowering::RuntimeDispatch => {
             body.push_str("    let plan = match load_plan() {\n");
@@ -521,37 +536,49 @@ fn render_export_fn(export: &NativeExportLowering, layout: &NativeLayoutCatalog)
             body.push_str("        Err(err) => { set_last_error(err); return 0; }\n");
             body.push_str("    };\n");
             body.push_str("    let result = outcome.result;\n");
-            if needs_final_args {
-                body.push_str("    let final_args = outcome.final_args;\n");
+            if needs_write_backs {
+                body.push_str("    let write_backs = outcome.write_backs;\n");
             }
         }
     }
     for (index, param) in api.params.iter().enumerate() {
-        if !param.is_edit || matches!(param.ty, NativeAbiType::Unit) {
+        if !matches!(param.pass_mode, ArcanaCabiPassMode::InWithWriteBack)
+            || matches!(param.ty, NativeAbiType::Unit)
+        {
             continue;
         }
         let out_name = format!("out_{}", param.name);
-        let final_arg_name = format!("{}_final_arg", param.name);
+        let source_value_name = format!("{}_write_back", param.name);
         let out_value_name = format!("{}_out_value", param.name);
         body.push_str(&format!(
             "    if {out_name}.is_null() {{ set_last_error(\"null {out_name}\".to_string()); return 0; }}\n"
         ));
-        body.push_str(&format!(
-            "    let {final_arg_name} = match final_args.get({index}) {{\n"
-        ));
-        body.push_str("        Some(value) => value.clone(),\n");
-        body.push_str(&format!(
-            "        None => {{ set_last_error(\"missing final arg `{}`\".to_string()); return 0; }}\n",
-            param.name
-        ));
-        body.push_str("    };\n");
+        match &export.lowering {
+            NativeRoutineLowering::Direct { .. } => {
+                body.push_str(&format!(
+                    "    let {source_value_name} = {}_value.clone();\n",
+                    param.name
+                ));
+            }
+            NativeRoutineLowering::RuntimeDispatch => {
+                body.push_str(&format!(
+                    "    let {source_value_name} = match write_backs.iter().find(|write_back| write_back.index == {index}) {{\n"
+                ));
+                body.push_str("        Some(write_back) => write_back.value.clone(),\n");
+                body.push_str(&format!(
+                    "        None => {{ set_last_error(\"missing write-back `{}`\".to_string()); return 0; }}\n",
+                    param.name
+                ));
+                body.push_str("    };\n");
+            }
+        }
         body.push_str(&format!(
             "    let {out_value_name}: {};\n",
             layout.rust_type_ref(&param.ty, NativeAbiRole::Return)
         ));
         body.push_str(&render_store_runtime_abi_value(
             &param.ty,
-            &final_arg_name,
+            &source_value_name,
             &out_value_name,
             layout,
         ));
@@ -588,10 +615,23 @@ fn render_dll_header(exports: &[NativeExport], layout: &NativeLayoutCatalog) -> 
         "#include <stdint.h>\n#include <stddef.h>\n\n",
     ));
     out.push_str(&layout.render_c_type_defs());
-    out.push_str(concat!(
-        "#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n",
-        "uint8_t* arcana_last_error_alloc(size_t* out_len);\n",
-        "void arcana_bytes_free(uint8_t* ptr, size_t len);\n\n",
+    out.push_str(&render_c_descriptor_type_defs());
+    out.push_str("#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n");
+    out.push_str(&format!(
+        "uint8_t* {}(size_t* out_len);\n",
+        ARCANA_CABI_LAST_ERROR_ALLOC_V1_SYMBOL
+    ));
+    out.push_str(&format!(
+        "void {}(uint8_t* ptr, size_t len);\n",
+        ARCANA_CABI_OWNED_BYTES_FREE_V1_SYMBOL
+    ));
+    out.push_str(&format!(
+        "void {}(uint8_t* ptr, size_t len);\n",
+        ARCANA_CABI_OWNED_STR_FREE_V1_SYMBOL
+    ));
+    out.push_str(&format!(
+        "const ArcanaCabiProductApiV1* {}(void);\n\n",
+        ARCANA_CABI_GET_PRODUCT_API_V1_SYMBOL
     ));
     for export in exports {
         let mut params = export
@@ -606,7 +646,9 @@ fn render_dll_header(exports: &[NativeExport], layout: &NativeLayoutCatalog) -> 
             })
             .collect::<Vec<_>>();
         for param in &export.params {
-            if param.is_edit && !matches!(param.ty, NativeAbiType::Unit) {
+            if matches!(param.pass_mode, ArcanaCabiPassMode::InWithWriteBack)
+                && !matches!(param.ty, NativeAbiType::Unit)
+            {
                 params.push(format!(
                     "{}* out_{}",
                     layout.c_type_ref(&param.ty, NativeAbiRole::Return),
@@ -627,21 +669,143 @@ fn render_dll_header(exports: &[NativeExport], layout: &NativeLayoutCatalog) -> 
     out
 }
 
+fn render_export_descriptor(plan: &NativePackagePlan, exports: &[NativeExportLowering]) -> String {
+    let Some(product) = &plan.native_product else {
+        return String::new();
+    };
+    let mut out = String::new();
+    for (export_index, export) in exports.iter().enumerate() {
+        out.push_str(&format!(
+            "static ARCANA_EXPORT_{export_index}_PARAMS: [ArcanaCabiExportParamV1; {}] = [\n",
+            export.export.params.len()
+        ));
+        for param in &export.export.params {
+            out.push_str(&format!(
+                concat!(
+                    "    ArcanaCabiExportParamV1 {{\n",
+                    "        name: {name},\n",
+                    "        source_mode: {source_mode},\n",
+                    "        pass_mode: {pass_mode},\n",
+                    "        input_type: {input_type},\n",
+                    "        write_back_type: {write_back_type},\n",
+                    "    }},\n"
+                ),
+                name = render_c_string_ptr(&param.name),
+                source_mode = render_c_string_ptr(param.source_mode.as_str()),
+                pass_mode = render_c_string_ptr(param.pass_mode.as_str()),
+                input_type = render_c_string_ptr(&param.ty.render()),
+                write_back_type = param
+                    .write_back_type
+                    .as_ref()
+                    .map(|ty| render_c_string_ptr(&ty.render()))
+                    .unwrap_or_else(|| "ptr::null()".to_string()),
+            ));
+        }
+        out.push_str("];\n\n");
+    }
+    out.push_str(&format!(
+        "static ARCANA_EXPORT_ENTRIES: [ArcanaCabiExportEntryV1; {}] = [\n",
+        exports.len()
+    ));
+    for (export_index, export) in exports.iter().enumerate() {
+        out.push_str(&format!(
+            concat!(
+                "    ArcanaCabiExportEntryV1 {{\n",
+                "        export_name: {export_name},\n",
+                "        routine_key: {routine_key},\n",
+                "        symbol_name: {symbol_name},\n",
+                "        return_type: {return_type},\n",
+                "        params: ARCANA_EXPORT_{export_index}_PARAMS.as_ptr(),\n",
+                "        param_count: {param_count},\n",
+                "    }},\n"
+            ),
+            export_name = render_c_string_ptr(&export.export.export_name),
+            routine_key = render_c_string_ptr(&export.export.routine_key),
+            symbol_name = render_c_string_ptr(&export.export.symbol_name),
+            return_type = render_c_string_ptr(&export.export.return_type.render()),
+            export_index = export_index,
+            param_count = export.export.params.len(),
+        ));
+    }
+    out.push_str("];\n\n");
+    out.push_str(&format!(
+        concat!(
+            "static ARCANA_EXPORT_OPS: ArcanaCabiExportOpsV1 = ArcanaCabiExportOpsV1 {{\n",
+            "    ops_size: std::mem::size_of::<ArcanaCabiExportOpsV1>(),\n",
+            "    exports: ARCANA_EXPORT_ENTRIES.as_ptr(),\n",
+            "    export_count: {},\n",
+            "    last_error_alloc: {},\n",
+            "    owned_bytes_free: {},\n",
+            "    owned_str_free: {},\n",
+            "    reserved0: ptr::null(),\n",
+            "    reserved1: ptr::null(),\n",
+            "}};\n\n",
+            "static ARCANA_PRODUCT_API: ArcanaCabiProductApiV1 = ArcanaCabiProductApiV1 {{\n",
+            "    descriptor_size: std::mem::size_of::<ArcanaCabiProductApiV1>(),\n",
+            "    package_name: {},\n",
+            "    product_name: {},\n",
+            "    role: {},\n",
+            "    contract_id: {},\n",
+            "    contract_version: {},\n",
+            "    role_ops: &ARCANA_EXPORT_OPS as *const _ as *const c_void,\n",
+            "    reserved0: ptr::null(),\n",
+            "    reserved1: ptr::null(),\n",
+            "}};\n\n",
+            "#[unsafe(no_mangle)]\n",
+            "pub extern \"system\" fn {}() -> *const ArcanaCabiProductApiV1 {{\n",
+            "    &ARCANA_PRODUCT_API\n",
+            "}}\n\n"
+        ),
+        exports.len(),
+        ARCANA_CABI_LAST_ERROR_ALLOC_V1_SYMBOL,
+        ARCANA_CABI_OWNED_BYTES_FREE_V1_SYMBOL,
+        ARCANA_CABI_OWNED_STR_FREE_V1_SYMBOL,
+        render_c_string_ptr(&plan.artifact.package_name),
+        render_c_string_ptr(&product.name),
+        render_c_string_ptr(product.role.as_str()),
+        render_c_string_ptr(&product.contract_id),
+        product.contract_version,
+        ARCANA_CABI_GET_PRODUCT_API_V1_SYMBOL,
+    ));
+    out
+}
+
+fn render_c_string_ptr(text: &str) -> String {
+    format!(
+        "b\"{}\\0\".as_ptr() as *const c_char",
+        escape_rust_byte_string(text)
+    )
+}
+
+fn escape_rust_byte_string(text: &str) -> String {
+    let mut out = String::new();
+    for byte in text.bytes() {
+        match byte {
+            b'\\' => out.push_str("\\\\"),
+            b'"' => out.push_str("\\\""),
+            0x20..=0x7e => out.push(char::from(byte)),
+            _ => out.push_str(&format!("\\x{byte:02x}")),
+        }
+    }
+    out
+}
+
 fn render_native_param_binding(
     export: &NativeExport,
     param: &NativeAbiParam,
     _layout: &NativeLayoutCatalog,
 ) -> String {
     let context = format!("{} parameter `{}`", export.export_name, param.name);
+    let mut_kw = if matches!(param.pass_mode, ArcanaCabiPassMode::InWithWriteBack) {
+        "mut "
+    } else {
+        ""
+    };
     format!(
-        concat!(
-            "    let {}_value = match {} {{\n",
-            "        Ok(value) => value,\n",
-            "        Err(err) => {{ set_last_error(err); return 0; }}\n",
-            "    }};\n"
-        ),
-        param.name,
-        render_runtime_abi_expr_from_native(&param.ty, &param.name, &context)
+        "    let {mut_kw}{name}_value = match {expr} {{\n        Ok(value) => value,\n        Err(err) => {{ set_last_error(err); return 0; }}\n    }};\n",
+        mut_kw = mut_kw,
+        name = param.name,
+        expr = render_runtime_abi_expr_from_native(&param.ty, &param.name, &context),
     )
 }
 
@@ -710,9 +874,11 @@ fn render_lowered_runtime_abi_expr(expr: &NativeDirectExpr, indent_level: usize)
         NativeDirectExpr::IntCompare { op, left, right } => {
             render_direct_int_compare_expr(*op, left, right, indent_level)
         }
-        NativeDirectExpr::Call { routine_key, args } => {
-            render_direct_routine_call_expr(routine_key, args, indent_level)
-        }
+        NativeDirectExpr::Call {
+            routine_key,
+            params,
+            args,
+        } => render_direct_routine_call_expr(routine_key, params, args, indent_level),
         NativeDirectExpr::Pair { left, right } => format!(
             concat!(
                 "{{\n",
@@ -790,19 +956,49 @@ fn render_direct_routine_helper(routine: &NativeDirectRoutine) -> String {
     let params = routine
         .params
         .iter()
-        .map(|param| format!("{}_value: RuntimeAbiValue", param.name))
+        .map(|param| match param.pass_mode {
+            ArcanaCabiPassMode::In => format!("{}_value: RuntimeAbiValue", param.name),
+            ArcanaCabiPassMode::InWithWriteBack => {
+                format!("{}_slot: &mut RuntimeAbiValue", param.name)
+            }
+        })
         .collect::<Vec<_>>()
         .join(", ");
-    let body = render_direct_block_body(&routine.body, 1);
+    let mut prelude = String::new();
+    for param in &routine.params {
+        if matches!(param.pass_mode, ArcanaCabiPassMode::InWithWriteBack) {
+            prelude.push_str(&format!(
+                "    let mut {}_value = {}_slot.clone();\n",
+                param.name, param.name
+            ));
+        }
+    }
+    let body = render_direct_block_body(&routine.body, 2);
+    let mut write_backs = String::new();
+    for param in &routine.params {
+        if matches!(param.pass_mode, ArcanaCabiPassMode::InWithWriteBack) {
+            write_backs.push_str(&format!(
+                "    *{}_slot = {}_value;\n",
+                param.name, param.name
+            ));
+        }
+    }
     format!(
         concat!(
             "fn {}({}) -> Result<RuntimeAbiValue, String> {{\n",
             "{}",
+            "    let result = (|| -> Result<RuntimeAbiValue, String> {{\n",
+            "{}",
+            "    }})();\n",
+            "{}",
+            "    result\n",
             "}}\n\n"
         ),
         direct_routine_fn_name(&routine.routine_key),
         params,
+        prelude,
         body,
+        write_backs,
     )
 }
 
@@ -933,36 +1129,74 @@ fn render_direct_stmt_body(statements: &[NativeDirectStmt], indent_level: usize)
         .collect()
 }
 
-fn render_direct_routine_call_from_values(routine_key: &str, values: &[String]) -> String {
+fn render_direct_routine_call_from_values(
+    routine_key: &str,
+    params: &[NativeAbiParam],
+    values: &[String],
+) -> String {
+    let rendered = params
+        .iter()
+        .zip(values)
+        .map(|(param, value)| match param.pass_mode {
+            ArcanaCabiPassMode::In => value.clone(),
+            ArcanaCabiPassMode::InWithWriteBack => format!("&mut {value}"),
+        })
+        .collect::<Vec<_>>();
     format!(
         "{}({})",
         direct_routine_fn_name(routine_key),
-        values.join(", ")
+        rendered.join(", ")
     )
 }
 
 fn render_direct_routine_call_expr(
     routine_key: &str,
+    params: &[NativeAbiParam],
     args: &[NativeDirectExpr],
     indent_level: usize,
 ) -> String {
-    render_direct_routine_call_match_chain(routine_key, args, 0, &mut Vec::new(), indent_level)
+    render_direct_routine_call_match_chain(
+        routine_key,
+        params,
+        args,
+        0,
+        &mut Vec::new(),
+        indent_level,
+    )
 }
 
 fn render_direct_routine_call_match_chain(
     routine_key: &str,
+    params: &[NativeAbiParam],
     args: &[NativeDirectExpr],
     index: usize,
     bound_args: &mut Vec<String>,
     indent_level: usize,
 ) -> String {
     if index == args.len() {
-        return render_direct_routine_call_from_values(routine_key, bound_args);
+        return render_direct_routine_call_from_values(routine_key, params, bound_args);
+    }
+    if matches!(params[index].pass_mode, ArcanaCabiPassMode::InWithWriteBack) {
+        let NativeDirectExpr::Binding(name) = &args[index] else {
+            return "Err(\"direct edit call expected binding argument\".to_string())".to_string();
+        };
+        bound_args.push(format!("{name}_value"));
+        let next = render_direct_routine_call_match_chain(
+            routine_key,
+            params,
+            args,
+            index + 1,
+            bound_args,
+            indent_level,
+        );
+        bound_args.pop();
+        return next;
     }
     let binding = format!("arg_{index}");
     bound_args.push(binding.clone());
     let next = render_direct_routine_call_match_chain(
         routine_key,
+        params,
         args,
         index + 1,
         bound_args,

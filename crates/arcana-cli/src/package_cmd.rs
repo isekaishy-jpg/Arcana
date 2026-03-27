@@ -2,17 +2,28 @@ use std::path::PathBuf;
 
 use arcana_frontend::check_workspace_graph;
 use arcana_package::{
-    BuildTarget, DistributionBundle, GrimoireKind, WorkspaceGraph, default_distribution_dir,
-    execute_build_with_context, load_workspace_graph, plan_package_build_for_target_with_context,
-    plan_workspace, prepare_build_from_workspace, read_lockfile, stage_distribution_bundle,
-    write_lockfile,
+    BuildOutputKey, BuildTarget, DistributionBundle, GrimoireKind, WorkspaceGraph,
+    default_distribution_dir_for_build, execute_build_with_context, load_workspace_graph,
+    plan_package_build_for_target_with_context, plan_workspace, prepare_build_from_workspace,
+    read_lockfile, stage_distribution_bundle_for_build, write_lockfile,
 };
 
 use crate::build_context::build_execution_context_for_target;
 
+#[cfg(test)]
 pub(crate) fn package_workspace(
     workspace_dir: PathBuf,
     target: BuildTarget,
+    member: Option<String>,
+    out_dir: Option<PathBuf>,
+) -> Result<DistributionBundle, String> {
+    package_workspace_with_product(workspace_dir, target, None, member, out_dir)
+}
+
+pub(crate) fn package_workspace_with_product(
+    workspace_dir: PathBuf,
+    target: BuildTarget,
+    product: Option<String>,
     member: Option<String>,
     out_dir: Option<PathBuf>,
 ) -> Result<DistributionBundle, String> {
@@ -20,8 +31,6 @@ pub(crate) fn package_workspace(
     let packaged_member = resolve_package_member(&graph, member.as_deref())?;
     target.artifact_file_name(&packaged_member.kind)?;
     let packaged_member_name = packaged_member.name.clone();
-    let output_dir =
-        out_dir.unwrap_or_else(|| default_distribution_dir(&graph, &packaged_member_name, &target));
 
     let order = plan_workspace(&graph)?;
     let checked = check_workspace_graph(&graph)?;
@@ -29,7 +38,7 @@ pub(crate) fn package_workspace(
     let prepared = prepare_build_from_workspace(&graph, workspace, resolved_workspace)?;
     let lock_path = graph.root_dir.join("Arcana.lock");
     let existing_lock = read_lockfile(&lock_path)?;
-    let execution_context = build_execution_context_for_target(&target)?;
+    let execution_context = build_execution_context_for_target(&target, product.clone())?;
     let statuses = plan_package_build_for_target_with_context(
         &graph,
         &order,
@@ -39,13 +48,21 @@ pub(crate) fn package_workspace(
         &packaged_member_name,
         &execution_context,
     )?;
+    let build_key = statuses
+        .iter()
+        .find(|status| status.member() == packaged_member_name && status.target() == &target)
+        .map(|status| status.build_key().clone())
+        .unwrap_or_else(|| BuildOutputKey::new(target.clone(), product.clone()));
+    let output_dir = out_dir.unwrap_or_else(|| {
+        default_distribution_dir_for_build(&graph, &packaged_member_name, &build_key)
+    });
     execute_build_with_context(&graph, &prepared, &statuses, &execution_context)?;
     write_lockfile(&graph, &order, &statuses)?;
-    stage_distribution_bundle(
+    stage_distribution_bundle_for_build(
         &graph,
         &statuses,
         &packaged_member_name,
-        &target,
+        &build_key,
         &output_dir,
     )
 }
@@ -1632,8 +1649,8 @@ mod tests {
                     .is_some_and(|name| name.starts_with("std-") && name.ends_with(".dll"))
             });
         assert!(
-            rust_std_dll.is_some(),
-            "expected staged Rust std runtime DLL beside {}",
+            rust_std_dll.is_none(),
+            "unexpected staged Rust std runtime DLL beside {}",
             runtime_dll_path.display()
         );
         let output = Command::new(&exe_path)
@@ -2283,11 +2300,18 @@ mod tests {
                 ) -> u8>(b"echo_pair")
                 .expect("typed pair export should exist");
             let last_error = library
-                .get::<unsafe extern "system" fn(*mut usize) -> *mut u8>(b"arcana_last_error_alloc")
+                .get::<unsafe extern "system" fn(*mut usize) -> *mut u8>(
+                    b"arcana_cabi_last_error_alloc_v1",
+                )
                 .expect("last-error export should exist");
             let free_bytes = library
-                .get::<unsafe extern "system" fn(*mut u8, usize)>(b"arcana_bytes_free")
-                .expect("free export should exist");
+                .get::<unsafe extern "system" fn(*mut u8, usize)>(
+                    b"arcana_cabi_owned_bytes_free_v1",
+                )
+                .expect("byte free export should exist");
+            let free_str = library
+                .get::<unsafe extern "system" fn(*mut u8, usize)>(b"arcana_cabi_owned_str_free_v1")
+                .expect("string free export should exist");
             let mut result = 0i64;
             let ok = answer(&mut result);
             if ok == 0 {
@@ -2311,7 +2335,7 @@ mod tests {
                     read_allocated_utf8(&last_error, &free_bytes).expect("last error should read");
                 panic!("typed greet export failed: {err}");
             }
-            let greeting_text = read_owned_utf8(greeting, &free_bytes).expect("greeting utf8");
+            let greeting_text = read_owned_utf8(greeting, &free_str).expect("greeting utf8");
             assert_eq!(greeting_text, "hello arcana");
 
             let mut prefix_bytes = ArcanaOwnedBytes::default();
@@ -2361,7 +2385,7 @@ mod tests {
                 panic!("typed pair export failed: {err}");
             }
             let echoed_left =
-                read_owned_utf8(echoed_pair.left, &free_bytes).expect("pair text should read");
+                read_owned_utf8(echoed_pair.left, &free_str).expect("pair text should read");
             assert_eq!(echoed_left, "pair");
             assert_eq!(echoed_pair.right, 17);
         }
@@ -2403,10 +2427,14 @@ mod tests {
                 .get::<unsafe extern "system" fn(*mut i64) -> u8>(b"answer")
                 .expect("typed answer export should exist");
             let last_error = library
-                .get::<unsafe extern "system" fn(*mut usize) -> *mut u8>(b"arcana_last_error_alloc")
+                .get::<unsafe extern "system" fn(*mut usize) -> *mut u8>(
+                    b"arcana_cabi_last_error_alloc_v1",
+                )
                 .expect("last-error export should exist");
             let free_bytes = library
-                .get::<unsafe extern "system" fn(*mut u8, usize)>(b"arcana_bytes_free")
+                .get::<unsafe extern "system" fn(*mut u8, usize)>(
+                    b"arcana_cabi_owned_bytes_free_v1",
+                )
                 .expect("free export should exist");
 
             let mut result = 0i64;

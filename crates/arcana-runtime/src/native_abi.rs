@@ -1,3 +1,4 @@
+// Runtime-facing projection of the cabi export contract for generated export shims.
 use super::{
     RuntimeExecutionState, RuntimeHost, RuntimePackagePlan, RuntimeRoutinePlan, RuntimeValue,
     execute_routine_call_with_state, validate_runtime_requirements_supported,
@@ -15,9 +16,16 @@ pub enum RuntimeAbiValue {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RuntimeAbiCallOutcome {
+pub struct RuntimeAbiWriteBack {
+    pub index: usize,
+    pub name: String,
+    pub value: RuntimeAbiValue,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeAbiExportOutcome {
     pub result: RuntimeAbiValue,
-    pub final_args: Vec<RuntimeAbiValue>,
+    pub write_backs: Vec<RuntimeAbiWriteBack>,
 }
 
 pub fn execute_exported_abi_routine(
@@ -25,13 +33,13 @@ pub fn execute_exported_abi_routine(
     routine_key: &str,
     args: Vec<RuntimeAbiValue>,
     host: &mut dyn RuntimeHost,
-) -> Result<RuntimeAbiCallOutcome, String> {
-    let routine_index = plan
+) -> Result<RuntimeAbiExportOutcome, String> {
+    let (routine_index, routine) = plan
         .routines
         .iter()
         .enumerate()
         .find(|(_, routine)| native_abi_callable(routine) && routine.routine_key == routine_key)
-        .map(|(index, _)| index)
+        .map(|(index, routine)| (index, routine))
         .ok_or_else(|| format!("abi routine `{routine_key}` is not exported or callable"))?;
     validate_runtime_requirements_supported(plan, host)?;
     let mut state = RuntimeExecutionState::default();
@@ -49,14 +57,35 @@ pub fn execute_exported_abi_routine(
         host,
         false,
     )?;
-    Ok(RuntimeAbiCallOutcome {
+    Ok(RuntimeAbiExportOutcome {
         result: abi_value_from_runtime(outcome.value)?,
-        final_args: outcome
-            .final_args
-            .into_iter()
-            .map(abi_value_from_runtime)
-            .collect::<Result<Vec<_>, _>>()?,
+        write_backs: project_export_write_backs(routine, outcome.final_args)?,
     })
+}
+
+pub(crate) fn project_export_write_backs(
+    routine: &RuntimeRoutinePlan,
+    final_args: Vec<RuntimeValue>,
+) -> Result<Vec<RuntimeAbiWriteBack>, String> {
+    routine
+        .params
+        .iter()
+        .enumerate()
+        .filter(|(_, param)| param.mode.as_deref() == Some("edit"))
+        .map(|(index, param)| {
+            let value = final_args.get(index).cloned().ok_or_else(|| {
+                format!(
+                    "missing final arg `{}` at exported edit index `{index}`",
+                    param.name
+                )
+            })?;
+            Ok(RuntimeAbiWriteBack {
+                index,
+                name: param.name.clone(),
+                value: abi_value_from_runtime(value)?,
+            })
+        })
+        .collect()
 }
 
 fn native_abi_callable(routine: &RuntimeRoutinePlan) -> bool {

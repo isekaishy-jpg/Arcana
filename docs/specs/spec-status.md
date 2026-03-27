@@ -115,4 +115,5 @@ This document defines how Arcana spec files are interpreted during the rewrite.
 - ECS scheduling/components remain first-party language/runtime surface during the rewrite; do not classify them as showcase-only helpers.
 - `std.app` fixed-step helpers and `std.tooling` planner helpers are carried convenience layers, not rewrite-approved first-party architecture unless a scope doc explicitly ratifies them.
 - Every std or Arcana-owned grimoire surface change must update the corresponding scope or status ledger in the same patch.
+- Public native ABI/product work should treat `crates/arcana-cabi` as the contract owner; generated headers, runtime JSON ABI, and native bundle manifests are projections of that contract rather than independent ABI authorities.
 - Generated direct-emit snapshot files and similar carried artifacts are migration corpus, not primary rewrite authority; do not let them outweigh approved docs or `crates/*` during review.

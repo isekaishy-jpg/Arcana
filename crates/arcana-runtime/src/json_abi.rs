@@ -1,15 +1,18 @@
 use std::collections::BTreeMap;
 
+// Tooling/debug projection of the cabi export contract, not the primary foreign ABI owner.
+use arcana_cabi::ArcanaCabiPassMode;
 use arcana_ir::{IrRoutineType, IrRoutineTypeKind};
 use serde::Serialize;
 
 use super::{
     RuntimeExecutionState, RuntimeHost, RuntimeOpaqueFamily, RuntimePackagePlan,
     RuntimeRoutinePlan, RuntimeValue, execute_routine_call_with_state,
-    routine_plan::render_runtime_signature_text, validate_runtime_requirements_supported,
+    native_abi::project_export_write_backs, routine_plan::render_runtime_signature_text,
+    validate_runtime_requirements_supported,
 };
 
-pub const RUNTIME_JSON_ABI_FORMAT: &str = "arcana-runtime-json-abi-v2";
+pub const RUNTIME_JSON_ABI_FORMAT: &str = "arcana-runtime-json-abi-v3";
 
 #[derive(Serialize)]
 struct JsonAbiManifest<'a> {
@@ -26,8 +29,21 @@ struct JsonAbiRoutine<'a> {
     symbol_name: &'a str,
     symbol_kind: &'a str,
     signature: String,
+    params: Vec<JsonAbiParam<'a>>,
+    return_type: String,
     impl_target_type: Option<String>,
     impl_trait_path: Option<&'a [String]>,
+}
+
+#[derive(Serialize)]
+struct JsonAbiParam<'a> {
+    name: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mode: Option<&'a str>,
+    ty: String,
+    pass_mode: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    write_back_ty: Option<String>,
 }
 
 pub fn render_exported_json_abi_manifest(plan: &RuntimePackagePlan) -> Result<String, String> {
@@ -43,6 +59,23 @@ pub fn render_exported_json_abi_manifest(plan: &RuntimePackagePlan) -> Result<St
                 symbol_name: &routine.symbol_name,
                 symbol_kind: &routine.symbol_kind,
                 signature: render_runtime_signature_text(routine),
+                params: routine
+                    .params
+                    .iter()
+                    .map(|param| JsonAbiParam {
+                        name: &param.name,
+                        mode: param.mode.as_deref(),
+                        ty: param.ty.render(),
+                        pass_mode: json_abi_pass_mode(param.mode.as_deref()).as_str(),
+                        write_back_ty: (param.mode.as_deref() == Some("edit"))
+                            .then(|| param.ty.render()),
+                    })
+                    .collect(),
+                return_type: routine
+                    .return_type
+                    .as_ref()
+                    .map(IrRoutineType::render)
+                    .unwrap_or_else(|| "Unit".to_string()),
                 impl_target_type: routine.impl_target_type.as_ref().map(|ty| ty.render()),
                 impl_trait_path: routine.impl_trait_path.as_deref(),
             })
@@ -63,12 +96,12 @@ pub fn execute_exported_json_abi_routine(
     let args = args_value
         .as_array()
         .ok_or_else(|| "runtime json abi args must be a JSON array".to_string())?;
-    let routine_index = plan
+    let (routine_index, routine) = plan
         .routines
         .iter()
         .enumerate()
         .find(|(_, routine)| json_abi_callable(plan, routine) && routine.routine_key == routine_key)
-        .map(|(index, _)| index)
+        .map(|(index, routine)| (index, routine))
         .ok_or_else(|| format!("json abi routine `{routine_key}` is not exported or callable"))?;
     validate_runtime_requirements_supported(plan, host)?;
     let converted_args = args
@@ -86,13 +119,19 @@ pub fn execute_exported_json_abi_routine(
         host,
         false,
     )?;
+    let write_backs = project_export_write_backs(routine, outcome.final_args)?;
     let rendered = serde_json::json!({
         "result": runtime_value_to_json_value(outcome.value)?,
-        "final_args": outcome
-            .final_args
+        "write_backs": write_backs
             .into_iter()
-            .map(runtime_value_to_json_value)
-            .collect::<Result<Vec<_>, _>>()?,
+            .map(|write_back| {
+                Ok(serde_json::json!({
+                    "index": write_back.index,
+                    "name": write_back.name,
+                    "value": runtime_value_to_json_value(runtime_value_from_abi(write_back.value))?,
+                }))
+            })
+            .collect::<Result<Vec<_>, String>>()?,
     });
     serde_json::to_string(&rendered)
         .map_err(|e| format!("failed to render runtime json abi result: {e}"))
@@ -153,6 +192,32 @@ fn json_abi_path_is_runtime_opaque(plan: &RuntimePackagePlan, rendered: &str) ->
                 .get(family.lang_item_name())
                 .is_some_and(|entries| entries.iter().any(|entry| entry == &rendered))
     })
+}
+
+fn json_abi_pass_mode(mode: Option<&str>) -> ArcanaCabiPassMode {
+    match mode {
+        Some("edit") => ArcanaCabiPassMode::InWithWriteBack,
+        _ => ArcanaCabiPassMode::In,
+    }
+}
+
+fn runtime_value_from_abi(value: super::RuntimeAbiValue) -> RuntimeValue {
+    match value {
+        super::RuntimeAbiValue::Int(value) => RuntimeValue::Int(value),
+        super::RuntimeAbiValue::Bool(value) => RuntimeValue::Bool(value),
+        super::RuntimeAbiValue::Str(value) => RuntimeValue::Str(value),
+        super::RuntimeAbiValue::Bytes(bytes) => RuntimeValue::Array(
+            bytes
+                .into_iter()
+                .map(|byte| RuntimeValue::Int(i64::from(byte)))
+                .collect(),
+        ),
+        super::RuntimeAbiValue::Pair(left, right) => RuntimeValue::Pair(
+            Box::new(runtime_value_from_abi(*left)),
+            Box::new(runtime_value_from_abi(*right)),
+        ),
+        super::RuntimeAbiValue::Unit => RuntimeValue::Unit,
+    }
 }
 
 fn json_value_to_runtime_value(value: &serde_json::Value) -> Result<RuntimeValue, String> {

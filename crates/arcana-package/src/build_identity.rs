@@ -22,6 +22,7 @@ pub struct CachedOutputMetadata {
     pub target_format: String,
     pub toolchain: String,
     pub artifact_hash: String,
+    pub native_product_closure: Option<String>,
     pub support_files: Vec<String>,
 }
 
@@ -100,6 +101,7 @@ pub fn render_cached_artifact(
     toolchain: &str,
     emission: &AotPackageEmission,
     artifact_hash: &str,
+    native_product_closure: Option<&str>,
 ) -> String {
     let support_files = emission
         .support_files
@@ -107,7 +109,7 @@ pub fn render_cached_artifact(
         .map(|file| format!("\"{}\"", escape_toml(&file.relative_path)))
         .collect::<Vec<_>>()
         .join(", ");
-    format!(
+    let mut rendered = format!(
         concat!(
             "member = \"{}\"\n",
             "kind = \"{}\"\n",
@@ -130,7 +132,19 @@ pub fn render_cached_artifact(
         escape_toml(artifact_hash),
         support_files,
         emission.primary_artifact_body
-    )
+    );
+    if let Some(closure) = native_product_closure {
+        rendered = rendered.replacen(
+            &format!("support_files = [{}]\n", support_files),
+            &format!(
+                "support_files = [{}]\nnative_product_closure = \"{}\"\n",
+                support_files,
+                escape_toml(closure)
+            ),
+            1,
+        );
+    }
+    rendered
 }
 
 pub fn cache_metadata_path_for_output(output_path: &Path, target: &BuildTarget) -> PathBuf {
@@ -156,6 +170,7 @@ pub fn cached_artifact_matches_status(
     expected_format: &str,
     expected_toolchain: &str,
     expected_artifact_hash: &str,
+    expected_native_product_closure: Option<&str>,
 ) -> bool {
     if expected_artifact_hash.is_empty() {
         return false;
@@ -178,7 +193,11 @@ pub fn cached_artifact_matches_status(
         && table.get("target").and_then(toml::Value::as_str) == Some(expected_target.key())
         && table.get("target_format").and_then(toml::Value::as_str) == Some(expected_format)
         && table.get("toolchain").and_then(toml::Value::as_str) == Some(expected_toolchain)
-        && table.get("artifact_hash").and_then(toml::Value::as_str) == Some(expected_artifact_hash);
+        && table.get("artifact_hash").and_then(toml::Value::as_str) == Some(expected_artifact_hash)
+        && table
+            .get("native_product_closure")
+            .and_then(toml::Value::as_str)
+            == expected_native_product_closure;
     if !matches_header {
         return false;
     }
@@ -252,6 +271,10 @@ pub fn read_cached_output_metadata(
             .to_string(),
         toolchain: required_header_field(table, &metadata_path, "toolchain")?,
         artifact_hash: required_header_field(table, &metadata_path, "artifact_hash")?,
+        native_product_closure: table
+            .get("native_product_closure")
+            .and_then(toml::Value::as_str)
+            .map(ToString::to_string),
         support_files: support_files_from_table(table).map_err(|e| {
             format!(
                 "artifact `{}` has invalid support file metadata: {e}",
@@ -521,6 +544,7 @@ mod tests {
                 "toolchain",
                 &emission,
                 &hash,
+                None,
             ),
         )
         .expect("artifact should write");
@@ -540,6 +564,7 @@ mod tests {
             AOT_INTERNAL_FORMAT,
             "toolchain",
             &hash,
+            None,
         ));
 
         let _ = fs::remove_dir_all(&dir);
@@ -578,6 +603,7 @@ mod tests {
                 "toolchain",
                 &emission,
                 &hash,
+                None,
             ),
         )
         .expect("artifact should write");
@@ -594,6 +620,7 @@ mod tests {
             AOT_INTERNAL_FORMAT,
             "toolchain",
             &hash,
+            None,
         ));
 
         let _ = fs::remove_dir_all(&dir);
@@ -656,6 +683,7 @@ mod tests {
                 "toolchain",
                 &emission,
                 &hash,
+                None,
             ),
         )
         .expect("metadata should write");

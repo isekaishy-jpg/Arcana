@@ -52,11 +52,12 @@ fn real_main() -> Result<i32, String> {
         "build" => {
             let Some(path) = args.next() else {
                 return Err(
-                    "usage: arcana build <workspace-dir> [--plan] [--target <target>]".to_string(),
+                    "usage: arcana build <workspace-dir> [--plan] [--target <target>] [--product <name>]".to_string(),
                 );
             };
             let mut plan_only = false;
             let mut target = BuildTarget::internal_aot();
+            let mut product = None;
             let rest = args.collect::<Vec<_>>();
             let mut index = 0;
             while index < rest.len() {
@@ -68,22 +69,32 @@ fn real_main() -> Result<i32, String> {
                     "--target" => {
                         let Some(value) = rest.get(index + 1) else {
                             return Err(
-                                "usage: arcana build <workspace-dir> [--plan] [--target <target>]"
+                                "usage: arcana build <workspace-dir> [--plan] [--target <target>] [--product <name>]"
                                     .to_string(),
                             );
                         };
                         target = parse_build_target(value)?;
                         index += 2;
                     }
+                    "--product" => {
+                        let Some(value) = rest.get(index + 1) else {
+                            return Err(
+                                "usage: arcana build <workspace-dir> [--plan] [--target <target>] [--product <name>]"
+                                    .to_string(),
+                            );
+                        };
+                        product = Some(value.clone());
+                        index += 2;
+                    }
                     _ => {
                         return Err(
-                            "usage: arcana build <workspace-dir> [--plan] [--target <target>]"
+                            "usage: arcana build <workspace-dir> [--plan] [--target <target>] [--product <name>]"
                                 .to_string(),
                         );
                     }
                 }
             }
-            run_build(PathBuf::from(path), plan_only, target)
+            run_build(PathBuf::from(path), plan_only, target, product)
         }
         "run" => {
             let Some(path) = args.next() else {
@@ -99,14 +110,19 @@ fn real_main() -> Result<i32, String> {
         "package" => {
             let Some(path) = args.next() else {
                 return Err(
-                    "usage: arcana package <workspace-dir> [--target <target>] [--member <member>] [--out-dir <dir>]"
+                    "usage: arcana package <workspace-dir> [--target <target>] [--product <name>] [--member <member>] [--out-dir <dir>]"
                         .to_string(),
                 );
             };
             let rest = args.collect::<Vec<_>>();
-            let (target, member, out_dir) = parse_package_args(&rest)?;
-            let bundle =
-                package_cmd::package_workspace(PathBuf::from(path), target, member, out_dir)?;
+            let (target, product, member, out_dir) = parse_package_args(&rest)?;
+            let bundle = package_cmd::package_workspace_with_product(
+                PathBuf::from(path),
+                target,
+                product,
+                member,
+                out_dir,
+            )?;
             println!(
                 "packaged {} {} {}",
                 bundle.member,
@@ -132,12 +148,20 @@ fn run_check(path: PathBuf) -> Result<i32, String> {
     Ok(0)
 }
 
-fn run_build(workspace_dir: PathBuf, plan_only: bool, target: BuildTarget) -> Result<i32, String> {
+fn run_build(
+    workspace_dir: PathBuf,
+    plan_only: bool,
+    target: BuildTarget,
+    product: Option<String>,
+) -> Result<i32, String> {
     let graph = load_workspace_graph(&workspace_dir)?;
     let order = plan_workspace(&graph)?;
     if plan_only {
         for member in order {
-            println!("{member} {target}");
+            match &product {
+                Some(product) => println!("{member} {}@{product}", target),
+                None => println!("{member} {target}"),
+            }
         }
         return Ok(0);
     }
@@ -147,7 +171,8 @@ fn run_build(workspace_dir: PathBuf, plan_only: bool, target: BuildTarget) -> Re
     let prepared = prepare_build_from_workspace(&graph, workspace, resolved_workspace)?;
     let lock_path = graph.root_dir.join("Arcana.lock");
     let existing_lock = read_lockfile(&lock_path)?;
-    let execution_context = build_context::build_execution_context_for_target(&target)?;
+    let execution_context =
+        build_context::build_execution_context_for_target(&target, product.clone())?;
     let statuses = plan_build_for_target_with_context(
         &graph,
         &order,
@@ -167,7 +192,7 @@ fn run_build(workspace_dir: PathBuf, plan_only: bool, target: BuildTarget) -> Re
                 BuildDisposition::CacheHit => "cache_hit",
             },
             status.member(),
-            status.target(),
+            status.build_key().storage_key(),
             status.fingerprint()
         );
     }
@@ -178,12 +203,12 @@ fn run_build(workspace_dir: PathBuf, plan_only: bool, target: BuildTarget) -> Re
 fn print_help() {
     println!("arcana");
     println!("  arcana check <path>");
-    println!("  arcana build <workspace-dir> [--plan] [--target <target>]");
+    println!("  arcana build <workspace-dir> [--plan] [--target <target>] [--product <name>]");
     println!("  arcana run <workspace-dir> [--target <target>] [--member <member>] [-- <args...>]");
     println!(
-        "  arcana package <workspace-dir> [--target <target>] [--member <member>] [--out-dir <dir>]"
+        "  arcana package <workspace-dir> [--target <target>] [--product <name>] [--member <member>] [--out-dir <dir>]"
     );
-    println!("    targets: internal-aot, windows-exe, windows-dll");
+    println!("    targets: internal-aot, windows-exe, windows-dll (export compatibility target)");
 }
 
 fn parse_run_args(args: &[String]) -> Result<(BuildTarget, Option<String>, Vec<String>), String> {
@@ -219,9 +244,10 @@ fn parse_run_args(args: &[String]) -> Result<(BuildTarget, Option<String>, Vec<S
 
 fn parse_package_args(
     args: &[String],
-) -> Result<(BuildTarget, Option<String>, Option<PathBuf>), String> {
-    let usage = "usage: arcana package <workspace-dir> [--target <target>] [--member <member>] [--out-dir <dir>]";
+) -> Result<(BuildTarget, Option<String>, Option<String>, Option<PathBuf>), String> {
+    let usage = "usage: arcana package <workspace-dir> [--target <target>] [--product <name>] [--member <member>] [--out-dir <dir>]";
     let mut target = BuildTarget::internal_aot();
+    let mut product = None;
     let mut member = None;
     let mut out_dir = None;
     let mut index = 0;
@@ -232,6 +258,13 @@ fn parse_package_args(
                     return Err(usage.to_string());
                 };
                 target = parse_build_target(value)?;
+                index += 2;
+            }
+            "--product" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err(usage.to_string());
+                };
+                product = Some(value.clone());
                 index += 2;
             }
             "--member" => {
@@ -251,5 +284,5 @@ fn parse_package_args(
             _ => return Err(usage.to_string()),
         }
     }
-    Ok((target, member, out_dir))
+    Ok((target, product, member, out_dir))
 }

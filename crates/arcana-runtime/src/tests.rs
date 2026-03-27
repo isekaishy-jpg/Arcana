@@ -1414,12 +1414,14 @@ fn runtime_json_abi_manifest_lists_exported_callable_routines() {
     let value = manifest
         .parse::<serde_json::Value>()
         .expect("manifest should parse as json");
-    assert_eq!(value["format"].as_str(), Some("arcana-runtime-json-abi-v2"));
+    assert_eq!(value["format"].as_str(), Some("arcana-runtime-json-abi-v3"));
     let routines = value["routines"]
         .as_array()
         .expect("manifest routines should be an array");
     assert_eq!(routines.len(), 1);
     assert_eq!(routines[0]["routine_key"].as_str(), Some("hello#sym-0"));
+    assert_eq!(routines[0]["params"], serde_json::json!([]));
+    assert_eq!(routines[0]["return_type"].as_str(), Some("Int"));
 }
 
 #[test]
@@ -1470,7 +1472,7 @@ fn runtime_json_abi_executes_exported_routine() {
         .parse::<serde_json::Value>()
         .expect("json abi result should parse");
     assert_eq!(result["result"], serde_json::Value::from(7));
-    assert_eq!(result["final_args"], serde_json::json!([5]));
+    assert_eq!(result["write_backs"], serde_json::json!([]));
 }
 
 #[test]
@@ -1524,7 +1526,10 @@ fn runtime_json_abi_writes_back_edit_arguments() {
         .parse::<serde_json::Value>()
         .expect("json abi result should parse");
     assert_eq!(result["result"], serde_json::Value::from(7));
-    assert_eq!(result["final_args"], serde_json::json!([7]));
+    assert_eq!(
+        result["write_backs"],
+        serde_json::json!([{ "index": 0, "name": "value", "value": 7 }])
+    );
 }
 
 #[test]
@@ -1746,7 +1751,7 @@ fn runtime_native_abi_executes_exported_routine() {
     )
     .expect("native abi invoke should succeed");
     assert_eq!(result.result, super::RuntimeAbiValue::Int(7));
-    assert_eq!(result.final_args, vec![super::RuntimeAbiValue::Int(5)]);
+    assert!(result.write_backs.is_empty());
 }
 
 #[test]
@@ -1861,10 +1866,7 @@ fn runtime_native_abi_supports_string_and_byte_values() {
         greet.result,
         super::RuntimeAbiValue::Str("hi arcana".to_string())
     );
-    assert_eq!(
-        greet.final_args,
-        vec![super::RuntimeAbiValue::Str("arcana".to_string())]
-    );
+    assert!(greet.write_backs.is_empty());
 
     let tail = execute_exported_abi_routine(
         &plan,
@@ -1874,10 +1876,7 @@ fn runtime_native_abi_supports_string_and_byte_values() {
     )
     .expect("byte abi invoke should succeed");
     assert_eq!(tail.result, super::RuntimeAbiValue::Bytes(b"rc".to_vec()));
-    assert_eq!(
-        tail.final_args,
-        vec![super::RuntimeAbiValue::Bytes(b"arc".to_vec())]
-    );
+    assert!(tail.write_backs.is_empty());
 
     let echoed = execute_exported_abi_routine(
         &plan,
@@ -1896,13 +1895,7 @@ fn runtime_native_abi_supports_string_and_byte_values() {
             Box::new(super::RuntimeAbiValue::Int(7)),
         )
     );
-    assert_eq!(
-        echoed.final_args,
-        vec![super::RuntimeAbiValue::Pair(
-            Box::new(super::RuntimeAbiValue::Str("arcana".to_string())),
-            Box::new(super::RuntimeAbiValue::Int(7)),
-        )]
-    );
+    assert!(echoed.write_backs.is_empty());
 }
 
 #[test]
@@ -1958,7 +1951,14 @@ fn runtime_native_abi_writes_back_edit_arguments() {
     )
     .expect("native abi invoke should succeed");
     assert_eq!(result.result, super::RuntimeAbiValue::Int(7));
-    assert_eq!(result.final_args, vec![super::RuntimeAbiValue::Int(7)]);
+    assert_eq!(
+        result.write_backs,
+        vec![super::RuntimeAbiWriteBack {
+            index: 0,
+            name: "value".to_string(),
+            value: super::RuntimeAbiValue::Int(7),
+        }]
+    );
 }
 
 #[test]

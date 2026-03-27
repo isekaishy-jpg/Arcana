@@ -32,9 +32,9 @@ That prints:
 - `smoke_score=767`
 
 The desktop runtime DLL is selected through the normal dependency metadata on `app/book.toml`:
-- `arcana_desktop = { path = "../../../grimoires/owned/libs/arcana-desktop", native_delivery = "dll" }`
+- `arcana_desktop = { path = "../../../grimoires/owned/libs/arcana-desktop", native_child = "default" }`
 
-That keeps the Arcana source-level desktop APIs in the app package while moving the native runtime host/session boundary into the sibling `arcana_desktop.dll` provider.
+That keeps the Arcana source-level desktop APIs in the app package while staging the sibling `arcana_desktop.dll` child product through declared native product metadata.
 
 Bundle note:
-- the staged native bundle now includes the Rust `std-*.dll` closure needed by `arcana_desktop.dll`
+- the staged native bundle includes the declared `arcana_desktop.dll` child product only; it does not scavenge Rust toolchain `std-*.dll` files

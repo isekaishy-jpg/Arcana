@@ -1,28 +1,24 @@
 use crate::artifact::{AotPackageArtifact, AotRoutineArtifact};
-use arcana_ir::{IrRoutineParam, IrRoutineType, IrRoutineTypeKind, render_routine_signature_text};
+use arcana_cabi::{ArcanaCabiParamSourceMode, ArcanaCabiPassMode, ArcanaCabiType};
+use arcana_ir::{IrRoutineParam, IrRoutineType, IrRoutineTypeKind, parse_routine_type_text};
 use std::collections::BTreeSet;
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum NativeAbiType {
-    Int,
-    Bool,
-    Str,
-    Bytes,
-    Pair(Box<NativeAbiType>, Box<NativeAbiType>),
-    Unit,
-}
+pub type NativeAbiType = ArcanaCabiType;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NativeAbiParam {
     pub name: String,
     pub ty: NativeAbiType,
-    pub is_edit: bool,
+    pub source_mode: ArcanaCabiParamSourceMode,
+    pub pass_mode: ArcanaCabiPassMode,
+    pub write_back_type: Option<NativeAbiType>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NativeExport {
     pub routine_key: String,
     pub export_name: String,
+    pub symbol_name: String,
     pub params: Vec<NativeAbiParam>,
     pub return_type: NativeAbiType,
 }
@@ -91,6 +87,7 @@ pub fn collect_native_exports(artifact: &AotPackageArtifact) -> Result<Vec<Nativ
         exports.push(NativeExport {
             routine_key: routine.routine_key.clone(),
             export_name,
+            symbol_name: routine.symbol_name.clone(),
             params,
             return_type,
         });
@@ -107,16 +104,6 @@ fn parse_package_function_export_row(row: &str) -> Option<(&str, &str, &str)> {
     Some((module_id, kind, signature))
 }
 
-fn declared_native_signature_eligible(signature: &str) -> bool {
-    let Some(rest) = signature.strip_prefix("fn ") else {
-        return false;
-    };
-    let Some((head, _)) = rest.split_once('(') else {
-        return false;
-    };
-    !head.contains('[')
-}
-
 fn validate_declared_native_export_rows(artifact: &AotPackageArtifact) -> Result<(), String> {
     let root_prefix = format!("{}.", artifact.root_module_id);
     let declared = artifact
@@ -127,12 +114,15 @@ fn validate_declared_native_export_rows(artifact: &AotPackageArtifact) -> Result
             *kind == "fn"
                 && (*module_id == artifact.root_module_id || module_id.starts_with(&root_prefix))
         })
-        .map(|(module_id, _, signature)| (module_id.to_string(), signature.to_string()))
-        .collect::<BTreeSet<_>>();
-    let declared_eligible = declared
-        .iter()
-        .filter(|(_, signature)| declared_native_signature_eligible(signature))
-        .cloned()
+        .map(|(module_id, _, signature)| {
+            Ok(match declared_native_signature_key(signature)? {
+                Some(signature_key) => Some((module_id.to_string(), signature_key)),
+                None => None,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?
+        .into_iter()
+        .flatten()
         .collect::<BTreeSet<_>>();
     let structured = artifact
         .routines
@@ -150,24 +140,184 @@ fn validate_declared_native_export_rows(artifact: &AotPackageArtifact) -> Result
         .map(|routine| {
             (
                 routine.module_id.clone(),
-                render_routine_signature_text(
-                    &routine.symbol_kind,
+                native_signature_key(
                     &routine.symbol_name,
-                    routine.is_async,
-                    &routine.type_params,
-                    &routine.params,
-                    routine.return_type.as_ref(),
+                    &native_routine_signature(routine)
+                        .expect("native signature should be available for structured export"),
                 ),
             )
         })
         .collect::<BTreeSet<_>>();
 
-    if structured != declared_eligible {
+    if structured != declared {
         return Err(
             "backend artifact native export rows do not match structured routines".to_string(),
         );
     }
     Ok(())
+}
+
+fn declared_native_signature_key(signature: &str) -> Result<Option<String>, String> {
+    let Some(rest) = signature.strip_prefix("fn ") else {
+        return Ok(None);
+    };
+    let Some((head, tail)) = rest.split_once('(') else {
+        return Err(format!("malformed native export signature `{signature}`"));
+    };
+    if head.contains('[') {
+        return Ok(None);
+    }
+    let symbol_name = head.trim();
+    let (params_text, after_params) = split_signature_param_section(tail)
+        .ok_or_else(|| format!("malformed native export signature `{signature}`"))?;
+    let after_params = after_params.trim();
+    let return_type = if after_params.is_empty() || after_params == ":" {
+        NativeAbiType::Unit
+    } else {
+        let Some(return_text) = after_params
+            .strip_prefix("->")
+            .map(str::trim)
+            .map(|text| text.trim_end_matches(':').trim())
+        else {
+            return Err(format!("malformed native export signature `{signature}`"));
+        };
+        parse_native_return_type(Some(&parse_routine_type_text(return_text)?))?
+    };
+    let params = split_signature_params(&params_text)
+        .into_iter()
+        .map(|param_text| parse_declared_native_param(&param_text))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Some(native_signature_key(
+        symbol_name,
+        &NativeRoutineSignature {
+            params,
+            return_type,
+        },
+    )))
+}
+
+fn parse_declared_native_param(text: &str) -> Result<NativeAbiParam, String> {
+    let Some((head, ty_text)) = text.split_once(':') else {
+        return Err(format!("malformed native export param `{text}`"));
+    };
+    let head = head.trim();
+    let ty = parse_routine_type_text(ty_text.trim())?;
+    let parts = head.split_whitespace().collect::<Vec<_>>();
+    let param = match parts.as_slice() {
+        [name] => IrRoutineParam {
+            mode: None,
+            name: (*name).to_string(),
+            ty,
+        },
+        [mode, name] => IrRoutineParam {
+            mode: Some((*mode).to_string()),
+            name: (*name).to_string(),
+            ty,
+        },
+        _ => return Err(format!("malformed native export param `{text}`")),
+    };
+    parse_native_param(&param)
+}
+
+fn split_signature_params(text: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut square_depth = 0usize;
+    let mut paren_depth = 0usize;
+    for ch in text.chars() {
+        match ch {
+            '[' => {
+                square_depth += 1;
+                current.push(ch);
+            }
+            ']' => {
+                square_depth = square_depth.saturating_sub(1);
+                current.push(ch);
+            }
+            '(' => {
+                paren_depth += 1;
+                current.push(ch);
+            }
+            ')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+                current.push(ch);
+            }
+            ',' if square_depth == 0 && paren_depth == 0 => {
+                let trimmed = current.trim();
+                if !trimmed.is_empty() {
+                    parts.push(trimmed.to_string());
+                }
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    let trimmed = current.trim();
+    if !trimmed.is_empty() {
+        parts.push(trimmed.to_string());
+    }
+    parts
+}
+
+fn split_signature_param_section(text: &str) -> Option<(String, String)> {
+    let mut nested_paren_depth = 0usize;
+    for (index, ch) in text.char_indices() {
+        match ch {
+            '(' => nested_paren_depth += 1,
+            ')' => {
+                if nested_paren_depth == 0 {
+                    return Some((text[..index].to_string(), text[index + 1..].to_string()));
+                }
+                nested_paren_depth -= 1;
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn native_signature_key(symbol_name: &str, signature: &NativeRoutineSignature) -> String {
+    let params = signature
+        .params
+        .iter()
+        .map(|param| {
+            format!(
+                "{}:{}:{}:{}",
+                param.source_mode.as_str(),
+                param.name,
+                canonical_native_type_name(&param.ty),
+                param
+                    .write_back_type
+                    .as_ref()
+                    .map(canonical_native_type_name)
+                    .unwrap_or_else(|| "-".to_string())
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "{}({})->{}",
+        symbol_name,
+        params,
+        canonical_native_type_name(&signature.return_type)
+    )
+}
+
+fn canonical_native_type_name(ty: &NativeAbiType) -> String {
+    match ty {
+        NativeAbiType::Int => "Int".to_string(),
+        NativeAbiType::Bool => "Bool".to_string(),
+        NativeAbiType::Str => "Str".to_string(),
+        NativeAbiType::Bytes => "Array[Int]".to_string(),
+        NativeAbiType::Unit => "Unit".to_string(),
+        NativeAbiType::Pair(left, right) => {
+            format!(
+                "Pair[{}, {}]",
+                canonical_native_type_name(left),
+                canonical_native_type_name(right)
+            )
+        }
+    }
 }
 
 pub fn native_routine_signature(
@@ -184,9 +334,11 @@ pub fn native_routine_signature(
 }
 
 pub fn parse_native_param(param: &IrRoutineParam) -> Result<NativeAbiParam, String> {
-    let is_edit = match param.mode.as_deref() {
-        None | Some("read") | Some("take") => false,
-        Some("edit") => true,
+    let ty = parse_native_type(&param.ty)?;
+    let source_mode = match param.mode.as_deref() {
+        None | Some("read") => ArcanaCabiParamSourceMode::Read,
+        Some("take") => ArcanaCabiParamSourceMode::Take,
+        Some("edit") => ArcanaCabiParamSourceMode::Edit,
         Some(other) => {
             return Err(format!(
                 "unsupported native abi parameter mode `{other}` for `{}`",
@@ -196,8 +348,18 @@ pub fn parse_native_param(param: &IrRoutineParam) -> Result<NativeAbiParam, Stri
     };
     Ok(NativeAbiParam {
         name: sanitize_name(&param.name),
-        ty: parse_native_type(&param.ty)?,
-        is_edit,
+        ty: ty.clone(),
+        source_mode,
+        pass_mode: match source_mode {
+            ArcanaCabiParamSourceMode::Edit => ArcanaCabiPassMode::InWithWriteBack,
+            ArcanaCabiParamSourceMode::Read | ArcanaCabiParamSourceMode::Take => {
+                ArcanaCabiPassMode::In
+            }
+        },
+        write_back_type: match source_mode {
+            ArcanaCabiParamSourceMode::Edit => Some(ty),
+            ArcanaCabiParamSourceMode::Read | ArcanaCabiParamSourceMode::Take => None,
+        },
     })
 }
 

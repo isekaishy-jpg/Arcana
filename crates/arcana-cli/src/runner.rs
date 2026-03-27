@@ -66,7 +66,7 @@ pub(crate) fn prepare_run_workspace(
     let prepared = prepare_build_from_workspace(&graph, workspace, resolved_workspace)?;
     let lock_path = graph.root_dir.join("Arcana.lock");
     let existing_lock = read_lockfile(&lock_path)?;
-    let execution_context = build_execution_context_for_target(&target)?;
+    let execution_context = build_execution_context_for_target(&target, None)?;
     let statuses = plan_build_for_target_with_context(
         &graph,
         &order,
