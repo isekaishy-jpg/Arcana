@@ -3,9 +3,9 @@ use std::path::PathBuf;
 
 use arcana_frontend::{check_path, check_workspace_graph};
 use arcana_package::{
-    BuildDisposition, BuildTarget, execute_build_with_context, load_workspace_graph,
-    parse_build_target, plan_build_for_target_with_context, plan_workspace,
-    prepare_build_from_workspace, read_lockfile, render_build_summary, write_lockfile,
+    BuildTarget, execute_build_with_context_and_progress, load_workspace_graph, parse_build_target,
+    plan_build_for_target_with_context, plan_workspace, prepare_build_from_workspace,
+    read_lockfile, write_lockfile,
 };
 
 mod build_context;
@@ -178,25 +178,21 @@ fn run_build(
         &order,
         &prepared,
         existing_lock.as_ref(),
-        target,
+        target.clone(),
         &execution_context,
     )?;
-    execute_build_with_context(&graph, &prepared, &statuses, &execution_context)?;
+    execute_build_with_context_and_progress(
+        &graph,
+        &prepared,
+        &statuses,
+        &execution_context,
+        |progress| println!("{}", build_context::render_build_progress(progress)),
+    )?;
     write_lockfile(&graph, &order, &statuses)?;
-
-    for status in &statuses {
-        println!(
-            "{} {} {} {}",
-            match status.disposition() {
-                BuildDisposition::Built => "built",
-                BuildDisposition::CacheHit => "cache_hit",
-            },
-            status.member(),
-            status.build_key().storage_key(),
-            status.fingerprint()
-        );
-    }
-    println!("{}", render_build_summary(&statuses, &graph));
+    println!(
+        "{}",
+        build_context::render_build_completion(&statuses, &target, product.as_deref())
+    );
     Ok(0)
 }
 

@@ -6,12 +6,12 @@ use std::process::Command;
 use arcana_frontend::check_workspace_graph;
 use arcana_package::{
     BuildTarget, GrimoireKind, WorkspaceGraph, default_distribution_dir,
-    execute_build_with_context, load_workspace_graph, plan_build_for_target_with_context,
-    plan_workspace, prepare_build_from_workspace, read_lockfile, stage_distribution_bundle,
-    write_lockfile,
+    execute_build_with_context_and_progress, load_workspace_graph,
+    plan_build_for_target_with_context, plan_workspace, prepare_build_from_workspace,
+    read_lockfile, stage_distribution_bundle, write_lockfile,
 };
 
-use crate::build_context::build_execution_context_for_target;
+use crate::build_context::{build_execution_context_for_target, render_build_progress};
 use crate::runtime_exec::{self, ProcessContext};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -75,7 +75,13 @@ pub(crate) fn prepare_run_workspace(
         target.clone(),
         &execution_context,
     )?;
-    execute_build_with_context(&graph, &prepared, &statuses, &execution_context)?;
+    execute_build_with_context_and_progress(
+        &graph,
+        &prepared,
+        &statuses,
+        &execution_context,
+        |progress| println!("{}", render_build_progress(progress)),
+    )?;
     write_lockfile(&graph, &order, &statuses)?;
 
     let status = statuses

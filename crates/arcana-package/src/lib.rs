@@ -21,10 +21,11 @@ mod fingerprint;
 pub type PackageResult<T> = Result<T, String>;
 
 pub use build::{
-    BuildDisposition, BuildExecutionContext, BuildStatus, PreparedBuild, execute_build,
-    execute_build_with_context, plan_build, plan_build_for_target,
-    plan_build_for_target_with_context, plan_package_build_for_target_with_context, prepare_build,
-    prepare_build_from_workspace, render_build_summary, render_lockfile, write_lockfile,
+    BuildDisposition, BuildExecutionContext, BuildProgress, BuildStatus, PreparedBuild,
+    execute_build, execute_build_with_context, execute_build_with_context_and_progress, plan_build,
+    plan_build_for_target, plan_build_for_target_with_context,
+    plan_package_build_for_target_with_context, prepare_build, prepare_build_from_workspace,
+    render_build_summary, render_lockfile, write_lockfile,
 };
 pub use distribution::{
     DISTRIBUTION_BUNDLE_FORMAT, DistributionBundle, default_distribution_dir,

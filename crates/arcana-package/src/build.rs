@@ -37,6 +37,13 @@ pub enum BuildDisposition {
     CacheHit,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BuildProgress<'a> {
+    pub index: usize,
+    pub total: usize,
+    pub status: &'a BuildStatus,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BuildStatus {
     pub(crate) member: String,
@@ -382,6 +389,19 @@ pub fn execute_build_with_context(
     statuses: &[BuildStatus],
     context: &BuildExecutionContext,
 ) -> PackageResult<PathBuf> {
+    execute_build_with_context_and_progress(graph, prepared, statuses, context, |_| {})
+}
+
+pub fn execute_build_with_context_and_progress<F>(
+    graph: &WorkspaceGraph,
+    prepared: &PreparedBuild,
+    statuses: &[BuildStatus],
+    context: &BuildExecutionContext,
+    mut on_progress: F,
+) -> PackageResult<PathBuf>
+where
+    F: FnMut(BuildProgress<'_>),
+{
     validate_prepared_snapshot_with_context(prepared, statuses, context)?;
 
     let cache_root = graph.root_dir.join(CACHE_DIR);
@@ -392,7 +412,13 @@ pub fn execute_build_with_context(
         )
     })?;
 
-    for status in statuses {
+    let total = statuses.len();
+    for (index, status) in statuses.iter().enumerate() {
+        on_progress(BuildProgress {
+            index: index + 1,
+            total,
+            status,
+        });
         if status.disposition == BuildDisposition::CacheHit {
             continue;
         }
