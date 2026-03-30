@@ -105,10 +105,25 @@ pub struct ExecMatchArm {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExecPageRollup {
+pub struct ExecCleanupFooter {
     pub kind: String,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub binding_id: u64,
     pub subject: String,
     pub handler_path: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_routine: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecNamedBindingId {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub binding_id: u64,
+}
+
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -151,13 +166,15 @@ pub enum ExecMatchPattern {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExecStmt {
     Let {
+        #[serde(default, skip_serializing_if = "is_zero_u64")]
+        binding_id: u64,
         mutable: bool,
         name: String,
         value: ExecExpr,
     },
     Expr {
         expr: ExecExpr,
-        rollups: Vec<ExecPageRollup>,
+        cleanup_footers: Vec<ExecCleanupFooter>,
     },
     ReturnVoid,
     ReturnValue {
@@ -168,26 +185,30 @@ pub enum ExecStmt {
         then_branch: Vec<ExecStmt>,
         else_branch: Vec<ExecStmt>,
         availability: Vec<ExecAvailabilityAttachment>,
-        rollups: Vec<ExecPageRollup>,
+        cleanup_footers: Vec<ExecCleanupFooter>,
     },
     While {
         condition: ExecExpr,
         body: Vec<ExecStmt>,
         availability: Vec<ExecAvailabilityAttachment>,
-        rollups: Vec<ExecPageRollup>,
+        cleanup_footers: Vec<ExecCleanupFooter>,
     },
     For {
+        #[serde(default, skip_serializing_if = "is_zero_u64")]
+        binding_id: u64,
         binding: String,
         iterable: ExecExpr,
         body: Vec<ExecStmt>,
         availability: Vec<ExecAvailabilityAttachment>,
-        rollups: Vec<ExecPageRollup>,
+        cleanup_footers: Vec<ExecCleanupFooter>,
     },
     ActivateOwner {
         owner_path: Vec<String>,
         owner_local_name: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         binding: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        object_binding_ids: Vec<ExecNamedBindingId>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context: Option<ExecExpr>,
     },

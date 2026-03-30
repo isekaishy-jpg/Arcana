@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::{
-    ExecAssignTarget, ExecExpr, ExecHeaderAttachment, ExecPageRollup, ExecPhraseArg, ExecStmt,
+    ExecAssignTarget, ExecCleanupFooter, ExecExpr, ExecHeaderAttachment, ExecPhraseArg, ExecStmt,
     IrEntrypoint, IrPackage, IrRoutine,
 };
 
@@ -117,7 +117,7 @@ fn find_entrypoint_routine_key(package: &IrPackage, entrypoint: &IrEntrypoint) -
 }
 
 fn collect_routine_callees(package: &IrPackage, routine: &IrRoutine, out: &mut BTreeSet<String>) {
-    for rollup in &routine.rollups {
+    for rollup in &routine.cleanup_footers {
         collect_rollup_callee(package, &routine.module_id, rollup, out);
     }
     for statement in &routine.statements {
@@ -128,7 +128,7 @@ fn collect_routine_callees(package: &IrPackage, routine: &IrRoutine, out: &mut B
 fn collect_rollup_callee(
     package: &IrPackage,
     current_module_id: &str,
-    rollup: &ExecPageRollup,
+    rollup: &ExecCleanupFooter,
     out: &mut BTreeSet<String>,
 ) {
     if let Some(routine_key) = resolve_routine_key(package, current_module_id, &rollup.handler_path)
@@ -145,9 +145,12 @@ fn collect_stmt_callees(
 ) {
     match statement {
         ExecStmt::Let { value, .. } => collect_expr_callees(package, current_module_id, value, out),
-        ExecStmt::Expr { expr, rollups } => {
+        ExecStmt::Expr {
+            expr,
+            cleanup_footers,
+        } => {
             collect_expr_callees(package, current_module_id, expr, out);
-            for rollup in rollups {
+            for rollup in cleanup_footers {
                 collect_rollup_callee(package, current_module_id, rollup, out);
             }
         }
@@ -159,11 +162,11 @@ fn collect_stmt_callees(
             condition,
             then_branch,
             else_branch,
-            rollups,
+            cleanup_footers,
             ..
         } => {
             collect_expr_callees(package, current_module_id, condition, out);
-            for rollup in rollups {
+            for rollup in cleanup_footers {
                 collect_rollup_callee(package, current_module_id, rollup, out);
             }
             for statement in then_branch {
@@ -176,11 +179,11 @@ fn collect_stmt_callees(
         ExecStmt::While {
             condition,
             body,
-            rollups,
+            cleanup_footers,
             ..
         } => {
             collect_expr_callees(package, current_module_id, condition, out);
-            for rollup in rollups {
+            for rollup in cleanup_footers {
                 collect_rollup_callee(package, current_module_id, rollup, out);
             }
             for statement in body {
@@ -190,11 +193,11 @@ fn collect_stmt_callees(
         ExecStmt::For {
             iterable,
             body,
-            rollups,
+            cleanup_footers,
             ..
         } => {
             collect_expr_callees(package, current_module_id, iterable, out);
-            for rollup in rollups {
+            for rollup in cleanup_footers {
                 collect_rollup_callee(package, current_module_id, rollup, out);
             }
             for statement in body {
@@ -432,7 +435,7 @@ mod tests {
         derive_runtime_requirements_with_roots,
     };
     use crate::{
-        ExecExpr, ExecPageRollup, ExecPhraseQualifierKind, ExecStmt, IrEntrypoint, IrPackage,
+        ExecCleanupFooter, ExecExpr, ExecPhraseQualifierKind, ExecStmt, IrEntrypoint, IrPackage,
         IrPackageModule, IrRoutine, IrRoutineParam, parse_routine_type_text,
     };
 
@@ -492,7 +495,7 @@ mod tests {
             impl_trait_path: None,
             availability: Vec::new(),
             foreword_rows: Vec::new(),
-            rollups: Vec::new(),
+            cleanup_footers: Vec::new(),
             statements,
         }
     }
@@ -877,10 +880,12 @@ mod tests {
                     impl_trait_path: None,
                     availability: Vec::new(),
                     foreword_rows: Vec::new(),
-                    rollups: vec![ExecPageRollup {
+                    cleanup_footers: vec![ExecCleanupFooter {
                         kind: "cleanup".to_string(),
+                        binding_id: 0,
                         subject: "scope".to_string(),
                         handler_path: vec!["cleanup".to_string()],
+                        resolved_routine: None,
                     }],
                     statements: vec![ExecStmt::ReturnValue {
                         value: ExecExpr::Int(0),
@@ -897,6 +902,7 @@ mod tests {
                     type_params: Vec::new(),
                     behavior_attrs: BTreeMap::new(),
                     params: vec![IrRoutineParam {
+                        binding_id: 0,
                         mode: None,
                         name: "scope".to_string(),
                         ty: ty("Int"),
@@ -907,7 +913,7 @@ mod tests {
                     impl_trait_path: None,
                     availability: Vec::new(),
                     foreword_rows: Vec::new(),
-                    rollups: Vec::new(),
+                    cleanup_footers: Vec::new(),
                     statements: Vec::new(),
                 },
             ],

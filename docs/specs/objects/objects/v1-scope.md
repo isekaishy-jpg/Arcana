@@ -106,7 +106,7 @@ Owner exits are evaluated at explicit checkpoints:
 
 - owner entry or re-entry while prior owner state is still active
 - successful mutation of active owner-backed state
-- structured block or routine exit after local `defer` work and page rollups complete
+- structured block or routine exit after local `defer` work and cleanup footer work complete
 
 If an exit condition resolves true:
 
@@ -126,7 +126,7 @@ If an exit condition resolves true:
 
 ## Cleanup Order
 
-- Local `defer` work runs before page rollups for the same header, per the existing approved cleanup contract.
+- Local `defer` work runs before cleanup footer work for the same header, per the existing approved cleanup contract.
 - Owner exit cleanup runs after those local cleanup rings for the exiting scope.
 
 ## Static Dispatch And Explicitness

@@ -20,7 +20,7 @@ This document records what still remains reserved after the pre-selfhost object/
 
 ## Why This Is Settled Now
 
-- Page rollups and other structured cleanup features should not quietly depend on closures.
+- Cleanup footers and other structured cleanup features should not quietly depend on closures.
 - Typed frontend and IR work should not invent placeholder closure semantics.
 - Future callable support should solve the lack of closures through explicit objects, not by reopening closure semantics through the back door.
 

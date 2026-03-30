@@ -1,8 +1,10 @@
 #![allow(clippy::too_many_arguments)]
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 mod api_fingerprint;
 mod semantic_types;
@@ -16,7 +18,7 @@ use arcana_hir::{
     HirAssignTarget, HirBinaryOp, HirChainStep, HirExpr, HirHeaderAttachment, HirImplDecl,
     HirLocalTypeLookup, HirMatchPattern, HirModule, HirModuleSummary, HirPhraseArg,
     HirResolvedModule, HirResolvedTarget, HirResolvedWorkspace, HirStatement, HirStatementKind,
-    HirSymbol, HirSymbolBody, HirSymbolKind, HirType, HirUnaryOp, HirWorkspacePackage,
+    HirSymbol, HirSymbolBody, HirSymbolKind, HirType, HirTypeKind, HirUnaryOp, HirWorkspacePackage,
     HirWorkspaceSummary, collect_hir_type_refs, current_workspace_package_for_module,
     infer_receiver_expr_type, lookup_method_candidates_for_hir_type, lower_module_text,
     match_name_resolves_to_zero_payload_variant, render_symbol_signature, resolve_workspace,
@@ -206,7 +208,7 @@ impl TypeScope {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 struct ValueScope {
     locals: BTreeSet<String>,
     mutable_locals: BTreeSet<String>,
@@ -214,10 +216,27 @@ struct ValueScope {
     ownership: BTreeMap<String, OwnershipClass>,
     types: BTreeMap<String, HirType>,
     binding_ids: BTreeMap<String, u64>,
-    next_binding_id: u64,
+    next_binding_id: Rc<Cell<u64>>,
     available_owners: BTreeMap<String, AvailableOwnerBinding>,
     attached_object_names: BTreeSet<String>,
     owner_member_types: BTreeMap<String, BTreeMap<String, HirType>>,
+}
+
+impl Default for ValueScope {
+    fn default() -> Self {
+        Self {
+            locals: BTreeSet::new(),
+            mutable_locals: BTreeSet::new(),
+            params: BTreeSet::new(),
+            ownership: BTreeMap::new(),
+            types: BTreeMap::new(),
+            binding_ids: BTreeMap::new(),
+            next_binding_id: Rc::new(Cell::new(1)),
+            available_owners: BTreeMap::new(),
+            attached_object_names: BTreeSet::new(),
+            owner_member_types: BTreeMap::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -261,12 +280,6 @@ impl ValueScope {
         next
     }
 
-    fn with_local(&self, name: &str, mutable: bool) -> Self {
-        let mut next = self.clone();
-        next.bind_local(name, mutable);
-        next
-    }
-
     fn insert(&mut self, name: &str, mutable: bool) {
         self.bind_local(name, mutable);
     }
@@ -276,8 +289,8 @@ impl ValueScope {
         if mutable {
             self.mutable_locals.insert(name.to_string());
         }
-        let binding_id = self.next_binding_id;
-        self.next_binding_id += 1;
+        let binding_id = self.next_binding_id.get();
+        self.next_binding_id.set(binding_id + 1);
         self.binding_ids.insert(name.to_string(), binding_id);
         binding_id
     }
@@ -2836,6 +2849,18 @@ fn validate_module_semantics(
                     ),
                 });
             }
+        } else if lang_item.name == "cleanup_contract"
+            && symbol_ref.symbol.kind != HirSymbolKind::Trait
+        {
+            diagnostics.push(Diagnostic {
+                path: module_path.clone(),
+                line: lang_item.span.line,
+                column: lang_item.span.column,
+                message: format!(
+                    "cleanup contract lang item `cleanup_contract` must target a trait, found `{}`",
+                    symbol_ref.symbol.kind.as_str()
+                ),
+            });
         }
     }
 
@@ -3684,15 +3709,53 @@ fn validate_symbol_value_semantics(
         &mut scope,
         diagnostics,
     );
-    let symbol_cleanup_subjects = collect_cleanup_subject_names(&symbol.rollups);
     for param in &symbol.params {
         let ownership = infer_type_ownership(workspace, resolved_module, &type_scope, &param.ty);
         scope.ownership.insert(param.name.clone(), ownership);
         scope.types.insert(param.name.clone(), param.ty.clone());
     }
+    let mut symbol_cleanup_candidates = symbol
+        .params
+        .iter()
+        .filter_map(|param| {
+            scope
+                .binding_id_of(&param.name)
+                .map(|binding_id| CleanupFooterCandidate {
+                    name: param.name.clone(),
+                    binding_id,
+                    ownership: scope.ownership_of(&param.name),
+                    ty: scope.type_of(&param.name).cloned(),
+                })
+        })
+        .collect::<Vec<_>>();
+    symbol_cleanup_candidates.extend(collect_cleanup_footer_candidates_recursive(
+        workspace,
+        resolved_workspace,
+        resolved_module,
+        module_path,
+        &type_scope,
+        &scope,
+        &symbol.statements,
+        true,
+    ));
+    let symbol_cleanup_policy = validate_cleanup_footer_targets(
+        workspace,
+        resolved_module,
+        module_path,
+        &symbol.cleanup_footers,
+        &symbol_cleanup_candidates,
+        diagnostics,
+    );
     let mut borrow_state = BorrowFlowState::default();
-    for name in &symbol_cleanup_subjects {
-        if let Some(binding_id) = scope.binding_id_of(name) {
+    for param in &symbol.params {
+        if should_activate_cleanup_binding(
+            workspace,
+            resolved_module,
+            &scope,
+            &symbol_cleanup_policy,
+            &param.name,
+        ) && let Some(binding_id) = scope.binding_id_of(&param.name)
+        {
             borrow_state.activate_cleanup_binding(binding_id);
         }
     }
@@ -3700,7 +3763,7 @@ fn validate_symbol_value_semantics(
         workspace,
         resolved_module,
         module_path,
-        &symbol.rollups,
+        &symbol.cleanup_footers,
         diagnostics,
     );
     validate_statement_block_semantics(
@@ -3712,7 +3775,7 @@ fn validate_symbol_value_semantics(
         &type_scope,
         &mut scope,
         &mut borrow_state,
-        &symbol_cleanup_subjects,
+        &symbol_cleanup_policy,
         diagnostics,
     );
 
@@ -3838,10 +3901,25 @@ fn validate_rollup_handlers(
     workspace: &HirWorkspaceSummary,
     resolved_module: &HirResolvedModule,
     module_path: &Path,
-    rollups: &[arcana_hir::HirPageRollup],
+    cleanup_footers: &[arcana_hir::HirCleanupFooter],
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    for rollup in rollups {
+    if cleanup_footers
+        .iter()
+        .any(|rollup| rollup.handler_path.is_empty() || has_bare_cleanup_rollup(cleanup_footers))
+        && let Err(message) = resolve_cleanup_contract_trait_path(workspace, resolved_module)
+    {
+        diagnostics.push(Diagnostic {
+            path: module_path.to_path_buf(),
+            line: cleanup_footers[0].span.line,
+            column: cleanup_footers[0].span.column,
+            message,
+        });
+    }
+    for rollup in cleanup_footers {
+        if rollup.handler_path.is_empty() {
+            continue;
+        }
         let Some(symbol_ref) = lookup_symbol_path(workspace, resolved_module, &rollup.handler_path)
         else {
             diagnostics.push(Diagnostic {
@@ -3849,7 +3927,7 @@ fn validate_rollup_handlers(
                 line: rollup.span.line,
                 column: rollup.span.column,
                 message: format!(
-                    "unresolved page rollup handler `{}`",
+                    "unresolved cleanup footer handler `{}`",
                     rollup.handler_path.join(".")
                 ),
             });
@@ -3867,7 +3945,7 @@ fn validate_rollup_handlers(
                 line: rollup.span.line,
                 column: rollup.span.column,
                 message: format!(
-                    "page rollup handler `{}` must resolve to a callable symbol",
+                    "cleanup footer handler `{}` must resolve to a callable symbol",
                     rollup.handler_path.join(".")
                 ),
             });
@@ -3879,7 +3957,7 @@ fn validate_rollup_handlers(
                 line: rollup.span.line,
                 column: rollup.span.column,
                 message: format!(
-                    "page rollup handler `{}` cannot be async in v1",
+                    "cleanup footer handler `{}` cannot be async in v1",
                     rollup.handler_path.join(".")
                 ),
             });
@@ -3891,7 +3969,30 @@ fn validate_rollup_handlers(
                 line: rollup.span.line,
                 column: rollup.span.column,
                 message: format!(
-                    "page rollup handler `{}` must accept exactly one parameter in v1",
+                    "cleanup footer handler `{}` must accept exactly one parameter in v1",
+                    rollup.handler_path.join(".")
+                ),
+            });
+            continue;
+        }
+        if symbol_ref.symbol.params[0].mode != Some(arcana_hir::HirParamMode::Take) {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: rollup.span.line,
+                column: rollup.span.column,
+                message: format!(
+                    "cleanup footer handler `{}` must take its target parameter in v1",
+                    rollup.handler_path.join(".")
+                ),
+            });
+        }
+        if !symbol_return_type_is_cleanup_result(symbol_ref.symbol.return_type.as_ref()) {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: rollup.span.line,
+                column: rollup.span.column,
+                message: format!(
+                    "cleanup footer handler `{}` must return `Result[Unit, Str]` in v1",
                     rollup.handler_path.join(".")
                 ),
             });
@@ -3899,20 +4000,557 @@ fn validate_rollup_handlers(
     }
 }
 
-fn collect_cleanup_subject_names(rollups: &[arcana_hir::HirPageRollup]) -> BTreeSet<String> {
-    rollups
+#[derive(Clone, Debug, Default)]
+struct CleanupFooterPolicy {
+    cover_all_cleanup_capable: bool,
+    explicit_target_ids: BTreeSet<u64>,
+}
+
+#[derive(Clone, Debug)]
+struct CleanupFooterCandidate {
+    name: String,
+    binding_id: u64,
+    ownership: OwnershipClass,
+    ty: Option<HirType>,
+}
+
+fn has_bare_cleanup_rollup(cleanup_footers: &[arcana_hir::HirCleanupFooter]) -> bool {
+    cleanup_footers
         .iter()
-        .map(|rollup| rollup.subject.clone())
-        .collect::<BTreeSet<_>>()
+        .any(|rollup| rollup.subject.is_empty())
+}
+
+fn push_cleanup_footer_candidate(
+    candidates: &mut Vec<CleanupFooterCandidate>,
+    scope: &ValueScope,
+    name: &str,
+) {
+    let Some(binding_id) = scope.binding_id_of(name) else {
+        return;
+    };
+    candidates.push(CleanupFooterCandidate {
+        name: name.to_string(),
+        binding_id,
+        ownership: scope.ownership_of(name),
+        ty: scope.type_of(name).cloned(),
+    });
+}
+
+fn infer_iterable_binding_type(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    type_scope: &TypeScope,
+    scope: &ValueScope,
+    iterable: &HirExpr,
+) -> Option<HirType> {
+    let iterable_ty =
+        infer_expr_value_type(workspace, resolved_module, type_scope, scope, iterable)?;
+    let path_segments_match = |segments: &[String], expected: &[&str]| {
+        segments.len() == expected.len()
+            && segments
+                .iter()
+                .map(String::as_str)
+                .zip(expected.iter().copied())
+                .all(|(actual, expected)| actual == expected)
+    };
+    match &iterable_ty.kind {
+        HirTypeKind::Path(path) if path.segments.len() == 1 && path.segments[0] == "RangeInt" => {
+            Some(HirType {
+                kind: HirTypeKind::Path(arcana_hir::HirPath {
+                    segments: vec!["Int".to_string()],
+                    span: Span::default(),
+                }),
+                span: Span::default(),
+            })
+        }
+        HirTypeKind::Apply { base, args }
+            if matches!(&base.segments[..], [name] if name == "List" || name == "Array")
+                || path_segments_match(&base.segments, &["std", "collections", "list", "List"])
+                || path_segments_match(
+                    &base.segments,
+                    &["std", "collections", "array", "Array"],
+                ) =>
+        {
+            args.first().cloned()
+        }
+        HirTypeKind::Apply { base, args }
+            if matches!(&base.segments[..], [name] if name == "Map")
+                || path_segments_match(&base.segments, &["std", "collections", "map", "Map"]) =>
+        {
+            match (args.first(), args.get(1)) {
+                (Some(key), Some(value)) => Some(HirType {
+                    kind: HirTypeKind::Apply {
+                        base: arcana_hir::HirPath {
+                            segments: vec!["Pair".to_string()],
+                            span: Span::default(),
+                        },
+                        args: vec![key.clone(), value.clone()],
+                    },
+                    span: Span::default(),
+                }),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn collect_cleanup_footer_candidates_recursive(
+    workspace: &HirWorkspaceSummary,
+    resolved_workspace: &HirResolvedWorkspace,
+    resolved_module: &HirResolvedModule,
+    module_path: &Path,
+    type_scope: &TypeScope,
+    scope: &ValueScope,
+    statements: &[HirStatement],
+    collect_bindings: bool,
+) -> Vec<CleanupFooterCandidate> {
+    let mut candidates = Vec::new();
+    let mut body_scope = scope.clone();
+    for statement in statements {
+        match &statement.kind {
+            HirStatementKind::Let {
+                mutable,
+                name,
+                value,
+            } => {
+                if let Some(owner_activation) = resolve_owner_activation_expr(
+                    workspace,
+                    resolved_workspace,
+                    resolved_module,
+                    value,
+                ) {
+                    let mut inserted_names =
+                        body_scope.activate_owner(&owner_activation.owner, Some(name), *mutable);
+                    for object in &owner_activation.owner.objects {
+                        if !body_scope
+                            .attached_object_names
+                            .contains(&object.local_name)
+                        {
+                            continue;
+                        }
+                        if body_scope.binding_id_of(&object.local_name).is_none() {
+                            body_scope.insert_typed(
+                                &object.local_name,
+                                true,
+                                OwnershipClass::Move,
+                                Some(object.ty.clone()),
+                            );
+                        }
+                        if !inserted_names
+                            .iter()
+                            .any(|inserted_name| inserted_name == &object.local_name)
+                        {
+                            inserted_names.push(object.local_name.clone());
+                        }
+                    }
+                    for inserted_name in inserted_names {
+                        if collect_bindings {
+                            push_cleanup_footer_candidate(
+                                &mut candidates,
+                                &body_scope,
+                                &inserted_name,
+                            );
+                        }
+                    }
+                    continue;
+                }
+                let ownership = infer_expr_ownership(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    &body_scope,
+                    value,
+                );
+                let ty = infer_expr_value_type(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    &body_scope,
+                    value,
+                );
+                body_scope.insert_typed(name, *mutable, ownership, ty);
+                if collect_bindings {
+                    push_cleanup_footer_candidate(&mut candidates, &body_scope, name);
+                }
+            }
+            HirStatementKind::Expr { expr } => {
+                if let Some(owner_activation) = resolve_owner_activation_expr(
+                    workspace,
+                    resolved_workspace,
+                    resolved_module,
+                    expr,
+                ) {
+                    let mut inserted_names =
+                        body_scope.activate_owner(&owner_activation.owner, None, false);
+                    for object in &owner_activation.owner.objects {
+                        if !body_scope
+                            .attached_object_names
+                            .contains(&object.local_name)
+                        {
+                            continue;
+                        }
+                        if body_scope.binding_id_of(&object.local_name).is_none() {
+                            body_scope.insert_typed(
+                                &object.local_name,
+                                true,
+                                OwnershipClass::Move,
+                                Some(object.ty.clone()),
+                            );
+                        }
+                        if !inserted_names
+                            .iter()
+                            .any(|inserted_name| inserted_name == &object.local_name)
+                        {
+                            inserted_names.push(object.local_name.clone());
+                        }
+                    }
+                    for inserted_name in inserted_names {
+                        if collect_bindings {
+                            push_cleanup_footer_candidate(
+                                &mut candidates,
+                                &body_scope,
+                                &inserted_name,
+                            );
+                        }
+                    }
+                }
+            }
+            HirStatementKind::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                let nested_collect = collect_bindings && statement.cleanup_footers.is_empty();
+                let mut then_scope = body_scope.clone();
+                let mut ignored = Vec::new();
+                apply_availability_attachments_to_scope(
+                    workspace,
+                    resolved_workspace,
+                    resolved_module,
+                    module_path,
+                    &statement.availability,
+                    &mut then_scope,
+                    &mut ignored,
+                );
+                candidates.extend(collect_cleanup_footer_candidates_recursive(
+                    workspace,
+                    resolved_workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    &then_scope,
+                    then_branch,
+                    nested_collect,
+                ));
+                if let Some(else_branch) = else_branch {
+                    let mut else_scope = body_scope.clone();
+                    let mut ignored = Vec::new();
+                    apply_availability_attachments_to_scope(
+                        workspace,
+                        resolved_workspace,
+                        resolved_module,
+                        module_path,
+                        &statement.availability,
+                        &mut else_scope,
+                        &mut ignored,
+                    );
+                    candidates.extend(collect_cleanup_footer_candidates_recursive(
+                        workspace,
+                        resolved_workspace,
+                        resolved_module,
+                        module_path,
+                        type_scope,
+                        &else_scope,
+                        else_branch,
+                        nested_collect,
+                    ));
+                }
+            }
+            HirStatementKind::While { body, .. } => {
+                let nested_collect = collect_bindings && statement.cleanup_footers.is_empty();
+                let mut nested_scope = body_scope.clone();
+                let mut ignored = Vec::new();
+                apply_availability_attachments_to_scope(
+                    workspace,
+                    resolved_workspace,
+                    resolved_module,
+                    module_path,
+                    &statement.availability,
+                    &mut nested_scope,
+                    &mut ignored,
+                );
+                candidates.extend(collect_cleanup_footer_candidates_recursive(
+                    workspace,
+                    resolved_workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    &nested_scope,
+                    body,
+                    nested_collect,
+                ));
+            }
+            HirStatementKind::For {
+                binding,
+                iterable,
+                body,
+            } => {
+                let nested_collect = collect_bindings && statement.cleanup_footers.is_empty();
+                let mut nested_scope = body_scope.clone();
+                let iterable_binding_ty = infer_iterable_binding_type(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    &body_scope,
+                    iterable,
+                );
+                let iterable_binding_ownership = iterable_binding_ty
+                    .as_ref()
+                    .map(|ty| infer_type_ownership(workspace, resolved_module, type_scope, ty))
+                    .unwrap_or_default();
+                nested_scope.insert_typed(
+                    binding,
+                    false,
+                    iterable_binding_ownership,
+                    iterable_binding_ty,
+                );
+                if nested_collect {
+                    push_cleanup_footer_candidate(&mut candidates, &nested_scope, binding);
+                }
+                let mut ignored = Vec::new();
+                apply_availability_attachments_to_scope(
+                    workspace,
+                    resolved_workspace,
+                    resolved_module,
+                    module_path,
+                    &statement.availability,
+                    &mut nested_scope,
+                    &mut ignored,
+                );
+                candidates.extend(collect_cleanup_footer_candidates_recursive(
+                    workspace,
+                    resolved_workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    &nested_scope,
+                    body,
+                    nested_collect,
+                ));
+            }
+            _ => {}
+        }
+    }
+    candidates
+}
+
+fn cleanup_target_supports_default_cleanup_contract(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    ownership: OwnershipClass,
+    ty: Option<&HirType>,
+) -> bool {
+    if !ownership.is_move_only() {
+        return false;
+    }
+    let Some(ty) = ty else {
+        return false;
+    };
+    let Ok(contract_path) = resolve_cleanup_contract_trait_path(workspace, resolved_module) else {
+        return false;
+    };
+    let candidates =
+        lookup_method_candidates_for_hir_type(workspace, resolved_module, ty, "cleanup")
+            .into_iter()
+            .filter(|candidate| candidate.trait_path.as_ref() == Some(&contract_path))
+            .collect::<Vec<_>>();
+    matches!(candidates.as_slice(), [_])
+}
+
+fn validate_cleanup_footer_targets(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    module_path: &Path,
+    cleanup_footers: &[arcana_hir::HirCleanupFooter],
+    candidates: &[CleanupFooterCandidate],
+    diagnostics: &mut Vec<Diagnostic>,
+) -> CleanupFooterPolicy {
+    let mut policy = CleanupFooterPolicy {
+        cover_all_cleanup_capable: has_bare_cleanup_rollup(cleanup_footers),
+        explicit_target_ids: BTreeSet::new(),
+    };
+    let mut candidates_by_name = BTreeMap::<&str, Vec<&CleanupFooterCandidate>>::new();
+    for candidate in candidates {
+        candidates_by_name
+            .entry(candidate.name.as_str())
+            .or_default()
+            .push(candidate);
+    }
+    for rollup in cleanup_footers {
+        if rollup.subject.is_empty() {
+            continue;
+        }
+        let Some(matches) = candidates_by_name.get(rollup.subject.as_str()) else {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: rollup.span.line,
+                column: rollup.span.column,
+                message: format!(
+                    "cleanup footer target `{}` is not available in the owning header scope",
+                    rollup.subject
+                ),
+            });
+            continue;
+        };
+        let mut distinct_binding_ids = matches
+            .iter()
+            .map(|candidate| candidate.binding_id)
+            .collect::<BTreeSet<_>>();
+        if distinct_binding_ids.len() > 1 {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: rollup.span.line,
+                column: rollup.span.column,
+                message: format!(
+                    "cleanup footer target `{}` is ambiguous in the owning header scope",
+                    rollup.subject
+                ),
+            });
+            continue;
+        }
+        let candidate = matches[0];
+        if !cleanup_target_supports_default_cleanup_contract(
+            workspace,
+            resolved_module,
+            candidate.ownership,
+            candidate.ty.as_ref(),
+        ) {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: rollup.span.line,
+                column: rollup.span.column,
+                message: format!(
+                    "cleanup footer target `{}` is not cleanup-capable in the owning header scope",
+                    rollup.subject
+                ),
+            });
+            continue;
+        }
+        distinct_binding_ids.clear();
+        policy.explicit_target_ids.insert(candidate.binding_id);
+    }
+    policy
+}
+
+fn symbol_return_type_is_cleanup_result(return_type: Option<&HirType>) -> bool {
+    let Some(return_type) = return_type else {
+        return false;
+    };
+    let HirTypeKind::Apply { base, args } = &return_type.kind else {
+        return false;
+    };
+    if args.len() != 2 {
+        return false;
+    }
+    let result_root = base.segments.last().map(String::as_str);
+    let ok_root = match &args[0].kind {
+        HirTypeKind::Path(path) => path.segments.last().map(String::as_str),
+        _ => None,
+    };
+    let err_root = match &args[1].kind {
+        HirTypeKind::Path(path) => path.segments.last().map(String::as_str),
+        _ => None,
+    };
+    result_root == Some("Result") && ok_root == Some("Unit") && err_root == Some("Str")
+}
+
+fn resolve_cleanup_contract_trait_path(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+) -> Result<Vec<String>, String> {
+    let mut found = BTreeSet::<Vec<String>>::new();
+    for package in workspace.packages.values() {
+        for module in &package.summary.modules {
+            for lang_item in &module.lang_items {
+                if lang_item.name != "cleanup_contract" {
+                    continue;
+                }
+                let Some(symbol_ref) =
+                    lookup_symbol_path(workspace, resolved_module, &lang_item.target)
+                else {
+                    continue;
+                };
+                if symbol_ref.symbol.kind != HirSymbolKind::Trait {
+                    continue;
+                }
+                let mut path = symbol_ref
+                    .module_id
+                    .split('.')
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>();
+                path.push(symbol_ref.symbol.name.clone());
+                found.insert(path);
+            }
+        }
+    }
+    match found.into_iter().collect::<Vec<_>>().as_slice() {
+        [] => Err("no `cleanup_contract` lang item is available for cleanup footers".to_string()),
+        [path] => Ok(path.clone()),
+        paths => Err(format!(
+            "`cleanup_contract` is ambiguous; candidates: {}",
+            paths
+                .iter()
+                .map(|path| path.join("."))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
+fn binding_supports_default_cleanup_contract(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    scope: &ValueScope,
+    name: &str,
+) -> bool {
+    cleanup_target_supports_default_cleanup_contract(
+        workspace,
+        resolved_module,
+        scope.ownership_of(name),
+        scope.type_of(name),
+    )
+}
+
+fn should_activate_cleanup_binding(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    scope: &ValueScope,
+    policy: &CleanupFooterPolicy,
+    name: &str,
+) -> bool {
+    scope
+        .binding_id_of(name)
+        .is_some_and(|binding_id| policy.explicit_target_ids.contains(&binding_id))
+        || (policy.cover_all_cleanup_capable
+            && binding_supports_default_cleanup_contract(workspace, resolved_module, scope, name))
 }
 
 fn activate_current_cleanup_binding(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
     borrow_state: &mut BorrowFlowState,
     scope: &ValueScope,
-    current_block_cleanup_subjects: &BTreeSet<String>,
+    current_block_cleanup_policy: &CleanupFooterPolicy,
     name: &str,
 ) {
-    if !current_block_cleanup_subjects.contains(name) {
+    if !should_activate_cleanup_binding(
+        workspace,
+        resolved_module,
+        scope,
+        current_block_cleanup_policy,
+        name,
+    ) {
         return;
     }
     if let Some(binding_id) = scope.binding_id_of(name) {
@@ -3929,7 +4567,7 @@ fn validate_statement_block_semantics(
     type_scope: &TypeScope,
     scope: &mut ValueScope,
     borrow_state: &mut BorrowFlowState,
-    current_block_cleanup_subjects: &BTreeSet<String>,
+    current_block_cleanup_policy: &CleanupFooterPolicy,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     for statement in statements {
@@ -3937,7 +4575,7 @@ fn validate_statement_block_semantics(
             workspace,
             resolved_module,
             module_path,
-            &statement.rollups,
+            &statement.cleanup_footers,
             diagnostics,
         );
         match &statement.kind {
@@ -4007,9 +4645,11 @@ fn validate_statement_block_semantics(
                         scope.activate_owner(&owner_activation.owner, Some(name), *mutable);
                     for inserted_name in inserted {
                         activate_current_cleanup_binding(
+                            workspace,
+                            resolved_module,
                             borrow_state,
                             scope,
-                            current_block_cleanup_subjects,
+                            current_block_cleanup_policy,
                             &inserted_name,
                         );
                     }
@@ -4052,9 +4692,11 @@ fn validate_statement_block_semantics(
                     infer_expr_value_type(workspace, resolved_module, type_scope, scope, value);
                 scope.insert_typed(name, *mutable, ownership, ty);
                 activate_current_cleanup_binding(
+                    workspace,
+                    resolved_module,
                     borrow_state,
                     scope,
-                    current_block_cleanup_subjects,
+                    current_block_cleanup_policy,
                     name,
                 );
             }
@@ -4095,7 +4737,6 @@ fn validate_statement_block_semantics(
                 then_branch,
                 else_branch,
             } => {
-                let nested_cleanup_subjects = collect_cleanup_subject_names(&statement.rollups);
                 validate_expr_semantics(
                     workspace,
                     resolved_module,
@@ -4143,6 +4784,33 @@ fn validate_statement_block_semantics(
                     &mut then_scope,
                     diagnostics,
                 );
+                let statement_has_own_cleanup = !statement.cleanup_footers.is_empty();
+                let mut nested_cleanup_candidates = if statement_has_own_cleanup {
+                    collect_cleanup_footer_candidates_recursive(
+                        workspace,
+                        resolved_workspace,
+                        resolved_module,
+                        module_path,
+                        type_scope,
+                        &then_scope,
+                        then_branch,
+                        true,
+                    )
+                } else {
+                    Vec::new()
+                };
+                let nested_cleanup_policy = if statement_has_own_cleanup {
+                    validate_cleanup_footer_targets(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        &statement.cleanup_footers,
+                        &nested_cleanup_candidates,
+                        diagnostics,
+                    )
+                } else {
+                    current_block_cleanup_policy.clone()
+                };
                 let mut then_borrows = borrow_state.clone();
                 validate_statement_block_semantics(
                     workspace,
@@ -4153,7 +4821,7 @@ fn validate_statement_block_semantics(
                     type_scope,
                     &mut then_scope,
                     &mut then_borrows,
-                    &nested_cleanup_subjects,
+                    &nested_cleanup_policy,
                     diagnostics,
                 );
                 borrow_state.merge_moves_from(&then_borrows);
@@ -4168,6 +4836,20 @@ fn validate_statement_block_semantics(
                         &mut else_scope,
                         diagnostics,
                     );
+                    if statement_has_own_cleanup {
+                        nested_cleanup_candidates.extend(
+                            collect_cleanup_footer_candidates_recursive(
+                                workspace,
+                                resolved_workspace,
+                                resolved_module,
+                                module_path,
+                                type_scope,
+                                &else_scope,
+                                else_branch,
+                                true,
+                            ),
+                        );
+                    }
                     let mut else_borrows = borrow_state.clone();
                     validate_statement_block_semantics(
                         workspace,
@@ -4178,14 +4860,13 @@ fn validate_statement_block_semantics(
                         type_scope,
                         &mut else_scope,
                         &mut else_borrows,
-                        &nested_cleanup_subjects,
+                        &nested_cleanup_policy,
                         diagnostics,
                     );
                     borrow_state.merge_moves_from(&else_borrows);
                 }
             }
             HirStatementKind::While { condition, body } => {
-                let nested_cleanup_subjects = collect_cleanup_subject_names(&statement.rollups);
                 validate_expr_semantics(
                     workspace,
                     resolved_module,
@@ -4233,6 +4914,33 @@ fn validate_statement_block_semantics(
                     &mut body_scope,
                     diagnostics,
                 );
+                let statement_has_own_cleanup = !statement.cleanup_footers.is_empty();
+                let nested_cleanup_candidates = if statement_has_own_cleanup {
+                    collect_cleanup_footer_candidates_recursive(
+                        workspace,
+                        resolved_workspace,
+                        resolved_module,
+                        module_path,
+                        type_scope,
+                        &body_scope,
+                        body,
+                        true,
+                    )
+                } else {
+                    Vec::new()
+                };
+                let nested_cleanup_policy = if statement_has_own_cleanup {
+                    validate_cleanup_footer_targets(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        &statement.cleanup_footers,
+                        &nested_cleanup_candidates,
+                        diagnostics,
+                    )
+                } else {
+                    current_block_cleanup_policy.clone()
+                };
                 let mut body_borrows = borrow_state.clone();
                 validate_statement_block_semantics(
                     workspace,
@@ -4243,7 +4951,7 @@ fn validate_statement_block_semantics(
                     type_scope,
                     &mut body_scope,
                     &mut body_borrows,
-                    &nested_cleanup_subjects,
+                    &nested_cleanup_policy,
                     diagnostics,
                 );
                 borrow_state.merge_moves_from(&body_borrows);
@@ -4282,8 +4990,24 @@ fn validate_statement_block_semantics(
                     iterable,
                     borrow_state,
                 );
-                let nested_cleanup_subjects = collect_cleanup_subject_names(&statement.rollups);
-                let mut body_scope = scope.with_local(binding, false);
+                let mut body_scope = scope.clone();
+                let iterable_binding_ty = infer_iterable_binding_type(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    scope,
+                    iterable,
+                );
+                let iterable_binding_ownership = iterable_binding_ty
+                    .as_ref()
+                    .map(|ty| infer_type_ownership(workspace, resolved_module, type_scope, ty))
+                    .unwrap_or_default();
+                body_scope.insert_typed(
+                    binding,
+                    false,
+                    iterable_binding_ownership,
+                    iterable_binding_ty,
+                );
                 apply_availability_attachments_to_scope(
                     workspace,
                     resolved_workspace,
@@ -4293,11 +5017,53 @@ fn validate_statement_block_semantics(
                     &mut body_scope,
                     diagnostics,
                 );
+                let statement_has_own_cleanup = !statement.cleanup_footers.is_empty();
+                let mut nested_cleanup_candidates = if statement_has_own_cleanup {
+                    body_scope
+                        .binding_id_of(binding)
+                        .map(|binding_id| {
+                            vec![CleanupFooterCandidate {
+                                name: binding.clone(),
+                                binding_id,
+                                ownership: body_scope.ownership_of(binding),
+                                ty: body_scope.type_of(binding).cloned(),
+                            }]
+                        })
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                if statement_has_own_cleanup {
+                    nested_cleanup_candidates.extend(collect_cleanup_footer_candidates_recursive(
+                        workspace,
+                        resolved_workspace,
+                        resolved_module,
+                        module_path,
+                        type_scope,
+                        &body_scope,
+                        body,
+                        true,
+                    ));
+                }
+                let nested_cleanup_policy = if statement_has_own_cleanup {
+                    validate_cleanup_footer_targets(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        &statement.cleanup_footers,
+                        &nested_cleanup_candidates,
+                        diagnostics,
+                    )
+                } else {
+                    current_block_cleanup_policy.clone()
+                };
                 let mut body_borrows = borrow_state.clone();
                 activate_current_cleanup_binding(
+                    workspace,
+                    resolved_module,
                     &mut body_borrows,
                     &body_scope,
-                    &nested_cleanup_subjects,
+                    &nested_cleanup_policy,
                     binding,
                 );
                 validate_statement_block_semantics(
@@ -4309,9 +5075,10 @@ fn validate_statement_block_semantics(
                     type_scope,
                     &mut body_scope,
                     &mut body_borrows,
-                    &nested_cleanup_subjects,
+                    &nested_cleanup_policy,
                     diagnostics,
                 );
+                body_borrows.clear_local(binding);
                 borrow_state.merge_moves_from(&body_borrows);
             }
             HirStatementKind::Defer { expr } | HirStatementKind::Expr { expr } => {
@@ -4377,9 +5144,11 @@ fn validate_statement_block_semantics(
                     let inserted = scope.activate_owner(&owner_activation.owner, None, false);
                     for inserted_name in inserted {
                         activate_current_cleanup_binding(
+                            workspace,
+                            resolved_module,
                             borrow_state,
                             scope,
-                            current_block_cleanup_subjects,
+                            current_block_cleanup_policy,
                             &inserted_name,
                         );
                     }
@@ -4578,7 +5347,18 @@ fn validate_assign_target_borrow_flow(
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     if let Some(name) = assign_target_root_local(target, scope) {
-        if !matches!(target, HirAssignTarget::Name { .. }) && state.has_moved(name) {
+        if matches!(target, HirAssignTarget::Name { .. })
+            && scope
+                .binding_id_of(name)
+                .is_some_and(|binding_id| state.has_active_cleanup_binding(binding_id))
+        {
+            push_type_contract_diagnostic(
+                module_path,
+                span,
+                diagnostics,
+                format!("cleanup footer target `{name}` cannot be reassigned after activation"),
+            );
+        } else if !matches!(target, HirAssignTarget::Name { .. }) && state.has_moved(name) {
             push_type_contract_diagnostic(
                 module_path,
                 span,
@@ -5933,24 +6713,16 @@ mod tests {
     }
 
     #[test]
-    fn check_sources_rejects_page_rollup_contract_fixtures() {
+    fn check_sources_rejects_cleanup_footer_contract_fixtures() {
         let repo_root = repo_root();
         for (fixture, expected) in [
             (
-                "page_rollup_stray.arc",
-                "page rollup without a valid owning header",
+                "cleanup_footer_stray.arc",
+                "cleanup footer without a valid owning header",
             ),
             (
-                "page_rollup_bad_subject.arc",
-                "cleanup subject must be a binding name",
-            ),
-            (
-                "page_rollup_unknown_subject.arc",
-                "cleanup subject `missing` is not available in the owning header scope",
-            ),
-            (
-                "page_rollup_reassign.arc",
-                "cleanup subject `local` cannot be reassigned after activation",
+                "cleanup_footer_bad_target.arc",
+                "cleanup footer target must be a binding name",
             ),
         ] {
             let source = fs::read_to_string(
@@ -6610,21 +7382,21 @@ mod tests {
     }
 
     #[test]
-    fn check_path_accepts_page_rollup_package() {
+    fn check_path_accepts_cleanup_footer_package() {
         let root = make_temp_package(
-            "page_rollup_positive",
+            "cleanup_footer_positive",
             "app",
             &[],
             &[
                 (
                     "src/shelf.arc",
-                    "fn cleanup(value: Int):\n    return\nfn run(seed: Int) -> Int:\n    let local = seed\n    while local > 0:\n        let scratch = local\n        local -= 1\n    [scratch, cleanup]#cleanup\n    return local\n[seed, cleanup]#cleanup\nfn main() -> Int:\n    return run :: 1 :: call\n",
+                    "enum Result[T, E]:\n    Ok(T)\n    Err(E)\nfn cleanup(take value: Int) -> Result[Unit, Str]:\n    return Result.Ok[Unit, Str] :: :: call\nfn run(seed: Int) -> Int:\n    let local = seed\n    while local > 0:\n        let scratch = local\n        local -= 1\n    -cleanup[target = scratch, handler = cleanup]\n    return local\n-cleanup[target = seed, handler = cleanup]\nfn main() -> Int:\n    return run :: 1 :: call\n",
                 ),
                 ("src/types.arc", ""),
             ],
         );
 
-        let summary = check_path(&root).expect("page rollup package should check");
+        let summary = check_path(&root).expect("cleanup footer package should check");
         assert_eq!(summary.package_count, 1);
         assert_eq!(summary.module_count, 2);
 
@@ -6632,23 +7404,93 @@ mod tests {
     }
 
     #[test]
-    fn check_path_rejects_async_page_rollup_handler() {
+    fn check_path_accepts_cleanup_footer_targeting_nested_scope_binding() {
         let root = make_temp_package(
-            "page_rollup_async_handler",
+            "cleanup_footer_nested_target",
             "app",
             &[],
             &[
                 (
                     "src/shelf.arc",
-                    "async fn cleanup(value: Int):\n    return\nfn main() -> Int:\n    let value = 1\n    return 0\n[value, cleanup]#cleanup\n",
+                    "enum Result[T, E]:\n    Ok(T)\n    Err(E)\nrecord Box:\n    value: Int\ntrait Cleanup[T]:\n    fn cleanup(take self: T) -> Result[Unit, Str]\nlang cleanup_contract = Cleanup\nimpl Cleanup[Box] for Box:\n    fn cleanup(take self: Box) -> Result[Unit, Str]:\n        return Result.Ok[Unit, Str] :: :: call\nfn cleanup(take value: Box) -> Result[Unit, Str]:\n    return Result.Ok[Unit, Str] :: :: call\nfn main() -> Int:\n    if true:\n        let inner = Box :: value = 2 :: call\n    return 0\n-cleanup[target = inner, handler = cleanup]\n",
                 ),
                 ("src/types.arc", ""),
             ],
         );
 
-        let err = check_path(&root).expect_err("async rollup handler should fail");
+        let summary = check_path(&root).expect("nested cleanup footer target should check");
+        assert_eq!(summary.package_count, 1);
+        assert_eq!(summary.module_count, 2);
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_accepts_cleanup_footer_on_system_symbol() {
+        let root = make_temp_package(
+            "cleanup_footer_system",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    "enum Result[T, E]:\n    Ok(T)\n    Err(E)\nrecord Box:\n    value: Int\ntrait Cleanup[T]:\n    fn cleanup(take self: T) -> Result[Unit, Str]\nlang cleanup_contract = Cleanup\nimpl Cleanup[Box] for Box:\n    fn cleanup(take self: Box) -> Result[Unit, Str]:\n        return Result.Ok[Unit, Str] :: :: call\nfn cleanup(take value: Box) -> Result[Unit, Str]:\n    return Result.Ok[Unit, Str] :: :: call\nsystem[phase=startup] fn boot() -> Int:\n    let value = Box :: value = 1 :: call\n    return 0\n-cleanup[target = value, handler = cleanup]\nfn main() -> Int:\n    return 0\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let summary = check_path(&root).expect("system cleanup footer should check");
+        assert_eq!(summary.package_count, 1);
+        assert_eq!(summary.module_count, 2);
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_ambiguous_cleanup_footer_target_under_shadowing() {
+        let root = make_temp_package(
+            "cleanup_footer_shadowing",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    "enum Result[T, E]:\n    Ok(T)\n    Err(E)\nrecord Box:\n    value: Int\ntrait Cleanup[T]:\n    fn cleanup(take self: T) -> Result[Unit, Str]\nlang cleanup_contract = Cleanup\nimpl Cleanup[Box] for Box:\n    fn cleanup(take self: Box) -> Result[Unit, Str]:\n        return Result.Ok[Unit, Str] :: :: call\nfn cleanup(take value: Box) -> Result[Unit, Str]:\n    return Result.Ok[Unit, Str] :: :: call\nfn main() -> Int:\n    let x = Box :: value = 1 :: call\n    if true:\n        let x = Box :: value = 2 :: call\n    return 0\n-cleanup[target = x, handler = cleanup]\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("shadowed cleanup footer target should fail");
         assert!(
-            err.contains("page rollup handler `cleanup` cannot be async in v1"),
+            err.contains("cleanup footer target `x` is ambiguous in the owning header scope"),
+            "unexpected error: {err}"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_unknown_cleanup_footer_target() {
+        let root = make_temp_package(
+            "cleanup_footer_unknown_target",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    "enum Result[T, E]:\n    Ok(T)\n    Err(E)\nfn cleanup(take value: Int) -> Result[Unit, Str]:\n    return Result.Ok[Unit, Str] :: :: call\nfn main() -> Int:\n    let value = 1\n    return value\n-cleanup[target = missing, handler = cleanup]\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("unknown cleanup footer target should fail");
+        assert!(
+            err.contains(
+                "cleanup footer target `missing` is not available in the owning header scope"
+            ),
             "{err}"
         );
 
@@ -6656,23 +7498,23 @@ mod tests {
     }
 
     #[test]
-    fn check_path_rejects_non_callable_page_rollup_handler() {
+    fn check_path_rejects_reassigned_cleanup_footer_target() {
         let root = make_temp_package(
-            "page_rollup_non_callable_handler",
+            "cleanup_footer_reassigned_target",
             "app",
             &[],
             &[
                 (
                     "src/shelf.arc",
-                    "record Cleaner:\n    id: Int\nfn main() -> Int:\n    let value = 1\n    return 0\n[value, Cleaner]#cleanup\n",
+                    "enum Result[T, E]:\n    Ok(T)\n    Err(E)\nfn cleanup(take value: Int) -> Result[Unit, Str]:\n    return Result.Ok[Unit, Str] :: :: call\nfn main(seed: Int) -> Int:\n    let local = seed\n    local += 1\n    return local\n-cleanup[target = local, handler = cleanup]\n",
                 ),
                 ("src/types.arc", ""),
             ],
         );
 
-        let err = check_path(&root).expect_err("non-callable rollup handler should fail");
+        let err = check_path(&root).expect_err("reassigned cleanup footer target should fail");
         assert!(
-            err.contains("page rollup handler `Cleaner` must resolve to a callable symbol"),
+            err.contains("cleanup footer target `local` cannot be reassigned after activation"),
             "{err}"
         );
 
@@ -6680,23 +7522,96 @@ mod tests {
     }
 
     #[test]
-    fn check_path_rejects_wrong_arity_page_rollup_handler() {
+    fn check_path_accepts_cleanup_footer_targeting_owner_activated_object_binding() {
         let root = make_temp_package(
-            "page_rollup_wrong_arity_handler",
+            "cleanup_footer_owner_object_positive",
             "app",
             &[],
             &[
                 (
                     "src/shelf.arc",
-                    "fn cleanup() -> Int:\n    return 0\nfn main() -> Int:\n    let value = 1\n    return 0\n[value, cleanup]#cleanup\n",
+                    "enum Result[T, E]:\n    Ok(T)\n    Err(E)\ntrait Cleanup[T]:\n    fn cleanup(take self: T) -> Result[Unit, Str]\nlang cleanup_contract = Cleanup\nobj Counter:\n    value: Int\n    fn init(edit self: Self):\n        self.value = 1\nimpl Cleanup[Counter] for Counter:\n    fn cleanup(take self: Counter) -> Result[Unit, Str]:\n        return Result.Ok[Unit, Str] :: :: call\ncreate Session [Counter] scope-exit:\n    done: when false hold [Counter]\nfn dispose(take value: Counter) -> Result[Unit, Str]:\n    return Result.Ok[Unit, Str] :: :: call\nSession\nCounter\nfn main() -> Int:\n    let active = Session :: :: call\n    return 0\n-cleanup[target = Counter, handler = dispose]\n",
                 ),
                 ("src/types.arc", ""),
             ],
         );
 
-        let err = check_path(&root).expect_err("wrong-arity rollup handler should fail");
+        let summary =
+            check_path(&root).expect("owner-activated cleanup footer target should check");
+        assert_eq!(summary.package_count, 1);
+        assert_eq!(summary.module_count, 2);
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_async_cleanup_footer_handler() {
+        let root = make_temp_package(
+            "cleanup_footer_async_handler",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    "enum Result[T, E]:\n    Ok(T)\n    Err(E)\nasync fn cleanup(take value: Int) -> Result[Unit, Str]:\n    return Result.Ok[Unit, Str] :: :: call\nfn main() -> Int:\n    let value = 1\n    return 0\n-cleanup[target = value, handler = cleanup]\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("async cleanup footer handler should fail");
         assert!(
-            err.contains("page rollup handler `cleanup` must accept exactly one parameter in v1"),
+            err.contains("cleanup footer handler `cleanup` cannot be async in v1"),
+            "{err}"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_non_callable_cleanup_footer_handler() {
+        let root = make_temp_package(
+            "cleanup_footer_non_callable_handler",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    "record Cleaner:\n    id: Int\nfn main() -> Int:\n    let value = 1\n    return 0\n-cleanup[target = value, handler = Cleaner]\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("non-callable cleanup footer handler should fail");
+        assert!(
+            err.contains("cleanup footer handler `Cleaner` must resolve to a callable symbol"),
+            "{err}"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_wrong_arity_cleanup_footer_handler() {
+        let root = make_temp_package(
+            "cleanup_footer_wrong_arity_handler",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    "enum Result[T, E]:\n    Ok(T)\n    Err(E)\nfn cleanup() -> Result[Unit, Str]:\n    return Result.Ok[Unit, Str] :: :: call\nfn main() -> Int:\n    let value = 1\n    return 0\n-cleanup[target = value, handler = cleanup]\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("wrong-arity cleanup footer handler should fail");
+        assert!(
+            err.contains(
+                "cleanup footer handler `cleanup` must accept exactly one parameter in v1"
+            ),
             "{err}"
         );
 
@@ -6706,13 +7621,13 @@ mod tests {
     #[test]
     fn check_path_rejects_cleanup_subject_move_after_activation() {
         let root = make_temp_package(
-            "page_rollup_moved_subject",
+            "cleanup_footer_moved_subject",
             "app",
             &[],
             &[
                 (
                     "src/shelf.arc",
-                    "fn cleanup(value: Str):\n    return\nfn consume(take value: Str):\n    return\nfn main() -> Int:\n    let text = \"hi\"\n    consume :: text :: call\n    return 0\n[text, cleanup]#cleanup\n",
+                    "enum Result[T, E]:\n    Ok(T)\n    Err(E)\nfn cleanup(take value: Str) -> Result[Unit, Str]:\n    return Result.Ok[Unit, Str] :: :: call\nfn consume(take value: Str):\n    return\nfn main() -> Int:\n    let text = \"hi\"\n    consume :: text :: call\n    return 0\n-cleanup[target = text, handler = cleanup]\n",
                 ),
                 ("src/types.arc", ""),
             ],
@@ -6720,11 +7635,56 @@ mod tests {
 
         let err = check_path(&root).expect_err("moved cleanup subject should fail");
         assert!(
-            err.contains("cleanup subject `text` cannot be moved after activation"),
+            err.contains("cleanup footer target `text` cannot be moved after activation"),
             "{err}"
         );
 
         fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_non_cleanup_capable_target_without_activation_follow_on_errors() {
+        let root = make_temp_package(
+            "cleanup_footer_non_cleanup_capable_target",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    "enum Result[T, E]:\n    Ok(T)\n    Err(E)\nfn cleanup(take value: Int) -> Result[Unit, Str]:\n    return Result.Ok[Unit, Str] :: :: call\nfn main(seed: Int) -> Int:\n    let local = seed\n    local += 1\n    return local\n-cleanup[target = local, handler = cleanup]\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err =
+            check_path(&root).expect_err("non-cleanup-capable cleanup footer target should fail");
+        assert!(
+            err.contains(
+                "cleanup footer target `local` is not cleanup-capable in the owning header scope"
+            ),
+            "{err}"
+        );
+        assert!(
+            !err.contains("cleanup footer target `local` cannot be reassigned after activation"),
+            "{err}"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_accepts_std_handle_cleanup_footer_conformance_fixture() {
+        let summary = check_path(
+            &repo_root()
+                .join("conformance")
+                .join("fixtures")
+                .join("cleanup_footer_std_handle_workspace")
+                .join("app"),
+        )
+        .expect("std-handle cleanup footer fixture should check");
+        assert!(summary.package_count >= 2);
+        assert!(summary.module_count >= 2);
     }
 
     #[test]
@@ -6819,8 +7779,8 @@ mod tests {
                 "unresolved value reference `missing` in chain step `missing`",
             ),
             (
-                "unresolved_rollup_handler",
-                "unresolved page rollup handler `missing.cleanup`",
+                "unresolved_cleanup_footer_handler",
+                "unresolved cleanup footer handler `missing.cleanup`",
             ),
         ] {
             let err = check_path(&repo_root.join(package))

@@ -16,13 +16,13 @@ use arcana_ir::{
     ExecAvailabilityAttachment as ParsedAvailabilityAttachment,
     ExecAvailabilityKind as ParsedAvailabilityKind, ExecBinaryOp as ParsedBinaryOp,
     ExecChainConnector as ParsedChainConnector, ExecChainIntroducer as ParsedChainIntroducer,
-    ExecChainStep as ParsedChainStep, ExecDynamicDispatch as ParsedDynamicDispatch,
-    ExecExpr as ParsedExpr, ExecHeaderAttachment as ParsedHeaderAttachment,
-    ExecMatchArm as ParsedMatchArm, ExecMatchPattern as ParsedMatchPattern,
-    ExecPageRollup as ParsedPageRollup, ExecPhraseArg as ParsedPhraseArg,
-    ExecPhraseQualifierKind as ParsedPhraseQualifierKind, ExecStmt as ParsedStmt,
-    ExecUnaryOp as ParsedUnaryOp, IrRoutineType, IrRoutineTypeKind, parse_routine_type_text,
-    validate_runtime_main_entry_contract,
+    ExecChainStep as ParsedChainStep, ExecCleanupFooter as ParsedCleanupFooter,
+    ExecDynamicDispatch as ParsedDynamicDispatch, ExecExpr as ParsedExpr,
+    ExecHeaderAttachment as ParsedHeaderAttachment, ExecMatchArm as ParsedMatchArm,
+    ExecMatchPattern as ParsedMatchPattern, ExecNamedBindingId as ParsedNamedBindingId,
+    ExecPhraseArg as ParsedPhraseArg, ExecPhraseQualifierKind as ParsedPhraseQualifierKind,
+    ExecStmt as ParsedStmt, ExecUnaryOp as ParsedUnaryOp, IrRoutineType, IrRoutineTypeKind,
+    parse_routine_type_text, validate_runtime_main_entry_contract,
 };
 use pathdiff::diff_paths;
 use serde::{Deserialize, Serialize};
@@ -39,7 +39,8 @@ pub use json_abi::{
     RUNTIME_JSON_ABI_FORMAT, execute_exported_json_abi_routine, render_exported_json_abi_manifest,
 };
 pub use native_abi::{
-    RuntimeAbiExportOutcome, RuntimeAbiValue, RuntimeAbiWriteBack, execute_exported_abi_routine,
+    RuntimeAbiExportOutcome, RuntimeAbiValue, RuntimeAbiWriteBack,
+    execute_cleanup_runtime_abi_routine, execute_exported_abi_routine,
 };
 #[cfg(windows)]
 pub use native_host::NativeProcessHost;
@@ -3802,6 +3803,7 @@ struct RoutineExecutionOutcome {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RuntimeLocal {
     handle: RuntimeLocalHandle,
+    binding_id: u64,
     mutable: bool,
     moved: bool,
     value: RuntimeValue,
@@ -3862,10 +3864,10 @@ fn runtime_eval_message(signal: RuntimeEvalSignal) -> String {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct RuntimeExecutionState {
+pub struct RuntimeExecutionState {
     next_local_handle: u64,
     call_stack: Vec<String>,
-    rollup_frames: Vec<RuntimeRollupFrame>,
+    cleanup_footer_frames: Vec<RuntimeCleanupFooterFrame>,
     owners: BTreeMap<String, RuntimeOwnerState>,
     next_entity_id: i64,
     live_entities: BTreeSet<i64>,
@@ -3945,18 +3947,21 @@ struct RuntimePoolArenaState {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct RuntimeRollupFrame {
-    rollups: Vec<ParsedPageRollup>,
+struct RuntimeCleanupFooterFrame {
+    cleanup_footers: Vec<ParsedCleanupFooter>,
     current_package_id: String,
     current_module_id: String,
+    owner_call_stack_depth: usize,
     owner_scope_depth: usize,
-    subjects: BTreeMap<String, RuntimeTrackedRollupSubject>,
+    activations: Vec<RuntimeTrackedCleanupBinding>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct RuntimeTrackedRollupSubject {
-    binding: Option<RuntimeLocalHandle>,
-    value: Option<RuntimeValue>,
+struct RuntimeTrackedCleanupBinding {
+    binding_id: u64,
+    subject: String,
+    binding: RuntimeLocalHandle,
+    value: RuntimeValue,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -4461,7 +4466,7 @@ pub fn plan_from_artifact(artifact: &AotPackageArtifact) -> Result<RuntimePackag
         routines,
         owners: artifact.owners.iter().map(lower_owner).collect(),
     };
-    validate_runtime_rollup_handlers(&plan)?;
+    validate_runtime_cleanup_footer_handlers(&plan)?;
     Ok(plan)
 }
 
@@ -4476,17 +4481,17 @@ pub fn load_package_plan(path: &Path) -> Result<RuntimePackagePlan, String> {
     plan_from_artifact(&artifact)
 }
 
-fn validate_runtime_rollup_handlers(plan: &RuntimePackagePlan) -> Result<(), String> {
+fn validate_runtime_cleanup_footer_handlers(plan: &RuntimePackagePlan) -> Result<(), String> {
     for routine in &plan.routines {
-        for rollup in &routine.rollups {
-            validate_runtime_rollup_handler_callable_path(
+        for cleanup_footer in &routine.cleanup_footers {
+            validate_runtime_cleanup_footer_handler(
                 plan,
                 &routine.package_id,
                 &routine.module_id,
-                &rollup.handler_path,
+                cleanup_footer,
             )?;
         }
-        validate_runtime_rollup_handlers_in_statements(
+        validate_runtime_cleanup_footer_handlers_in_statements(
             plan,
             &routine.package_id,
             &routine.module_id,
@@ -4496,7 +4501,7 @@ fn validate_runtime_rollup_handlers(plan: &RuntimePackagePlan) -> Result<(), Str
     Ok(())
 }
 
-fn validate_runtime_rollup_handlers_in_statements(
+fn validate_runtime_cleanup_footer_handlers_in_statements(
     plan: &RuntimePackagePlan,
     current_package_id: &str,
     current_module_id: &str,
@@ -4504,53 +4509,64 @@ fn validate_runtime_rollup_handlers_in_statements(
 ) -> Result<(), String> {
     for statement in statements {
         match statement {
-            ParsedStmt::Expr { rollups, .. } => {
-                for rollup in rollups {
-                    validate_runtime_rollup_handler_callable_path(
+            ParsedStmt::Expr {
+                cleanup_footers, ..
+            } => {
+                for cleanup_footer in cleanup_footers {
+                    validate_runtime_cleanup_footer_handler(
                         plan,
                         current_package_id,
                         current_module_id,
-                        &rollup.handler_path,
+                        cleanup_footer,
                     )?;
                 }
             }
             ParsedStmt::If {
                 then_branch,
                 else_branch,
-                rollups,
+                cleanup_footers,
                 ..
             } => {
-                for rollup in rollups {
-                    validate_runtime_rollup_handler_callable_path(
+                for cleanup_footer in cleanup_footers {
+                    validate_runtime_cleanup_footer_handler(
                         plan,
                         current_package_id,
                         current_module_id,
-                        &rollup.handler_path,
+                        cleanup_footer,
                     )?;
                 }
-                validate_runtime_rollup_handlers_in_statements(
+                validate_runtime_cleanup_footer_handlers_in_statements(
                     plan,
                     current_package_id,
                     current_module_id,
                     then_branch,
                 )?;
-                validate_runtime_rollup_handlers_in_statements(
+                validate_runtime_cleanup_footer_handlers_in_statements(
                     plan,
                     current_package_id,
                     current_module_id,
                     else_branch,
                 )?;
             }
-            ParsedStmt::While { body, rollups, .. } | ParsedStmt::For { body, rollups, .. } => {
-                for rollup in rollups {
-                    validate_runtime_rollup_handler_callable_path(
+            ParsedStmt::While {
+                body,
+                cleanup_footers,
+                ..
+            }
+            | ParsedStmt::For {
+                body,
+                cleanup_footers,
+                ..
+            } => {
+                for cleanup_footer in cleanup_footers {
+                    validate_runtime_cleanup_footer_handler(
                         plan,
                         current_package_id,
                         current_module_id,
-                        &rollup.handler_path,
+                        cleanup_footer,
                     )?;
                 }
-                validate_runtime_rollup_handlers_in_statements(
+                validate_runtime_cleanup_footer_handlers_in_statements(
                     plan,
                     current_package_id,
                     current_module_id,
@@ -5879,69 +5895,70 @@ fn lookup_local_with_name_by_handle(
     })
 }
 
-fn push_runtime_rollup_frame(
+fn push_runtime_cleanup_footer_frame(
     state: &mut RuntimeExecutionState,
-    rollups: &[ParsedPageRollup],
+    cleanup_footers: &[ParsedCleanupFooter],
     scopes: &[RuntimeScope],
     current_package_id: &str,
     current_module_id: &str,
 ) {
-    if rollups.is_empty() {
+    if cleanup_footers.is_empty() {
         return;
     }
-    let subjects = rollups
-        .iter()
-        .map(|rollup| rollup.subject.clone())
-        .map(|subject| {
-            (
-                subject,
-                RuntimeTrackedRollupSubject {
-                    binding: None,
-                    value: None,
-                },
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    state.rollup_frames.push(RuntimeRollupFrame {
-        rollups: rollups.to_vec(),
+    state.cleanup_footer_frames.push(RuntimeCleanupFooterFrame {
+        cleanup_footers: cleanup_footers.to_vec(),
         current_package_id: current_package_id.to_string(),
         current_module_id: current_module_id.to_string(),
+        owner_call_stack_depth: state.call_stack.len(),
         owner_scope_depth: scopes.len(),
-        subjects,
+        activations: Vec::new(),
     });
 }
 
-fn pop_runtime_rollup_frame(state: &mut RuntimeExecutionState) -> Option<RuntimeRollupFrame> {
-    state.rollup_frames.pop()
+fn pop_runtime_cleanup_footer_frame(
+    state: &mut RuntimeExecutionState,
+) -> Option<RuntimeCleanupFooterFrame> {
+    state.cleanup_footer_frames.pop()
 }
 
-fn activate_runtime_rollup_binding(
+fn activate_runtime_cleanup_footer_binding(
     state: &mut RuntimeExecutionState,
     scope_depth: usize,
+    binding_id: u64,
     name: &str,
     handle: RuntimeLocalHandle,
     value: &RuntimeValue,
 ) {
-    for frame in state.rollup_frames.iter_mut().rev() {
-        if frame.owner_scope_depth != scope_depth {
+    let current_call_stack_depth = state.call_stack.len();
+    for frame in state.cleanup_footer_frames.iter_mut().rev() {
+        if frame.owner_scope_depth != scope_depth
+            || frame.owner_call_stack_depth != current_call_stack_depth
+        {
             continue;
         }
-        if let Some(subject) = frame.subjects.get_mut(name) {
-            subject.binding = Some(handle);
-            subject.value = Some(value.clone());
+        if frame.cleanup_footers.iter().any(|cleanup_footer| {
+            (cleanup_footer.binding_id != 0 && cleanup_footer.binding_id == binding_id)
+                || (cleanup_footer.binding_id == 0 && cleanup_footer.subject == name)
+        }) {
+            frame.activations.push(RuntimeTrackedCleanupBinding {
+                binding_id,
+                subject: name.to_string(),
+                binding: handle,
+                value: value.clone(),
+            });
         }
     }
 }
 
-fn update_runtime_rollup_binding_value(
+fn update_runtime_cleanup_footer_binding_value(
     state: &mut RuntimeExecutionState,
     handle: RuntimeLocalHandle,
     value: &RuntimeValue,
 ) {
-    for frame in state.rollup_frames.iter_mut().rev() {
-        for subject in frame.subjects.values_mut() {
-            if subject.binding == Some(handle) {
-                subject.value = Some(value.clone());
+    for frame in state.cleanup_footer_frames.iter_mut().rev() {
+        for subject in frame.activations.iter_mut() {
+            if subject.binding == handle {
+                subject.value = value.clone();
             }
         }
     }
@@ -5951,17 +5968,19 @@ fn insert_runtime_local(
     state: &mut RuntimeExecutionState,
     scope_depth: usize,
     scope: &mut RuntimeScope,
+    binding_id: u64,
     name: String,
     mutable: bool,
     value: RuntimeValue,
 ) {
     let handle = RuntimeLocalHandle(state.next_local_handle);
     state.next_local_handle += 1;
-    activate_runtime_rollup_binding(state, scope_depth, &name, handle, &value);
+    activate_runtime_cleanup_footer_binding(state, scope_depth, binding_id, &name, handle, &value);
     scope.locals.insert(
         name,
         RuntimeLocal {
             handle,
+            binding_id,
             mutable,
             moved: false,
             value,
@@ -6140,7 +6159,7 @@ fn activate_attached_runtime_owners_for_current_scope(
         } else {
             Some(attached_owner.local_name.as_str())
         };
-        activate_owner_scope_binding(scopes, state, owner, &owner_key, binding)?;
+        activate_owner_scope_binding(scopes, state, owner, &owner_key, binding, &[])?;
     }
     Ok(())
 }
@@ -6211,6 +6230,7 @@ fn activate_attached_runtime_objects_for_current_scope(
                 state,
                 scope_depth,
                 scope,
+                0,
                 attached_object.local_name,
                 true,
                 value,
@@ -6221,6 +6241,7 @@ fn activate_attached_runtime_objects_for_current_scope(
             state,
             scope_depth,
             scope,
+            0,
             attached_object.local_name,
             true,
             make_owner_object_reference(&owner_key, &object_name),
@@ -6599,6 +6620,7 @@ fn owner_exit_eval_scope(
         state,
         0,
         &mut scope,
+        0,
         owner.owner_name.clone(),
         false,
         RuntimeValue::OwnerHandle(owner_key.to_string()),
@@ -6608,6 +6630,7 @@ fn owner_exit_eval_scope(
             state,
             0,
             &mut scope,
+            0,
             object.local_name.clone(),
             true,
             make_owner_object_reference(owner_key, &object.local_name),
@@ -6714,6 +6737,7 @@ fn activate_owner_scope_binding(
     owner: &RuntimeOwnerPlan,
     owner_key: &str,
     binding: Option<&str>,
+    object_binding_ids: &[ParsedNamedBindingId],
 ) -> Result<(), String> {
     let scope_depth = scopes.len().saturating_sub(1);
     let visible_objects = owner
@@ -6741,6 +6765,7 @@ fn activate_owner_scope_binding(
         state,
         scope_depth,
         scope,
+        0,
         owner.owner_name.clone(),
         false,
         RuntimeValue::OwnerHandle(owner_key.to_string()),
@@ -6750,16 +6775,23 @@ fn activate_owner_scope_binding(
             state,
             scope_depth,
             scope,
+            0,
             binding.to_string(),
             false,
             RuntimeValue::OwnerHandle(owner_key.to_string()),
         );
     }
     for object_name in visible_objects {
+        let binding_id = object_binding_ids
+            .iter()
+            .find(|entry| entry.name == object_name)
+            .map(|entry| entry.binding_id)
+            .unwrap_or(0);
         insert_runtime_local(
             state,
             scope_depth,
             scope,
+            binding_id,
             object_name.clone(),
             true,
             make_owner_object_reference(owner_key, &object_name),
@@ -7023,7 +7055,7 @@ fn write_runtime_reference(
                 .ok_or_else(|| format!("runtime reference local `{}` is unresolved", local.0))?;
             runtime_local.moved = false;
             runtime_local.value = updated_root;
-            update_runtime_rollup_binding_value(state, *local, &runtime_local.value);
+            update_runtime_cleanup_footer_binding_value(state, *local, &runtime_local.value);
             Ok(())
         }
         RuntimeReferenceTarget::OwnerObject {
@@ -11255,7 +11287,7 @@ fn eval_match_expr(
             }
             let mut scope = RuntimeScope::default();
             for (name, value) in bindings {
-                insert_runtime_local(state, scopes.len(), &mut scope, name, false, value);
+                insert_runtime_local(state, scopes.len(), &mut scope, 0, name, false, value);
             }
             scopes.push(scope);
             let result = eval_expr(
@@ -11282,6 +11314,34 @@ fn err_variant(message: String) -> RuntimeValue {
     RuntimeValue::Variant {
         name: "Result.Err".to_string(),
         payload: vec![RuntimeValue::Str(message)],
+    }
+}
+
+fn expect_cleanup_outcome(value: RuntimeValue) -> Result<(), String> {
+    match value {
+        RuntimeValue::Unit => Ok(()),
+        RuntimeValue::Variant { name, payload } if variant_name_matches(&name, "Result.Ok") => {
+            match payload.as_slice() {
+                [RuntimeValue::Unit] => Ok(()),
+                _ => Err(format!(
+                    "cleanup footer expected Result.Ok(Unit), got `{name}`"
+                )),
+            }
+        }
+        RuntimeValue::Variant { name, payload } if variant_name_matches(&name, "Result.Err") => {
+            match payload.as_slice() {
+                [RuntimeValue::Str(message)] => Err(message.clone()),
+                [other] => Err(format!(
+                    "cleanup footer expected Result.Err(Str), got `{other:?}`"
+                )),
+                _ => Err(format!(
+                    "cleanup footer expected Result.Err(Str), got `{name}`"
+                )),
+            }
+        }
+        other => Err(format!(
+            "cleanup footer expected Result[Unit, Str], got `{other:?}`"
+        )),
     }
 }
 
@@ -11546,7 +11606,7 @@ fn resolve_routine_index_for_call(
     }
 }
 
-fn resolve_rollup_handler_callable_path(
+fn resolve_cleanup_footer_handler_callable_path(
     plan: &RuntimePackagePlan,
     current_package_id: &str,
     current_module_id: &str,
@@ -11570,13 +11630,75 @@ fn resolve_rollup_handler_callable_path(
     handler_path.to_vec()
 }
 
-fn validate_runtime_rollup_handler_callable_path(
+fn cleanup_footer_return_type_is_valid(return_type: Option<&IrRoutineType>) -> bool {
+    let Some(return_type) = return_type else {
+        return false;
+    };
+    let IrRoutineTypeKind::Apply { base, args } = &return_type.kind else {
+        return false;
+    };
+    if base.root_name() != Some("Result") || args.len() != 2 {
+        return false;
+    }
+    matches!(
+        (&args[0].kind, &args[1].kind),
+        (
+            IrRoutineTypeKind::Path(unit_path),
+            IrRoutineTypeKind::Path(str_path),
+        ) if unit_path.root_name() == Some("Unit") && str_path.root_name() == Some("Str")
+    )
+}
+
+fn validate_cleanup_footer_handler_routine_plan(
+    routine: &RuntimeRoutinePlan,
+    handler_label: &str,
+) -> Result<(), String> {
+    if routine.is_async {
+        return Err(format!(
+            "cleanup footer handler `{handler_label}` cannot be async in v1"
+        ));
+    }
+    if routine.params.len() != 1 {
+        return Err(format!(
+            "cleanup footer handler `{handler_label}` must accept exactly one parameter in v1"
+        ));
+    }
+    if routine.params[0].mode.as_deref() != Some("take") {
+        return Err(format!(
+            "cleanup footer handler `{handler_label}` must take its target parameter in v1"
+        ));
+    }
+    if !cleanup_footer_return_type_is_valid(routine.return_type.as_ref()) {
+        return Err(format!(
+            "cleanup footer handler `{handler_label}` must return `Result[Unit, Str]` in v1"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_runtime_cleanup_footer_handler(
     plan: &RuntimePackagePlan,
     current_package_id: &str,
     current_module_id: &str,
-    handler_path: &[String],
+    cleanup_footer: &ParsedCleanupFooter,
 ) -> Result<Vec<String>, String> {
-    let callable = resolve_rollup_handler_callable_path(
+    if cleanup_footer.handler_path == [String::from("cleanup")]
+        && let Some(routine_key) = cleanup_footer.resolved_routine.as_deref()
+    {
+        let routine = plan
+            .routines
+            .iter()
+            .find(|routine| routine.routine_key == routine_key)
+            .ok_or_else(|| {
+                format!(
+                    "cleanup footer handler `cleanup` resolved to missing routine `{routine_key}`"
+                )
+            })?;
+        validate_cleanup_footer_handler_routine_plan(routine, "cleanup")?;
+        return Ok(cleanup_footer.handler_path.clone());
+    }
+    let handler_path = &cleanup_footer.handler_path;
+    let callable = resolve_cleanup_footer_handler_callable_path(
         plan,
         current_package_id,
         current_module_id,
@@ -11587,26 +11709,15 @@ fn validate_runtime_rollup_handler_callable_path(
     {
         let routine = plan.routines.get(routine_index).ok_or_else(|| {
             format!(
-                "runtime rollup handler `{}` resolved to invalid routine index `{routine_index}`",
+                "cleanup footer handler `{}` resolved to invalid routine index `{routine_index}`",
                 handler_path.join(".")
             )
         })?;
-        if routine.is_async {
-            return Err(format!(
-                "runtime rollup handler `{}` cannot be async in v1",
-                handler_path.join(".")
-            ));
-        }
-        if routine.params.len() != 1 {
-            return Err(format!(
-                "runtime rollup handler `{}` must accept exactly one parameter in v1",
-                handler_path.join(".")
-            ));
-        }
+        validate_cleanup_footer_handler_routine_plan(routine, &handler_path.join("."))?;
         return Ok(callable);
     }
     Err(format!(
-        "runtime rollup handler `{}` does not resolve to a callable path",
+        "cleanup footer handler `{}` does not resolve to a callable path",
         handler_path.join(".")
     ))
 }
@@ -17200,8 +17311,8 @@ fn run_scope_defers(
     Ok(())
 }
 
-fn execute_page_rollups(
-    frame: RuntimeRollupFrame,
+fn execute_cleanup_footers(
+    frame: RuntimeCleanupFooterFrame,
     plan: &RuntimePackagePlan,
     scopes: &mut Vec<RuntimeScope>,
     state: &mut RuntimeExecutionState,
@@ -17209,49 +17320,68 @@ fn execute_page_rollups(
 ) -> RuntimeEvalResult<()> {
     let current_package_id = frame.current_package_id.clone();
     let current_module_id = frame.current_module_id.clone();
-    for rollup in frame.rollups.into_iter().rev() {
-        if rollup.kind != "cleanup" {
-            return Err(format!("unsupported runtime rollup kind `{}`", rollup.kind).into());
-        }
-        let Some(subject_value) = frame
-            .subjects
-            .get(&rollup.subject)
-            .and_then(|subject| subject.value.clone())
-        else {
+    let cleanup_footers_by_binding_id = frame
+        .cleanup_footers
+        .iter()
+        .filter(|cleanup_footer| cleanup_footer.binding_id != 0)
+        .map(|cleanup_footer| (cleanup_footer.binding_id, cleanup_footer))
+        .collect::<BTreeMap<_, _>>();
+    let cleanup_footers_by_subject = frame
+        .cleanup_footers
+        .iter()
+        .filter(|cleanup_footer| cleanup_footer.binding_id == 0)
+        .map(|cleanup_footer| (cleanup_footer.subject.clone(), cleanup_footer))
+        .collect::<BTreeMap<_, _>>();
+    for subject in frame.activations.into_iter().rev() {
+        let cleanup_footer = cleanup_footers_by_binding_id
+            .get(&subject.binding_id)
+            .copied()
+            .or_else(|| cleanup_footers_by_subject.get(&subject.subject).copied());
+        let Some(cleanup_footer) = cleanup_footer else {
             continue;
         };
-        let callable = resolve_rollup_handler_callable_path(
-            plan,
-            &current_package_id,
-            &current_module_id,
-            &rollup.handler_path,
-        );
-        let _ = execute_call_by_path(
+        if cleanup_footer.kind != "cleanup" {
+            return Err(
+                format!("unsupported cleanup footer kind `{}`", cleanup_footer.kind).into(),
+            );
+        }
+        let callable = if cleanup_footer.handler_path.is_empty() {
+            vec!["cleanup".to_string()]
+        } else {
+            resolve_cleanup_footer_handler_callable_path(
+                plan,
+                &current_package_id,
+                &current_module_id,
+                &cleanup_footer.handler_path,
+            )
+        };
+        let outcome = execute_call_by_path(
             &callable,
-            None,
+            cleanup_footer.resolved_routine.as_deref(),
             None,
             &current_package_id,
             &current_module_id,
             Vec::new(),
             vec![RuntimeCallArg {
                 name: None,
-                value: subject_value,
-                source_expr: ParsedExpr::Path(vec![rollup.subject.clone()]),
+                value: subject.value,
+                source_expr: ParsedExpr::Path(vec![cleanup_footer.subject.clone()]),
             }],
-            false,
+            cleanup_footer.handler_path.is_empty(),
             plan,
             scopes,
             state,
             host,
             false,
         )?;
+        expect_cleanup_outcome(outcome).map_err(RuntimeEvalSignal::Message)?;
     }
     Ok(())
 }
 
-fn finish_runtime_rollups<T>(
+fn finish_runtime_cleanup_footers<T>(
     result: RuntimeEvalResult<T>,
-    frame: Option<RuntimeRollupFrame>,
+    frame: Option<RuntimeCleanupFooterFrame>,
     plan: &RuntimePackagePlan,
     scopes: &mut Vec<RuntimeScope>,
     state: &mut RuntimeExecutionState,
@@ -17260,14 +17390,14 @@ fn finish_runtime_rollups<T>(
     if let Some(frame) = frame
         && !matches!(result, Err(RuntimeEvalSignal::Message(_)))
     {
-        execute_page_rollups(frame, plan, scopes, state, host)?;
+        execute_cleanup_footers(frame, plan, scopes, state, host)?;
     }
     result
 }
 
 fn execute_scoped_block(
     statements: &[ParsedStmt],
-    rollups: &[ParsedPageRollup],
+    cleanup_footers: &[ParsedCleanupFooter],
     scopes: &mut Vec<RuntimeScope>,
     scope: RuntimeScope,
     plan: &RuntimePackagePlan,
@@ -17278,9 +17408,9 @@ fn execute_scoped_block(
     state: &mut RuntimeExecutionState,
     host: &mut dyn RuntimeHost,
 ) -> RuntimeEvalResult<FlowSignal> {
-    push_runtime_rollup_frame(
+    push_runtime_cleanup_footer_frame(
         state,
-        rollups,
+        cleanup_footers,
         scopes,
         current_package_id,
         current_module_id,
@@ -17325,12 +17455,12 @@ fn execute_scoped_block(
         .pop()
         .ok_or_else(|| "runtime scope stack is empty".to_string())?;
     defer_result?;
-    let frame = if rollups.is_empty() {
+    let frame = if cleanup_footers.is_empty() {
         None
     } else {
-        pop_runtime_rollup_frame(state)
+        pop_runtime_cleanup_footer_frame(state)
     };
-    let result = finish_runtime_rollups(result, frame, plan, scopes, state, host);
+    let result = finish_runtime_cleanup_footers(result, frame, plan, scopes, state, host);
     if let Err(err) = evaluate_owner_exit_checkpoints(
         &exited_scope.activated_owner_keys,
         plan,
@@ -17362,6 +17492,7 @@ fn execute_statements(
     for statement in statements {
         let signal = match statement {
             ParsedStmt::Let {
+                binding_id,
                 mutable,
                 name,
                 value,
@@ -17385,21 +17516,25 @@ fn execute_statements(
                     state,
                     current_scope_depth,
                     current_scope,
+                    *binding_id,
                     name.clone(),
                     *mutable,
                     value,
                 );
                 FlowSignal::Next
             }
-            ParsedStmt::Expr { expr, rollups } => {
-                push_runtime_rollup_frame(
+            ParsedStmt::Expr {
+                expr,
+                cleanup_footers,
+            } => {
+                push_runtime_cleanup_footer_frame(
                     state,
-                    rollups,
+                    cleanup_footers,
                     scopes,
                     current_package_id,
                     current_module_id,
                 );
-                finish_runtime_rollups(
+                finish_runtime_cleanup_footers(
                     eval_expr(
                         expr,
                         plan,
@@ -17412,10 +17547,10 @@ fn execute_statements(
                         host,
                     )
                     .map(|_| FlowSignal::Next),
-                    if rollups.is_empty() {
+                    if cleanup_footers.is_empty() {
                         None
                     } else {
-                        pop_runtime_rollup_frame(state)
+                        pop_runtime_cleanup_footer_frame(state)
                     },
                     plan,
                     scopes,
@@ -17440,7 +17575,7 @@ fn execute_statements(
                 condition,
                 then_branch,
                 else_branch,
-                rollups,
+                cleanup_footers,
                 availability,
             } => {
                 if expect_bool(
@@ -17461,7 +17596,7 @@ fn execute_statements(
                     apply_runtime_availability_attachments(&mut scope, availability);
                     execute_scoped_block(
                         then_branch,
-                        rollups,
+                        cleanup_footers,
                         scopes,
                         scope,
                         plan,
@@ -17479,7 +17614,7 @@ fn execute_statements(
                     apply_runtime_availability_attachments(&mut scope, availability);
                     execute_scoped_block(
                         else_branch,
-                        rollups,
+                        cleanup_footers,
                         scopes,
                         scope,
                         plan,
@@ -17495,85 +17630,12 @@ fn execute_statements(
             ParsedStmt::While {
                 condition,
                 body,
-                rollups,
+                cleanup_footers,
                 availability,
-            } => {
-                push_runtime_rollup_frame(
-                    state,
-                    rollups,
-                    scopes,
-                    current_package_id,
-                    current_module_id,
-                );
-                let result = (|| -> RuntimeEvalResult<FlowSignal> {
-                    loop {
-                        if !expect_bool(
-                            eval_expr(
-                                condition,
-                                plan,
-                                current_package_id,
-                                current_module_id,
-                                scopes,
-                                aliases,
-                                type_bindings,
-                                state,
-                                host,
-                            )?,
-                            "while condition",
-                        )? {
-                            break Ok(FlowSignal::Next);
-                        }
-                        let mut scope = RuntimeScope::default();
-                        apply_runtime_availability_attachments(&mut scope, availability);
-                        match execute_scoped_block(
-                            body,
-                            &[],
-                            scopes,
-                            scope,
-                            plan,
-                            current_package_id,
-                            current_module_id,
-                            aliases,
-                            type_bindings,
-                            state,
-                            host,
-                        )? {
-                            FlowSignal::Next | FlowSignal::Continue => {}
-                            FlowSignal::Break => break Ok(FlowSignal::Next),
-                            FlowSignal::Return(value) => break Ok(FlowSignal::Return(value)),
-                        }
-                    }
-                })();
-                finish_runtime_rollups(
-                    result,
-                    if rollups.is_empty() {
-                        None
-                    } else {
-                        pop_runtime_rollup_frame(state)
-                    },
-                    plan,
-                    scopes,
-                    state,
-                    host,
-                )?
-            }
-            ParsedStmt::For {
-                binding,
-                iterable,
-                body,
-                rollups,
-                availability,
-            } => {
-                push_runtime_rollup_frame(
-                    state,
-                    rollups,
-                    scopes,
-                    current_package_id,
-                    current_module_id,
-                );
-                let result = (|| -> RuntimeEvalResult<FlowSignal> {
-                    let values = into_iterable_values(eval_expr(
-                        iterable,
+            } => loop {
+                if !expect_bool(
+                    eval_expr(
+                        condition,
                         plan,
                         current_package_id,
                         current_module_id,
@@ -17582,57 +17644,88 @@ fn execute_statements(
                         type_bindings,
                         state,
                         host,
-                    )?)?;
-                    let mut loop_signal = FlowSignal::Next;
-                    for value in values {
-                        let mut scope = RuntimeScope::default();
-                        apply_runtime_availability_attachments(&mut scope, availability);
-                        insert_runtime_local(
-                            state,
-                            scopes.len(),
-                            &mut scope,
-                            binding.clone(),
-                            false,
-                            value,
-                        );
-                        match execute_scoped_block(
-                            body,
-                            &[],
-                            scopes,
-                            scope,
-                            plan,
-                            current_package_id,
-                            current_module_id,
-                            aliases,
-                            type_bindings,
-                            state,
-                            host,
-                        )? {
-                            FlowSignal::Next | FlowSignal::Continue => {}
-                            FlowSignal::Break => {
-                                loop_signal = FlowSignal::Next;
-                                break;
-                            }
-                            FlowSignal::Return(value) => {
-                                loop_signal = FlowSignal::Return(value);
-                                break;
-                            }
-                        }
-                    }
-                    Ok(loop_signal)
-                })();
-                finish_runtime_rollups(
-                    result,
-                    if rollups.is_empty() {
-                        None
-                    } else {
-                        pop_runtime_rollup_frame(state)
-                    },
-                    plan,
+                    )?,
+                    "while condition",
+                )? {
+                    break FlowSignal::Next;
+                }
+                let mut scope = RuntimeScope::default();
+                apply_runtime_availability_attachments(&mut scope, availability);
+                match execute_scoped_block(
+                    body,
+                    cleanup_footers,
                     scopes,
+                    scope,
+                    plan,
+                    current_package_id,
+                    current_module_id,
+                    aliases,
+                    type_bindings,
                     state,
                     host,
-                )?
+                )? {
+                    FlowSignal::Next | FlowSignal::Continue => {}
+                    FlowSignal::Break => break FlowSignal::Next,
+                    FlowSignal::Return(value) => break FlowSignal::Return(value),
+                }
+            },
+            ParsedStmt::For {
+                binding_id,
+                binding,
+                iterable,
+                body,
+                cleanup_footers,
+                availability,
+            } => {
+                let values = into_iterable_values(eval_expr(
+                    iterable,
+                    plan,
+                    current_package_id,
+                    current_module_id,
+                    scopes,
+                    aliases,
+                    type_bindings,
+                    state,
+                    host,
+                )?)?;
+                let mut loop_signal = FlowSignal::Next;
+                for value in values {
+                    let mut scope = RuntimeScope::default();
+                    apply_runtime_availability_attachments(&mut scope, availability);
+                    insert_runtime_local(
+                        state,
+                        scopes.len(),
+                        &mut scope,
+                        *binding_id,
+                        binding.clone(),
+                        false,
+                        value,
+                    );
+                    match execute_scoped_block(
+                        body,
+                        cleanup_footers,
+                        scopes,
+                        scope,
+                        plan,
+                        current_package_id,
+                        current_module_id,
+                        aliases,
+                        type_bindings,
+                        state,
+                        host,
+                    )? {
+                        FlowSignal::Next | FlowSignal::Continue => {}
+                        FlowSignal::Break => {
+                            loop_signal = FlowSignal::Next;
+                            break;
+                        }
+                        FlowSignal::Return(value) => {
+                            loop_signal = FlowSignal::Return(value);
+                            break;
+                        }
+                    }
+                }
+                loop_signal
             }
             ParsedStmt::Defer(expr) => {
                 scopes
@@ -17647,6 +17740,7 @@ fn execute_statements(
                     owner_path,
                     owner_local_name: _,
                     binding,
+                    object_binding_ids,
                     context,
                 } = statement
                 else {
@@ -17709,8 +17803,15 @@ fn execute_statements(
                     owner_state.pending_init.clear();
                     owner_state.pending_resume = owner_state.objects.keys().cloned().collect();
                 }
-                activate_owner_scope_binding(scopes, state, owner, &owner_key, binding.as_deref())
-                    .map_err(RuntimeEvalSignal::from)?;
+                activate_owner_scope_binding(
+                    scopes,
+                    state,
+                    owner,
+                    &owner_key,
+                    binding.as_deref(),
+                    object_binding_ids,
+                )
+                .map_err(RuntimeEvalSignal::from)?;
                 FlowSignal::Next
             }
             ParsedStmt::Break => FlowSignal::Break,
@@ -17834,9 +17935,9 @@ fn execute_routine_call_with_state(
                 ..Default::default()
             };
             apply_runtime_availability_attachments(&mut initial_scope, &routine.availability);
-            push_runtime_rollup_frame(
+            push_runtime_cleanup_footer_frame(
                 state,
-                &routine.rollups,
+                &routine.cleanup_footers,
                 &[],
                 &routine.package_id,
                 &routine.module_id,
@@ -17846,6 +17947,7 @@ fn execute_routine_call_with_state(
                     state,
                     0,
                     &mut initial_scope,
+                    param.binding_id,
                     param.name.clone(),
                     param.mode.as_deref() == Some("edit"),
                     value,
@@ -17888,7 +17990,7 @@ fn execute_routine_call_with_state(
                 state,
                 host,
             );
-            let routine_rollup_frame = pop_runtime_rollup_frame(state);
+            let routine_cleanup_footer_frame = pop_runtime_cleanup_footer_frame(state);
             let final_scope = scopes
                 .pop()
                 .ok_or_else(|| "runtime scope stack is empty".to_string())?;
@@ -17896,8 +17998,8 @@ fn execute_routine_call_with_state(
                 Ok(()) => {}
                 Err(RuntimeEvalSignal::Message(message)) => return Err(message),
                 Err(RuntimeEvalSignal::Return(value)) => {
-                    if let Some(frame) = routine_rollup_frame.clone() {
-                        execute_page_rollups(frame, plan, &mut scopes, state, host)
+                    if let Some(frame) = routine_cleanup_footer_frame.clone() {
+                        execute_cleanup_footers(frame, plan, &mut scopes, state, host)
                             .map_err(runtime_eval_message)?;
                     }
                     evaluate_owner_exit_checkpoints(
@@ -17931,10 +18033,10 @@ fn execute_routine_call_with_state(
                     return Ok(RoutineExecutionOutcome { value, final_args });
                 }
             }
-            if let Some(frame) = routine_rollup_frame.clone()
+            if let Some(frame) = routine_cleanup_footer_frame.clone()
                 && !matches!(result, Err(RuntimeEvalSignal::Message(_)))
             {
-                execute_page_rollups(frame, plan, &mut scopes, state, host)
+                execute_cleanup_footers(frame, plan, &mut scopes, state, host)
                     .map_err(runtime_eval_message)?;
             }
             evaluate_owner_exit_checkpoints(
@@ -18160,6 +18262,6 @@ pub(crate) fn ensure_audio_buffer_matches_device(
 #[cfg(test)]
 mod test_parse;
 #[cfg(test)]
-pub(crate) use test_parse::{parse_rollup_row, parse_stmt};
+pub(crate) use test_parse::{parse_cleanup_footer_row, parse_stmt};
 #[cfg(test)]
 mod tests;

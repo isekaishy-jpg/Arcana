@@ -9,7 +9,7 @@ Completed foundation work:
 - Rust workspace scaffold with isolated crates for syntax, HIR, frontend, package/build, IR, AOT, and CLI
 - language freeze policy and CI freeze guard
 - AnyBox policy guard over code-bearing paths
-- explicit spec-status taxonomy plus pre-selfhost contract docs for page rollups, tuples, callable/context direction, and AnyBox ban
+- explicit spec-status taxonomy plus pre-selfhost contract docs for cleanup footers, tuples, callable/context direction, and AnyBox ban
 - clarified frozen-doc interpretation so domain scopes beat descriptive implementation limits, tuple docs stay forward-looking, and chain-style semantics are explicit rather than inherited from Meadow-era behavior
 - seed import of frozen contract docs, conformance matrix, `std`, and historical MeadowLang corpus, with the broad reference tree now archived outside the repo
 - explicit recognition that rewrite-owned `std` is first-party surface and archived historical grimoires are not rewrite architecture authority
@@ -30,13 +30,13 @@ Completed foundation work:
 - structured header attachments for qualified and memory phrases, with named entries and chain lines lowering through syntax/HIR instead of raw attached entries
 - structured assignment targets for name, member, and index mutation paths over the imported behavior/list/selfhost corpus
 - enforced pair-tuple contract over current syntax/frontend coverage, including `.0`/`.1`-only access, no tuple destructuring in bindings/params, no tuple field assignment, and new negative conformance fixtures wired into the frozen matrix
-- page rollups now parse and lower through syntax/HIR for function-like owners and block-owning statements, with subject-scope validation, cleanup-subject reassignment diagnostics, and example/negative conformance coverage wired into the frozen matrix
+- cleanup footers now parse and lower through syntax/HIR for function-like owners and block-owning statements, with target-scope validation, cleanup-target reassignment diagnostics, concrete `Cleanup`-contract resolution, and example/negative conformance coverage wired into the frozen matrix
 - one explicit pre-desktop freeze exception is now landed and closed: `obj` plus `create ... scope-exit` owner support is approved as the rewrite-owned object/lifetime contract, with syntax/HIR/frontend/IR/runtime/AOT/native-bundle coverage in place so future grimoires can build on explicit owner state instead of reviving the old selfhost scaffolds
 - frontend semantic validation now includes unresolved `lang` item targets after workspace resolution
 - impl header generic/lifetime params now survive syntax/HIR lowering instead of being discarded
 - frontend semantic validation now includes declaration-surface type and lifetime resolution for params, returns, fields, enum payloads, trait defaults, impl headers, and inherited trait/impl method scopes
 - frontend semantic validation now includes recursive boundary-safe typing across nested record/enum surfaces for carried Lua/SQL boundary contracts
-- frontend semantic validation now includes conservative body-level value resolution for locals, namespace-qualified member chains, enum variant constructors, module impl-method paths, structured chain stages and bound args, memory constructors, rollup handlers, package/module-qualified value roots, and expression generic-argument type references over the imported selfhost corpus
+- frontend semantic validation now includes conservative body-level value resolution for locals, namespace-qualified member chains, enum variant constructors, module impl-method paths, structured chain stages and bound args, memory constructors, cleanup footer handlers, package/module-qualified value roots, and expression generic-argument type references over the imported selfhost corpus
 - frontend semantic validation now covers conservative expression typing plus ownership/borrow/lifetime flow on the current frontend path: type-shape checks for `if`/`while` conditions, unary/logical/bitwise/shift operators, tuple projection bases, slice bounds, explicit `&` / `&mut` place validation, lexical local-borrow conflict checks, direct-access/assignment rejection while locals are borrowed, `read` / `edit` / `take` call-site flow for resolved qualified phrases, use-after-move and move-while-borrowed diagnostics, and conservative return-lifetime / returned-local-borrow validation
 - boundary-varietal example/negative conformance now covers Lua/SQL compile-time interop contracts, and ECS docs now preserve first-class scheduler/component direction without freezing general query authoring into the selfhost baseline
 - current rewrite CLI remains intentionally narrow: `arcana check` is the compiler correctness gate, while `arcana test`, `arcana format`, and the smaller advisory `arcana review` layer are planned pre-selfhost tooling work rather than implied current commands

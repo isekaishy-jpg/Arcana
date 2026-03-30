@@ -96,7 +96,7 @@ This document defines how Arcana spec files are interpreted during the rewrite.
 
 ## Immediate Rewrite Guidance
 
-- Page rollups are a pre-selfhost contract, not a post-selfhost cleanup idea.
+- Cleanup footers are a pre-selfhost contract, not a post-selfhost cleanup idea.
 - Rewrite-era scopes for access modes, qualified phrases, collections/ranges, `where`, concurrency, resources, memory, and chain surface now supersede stale Meadow-era planning notes where they overlap.
 - Chain surface should stay explicit as style qualifier plus introducer family plus connector-directed edges.
 - Pair-tuple rules must be explicit before selfhost because the imported corpus already depends on them heavily.

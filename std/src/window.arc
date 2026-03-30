@@ -1,4 +1,5 @@
 import std.events
+import std.cleanup
 import std.kernel.gfx
 import std.result
 use std.result.Result
@@ -183,6 +184,10 @@ export fn default_config() -> std.window.WindowConfig:
     let mut options = std.window.window_options_base :: style, state, cursor :: call
     options.text_input_enabled = false
     return std.window.WindowConfig :: title = "Arcana", bounds = bounds, options = options :: call
+
+impl std.cleanup.Cleanup[std.window.Window] for std.window.Window:
+    fn cleanup(take self: std.window.Window) -> Result[Unit, Str]:
+        return std.window.close :: self :: call
 
 fn apply_config(take win: Window, read cfg: std.window.WindowConfig) -> Window:
     let mut win = win

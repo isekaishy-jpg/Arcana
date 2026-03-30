@@ -1,7 +1,7 @@
 // Runtime-facing projection of the cabi export contract for generated export shims.
 use super::{
     RuntimeExecutionState, RuntimeHost, RuntimePackagePlan, RuntimeRoutinePlan, RuntimeValue,
-    execute_routine_call_with_state, validate_runtime_requirements_supported,
+    execute_routine_call_with_state, validate_runtime_requirements_supported, variant_name_matches,
 };
 use arcana_ir::{IrRoutineType, IrRoutineTypeKind};
 
@@ -60,6 +60,33 @@ pub fn execute_exported_abi_routine(
         result: abi_value_from_runtime(outcome.value)?,
         write_backs: project_export_write_backs(routine, outcome.final_args)?,
     })
+}
+
+pub fn execute_cleanup_runtime_abi_routine(
+    plan: &RuntimePackagePlan,
+    routine_key: &str,
+    arg: RuntimeAbiValue,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
+) -> Result<(), String> {
+    validate_runtime_requirements_supported(plan, host)?;
+    let (routine_index, _) = plan
+        .routines
+        .iter()
+        .enumerate()
+        .find(|(_, routine)| routine.routine_key == routine_key)
+        .ok_or_else(|| format!("cleanup routine `{routine_key}` is not present"))?;
+    let outcome = execute_routine_call_with_state(
+        plan,
+        routine_index,
+        Vec::new(),
+        vec![runtime_value_from_abi(arg)],
+        &[],
+        state,
+        host,
+        false,
+    )?;
+    expect_cleanup_runtime_value(outcome.value)
 }
 
 pub(crate) fn project_export_write_backs(
@@ -136,6 +163,35 @@ fn runtime_value_from_abi(value: RuntimeAbiValue) -> RuntimeValue {
             Box::new(runtime_value_from_abi(*right)),
         ),
         RuntimeAbiValue::Unit => RuntimeValue::Unit,
+    }
+}
+
+fn expect_cleanup_runtime_value(value: RuntimeValue) -> Result<(), String> {
+    match value {
+        RuntimeValue::Unit => Ok(()),
+        RuntimeValue::Variant { name, payload } if variant_name_matches(&name, "Result.Ok") => {
+            if payload.is_empty() || matches!(payload.first(), Some(RuntimeValue::Unit)) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "cleanup footer expected Result.Ok(Unit), got `{name}`"
+                ))
+            }
+        }
+        RuntimeValue::Variant { name, payload } if variant_name_matches(&name, "Result.Err") => {
+            match payload.as_slice() {
+                [RuntimeValue::Str(message)] => Err(message.clone()),
+                [other] => Err(format!(
+                    "cleanup footer expected Result.Err(Str), got `{other:?}`"
+                )),
+                _ => Err(format!(
+                    "cleanup footer expected Result.Err(Str), got `{name}`"
+                )),
+            }
+        }
+        other => Err(format!(
+            "cleanup footer expected Unit or Result[Unit, Str], got `{other:?}`"
+        )),
     }
 }
 

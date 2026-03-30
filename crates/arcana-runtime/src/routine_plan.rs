@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 
 use arcana_aot::{AotEntrypointArtifact, AotRoutineArtifact};
 use arcana_ir::{
-    ExecAvailabilityAttachment as ParsedAvailabilityAttachment, ExecPageRollup as ParsedPageRollup,
-    ExecStmt as ParsedStmt, IrRoutineParam, IrRoutineType, RUNTIME_MAIN_ENTRYPOINT_NAME,
-    validate_runtime_main_entry_contract,
+    ExecAvailabilityAttachment as ParsedAvailabilityAttachment,
+    ExecCleanupFooter as ParsedCleanupFooter, ExecStmt as ParsedStmt, IrRoutineParam,
+    IrRoutineType, RUNTIME_MAIN_ENTRYPOINT_NAME, validate_runtime_main_entry_contract,
 };
 use serde::{Deserialize, Serialize};
 
@@ -28,7 +28,7 @@ pub struct RuntimeRoutinePlan {
     pub impl_trait_path: Option<Vec<String>>,
     pub availability: Vec<ParsedAvailabilityAttachment>,
     pub foreword_rows: Vec<String>,
-    pub rollups: Vec<ParsedPageRollup>,
+    pub cleanup_footers: Vec<ParsedCleanupFooter>,
     pub statements: Vec<ParsedStmt>,
 }
 
@@ -61,7 +61,7 @@ pub(crate) fn lower_routine(routine: &AotRoutineArtifact) -> RuntimeRoutinePlan 
         impl_trait_path: routine.impl_trait_path.clone(),
         availability: routine.availability.clone(),
         foreword_rows: routine.foreword_rows.clone(),
-        rollups: routine.rollups.clone(),
+        cleanup_footers: routine.cleanup_footers.clone(),
         statements: routine.statements.clone(),
     }
 }

@@ -55,9 +55,15 @@ pub enum IrRoutineTypeKind {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IrRoutineParam {
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub binding_id: u64,
     pub mode: Option<String>,
     pub name: String,
     pub ty: IrRoutineType,
+}
+
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
 }
 
 impl IrRoutinePath {

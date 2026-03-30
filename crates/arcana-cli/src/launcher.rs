@@ -162,7 +162,7 @@ mod tests {
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: Vec::new(),
-                rollups: Vec::new(),
+                cleanup_footers: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Int(7),
                 }],

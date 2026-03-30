@@ -79,30 +79,36 @@ fn parse_list(text: &str) -> Result<Vec<String>, String> {
     Ok(split_top_level(inner))
 }
 
-pub(crate) fn parse_rollup_row(text: &str) -> Result<ParsedPageRollup, String> {
+pub(crate) fn parse_cleanup_footer_row(text: &str) -> Result<ParsedCleanupFooter, String> {
     let parts = text.splitn(3, ':').collect::<Vec<_>>();
     if parts.len() != 3 {
-        return Err(format!("malformed runtime rollup row `{text}`"));
+        return Err(format!("malformed cleanup footer row `{text}`"));
     }
     let kind = parts[0].trim();
     let subject = parts[1].trim();
     let handler = parts[2].trim();
     if kind != "cleanup" {
-        return Err(format!("unsupported runtime rollup kind `{kind}`"));
+        return Err(format!("unsupported cleanup footer kind `{kind}`"));
     }
     if subject.is_empty() {
-        return Err(format!("runtime rollup row missing subject in `{text}`"));
+        return Err(format!("cleanup footer row missing subject in `{text}`"));
     }
     if handler.is_empty() {
         return Err(format!(
-            "runtime rollup row missing handler path in `{text}`"
+            "cleanup footer row missing handler path in `{text}`"
         ));
     }
-    Ok(ParsedPageRollup {
+    Ok(ParsedCleanupFooter {
         kind: kind.to_string(),
+        binding_id: 0,
         subject: subject.to_string(),
         handler_path: handler.split('.').map(ToString::to_string).collect(),
+        resolved_routine: None,
     })
+}
+
+pub(crate) fn parse_rollup_row(text: &str) -> Result<ParsedCleanupFooter, String> {
+    parse_cleanup_footer_row(text)
 }
 
 fn parse_chain_connector(text: &str) -> Result<Option<ParsedChainConnector>, String> {
@@ -789,10 +795,10 @@ pub(crate) fn parse_stmt(text: &str) -> Result<ParsedStmt, String> {
             .get("forewords")
             .ok_or_else(|| format!("runtime stmt missing forewords in `{text}`"))?,
     )?;
-    let rollups = parse_list(
+    let cleanup_footers = parse_list(
         fields
-            .get("rollups")
-            .ok_or_else(|| format!("runtime stmt missing rollups in `{text}`"))?,
+            .get("cleanup_footers")
+            .ok_or_else(|| format!("runtime stmt missing cleanup_footers in `{text}`"))?,
     )?
     .into_iter()
     .map(|row| parse_rollup_row(&row))
@@ -812,6 +818,7 @@ pub(crate) fn parse_stmt(text: &str) -> Result<ParsedStmt, String> {
             other => return Err(format!("invalid runtime let mutable `{other}`")),
         };
         return Ok(ParsedStmt::Let {
+            binding_id: 0,
             mutable,
             name: let_fields
                 .get("name")
@@ -827,7 +834,7 @@ pub(crate) fn parse_stmt(text: &str) -> Result<ParsedStmt, String> {
     if core.starts_with("expr(") && core.ends_with(')') {
         return Ok(ParsedStmt::Expr {
             expr: parse_expr(strip_prefix_suffix(core, "expr(", ")")?)?,
-            rollups,
+            cleanup_footers,
         });
     }
     if core.starts_with("return(") && core.ends_with(')') {
@@ -865,7 +872,7 @@ pub(crate) fn parse_stmt(text: &str) -> Result<ParsedStmt, String> {
             .map(|item| parse_stmt(&item))
             .collect::<Result<Vec<_>, String>>()?,
             availability: Vec::new(),
-            rollups,
+            cleanup_footers,
         });
     }
     if core.starts_with("while(") && core.ends_with(')') {
@@ -885,12 +892,13 @@ pub(crate) fn parse_stmt(text: &str) -> Result<ParsedStmt, String> {
             .map(|item| parse_stmt(&item))
             .collect::<Result<Vec<_>, String>>()?,
             availability: Vec::new(),
-            rollups,
+            cleanup_footers,
         });
     }
     if core.starts_with("for(") && core.ends_with(')') {
         let for_fields = parse_named_fields(strip_prefix_suffix(core, "for(", ")")?)?;
         return Ok(ParsedStmt::For {
+            binding_id: 0,
             binding: for_fields
                 .get("binding")
                 .ok_or_else(|| format!("runtime for missing binding in `{text}`"))?
@@ -909,7 +917,7 @@ pub(crate) fn parse_stmt(text: &str) -> Result<ParsedStmt, String> {
             .map(|item| parse_stmt(&item))
             .collect::<Result<Vec<_>, String>>()?,
             availability: Vec::new(),
-            rollups,
+            cleanup_footers,
         });
     }
     if core.starts_with("defer(") && core.ends_with(')') {

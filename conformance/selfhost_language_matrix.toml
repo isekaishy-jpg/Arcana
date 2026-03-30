@@ -143,14 +143,18 @@ positive = ["std/src", "grimoires/owned/libs/arcana-audio/src"]
 negative = ["conformance/check_parity_fixtures/unresolved_symbol.arc"]
 
 [[feature]]
-id = "page_rollups_v1"
+id = "cleanup_footers_v1"
 status = "required"
-positive = ["std/src", "conformance/fixtures/types_guard_workspace/app/src"]
+positive = [
+    "std/src",
+    "conformance/fixtures/types_guard_workspace/app/src",
+    "conformance/fixtures/cleanup_footer_std_handle_workspace/app/src",
+]
 negative = [
-    "conformance/check_parity_fixtures/page_rollup_stray.arc",
-    "conformance/check_parity_fixtures/page_rollup_bad_subject.arc",
-    "conformance/check_parity_fixtures/page_rollup_unknown_subject.arc",
-    "conformance/check_parity_fixtures/page_rollup_reassign.arc",
+    "conformance/check_parity_fixtures/cleanup_footer_stray.arc",
+    "conformance/check_parity_fixtures/cleanup_footer_bad_target.arc",
+    "conformance/check_parity_fixtures/cleanup_footer_unknown_target.arc",
+    "conformance/check_parity_fixtures/cleanup_footer_reassign.arc",
 ]
 
 [[feature]]

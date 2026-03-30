@@ -50,7 +50,7 @@ mod tests {
         validate_package_artifact,
     };
     use arcana_ir::{
-        ExecExpr, ExecPageRollup, ExecPhraseQualifierKind, ExecStmt, IrEntrypoint, IrModule,
+        ExecCleanupFooter, ExecExpr, ExecPhraseQualifierKind, ExecStmt, IrEntrypoint, IrModule,
         IrPackage, IrPackageModule, IrRoutine, IrRoutineParam, IrRoutineType,
         parse_routine_type_text, render_routine_signature_text,
     };
@@ -67,6 +67,7 @@ mod tests {
             let name = parts[1].strip_prefix("name=").unwrap_or_default();
             let ty = parts[2].strip_prefix("ty=").unwrap_or_default();
             Self {
+                binding_id: 0,
                 mode: (!mode.is_empty()).then(|| mode.to_string()),
                 name: name.to_string(),
                 ty: parse_routine_type_text(ty).expect("type should parse"),
@@ -215,7 +216,7 @@ mod tests {
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: Vec::new(),
-                rollups: Vec::new(),
+                cleanup_footers: Vec::new(),
                 statements: Vec::new(),
             }],
             owners: Vec::new(),
@@ -317,7 +318,7 @@ mod tests {
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: Vec::new(),
-                rollups: Vec::new(),
+                cleanup_footers: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Int(0),
                 }],
@@ -381,7 +382,7 @@ mod tests {
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: Vec::new(),
-                rollups: Vec::new(),
+                cleanup_footers: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Int(0),
                 }],
@@ -462,7 +463,7 @@ mod tests {
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: Vec::new(),
-                rollups: Vec::new(),
+                cleanup_footers: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Int(0),
                 }],
@@ -608,7 +609,7 @@ mod tests {
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: Vec::new(),
-                rollups: Vec::new(),
+                cleanup_footers: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Int(0),
                 }],
@@ -735,7 +736,7 @@ mod tests {
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: Vec::new(),
-                rollups: Vec::new(),
+                cleanup_footers: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Bool(true),
                 }],
@@ -849,7 +850,7 @@ mod tests {
                     impl_trait_path: None,
                     availability: Vec::new(),
                     foreword_rows: Vec::new(),
-                    rollups: Vec::new(),
+                    cleanup_footers: Vec::new(),
                     statements: vec![ExecStmt::ReturnValue {
                         value: ExecExpr::Str("hi".to_string()),
                     }],
@@ -873,7 +874,7 @@ mod tests {
                     impl_trait_path: None,
                     availability: Vec::new(),
                     foreword_rows: Vec::new(),
-                    rollups: Vec::new(),
+                    cleanup_footers: Vec::new(),
                     statements: vec![ExecStmt::ReturnValue {
                         value: ExecExpr::Path(vec!["bytes".to_string()]),
                     }],
@@ -954,7 +955,7 @@ mod tests {
                     impl_trait_path: None,
                     availability: Vec::new(),
                     foreword_rows: Vec::new(),
-                    rollups: Vec::new(),
+                    cleanup_footers: Vec::new(),
                     statements: vec![ExecStmt::ReturnValue {
                         value: ExecExpr::Int(42),
                     }],
@@ -976,7 +977,7 @@ mod tests {
                     impl_trait_path: None,
                     availability: Vec::new(),
                     foreword_rows: Vec::new(),
-                    rollups: Vec::new(),
+                    cleanup_footers: Vec::new(),
                     statements: vec![ExecStmt::ReturnValue {
                         value: ExecExpr::Int(0),
                     }],
@@ -1072,7 +1073,7 @@ mod tests {
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: Vec::new(),
-                rollups: Vec::new(),
+                cleanup_footers: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Path(vec!["pair".to_string()]),
                 }],
@@ -1155,10 +1156,12 @@ mod tests {
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: vec!["test()".to_string()],
-                rollups: vec![ExecPageRollup {
+                cleanup_footers: vec![ExecCleanupFooter {
+                    binding_id: 0,
                     kind: "cleanup".to_string(),
                     subject: "page".to_string(),
                     handler_path: vec!["handler".to_string()],
+                    resolved_routine: None,
                 }],
                 statements: vec![ExecStmt::Expr {
                     expr: ExecExpr::Phrase {
@@ -1175,7 +1178,7 @@ mod tests {
                         dynamic_dispatch: None,
                         attached: Vec::new(),
                     },
-                    rollups: Vec::new(),
+                    cleanup_footers: Vec::new(),
                 }],
             }],
             owners: Vec::new(),
@@ -1248,7 +1251,7 @@ mod tests {
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: Vec::new(),
-                rollups: Vec::new(),
+                cleanup_footers: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Int(0),
                 }],
@@ -1319,7 +1322,7 @@ mod tests {
                     impl_trait_path: None,
                     availability: Vec::new(),
                     foreword_rows: Vec::new(),
-                    rollups: Vec::new(),
+                    cleanup_footers: Vec::new(),
                     statements: Vec::new(),
                 },
                 AotRoutineArtifact {
@@ -1339,7 +1342,7 @@ mod tests {
                     impl_trait_path: None,
                     availability: Vec::new(),
                     foreword_rows: Vec::new(),
-                    rollups: Vec::new(),
+                    cleanup_footers: Vec::new(),
                     statements: Vec::new(),
                 },
             ],
@@ -1420,7 +1423,7 @@ mod tests {
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: Vec::new(),
-                rollups: Vec::new(),
+                cleanup_footers: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Int(0),
                 }],
@@ -1428,6 +1431,7 @@ mod tests {
             owners: Vec::new(),
         });
         artifact.routines[0].params = vec![AotRoutineParamArtifact {
+            binding_id: 0,
             mode: Some("invalid".to_string()),
             name: "value".to_string(),
             ty: parse_routine_type_text("Int").expect("type should parse"),
@@ -1481,7 +1485,7 @@ mod tests {
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: Vec::new(),
-                rollups: Vec::new(),
+                cleanup_footers: Vec::new(),
                 statements: Vec::new(),
             }],
             owners: Vec::new(),
@@ -1591,7 +1595,7 @@ mod tests {
             impl_trait_path: None,
             availability: Vec::new(),
             foreword_rows: Vec::new(),
-            rollups: Vec::new(),
+            cleanup_footers: Vec::new(),
             statements: Vec::new(),
         }];
         artifact.exported_surface_rows =

@@ -1,4 +1,5 @@
 import std.kernel.audio
+import std.cleanup
 import std.result
 use std.result.Result
 
@@ -39,6 +40,14 @@ export fn play_buffer(edit device: AudioDevice, read buffer: AudioBuffer) -> Res
 
 export fn output_set_gain_milli(edit device: AudioDevice, milli: Int):
     std.kernel.audio.output_set_gain_milli :: device, milli :: call
+
+impl std.cleanup.Cleanup[std.audio.AudioDevice] for std.audio.AudioDevice:
+    fn cleanup(take self: std.audio.AudioDevice) -> Result[Unit, Str]:
+        return std.audio.output_close :: self :: call
+
+impl std.cleanup.Cleanup[std.audio.AudioPlayback] for std.audio.AudioPlayback:
+    fn cleanup(take self: std.audio.AudioPlayback) -> Result[Unit, Str]:
+        return self :: :: stop
 
 impl AudioPlayback:
     fn stop(take self: AudioPlayback) -> Result[Unit, Str]:

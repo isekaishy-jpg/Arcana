@@ -127,7 +127,7 @@ pub const FROZEN_AST_NODE_KINDS: &[&str] = &[
     "ParamDecl",
     "WherePredicate",
     "TypeRef",
-    "PageRollup",
+    "CleanupFooter",
     "Stmt",
     "Expr",
     "Pattern",

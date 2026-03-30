@@ -3,6 +3,7 @@ reexport behavior_traits
 reexport std.prelude
 reexport std.result
 reexport std.option
+reexport std.cleanup
 reexport std.collections.list
 reexport std.collections.array
 reexport std.collections.map

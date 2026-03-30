@@ -64,7 +64,7 @@ fn compile_routine(routine: &IrRoutine) -> AotRoutineArtifact {
         impl_trait_path: routine.impl_trait_path.clone(),
         availability: routine.availability.clone(),
         foreword_rows: routine.foreword_rows.clone(),
-        rollups: routine.rollups.clone(),
+        cleanup_footers: routine.cleanup_footers.clone(),
         statements: routine.statements.clone(),
     }
 }

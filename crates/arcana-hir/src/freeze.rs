@@ -14,7 +14,7 @@ pub const FROZEN_HIR_NODE_KINDS: &[&str] = &[
     "Behavior",
     "System",
     "Type",
-    "PageRollup",
+    "CleanupFooter",
     "AvailabilityAttachment",
     "OwnerObject",
     "OwnerExit",

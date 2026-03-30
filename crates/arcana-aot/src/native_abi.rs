@@ -190,11 +190,13 @@ fn parse_declared_native_param(text: &str) -> Result<NativeAbiParam, String> {
     let parts = head.split_whitespace().collect::<Vec<_>>();
     let param = match parts.as_slice() {
         [name] => IrRoutineParam {
+            binding_id: 0,
             mode: None,
             name: (*name).to_string(),
             ty,
         },
         [mode, name] => IrRoutineParam {
+            binding_id: 0,
             mode: Some((*mode).to_string()),
             name: (*name).to_string(),
             ty,

@@ -151,7 +151,7 @@ pub struct HirSymbol {
     pub intrinsic_impl: Option<String>,
     pub body: HirSymbolBody,
     pub statements: Vec<HirStatement>,
-    pub rollups: Vec<HirPageRollup>,
+    pub cleanup_footers: Vec<HirCleanupFooter>,
     pub span: Span,
 }
 
@@ -213,11 +213,11 @@ pub struct HirLangItem {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HirPageRollupKind {
+pub enum HirCleanupFooterKind {
     Cleanup,
 }
 
-impl HirPageRollupKind {
+impl HirCleanupFooterKind {
     pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Cleanup => "cleanup",
@@ -226,8 +226,8 @@ impl HirPageRollupKind {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct HirPageRollup {
-    pub kind: HirPageRollupKind,
+pub struct HirCleanupFooter {
+    pub kind: HirCleanupFooterKind,
     pub subject: String,
     pub handler_path: Vec<String>,
     pub span: Span,
@@ -523,7 +523,7 @@ pub struct HirStatement {
     pub kind: HirStatementKind,
     pub availability: Vec<HirAvailabilityAttachment>,
     pub forewords: Vec<HirForewordApp>,
-    pub rollups: Vec<HirPageRollup>,
+    pub cleanup_footers: Vec<HirCleanupFooter>,
     pub span: Span,
 }
 
@@ -941,6 +941,7 @@ pub struct HirMethodCandidate<'a> {
     pub symbol: &'a HirSymbol,
     pub declared_receiver_hir: HirType,
     pub routine_key: String,
+    pub trait_path: Option<Vec<String>>,
 }
 
 pub fn routine_key_for_symbol(module_id: &str, symbol_index: usize) -> String {
@@ -1771,7 +1772,7 @@ pub fn lower_parsed_module(
                 intrinsic_impl: symbol.intrinsic_impl.clone(),
                 body: lower_symbol_body(&symbol.body),
                 statements: lower_statements(&symbol.statements),
-                rollups: lower_rollups(&symbol.rollups),
+                cleanup_footers: lower_cleanup_footers(&symbol.cleanup_footers),
                 span: symbol.span,
             })
             .collect(),
@@ -2537,7 +2538,7 @@ fn lower_trait_or_impl_method(method: &arcana_syntax::SymbolDecl) -> HirSymbol {
         intrinsic_impl: method.intrinsic_impl.clone(),
         body: lower_symbol_body(&method.body),
         statements: lower_statements(&method.statements),
-        rollups: lower_rollups(&method.rollups),
+        cleanup_footers: lower_cleanup_footers(&method.cleanup_footers),
         span: method.span,
     }
 }
@@ -2572,12 +2573,14 @@ fn lower_forewords(forewords: &[arcana_syntax::ForewordApp]) -> Vec<HirForewordA
         .collect()
 }
 
-fn lower_rollups(rollups: &[arcana_syntax::PageRollup]) -> Vec<HirPageRollup> {
-    rollups
+fn lower_cleanup_footers(
+    cleanup_footers: &[arcana_syntax::CleanupFooter],
+) -> Vec<HirCleanupFooter> {
+    cleanup_footers
         .iter()
-        .map(|rollup| HirPageRollup {
+        .map(|rollup| HirCleanupFooter {
             kind: match rollup.kind {
-                arcana_syntax::PageRollupKind::Cleanup => HirPageRollupKind::Cleanup,
+                arcana_syntax::CleanupFooterKind::Cleanup => HirCleanupFooterKind::Cleanup,
             },
             subject: rollup.subject.clone(),
             handler_path: rollup.handler_path.clone(),
@@ -2897,7 +2900,7 @@ fn lower_statement(statement: &arcana_syntax::Statement) -> HirStatement {
         },
         availability: lower_availability_attachments(&statement.availability),
         forewords: lower_forewords(&statement.forewords),
-        rollups: lower_rollups(&statement.rollups),
+        cleanup_footers: lower_cleanup_footers(&statement.cleanup_footers),
         span: statement.span,
     }
 }
@@ -3153,30 +3156,33 @@ mod tests {
     }
 
     #[test]
-    fn lower_module_text_captures_page_rollups() {
+    fn lower_module_text_captures_cleanup_footers() {
         let module = lower_module_text(
-            "rollups",
-            "fn cleanup(value: Int):\n    return\nfn run(seed: Int) -> Int:\n    let local = seed\n    while local > 0:\n        let scratch = local\n        local -= 1\n    [scratch, cleanup]#cleanup\n    return local\n[seed, cleanup]#cleanup\n",
+            "cleanup_footers",
+            "fn cleanup(take value: Int) -> Result[Unit, Str]:\n    return Result.Ok[Unit, Str] :: :: call\nfn run(seed: Int) -> Int:\n    let local = seed\n    while local > 0:\n        let scratch = local\n        local -= 1\n    -cleanup[target = scratch, handler = cleanup]\n    return local\n-cleanup[target = seed, handler = cleanup]\n",
         )
-        .expect("rollups should lower");
+        .expect("cleanup footers should lower");
 
         let run = module
             .symbols
             .iter()
             .find(|symbol| symbol.name == "run")
             .expect("run symbol should exist");
-        assert_eq!(run.rollups.len(), 1);
-        assert_eq!(run.rollups[0].subject, "seed");
-        assert_eq!(run.rollups[0].handler_path, vec!["cleanup".to_string()]);
+        assert_eq!(run.cleanup_footers.len(), 1);
+        assert_eq!(run.cleanup_footers[0].subject, "seed");
+        assert_eq!(
+            run.cleanup_footers[0].handler_path,
+            vec!["cleanup".to_string()]
+        );
         match &run.statements[1] {
             HirStatement {
                 kind: HirStatementKind::While { .. },
-                rollups,
+                cleanup_footers,
                 ..
             } => {
-                assert_eq!(rollups.len(), 1);
-                assert_eq!(rollups[0].subject, "scratch");
-                assert_eq!(rollups[0].kind.as_str(), "cleanup");
+                assert_eq!(cleanup_footers.len(), 1);
+                assert_eq!(cleanup_footers[0].subject, "scratch");
+                assert_eq!(cleanup_footers[0].kind.as_str(), "cleanup");
             }
             other => panic!("expected while statement with rollup, got {other:?}"),
         }

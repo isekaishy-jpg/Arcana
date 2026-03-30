@@ -538,6 +538,7 @@ pub fn lookup_method_candidates_for_hir_type<'a>(
                         symbol: method,
                         declared_receiver_hir: declared_hir.clone(),
                         routine_key,
+                        trait_path: None,
                     });
                 }
             }
@@ -583,6 +584,13 @@ pub fn lookup_method_candidates_for_hir_type<'a>(
                         symbol: method,
                         declared_receiver_hir: impl_decl.target_type.clone(),
                         routine_key,
+                        trait_path: impl_decl.trait_path.as_ref().map(|trait_ref| {
+                            canonicalize_hir_trait_ref_in_module(
+                                workspace, package, module, trait_ref,
+                            )
+                            .path
+                            .segments
+                        }),
                     });
                 }
             }

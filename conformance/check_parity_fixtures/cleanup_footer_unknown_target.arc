@@ -4,4 +4,4 @@ fn cleanup(value: Int):
 fn main() -> Int:
     let value = 1
     return value
-[missing, cleanup]#cleanup
+-cleanup[target = missing, handler = cleanup]

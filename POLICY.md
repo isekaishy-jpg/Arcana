@@ -24,7 +24,7 @@ Allowed pre-selfhost language edits are limited to:
 
 - Contract questions that materially affect parser shape, typed HIR, IR, or selfhost grimoires must be settled before those layers solidify.
 - `docs/specs/spec-status.md` defines which spec files are frozen, approved, reserved, or deferred-only.
-- Page rollups are an approved pre-selfhost contract.
+- Cleanup footers are an approved pre-selfhost contract through `docs/specs/page-rollups/page-rollups/v1-scope.md`.
 - Pair-tuple rules are an approved pre-selfhost contract.
 - The explicit object/owner model in `docs/specs/objects/objects/v1-scope.md` is an approved pre-selfhost contract.
 - `AnyBox`-style erased Arcana values are banned from the rewrite contract.

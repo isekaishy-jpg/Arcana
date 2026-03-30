@@ -166,6 +166,16 @@ Warnings are non-fatal and printed to stderr.
 - `edit` gives exclusive mutable access during the call (for example: `bump :: x :: call`)
 - `take` moves non-`Copy` values (`Str`, records)
 
+## Cleanup Footers (v0.38)
+
+- Arcana supports attached cleanup footers after an owning block dedents:
+  - `-cleanup`
+  - `-cleanup[target = name]`
+  - `-cleanup[target = name, handler = path]`
+- Bare `-cleanup` covers cleanup-capable owning bindings activated in that owner scope.
+- Local `defer` still runs before the owner's cleanup footer work.
+- Old `[subject, handler]#cleanup` syntax is no longer part of the accepted language.
+
 ## Generic Phrase Family (v0.24)
 
 Arcana’s phrase family has three forms:

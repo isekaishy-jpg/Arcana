@@ -2,7 +2,8 @@ use std::collections::BTreeMap;
 
 use arcana_cabi::ArcanaCabiPassMode;
 use arcana_ir::{
-    ExecAssignOp, ExecAssignTarget, ExecBinaryOp, ExecExpr, ExecPhraseQualifierKind, ExecStmt,
+    ExecAssignOp, ExecAssignTarget, ExecBinaryOp, ExecCleanupFooter, ExecExpr,
+    ExecPhraseQualifierKind, ExecStmt,
 };
 
 use crate::artifact::AotRoutineArtifact;
@@ -60,6 +61,9 @@ pub enum NativeDirectStmt {
     Expr {
         value: NativeDirectExpr,
     },
+    Cleanup {
+        action: NativeCleanupAction,
+    },
     Assign {
         name: String,
         value: NativeDirectExpr,
@@ -78,6 +82,17 @@ pub enum NativeDirectStmt {
     },
     Break,
     Continue,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NativeCleanupAction {
+    Direct {
+        value: NativeDirectExpr,
+    },
+    RuntimeDispatch {
+        routine_key: String,
+        arg: NativeDirectExpr,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -158,14 +173,32 @@ struct LoweredDirectExpr {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct NativeBinding {
+    binding_id: u64,
     ty: NativeAbiType,
     mutable: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct NativeCleanupScope {
+    defers: Vec<NativeDirectExpr>,
+    cleanup_actions: Vec<NativeCleanupAction>,
+    loop_boundary: bool,
+}
+
+#[derive(Clone, Copy)]
+struct NativeBlockLoweringCtx<'a> {
+    expected_return_type: &'a NativeAbiType,
+    current_cleanup_footers: &'a [ExecCleanupFooter],
+    current_cleanup_actions: &'a [NativeCleanupAction],
+    outer_cleanup_scopes: &'a [NativeCleanupScope],
+    current_scope_is_loop_boundary: bool,
 }
 
 struct NativeLoweringBuilder<'a> {
     routines_by_key: BTreeMap<&'a str, &'a AotRoutineArtifact>,
     direct_routines: BTreeMap<String, NativeDirectRoutine>,
     states: BTreeMap<String, LoweringState>,
+    temp_counter: usize,
 }
 
 impl<'a> NativeLoweringBuilder<'a> {
@@ -177,6 +210,7 @@ impl<'a> NativeLoweringBuilder<'a> {
                 .collect(),
             direct_routines: BTreeMap::new(),
             states: BTreeMap::new(),
+            temp_counter: 0,
         }
     }
 
@@ -259,28 +293,39 @@ impl<'a> NativeLoweringBuilder<'a> {
         if routine.symbol_kind != "fn"
             || routine.is_async
             || routine.intrinsic_impl.is_some()
-            || routine.impl_target_type.is_some()
-            || routine.impl_trait_path.is_some()
             || !routine.type_params.is_empty()
             || !routine.foreword_rows.is_empty()
-            || !routine.rollups.is_empty()
         {
             return None;
         }
         let bindings = signature
             .params
             .iter()
+            .zip(routine.params.iter())
             .map(|param| {
+                let (param, routine_param) = param;
                 (
                     param.name.clone(),
                     NativeBinding {
+                        binding_id: routine_param.binding_id,
                         ty: param.input_type.clone(),
                         mutable: matches!(param.pass_mode, ArcanaCabiPassMode::InWithWriteBack),
                     },
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        let body = self.lower_block(&routine.statements, &bindings, &signature.return_type)?;
+        let initial_binding_names = routine
+            .params
+            .iter()
+            .map(|param| param.name.clone())
+            .collect::<Vec<_>>();
+        let body = self.lower_block(
+            &routine.statements,
+            &bindings,
+            &signature.return_type,
+            &routine.cleanup_footers,
+            &initial_binding_names,
+        )?;
         Some(NativeDirectRoutine {
             routine_key: routine.routine_key.clone(),
             params: signature.params.clone(),
@@ -294,63 +339,408 @@ impl<'a> NativeLoweringBuilder<'a> {
         statements: &[ExecStmt],
         bindings: &BTreeMap<String, NativeBinding>,
         expected_return_type: &NativeAbiType,
+        current_cleanup_footers: &[ExecCleanupFooter],
+        initial_binding_names: &[String],
     ) -> Option<NativeDirectBlock> {
+        let current_cleanup_actions =
+            self.initial_cleanup_actions(current_cleanup_footers, bindings, initial_binding_names)?;
+        self.lower_value_block(
+            statements,
+            bindings,
+            NativeBlockLoweringCtx {
+                expected_return_type,
+                current_cleanup_footers,
+                current_cleanup_actions: &current_cleanup_actions,
+                outer_cleanup_scopes: &[],
+                current_scope_is_loop_boundary: false,
+            },
+        )
+    }
+
+    fn lower_value_block(
+        &mut self,
+        statements: &[ExecStmt],
+        bindings: &BTreeMap<String, NativeBinding>,
+        ctx: NativeBlockLoweringCtx<'_>,
+    ) -> Option<NativeDirectBlock> {
+        let expected_return_type = ctx.expected_return_type;
+        let current_cleanup_footers = ctx.current_cleanup_footers;
+        let outer_cleanup_scopes = ctx.outer_cleanup_scopes;
         let mut bindings = bindings.clone();
         let mut lowered_statements = Vec::new();
+        let mut current_defers = Vec::new();
+        let mut current_cleanup_actions = ctx.current_cleanup_actions.to_vec();
         let mut iter = statements.iter().peekable();
         while let Some(stmt) = iter.next() {
             let is_last = iter.peek().is_none();
             match stmt {
-                ExecStmt::Let { .. } => {
-                    lowered_statements.push(self.lower_stmt(stmt, &mut bindings, false)?);
+                ExecStmt::Defer(expr) => {
+                    current_defers.push(self.lower_typed_expr(expr, &bindings)?.expr);
+                }
+                ExecStmt::Let { name, .. } => {
+                    lowered_statements.push(self.lower_stmt(stmt, &mut bindings)?);
+                    self.activate_cleanup_actions_for_binding(
+                        &mut current_cleanup_actions,
+                        current_cleanup_footers,
+                        name,
+                        &bindings,
+                    )?;
+                }
+                ExecStmt::Assign { .. } => {
+                    lowered_statements.push(self.lower_stmt(stmt, &mut bindings)?);
+                }
+                ExecStmt::Expr {
+                    expr,
+                    cleanup_footers,
+                } if cleanup_footers.is_empty() => {
+                    lowered_statements.push(NativeDirectStmt::Expr {
+                        value: self.lower_typed_expr(expr, &bindings)?.expr,
+                    });
                 }
                 ExecStmt::ReturnValue { value } if is_last => {
-                    return Some(NativeDirectBlock {
-                        statements: lowered_statements,
-                        return_expr: self.lower_expr(value, &bindings, expected_return_type)?,
-                    });
+                    let return_expr = self.lower_expr(value, &bindings, expected_return_type)?;
+                    return Some(self.wrap_tail_expr_with_cleanup(
+                        lowered_statements,
+                        return_expr,
+                        &bindings,
+                        &current_defers,
+                        &current_cleanup_actions,
+                    ));
                 }
                 ExecStmt::ReturnVoid if is_last && *expected_return_type == NativeAbiType::Unit => {
-                    return Some(NativeDirectBlock {
-                        statements: lowered_statements,
-                        return_expr: NativeDirectExpr::Unit,
-                    });
+                    return Some(self.wrap_tail_expr_with_cleanup(
+                        lowered_statements,
+                        NativeDirectExpr::Unit,
+                        &bindings,
+                        &current_defers,
+                        &current_cleanup_actions,
+                    ));
                 }
                 ExecStmt::If {
                     condition,
                     then_branch,
                     else_branch,
-                    rollups,
+                    cleanup_footers,
                     ..
-                } if rollups.is_empty() && is_last => {
+                } if cleanup_footers.is_empty() && is_last => {
+                    let nested_scopes = self.extend_cleanup_scopes(
+                        outer_cleanup_scopes,
+                        &current_defers,
+                        &current_cleanup_actions,
+                        ctx.current_scope_is_loop_boundary,
+                    );
                     let condition = self.lower_expr(condition, &bindings, &NativeAbiType::Bool)?;
-                    let then_block =
-                        self.lower_block(then_branch, &bindings, expected_return_type)?;
-                    let else_block =
-                        self.lower_block(else_branch, &bindings, expected_return_type)?;
-                    return Some(NativeDirectBlock {
-                        statements: lowered_statements,
-                        return_expr: NativeDirectExpr::If {
+                    let then_cleanup_actions =
+                        self.initial_cleanup_actions(cleanup_footers, &bindings, &[])?;
+                    let else_cleanup_actions =
+                        self.initial_cleanup_actions(cleanup_footers, &bindings, &[])?;
+                    let then_block = self.lower_value_block(
+                        then_branch,
+                        &bindings,
+                        NativeBlockLoweringCtx {
+                            expected_return_type,
+                            current_cleanup_footers: cleanup_footers,
+                            current_cleanup_actions: &then_cleanup_actions,
+                            outer_cleanup_scopes: &nested_scopes,
+                            current_scope_is_loop_boundary: false,
+                        },
+                    )?;
+                    let else_block = self.lower_value_block(
+                        else_branch,
+                        &bindings,
+                        NativeBlockLoweringCtx {
+                            expected_return_type,
+                            current_cleanup_footers: cleanup_footers,
+                            current_cleanup_actions: &else_cleanup_actions,
+                            outer_cleanup_scopes: &nested_scopes,
+                            current_scope_is_loop_boundary: false,
+                        },
+                    )?;
+                    return Some(self.wrap_tail_expr_with_cleanup(
+                        lowered_statements,
+                        NativeDirectExpr::If {
                             condition: Box::new(condition),
                             then_block: Box::new(then_block),
                             else_block: Box::new(else_block),
                         },
+                        &bindings,
+                        &current_defers,
+                        &current_cleanup_actions,
+                    ));
+                }
+                ExecStmt::ReturnValue { value } => {
+                    let value = self.lower_typed_expr(value, &bindings)?.expr;
+                    self.push_return_with_cleanup(
+                        &mut lowered_statements,
+                        value,
+                        &bindings,
+                        outer_cleanup_scopes,
+                        &current_defers,
+                        &current_cleanup_actions,
+                    );
+                }
+                ExecStmt::ReturnVoid if *expected_return_type == NativeAbiType::Unit => {
+                    self.push_return_with_cleanup(
+                        &mut lowered_statements,
+                        NativeDirectExpr::Unit,
+                        &bindings,
+                        outer_cleanup_scopes,
+                        &current_defers,
+                        &current_cleanup_actions,
+                    );
+                }
+                ExecStmt::If {
+                    condition,
+                    then_branch,
+                    else_branch,
+                    cleanup_footers,
+                    ..
+                } => {
+                    let nested_scopes = self.extend_cleanup_scopes(
+                        outer_cleanup_scopes,
+                        &current_defers,
+                        &current_cleanup_actions,
+                        ctx.current_scope_is_loop_boundary,
+                    );
+                    let then_cleanup_actions =
+                        self.initial_cleanup_actions(cleanup_footers, &bindings, &[])?;
+                    let else_cleanup_actions =
+                        self.initial_cleanup_actions(cleanup_footers, &bindings, &[])?;
+                    lowered_statements.push(NativeDirectStmt::If {
+                        condition: self.lower_expr(condition, &bindings, &NativeAbiType::Bool)?,
+                        then_body: self.lower_void_block(
+                            then_branch,
+                            &bindings,
+                            NativeBlockLoweringCtx {
+                                expected_return_type,
+                                current_cleanup_footers: cleanup_footers,
+                                current_cleanup_actions: &then_cleanup_actions,
+                                outer_cleanup_scopes: &nested_scopes,
+                                current_scope_is_loop_boundary: false,
+                            },
+                        )?,
+                        else_body: self.lower_void_block(
+                            else_branch,
+                            &bindings,
+                            NativeBlockLoweringCtx {
+                                expected_return_type,
+                                current_cleanup_footers: cleanup_footers,
+                                current_cleanup_actions: &else_cleanup_actions,
+                                outer_cleanup_scopes: &nested_scopes,
+                                current_scope_is_loop_boundary: false,
+                            },
+                        )?,
                     });
                 }
-                _ => lowered_statements.push(self.lower_stmt(stmt, &mut bindings, false)?),
+                ExecStmt::While {
+                    condition,
+                    body,
+                    cleanup_footers,
+                    ..
+                } => {
+                    let nested_scopes = self.extend_cleanup_scopes(
+                        outer_cleanup_scopes,
+                        &current_defers,
+                        &current_cleanup_actions,
+                        ctx.current_scope_is_loop_boundary,
+                    );
+                    let body_cleanup_actions =
+                        self.initial_cleanup_actions(cleanup_footers, &bindings, &[])?;
+                    lowered_statements.push(NativeDirectStmt::While {
+                        condition: self.lower_expr(condition, &bindings, &NativeAbiType::Bool)?,
+                        body: self.lower_void_block(
+                            body,
+                            &bindings,
+                            NativeBlockLoweringCtx {
+                                expected_return_type,
+                                current_cleanup_footers: cleanup_footers,
+                                current_cleanup_actions: &body_cleanup_actions,
+                                outer_cleanup_scopes: &nested_scopes,
+                                current_scope_is_loop_boundary: true,
+                            },
+                        )?,
+                    });
+                }
+                _ => return None,
             }
         }
         None
+    }
+
+    fn lower_void_block(
+        &mut self,
+        statements: &[ExecStmt],
+        bindings: &BTreeMap<String, NativeBinding>,
+        ctx: NativeBlockLoweringCtx<'_>,
+    ) -> Option<Vec<NativeDirectStmt>> {
+        let expected_return_type = ctx.expected_return_type;
+        let current_cleanup_footers = ctx.current_cleanup_footers;
+        let outer_cleanup_scopes = ctx.outer_cleanup_scopes;
+        let mut bindings = bindings.clone();
+        let mut lowered_statements = Vec::new();
+        let mut current_defers = Vec::new();
+        let mut current_cleanup_actions = ctx.current_cleanup_actions.to_vec();
+        for stmt in statements {
+            match stmt {
+                ExecStmt::Defer(expr) => {
+                    current_defers.push(self.lower_typed_expr(expr, &bindings)?.expr);
+                }
+                ExecStmt::Let { name, .. } => {
+                    lowered_statements.push(self.lower_stmt(stmt, &mut bindings)?);
+                    self.activate_cleanup_actions_for_binding(
+                        &mut current_cleanup_actions,
+                        current_cleanup_footers,
+                        name,
+                        &bindings,
+                    )?;
+                }
+                ExecStmt::Assign { .. } => {
+                    lowered_statements.push(self.lower_stmt(stmt, &mut bindings)?);
+                }
+                ExecStmt::Expr {
+                    expr,
+                    cleanup_footers,
+                } if cleanup_footers.is_empty() => {
+                    lowered_statements.push(NativeDirectStmt::Expr {
+                        value: self.lower_typed_expr(expr, &bindings)?.expr,
+                    });
+                }
+                ExecStmt::ReturnValue { value } => {
+                    let value = self.lower_typed_expr(value, &bindings)?.expr;
+                    self.push_return_with_cleanup(
+                        &mut lowered_statements,
+                        value,
+                        &bindings,
+                        outer_cleanup_scopes,
+                        &current_defers,
+                        &current_cleanup_actions,
+                    );
+                    return Some(lowered_statements);
+                }
+                ExecStmt::ReturnVoid if *expected_return_type == NativeAbiType::Unit => {
+                    self.push_return_with_cleanup(
+                        &mut lowered_statements,
+                        NativeDirectExpr::Unit,
+                        &bindings,
+                        outer_cleanup_scopes,
+                        &current_defers,
+                        &current_cleanup_actions,
+                    );
+                    return Some(lowered_statements);
+                }
+                ExecStmt::If {
+                    condition,
+                    then_branch,
+                    else_branch,
+                    cleanup_footers,
+                    ..
+                } => {
+                    let nested_scopes = self.extend_cleanup_scopes(
+                        outer_cleanup_scopes,
+                        &current_defers,
+                        &current_cleanup_actions,
+                        ctx.current_scope_is_loop_boundary,
+                    );
+                    let then_cleanup_actions =
+                        self.initial_cleanup_actions(cleanup_footers, &bindings, &[])?;
+                    let else_cleanup_actions =
+                        self.initial_cleanup_actions(cleanup_footers, &bindings, &[])?;
+                    lowered_statements.push(NativeDirectStmt::If {
+                        condition: self.lower_expr(condition, &bindings, &NativeAbiType::Bool)?,
+                        then_body: self.lower_void_block(
+                            then_branch,
+                            &bindings,
+                            NativeBlockLoweringCtx {
+                                expected_return_type,
+                                current_cleanup_footers: cleanup_footers,
+                                current_cleanup_actions: &then_cleanup_actions,
+                                outer_cleanup_scopes: &nested_scopes,
+                                current_scope_is_loop_boundary: false,
+                            },
+                        )?,
+                        else_body: self.lower_void_block(
+                            else_branch,
+                            &bindings,
+                            NativeBlockLoweringCtx {
+                                expected_return_type,
+                                current_cleanup_footers: cleanup_footers,
+                                current_cleanup_actions: &else_cleanup_actions,
+                                outer_cleanup_scopes: &nested_scopes,
+                                current_scope_is_loop_boundary: false,
+                            },
+                        )?,
+                    });
+                }
+                ExecStmt::While {
+                    condition,
+                    body,
+                    cleanup_footers,
+                    ..
+                } => {
+                    let nested_scopes = self.extend_cleanup_scopes(
+                        outer_cleanup_scopes,
+                        &current_defers,
+                        &current_cleanup_actions,
+                        ctx.current_scope_is_loop_boundary,
+                    );
+                    let body_cleanup_actions =
+                        self.initial_cleanup_actions(cleanup_footers, &bindings, &[])?;
+                    lowered_statements.push(NativeDirectStmt::While {
+                        condition: self.lower_expr(condition, &bindings, &NativeAbiType::Bool)?,
+                        body: self.lower_void_block(
+                            body,
+                            &bindings,
+                            NativeBlockLoweringCtx {
+                                expected_return_type,
+                                current_cleanup_footers: cleanup_footers,
+                                current_cleanup_actions: &body_cleanup_actions,
+                                outer_cleanup_scopes: &nested_scopes,
+                                current_scope_is_loop_boundary: true,
+                            },
+                        )?,
+                    });
+                }
+                ExecStmt::Break => {
+                    self.push_loop_exit_with_cleanup(
+                        &mut lowered_statements,
+                        NativeDirectStmt::Break,
+                        outer_cleanup_scopes,
+                        &current_defers,
+                        &current_cleanup_actions,
+                        ctx.current_scope_is_loop_boundary,
+                    )?;
+                    return Some(lowered_statements);
+                }
+                ExecStmt::Continue => {
+                    self.push_loop_exit_with_cleanup(
+                        &mut lowered_statements,
+                        NativeDirectStmt::Continue,
+                        outer_cleanup_scopes,
+                        &current_defers,
+                        &current_cleanup_actions,
+                        ctx.current_scope_is_loop_boundary,
+                    )?;
+                    return Some(lowered_statements);
+                }
+                _ => return None,
+            }
+        }
+        self.append_cleanup_scope(
+            &mut lowered_statements,
+            &current_defers,
+            &current_cleanup_actions,
+        );
+        Some(lowered_statements)
     }
 
     fn lower_stmt(
         &mut self,
         stmt: &ExecStmt,
         bindings: &mut BTreeMap<String, NativeBinding>,
-        in_loop: bool,
     ) -> Option<NativeDirectStmt> {
         match stmt {
             ExecStmt::Let {
+                binding_id,
                 mutable,
                 name,
                 value,
@@ -359,6 +749,7 @@ impl<'a> NativeLoweringBuilder<'a> {
                 bindings.insert(
                     name.clone(),
                     NativeBinding {
+                        binding_id: *binding_id,
                         ty: lowered.ty.clone(),
                         mutable: *mutable,
                     },
@@ -384,54 +775,267 @@ impl<'a> NativeLoweringBuilder<'a> {
                     value: self.lower_assignment_value(name, binding, *op, value, bindings)?,
                 })
             }
-            ExecStmt::Expr { expr, rollups } if rollups.is_empty() => {
-                Some(NativeDirectStmt::Expr {
-                    value: self.lower_typed_expr(expr, bindings)?.expr,
-                })
-            }
-            ExecStmt::ReturnValue { value } => Some(NativeDirectStmt::Return {
-                value: self.lower_typed_expr(value, bindings)?.expr,
-            }),
-            ExecStmt::ReturnVoid => Some(NativeDirectStmt::Return {
-                value: NativeDirectExpr::Unit,
-            }),
-            ExecStmt::If {
-                condition,
-                then_branch,
-                else_branch,
-                rollups,
-                ..
-            } if rollups.is_empty() => Some(NativeDirectStmt::If {
-                condition: self.lower_expr(condition, bindings, &NativeAbiType::Bool)?,
-                then_body: self.lower_stmt_body(then_branch, bindings, in_loop)?,
-                else_body: self.lower_stmt_body(else_branch, bindings, in_loop)?,
-            }),
-            ExecStmt::While {
-                condition,
-                body,
-                rollups,
-                ..
-            } if rollups.is_empty() => Some(NativeDirectStmt::While {
-                condition: self.lower_expr(condition, bindings, &NativeAbiType::Bool)?,
-                body: self.lower_stmt_body(body, bindings, true)?,
-            }),
-            ExecStmt::Break if in_loop => Some(NativeDirectStmt::Break),
-            ExecStmt::Continue if in_loop => Some(NativeDirectStmt::Continue),
             _ => None,
         }
     }
 
-    fn lower_stmt_body(
+    fn wrap_tail_expr_with_cleanup(
         &mut self,
-        statements: &[ExecStmt],
+        mut statements: Vec<NativeDirectStmt>,
+        return_expr: NativeDirectExpr,
         bindings: &BTreeMap<String, NativeBinding>,
-        in_loop: bool,
-    ) -> Option<Vec<NativeDirectStmt>> {
-        let mut body_bindings = bindings.clone();
-        statements
-            .iter()
-            .map(|stmt| self.lower_stmt(stmt, &mut body_bindings, in_loop))
-            .collect()
+        current_defers: &[NativeDirectExpr],
+        current_cleanup_actions: &[NativeCleanupAction],
+    ) -> NativeDirectBlock {
+        if current_defers.is_empty() && current_cleanup_actions.is_empty() {
+            return NativeDirectBlock {
+                statements,
+                return_expr,
+            };
+        }
+        let temp_name = self.fresh_temp_name(bindings, "defer_return");
+        statements.push(NativeDirectStmt::Let {
+            mutable: false,
+            name: temp_name.clone(),
+            value: return_expr,
+        });
+        self.append_cleanup_scope(&mut statements, current_defers, current_cleanup_actions);
+        NativeDirectBlock {
+            statements,
+            return_expr: NativeDirectExpr::Binding(temp_name),
+        }
+    }
+
+    fn push_return_with_cleanup(
+        &mut self,
+        statements: &mut Vec<NativeDirectStmt>,
+        value: NativeDirectExpr,
+        bindings: &BTreeMap<String, NativeBinding>,
+        outer_cleanup_scopes: &[NativeCleanupScope],
+        current_defers: &[NativeDirectExpr],
+        current_cleanup_actions: &[NativeCleanupAction],
+    ) {
+        let needs_cleanup = !current_defers.is_empty()
+            || !current_cleanup_actions.is_empty()
+            || outer_cleanup_scopes
+                .iter()
+                .any(|scope| !scope.defers.is_empty() || !scope.cleanup_actions.is_empty());
+        if !needs_cleanup {
+            statements.push(NativeDirectStmt::Return { value });
+            return;
+        }
+        let temp_name = self.fresh_temp_name(bindings, "defer_return");
+        statements.push(NativeDirectStmt::Let {
+            mutable: false,
+            name: temp_name.clone(),
+            value,
+        });
+        self.append_return_cleanup(
+            statements,
+            outer_cleanup_scopes,
+            current_defers,
+            current_cleanup_actions,
+        );
+        statements.push(NativeDirectStmt::Return {
+            value: NativeDirectExpr::Binding(temp_name),
+        });
+    }
+
+    fn push_loop_exit_with_cleanup(
+        &mut self,
+        statements: &mut Vec<NativeDirectStmt>,
+        control: NativeDirectStmt,
+        outer_cleanup_scopes: &[NativeCleanupScope],
+        current_defers: &[NativeDirectExpr],
+        current_cleanup_actions: &[NativeCleanupAction],
+        current_scope_is_loop_boundary: bool,
+    ) -> Option<()> {
+        self.append_loop_cleanup(
+            statements,
+            outer_cleanup_scopes,
+            current_defers,
+            current_cleanup_actions,
+            current_scope_is_loop_boundary,
+        )?;
+        statements.push(control);
+        Some(())
+    }
+
+    fn extend_cleanup_scopes(
+        &self,
+        outer_cleanup_scopes: &[NativeCleanupScope],
+        current_defers: &[NativeDirectExpr],
+        current_cleanup_actions: &[NativeCleanupAction],
+        current_scope_is_loop_boundary: bool,
+    ) -> Vec<NativeCleanupScope> {
+        let mut scopes = outer_cleanup_scopes.to_vec();
+        scopes.push(NativeCleanupScope {
+            defers: current_defers.to_vec(),
+            cleanup_actions: current_cleanup_actions.to_vec(),
+            loop_boundary: current_scope_is_loop_boundary,
+        });
+        scopes
+    }
+
+    fn append_return_cleanup(
+        &self,
+        statements: &mut Vec<NativeDirectStmt>,
+        outer_cleanup_scopes: &[NativeCleanupScope],
+        current_defers: &[NativeDirectExpr],
+        current_cleanup_actions: &[NativeCleanupAction],
+    ) {
+        self.append_cleanup_scope(statements, current_defers, current_cleanup_actions);
+        for scope in outer_cleanup_scopes.iter().rev() {
+            self.append_cleanup_scope(statements, &scope.defers, &scope.cleanup_actions);
+        }
+    }
+
+    fn append_loop_cleanup(
+        &self,
+        statements: &mut Vec<NativeDirectStmt>,
+        outer_cleanup_scopes: &[NativeCleanupScope],
+        current_defers: &[NativeDirectExpr],
+        current_cleanup_actions: &[NativeCleanupAction],
+        current_scope_is_loop_boundary: bool,
+    ) -> Option<()> {
+        self.append_cleanup_scope(statements, current_defers, current_cleanup_actions);
+        if current_scope_is_loop_boundary {
+            return Some(());
+        }
+        for scope in outer_cleanup_scopes.iter().rev() {
+            self.append_cleanup_scope(statements, &scope.defers, &scope.cleanup_actions);
+            if scope.loop_boundary {
+                return Some(());
+            }
+        }
+        None
+    }
+
+    fn append_cleanup_scope(
+        &self,
+        statements: &mut Vec<NativeDirectStmt>,
+        defers: &[NativeDirectExpr],
+        cleanup_actions: &[NativeCleanupAction],
+    ) {
+        for defer in defers.iter().rev() {
+            statements.push(NativeDirectStmt::Expr {
+                value: defer.clone(),
+            });
+        }
+        for cleanup in cleanup_actions.iter().rev() {
+            statements.push(NativeDirectStmt::Cleanup {
+                action: cleanup.clone(),
+            });
+        }
+    }
+
+    fn initial_cleanup_actions(
+        &mut self,
+        cleanup_footers: &[ExecCleanupFooter],
+        bindings: &BTreeMap<String, NativeBinding>,
+        initial_binding_names: &[String],
+    ) -> Option<Vec<NativeCleanupAction>> {
+        let mut cleanup_actions = Vec::new();
+        for name in initial_binding_names {
+            self.activate_cleanup_actions_for_binding(
+                &mut cleanup_actions,
+                cleanup_footers,
+                name,
+                bindings,
+            )?;
+        }
+        Some(cleanup_actions)
+    }
+
+    fn activate_cleanup_actions_for_binding(
+        &mut self,
+        cleanup_actions: &mut Vec<NativeCleanupAction>,
+        cleanup_footers: &[ExecCleanupFooter],
+        name: &str,
+        bindings: &BTreeMap<String, NativeBinding>,
+    ) -> Option<()> {
+        let binding_id = bindings
+            .get(name)
+            .map(|binding| binding.binding_id)
+            .unwrap_or(0);
+        for rollup in cleanup_footers {
+            let matches_binding = if rollup.binding_id != 0 {
+                rollup.binding_id == binding_id
+            } else {
+                rollup.subject == name
+            };
+            if !matches_binding {
+                continue;
+            }
+            cleanup_actions.push(self.lower_cleanup_action(rollup, name, bindings)?);
+        }
+        Some(())
+    }
+
+    fn lower_cleanup_action(
+        &mut self,
+        rollup: &ExecCleanupFooter,
+        binding_name: &str,
+        bindings: &BTreeMap<String, NativeBinding>,
+    ) -> Option<NativeCleanupAction> {
+        let callee_key = rollup.resolved_routine.as_deref()?;
+        let binding = bindings.get(binding_name)?;
+        let arg = NativeDirectExpr::Binding(binding_name.to_string());
+        if let Some(callee_signature) = self.signature_for(callee_key)
+            && callee_signature.params.len() == 1
+        {
+            let direct_arg = match callee_signature.params[0].pass_mode {
+                ArcanaCabiPassMode::In => arg.clone(),
+                ArcanaCabiPassMode::InWithWriteBack if binding.mutable => arg.clone(),
+                ArcanaCabiPassMode::InWithWriteBack => return None,
+            };
+            if let NativeRoutineLowering::Direct { routine_key } =
+                self.lower_routine(callee_key, &callee_signature)
+            {
+                return Some(NativeCleanupAction::Direct {
+                    value: NativeDirectExpr::Call {
+                        routine_key,
+                        params: callee_signature.params.clone(),
+                        args: vec![direct_arg],
+                    },
+                });
+            }
+        }
+        let routine = self.routines_by_key.get(callee_key)?;
+        if routine.params.len() != 1 {
+            return None;
+        }
+        match routine.params[0].mode.as_deref() {
+            None | Some("take") | Some("read") => {}
+            Some("edit") => return None,
+            Some(_) => return None,
+        }
+        match binding.ty {
+            NativeAbiType::Int
+            | NativeAbiType::Bool
+            | NativeAbiType::Str
+            | NativeAbiType::Bytes
+            | NativeAbiType::Unit
+            | NativeAbiType::Pair(_, _) => {}
+        };
+        Some(NativeCleanupAction::RuntimeDispatch {
+            routine_key: callee_key.to_string(),
+            arg,
+        })
+    }
+
+    fn fresh_temp_name(
+        &mut self,
+        bindings: &BTreeMap<String, NativeBinding>,
+        suffix: &str,
+    ) -> String {
+        loop {
+            let candidate = format!("__arcana_{suffix}_{}", self.temp_counter);
+            self.temp_counter += 1;
+            if !bindings.contains_key(&candidate) {
+                return candidate;
+            }
+        }
     }
 
     fn lower_assignment_value(
@@ -824,15 +1428,15 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        NativeDirectExpr, NativeDirectIntBinaryOp, NativeDirectIntCompareOp, NativeDirectStmt,
-        NativeLaunchLowering, NativeRoutineLowering, build_native_lowering_plan,
+        NativeCleanupAction, NativeDirectExpr, NativeDirectIntBinaryOp, NativeDirectIntCompareOp,
+        NativeDirectStmt, NativeLaunchLowering, NativeRoutineLowering, build_native_lowering_plan,
     };
     use crate::emit::{AotEmitContext, AotEmitTarget, AotRuntimeBinding};
     use crate::native_plan::build_native_package_plan;
     use arcana_ir::{
-        ExecAssignOp, ExecAssignTarget, ExecExpr, ExecPhraseArg, ExecPhraseQualifierKind, ExecStmt,
-        IrEntrypoint, IrPackage, IrPackageModule, IrRoutine, IrRoutineParam, IrRoutineType,
-        parse_routine_type_text, render_routine_signature_text,
+        ExecAssignOp, ExecAssignTarget, ExecBinaryOp, ExecCleanupFooter, ExecExpr, ExecPhraseArg,
+        ExecPhraseQualifierKind, ExecStmt, IrEntrypoint, IrPackage, IrPackageModule, IrRoutine,
+        IrRoutineParam, IrRoutineType, parse_routine_type_text, render_routine_signature_text,
     };
 
     fn test_return_type(signature: &str) -> Option<IrRoutineType> {
@@ -851,6 +1455,7 @@ mod tests {
                 let name = parts[1].strip_prefix("name=").unwrap_or_default();
                 let ty = parts[2].strip_prefix("ty=").unwrap_or_default();
                 IrRoutineParam {
+                    binding_id: 0,
                     mode: (!mode.is_empty()).then(|| mode.to_string()),
                     name: name.to_string(),
                     ty: parse_routine_type_text(ty).expect("type should parse"),
@@ -1008,7 +1613,7 @@ mod tests {
             impl_trait_path: None,
             availability: Vec::new(),
             foreword_rows: Vec::new(),
-            rollups: Vec::new(),
+            cleanup_footers: Vec::new(),
             statements: vec![ExecStmt::ReturnValue {
                 value: ExecExpr::Int(9),
             }],
@@ -1069,7 +1674,7 @@ mod tests {
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: Vec::new(),
-                rollups: Vec::new(),
+                cleanup_footers: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Phrase {
                         subject: Box::new(ExecExpr::Path(vec!["helper".to_string()])),
@@ -1103,7 +1708,7 @@ mod tests {
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: Vec::new(),
-                rollups: Vec::new(),
+                cleanup_footers: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Path(vec!["value".to_string()]),
                 }],
@@ -1164,7 +1769,7 @@ mod tests {
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: Vec::new(),
-                rollups: Vec::new(),
+                cleanup_footers: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Int(11),
                 }],
@@ -1186,7 +1791,7 @@ mod tests {
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: Vec::new(),
-                rollups: Vec::new(),
+                cleanup_footers: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Binary {
                         left: Box::new(ExecExpr::Str("hi ".to_string())),
@@ -1212,7 +1817,7 @@ mod tests {
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: Vec::new(),
-                rollups: Vec::new(),
+                cleanup_footers: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Phrase {
                         subject: Box::new(ExecExpr::Path(vec!["std".to_string()])),
@@ -1245,7 +1850,7 @@ mod tests {
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: Vec::new(),
-                rollups: Vec::new(),
+                cleanup_footers: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Path(vec!["pair".to_string()]),
                 }],
@@ -1267,7 +1872,7 @@ mod tests {
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: Vec::new(),
-                rollups: Vec::new(),
+                cleanup_footers: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Phrase {
                         subject: Box::new(ExecExpr::Path(vec!["helper".to_string()])),
@@ -1298,7 +1903,7 @@ mod tests {
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: Vec::new(),
-                rollups: Vec::new(),
+                cleanup_footers: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Int(21),
                 }],
@@ -1367,7 +1972,7 @@ mod tests {
             impl_trait_path: None,
             availability: Vec::new(),
             foreword_rows: Vec::new(),
-            rollups: Vec::new(),
+            cleanup_footers: Vec::new(),
             statements: vec![
                 ExecStmt::Assign {
                     target: ExecAssignTarget::Name("value".to_string()),
@@ -1437,7 +2042,7 @@ mod tests {
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: Vec::new(),
-                rollups: Vec::new(),
+                cleanup_footers: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Phrase {
                         subject: Box::new(ExecExpr::Path(vec!["helper".to_string()])),
@@ -1471,7 +2076,7 @@ mod tests {
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: Vec::new(),
-                rollups: Vec::new(),
+                cleanup_footers: Vec::new(),
                 statements: vec![
                     ExecStmt::Assign {
                         target: ExecAssignTarget::Name("value".to_string()),
@@ -1548,7 +2153,7 @@ mod tests {
             impl_trait_path: None,
             availability: Vec::new(),
             foreword_rows: Vec::new(),
-            rollups: Vec::new(),
+            cleanup_footers: Vec::new(),
             statements: vec![
                 ExecStmt::Assign {
                     target: ExecAssignTarget::Index {
@@ -1613,9 +2218,10 @@ mod tests {
             impl_trait_path: None,
             availability: Vec::new(),
             foreword_rows: Vec::new(),
-            rollups: Vec::new(),
+            cleanup_footers: Vec::new(),
             statements: vec![
                 ExecStmt::Let {
+                    binding_id: 0,
                     mutable: false,
                     name: "value".to_string(),
                     value: ExecExpr::Int(9),
@@ -1680,9 +2286,10 @@ mod tests {
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: Vec::new(),
-                rollups: Vec::new(),
+                cleanup_footers: Vec::new(),
                 statements: vec![
                     ExecStmt::Let {
+                        binding_id: 0,
                         mutable: false,
                         name: "base".to_string(),
                         value: ExecExpr::Int(8),
@@ -1714,7 +2321,7 @@ mod tests {
                         else_branch: vec![ExecStmt::ReturnValue {
                             value: ExecExpr::Int(0),
                         }],
-                        rollups: Vec::new(),
+                        cleanup_footers: Vec::new(),
                         availability: Vec::new(),
                     },
                 ],
@@ -1736,9 +2343,10 @@ mod tests {
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: Vec::new(),
-                rollups: Vec::new(),
+                cleanup_footers: Vec::new(),
                 statements: vec![
                     ExecStmt::Let {
+                        binding_id: 0,
                         mutable: false,
                         name: "bumped".to_string(),
                         value: ExecExpr::Binary {
@@ -1841,7 +2449,7 @@ mod tests {
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: Vec::new(),
-                rollups: Vec::new(),
+                cleanup_footers: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Phrase {
                         subject: Box::new(ExecExpr::Path(vec!["helper".to_string()])),
@@ -1875,7 +2483,7 @@ mod tests {
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: Vec::new(),
-                rollups: Vec::new(),
+                cleanup_footers: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Path(vec!["value".to_string()]),
                 }],
@@ -1923,7 +2531,7 @@ mod tests {
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: Vec::new(),
-                rollups: Vec::new(),
+                cleanup_footers: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Phrase {
                         subject: Box::new(ExecExpr::Path(vec!["helper".to_string()])),
@@ -1960,7 +2568,7 @@ mod tests {
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: Vec::new(),
-                rollups: Vec::new(),
+                cleanup_footers: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Path(vec!["value".to_string()]),
                 }],
@@ -2012,14 +2620,16 @@ mod tests {
             impl_trait_path: None,
             availability: Vec::new(),
             foreword_rows: Vec::new(),
-            rollups: Vec::new(),
+            cleanup_footers: Vec::new(),
             statements: vec![
                 ExecStmt::Let {
+                    binding_id: 0,
                     mutable: true,
                     name: "i".to_string(),
                     value: ExecExpr::Int(0),
                 },
                 ExecStmt::Let {
+                    binding_id: 0,
                     mutable: true,
                     name: "sum".to_string(),
                     value: ExecExpr::Int(0),
@@ -2044,7 +2654,7 @@ mod tests {
                             },
                             then_branch: vec![ExecStmt::Continue],
                             else_branch: Vec::new(),
-                            rollups: Vec::new(),
+                            cleanup_footers: Vec::new(),
                             availability: Vec::new(),
                         },
                         ExecStmt::Assign {
@@ -2060,11 +2670,11 @@ mod tests {
                             },
                             then_branch: vec![ExecStmt::Break],
                             else_branch: Vec::new(),
-                            rollups: Vec::new(),
+                            cleanup_footers: Vec::new(),
                             availability: Vec::new(),
                         },
                     ],
-                    rollups: Vec::new(),
+                    cleanup_footers: Vec::new(),
                     availability: Vec::new(),
                 },
                 ExecStmt::ReturnValue {
@@ -2177,7 +2787,7 @@ mod tests {
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: Vec::new(),
-                rollups: Vec::new(),
+                cleanup_footers: Vec::new(),
                 statements: vec![
                     ExecStmt::Expr {
                         expr: ExecExpr::Phrase {
@@ -2190,7 +2800,7 @@ mod tests {
                             dynamic_dispatch: None,
                             attached: Vec::new(),
                         },
-                        rollups: Vec::new(),
+                        cleanup_footers: Vec::new(),
                     },
                     ExecStmt::If {
                         condition: ExecExpr::Bool(true),
@@ -2198,7 +2808,7 @@ mod tests {
                             value: ExecExpr::Int(9),
                         }],
                         else_branch: Vec::new(),
-                        rollups: Vec::new(),
+                        cleanup_footers: Vec::new(),
                         availability: Vec::new(),
                     },
                     ExecStmt::ReturnValue {
@@ -2223,7 +2833,7 @@ mod tests {
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: Vec::new(),
-                rollups: Vec::new(),
+                cleanup_footers: Vec::new(),
                 statements: vec![ExecStmt::ReturnVoid],
             },
         ]);
@@ -2263,5 +2873,792 @@ mod tests {
                     ]
                 && routine.body.return_expr == NativeDirectExpr::Int(0)
         }));
+    }
+
+    #[test]
+    fn lowering_supports_defer_cleanup_on_routine_exit() {
+        let mut package = base_package();
+        package.entrypoints.push(IrEntrypoint {
+            package_id: test_package_id_for_module("core"),
+            module_id: "core".to_string(),
+            symbol_name: "main".to_string(),
+            symbol_kind: "fn".to_string(),
+            is_async: false,
+            exported: true,
+        });
+        package.routines.extend([
+            IrRoutine {
+                package_id: test_package_id_for_module("core"),
+                module_id: "core".to_string(),
+                routine_key: "core#fn-0".to_string(),
+                symbol_name: "main".to_string(),
+                symbol_kind: "fn".to_string(),
+                exported: true,
+                is_async: false,
+                type_params: Vec::new(),
+                behavior_attrs: BTreeMap::new(),
+                params: Vec::new(),
+                return_type: test_return_type("fn main() -> Int:"),
+                intrinsic_impl: None,
+                impl_target_type: None,
+                impl_trait_path: None,
+                availability: Vec::new(),
+                foreword_rows: Vec::new(),
+                cleanup_footers: Vec::new(),
+                statements: vec![
+                    ExecStmt::Let {
+                        binding_id: 0,
+                        mutable: true,
+                        name: "value".to_string(),
+                        value: ExecExpr::Int(1),
+                    },
+                    ExecStmt::Defer(ExecExpr::Phrase {
+                        subject: Box::new(ExecExpr::Path(vec!["touch".to_string()])),
+                        args: vec![ExecPhraseArg {
+                            name: None,
+                            value: ExecExpr::Path(vec!["value".to_string()]),
+                        }],
+                        qualifier_kind: ExecPhraseQualifierKind::Call,
+                        qualifier: "call".to_string(),
+                        resolved_callable: Some(vec!["core".to_string(), "touch".to_string()]),
+                        resolved_routine: Some("core#fn-1".to_string()),
+                        dynamic_dispatch: None,
+                        attached: Vec::new(),
+                    }),
+                    ExecStmt::Assign {
+                        target: ExecAssignTarget::Name("value".to_string()),
+                        op: ExecAssignOp::AddAssign,
+                        value: ExecExpr::Int(2),
+                    },
+                    ExecStmt::ReturnValue {
+                        value: ExecExpr::Path(vec!["value".to_string()]),
+                    },
+                ],
+            },
+            IrRoutine {
+                package_id: test_package_id_for_module("core"),
+                module_id: "core".to_string(),
+                routine_key: "core#fn-1".to_string(),
+                symbol_name: "touch".to_string(),
+                symbol_kind: "fn".to_string(),
+                exported: false,
+                is_async: false,
+                type_params: Vec::new(),
+                behavior_attrs: BTreeMap::new(),
+                params: test_params(&["mode=:name=value:ty=Int".to_string()]),
+                return_type: test_return_type("fn touch(value: Int):"),
+                intrinsic_impl: None,
+                impl_target_type: None,
+                impl_trait_path: None,
+                availability: Vec::new(),
+                foreword_rows: Vec::new(),
+                cleanup_footers: Vec::new(),
+                statements: vec![ExecStmt::ReturnVoid],
+            },
+        ]);
+
+        sync_exported_function_surface_rows(&mut package);
+        let package_plan = build_native_package_plan(
+            AotEmitTarget::WindowsExeBundle,
+            &package,
+            &test_emit_context("app.exe"),
+        )
+        .expect("native package plan should build");
+        let lowering_plan =
+            build_native_lowering_plan(&package_plan).expect("native lowering should build");
+
+        assert_eq!(lowering_plan.direct_routines.len(), 2);
+        let main = lowering_plan
+            .direct_routines
+            .iter()
+            .find(|routine| routine.routine_key == "core#fn-0")
+            .expect("main routine should lower directly");
+        assert_eq!(main.body.statements.len(), 4);
+        assert_eq!(
+            main.body.statements[0],
+            NativeDirectStmt::Let {
+                mutable: true,
+                name: "value".to_string(),
+                value: NativeDirectExpr::Int(1),
+            }
+        );
+        assert_eq!(
+            main.body.statements[1],
+            NativeDirectStmt::Assign {
+                name: "value".to_string(),
+                value: NativeDirectExpr::IntBinary {
+                    op: NativeDirectIntBinaryOp::Add,
+                    left: Box::new(NativeDirectExpr::Binding("value".to_string())),
+                    right: Box::new(NativeDirectExpr::Int(2)),
+                },
+            }
+        );
+        let temp_name = match &main.body.statements[2] {
+            NativeDirectStmt::Let {
+                mutable,
+                name,
+                value,
+            } => {
+                assert!(!mutable);
+                assert!(name.starts_with("__arcana_defer_return_"));
+                assert_eq!(value, &NativeDirectExpr::Binding("value".to_string()));
+                name.clone()
+            }
+            other => panic!("expected defer temp let, got {other:?}"),
+        };
+        match &main.body.statements[3] {
+            NativeDirectStmt::Expr {
+                value:
+                    NativeDirectExpr::Call {
+                        routine_key, args, ..
+                    },
+            } => {
+                assert_eq!(routine_key, "core#fn-1");
+                assert_eq!(args, &vec![NativeDirectExpr::Binding("value".to_string())]);
+            }
+            other => panic!("expected deferred cleanup call, got {other:?}"),
+        }
+        assert_eq!(main.body.return_expr, NativeDirectExpr::Binding(temp_name));
+    }
+
+    #[test]
+    fn lowering_keeps_cleanup_footer_in_direct_lane_with_runtime_dispatched_handler() {
+        let mut package = base_package();
+        package.entrypoints.push(IrEntrypoint {
+            package_id: test_package_id_for_module("core"),
+            module_id: "core".to_string(),
+            symbol_name: "main".to_string(),
+            symbol_kind: "fn".to_string(),
+            is_async: false,
+            exported: true,
+        });
+        package.routines.extend([
+            IrRoutine {
+                package_id: test_package_id_for_module("core"),
+                module_id: "core".to_string(),
+                routine_key: "core#fn-0".to_string(),
+                symbol_name: "main".to_string(),
+                symbol_kind: "fn".to_string(),
+                exported: true,
+                is_async: false,
+                type_params: Vec::new(),
+                behavior_attrs: BTreeMap::new(),
+                params: Vec::new(),
+                return_type: test_return_type("fn main() -> Int:"),
+                intrinsic_impl: None,
+                impl_target_type: None,
+                impl_trait_path: None,
+                availability: Vec::new(),
+                foreword_rows: Vec::new(),
+                cleanup_footers: vec![ExecCleanupFooter {
+                    binding_id: 0,
+                    kind: "cleanup".to_string(),
+                    subject: "value".to_string(),
+                    handler_path: vec!["cleanup".to_string()],
+                    resolved_routine: Some("core#fn-1".to_string()),
+                }],
+                statements: vec![
+                    ExecStmt::Let {
+                        binding_id: 0,
+                        mutable: false,
+                        name: "value".to_string(),
+                        value: ExecExpr::Int(9),
+                    },
+                    ExecStmt::ReturnValue {
+                        value: ExecExpr::Int(0),
+                    },
+                ],
+            },
+            IrRoutine {
+                package_id: test_package_id_for_module("core"),
+                module_id: "core".to_string(),
+                routine_key: "core#fn-1".to_string(),
+                symbol_name: "cleanup".to_string(),
+                symbol_kind: "fn".to_string(),
+                exported: false,
+                is_async: false,
+                type_params: Vec::new(),
+                behavior_attrs: BTreeMap::new(),
+                params: test_params(&["mode=take:name=value:ty=Int".to_string()]),
+                return_type: test_return_type("fn cleanup(take value: Int) -> Result[Unit, Str]:"),
+                intrinsic_impl: None,
+                impl_target_type: None,
+                impl_trait_path: None,
+                availability: Vec::new(),
+                foreword_rows: Vec::new(),
+                cleanup_footers: Vec::new(),
+                statements: vec![ExecStmt::ReturnVoid],
+            },
+        ]);
+
+        sync_exported_function_surface_rows(&mut package);
+        let package_plan = build_native_package_plan(
+            AotEmitTarget::WindowsExeBundle,
+            &package,
+            &test_emit_context("app.exe"),
+        )
+        .expect("native package plan should build");
+        let lowering_plan =
+            build_native_lowering_plan(&package_plan).expect("native lowering should build");
+
+        assert!(matches!(
+            lowering_plan.launch,
+            NativeLaunchLowering::Executable {
+                lowering: NativeRoutineLowering::Direct { .. },
+                ..
+            }
+        ));
+        let main = lowering_plan
+            .direct_routines
+            .iter()
+            .find(|routine| routine.routine_key == "core#fn-0")
+            .expect("main routine should lower directly");
+        assert!(main.body.statements.iter().any(|stmt| {
+            matches!(
+                stmt,
+                NativeDirectStmt::Cleanup {
+                    action: NativeCleanupAction::RuntimeDispatch { routine_key, arg }
+                } if routine_key == "core#fn-1"
+                    && arg == &NativeDirectExpr::Binding("value".to_string())
+            )
+        }));
+    }
+
+    #[test]
+    fn lowering_runs_param_cleanup_in_reverse_lexical_activation_order() {
+        let mut package = base_package();
+        package.entrypoints.push(IrEntrypoint {
+            package_id: test_package_id_for_module("core"),
+            module_id: "core".to_string(),
+            symbol_name: "main".to_string(),
+            symbol_kind: "fn".to_string(),
+            is_async: false,
+            exported: true,
+        });
+        package.routines.extend([
+            IrRoutine {
+                package_id: test_package_id_for_module("core"),
+                module_id: "core".to_string(),
+                routine_key: "core#fn-0".to_string(),
+                symbol_name: "main".to_string(),
+                symbol_kind: "fn".to_string(),
+                exported: true,
+                is_async: false,
+                type_params: Vec::new(),
+                behavior_attrs: BTreeMap::new(),
+                params: Vec::new(),
+                return_type: test_return_type("fn main() -> Int:"),
+                intrinsic_impl: None,
+                impl_target_type: None,
+                impl_trait_path: None,
+                availability: Vec::new(),
+                foreword_rows: Vec::new(),
+                cleanup_footers: Vec::new(),
+                statements: vec![ExecStmt::ReturnValue {
+                    value: ExecExpr::Phrase {
+                        subject: Box::new(ExecExpr::Path(vec!["run".to_string()])),
+                        args: vec![
+                            ExecPhraseArg {
+                                name: None,
+                                value: ExecExpr::Int(1),
+                            },
+                            ExecPhraseArg {
+                                name: None,
+                                value: ExecExpr::Int(2),
+                            },
+                        ],
+                        qualifier_kind: ExecPhraseQualifierKind::Call,
+                        qualifier: "call".to_string(),
+                        resolved_callable: Some(vec!["core".to_string(), "run".to_string()]),
+                        resolved_routine: Some("core#fn-1".to_string()),
+                        dynamic_dispatch: None,
+                        attached: Vec::new(),
+                    },
+                }],
+            },
+            IrRoutine {
+                package_id: test_package_id_for_module("core"),
+                module_id: "core".to_string(),
+                routine_key: "core#fn-1".to_string(),
+                symbol_name: "run".to_string(),
+                symbol_kind: "fn".to_string(),
+                exported: false,
+                is_async: false,
+                type_params: Vec::new(),
+                behavior_attrs: BTreeMap::new(),
+                params: test_params(&[
+                    "mode=take:name=zebra:ty=Int".to_string(),
+                    "mode=take:name=alpha:ty=Int".to_string(),
+                ]),
+                return_type: test_return_type("fn run(take zebra: Int, take alpha: Int) -> Int:"),
+                intrinsic_impl: None,
+                impl_target_type: None,
+                impl_trait_path: None,
+                availability: Vec::new(),
+                foreword_rows: Vec::new(),
+                cleanup_footers: vec![
+                    ExecCleanupFooter {
+                        binding_id: 0,
+                        kind: "cleanup".to_string(),
+                        subject: "zebra".to_string(),
+                        handler_path: vec!["cleanup".to_string()],
+                        resolved_routine: Some("core#fn-2".to_string()),
+                    },
+                    ExecCleanupFooter {
+                        binding_id: 0,
+                        kind: "cleanup".to_string(),
+                        subject: "alpha".to_string(),
+                        handler_path: vec!["cleanup".to_string()],
+                        resolved_routine: Some("core#fn-2".to_string()),
+                    },
+                ],
+                statements: vec![ExecStmt::ReturnValue {
+                    value: ExecExpr::Int(0),
+                }],
+            },
+            IrRoutine {
+                package_id: test_package_id_for_module("core"),
+                module_id: "core".to_string(),
+                routine_key: "core#fn-2".to_string(),
+                symbol_name: "cleanup".to_string(),
+                symbol_kind: "fn".to_string(),
+                exported: false,
+                is_async: false,
+                type_params: Vec::new(),
+                behavior_attrs: BTreeMap::new(),
+                params: test_params(&["mode=take:name=value:ty=Int".to_string()]),
+                return_type: test_return_type("fn cleanup(take value: Int) -> Result[Unit, Str]:"),
+                intrinsic_impl: None,
+                impl_target_type: None,
+                impl_trait_path: None,
+                availability: Vec::new(),
+                foreword_rows: Vec::new(),
+                cleanup_footers: Vec::new(),
+                statements: vec![ExecStmt::ReturnVoid],
+            },
+        ]);
+
+        sync_exported_function_surface_rows(&mut package);
+        let package_plan = build_native_package_plan(
+            AotEmitTarget::WindowsExeBundle,
+            &package,
+            &test_emit_context("app.exe"),
+        )
+        .expect("native package plan should build");
+        let lowering_plan =
+            build_native_lowering_plan(&package_plan).expect("native lowering should build");
+
+        let main = lowering_plan
+            .direct_routines
+            .iter()
+            .find(|routine| routine.routine_key == "core#fn-1")
+            .expect("run routine should lower directly");
+        assert_eq!(main.body.statements.len(), 3);
+        assert!(matches!(
+            &main.body.statements[1],
+            NativeDirectStmt::Cleanup {
+                action: NativeCleanupAction::RuntimeDispatch { arg, .. }
+            } if arg == &NativeDirectExpr::Binding("alpha".to_string())
+        ));
+        assert!(matches!(
+            &main.body.statements[2],
+            NativeDirectStmt::Cleanup {
+                action: NativeCleanupAction::RuntimeDispatch { arg, .. }
+            } if arg == &NativeDirectExpr::Binding("zebra".to_string())
+        ));
+    }
+
+    #[test]
+    fn lowering_runs_defer_before_early_return_inside_if() {
+        let mut package = base_package();
+        package.entrypoints.push(IrEntrypoint {
+            package_id: test_package_id_for_module("core"),
+            module_id: "core".to_string(),
+            symbol_name: "main".to_string(),
+            symbol_kind: "fn".to_string(),
+            is_async: false,
+            exported: true,
+        });
+        package.routines.extend([
+            IrRoutine {
+                package_id: test_package_id_for_module("core"),
+                module_id: "core".to_string(),
+                routine_key: "core#fn-0".to_string(),
+                symbol_name: "main".to_string(),
+                symbol_kind: "fn".to_string(),
+                exported: true,
+                is_async: false,
+                type_params: Vec::new(),
+                behavior_attrs: BTreeMap::new(),
+                params: Vec::new(),
+                return_type: test_return_type("fn main() -> Int:"),
+                intrinsic_impl: None,
+                impl_target_type: None,
+                impl_trait_path: None,
+                availability: Vec::new(),
+                foreword_rows: Vec::new(),
+                cleanup_footers: Vec::new(),
+                statements: vec![
+                    ExecStmt::If {
+                        condition: ExecExpr::Bool(true),
+                        then_branch: vec![
+                            ExecStmt::Let {
+                                binding_id: 0,
+                                mutable: false,
+                                name: "value".to_string(),
+                                value: ExecExpr::Int(9),
+                            },
+                            ExecStmt::Defer(ExecExpr::Phrase {
+                                subject: Box::new(ExecExpr::Path(vec!["touch".to_string()])),
+                                args: vec![ExecPhraseArg {
+                                    name: None,
+                                    value: ExecExpr::Path(vec!["value".to_string()]),
+                                }],
+                                qualifier_kind: ExecPhraseQualifierKind::Call,
+                                qualifier: "call".to_string(),
+                                resolved_callable: Some(vec![
+                                    "core".to_string(),
+                                    "touch".to_string(),
+                                ]),
+                                resolved_routine: Some("core#fn-1".to_string()),
+                                dynamic_dispatch: None,
+                                attached: Vec::new(),
+                            }),
+                            ExecStmt::ReturnValue {
+                                value: ExecExpr::Path(vec!["value".to_string()]),
+                            },
+                        ],
+                        else_branch: Vec::new(),
+                        cleanup_footers: Vec::new(),
+                        availability: Vec::new(),
+                    },
+                    ExecStmt::ReturnValue {
+                        value: ExecExpr::Int(0),
+                    },
+                ],
+            },
+            IrRoutine {
+                package_id: test_package_id_for_module("core"),
+                module_id: "core".to_string(),
+                routine_key: "core#fn-1".to_string(),
+                symbol_name: "touch".to_string(),
+                symbol_kind: "fn".to_string(),
+                exported: false,
+                is_async: false,
+                type_params: Vec::new(),
+                behavior_attrs: BTreeMap::new(),
+                params: test_params(&["mode=:name=value:ty=Int".to_string()]),
+                return_type: test_return_type("fn touch(value: Int):"),
+                intrinsic_impl: None,
+                impl_target_type: None,
+                impl_trait_path: None,
+                availability: Vec::new(),
+                foreword_rows: Vec::new(),
+                cleanup_footers: Vec::new(),
+                statements: vec![ExecStmt::ReturnVoid],
+            },
+        ]);
+
+        sync_exported_function_surface_rows(&mut package);
+        let package_plan = build_native_package_plan(
+            AotEmitTarget::WindowsExeBundle,
+            &package,
+            &test_emit_context("app.exe"),
+        )
+        .expect("native package plan should build");
+        let lowering_plan =
+            build_native_lowering_plan(&package_plan).expect("native lowering should build");
+
+        let main = lowering_plan
+            .direct_routines
+            .iter()
+            .find(|routine| routine.routine_key == "core#fn-0")
+            .expect("main routine should lower directly");
+        assert_eq!(main.body.statements.len(), 1);
+        let NativeDirectStmt::If {
+            condition,
+            then_body,
+            else_body,
+        } = &main.body.statements[0]
+        else {
+            panic!("expected leading if statement");
+        };
+        assert_eq!(condition, &NativeDirectExpr::Bool(true));
+        assert!(else_body.is_empty());
+        assert_eq!(then_body.len(), 4);
+        assert_eq!(
+            then_body[0],
+            NativeDirectStmt::Let {
+                mutable: false,
+                name: "value".to_string(),
+                value: NativeDirectExpr::Int(9),
+            }
+        );
+        let temp_name = match &then_body[1] {
+            NativeDirectStmt::Let {
+                mutable,
+                name,
+                value,
+            } => {
+                assert!(!mutable);
+                assert!(name.starts_with("__arcana_defer_return_"));
+                assert_eq!(value, &NativeDirectExpr::Binding("value".to_string()));
+                name.clone()
+            }
+            other => panic!("expected branch defer temp let, got {other:?}"),
+        };
+        match &then_body[2] {
+            NativeDirectStmt::Expr {
+                value:
+                    NativeDirectExpr::Call {
+                        routine_key, args, ..
+                    },
+            } => {
+                assert_eq!(routine_key, "core#fn-1");
+                assert_eq!(args, &vec![NativeDirectExpr::Binding("value".to_string())]);
+            }
+            other => panic!("expected branch deferred cleanup call, got {other:?}"),
+        }
+        assert_eq!(
+            then_body[3],
+            NativeDirectStmt::Return {
+                value: NativeDirectExpr::Binding(temp_name),
+            }
+        );
+        assert_eq!(main.body.return_expr, NativeDirectExpr::Int(0));
+    }
+
+    #[test]
+    fn lowering_runs_loop_body_defers_before_continue() {
+        let mut package = base_package();
+        package.entrypoints.push(IrEntrypoint {
+            package_id: test_package_id_for_module("core"),
+            module_id: "core".to_string(),
+            symbol_name: "main".to_string(),
+            symbol_kind: "fn".to_string(),
+            is_async: false,
+            exported: true,
+        });
+        package.routines.extend([
+            IrRoutine {
+                package_id: test_package_id_for_module("core"),
+                module_id: "core".to_string(),
+                routine_key: "core#fn-0".to_string(),
+                symbol_name: "main".to_string(),
+                symbol_kind: "fn".to_string(),
+                exported: true,
+                is_async: false,
+                type_params: Vec::new(),
+                behavior_attrs: BTreeMap::new(),
+                params: Vec::new(),
+                return_type: test_return_type("fn main() -> Int:"),
+                intrinsic_impl: None,
+                impl_target_type: None,
+                impl_trait_path: None,
+                availability: Vec::new(),
+                foreword_rows: Vec::new(),
+                cleanup_footers: Vec::new(),
+                statements: vec![
+                    ExecStmt::Let {
+                        binding_id: 0,
+                        mutable: true,
+                        name: "i".to_string(),
+                        value: ExecExpr::Int(0),
+                    },
+                    ExecStmt::Let {
+                        binding_id: 0,
+                        mutable: true,
+                        name: "sum".to_string(),
+                        value: ExecExpr::Int(0),
+                    },
+                    ExecStmt::While {
+                        condition: ExecExpr::Binary {
+                            left: Box::new(ExecExpr::Path(vec!["i".to_string()])),
+                            op: ExecBinaryOp::Lt,
+                            right: Box::new(ExecExpr::Int(3)),
+                        },
+                        body: vec![
+                            ExecStmt::Defer(ExecExpr::Phrase {
+                                subject: Box::new(ExecExpr::Path(vec!["touch".to_string()])),
+                                args: vec![ExecPhraseArg {
+                                    name: None,
+                                    value: ExecExpr::Path(vec!["i".to_string()]),
+                                }],
+                                qualifier_kind: ExecPhraseQualifierKind::Call,
+                                qualifier: "call".to_string(),
+                                resolved_callable: Some(vec![
+                                    "core".to_string(),
+                                    "touch".to_string(),
+                                ]),
+                                resolved_routine: Some("core#fn-1".to_string()),
+                                dynamic_dispatch: None,
+                                attached: Vec::new(),
+                            }),
+                            ExecStmt::If {
+                                condition: ExecExpr::Binary {
+                                    left: Box::new(ExecExpr::Path(vec!["i".to_string()])),
+                                    op: ExecBinaryOp::EqEq,
+                                    right: Box::new(ExecExpr::Int(1)),
+                                },
+                                then_branch: vec![
+                                    ExecStmt::Assign {
+                                        target: ExecAssignTarget::Name("i".to_string()),
+                                        op: ExecAssignOp::AddAssign,
+                                        value: ExecExpr::Int(1),
+                                    },
+                                    ExecStmt::Continue,
+                                ],
+                                else_branch: Vec::new(),
+                                cleanup_footers: Vec::new(),
+                                availability: Vec::new(),
+                            },
+                            ExecStmt::Assign {
+                                target: ExecAssignTarget::Name("sum".to_string()),
+                                op: ExecAssignOp::AddAssign,
+                                value: ExecExpr::Path(vec!["i".to_string()]),
+                            },
+                            ExecStmt::Assign {
+                                target: ExecAssignTarget::Name("i".to_string()),
+                                op: ExecAssignOp::AddAssign,
+                                value: ExecExpr::Int(1),
+                            },
+                        ],
+                        cleanup_footers: Vec::new(),
+                        availability: Vec::new(),
+                    },
+                    ExecStmt::ReturnValue {
+                        value: ExecExpr::Path(vec!["sum".to_string()]),
+                    },
+                ],
+            },
+            IrRoutine {
+                package_id: test_package_id_for_module("core"),
+                module_id: "core".to_string(),
+                routine_key: "core#fn-1".to_string(),
+                symbol_name: "touch".to_string(),
+                symbol_kind: "fn".to_string(),
+                exported: false,
+                is_async: false,
+                type_params: Vec::new(),
+                behavior_attrs: BTreeMap::new(),
+                params: test_params(&["mode=:name=value:ty=Int".to_string()]),
+                return_type: test_return_type("fn touch(value: Int):"),
+                intrinsic_impl: None,
+                impl_target_type: None,
+                impl_trait_path: None,
+                availability: Vec::new(),
+                foreword_rows: Vec::new(),
+                cleanup_footers: Vec::new(),
+                statements: vec![ExecStmt::ReturnVoid],
+            },
+        ]);
+
+        sync_exported_function_surface_rows(&mut package);
+        let package_plan = build_native_package_plan(
+            AotEmitTarget::WindowsExeBundle,
+            &package,
+            &test_emit_context("app.exe"),
+        )
+        .expect("native package plan should build");
+        let lowering_plan =
+            build_native_lowering_plan(&package_plan).expect("native lowering should build");
+
+        let main = lowering_plan
+            .direct_routines
+            .iter()
+            .find(|routine| routine.routine_key == "core#fn-0")
+            .expect("main routine should lower directly");
+        assert_eq!(main.body.statements.len(), 3);
+        let NativeDirectStmt::While { condition, body } = &main.body.statements[2] else {
+            panic!("expected while statement");
+        };
+        assert_eq!(
+            condition,
+            &NativeDirectExpr::IntCompare {
+                op: NativeDirectIntCompareOp::Lt,
+                left: Box::new(NativeDirectExpr::Binding("i".to_string())),
+                right: Box::new(NativeDirectExpr::Int(3)),
+            }
+        );
+        assert_eq!(body.len(), 4);
+        let NativeDirectStmt::If {
+            condition,
+            then_body,
+            else_body,
+        } = &body[0]
+        else {
+            panic!("expected loop guard if");
+        };
+        assert_eq!(
+            condition,
+            &NativeDirectExpr::IntCompare {
+                op: NativeDirectIntCompareOp::Eq,
+                left: Box::new(NativeDirectExpr::Binding("i".to_string())),
+                right: Box::new(NativeDirectExpr::Int(1)),
+            }
+        );
+        assert!(else_body.is_empty());
+        assert_eq!(
+            then_body[0],
+            NativeDirectStmt::Assign {
+                name: "i".to_string(),
+                value: NativeDirectExpr::IntBinary {
+                    op: NativeDirectIntBinaryOp::Add,
+                    left: Box::new(NativeDirectExpr::Binding("i".to_string())),
+                    right: Box::new(NativeDirectExpr::Int(1)),
+                },
+            }
+        );
+        match &then_body[1] {
+            NativeDirectStmt::Expr {
+                value:
+                    NativeDirectExpr::Call {
+                        routine_key, args, ..
+                    },
+            } => {
+                assert_eq!(routine_key, "core#fn-1");
+                assert_eq!(args, &vec![NativeDirectExpr::Binding("i".to_string())]);
+            }
+            other => panic!("expected loop continue cleanup call, got {other:?}"),
+        }
+        assert_eq!(then_body[2], NativeDirectStmt::Continue);
+        assert_eq!(
+            body[1],
+            NativeDirectStmt::Assign {
+                name: "sum".to_string(),
+                value: NativeDirectExpr::IntBinary {
+                    op: NativeDirectIntBinaryOp::Add,
+                    left: Box::new(NativeDirectExpr::Binding("sum".to_string())),
+                    right: Box::new(NativeDirectExpr::Binding("i".to_string())),
+                },
+            }
+        );
+        assert_eq!(
+            body[2],
+            NativeDirectStmt::Assign {
+                name: "i".to_string(),
+                value: NativeDirectExpr::IntBinary {
+                    op: NativeDirectIntBinaryOp::Add,
+                    left: Box::new(NativeDirectExpr::Binding("i".to_string())),
+                    right: Box::new(NativeDirectExpr::Int(1)),
+                },
+            }
+        );
+        match &body[3] {
+            NativeDirectStmt::Expr {
+                value:
+                    NativeDirectExpr::Call {
+                        routine_key, args, ..
+                    },
+            } => {
+                assert_eq!(routine_key, "core#fn-1");
+                assert_eq!(args, &vec![NativeDirectExpr::Binding("i".to_string())]);
+            }
+            other => panic!("expected loop fallthrough cleanup call, got {other:?}"),
+        }
+        assert_eq!(
+            main.body.return_expr,
+            NativeDirectExpr::Binding("sum".to_string())
+        );
     }
 }

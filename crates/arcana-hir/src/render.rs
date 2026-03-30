@@ -1,8 +1,8 @@
 use super::{
     HirAssignTarget, HirAvailabilityAttachment, HirBehaviorAttr, HirBinaryOp, HirChainConnector,
-    HirChainIntroducer, HirChainStep, HirDirective, HirEnumVariant, HirExpr, HirForewordApp,
-    HirForewordArg, HirHeaderAttachment, HirImplAssocTypeBinding, HirImplDecl, HirLangItem,
-    HirMatchArm, HirMatchPattern, HirModuleDependency, HirOwnerExit, HirOwnerObject, HirPageRollup,
+    HirChainIntroducer, HirChainStep, HirCleanupFooter, HirDirective, HirEnumVariant, HirExpr,
+    HirForewordApp, HirForewordArg, HirHeaderAttachment, HirImplAssocTypeBinding, HirImplDecl,
+    HirLangItem, HirMatchArm, HirMatchPattern, HirModuleDependency, HirOwnerExit, HirOwnerObject,
     HirPhraseArg, HirStatement, HirStatementKind, HirSymbol, HirSymbolBody, HirUnaryOp,
     signature::render_symbol_signature,
 };
@@ -63,7 +63,7 @@ pub fn render_symbol_fingerprint(symbol: &HirSymbol) -> String {
             "symbol(",
             "kind={}|name={}|exported={}|async={}|signature={}|type_params=[{}]|",
             "where_clause={}|behavior_attrs=[{}]|availability=[{}]|forewords=[{}]|intrinsic={}|body={}|",
-            "statements=[{}]|rollups=[{}])"
+            "statements=[{}]|cleanup_footers=[{}])"
         ),
         symbol.kind.as_str(),
         quote_fingerprint_text(&symbol.name),
@@ -112,7 +112,7 @@ pub fn render_symbol_fingerprint(symbol: &HirSymbol) -> String {
             .collect::<Vec<_>>()
             .join(","),
         symbol
-            .rollups
+            .cleanup_footers
             .iter()
             .map(render_rollup_fingerprint)
             .collect::<Vec<_>>()
@@ -326,7 +326,7 @@ fn render_impl_assoc_type_fingerprint(assoc_type: &HirImplAssocTypeBinding) -> S
     )
 }
 
-fn render_rollup_fingerprint(rollup: &HirPageRollup) -> String {
+fn render_rollup_fingerprint(rollup: &HirCleanupFooter) -> String {
     format!(
         "rollup(kind={}|subject={}|handler=[{}])",
         rollup.kind.as_str(),
@@ -342,7 +342,7 @@ fn render_rollup_fingerprint(rollup: &HirPageRollup) -> String {
 
 fn render_statement_fingerprint(statement: &HirStatement) -> String {
     format!(
-        "stmt(availability=[{}]|forewords=[{}]|rollups=[{}]|kind={})",
+        "stmt(availability=[{}]|forewords=[{}]|cleanup_footers=[{}]|kind={})",
         statement
             .availability
             .iter()
@@ -356,7 +356,7 @@ fn render_statement_fingerprint(statement: &HirStatement) -> String {
             .collect::<Vec<_>>()
             .join(","),
         statement
-            .rollups
+            .cleanup_footers
             .iter()
             .map(render_rollup_fingerprint)
             .collect::<Vec<_>>()

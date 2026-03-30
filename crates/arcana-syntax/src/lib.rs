@@ -197,11 +197,11 @@ pub struct LangItemDecl {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PageRollupKind {
+pub enum CleanupFooterKind {
     Cleanup,
 }
 
-impl PageRollupKind {
+impl CleanupFooterKind {
     pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Cleanup => "cleanup",
@@ -210,8 +210,8 @@ impl PageRollupKind {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PageRollup {
-    pub kind: PageRollupKind,
+pub struct CleanupFooter {
+    pub kind: CleanupFooterKind,
     pub subject: String,
     pub handler_path: Vec<String>,
     pub span: Span,
@@ -514,7 +514,7 @@ pub struct Statement {
     pub kind: StatementKind,
     pub availability: Vec<AvailabilityAttachment>,
     pub forewords: Vec<ForewordApp>,
-    pub rollups: Vec<PageRollup>,
+    pub cleanup_footers: Vec<CleanupFooter>,
     pub span: Span,
 }
 
@@ -558,7 +558,7 @@ pub struct SymbolDecl {
     pub intrinsic_impl: Option<String>,
     pub body: SymbolBody,
     pub statements: Vec<Statement>,
-    pub rollups: Vec<PageRollup>,
+    pub cleanup_footers: Vec<CleanupFooter>,
     pub surface_text: String,
     pub span: Span,
 }
@@ -637,9 +637,9 @@ pub fn parse_module(source: &str) -> Result<ParsedModule, String> {
                 continue;
             }
         }
-        if parse_page_rollup_entry(entry)?.is_some() {
+        if parse_cleanup_footer_entry(entry)?.is_some() {
             return Err(format!(
-                "{}:{}: page rollup without a valid owning header",
+                "{}:{}: cleanup footer without a valid owning header",
                 entry.span.line, entry.span.column
             ));
         }
@@ -692,14 +692,15 @@ pub fn parse_module(source: &str) -> Result<ParsedModule, String> {
                     span.line, span.column
                 ));
             }
-            let (rollups, consumed) = collect_following_rollups(&entries, index + 1)?;
-            if !rollups.is_empty() {
-                if symbol_can_own_rollups(&symbol) {
-                    symbol.rollups = rollups;
+            let (cleanup_footers, consumed) =
+                collect_following_cleanup_footers(&entries, index + 1)?;
+            if !cleanup_footers.is_empty() {
+                if symbol_can_own_cleanup_footers(&symbol) {
+                    symbol.cleanup_footers = cleanup_footers;
                 } else {
-                    let span = rollups[0].span;
+                    let span = cleanup_footers[0].span;
                     return Err(format!(
-                        "{}:{}: page rollups can only attach to function-like owning headers",
+                        "{}:{}: cleanup footers can only attach to owning function, behavior, or system headers",
                         span.line, span.column
                     ));
                 }
@@ -1118,7 +1119,7 @@ fn parse_symbol_header(trimmed: &str, span: Span) -> Option<SymbolDecl> {
             intrinsic_impl: None,
             body: SymbolBody::None,
             statements: Vec::new(),
-            rollups: Vec::new(),
+            cleanup_footers: Vec::new(),
             surface_text: trimmed.to_string(),
             span,
         });
@@ -1148,7 +1149,7 @@ fn parse_owner_symbol(rest: &str, exported: bool, span: Span) -> Option<SymbolDe
             exits: Vec::new(),
         },
         statements: Vec::new(),
-        rollups: Vec::new(),
+        cleanup_footers: Vec::new(),
         surface_text: format!("create {}", rest.trim()),
         span,
     })
@@ -1180,7 +1181,7 @@ fn parse_behavior_symbol(rest: &str, exported: bool, span: Span) -> Option<Symbo
         intrinsic_impl: None,
         body: SymbolBody::None,
         statements: Vec::new(),
-        rollups: Vec::new(),
+        cleanup_footers: Vec::new(),
         surface_text: format!(
             "behavior[{}] fn {}",
             &rest[open_idx + 1..close_idx],
@@ -1216,7 +1217,7 @@ fn parse_system_symbol(rest: &str, exported: bool, span: Span) -> Option<SymbolD
         intrinsic_impl: None,
         body: SymbolBody::None,
         statements: Vec::new(),
-        rollups: Vec::new(),
+        cleanup_footers: Vec::new(),
         surface_text: format!("system[{}] fn {}", &rest[open_idx + 1..close_idx], fn_rest),
         span,
     })
@@ -1246,7 +1247,7 @@ fn parse_intrinsic_symbol(rest: &str, exported: bool, span: Span) -> Option<Symb
         intrinsic_impl: Some(binding.to_string()),
         body: SymbolBody::None,
         statements: Vec::new(),
-        rollups: Vec::new(),
+        cleanup_footers: Vec::new(),
         surface_text: format!("intrinsic fn {} = {}", signature_text.trim(), binding),
         span,
     })
@@ -1276,7 +1277,7 @@ fn parse_opaque_symbol(rest: &str, exported: bool, span: Span) -> Option<SymbolD
         intrinsic_impl: None,
         body: SymbolBody::None,
         statements: Vec::new(),
-        rollups: Vec::new(),
+        cleanup_footers: Vec::new(),
         surface_text: format!("opaque type {header}"),
         span,
     })
@@ -1620,9 +1621,9 @@ fn parse_impl_decl(entry: &RawBlockEntry) -> Result<Option<ImplDecl>, String> {
             index += 1;
             continue;
         }
-        if parse_page_rollup_entry(child)?.is_some() {
+        if parse_cleanup_footer_entry(child)?.is_some() {
             return Err(format!(
-                "{}:{}: page rollup without a valid owning header",
+                "{}:{}: cleanup footer without a valid owning header",
                 child.span.line, child.span.column
             ));
         }
@@ -1640,14 +1641,15 @@ fn parse_impl_decl(entry: &RawBlockEntry) -> Result<Option<ImplDecl>, String> {
         }
         if let Some(mut method) = parse_symbol_entry(child)? {
             method.forewords = std::mem::take(&mut pending_forewords);
-            let (rollups, consumed) = collect_following_rollups(&entry.children, index + 1)?;
-            if !rollups.is_empty() {
-                if symbol_can_own_rollups(&method) {
-                    method.rollups = rollups;
+            let (cleanup_footers, consumed) =
+                collect_following_cleanup_footers(&entry.children, index + 1)?;
+            if !cleanup_footers.is_empty() {
+                if symbol_can_own_cleanup_footers(&method) {
+                    method.cleanup_footers = cleanup_footers;
                 } else {
                     let span = method.span;
                     return Err(format!(
-                        "{}:{}: page rollups can only attach to function-like owning headers",
+                        "{}:{}: cleanup footers can only attach to owning function, behavior, or system headers",
                         span.line, span.column
                     ));
                 }
@@ -1720,9 +1722,9 @@ fn parse_symbol_body(kind: &SymbolKind, entries: &[RawBlockEntry]) -> Result<Sym
                     index += 1;
                     continue;
                 }
-                if parse_page_rollup_entry(entry)?.is_some() {
+                if parse_cleanup_footer_entry(entry)?.is_some() {
                     return Err(format!(
-                        "{}:{}: page rollup without a valid owning header",
+                        "{}:{}: cleanup footer without a valid owning header",
                         entry.span.line, entry.span.column
                     ));
                 }
@@ -1740,14 +1742,15 @@ fn parse_symbol_body(kind: &SymbolKind, entries: &[RawBlockEntry]) -> Result<Sym
                 }
                 if let Some(mut method) = parse_symbol_entry(entry)? {
                     method.forewords = std::mem::take(&mut pending_forewords);
-                    let (rollups, consumed) = collect_following_rollups(entries, index + 1)?;
-                    if !rollups.is_empty() {
-                        if symbol_can_own_rollups(&method) {
-                            method.rollups = rollups;
+                    let (cleanup_footers, consumed) =
+                        collect_following_cleanup_footers(entries, index + 1)?;
+                    if !cleanup_footers.is_empty() {
+                        if symbol_can_own_cleanup_footers(&method) {
+                            method.cleanup_footers = cleanup_footers;
                         } else {
                             let span = method.span;
                             return Err(format!(
-                                "{}:{}: page rollups can only attach to function-like owning headers",
+                                "{}:{}: cleanup footers can only attach to owning function, behavior, or system headers",
                                 span.line, span.column
                             ));
                         }
@@ -1787,9 +1790,9 @@ fn parse_symbol_body(kind: &SymbolKind, entries: &[RawBlockEntry]) -> Result<Sym
                     index += 1;
                     continue;
                 }
-                if parse_page_rollup_entry(entry)?.is_some() {
+                if parse_cleanup_footer_entry(entry)?.is_some() {
                     return Err(format!(
-                        "{}:{}: page rollup without a valid owning header",
+                        "{}:{}: cleanup footer without a valid owning header",
                         entry.span.line, entry.span.column
                     ));
                 }
@@ -1807,14 +1810,15 @@ fn parse_symbol_body(kind: &SymbolKind, entries: &[RawBlockEntry]) -> Result<Sym
                 }
                 if let Some(mut method) = parse_symbol_entry(entry)? {
                     method.forewords = std::mem::take(&mut pending_forewords);
-                    let (rollups, consumed) = collect_following_rollups(entries, index + 1)?;
-                    if !rollups.is_empty() {
-                        if symbol_can_own_rollups(&method) {
-                            method.rollups = rollups;
+                    let (cleanup_footers, consumed) =
+                        collect_following_cleanup_footers(entries, index + 1)?;
+                    if !cleanup_footers.is_empty() {
+                        if symbol_can_own_cleanup_footers(&method) {
+                            method.cleanup_footers = cleanup_footers;
                         } else {
                             let span = method.span;
                             return Err(format!(
-                                "{}:{}: page rollups can only attach to function-like owning headers",
+                                "{}:{}: cleanup footers can only attach to owning function, behavior, or system headers",
                                 span.line, span.column
                             ));
                         }
@@ -1975,9 +1979,9 @@ fn parse_statement_block(
                 entry.span.line, entry.span.column
             ));
         }
-        if parse_page_rollup_entry(entry)?.is_some() {
+        if parse_cleanup_footer_entry(entry)?.is_some() {
             return Err(format!(
-                "{}:{}: page rollup without a valid owning header",
+                "{}:{}: cleanup footer without a valid owning header",
                 entry.span.line, entry.span.column
             ));
         }
@@ -2007,14 +2011,14 @@ fn parse_statement_block(
             }
         }
 
-        let (rollups, consumed) = collect_following_rollups(entries, next_index)?;
-        if !rollups.is_empty() {
-            if statement_can_own_rollups(&statement) {
-                statement.rollups = rollups;
+        let (cleanup_footers, consumed) = collect_following_cleanup_footers(entries, next_index)?;
+        if !cleanup_footers.is_empty() {
+            if statement_can_own_cleanup_footers(&statement) {
+                statement.cleanup_footers = cleanup_footers;
             } else {
                 let span = entries[next_index].span;
                 return Err(format!(
-                    "{}:{}: page rollups can only attach to block-owning headers",
+                    "{}:{}: cleanup footers can only attach to block-owning headers",
                     span.line, span.column
                 ));
             }
@@ -2055,7 +2059,7 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
             },
             availability: Vec::new(),
             forewords: Vec::new(),
-            rollups: Vec::new(),
+            cleanup_footers: Vec::new(),
             span: entry.span,
         });
     }
@@ -2073,7 +2077,7 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
             },
             availability: Vec::new(),
             forewords: Vec::new(),
-            rollups: Vec::new(),
+            cleanup_footers: Vec::new(),
             span: entry.span,
         });
     }
@@ -2108,7 +2112,7 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
             },
             availability: Vec::new(),
             forewords: Vec::new(),
-            rollups: Vec::new(),
+            cleanup_footers: Vec::new(),
             span: entry.span,
         });
     }
@@ -2147,7 +2151,7 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
             },
             availability: Vec::new(),
             forewords: Vec::new(),
-            rollups: Vec::new(),
+            cleanup_footers: Vec::new(),
             span: entry.span,
         });
     }
@@ -2167,7 +2171,7 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
             kind: StatementKind::Return { value },
             availability: Vec::new(),
             forewords: Vec::new(),
-            rollups: Vec::new(),
+            cleanup_footers: Vec::new(),
             span: entry.span,
         });
     }
@@ -2179,7 +2183,7 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
             },
             availability: Vec::new(),
             forewords: Vec::new(),
-            rollups: Vec::new(),
+            cleanup_footers: Vec::new(),
             span: entry.span,
         });
     }
@@ -2195,7 +2199,7 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
             kind: StatementKind::Break,
             availability: Vec::new(),
             forewords: Vec::new(),
-            rollups: Vec::new(),
+            cleanup_footers: Vec::new(),
             span: entry.span,
         });
     }
@@ -2211,7 +2215,7 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
             kind: StatementKind::Continue,
             availability: Vec::new(),
             forewords: Vec::new(),
-            rollups: Vec::new(),
+            cleanup_footers: Vec::new(),
             span: entry.span,
         });
     }
@@ -2225,7 +2229,7 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
             },
             availability: Vec::new(),
             forewords: Vec::new(),
-            rollups: Vec::new(),
+            cleanup_footers: Vec::new(),
             span: entry.span,
         });
     }
@@ -2236,7 +2240,7 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
         },
         availability: Vec::new(),
         forewords: Vec::new(),
-        rollups: Vec::new(),
+        cleanup_footers: Vec::new(),
         span: entry.span,
     })
 }
@@ -3977,77 +3981,161 @@ fn parse_impl_assoc_type_binding(trimmed: &str, span: Span) -> Option<ImplAssocT
     })
 }
 
-fn parse_page_rollup_entry(entry: &RawBlockEntry) -> Result<Option<PageRollup>, String> {
+fn parse_cleanup_footer_entry(entry: &RawBlockEntry) -> Result<Option<CleanupFooter>, String> {
     let text = entry.text.trim();
-    if !text.starts_with('[') {
+    if text.starts_with('[') {
+        let Some(close_idx) = find_matching_delim(text, 0, '[', ']') else {
+            return Ok(None);
+        };
+        let suffix = text[close_idx + 1..].trim();
+        if suffix == "#cleanup" {
+            return Err(format!(
+                "{}:{}: `#cleanup` has been replaced by `-cleanup[target = name, handler = path]`",
+                entry.span.line, entry.span.column
+            ));
+        }
         return Ok(None);
     }
-    let Some(close_idx) = find_matching_delim(text, 0, '[', ']') else {
+    if !text.starts_with('-') {
         return Ok(None);
-    };
-    let suffix = text[close_idx + 1..].trim();
-    let Some(kind_text) = suffix.strip_prefix('#') else {
-        return Ok(None);
-    };
+    }
     if !entry.children.is_empty() {
         return Err(format!(
-            "{}:{}: page rollup lines cannot own nested blocks",
+            "{}:{}: cleanup footer lines cannot own nested blocks",
             entry.span.line, entry.span.column
         ));
     }
-    if kind_text.trim() != "cleanup" {
+    let Some(rest) = text.strip_prefix("-cleanup") else {
+        let name = text
+            .strip_prefix('-')
+            .and_then(|value| value.split_once('[').map(|(head, _)| head).or(Some(value)))
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("?");
         return Err(format!(
-            "{}:{}: only `#cleanup` page rollups are supported in v1",
+            "{}:{}: attached `-{name}` is unsupported here; this footer position currently accepts only `-cleanup`",
             entry.span.line, entry.span.column
         ));
+    };
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return Ok(Some(CleanupFooter {
+            kind: CleanupFooterKind::Cleanup,
+            subject: String::new(),
+            handler_path: Vec::new(),
+            span: entry.span,
+        }));
     }
-
-    let args = split_top_level(text[1..close_idx].trim(), ',')
-        .into_iter()
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>();
-    if args.len() != 2 {
+    let payload = rest
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'));
+    let Some(payload) = payload else {
         return Err(format!(
-            "{}:{}: `#cleanup` rollups require exactly `[subject, handler]`",
+            "{}:{}: malformed `-cleanup` footer payload",
             entry.span.line, entry.span.column
         ));
+    };
+    let mut subject = None::<String>;
+    let mut handler_path = None::<Vec<String>>;
+    for part in split_top_level(payload, ',') {
+        let Some((name, value)) = part.split_once('=') else {
+            return Err(format!(
+                "{}:{}: cleanup footer entries must use named fields",
+                entry.span.line, entry.span.column
+            ));
+        };
+        let field = name.trim();
+        let value = value.trim();
+        match field {
+            "target" => {
+                if subject.is_some() {
+                    return Err(format!(
+                        "{}:{}: cleanup footer field `target` is duplicated",
+                        entry.span.line, entry.span.column
+                    ));
+                }
+                if !is_identifier(value) {
+                    return Err(format!(
+                        "{}:{}: cleanup footer target must be a binding name",
+                        entry.span.line, entry.span.column
+                    ));
+                }
+                subject = Some(value.to_string());
+            }
+            "handler" => {
+                if handler_path.is_some() {
+                    return Err(format!(
+                        "{}:{}: cleanup footer field `handler` is duplicated",
+                        entry.span.line, entry.span.column
+                    ));
+                }
+                handler_path = Some(parse_path(value).map_err(|detail| {
+                    format!(
+                        "{}:{}: cleanup footer handler must be a named callable path: {}",
+                        entry.span.line, entry.span.column, detail
+                    )
+                })?);
+            }
+            other => {
+                return Err(format!(
+                    "{}:{}: unknown cleanup footer field `{other}`",
+                    entry.span.line, entry.span.column
+                ));
+            }
+        }
     }
-    let subject = args[0];
-    if !is_identifier(subject) {
+    if handler_path.is_some() && subject.is_none() {
         return Err(format!(
-            "{}:{}: cleanup subject must be a binding name",
+            "{}:{}: cleanup footer `handler` requires `target`",
             entry.span.line, entry.span.column
         ));
     }
-    let handler_path = parse_path(args[1]).map_err(|detail| {
-        format!(
-            "{}:{}: cleanup handler must be a named callable path: {}",
-            entry.span.line, entry.span.column, detail
-        )
-    })?;
-    Ok(Some(PageRollup {
-        kind: PageRollupKind::Cleanup,
-        subject: subject.to_string(),
-        handler_path,
+    Ok(Some(CleanupFooter {
+        kind: CleanupFooterKind::Cleanup,
+        subject: subject.unwrap_or_default(),
+        handler_path: handler_path.unwrap_or_default(),
         span: entry.span,
     }))
 }
 
-fn collect_following_rollups(
+fn collect_following_cleanup_footers(
     entries: &[RawBlockEntry],
     start_index: usize,
-) -> Result<(Vec<PageRollup>, usize), String> {
+) -> Result<(Vec<CleanupFooter>, usize), String> {
     let mut index = start_index;
-    let mut rollups = Vec::new();
+    let mut cleanup_footers = Vec::new();
+    let mut saw_bare_cleanup = false;
+    let mut seen_targets = BTreeSet::new();
     while index < entries.len() {
-        let Some(rollup) = parse_page_rollup_entry(&entries[index])? else {
+        let Some(rollup) = parse_cleanup_footer_entry(&entries[index])? else {
             break;
         };
-        rollups.push(rollup);
+        if rollup.subject.is_empty() {
+            if saw_bare_cleanup {
+                return Err(format!(
+                    "{}:{}: duplicate bare `-cleanup` footer",
+                    rollup.span.line, rollup.span.column
+                ));
+            }
+            saw_bare_cleanup = true;
+        } else {
+            if !seen_targets.insert(rollup.subject.clone()) {
+                return Err(format!(
+                    "{}:{}: duplicate cleanup footer target `{}`",
+                    rollup.span.line, rollup.span.column, rollup.subject
+                ));
+            }
+            if saw_bare_cleanup && rollup.handler_path.is_empty() {
+                return Err(format!(
+                    "{}:{}: `-cleanup[target = {}]` is redundant when bare `-cleanup` is already present",
+                    rollup.span.line, rollup.span.column, rollup.subject
+                ));
+            }
+        }
+        cleanup_footers.push(rollup);
         index += 1;
     }
-    Ok((rollups, index - start_index))
+    Ok((cleanup_footers, index - start_index))
 }
 
 fn parse_availability_attachment(
@@ -4100,11 +4188,14 @@ fn statement_has_following_availability_target(
     Ok(false)
 }
 
-fn symbol_can_own_rollups(symbol: &SymbolDecl) -> bool {
-    matches!(symbol.kind, SymbolKind::Fn | SymbolKind::Behavior)
+fn symbol_can_own_cleanup_footers(symbol: &SymbolDecl) -> bool {
+    matches!(
+        symbol.kind,
+        SymbolKind::Fn | SymbolKind::Behavior | SymbolKind::System
+    )
 }
 
-fn statement_can_own_rollups(statement: &Statement) -> bool {
+fn statement_can_own_cleanup_footers(statement: &Statement) -> bool {
     match &statement.kind {
         StatementKind::If { .. } | StatementKind::While { .. } | StatementKind::For { .. } => true,
         StatementKind::Expr { expr } => expr_has_attached_block(expr),
@@ -5203,32 +5294,6 @@ fn validate_module_rollup_contract(parsed: &ParsedModule) -> Result<(), String> 
 }
 
 fn validate_symbol_rollup_contract(symbol: &SymbolDecl) -> Result<(), String> {
-    let mut available = symbol
-        .params
-        .iter()
-        .map(|param| param.name.clone())
-        .collect::<BTreeSet<_>>();
-    available.extend(immediate_statement_bindings(&symbol.statements));
-    let cleanup_subjects = collect_rollup_subjects(&symbol.rollups);
-    for rollup in &symbol.rollups {
-        if !available.contains(&rollup.subject) {
-            return Err(format!(
-                "{}:{}: cleanup subject `{}` is not available in the owning header scope",
-                rollup.span.line, rollup.span.column, rollup.subject
-            ));
-        }
-    }
-    let initially_active = symbol
-        .params
-        .iter()
-        .map(|param| param.name.clone())
-        .filter(|name| cleanup_subjects.contains(name))
-        .collect::<BTreeSet<_>>();
-    validate_rollup_reassignment_contract(
-        &symbol.statements,
-        &cleanup_subjects,
-        &initially_active,
-    )?;
     validate_statement_rollup_contract(&symbol.statements)?;
     if let SymbolBody::Trait { methods, .. } = &symbol.body {
         for method in methods {
@@ -5240,51 +5305,6 @@ fn validate_symbol_rollup_contract(symbol: &SymbolDecl) -> Result<(), String> {
 
 fn validate_statement_rollup_contract(statements: &[Statement]) -> Result<(), String> {
     for statement in statements {
-        if let Some(available) = statement_rollup_subjects(statement) {
-            let cleanup_subjects = collect_rollup_subjects(&statement.rollups);
-            for rollup in &statement.rollups {
-                if !available.contains(&rollup.subject) {
-                    return Err(format!(
-                        "{}:{}: cleanup subject `{}` is not available in the owning header scope",
-                        rollup.span.line, rollup.span.column, rollup.subject
-                    ));
-                }
-            }
-            let mut initially_active = BTreeSet::new();
-            if let StatementKind::For { binding, .. } = &statement.kind
-                && cleanup_subjects.contains(binding)
-            {
-                initially_active.insert(binding.clone());
-            }
-            match &statement.kind {
-                StatementKind::If {
-                    then_branch,
-                    else_branch,
-                    ..
-                } => {
-                    validate_rollup_reassignment_contract(
-                        then_branch,
-                        &cleanup_subjects,
-                        &initially_active,
-                    )?;
-                    if let Some(else_branch) = else_branch {
-                        validate_rollup_reassignment_contract(
-                            else_branch,
-                            &cleanup_subjects,
-                            &initially_active,
-                        )?;
-                    }
-                }
-                StatementKind::While { body, .. } | StatementKind::For { body, .. } => {
-                    validate_rollup_reassignment_contract(
-                        body,
-                        &cleanup_subjects,
-                        &initially_active,
-                    )?;
-                }
-                _ => {}
-            }
-        }
         match &statement.kind {
             StatementKind::If {
                 then_branch,
@@ -5303,105 +5323,6 @@ fn validate_statement_rollup_contract(statements: &[Statement]) -> Result<(), St
         }
     }
     Ok(())
-}
-
-fn statement_rollup_subjects(statement: &Statement) -> Option<BTreeSet<String>> {
-    match &statement.kind {
-        StatementKind::If {
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            let mut names = immediate_statement_bindings(then_branch);
-            if let Some(else_branch) = else_branch {
-                names.extend(immediate_statement_bindings(else_branch));
-            }
-            Some(names)
-        }
-        StatementKind::While { body, .. } => Some(immediate_statement_bindings(body)),
-        StatementKind::For { binding, body, .. } => {
-            let mut names = immediate_statement_bindings(body);
-            names.insert(binding.clone());
-            Some(names)
-        }
-        StatementKind::Expr { expr } if expr_has_attached_block(expr) => Some(BTreeSet::new()),
-        _ => Some(BTreeSet::new()),
-    }
-}
-
-fn immediate_statement_bindings(statements: &[Statement]) -> BTreeSet<String> {
-    let mut names = BTreeSet::new();
-    for statement in statements {
-        if let StatementKind::Let { name, .. } = &statement.kind {
-            names.insert(name.clone());
-        }
-    }
-    names
-}
-
-fn collect_rollup_subjects(rollups: &[PageRollup]) -> BTreeSet<String> {
-    rollups
-        .iter()
-        .map(|rollup| rollup.subject.clone())
-        .collect::<BTreeSet<_>>()
-}
-
-fn validate_rollup_reassignment_contract(
-    statements: &[Statement],
-    cleanup_subjects: &BTreeSet<String>,
-    active_subjects: &BTreeSet<String>,
-) -> Result<(), String> {
-    let mut active = active_subjects.clone();
-    for statement in statements {
-        if let Some(name) = assignment_target_name(statement)
-            && active.contains(name)
-        {
-            return Err(format!(
-                "{}:{}: cleanup subject `{}` cannot be reassigned after activation",
-                statement.span.line, statement.span.column, name
-            ));
-        }
-
-        match &statement.kind {
-            StatementKind::Let { name, .. } => {
-                if cleanup_subjects.contains(name) {
-                    active.insert(name.clone());
-                }
-            }
-            StatementKind::If {
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                validate_rollup_reassignment_contract(then_branch, cleanup_subjects, &active)?;
-                if let Some(else_branch) = else_branch {
-                    validate_rollup_reassignment_contract(else_branch, cleanup_subjects, &active)?;
-                }
-            }
-            StatementKind::While { body, .. } => {
-                validate_rollup_reassignment_contract(body, cleanup_subjects, &active)?;
-            }
-            StatementKind::For { binding, body, .. } => {
-                let mut loop_active = active.clone();
-                if cleanup_subjects.contains(binding) {
-                    loop_active.insert(binding.clone());
-                }
-                validate_rollup_reassignment_contract(body, cleanup_subjects, &loop_active)?;
-            }
-            _ => {}
-        }
-    }
-    Ok(())
-}
-
-fn assignment_target_name(statement: &Statement) -> Option<&str> {
-    match &statement.kind {
-        StatementKind::Assign {
-            target: AssignTarget::Name { text },
-            ..
-        } => Some(text.as_str()),
-        _ => None,
-    }
 }
 
 fn validate_module_tuple_contract(parsed: &ParsedModule) -> Result<(), String> {
@@ -6419,64 +6340,107 @@ mod tests {
     }
 
     #[test]
-    fn parse_module_collects_page_rollups() {
+    fn parse_module_collects_cleanup_footers() {
         let parsed = parse_module(
-            "fn cleanup(value: Int):\n    return\nfn run(seed: Int) -> Int:\n    let local = seed\n    while local > 0:\n        let scratch = local\n        local -= 1\n    [scratch, cleanup]#cleanup\n    return local\n[seed, cleanup]#cleanup\n",
+            "fn cleanup(take value: Int) -> Result[Unit, Str]:\n    return Result.Ok[Unit, Str] :: :: call\nfn run(seed: Int) -> Int:\n    let local = seed\n    while local > 0:\n        let scratch = local\n        local -= 1\n    -cleanup[target = scratch, handler = cleanup]\n    return local\n-cleanup[target = seed, handler = cleanup]\n",
         )
-        .expect("rollups should parse");
+        .expect("cleanup footers should parse");
 
         let run = parsed
             .symbols
             .iter()
             .find(|symbol| symbol.name == "run")
             .expect("run symbol should exist");
-        assert_eq!(run.rollups.len(), 1);
-        assert_eq!(run.rollups[0].subject, "seed");
-        assert_eq!(run.rollups[0].handler_path, vec!["cleanup".to_string()]);
+        assert_eq!(run.cleanup_footers.len(), 1);
+        assert_eq!(run.cleanup_footers[0].subject, "seed");
+        assert_eq!(
+            run.cleanup_footers[0].handler_path,
+            vec!["cleanup".to_string()]
+        );
         match &run.statements[1] {
             Statement {
                 kind: StatementKind::While { .. },
-                rollups,
+                cleanup_footers,
                 ..
             } => {
-                assert_eq!(rollups.len(), 1);
-                assert_eq!(rollups[0].subject, "scratch");
-                assert_eq!(rollups[0].kind.as_str(), "cleanup");
+                assert_eq!(cleanup_footers.len(), 1);
+                assert_eq!(cleanup_footers[0].subject, "scratch");
+                assert_eq!(cleanup_footers[0].kind.as_str(), "cleanup");
             }
-            other => panic!("expected while statement with rollup, got {other:?}"),
+            other => panic!("expected while statement with cleanup footer, got {other:?}"),
         }
     }
 
     #[test]
-    fn parse_module_rejects_ownerless_page_rollups() {
-        let err = parse_module("[value, cleanup]#cleanup\nfn cleanup(value: Int):\n    return\n")
-            .expect_err("ownerless rollup should fail");
+    fn parse_module_rejects_ownerless_cleanup_footers() {
+        let err = parse_module(
+            "-cleanup[target = value, handler = cleanup]\nfn cleanup(value: Int):\n    return\n",
+        )
+        .expect_err("ownerless cleanup footer should fail");
         assert!(
-            err.contains("page rollup without a valid owning header"),
+            err.contains("cleanup footer without a valid owning header"),
             "{err}"
         );
     }
 
     #[test]
-    fn parse_module_rejects_unknown_cleanup_subjects() {
-        let err = parse_module(
-            "fn cleanup(value: Int):\n    return\nfn main() -> Int:\n    let value = 1\n    return value\n[missing, cleanup]#cleanup\n",
+    fn parse_module_allows_unknown_cleanup_footer_targets_for_later_semantic_validation() {
+        let parsed = parse_module(
+            "fn cleanup(take value: Int) -> Result[Unit, Str]:\n    return Result.Ok[Unit, Str] :: :: call\nfn main() -> Int:\n    let value = 1\n    return value\n-cleanup[target = missing, handler = cleanup]\n",
         )
-        .expect_err("unknown subject should fail");
+        .expect("unknown cleanup footer target should defer to semantic validation");
+        assert_eq!(parsed.symbols[1].cleanup_footers[0].subject, "missing");
+    }
+
+    #[test]
+    fn parse_module_allows_reassigned_cleanup_footer_targets_for_later_semantic_validation() {
+        let parsed = parse_module(
+            "fn cleanup(take value: Int) -> Result[Unit, Str]:\n    return Result.Ok[Unit, Str] :: :: call\nfn main(seed: Int) -> Int:\n    let local = seed\n    local += 1\n    return local\n-cleanup[target = local, handler = cleanup]\n",
+        )
+        .expect("cleanup footer target reassignment should defer to semantic validation");
+        assert_eq!(parsed.symbols[1].cleanup_footers[0].subject, "local");
+    }
+
+    #[test]
+    fn parse_module_allows_cleanup_footers_on_systems() {
+        let parsed = parse_module(
+            "enum Result[T, E]:\n    Ok(T)\n    Err(E)\nfn cleanup(take value: Int) -> Result[Unit, Str]:\n    return Result.Ok[Unit, Str] :: :: call\nsystem[phase=startup] fn boot() -> Int:\n    let value = 1\n    return value\n-cleanup[target = value, handler = cleanup]\n",
+        )
+        .expect("system cleanup footer should parse");
+        assert_eq!(parsed.symbols[2].kind, SymbolKind::System);
+        assert_eq!(parsed.symbols[2].cleanup_footers.len(), 1);
+        assert_eq!(parsed.symbols[2].cleanup_footers[0].subject, "value");
+    }
+
+    #[test]
+    fn parse_module_rejects_unsupported_attached_dash_footer_forms() {
+        let err = parse_module("fn main() -> Int:\n    return 0\n-defer\n")
+            .expect_err("unsupported attached dash footer should fail");
         assert!(
-            err.contains("cleanup subject `missing` is not available in the owning header scope"),
+            err.contains(
+                "attached `-defer` is unsupported here; this footer position currently accepts only `-cleanup`"
+            ),
             "{err}"
         );
     }
 
     #[test]
-    fn parse_module_rejects_reassigned_cleanup_subjects() {
+    fn parse_module_rejects_duplicate_bare_cleanup_footers() {
+        let err = parse_module("fn main() -> Int:\n    return 0\n-cleanup\n-cleanup\n")
+            .expect_err("duplicate bare cleanup footers should fail");
+        assert!(err.contains("duplicate bare `-cleanup` footer"), "{err}");
+    }
+
+    #[test]
+    fn parse_module_rejects_redundant_targeted_cleanup_under_bare_cleanup() {
         let err = parse_module(
-            "fn cleanup(value: Int):\n    return\nfn main(seed: Int) -> Int:\n    let local = seed\n    local += 1\n    return local\n[local, cleanup]#cleanup\n",
+            "fn cleanup(take value: Int) -> Result[Unit, Str]:\n    return Result.Ok[Unit, Str] :: :: call\nfn main(seed: Int) -> Int:\n    return seed\n-cleanup\n-cleanup[target = seed]\n",
         )
-        .expect_err("cleanup subject reassignment should fail");
+        .expect_err("redundant targeted cleanup footer should fail");
         assert!(
-            err.contains("cleanup subject `local` cannot be reassigned after activation"),
+            err.contains(
+                "`-cleanup[target = seed]` is redundant when bare `-cleanup` is already present"
+            ),
             "{err}"
         );
     }

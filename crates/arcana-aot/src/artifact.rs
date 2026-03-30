@@ -1,5 +1,6 @@
 use arcana_ir::{
-    ExecAvailabilityAttachment, ExecExpr, ExecPageRollup, ExecStmt, IrRoutineParam, IrRoutineType,
+    ExecAvailabilityAttachment, ExecCleanupFooter, ExecExpr, ExecStmt, IrRoutineParam,
+    IrRoutineType,
 };
 use serde::{Deserialize, Serialize};
 
@@ -59,7 +60,7 @@ pub struct AotRoutineArtifact {
     pub impl_trait_path: Option<Vec<String>>,
     pub availability: Vec<ExecAvailabilityAttachment>,
     pub foreword_rows: Vec<String>,
-    pub rollups: Vec<ExecPageRollup>,
+    pub cleanup_footers: Vec<ExecCleanupFooter>,
     pub statements: Vec<ExecStmt>,
 }
 

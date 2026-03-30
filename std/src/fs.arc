@@ -1,4 +1,5 @@
 import std.kernel.fs
+import std.cleanup
 import std.result
 use std.result.Result
 
@@ -74,3 +75,7 @@ export fn file_size(path: Str) -> Result[Int, Str]:
 
 export fn modified_unix_ms(path: Str) -> Result[Int, Str]:
     return std.kernel.fs.fs_modified_unix_ms :: path :: call
+
+impl std.cleanup.Cleanup[std.fs.FileStream] for std.fs.FileStream:
+    fn cleanup(take self: std.fs.FileStream) -> Result[Unit, Str]:
+        return std.fs.stream_close :: self :: call

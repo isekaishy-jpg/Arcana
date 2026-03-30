@@ -2,14 +2,14 @@
 use super::NativeProcessHost;
 use super::{
     BufferedEvent, BufferedFrameInput, BufferedHost, ParsedAssignOp, ParsedAssignTarget,
-    ParsedExpr, ParsedPageRollup, ParsedPhraseArg, ParsedPhraseQualifierKind, ParsedStmt,
+    ParsedCleanupFooter, ParsedExpr, ParsedPhraseArg, ParsedPhraseQualifierKind, ParsedStmt,
     RuntimeCallArg, RuntimeEntrypointPlan, RuntimeExecutionState, RuntimeHost, RuntimeOpaqueValue,
     RuntimePackagePlan, RuntimeParamPlan, RuntimeRoutinePlan, RuntimeValue,
     arcana_desktop_session_record, arcana_desktop_wake_record, arcana_desktop_window_value,
     arcana_window_id_record, err_variant, execute_entrypoint_routine, execute_exported_abi_routine,
     execute_exported_json_abi_routine, execute_main, execute_routine, insert_runtime_channel,
     load_package_plan, lookup_runtime_owner_plan, none_variant, ok_variant, owner_state_key,
-    parse_rollup_row, parse_runtime_package_image, parse_stmt, plan_from_artifact,
+    parse_cleanup_footer_row, parse_runtime_package_image, parse_stmt, plan_from_artifact,
     render_exported_json_abi_manifest, render_runtime_package_image, resolve_routine_index,
     resolve_routine_index_for_call, some_variant, try_execute_arcana_owned_api_call,
 };
@@ -44,6 +44,7 @@ impl TestParamRow for AotRoutineParamArtifact {
         let name = parts[1].strip_prefix("name=").unwrap_or_default();
         let ty = parts[2].strip_prefix("ty=").unwrap_or_default();
         Self {
+            binding_id: 0,
             mode: (!mode.is_empty()).then(|| mode.to_string()),
             name: name.to_string(),
             ty: parse_routine_type_text(ty).expect("type should parse"),
@@ -588,9 +589,9 @@ fn sample_return_artifact() -> AotPackageArtifact {
             impl_trait_path: None,
             availability: Vec::new(),
             foreword_rows: Vec::new(),
-            rollups: Vec::new(),
+            cleanup_footers: Vec::new(),
             statements: vec![
-                parse_stmt("stmt(core=return(int(7)),forewords=[],rollups=[])")
+                parse_stmt("stmt(core=return(int(7)),forewords=[],cleanup_footers=[])")
                     .expect("statement should parse"),
             ],
         }],
@@ -652,8 +653,8 @@ fn sample_print_artifact() -> AotPackageArtifact {
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: Vec::new(),
-                rollups: Vec::new(),
-                statements: vec![parse_stmt("stmt(core=expr(phrase(subject=generic(expr=member(path(io), print),types=[Str]),args=[str(\"\\\"hello, arcana\\\"\")],qualifier=call,attached=[])),forewords=[],rollups=[])")
+                cleanup_footers: Vec::new(),
+                statements: vec![parse_stmt("stmt(core=expr(phrase(subject=generic(expr=member(path(io), print),types=[Str]),args=[str(\"\\\"hello, arcana\\\"\")],qualifier=call,attached=[])),forewords=[],cleanup_footers=[])")
                     .expect("statement should parse")],
             }],
             owners: Vec::new(),
@@ -715,10 +716,10 @@ fn sample_stmt_metadata_artifact() -> AotPackageArtifact {
                     impl_trait_path: None,
                     availability: Vec::new(),
                     foreword_rows: vec!["test()".to_string()],
-                    rollups: vec![parse_rollup_row("cleanup:scope:metadata.cleanup")
-                        .expect("rollup should parse")],
+                    cleanup_footers: vec![parse_cleanup_footer_row("cleanup:scope:metadata.cleanup")
+                        .expect("cleanup footer should parse")],
                     statements: vec![parse_stmt(
-                        "stmt(core=return(int(0)),forewords=[only(os=\"windows\")],rollups=[cleanup:scope:metadata.cleanup])",
+                        "stmt(core=return(int(0)),forewords=[only(os=\"windows\")],cleanup_footers=[cleanup:scope:metadata.cleanup])",
                     )
                     .expect("statement should parse")],
                 },
@@ -739,8 +740,8 @@ fn sample_stmt_metadata_artifact() -> AotPackageArtifact {
                     impl_trait_path: None,
                     availability: Vec::new(),
                     foreword_rows: Vec::new(),
-                    rollups: Vec::new(),
-                    statements: vec![parse_stmt("stmt(core=return(int(0)),forewords=[],rollups=[])")
+                    cleanup_footers: Vec::new(),
+                    statements: vec![parse_stmt("stmt(core=return(int(0)),forewords=[],cleanup_footers=[])")
                         .expect("statement should parse")],
                 },
             ],
@@ -801,21 +802,21 @@ fn sample_attachment_foreword_artifact() -> AotPackageArtifact {
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: Vec::new(),
-                rollups: Vec::new(),
+                cleanup_footers: Vec::new(),
                 statements: vec![
                     parse_stmt(
-                        "stmt(core=let(mutable=true,name=xs,value=collection([int(1)])),forewords=[],rollups=[])",
+                        "stmt(core=let(mutable=true,name=xs,value=collection([int(1)])),forewords=[],cleanup_footers=[])",
                     )
                     .expect("statement should parse"),
                     parse_stmt(
-                        "stmt(core=expr(phrase(subject=path(std.kernel.collections.list_push),args=[path(xs)],kind=call,qualifier=call,attached=[chain(int(2),forewords=[inline()])])),forewords=[],rollups=[])",
+                        "stmt(core=expr(phrase(subject=path(std.kernel.collections.list_push),args=[path(xs)],kind=call,qualifier=call,attached=[chain(int(2),forewords=[inline()])])),forewords=[],cleanup_footers=[])",
                     )
                     .expect("statement should parse"),
                     parse_stmt(
-                        "stmt(core=expr(phrase(subject=generic(expr=path(std.io.print),types=[Int]),args=[phrase(subject=path(std.kernel.collections.list_len),args=[path(xs)],kind=call,qualifier=call,attached=[])],kind=call,qualifier=call,attached=[])),forewords=[],rollups=[])",
+                        "stmt(core=expr(phrase(subject=generic(expr=path(std.io.print),types=[Int]),args=[phrase(subject=path(std.kernel.collections.list_len),args=[path(xs)],kind=call,qualifier=call,attached=[])],kind=call,qualifier=call,attached=[])),forewords=[],cleanup_footers=[])",
                     )
                     .expect("statement should parse"),
-                    parse_stmt("stmt(core=return(int(0)),forewords=[],rollups=[])")
+                    parse_stmt("stmt(core=return(int(0)),forewords=[],cleanup_footers=[])")
                         .expect("statement should parse"),
                 ],
             }],
@@ -942,39 +943,72 @@ fn plan_from_artifact_rejects_main_with_non_runtime_return_type() {
 }
 
 #[test]
-fn plan_from_artifact_rejects_async_rollup_handler() {
+fn plan_from_artifact_rejects_async_cleanup_footer_handler() {
     let mut artifact = sample_stmt_metadata_artifact();
     artifact.routines[1].is_async = true;
 
-    let err = plan_from_artifact(&artifact).expect_err("async rollup handler should fail");
+    let err = plan_from_artifact(&artifact).expect_err("async cleanup footer handler should fail");
     assert!(
-        err.contains("runtime rollup handler `metadata.cleanup` cannot be async in v1"),
+        err.contains("cleanup footer handler `metadata.cleanup` cannot be async in v1"),
         "{err}"
     );
 }
 
 #[test]
-fn plan_from_artifact_rejects_wrong_arity_rollup_handler() {
+fn plan_from_artifact_rejects_wrong_arity_cleanup_footer_handler() {
     let mut artifact = sample_stmt_metadata_artifact();
     artifact.routines[1].params.clear();
 
-    let err = plan_from_artifact(&artifact).expect_err("wrong-arity rollup handler should fail");
+    let err =
+        plan_from_artifact(&artifact).expect_err("wrong-arity cleanup footer handler should fail");
     assert!(
         err.contains(
-            "runtime rollup handler `metadata.cleanup` must accept exactly one parameter in v1"
+            "cleanup footer handler `metadata.cleanup` must accept exactly one parameter in v1"
         ),
         "{err}"
     );
 }
 
 #[test]
-fn plan_from_artifact_rejects_rollup_handler_outside_module_scope() {
+fn plan_from_artifact_rejects_non_take_cleanup_footer_handler() {
+    let mut artifact = sample_stmt_metadata_artifact();
+    artifact.routines[1].params[0].mode = Some("read".to_string());
+
+    let err =
+        plan_from_artifact(&artifact).expect_err("non-take cleanup footer handler should fail");
+    assert!(
+        err.contains(
+            "cleanup footer handler `metadata.cleanup` must take its target parameter in v1"
+        ),
+        "{err}"
+    );
+}
+
+#[test]
+fn plan_from_artifact_rejects_wrong_cleanup_footer_handler_return_type() {
+    let mut artifact = sample_stmt_metadata_artifact();
+    artifact.routines[1].params[0].mode = Some("take".to_string());
+    artifact.routines[1].return_type = Some(parse_routine_type_text("Int").expect("type"));
+
+    let err = plan_from_artifact(&artifact)
+        .expect_err("wrong-returning cleanup footer handler should fail");
+    assert!(
+        err.contains(
+            "cleanup footer handler `metadata.cleanup` must return `Result[Unit, Str]` in v1"
+        ),
+        "{err}"
+    );
+}
+
+#[test]
+fn plan_from_artifact_rejects_cleanup_footer_handler_outside_module_scope() {
     let mut artifact = sample_stmt_metadata_artifact();
     artifact.module_count = 2;
-    artifact.routines[0].rollups =
-        vec![parse_rollup_row("cleanup:scope:cleanup").expect("rollup should parse")];
+    artifact.routines[0].cleanup_footers = vec![
+        parse_cleanup_footer_row("cleanup:scope:cleanup").expect("cleanup footer should parse"),
+    ];
     artifact.routines[0].statements = vec![parse_stmt(
-        "stmt(core=return(int(0)),forewords=[only(os=\"windows\")],rollups=[cleanup:scope:cleanup])",
+        "stmt(core=return(int(0)),forewords=[only(os=\"windows\")],cleanup_footers=[cleanup:scope:cleanup])",
     )
     .expect("statement should parse")];
     artifact.routines[1].module_id = "helpers".to_string();
@@ -991,9 +1025,10 @@ fn plan_from_artifact_rejects_rollup_handler_outside_module_scope() {
         exported_surface_rows: Vec::new(),
     });
 
-    let err = plan_from_artifact(&artifact).expect_err("out-of-scope rollup handler should fail");
+    let err =
+        plan_from_artifact(&artifact).expect_err("out-of-scope cleanup footer handler should fail");
     assert!(
-        err.contains("runtime rollup handler `cleanup` does not resolve to a callable path"),
+        err.contains("cleanup footer handler `cleanup` does not resolve to a callable path"),
         "{err}"
     );
 }
@@ -1046,6 +1081,7 @@ fn resolve_routine_index_for_call_prefers_lowered_routine_identity() {
                 type_params: Vec::new(),
                 behavior_attrs: BTreeMap::new(),
                 params: vec![RuntimeParamPlan {
+                    binding_id: 0,
                     mode: Some("read".to_string()),
                     name: "self".to_string(),
                     ty: parse_routine_type_text("AtomicInt").expect("type"),
@@ -1056,7 +1092,7 @@ fn resolve_routine_index_for_call_prefers_lowered_routine_identity() {
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: Vec::new(),
-                rollups: Vec::new(),
+                cleanup_footers: Vec::new(),
                 statements: Vec::new(),
             },
             RuntimeRoutinePlan {
@@ -1070,6 +1106,7 @@ fn resolve_routine_index_for_call_prefers_lowered_routine_identity() {
                 type_params: Vec::new(),
                 behavior_attrs: BTreeMap::new(),
                 params: vec![RuntimeParamPlan {
+                    binding_id: 0,
                     mode: Some("read".to_string()),
                     name: "self".to_string(),
                     ty: parse_routine_type_text("AtomicBool").expect("type"),
@@ -1080,7 +1117,7 @@ fn resolve_routine_index_for_call_prefers_lowered_routine_identity() {
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: Vec::new(),
-                rollups: Vec::new(),
+                cleanup_footers: Vec::new(),
                 statements: Vec::new(),
             },
         ],
@@ -1143,6 +1180,7 @@ fn runtime_dynamic_bare_method_fallback_matches_receiver_type_args() {
                 type_params: vec!["T".to_string()],
                 behavior_attrs: BTreeMap::new(),
                 params: vec![RuntimeParamPlan {
+                    binding_id: 0,
                     mode: Some("read".to_string()),
                     name: "self".to_string(),
                     ty: parse_routine_type_text("std.concurrent.Channel[T]").expect("type"),
@@ -1155,7 +1193,7 @@ fn runtime_dynamic_bare_method_fallback_matches_receiver_type_args() {
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: Vec::new(),
-                rollups: Vec::new(),
+                cleanup_footers: Vec::new(),
                 statements: Vec::new(),
             },
             RuntimeRoutinePlan {
@@ -1169,6 +1207,7 @@ fn runtime_dynamic_bare_method_fallback_matches_receiver_type_args() {
                 type_params: Vec::new(),
                 behavior_attrs: BTreeMap::new(),
                 params: vec![RuntimeParamPlan {
+                    binding_id: 0,
                     mode: Some("read".to_string()),
                     name: "self".to_string(),
                     ty: parse_routine_type_text("std.concurrent.Channel[Bool]").expect("type"),
@@ -1181,7 +1220,7 @@ fn runtime_dynamic_bare_method_fallback_matches_receiver_type_args() {
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: Vec::new(),
-                rollups: Vec::new(),
+                cleanup_footers: Vec::new(),
                 statements: Vec::new(),
             },
         ],
@@ -1248,6 +1287,7 @@ fn runtime_dynamic_bare_method_fallback_matches_opaque_family_receiver() {
             type_params: Vec::new(),
             behavior_attrs: BTreeMap::new(),
             params: vec![RuntimeParamPlan {
+                binding_id: 0,
                 mode: Some("read".to_string()),
                 name: "self".to_string(),
                 ty: parse_routine_type_text("desktop.types.Window").expect("type"),
@@ -1258,7 +1298,7 @@ fn runtime_dynamic_bare_method_fallback_matches_opaque_family_receiver() {
             impl_trait_path: None,
             availability: Vec::new(),
             foreword_rows: Vec::new(),
-            rollups: Vec::new(),
+            cleanup_footers: Vec::new(),
             statements: Vec::new(),
         }],
     };
@@ -1335,6 +1375,7 @@ fn runtime_dynamic_bare_method_fallback_keeps_owner_identity() {
                 type_params: Vec::new(),
                 behavior_attrs: BTreeMap::new(),
                 params: vec![RuntimeParamPlan {
+                    binding_id: 0,
                     mode: Some("read".to_string()),
                     name: "self".to_string(),
                     ty: owner_counter.clone(),
@@ -1345,7 +1386,7 @@ fn runtime_dynamic_bare_method_fallback_keeps_owner_identity() {
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: Vec::new(),
-                rollups: Vec::new(),
+                cleanup_footers: Vec::new(),
                 statements: Vec::new(),
             },
             RuntimeRoutinePlan {
@@ -1359,6 +1400,7 @@ fn runtime_dynamic_bare_method_fallback_keeps_owner_identity() {
                 type_params: Vec::new(),
                 behavior_attrs: BTreeMap::new(),
                 params: vec![RuntimeParamPlan {
+                    binding_id: 0,
                     mode: Some("read".to_string()),
                     name: "self".to_string(),
                     ty: owner_timer.clone(),
@@ -1369,7 +1411,7 @@ fn runtime_dynamic_bare_method_fallback_keeps_owner_identity() {
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: Vec::new(),
-                rollups: Vec::new(),
+                cleanup_footers: Vec::new(),
                 statements: Vec::new(),
             },
         ],
@@ -1433,6 +1475,7 @@ fn runtime_dynamic_bare_method_fallback_rejects_wrong_sole_candidate() {
             type_params: Vec::new(),
             behavior_attrs: BTreeMap::new(),
             params: vec![RuntimeParamPlan {
+                binding_id: 0,
                 mode: Some("read".to_string()),
                 name: "self".to_string(),
                 ty: self_type.clone(),
@@ -1443,7 +1486,7 @@ fn runtime_dynamic_bare_method_fallback_rejects_wrong_sole_candidate() {
             impl_trait_path: None,
             availability: Vec::new(),
             foreword_rows: Vec::new(),
-            rollups: Vec::new(),
+            cleanup_footers: Vec::new(),
             statements: Vec::new(),
         }],
     };
@@ -1511,6 +1554,7 @@ fn runtime_dynamic_bare_method_fallback_rejects_qualified_leaf_collision() {
             type_params: Vec::new(),
             behavior_attrs: BTreeMap::new(),
             params: vec![RuntimeParamPlan {
+                binding_id: 0,
                 mode: Some("read".to_string()),
                 name: "self".to_string(),
                 ty: self_type.clone(),
@@ -1521,7 +1565,7 @@ fn runtime_dynamic_bare_method_fallback_rejects_qualified_leaf_collision() {
             impl_trait_path: None,
             availability: Vec::new(),
             foreword_rows: Vec::new(),
-            rollups: Vec::new(),
+            cleanup_footers: Vec::new(),
             statements: Vec::new(),
         }],
     };
@@ -1619,6 +1663,7 @@ fn runtime_json_abi_executes_exported_routine() {
             type_params: Vec::new(),
             behavior_attrs: BTreeMap::new(),
             params: vec![RuntimeParamPlan {
+                binding_id: 0,
                 mode: None,
                 name: "value".to_string(),
                 ty: parse_routine_type_text("Int").expect("type"),
@@ -1629,7 +1674,7 @@ fn runtime_json_abi_executes_exported_routine() {
             impl_trait_path: None,
             availability: Vec::new(),
             foreword_rows: Vec::new(),
-            rollups: Vec::new(),
+            cleanup_footers: Vec::new(),
             statements: vec![ParsedStmt::ReturnValue {
                 value: ParsedExpr::Binary {
                     op: arcana_ir::ExecBinaryOp::Add,
@@ -1684,6 +1729,7 @@ fn runtime_json_abi_manifest_records_cabi_param_metadata() {
             type_params: Vec::new(),
             behavior_attrs: BTreeMap::new(),
             params: vec![RuntimeParamPlan {
+                binding_id: 0,
                 mode: Some("edit".to_string()),
                 name: "value".to_string(),
                 ty: parse_routine_type_text("Int").expect("type"),
@@ -1694,7 +1740,7 @@ fn runtime_json_abi_manifest_records_cabi_param_metadata() {
             impl_trait_path: None,
             availability: Vec::new(),
             foreword_rows: Vec::new(),
-            rollups: Vec::new(),
+            cleanup_footers: Vec::new(),
             statements: vec![ParsedStmt::ReturnValue {
                 value: ParsedExpr::Path(vec!["value".to_string()]),
             }],
@@ -1753,6 +1799,7 @@ fn runtime_json_abi_manifest_projects_default_read_source_mode() {
             type_params: Vec::new(),
             behavior_attrs: BTreeMap::new(),
             params: vec![RuntimeParamPlan {
+                binding_id: 0,
                 mode: None,
                 name: "value".to_string(),
                 ty: parse_routine_type_text("Int").expect("type"),
@@ -1763,7 +1810,7 @@ fn runtime_json_abi_manifest_projects_default_read_source_mode() {
             impl_trait_path: None,
             availability: Vec::new(),
             foreword_rows: Vec::new(),
-            rollups: Vec::new(),
+            cleanup_footers: Vec::new(),
             statements: vec![ParsedStmt::ReturnValue {
                 value: ParsedExpr::Path(vec!["value".to_string()]),
             }],
@@ -1818,6 +1865,7 @@ fn runtime_json_abi_writes_back_edit_arguments() {
             type_params: Vec::new(),
             behavior_attrs: BTreeMap::new(),
             params: vec![RuntimeParamPlan {
+                binding_id: 0,
                 mode: Some("edit".to_string()),
                 name: "value".to_string(),
                 ty: parse_routine_type_text("Int").expect("type"),
@@ -1828,7 +1876,7 @@ fn runtime_json_abi_writes_back_edit_arguments() {
             impl_trait_path: None,
             availability: Vec::new(),
             foreword_rows: Vec::new(),
-            rollups: Vec::new(),
+            cleanup_footers: Vec::new(),
             statements: vec![
                 ParsedStmt::Assign {
                     target: ParsedAssignTarget::Name("value".to_string()),
@@ -1893,6 +1941,7 @@ fn runtime_json_abi_manifest_omits_unsupported_owner_reference_and_opaque_routin
                 type_params: Vec::new(),
                 behavior_attrs: BTreeMap::new(),
                 params: vec![RuntimeParamPlan {
+                    binding_id: 0,
                     mode: None,
                     name: "value".to_string(),
                     ty: parse_routine_type_text("Int").expect("type"),
@@ -1903,7 +1952,7 @@ fn runtime_json_abi_manifest_omits_unsupported_owner_reference_and_opaque_routin
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: Vec::new(),
-                rollups: Vec::new(),
+                cleanup_footers: Vec::new(),
                 statements: vec![ParsedStmt::ReturnValue {
                     value: ParsedExpr::Path(vec!["value".to_string()]),
                 }],
@@ -1919,6 +1968,7 @@ fn runtime_json_abi_manifest_omits_unsupported_owner_reference_and_opaque_routin
                 type_params: Vec::new(),
                 behavior_attrs: BTreeMap::new(),
                 params: vec![RuntimeParamPlan {
+                    binding_id: 0,
                     mode: Some("read".to_string()),
                     name: "value".to_string(),
                     ty: parse_routine_type_text("&Int").expect("type"),
@@ -1929,7 +1979,7 @@ fn runtime_json_abi_manifest_omits_unsupported_owner_reference_and_opaque_routin
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: Vec::new(),
-                rollups: Vec::new(),
+                cleanup_footers: Vec::new(),
                 statements: Vec::new(),
             },
             RuntimeRoutinePlan {
@@ -1943,6 +1993,7 @@ fn runtime_json_abi_manifest_omits_unsupported_owner_reference_and_opaque_routin
                 type_params: Vec::new(),
                 behavior_attrs: BTreeMap::new(),
                 params: vec![RuntimeParamPlan {
+                    binding_id: 0,
                     mode: Some("read".to_string()),
                     name: "window".to_string(),
                     ty: parse_routine_type_text("desktop.types.Window").expect("type"),
@@ -1955,7 +2006,7 @@ fn runtime_json_abi_manifest_omits_unsupported_owner_reference_and_opaque_routin
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: Vec::new(),
-                rollups: Vec::new(),
+                cleanup_footers: Vec::new(),
                 statements: Vec::new(),
             },
             RuntimeRoutinePlan {
@@ -1969,6 +2020,7 @@ fn runtime_json_abi_manifest_omits_unsupported_owner_reference_and_opaque_routin
                 type_params: Vec::new(),
                 behavior_attrs: BTreeMap::new(),
                 params: vec![RuntimeParamPlan {
+                    binding_id: 0,
                     mode: Some("read".to_string()),
                     name: "owner".to_string(),
                     ty: parse_routine_type_text("Owner").expect("type"),
@@ -1979,7 +2031,7 @@ fn runtime_json_abi_manifest_omits_unsupported_owner_reference_and_opaque_routin
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: Vec::new(),
-                rollups: Vec::new(),
+                cleanup_footers: Vec::new(),
                 statements: Vec::new(),
             },
         ],
@@ -2032,6 +2084,7 @@ fn runtime_json_abi_rejects_executing_unsupported_exported_routine() {
             type_params: Vec::new(),
             behavior_attrs: BTreeMap::new(),
             params: vec![RuntimeParamPlan {
+                binding_id: 0,
                 mode: Some("read".to_string()),
                 name: "value".to_string(),
                 ty: parse_routine_type_text("&Int").expect("type"),
@@ -2042,7 +2095,7 @@ fn runtime_json_abi_rejects_executing_unsupported_exported_routine() {
             impl_trait_path: None,
             availability: Vec::new(),
             foreword_rows: Vec::new(),
-            rollups: Vec::new(),
+            cleanup_footers: Vec::new(),
             statements: Vec::new(),
         }],
     };
@@ -2089,6 +2142,7 @@ fn runtime_native_abi_executes_exported_routine() {
             type_params: Vec::new(),
             behavior_attrs: BTreeMap::new(),
             params: vec![RuntimeParamPlan {
+                binding_id: 0,
                 mode: None,
                 name: "value".to_string(),
                 ty: parse_routine_type_text("Int").expect("type"),
@@ -2099,7 +2153,7 @@ fn runtime_native_abi_executes_exported_routine() {
             impl_trait_path: None,
             availability: Vec::new(),
             foreword_rows: Vec::new(),
-            rollups: Vec::new(),
+            cleanup_footers: Vec::new(),
             statements: vec![ParsedStmt::ReturnValue {
                 value: ParsedExpr::Binary {
                     op: arcana_ir::ExecBinaryOp::Add,
@@ -2157,6 +2211,7 @@ fn runtime_native_abi_supports_string_and_byte_values() {
                 type_params: Vec::new(),
                 behavior_attrs: BTreeMap::new(),
                 params: vec![RuntimeParamPlan {
+                    binding_id: 0,
                     mode: Some("read".to_string()),
                     name: "name".to_string(),
                     ty: parse_routine_type_text("Str").expect("type"),
@@ -2167,7 +2222,7 @@ fn runtime_native_abi_supports_string_and_byte_values() {
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: Vec::new(),
-                rollups: Vec::new(),
+                cleanup_footers: Vec::new(),
                 statements: vec![ParsedStmt::ReturnValue {
                     value: ParsedExpr::Binary {
                         op: arcana_ir::ExecBinaryOp::Add,
@@ -2187,6 +2242,7 @@ fn runtime_native_abi_supports_string_and_byte_values() {
                 type_params: Vec::new(),
                 behavior_attrs: BTreeMap::new(),
                 params: vec![RuntimeParamPlan {
+                    binding_id: 0,
                     mode: Some("read".to_string()),
                     name: "bytes".to_string(),
                     ty: parse_routine_type_text("Array[Int]").expect("type"),
@@ -2197,7 +2253,7 @@ fn runtime_native_abi_supports_string_and_byte_values() {
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: Vec::new(),
-                rollups: Vec::new(),
+                cleanup_footers: Vec::new(),
                 statements: vec![ParsedStmt::ReturnValue {
                     value: ParsedExpr::Slice {
                         expr: Box::new(ParsedExpr::Path(vec!["bytes".to_string()])),
@@ -2218,6 +2274,7 @@ fn runtime_native_abi_supports_string_and_byte_values() {
                 type_params: Vec::new(),
                 behavior_attrs: BTreeMap::new(),
                 params: vec![RuntimeParamPlan {
+                    binding_id: 0,
                     mode: Some("read".to_string()),
                     name: "pair".to_string(),
                     ty: parse_routine_type_text("Pair[Str, Int]").expect("type"),
@@ -2230,7 +2287,7 @@ fn runtime_native_abi_supports_string_and_byte_values() {
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: Vec::new(),
-                rollups: Vec::new(),
+                cleanup_footers: Vec::new(),
                 statements: vec![ParsedStmt::ReturnValue {
                     value: ParsedExpr::Path(vec!["pair".to_string()]),
                 }],
@@ -2316,6 +2373,7 @@ fn runtime_native_abi_writes_back_edit_arguments() {
             type_params: Vec::new(),
             behavior_attrs: BTreeMap::new(),
             params: vec![RuntimeParamPlan {
+                binding_id: 0,
                 mode: Some("edit".to_string()),
                 name: "value".to_string(),
                 ty: parse_routine_type_text("Int").expect("type"),
@@ -2326,7 +2384,7 @@ fn runtime_native_abi_writes_back_edit_arguments() {
             impl_trait_path: None,
             availability: Vec::new(),
             foreword_rows: Vec::new(),
-            rollups: Vec::new(),
+            cleanup_footers: Vec::new(),
             statements: vec![
                 ParsedStmt::Assign {
                     target: ParsedAssignTarget::Name("value".to_string()),
@@ -2398,7 +2456,7 @@ fn execute_routine_rejects_missing_runtime_requirement() {
 }
 
 #[test]
-fn plan_from_artifact_accepts_stmt_forewords_and_rollups() {
+fn plan_from_artifact_accepts_stmt_forewords_and_cleanup_footers() {
     let plan =
         plan_from_artifact(&sample_stmt_metadata_artifact()).expect("runtime plan should build");
     let mut host = BufferedHost::default();
@@ -2417,11 +2475,11 @@ fn execute_main_accepts_attachment_foreword_metadata() {
 }
 
 #[test]
-fn execute_main_runs_page_rollups_on_loop_exit_and_try_propagation() {
-    let dir = temp_workspace_dir("page_rollups");
+fn execute_main_runs_cleanup_footers_on_loop_exit_and_try_propagation() {
+    let dir = temp_workspace_dir("cleanup_footers");
     write_file(
         &dir.join("book.toml"),
-        "name = \"runtime_page_rollups\"\nkind = \"app\"\n",
+        "name = \"runtime_cleanup_footers\"\nkind = \"app\"\n",
     );
     write_file(
         &dir.join("src").join("shelf.arc"),
@@ -2429,23 +2487,26 @@ fn execute_main_runs_page_rollups_on_loop_exit_and_try_propagation() {
             "import std.io\n",
             "import std.result\n",
             "use std.result.Result\n",
-            "fn cleanup(value: Int) -> Int:\n",
-            "    std.io.print[Int] :: value :: call\n",
-            "    return 0\n",
+            "record Scratch:\n",
+            "    value: Int\n",
+            "impl std.cleanup.Cleanup[Scratch] for Scratch:\n",
+            "    fn cleanup(take self: Scratch) -> Result[Unit, Str]:\n",
+            "        return Result.Ok[Unit, Str] :: :: call\n",
+            "fn cleanup(take value: Scratch) -> Result[Unit, Str]:\n",
+            "    std.io.print[Int] :: value.value :: call\n",
+            "    return Result.Ok[Unit, Str] :: :: call\n",
             "fn maybe(flag: Bool) -> Result[Int, Str]:\n",
             "    if flag:\n",
             "        return Result.Err[Int, Str] :: \"bad\" :: call\n",
             "    return Result.Ok[Int, Str] :: 9 :: call\n",
             "fn run(seed: Int, flag: Bool) -> Result[Int, Str]:\n",
             "    let mut local = seed\n",
-            "    defer std.io.print[Int] :: 100 :: call\n",
             "    while local > 0:\n",
-            "        let scratch = local\n",
+            "        let scratch = Scratch :: value = local :: call\n",
             "        local -= 1\n",
-            "    [scratch, cleanup]#cleanup\n",
+            "    -cleanup[target = scratch, handler = cleanup]\n",
             "    let value = (maybe :: flag :: call) :: :: ?\n",
             "    return Result.Ok[Int, Str] :: value :: call\n",
-            "[seed, cleanup]#cleanup\n",
             "fn main() -> Int:\n",
             "    let result = run :: 2, true :: call\n",
             "    std.io.print[Bool] :: (result :: :: is_err) :: call\n",
@@ -2466,7 +2527,7 @@ fn execute_main_runs_page_rollups_on_loop_exit_and_try_propagation() {
     let artifact_path = graph.root_dir.join(
         statuses
             .iter()
-            .find(|status| status.member_name() == "runtime_page_rollups")
+            .find(|status| status.member_name() == "runtime_cleanup_footers")
             .expect("app artifact status should exist")
             .artifact_rel_path(),
     );
@@ -2476,71 +2537,80 @@ fn execute_main_runs_page_rollups_on_loop_exit_and_try_propagation() {
     assert_eq!(code, 0);
     assert_eq!(
         host.stdout,
-        vec![
-            "1".to_string(),
-            "2".to_string(),
-            "100".to_string(),
-            "true".to_string(),
-        ]
+        vec!["2".to_string(), "1".to_string(), "true".to_string(),]
     );
 
     let _ = fs::remove_dir_all(dir);
 }
 
 #[test]
-fn execute_main_page_rollups_preserve_outer_binding_under_shadowing() {
-    let dir = temp_workspace_dir("page_rollup_shadowing");
+fn build_workspace_rejects_ambiguous_cleanup_footer_target_under_shadowing() {
+    let dir = temp_workspace_dir("cleanup_footer_shadowing");
     write_file(
         &dir.join("book.toml"),
-        "name = \"runtime_page_rollup_shadowing\"\nkind = \"app\"\n",
+        "name = \"runtime_cleanup_footer_shadowing\"\nkind = \"app\"\n",
     );
     write_file(
         &dir.join("src").join("shelf.arc"),
         concat!(
             "import std.io\n",
-            "fn cleanup(value: Int) -> Int:\n",
-            "    std.io.print[Int] :: value :: call\n",
-            "    return 0\n",
+            "import std.result\n",
+            "use std.result.Result\n",
+            "record Box:\n",
+            "    value: Int\n",
+            "impl std.cleanup.Cleanup[Box] for Box:\n",
+            "    fn cleanup(take self: Box) -> Result[Unit, Str]:\n",
+            "        return Result.Ok[Unit, Str] :: :: call\n",
+            "fn cleanup(take value: Box) -> Result[Unit, Str]:\n",
+            "    std.io.print[Int] :: value.value :: call\n",
+            "    return Result.Ok[Unit, Str] :: :: call\n",
             "fn main() -> Int:\n",
-            "    let x = 1\n",
+            "    let x = Box :: value = 1 :: call\n",
             "    if true:\n",
-            "        let x = 2\n",
+            "        let x = Box :: value = 2 :: call\n",
             "    return 0\n",
-            "[x, cleanup]#cleanup\n",
+            "-cleanup[target = x, handler = cleanup]\n",
         ),
     );
     write_file(&dir.join("src").join("types.arc"), "// test types\n");
 
-    let plan = build_workspace_plan_for_member(&dir, "runtime_page_rollup_shadowing");
-    let mut host = BufferedHost::default();
-    let code = execute_main(&plan, &mut host).expect("runtime should execute");
-
-    assert_eq!(code, 0);
-    assert_eq!(host.stdout, vec!["1".to_string()]);
+    let err = match load_workspace_graph(&dir).and_then(|graph| check_workspace_graph(&graph)) {
+        Ok(_) => panic!("shadowed cleanup footer target should be ambiguous"),
+        Err(err) => err,
+    };
+    assert!(
+        err.contains("cleanup footer target `x` is ambiguous in the owning header scope"),
+        "unexpected error: {err}"
+    );
 
     let _ = fs::remove_dir_all(dir);
 }
 
 #[test]
-fn execute_main_page_rollups_refresh_subject_value_after_mutation() {
-    let dir = temp_workspace_dir("page_rollup_mutation_refresh");
+fn execute_main_cleanup_footers_refresh_subject_value_after_mutation() {
+    let dir = temp_workspace_dir("cleanup_footer_mutation_refresh");
     write_file(
         &dir.join("book.toml"),
-        "name = \"runtime_page_rollup_mutation_refresh\"\nkind = \"app\"\n",
+        "name = \"runtime_cleanup_footer_mutation_refresh\"\nkind = \"app\"\n",
     );
     write_file(
         &dir.join("src").join("shelf.arc"),
         concat!(
             "import std.io\n",
+            "import std.result\n",
+            "use std.result.Result\n",
             "use types.Counter\n",
-            "fn cleanup(counter: Counter) -> Int:\n",
+            "impl std.cleanup.Cleanup[Counter] for Counter:\n",
+            "    fn cleanup(take self: Counter) -> Result[Unit, Str]:\n",
+            "        return Result.Ok[Unit, Str] :: :: call\n",
+            "fn cleanup(take counter: Counter) -> Result[Unit, Str]:\n",
             "    std.io.print[Int] :: counter.value :: call\n",
-            "    return 0\n",
+            "    return Result.Ok[Unit, Str] :: :: call\n",
             "fn main() -> Int:\n",
             "    let mut counter = Counter :: value = 1 :: call\n",
             "    counter.value = 2\n",
             "    return 0\n",
-            "[counter, cleanup]#cleanup\n",
+            "-cleanup[target = counter, handler = cleanup]\n",
         ),
     );
     write_file(
@@ -2548,7 +2618,7 @@ fn execute_main_page_rollups_refresh_subject_value_after_mutation() {
         "export record Counter:\n    value: Int\n",
     );
 
-    let plan = build_workspace_plan_for_member(&dir, "runtime_page_rollup_mutation_refresh");
+    let plan = build_workspace_plan_for_member(&dir, "runtime_cleanup_footer_mutation_refresh");
     let mut host = BufferedHost::default();
     let code = execute_main(&plan, &mut host).expect("runtime should execute");
 
@@ -2559,21 +2629,138 @@ fn execute_main_page_rollups_refresh_subject_value_after_mutation() {
 }
 
 #[test]
-fn execute_main_manual_routine_rollups_run_after_defers() {
+fn execute_main_bare_cleanup_footer_covers_whole_routine_scope() {
+    let dir = temp_workspace_dir("bare_cleanup_footer_scope");
+    write_file(
+        &dir.join("book.toml"),
+        "name = \"runtime_bare_cleanup_footer_scope\"\nkind = \"app\"\n",
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "import std.io\n",
+            "import std.result\n",
+            "use std.result.Result\n",
+            "record Counter:\n",
+            "    value: Int\n",
+            "impl std.cleanup.Cleanup[Counter] for Counter:\n",
+            "    fn cleanup(take self: Counter) -> Result[Unit, Str]:\n",
+            "        std.io.print[Int] :: self.value :: call\n",
+            "        return Result.Ok[Unit, Str] :: :: call\n",
+            "fn main() -> Int:\n",
+            "    let first = Counter :: value = 1 :: call\n",
+            "    let second = Counter :: value = 2 :: call\n",
+            "    return 0\n",
+            "-cleanup\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let plan = build_workspace_plan_for_member(&dir, "runtime_bare_cleanup_footer_scope");
+    let mut host = BufferedHost::default();
+    let code = execute_main(&plan, &mut host).expect("runtime should execute");
+
+    assert_eq!(code, 0);
+    assert_eq!(host.stdout, vec!["2".to_string(), "1".to_string()]);
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn execute_main_bare_cleanup_footer_covers_nested_scope_bindings() {
+    let dir = temp_workspace_dir("bare_cleanup_footer_nested_scope");
+    write_file(
+        &dir.join("book.toml"),
+        "name = \"runtime_bare_cleanup_footer_nested_scope\"\nkind = \"app\"\n",
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "import std.io\n",
+            "import std.result\n",
+            "use std.result.Result\n",
+            "record Counter:\n",
+            "    value: Int\n",
+            "impl std.cleanup.Cleanup[Counter] for Counter:\n",
+            "    fn cleanup(take self: Counter) -> Result[Unit, Str]:\n",
+            "        std.io.print[Int] :: self.value :: call\n",
+            "        return Result.Ok[Unit, Str] :: :: call\n",
+            "fn main() -> Int:\n",
+            "    let outer = Counter :: value = 1 :: call\n",
+            "    if true:\n",
+            "        let inner = Counter :: value = 2 :: call\n",
+            "    return 0\n",
+            "-cleanup\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let plan = build_workspace_plan_for_member(&dir, "runtime_bare_cleanup_footer_nested_scope");
+    let mut host = BufferedHost::default();
+    let code = execute_main(&plan, &mut host).expect("runtime should execute");
+
+    assert_eq!(code, 0);
+    assert_eq!(host.stdout, vec!["2".to_string(), "1".to_string()]);
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn execute_main_cleanup_footer_targets_nested_scope_binding() {
+    let dir = temp_workspace_dir("cleanup_footer_nested_target");
+    write_file(
+        &dir.join("book.toml"),
+        "name = \"runtime_cleanup_footer_nested_target\"\nkind = \"app\"\n",
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "import std.io\n",
+            "import std.result\n",
+            "use std.result.Result\n",
+            "record Box:\n",
+            "    value: Int\n",
+            "impl std.cleanup.Cleanup[Box] for Box:\n",
+            "    fn cleanup(take self: Box) -> Result[Unit, Str]:\n",
+            "        return Result.Ok[Unit, Str] :: :: call\n",
+            "fn cleanup(take value: Box) -> Result[Unit, Str]:\n",
+            "    std.io.print[Int] :: value.value :: call\n",
+            "    return Result.Ok[Unit, Str] :: :: call\n",
+            "fn main() -> Int:\n",
+            "    if true:\n",
+            "        let inner = Box :: value = 2 :: call\n",
+            "    return 0\n",
+            "-cleanup[target = inner, handler = cleanup]\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let plan = build_workspace_plan_for_member(&dir, "runtime_cleanup_footer_nested_target");
+    let mut host = BufferedHost::default();
+    let code = execute_main(&plan, &mut host).expect("runtime should execute");
+
+    assert_eq!(code, 0);
+    assert_eq!(host.stdout, vec!["2".to_string()]);
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn execute_main_manual_routine_cleanup_footers_run_after_defers() {
     let plan = RuntimePackagePlan {
-        package_id: "manual_routine_rollups".to_string(),
-        package_name: "manual_routine_rollups".to_string(),
-        root_module_id: "manual_routine_rollups".to_string(),
+        package_id: "manual_routine_cleanup_footers".to_string(),
+        package_name: "manual_routine_cleanup_footers".to_string(),
+        root_module_id: "manual_routine_cleanup_footers".to_string(),
         direct_deps: Vec::new(),
         direct_dep_ids: Vec::new(),
         package_display_names: test_package_display_names_with_deps(
-            "manual_routine_rollups".to_string(),
-            "manual_routine_rollups".to_string(),
+            "manual_routine_cleanup_footers".to_string(),
+            "manual_routine_cleanup_footers".to_string(),
             Vec::new(),
             Vec::new(),
         ),
         package_direct_dep_ids: test_package_direct_dep_ids(
-            "manual_routine_rollups".to_string(),
+            "manual_routine_cleanup_footers".to_string(),
             Vec::new(),
             Vec::new(),
         ),
@@ -2581,8 +2768,8 @@ fn execute_main_manual_routine_rollups_run_after_defers() {
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::new(),
         entrypoints: vec![RuntimeEntrypointPlan {
-            package_id: test_package_id_for_module("manual_routine_rollups"),
-            module_id: "manual_routine_rollups".to_string(),
+            package_id: test_package_id_for_module("manual_routine_cleanup_footers"),
+            module_id: "manual_routine_cleanup_footers".to_string(),
             symbol_name: "main".to_string(),
             symbol_kind: "fn".to_string(),
             is_async: false,
@@ -2592,9 +2779,9 @@ fn execute_main_manual_routine_rollups_run_after_defers() {
         owners: Vec::new(),
         routines: vec![
             RuntimeRoutinePlan {
-                package_id: test_package_id_for_module("manual_routine_rollups"),
-                module_id: "manual_routine_rollups".to_string(),
-                routine_key: "manual_routine_rollups#sym-0".to_string(),
+                package_id: test_package_id_for_module("manual_routine_cleanup_footers"),
+                module_id: "manual_routine_cleanup_footers".to_string(),
+                routine_key: "manual_routine_cleanup_footers#sym-0".to_string(),
                 symbol_name: "run".to_string(),
                 symbol_kind: "fn".to_string(),
                 exported: false,
@@ -2602,6 +2789,7 @@ fn execute_main_manual_routine_rollups_run_after_defers() {
                 type_params: Vec::new(),
                 behavior_attrs: BTreeMap::new(),
                 params: vec![RuntimeParamPlan {
+                    binding_id: 0,
                     mode: Some("read".to_string()),
                     name: "seed".to_string(),
                     ty: parse_routine_type_text("Int").expect("type"),
@@ -2612,10 +2800,12 @@ fn execute_main_manual_routine_rollups_run_after_defers() {
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: Vec::new(),
-                rollups: vec![ParsedPageRollup {
+                cleanup_footers: vec![ParsedCleanupFooter {
+                    binding_id: 0,
                     kind: "cleanup".to_string(),
                     subject: "seed".to_string(),
                     handler_path: vec!["std".to_string(), "io".to_string(), "print".to_string()],
+                    resolved_routine: None,
                 }],
                 statements: vec![
                     ParsedStmt::Defer(ParsedExpr::Phrase {
@@ -2661,14 +2851,14 @@ fn execute_main_manual_routine_rollups_run_after_defers() {
                             dynamic_dispatch: None,
                             attached: Vec::new(),
                         },
-                        rollups: Vec::new(),
+                        cleanup_footers: Vec::new(),
                     },
                 ],
             },
             RuntimeRoutinePlan {
-                package_id: test_package_id_for_module("manual_routine_rollups"),
-                module_id: "manual_routine_rollups".to_string(),
-                routine_key: "manual_routine_rollups#sym-1".to_string(),
+                package_id: test_package_id_for_module("manual_routine_cleanup_footers"),
+                module_id: "manual_routine_cleanup_footers".to_string(),
+                routine_key: "manual_routine_cleanup_footers#sym-1".to_string(),
                 symbol_name: "main".to_string(),
                 symbol_kind: "fn".to_string(),
                 exported: true,
@@ -2682,7 +2872,7 @@ fn execute_main_manual_routine_rollups_run_after_defers() {
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: Vec::new(),
-                rollups: Vec::new(),
+                cleanup_footers: Vec::new(),
                 statements: vec![
                     ParsedStmt::Expr {
                         expr: ParsedExpr::Phrase {
@@ -2698,7 +2888,7 @@ fn execute_main_manual_routine_rollups_run_after_defers() {
                             dynamic_dispatch: None,
                             attached: Vec::new(),
                         },
-                        rollups: Vec::new(),
+                        cleanup_footers: Vec::new(),
                     },
                     ParsedStmt::ReturnValue {
                         value: ParsedExpr::Int(0),
@@ -2716,6 +2906,7 @@ fn execute_main_manual_routine_rollups_run_after_defers() {
                 type_params: vec!["T".to_string()],
                 behavior_attrs: BTreeMap::new(),
                 params: vec![RuntimeParamPlan {
+                    binding_id: 0,
                     mode: Some("read".to_string()),
                     name: "value".to_string(),
                     ty: parse_routine_type_text("T").expect("type"),
@@ -2726,7 +2917,7 @@ fn execute_main_manual_routine_rollups_run_after_defers() {
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: Vec::new(),
-                rollups: Vec::new(),
+                cleanup_footers: Vec::new(),
                 statements: Vec::new(),
             },
         ],
@@ -4941,9 +5132,10 @@ fn execute_main_rejects_try_qualifier_arguments() {
             impl_trait_path: None,
             availability: Vec::new(),
             foreword_rows: Vec::new(),
-            rollups: Vec::new(),
+            cleanup_footers: Vec::new(),
             statements: vec![
                 ParsedStmt::Let {
+                    binding_id: 0,
                     mutable: false,
                     name: "value".to_string(),
                     value: ParsedExpr::Phrase {
@@ -4977,7 +5169,7 @@ fn execute_main_rejects_try_qualifier_arguments() {
                         dynamic_dispatch: None,
                         attached: Vec::new(),
                     },
-                    rollups: Vec::new(),
+                    cleanup_footers: Vec::new(),
                 },
                 ParsedStmt::ReturnValue {
                     value: ParsedExpr::Int(0),
@@ -5271,6 +5463,7 @@ fn execute_main_rejects_use_after_take_move() {
                 type_params: Vec::new(),
                 behavior_attrs: BTreeMap::new(),
                 params: vec![RuntimeParamPlan {
+                    binding_id: 0,
                     mode: Some("take".to_string()),
                     name: "value".to_string(),
                     ty: parse_routine_type_text("Str").expect("type"),
@@ -5281,7 +5474,7 @@ fn execute_main_rejects_use_after_take_move() {
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: Vec::new(),
-                rollups: Vec::new(),
+                cleanup_footers: Vec::new(),
                 statements: vec![ParsedStmt::ReturnValue {
                     value: ParsedExpr::Int(1),
                 }],
@@ -5297,6 +5490,7 @@ fn execute_main_rejects_use_after_take_move() {
                 type_params: Vec::new(),
                 behavior_attrs: BTreeMap::new(),
                 params: vec![RuntimeParamPlan {
+                    binding_id: 0,
                     mode: Some("read".to_string()),
                     name: "value".to_string(),
                     ty: parse_routine_type_text("Str").expect("type"),
@@ -5307,7 +5501,7 @@ fn execute_main_rejects_use_after_take_move() {
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: Vec::new(),
-                rollups: Vec::new(),
+                cleanup_footers: Vec::new(),
                 statements: vec![ParsedStmt::ReturnValue {
                     value: ParsedExpr::Int(0),
                 }],
@@ -5329,9 +5523,10 @@ fn execute_main_rejects_use_after_take_move() {
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: Vec::new(),
-                rollups: Vec::new(),
+                cleanup_footers: Vec::new(),
                 statements: vec![
                     ParsedStmt::Let {
+                        binding_id: 0,
                         mutable: true,
                         name: "s".to_string(),
                         value: ParsedExpr::Str("hi".to_string()),
@@ -5350,7 +5545,7 @@ fn execute_main_rejects_use_after_take_move() {
                             dynamic_dispatch: None,
                             attached: Vec::new(),
                         },
-                        rollups: Vec::new(),
+                        cleanup_footers: Vec::new(),
                     },
                     ParsedStmt::ReturnValue {
                         value: ParsedExpr::Phrase {
@@ -5426,9 +5621,10 @@ fn execute_main_rejects_direct_intrinsic_take_fallback_reuse() {
             impl_trait_path: None,
             availability: Vec::new(),
             foreword_rows: Vec::new(),
-            rollups: Vec::new(),
+            cleanup_footers: Vec::new(),
             statements: vec![
                 ParsedStmt::Let {
+                    binding_id: 0,
                     mutable: true,
                     name: "xs".to_string(),
                     value: ParsedExpr::Collection {
@@ -5454,7 +5650,7 @@ fn execute_main_rejects_direct_intrinsic_take_fallback_reuse() {
                         dynamic_dispatch: None,
                         attached: Vec::new(),
                     },
-                    rollups: Vec::new(),
+                    cleanup_footers: Vec::new(),
                 },
                 ParsedStmt::ReturnValue {
                     value: ParsedExpr::Phrase {
@@ -6371,7 +6567,7 @@ fn resolve_routine_index_uses_current_package_dep_id_when_display_names_collide(
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: Vec::new(),
-                rollups: Vec::new(),
+                cleanup_footers: Vec::new(),
                 statements: Vec::new(),
             },
             RuntimeRoutinePlan {
@@ -6391,7 +6587,7 @@ fn resolve_routine_index_uses_current_package_dep_id_when_display_names_collide(
                 impl_trait_path: None,
                 availability: Vec::new(),
                 foreword_rows: Vec::new(),
-                rollups: Vec::new(),
+                cleanup_footers: Vec::new(),
                 statements: Vec::new(),
             },
         ],
@@ -6453,7 +6649,7 @@ fn resolve_routine_index_rejects_globally_unique_package_name_without_direct_dep
             impl_trait_path: None,
             availability: Vec::new(),
             foreword_rows: Vec::new(),
-            rollups: Vec::new(),
+            cleanup_footers: Vec::new(),
             statements: Vec::new(),
         }],
     };

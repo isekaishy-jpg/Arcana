@@ -4,9 +4,9 @@ use crate::emit::AotRuntimeBinding;
 use crate::native_abi::{NativeAbiParam, NativeAbiType, NativeExport};
 use crate::native_layout::{NativeAbiRole, NativeLayoutCatalog};
 use crate::native_lowering::{
-    NativeDirectBlock, NativeDirectExpr, NativeDirectIntBinaryOp, NativeDirectIntCompareOp,
-    NativeDirectRoutine, NativeDirectStmt, NativeExportLowering, NativeLaunchLowering,
-    NativeLoweringPlan, NativeRoutineLowering,
+    NativeCleanupAction, NativeDirectBlock, NativeDirectExpr, NativeDirectIntBinaryOp,
+    NativeDirectIntCompareOp, NativeDirectRoutine, NativeDirectStmt, NativeExportLowering,
+    NativeLaunchLowering, NativeLoweringPlan, NativeRoutineLowering,
 };
 use crate::native_manifest::{
     native_bundle_manifest_file_name, render_native_bundle_manifest,
@@ -247,10 +247,13 @@ fn render_exe_main_rs(
         NativeRoutineLowering::Direct { routine_key } => format!(
             concat!(
                 "#![windows_subsystem = \"windows\"]\n\n",
-                "use arcana_runtime::{{activate_current_bundle_native_products, RuntimeAbiValue}};\n\n",
+                "use arcana_runtime::{{RuntimeAbiValue, RuntimeExecutionState, RuntimePackagePlan, activate_current_bundle_native_products, current_process_runtime_host, parse_runtime_package_image}};\n\n",
                 "static PACKAGE_IMAGE_TEXT: &str = include_str!(concat!(env!(\"OUT_DIR\"), \"/runtime-package.json\"));\n\n",
                 "static MAIN_ROUTINE_KEY: &str = __ARCANA_MAIN_ROUTINE_KEY__;\n\n",
                 "{}",
+                "fn load_plan() -> Result<RuntimePackagePlan, String> {{\n",
+                "    parse_runtime_package_image(PACKAGE_IMAGE_TEXT)\n",
+                "}}\n\n",
                 "fn main() {{\n",
                 "    let code = match run() {{\n",
                 "        Ok(code) => code,\n",
@@ -266,6 +269,9 @@ fn render_exe_main_rs(
                 "    if let Some(code) = native_products.run_child_entrypoint(PACKAGE_IMAGE_TEXT, MAIN_ROUTINE_KEY)? {{\n",
                 "        return Ok(code);\n",
                 "    }}\n",
+                "    let plan = load_plan()?;\n",
+                "    let mut host = current_process_runtime_host()?;\n",
+                "    let mut state = RuntimeExecutionState::default();\n",
                 "    let result = {}?;\n",
                 "    match result {{\n",
                 "        RuntimeAbiValue::Int(code) => i32::try_from(code)\n",
@@ -276,7 +282,14 @@ fn render_exe_main_rs(
                 "}}\n",
             ),
             render_direct_routine_helpers(plan),
-            render_direct_routine_call_from_values(routine_key, &[], &[]),
+            render_direct_routine_call_from_values(
+                routine_key,
+                &[],
+                &[],
+                Some("&plan"),
+                Some("&mut state"),
+                Some("host.as_mut()"),
+            ),
             main_routine_key,
         )
         .replace(
@@ -286,7 +299,7 @@ fn render_exe_main_rs(
         NativeRoutineLowering::RuntimeDispatch => {
             let template = concat!(
                 "#![windows_subsystem = \"windows\"]\n\n",
-                "use arcana_runtime::execute_current_bundle_entrypoint;\n\n",
+                "use arcana_runtime::{RuntimeAbiValue, RuntimeExecutionState, RuntimePackagePlan, execute_current_bundle_entrypoint};\n\n",
                 "static PACKAGE_IMAGE_TEXT: &str = include_str!(concat!(env!(\"OUT_DIR\"), \"/runtime-package.json\"));\n\n",
                 "static MAIN_ROUTINE_KEY: &str = __ARCANA_MAIN_ROUTINE_KEY__;\n\n",
                 "fn main() {\n",
@@ -388,7 +401,7 @@ fn render_dll_lib_rs(
             "use std::ptr;\n",
             "use std::sync::OnceLock;\n\n",
             "use arcana_cabi::{{ArcanaBytesView, ArcanaCabiExportEntryV1, ArcanaCabiExportOpsV1, ArcanaCabiExportParamV1, ArcanaCabiProductApiV1, ArcanaOwnedBytes, ArcanaOwnedStr, ArcanaStrView}};\n",
-            "use arcana_runtime::{{RuntimeAbiExportOutcome, RuntimeAbiValue, RuntimeAbiWriteBack, RuntimePackagePlan, current_process_runtime_host, execute_exported_abi_routine, parse_runtime_package_image}};\n\n",
+            "use arcana_runtime::{{RuntimeAbiExportOutcome, RuntimeAbiValue, RuntimeAbiWriteBack, RuntimeExecutionState, RuntimePackagePlan, current_process_runtime_host, execute_exported_abi_routine, parse_runtime_package_image}};\n\n",
             "thread_local! {{\n",
             "    static LAST_ERROR: RefCell<Vec<u8>> = const {{ RefCell::new(Vec::new()) }};\n",
             "}}\n\n",
@@ -507,6 +520,15 @@ fn render_export_fn(export: &NativeExportLowering, layout: &NativeLayoutCatalog)
     }
     match &export.lowering {
         NativeRoutineLowering::Direct { routine_key } => {
+            body.push_str("    let plan = match load_plan() {\n");
+            body.push_str("        Ok(plan) => plan,\n");
+            body.push_str("        Err(err) => { set_last_error(err); return 0; }\n");
+            body.push_str("    };\n");
+            body.push_str("    let mut host = match default_host() {\n");
+            body.push_str("        Ok(host) => host,\n");
+            body.push_str("        Err(err) => { set_last_error(err); return 0; }\n");
+            body.push_str("    };\n");
+            body.push_str("    let mut state = RuntimeExecutionState::default();\n");
             body.push_str("    let result = match ");
             body.push_str(&render_direct_routine_call_from_values(
                 routine_key,
@@ -515,6 +537,9 @@ fn render_export_fn(export: &NativeExportLowering, layout: &NativeLayoutCatalog)
                     .iter()
                     .map(|param| format!("{}_value", param.name))
                     .collect::<Vec<_>>(),
+                Some("plan"),
+                Some("&mut state"),
+                Some("host.as_mut()"),
             ));
             body.push_str(" {\n");
             body.push_str("        Ok(value) => value,\n");
@@ -973,7 +998,15 @@ fn render_direct_routine_helper(routine: &NativeDirectRoutine) -> String {
         })
         .collect::<Vec<_>>()
         .join(", ");
+    let params = if params.is_empty() {
+        "plan: &RuntimePackagePlan, state: &mut RuntimeExecutionState, host: &mut dyn arcana_runtime::RuntimeHost".to_string()
+    } else {
+        format!(
+            "plan: &RuntimePackagePlan, state: &mut RuntimeExecutionState, host: &mut dyn arcana_runtime::RuntimeHost, {params}"
+        )
+    };
     let mut prelude = String::new();
+    prelude.push_str("    let _ = (&*plan, &mut *state, &mut *host);\n");
     for param in &routine.params {
         if matches!(param.pass_mode, ArcanaCabiPassMode::InWithWriteBack) {
             prelude.push_str(&format!(
@@ -1067,6 +1100,7 @@ fn render_direct_routine_stmt(stmt: &NativeDirectStmt, indent_level: usize) -> S
             indent = indent(indent_level),
             match_indent = indent(indent_level + 1),
         ),
+        NativeDirectStmt::Cleanup { action } => render_cleanup_action_stmt(action, indent_level),
         NativeDirectStmt::Assign { name, value } => format!(
             concat!(
                 "{indent}{}_value = match {} {{\n",
@@ -1138,10 +1172,48 @@ fn render_direct_stmt_body(statements: &[NativeDirectStmt], indent_level: usize)
         .collect()
 }
 
+fn render_cleanup_action_stmt(action: &NativeCleanupAction, indent_level: usize) -> String {
+    match action {
+        NativeCleanupAction::Direct { value } => format!(
+            concat!(
+                "{indent}match {} {{\n",
+                "{arm_indent}Ok(RuntimeAbiValue::Unit) => {{}}\n",
+                "{arm_indent}Ok(other) => return Err(format!(\"cleanup footer expected Unit, got `{{:?}}`\", other)),\n",
+                "{arm_indent}Err(err) => return Err(err),\n",
+                "{indent}}};\n"
+            ),
+            render_lowered_runtime_abi_expr(value, indent_level + 1),
+            indent = indent(indent_level),
+            arm_indent = indent(indent_level + 1),
+        ),
+        NativeCleanupAction::RuntimeDispatch { routine_key, arg } => format!(
+            concat!(
+                "{indent}{{\n",
+                "{bind_indent}let cleanup_arg = match {} {{\n",
+                "{arg_indent}Ok(value) => value,\n",
+                "{arg_indent}Err(err) => return Err(err),\n",
+                "{bind_indent}}};\n",
+                "{bind_indent}if let Err(err) = arcana_runtime::execute_cleanup_runtime_abi_routine(plan, {:?}, cleanup_arg, state, host) {{\n",
+                "{arg_indent}return Err(err);\n",
+                "{bind_indent}}}\n",
+                "{indent}}}\n"
+            ),
+            render_lowered_runtime_abi_expr(arg, indent_level + 2),
+            routine_key,
+            indent = indent(indent_level),
+            bind_indent = indent(indent_level + 1),
+            arg_indent = indent(indent_level + 2),
+        ),
+    }
+}
+
 fn render_direct_routine_call_from_values(
     routine_key: &str,
     params: &[NativeAbiParam],
     values: &[String],
+    plan_expr: Option<&str>,
+    state_expr: Option<&str>,
+    host_expr: Option<&str>,
 ) -> String {
     let rendered = params
         .iter()
@@ -1151,10 +1223,21 @@ fn render_direct_routine_call_from_values(
             ArcanaCabiPassMode::InWithWriteBack => format!("&mut {value}"),
         })
         .collect::<Vec<_>>();
+    let mut args = Vec::new();
+    if let Some(plan_expr) = plan_expr {
+        args.push(plan_expr.to_string());
+    }
+    if let Some(state_expr) = state_expr {
+        args.push(state_expr.to_string());
+    }
+    if let Some(host_expr) = host_expr {
+        args.push(host_expr.to_string());
+    }
+    args.extend(rendered);
     format!(
         "{}({})",
         direct_routine_fn_name(routine_key),
-        rendered.join(", ")
+        args.join(", ")
     )
 }
 
@@ -1183,7 +1266,14 @@ fn render_direct_routine_call_match_chain(
     indent_level: usize,
 ) -> String {
     if index == args.len() {
-        return render_direct_routine_call_from_values(routine_key, params, bound_args);
+        return render_direct_routine_call_from_values(
+            routine_key,
+            params,
+            bound_args,
+            Some("plan"),
+            Some("state"),
+            Some("host"),
+        );
     }
     if matches!(params[index].pass_mode, ArcanaCabiPassMode::InWithWriteBack) {
         let NativeDirectExpr::Binding(name) = &args[index] else {
