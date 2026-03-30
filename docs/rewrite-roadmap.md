@@ -15,7 +15,7 @@ Completed foundation work:
 - explicit recognition that rewrite-owned `std` is first-party surface and archived historical grimoires are not rewrite architecture authority
 - explicit std/grimoire governance docs so bootstrap-required surface and transitional carried roles are tracked in-repo instead of inferred from imports
 - explicit review boundary: approved docs plus `crates/*` define rewrite status, while archived historical corpus and generated snapshots are migration context unless a current scope ratifies them
-- deterministic path-only package graph, lockfile v1, and foundation build cache
+- deterministic package graph, source-aware package ids, lockfile evolution through the current versioned local-registry phase, and foundation build cache
 - package/member rebuild planning now uses normalized HIR member fingerprints instead of raw source-byte hashes, so whitespace-only edits no longer trigger rebuild drift on the current planner path
 - downstream rebuild invalidation now uses resolved API fingerprints on the real build path, including public impl-method surface, so equivalent exported type spelling no longer perturbs dependent rebuilds while callable API changes still propagate
 - shared workspace/package HIR loading and symbol-based module and imported-name resolution over the current parser foundation
@@ -65,6 +65,8 @@ Imported-source guardrails:
 
 ## Next Milestones
 
+TODO: the current rewrite already has package-level build caching, but once more of the CLI and toolchain logic moves into Arcana code the long-term performance answer will need to be Arcana-native incremental compilation/cache reuse below whole-package rebuilds. External Rust compiler caches are still useful in the current Rust-heavy phase, but they are only a transitional optimization rather than the selfhost end-state.
+
 1. Completed: replace the remaining raw opaque-expression fallbacks and leftover grouped-comma bracket ambiguities with fully structured parsing on the current frontend path.
 2. Completed: freeze the rewrite-owned package boundaries and bootstrap ledgers: host-core in `selfhost-host/v1-scope`, app/runtime substrate in `app-substrate-v1-scope`, std scope/status, grimoire role scope/status, ECS/behaviors kept first-party, and carried convenience layers explicitly left unratified.
 3. Completed: extend the typed frontend from declaration-surface plus body-resolution checks into conservative expression typing, ownership, and borrow/lifetime flow on the current frontend path.
@@ -83,5 +85,5 @@ Imported-source guardrails:
 ## Non-Goals Before Selfhost
 
 - no language expansion
-- no Git or registry dependencies
+- no remote registry or Git dependencies
 - no public bytecode compatibility promise

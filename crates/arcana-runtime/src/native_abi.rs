@@ -39,7 +39,6 @@ pub fn execute_exported_abi_routine(
         .iter()
         .enumerate()
         .find(|(_, routine)| native_abi_callable(routine) && routine.routine_key == routine_key)
-        .map(|(index, routine)| (index, routine))
         .ok_or_else(|| format!("abi routine `{routine_key}` is not exported or callable"))?;
     validate_runtime_requirements_supported(plan, host)?;
     let mut state = RuntimeExecutionState::default();

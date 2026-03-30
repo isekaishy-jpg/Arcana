@@ -29,7 +29,7 @@ pub(crate) fn render_build_progress(progress: BuildProgress<'_>) -> String {
         progress.index,
         progress.total,
         verb,
-        progress.status.member(),
+        progress.status.member_label(),
         &storage_key,
     )
 }

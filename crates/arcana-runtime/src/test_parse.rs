@@ -644,8 +644,7 @@ fn parse_phrase_qualifier_kind(text: &str) -> Result<ParsedPhraseQualifierKind, 
 }
 
 fn is_simple_runtime_path(text: &str) -> bool {
-    text.split('.')
-        .all(|segment| is_simple_runtime_identifier(segment))
+    text.split('.').all(is_simple_runtime_identifier)
 }
 
 fn classify_phrase_qualifier_kind(text: &str) -> Result<ParsedPhraseQualifierKind, String> {

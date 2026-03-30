@@ -54,6 +54,7 @@ This document defines how Arcana spec files are interpreted during the rewrite.
 - `docs/specs/where/where/v1-scope.md`
 - `docs/specs/concurrency/concurrency/v1-scope.md`
 - `docs/specs/resources/resources/v1-scope.md`
+- `docs/specs/package-management/package-management/v1-scope.md`
 - `docs/specs/std/std/v1-scope.md`
 - `docs/specs/std/std/v1-status.md`
 - `docs/specs/grimoires/grimoires/v1-scope.md`

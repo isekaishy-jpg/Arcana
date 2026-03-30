@@ -8,14 +8,14 @@ use super::{
     arcana_desktop_session_record, arcana_desktop_wake_record, arcana_desktop_window_value,
     arcana_window_id_record, err_variant, execute_entrypoint_routine, execute_exported_abi_routine,
     execute_exported_json_abi_routine, execute_main, execute_routine, insert_runtime_channel,
-    load_package_plan, none_variant, ok_variant, parse_rollup_row, parse_runtime_package_image,
-    parse_stmt, plan_from_artifact, render_exported_json_abi_manifest,
-    render_runtime_package_image, resolve_routine_index, resolve_routine_index_for_call,
-    some_variant, try_execute_arcana_owned_api_call,
+    load_package_plan, lookup_runtime_owner_plan, none_variant, ok_variant, owner_state_key,
+    parse_rollup_row, parse_runtime_package_image, parse_stmt, plan_from_artifact,
+    render_exported_json_abi_manifest, render_runtime_package_image, resolve_routine_index,
+    resolve_routine_index_for_call, some_variant, try_execute_arcana_owned_api_call,
 };
 use arcana_aot::{
-    AOT_INTERNAL_FORMAT, AotEntrypointArtifact, AotPackageArtifact, AotPackageModuleArtifact,
-    AotRoutineArtifact, AotRoutineParamArtifact, render_package_artifact,
+    AOT_INTERNAL_FORMAT, AotEntrypointArtifact, AotOwnerArtifact, AotPackageArtifact,
+    AotPackageModuleArtifact, AotRoutineArtifact, AotRoutineParamArtifact, render_package_artifact,
 };
 use arcana_frontend::{check_workspace_graph, compute_member_fingerprints_for_checked_workspace};
 use arcana_ir::{IrRoutineType, IrRoutineTypeKind, parse_routine_type_text};
@@ -65,6 +65,34 @@ fn test_return_type(signature: &str) -> Option<IrRoutineType> {
     let (_, tail) = signature.rsplit_once("->")?;
     let trimmed = tail.trim().trim_end_matches(':').trim();
     (!trimmed.is_empty()).then(|| parse_routine_type_text(trimmed).expect("type should parse"))
+}
+
+fn test_package_id_for_module(module_id: &str) -> String {
+    module_id.split('.').next().unwrap_or(module_id).to_string()
+}
+
+fn test_package_display_names_with_deps(
+    package_id: impl Into<String>,
+    package_name: impl Into<String>,
+    direct_deps: Vec<String>,
+    direct_dep_ids: Vec<String>,
+) -> BTreeMap<String, String> {
+    let mut names = BTreeMap::from([(package_id.into(), package_name.into())]);
+    for (dep_name, dep_id) in direct_deps.into_iter().zip(direct_dep_ids) {
+        names.entry(dep_id).or_insert(dep_name);
+    }
+    names
+}
+
+fn test_package_direct_dep_ids(
+    package_id: impl Into<String>,
+    direct_deps: Vec<String>,
+    direct_dep_ids: Vec<String>,
+) -> BTreeMap<String, BTreeMap<String, String>> {
+    BTreeMap::from([(
+        package_id.into(),
+        direct_deps.into_iter().zip(direct_dep_ids).collect(),
+    )])
 }
 
 fn temp_artifact_path(label: &str) -> PathBuf {
@@ -291,9 +319,9 @@ fn build_workspace_plan_for_member(dir: &Path, member: &str) -> RuntimePackagePl
     execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
-        &statuses
+        statuses
             .iter()
-            .find(|status| status.member() == member)
+            .find(|status| status.member_name() == member)
             .expect("artifact status should exist")
             .artifact_rel_path(),
     );
@@ -514,15 +542,29 @@ fn write_host_core_workspace(destination: &Path) {
 fn sample_return_artifact() -> AotPackageArtifact {
     AotPackageArtifact {
         format: AOT_INTERNAL_FORMAT.to_string(),
+        package_id: "hello".to_string(),
         package_name: "hello".to_string(),
         root_module_id: "hello".to_string(),
         direct_deps: vec!["std".to_string()],
+        direct_dep_ids: vec!["std".to_string()],
+        package_display_names: test_package_display_names_with_deps(
+            "hello".to_string(),
+            "hello".to_string(),
+            vec!["std".to_string()],
+            vec!["std".to_string()],
+        ),
+        package_direct_dep_ids: test_package_direct_dep_ids(
+            test_package_id_for_module("hello"),
+            vec!["std".to_string()],
+            vec!["std".to_string()],
+        ),
         module_count: 1,
         dependency_edge_count: 1,
         dependency_rows: vec!["source=hello:import:std.io:".to_string()],
         exported_surface_rows: vec!["module=hello:export:fn:fn main() -> Int:".to_string()],
         runtime_requirements: vec!["std.io".to_string()],
         entrypoints: vec![AotEntrypointArtifact {
+            package_id: test_package_id_for_module("hello"),
             module_id: "hello".to_string(),
             symbol_name: "main".to_string(),
             symbol_kind: "fn".to_string(),
@@ -530,6 +572,7 @@ fn sample_return_artifact() -> AotPackageArtifact {
             exported: true,
         }],
         routines: vec![AotRoutineArtifact {
+            package_id: test_package_id_for_module("hello"),
             module_id: "hello".to_string(),
             routine_key: "hello#sym-0".to_string(),
             symbol_name: "main".to_string(),
@@ -553,6 +596,7 @@ fn sample_return_artifact() -> AotPackageArtifact {
         }],
         owners: Vec::new(),
         modules: vec![AotPackageModuleArtifact {
+            package_id: test_package_id_for_module("hello"),
             module_id: "hello".to_string(),
             symbol_count: 1,
             item_count: 2,
@@ -568,9 +612,13 @@ fn sample_return_artifact() -> AotPackageArtifact {
 fn sample_print_artifact() -> AotPackageArtifact {
     AotPackageArtifact {
             format: AOT_INTERNAL_FORMAT.to_string(),
+            package_id: "hello".to_string(),
             package_name: "hello".to_string(),
             root_module_id: "hello".to_string(),
             direct_deps: vec!["std".to_string()],
+            direct_dep_ids: vec!["std".to_string()],
+            package_display_names: test_package_display_names_with_deps("hello".to_string(), "hello".to_string(), vec!["std".to_string()], vec!["std".to_string()]),
+            package_direct_dep_ids: test_package_direct_dep_ids(test_package_id_for_module("hello"), vec!["std".to_string()], vec!["std".to_string()]),
             module_count: 1,
             dependency_edge_count: 2,
             dependency_rows: vec![
@@ -580,6 +628,7 @@ fn sample_print_artifact() -> AotPackageArtifact {
             exported_surface_rows: vec![],
             runtime_requirements: vec!["std.io".to_string()],
             entrypoints: vec![AotEntrypointArtifact {
+                package_id: test_package_id_for_module("hello"),
                 module_id: "hello".to_string(),
                 symbol_name: "main".to_string(),
                 symbol_kind: "fn".to_string(),
@@ -587,6 +636,7 @@ fn sample_print_artifact() -> AotPackageArtifact {
                 exported: false,
             }],
             routines: vec![AotRoutineArtifact {
+                package_id: test_package_id_for_module("hello"),
                 module_id: "hello".to_string(),
                 routine_key: "hello#sym-0".to_string(),
                 symbol_name: "main".to_string(),
@@ -608,6 +658,7 @@ fn sample_print_artifact() -> AotPackageArtifact {
             }],
             owners: Vec::new(),
             modules: vec![AotPackageModuleArtifact {
+                package_id: test_package_id_for_module("hello"),
                 module_id: "hello".to_string(),
                 symbol_count: 1,
                 item_count: 4,
@@ -626,15 +677,20 @@ fn sample_print_artifact() -> AotPackageArtifact {
 fn sample_stmt_metadata_artifact() -> AotPackageArtifact {
     AotPackageArtifact {
             format: AOT_INTERNAL_FORMAT.to_string(),
+            package_id: "metadata".to_string(),
             package_name: "metadata".to_string(),
             root_module_id: "metadata".to_string(),
             direct_deps: Vec::new(),
+            direct_dep_ids: Vec::new(),
+            package_display_names: test_package_display_names_with_deps("metadata".to_string(), "metadata".to_string(), Vec::new(), Vec::new()),
+            package_direct_dep_ids: test_package_direct_dep_ids(test_package_id_for_module("metadata"), Vec::new(), Vec::new()),
             module_count: 1,
             dependency_edge_count: 0,
             dependency_rows: Vec::new(),
             exported_surface_rows: vec!["module=metadata:export:fn:fn main() -> Int:".to_string()],
             runtime_requirements: Vec::new(),
             entrypoints: vec![AotEntrypointArtifact {
+                package_id: test_package_id_for_module("metadata"),
                 module_id: "metadata".to_string(),
                 symbol_name: "main".to_string(),
                 symbol_kind: "fn".to_string(),
@@ -643,7 +699,8 @@ fn sample_stmt_metadata_artifact() -> AotPackageArtifact {
             }],
             routines: vec![
                 AotRoutineArtifact {
-                    module_id: "metadata".to_string(),
+                    package_id: test_package_id_for_module("metadata"),
+                module_id: "metadata".to_string(),
                     routine_key: "metadata#sym-0".to_string(),
                     symbol_name: "main".to_string(),
                     symbol_kind: "fn".to_string(),
@@ -666,7 +723,8 @@ fn sample_stmt_metadata_artifact() -> AotPackageArtifact {
                     .expect("statement should parse")],
                 },
                 AotRoutineArtifact {
-                    module_id: "metadata".to_string(),
+                    package_id: test_package_id_for_module("metadata"),
+                module_id: "metadata".to_string(),
                     routine_key: "metadata#sym-1".to_string(),
                     symbol_name: "cleanup".to_string(),
                     symbol_kind: "fn".to_string(),
@@ -688,6 +746,7 @@ fn sample_stmt_metadata_artifact() -> AotPackageArtifact {
             ],
             owners: Vec::new(),
             modules: vec![AotPackageModuleArtifact {
+                package_id: test_package_id_for_module("metadata"),
                 module_id: "metadata".to_string(),
                 symbol_count: 2,
                 item_count: 2,
@@ -703,9 +762,13 @@ fn sample_stmt_metadata_artifact() -> AotPackageArtifact {
 fn sample_attachment_foreword_artifact() -> AotPackageArtifact {
     AotPackageArtifact {
             format: AOT_INTERNAL_FORMAT.to_string(),
+            package_id: "attachment".to_string(),
             package_name: "attachment".to_string(),
             root_module_id: "attachment".to_string(),
             direct_deps: vec!["std".to_string()],
+            direct_dep_ids: vec!["std".to_string()],
+            package_display_names: test_package_display_names_with_deps("attachment".to_string(), "attachment".to_string(), vec!["std".to_string()], vec!["std".to_string()]),
+            package_direct_dep_ids: test_package_direct_dep_ids(test_package_id_for_module("attachment"), vec!["std".to_string()], vec!["std".to_string()]),
             module_count: 1,
             dependency_edge_count: 0,
             dependency_rows: Vec::new(),
@@ -714,6 +777,7 @@ fn sample_attachment_foreword_artifact() -> AotPackageArtifact {
             ],
             runtime_requirements: vec!["std.io".to_string()],
             entrypoints: vec![AotEntrypointArtifact {
+                package_id: test_package_id_for_module("attachment"),
                 module_id: "attachment".to_string(),
                 symbol_name: "main".to_string(),
                 symbol_kind: "fn".to_string(),
@@ -721,6 +785,7 @@ fn sample_attachment_foreword_artifact() -> AotPackageArtifact {
                 exported: true,
             }],
             routines: vec![AotRoutineArtifact {
+                package_id: test_package_id_for_module("attachment"),
                 module_id: "attachment".to_string(),
                 routine_key: "attachment#sym-0".to_string(),
                 symbol_name: "main".to_string(),
@@ -756,6 +821,7 @@ fn sample_attachment_foreword_artifact() -> AotPackageArtifact {
             }],
             owners: Vec::new(),
             modules: vec![AotPackageModuleArtifact {
+                package_id: test_package_id_for_module("attachment"),
                 module_id: "attachment".to_string(),
                 symbol_count: 1,
                 item_count: 4,
@@ -831,9 +897,9 @@ fn load_package_plan_accepts_behavior_attr_values_with_colons() {
     execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
-        &statuses
+        statuses
             .iter()
-            .find(|status| status.member() == "runtime_behavior_attr")
+            .find(|status| status.member_name() == "runtime_behavior_attr")
             .expect("app artifact status should exist")
             .artifact_rel_path(),
     );
@@ -914,6 +980,7 @@ fn plan_from_artifact_rejects_rollup_handler_outside_module_scope() {
     artifact.routines[1].module_id = "helpers".to_string();
     artifact.modules[0].symbol_count = 1;
     artifact.modules.push(AotPackageModuleArtifact {
+        package_id: artifact.package_id.clone(),
         module_id: "helpers".to_string(),
         symbol_count: 1,
         item_count: 1,
@@ -946,9 +1013,22 @@ fn plan_from_artifact_rejects_inconsistent_module_count() {
 #[test]
 fn resolve_routine_index_for_call_prefers_lowered_routine_identity() {
     let plan = RuntimePackagePlan {
+        package_id: "ops".to_string(),
         package_name: "ops".to_string(),
         root_module_id: "ops".to_string(),
         direct_deps: Vec::new(),
+        direct_dep_ids: Vec::new(),
+        package_display_names: test_package_display_names_with_deps(
+            "ops".to_string(),
+            "ops".to_string(),
+            Vec::new(),
+            Vec::new(),
+        ),
+        package_direct_dep_ids: test_package_direct_dep_ids(
+            "ops".to_string(),
+            Vec::new(),
+            Vec::new(),
+        ),
         runtime_requirements: Vec::new(),
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::new(),
@@ -956,6 +1036,7 @@ fn resolve_routine_index_for_call_prefers_lowered_routine_identity() {
         owners: Vec::new(),
         routines: vec![
             RuntimeRoutinePlan {
+                package_id: test_package_id_for_module("ops"),
                 module_id: "ops".to_string(),
                 routine_key: "ops#impl-0-method-0".to_string(),
                 symbol_name: "load".to_string(),
@@ -979,6 +1060,7 @@ fn resolve_routine_index_for_call_prefers_lowered_routine_identity() {
                 statements: Vec::new(),
             },
             RuntimeRoutinePlan {
+                package_id: test_package_id_for_module("ops"),
                 module_id: "ops".to_string(),
                 routine_key: "ops#impl-1-method-0".to_string(),
                 symbol_name: "load".to_string(),
@@ -1007,6 +1089,7 @@ fn resolve_routine_index_for_call_prefers_lowered_routine_identity() {
     let index = resolve_routine_index_for_call(
         &plan,
         "ops",
+        "ops",
         &["ops".to_string(), "load".to_string()],
         &[RuntimeCallArg {
             name: None,
@@ -1027,9 +1110,22 @@ fn resolve_routine_index_for_call_prefers_lowered_routine_identity() {
 #[test]
 fn runtime_dynamic_bare_method_fallback_matches_receiver_type_args() {
     let plan = RuntimePackagePlan {
+        package_id: "ops".to_string(),
         package_name: "ops".to_string(),
         root_module_id: "ops".to_string(),
         direct_deps: Vec::new(),
+        direct_dep_ids: Vec::new(),
+        package_display_names: test_package_display_names_with_deps(
+            "ops".to_string(),
+            "ops".to_string(),
+            Vec::new(),
+            Vec::new(),
+        ),
+        package_direct_dep_ids: test_package_direct_dep_ids(
+            "ops".to_string(),
+            Vec::new(),
+            Vec::new(),
+        ),
         runtime_requirements: Vec::new(),
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::new(),
@@ -1037,6 +1133,7 @@ fn runtime_dynamic_bare_method_fallback_matches_receiver_type_args() {
         owners: Vec::new(),
         routines: vec![
             RuntimeRoutinePlan {
+                package_id: test_package_id_for_module("ops"),
                 module_id: "ops".to_string(),
                 routine_key: "ops#impl-0-method-0".to_string(),
                 symbol_name: "send".to_string(),
@@ -1062,6 +1159,7 @@ fn runtime_dynamic_bare_method_fallback_matches_receiver_type_args() {
                 statements: Vec::new(),
             },
             RuntimeRoutinePlan {
+                package_id: test_package_id_for_module("ops"),
                 module_id: "ops".to_string(),
                 routine_key: "ops#impl-1-method-0".to_string(),
                 symbol_name: "send".to_string(),
@@ -1094,6 +1192,7 @@ fn runtime_dynamic_bare_method_fallback_matches_receiver_type_args() {
     let index = resolve_routine_index_for_call(
         &plan,
         "ops",
+        "ops",
         &["ops".to_string(), "send".to_string()],
         &[RuntimeCallArg {
             name: None,
@@ -1114,9 +1213,22 @@ fn runtime_dynamic_bare_method_fallback_matches_receiver_type_args() {
 #[test]
 fn runtime_dynamic_bare_method_fallback_matches_opaque_family_receiver() {
     let plan = RuntimePackagePlan {
+        package_id: "desktop".to_string(),
         package_name: "desktop".to_string(),
         root_module_id: "desktop".to_string(),
         direct_deps: Vec::new(),
+        direct_dep_ids: Vec::new(),
+        package_display_names: test_package_display_names_with_deps(
+            "desktop".to_string(),
+            "desktop".to_string(),
+            Vec::new(),
+            Vec::new(),
+        ),
+        package_direct_dep_ids: test_package_direct_dep_ids(
+            "desktop".to_string(),
+            Vec::new(),
+            Vec::new(),
+        ),
         runtime_requirements: Vec::new(),
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::from([(
@@ -1126,6 +1238,7 @@ fn runtime_dynamic_bare_method_fallback_matches_opaque_family_receiver() {
         entrypoints: Vec::new(),
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
+            package_id: test_package_id_for_module("desktop"),
             module_id: "desktop".to_string(),
             routine_key: "desktop#impl-0-method-0".to_string(),
             symbol_name: "alive".to_string(),
@@ -1158,6 +1271,7 @@ fn runtime_dynamic_bare_method_fallback_matches_opaque_family_receiver() {
     let index = resolve_routine_index_for_call(
         &plan,
         "desktop",
+        "desktop",
         &["desktop".to_string(), "alive".to_string()],
         &[RuntimeCallArg {
             name: None,
@@ -1188,9 +1302,22 @@ fn runtime_dynamic_bare_method_fallback_keeps_owner_identity() {
     let owner_counter = synthetic_owner_type("app.Counter");
     let owner_timer = synthetic_owner_type("app.Timer");
     let plan = RuntimePackagePlan {
+        package_id: "app".to_string(),
         package_name: "app".to_string(),
         root_module_id: "app".to_string(),
         direct_deps: Vec::new(),
+        direct_dep_ids: Vec::new(),
+        package_display_names: test_package_display_names_with_deps(
+            "app".to_string(),
+            "app".to_string(),
+            Vec::new(),
+            Vec::new(),
+        ),
+        package_direct_dep_ids: test_package_direct_dep_ids(
+            "app".to_string(),
+            Vec::new(),
+            Vec::new(),
+        ),
         runtime_requirements: Vec::new(),
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::new(),
@@ -1198,6 +1325,7 @@ fn runtime_dynamic_bare_method_fallback_keeps_owner_identity() {
         owners: Vec::new(),
         routines: vec![
             RuntimeRoutinePlan {
+                package_id: test_package_id_for_module("app"),
                 module_id: "app".to_string(),
                 routine_key: "app#impl-0-method-0".to_string(),
                 symbol_name: "tick".to_string(),
@@ -1221,6 +1349,7 @@ fn runtime_dynamic_bare_method_fallback_keeps_owner_identity() {
                 statements: Vec::new(),
             },
             RuntimeRoutinePlan {
+                package_id: test_package_id_for_module("app"),
                 module_id: "app".to_string(),
                 routine_key: "app#impl-1-method-0".to_string(),
                 symbol_name: "tick".to_string(),
@@ -1250,6 +1379,7 @@ fn runtime_dynamic_bare_method_fallback_keeps_owner_identity() {
     let index = resolve_routine_index_for_call(
         &plan,
         "app",
+        "app",
         &["tick".to_string()],
         &[RuntimeCallArg {
             name: None,
@@ -1271,15 +1401,29 @@ fn runtime_dynamic_bare_method_fallback_keeps_owner_identity() {
 fn runtime_dynamic_bare_method_fallback_rejects_wrong_sole_candidate() {
     let self_type = parse_routine_type_text("AtomicInt").expect("type");
     let plan = RuntimePackagePlan {
+        package_id: "ops".to_string(),
         package_name: "ops".to_string(),
         root_module_id: "ops".to_string(),
         direct_deps: Vec::new(),
+        direct_dep_ids: Vec::new(),
+        package_display_names: test_package_display_names_with_deps(
+            "ops".to_string(),
+            "ops".to_string(),
+            Vec::new(),
+            Vec::new(),
+        ),
+        package_direct_dep_ids: test_package_direct_dep_ids(
+            "ops".to_string(),
+            Vec::new(),
+            Vec::new(),
+        ),
         runtime_requirements: Vec::new(),
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
+            package_id: test_package_id_for_module("ops"),
             module_id: "ops".to_string(),
             routine_key: "ops#impl-0-method-0".to_string(),
             symbol_name: "tick".to_string(),
@@ -1306,6 +1450,7 @@ fn runtime_dynamic_bare_method_fallback_rejects_wrong_sole_candidate() {
 
     let err = resolve_routine_index_for_call(
         &plan,
+        "ops",
         "ops",
         &["tick".to_string()],
         &[RuntimeCallArg {
@@ -1334,15 +1479,29 @@ fn runtime_dynamic_bare_method_fallback_rejects_qualified_leaf_collision() {
         fields: BTreeMap::new(),
     };
     let plan = RuntimePackagePlan {
+        package_id: "app".to_string(),
         package_name: "app".to_string(),
         root_module_id: "app".to_string(),
         direct_deps: Vec::new(),
+        direct_dep_ids: Vec::new(),
+        package_display_names: test_package_display_names_with_deps(
+            "app".to_string(),
+            "app".to_string(),
+            Vec::new(),
+            Vec::new(),
+        ),
+        package_direct_dep_ids: test_package_direct_dep_ids(
+            "app".to_string(),
+            Vec::new(),
+            Vec::new(),
+        ),
         runtime_requirements: Vec::new(),
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
+            package_id: test_package_id_for_module("app"),
             module_id: "app".to_string(),
             routine_key: "app#impl-0-method-0".to_string(),
             symbol_name: "tick".to_string(),
@@ -1369,6 +1528,7 @@ fn runtime_dynamic_bare_method_fallback_rejects_qualified_leaf_collision() {
 
     let err = resolve_routine_index_for_call(
         &plan,
+        "app",
         "app",
         &["tick".to_string()],
         &[RuntimeCallArg {
@@ -1403,7 +1563,7 @@ fn execute_main_prints_hello() {
     let plan = plan_from_artifact(&sample_print_artifact()).expect("runtime plan should build");
     let mut host = BufferedHost::default();
     let code = execute_main(&plan, &mut host).expect("runtime should execute");
-    assert_eq!(code, 0);
+    assert_eq!(code, 0, "stdout={:?}", host.stdout);
     assert_eq!(host.stdout, vec!["hello, arcana".to_string()]);
 }
 
@@ -1427,15 +1587,29 @@ fn runtime_json_abi_manifest_lists_exported_callable_routines() {
 #[test]
 fn runtime_json_abi_executes_exported_routine() {
     let plan = RuntimePackagePlan {
+        package_id: "tool".to_string(),
         package_name: "tool".to_string(),
         root_module_id: "tool".to_string(),
         direct_deps: Vec::new(),
+        direct_dep_ids: Vec::new(),
+        package_display_names: test_package_display_names_with_deps(
+            "tool".to_string(),
+            "tool".to_string(),
+            Vec::new(),
+            Vec::new(),
+        ),
+        package_direct_dep_ids: test_package_direct_dep_ids(
+            "tool".to_string(),
+            Vec::new(),
+            Vec::new(),
+        ),
         runtime_requirements: Vec::new(),
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
+            package_id: test_package_id_for_module("tool"),
             module_id: "tool".to_string(),
             routine_key: "tool#fn-0".to_string(),
             symbol_name: "answer".to_string(),
@@ -1478,15 +1652,29 @@ fn runtime_json_abi_executes_exported_routine() {
 #[test]
 fn runtime_json_abi_manifest_records_cabi_param_metadata() {
     let plan = RuntimePackagePlan {
+        package_id: "tool".to_string(),
         package_name: "tool".to_string(),
         root_module_id: "tool".to_string(),
         direct_deps: Vec::new(),
+        direct_dep_ids: Vec::new(),
+        package_display_names: test_package_display_names_with_deps(
+            "tool".to_string(),
+            "tool".to_string(),
+            Vec::new(),
+            Vec::new(),
+        ),
+        package_direct_dep_ids: test_package_direct_dep_ids(
+            "tool".to_string(),
+            Vec::new(),
+            Vec::new(),
+        ),
         runtime_requirements: Vec::new(),
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
+            package_id: test_package_id_for_module("tool"),
             module_id: "tool".to_string(),
             routine_key: "tool#fn-0".to_string(),
             symbol_name: "bump".to_string(),
@@ -1533,15 +1721,29 @@ fn runtime_json_abi_manifest_records_cabi_param_metadata() {
 #[test]
 fn runtime_json_abi_manifest_projects_default_read_source_mode() {
     let plan = RuntimePackagePlan {
+        package_id: "tool".to_string(),
         package_name: "tool".to_string(),
         root_module_id: "tool".to_string(),
         direct_deps: Vec::new(),
+        direct_dep_ids: Vec::new(),
+        package_display_names: test_package_display_names_with_deps(
+            "tool".to_string(),
+            "tool".to_string(),
+            Vec::new(),
+            Vec::new(),
+        ),
+        package_direct_dep_ids: test_package_direct_dep_ids(
+            "tool".to_string(),
+            Vec::new(),
+            Vec::new(),
+        ),
         runtime_requirements: Vec::new(),
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
+            package_id: test_package_id_for_module("tool"),
             module_id: "tool".to_string(),
             routine_key: "tool#fn-0".to_string(),
             symbol_name: "answer".to_string(),
@@ -1584,15 +1786,29 @@ fn runtime_json_abi_manifest_projects_default_read_source_mode() {
 #[test]
 fn runtime_json_abi_writes_back_edit_arguments() {
     let plan = RuntimePackagePlan {
+        package_id: "tool".to_string(),
         package_name: "tool".to_string(),
         root_module_id: "tool".to_string(),
         direct_deps: Vec::new(),
+        direct_dep_ids: Vec::new(),
+        package_display_names: test_package_display_names_with_deps(
+            "tool".to_string(),
+            "tool".to_string(),
+            Vec::new(),
+            Vec::new(),
+        ),
+        package_direct_dep_ids: test_package_direct_dep_ids(
+            "tool".to_string(),
+            Vec::new(),
+            Vec::new(),
+        ),
         runtime_requirements: Vec::new(),
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
+            package_id: test_package_id_for_module("tool"),
             module_id: "tool".to_string(),
             routine_key: "tool#fn-0".to_string(),
             symbol_name: "bump".to_string(),
@@ -1641,9 +1857,22 @@ fn runtime_json_abi_writes_back_edit_arguments() {
 #[test]
 fn runtime_json_abi_manifest_omits_unsupported_owner_reference_and_opaque_routines() {
     let plan = RuntimePackagePlan {
+        package_id: "tool".to_string(),
         package_name: "tool".to_string(),
         root_module_id: "tool".to_string(),
         direct_deps: Vec::new(),
+        direct_dep_ids: Vec::new(),
+        package_display_names: test_package_display_names_with_deps(
+            "tool".to_string(),
+            "tool".to_string(),
+            Vec::new(),
+            Vec::new(),
+        ),
+        package_direct_dep_ids: test_package_direct_dep_ids(
+            "tool".to_string(),
+            Vec::new(),
+            Vec::new(),
+        ),
         runtime_requirements: Vec::new(),
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::from([(
@@ -1654,6 +1883,7 @@ fn runtime_json_abi_manifest_omits_unsupported_owner_reference_and_opaque_routin
         owners: Vec::new(),
         routines: vec![
             RuntimeRoutinePlan {
+                package_id: test_package_id_for_module("tool"),
                 module_id: "tool".to_string(),
                 routine_key: "tool#fn-0".to_string(),
                 symbol_name: "answer".to_string(),
@@ -1679,6 +1909,7 @@ fn runtime_json_abi_manifest_omits_unsupported_owner_reference_and_opaque_routin
                 }],
             },
             RuntimeRoutinePlan {
+                package_id: test_package_id_for_module("tool"),
                 module_id: "tool".to_string(),
                 routine_key: "tool#fn-1".to_string(),
                 symbol_name: "borrowed".to_string(),
@@ -1702,6 +1933,7 @@ fn runtime_json_abi_manifest_omits_unsupported_owner_reference_and_opaque_routin
                 statements: Vec::new(),
             },
             RuntimeRoutinePlan {
+                package_id: test_package_id_for_module("tool"),
                 module_id: "tool".to_string(),
                 routine_key: "tool#fn-2".to_string(),
                 symbol_name: "window_title".to_string(),
@@ -1727,6 +1959,7 @@ fn runtime_json_abi_manifest_omits_unsupported_owner_reference_and_opaque_routin
                 statements: Vec::new(),
             },
             RuntimeRoutinePlan {
+                package_id: test_package_id_for_module("tool"),
                 module_id: "tool".to_string(),
                 routine_key: "tool#fn-3".to_string(),
                 symbol_name: "owner_only".to_string(),
@@ -1767,15 +2000,29 @@ fn runtime_json_abi_manifest_omits_unsupported_owner_reference_and_opaque_routin
 #[test]
 fn runtime_json_abi_rejects_executing_unsupported_exported_routine() {
     let plan = RuntimePackagePlan {
+        package_id: "tool".to_string(),
         package_name: "tool".to_string(),
         root_module_id: "tool".to_string(),
         direct_deps: Vec::new(),
+        direct_dep_ids: Vec::new(),
+        package_display_names: test_package_display_names_with_deps(
+            "tool".to_string(),
+            "tool".to_string(),
+            Vec::new(),
+            Vec::new(),
+        ),
+        package_direct_dep_ids: test_package_direct_dep_ids(
+            "tool".to_string(),
+            Vec::new(),
+            Vec::new(),
+        ),
         runtime_requirements: Vec::new(),
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
+            package_id: test_package_id_for_module("tool"),
             module_id: "tool".to_string(),
             routine_key: "tool#fn-0".to_string(),
             symbol_name: "borrowed".to_string(),
@@ -1810,15 +2057,29 @@ fn runtime_json_abi_rejects_executing_unsupported_exported_routine() {
 #[test]
 fn runtime_native_abi_executes_exported_routine() {
     let plan = RuntimePackagePlan {
+        package_id: "tool".to_string(),
         package_name: "tool".to_string(),
         root_module_id: "tool".to_string(),
         direct_deps: Vec::new(),
+        direct_dep_ids: Vec::new(),
+        package_display_names: test_package_display_names_with_deps(
+            "tool".to_string(),
+            "tool".to_string(),
+            Vec::new(),
+            Vec::new(),
+        ),
+        package_direct_dep_ids: test_package_direct_dep_ids(
+            "tool".to_string(),
+            Vec::new(),
+            Vec::new(),
+        ),
         runtime_requirements: Vec::new(),
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
+            package_id: test_package_id_for_module("tool"),
             module_id: "tool".to_string(),
             routine_key: "tool#fn-0".to_string(),
             symbol_name: "answer".to_string(),
@@ -1863,9 +2124,22 @@ fn runtime_native_abi_executes_exported_routine() {
 #[test]
 fn runtime_native_abi_supports_string_and_byte_values() {
     let plan = RuntimePackagePlan {
+        package_id: "tool".to_string(),
         package_name: "tool".to_string(),
         root_module_id: "tool".to_string(),
         direct_deps: Vec::new(),
+        direct_dep_ids: Vec::new(),
+        package_display_names: test_package_display_names_with_deps(
+            "tool".to_string(),
+            "tool".to_string(),
+            Vec::new(),
+            Vec::new(),
+        ),
+        package_direct_dep_ids: test_package_direct_dep_ids(
+            "tool".to_string(),
+            Vec::new(),
+            Vec::new(),
+        ),
         runtime_requirements: Vec::new(),
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::new(),
@@ -1873,6 +2147,7 @@ fn runtime_native_abi_supports_string_and_byte_values() {
         owners: Vec::new(),
         routines: vec![
             RuntimeRoutinePlan {
+                package_id: test_package_id_for_module("tool"),
                 module_id: "tool".to_string(),
                 routine_key: "tool#fn-0".to_string(),
                 symbol_name: "greet".to_string(),
@@ -1902,6 +2177,7 @@ fn runtime_native_abi_supports_string_and_byte_values() {
                 }],
             },
             RuntimeRoutinePlan {
+                package_id: test_package_id_for_module("tool"),
                 module_id: "tool".to_string(),
                 routine_key: "tool#fn-1".to_string(),
                 symbol_name: "tail".to_string(),
@@ -1932,6 +2208,7 @@ fn runtime_native_abi_supports_string_and_byte_values() {
                 }],
             },
             RuntimeRoutinePlan {
+                package_id: test_package_id_for_module("tool"),
                 module_id: "tool".to_string(),
                 routine_key: "tool#fn-2".to_string(),
                 symbol_name: "echo_pair".to_string(),
@@ -2007,15 +2284,29 @@ fn runtime_native_abi_supports_string_and_byte_values() {
 #[test]
 fn runtime_native_abi_writes_back_edit_arguments() {
     let plan = RuntimePackagePlan {
+        package_id: "tool".to_string(),
         package_name: "tool".to_string(),
         root_module_id: "tool".to_string(),
         direct_deps: Vec::new(),
+        direct_dep_ids: Vec::new(),
+        package_display_names: test_package_display_names_with_deps(
+            "tool".to_string(),
+            "tool".to_string(),
+            Vec::new(),
+            Vec::new(),
+        ),
+        package_direct_dep_ids: test_package_direct_dep_ids(
+            "tool".to_string(),
+            Vec::new(),
+            Vec::new(),
+        ),
         runtime_requirements: Vec::new(),
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
+            package_id: test_package_id_for_module("tool"),
             module_id: "tool".to_string(),
             routine_key: "tool#fn-0".to_string(),
             symbol_name: "bump".to_string(),
@@ -2112,7 +2403,7 @@ fn plan_from_artifact_accepts_stmt_forewords_and_rollups() {
         plan_from_artifact(&sample_stmt_metadata_artifact()).expect("runtime plan should build");
     let mut host = BufferedHost::default();
     let code = execute_main(&plan, &mut host).expect("runtime should execute");
-    assert_eq!(code, 0);
+    assert_eq!(code, 0, "stdout={:?}", host.stdout);
 }
 
 #[test]
@@ -2173,16 +2464,15 @@ fn execute_main_runs_page_rollups_on_loop_exit_and_try_propagation() {
     execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
-        &statuses
+        statuses
             .iter()
-            .find(|status| status.member() == "runtime_page_rollups")
+            .find(|status| status.member_name() == "runtime_page_rollups")
             .expect("app artifact status should exist")
             .artifact_rel_path(),
     );
     let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
     let mut host = BufferedHost::default();
     let code = execute_main(&plan, &mut host).expect("runtime should execute");
-
     assert_eq!(code, 0);
     assert_eq!(
         host.stdout,
@@ -2271,13 +2561,27 @@ fn execute_main_page_rollups_refresh_subject_value_after_mutation() {
 #[test]
 fn execute_main_manual_routine_rollups_run_after_defers() {
     let plan = RuntimePackagePlan {
+        package_id: "manual_routine_rollups".to_string(),
         package_name: "manual_routine_rollups".to_string(),
         root_module_id: "manual_routine_rollups".to_string(),
         direct_deps: Vec::new(),
+        direct_dep_ids: Vec::new(),
+        package_display_names: test_package_display_names_with_deps(
+            "manual_routine_rollups".to_string(),
+            "manual_routine_rollups".to_string(),
+            Vec::new(),
+            Vec::new(),
+        ),
+        package_direct_dep_ids: test_package_direct_dep_ids(
+            "manual_routine_rollups".to_string(),
+            Vec::new(),
+            Vec::new(),
+        ),
         runtime_requirements: Vec::new(),
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::new(),
         entrypoints: vec![RuntimeEntrypointPlan {
+            package_id: test_package_id_for_module("manual_routine_rollups"),
             module_id: "manual_routine_rollups".to_string(),
             symbol_name: "main".to_string(),
             symbol_kind: "fn".to_string(),
@@ -2288,6 +2592,7 @@ fn execute_main_manual_routine_rollups_run_after_defers() {
         owners: Vec::new(),
         routines: vec![
             RuntimeRoutinePlan {
+                package_id: test_package_id_for_module("manual_routine_rollups"),
                 module_id: "manual_routine_rollups".to_string(),
                 routine_key: "manual_routine_rollups#sym-0".to_string(),
                 symbol_name: "run".to_string(),
@@ -2361,6 +2666,7 @@ fn execute_main_manual_routine_rollups_run_after_defers() {
                 ],
             },
             RuntimeRoutinePlan {
+                package_id: test_package_id_for_module("manual_routine_rollups"),
                 module_id: "manual_routine_rollups".to_string(),
                 routine_key: "manual_routine_rollups#sym-1".to_string(),
                 symbol_name: "main".to_string(),
@@ -2400,6 +2706,7 @@ fn execute_main_manual_routine_rollups_run_after_defers() {
                 ],
             },
             RuntimeRoutinePlan {
+                package_id: test_package_id_for_module("std.io"),
                 module_id: "std.io".to_string(),
                 routine_key: "std.io#sym-0".to_string(),
                 symbol_name: "print".to_string(),
@@ -2462,9 +2769,9 @@ fn execute_main_runs_counter_style_workspace_artifact() {
     execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
-        &statuses
+        statuses
             .iter()
-            .find(|status| status.member() == "runtime_counter")
+            .find(|status| status.member_name() == "runtime_counter")
             .expect("app artifact status should exist")
             .artifact_rel_path(),
     );
@@ -2517,9 +2824,9 @@ fn execute_main_runs_routine_calls_with_std_args() {
     execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
-        &statuses
+        statuses
             .iter()
-            .find(|status| status.member() == "runtime_args")
+            .find(|status| status.member_name() == "runtime_args")
             .expect("app artifact status should exist")
             .artifact_rel_path(),
     );
@@ -2565,9 +2872,9 @@ fn execute_main_runs_linked_std_text_routine() {
     execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
-        &statuses
+        statuses
             .iter()
-            .find(|status| status.member() == "runtime_std_text")
+            .find(|status| status.member_name() == "runtime_std_text")
             .expect("app artifact status should exist")
             .artifact_rel_path(),
     );
@@ -2619,9 +2926,9 @@ fn execute_main_runs_linked_std_array_routines() {
     execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
-        &statuses
+        statuses
             .iter()
-            .find(|status| status.member() == "runtime_std_array")
+            .find(|status| status.member_name() == "runtime_std_array")
             .expect("app artifact status should exist")
             .artifact_rel_path(),
     );
@@ -2673,9 +2980,9 @@ fn execute_main_runs_linked_std_iter_and_set_routines() {
     execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
-        &statuses
+        statuses
             .iter()
-            .find(|status| status.member() == "runtime_std_iter_set")
+            .find(|status| status.member_name() == "runtime_std_iter_set")
             .expect("app artifact status should exist")
             .artifact_rel_path(),
     );
@@ -2683,7 +2990,7 @@ fn execute_main_runs_linked_std_iter_and_set_routines() {
     let mut host = BufferedHost::default();
     let code = execute_main(&plan, &mut host).expect("runtime should execute");
 
-    assert_eq!(code, 0);
+    assert_eq!(code, 0, "stdout={:?}", host.stdout);
     assert_eq!(
         host.stdout,
         vec![
@@ -2740,9 +3047,9 @@ fn execute_main_runs_linked_std_config_routines() {
     execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
-        &statuses
+        statuses
             .iter()
-            .find(|status| status.member() == "runtime_std_config")
+            .find(|status| status.member_name() == "runtime_std_config")
             .expect("app artifact status should exist")
             .artifact_rel_path(),
     );
@@ -2780,46 +3087,91 @@ fn execute_main_runs_linked_std_manifest_routines() {
             "import std.io\n",
             "import std.manifest\n",
             "fn main() -> Int:\n",
-            "    let book = \"name = \\\"demo\\\"\\nkind = \\\"app\\\"\\n[workspace]\\nmembers = [\\\"game\\\", \\\"tools\\\"]\\n[deps]\\nfoo = { path = \\\"../foo\\\" }\\n\"\n",
+            "    let book = \"name = \\\"demo\\\"\\nkind = \\\"app\\\"\\nversion = \\\"0.1.0\\\"\\n[workspace]\\nmembers = [\\\"game\\\", \\\"tools\\\"]\\n[deps]\\nfoo = { version = \\\"^1.2.3\\\", registry = \\\"local\\\" }\\nbar = { path = \\\"../bar\\\" }\\n\"\n",
             "    let parsed_book = std.manifest.parse_book :: book :: call\n",
             "    if parsed_book :: :: is_err:\n",
-            "        std.io.print[Str] :: (parsed_book :: \"book parse error\" :: unwrap_or) :: call\n",
+            "        let err = match parsed_book:\n",
+            "            Result.Ok(_) => \"book parse error\"\n",
+            "            Result.Err(message) => message\n",
+            "        std.io.print[Str] :: err :: call\n",
             "        return 1\n",
-            "    let book_manifest = parsed_book :: (std.manifest.BookManifest :: state = (std.manifest.BookState :: name = \"\", kind = \"\", workspace_member_names = (std.collections.list.new[Str] :: :: call) :: call), dependency_paths = (std.collections.list.new[std.manifest.NameValue] :: :: call) :: call) :: unwrap_or\n",
+            "    let book_manifest = parsed_book :: (std.manifest.empty_book_manifest :: :: call) :: unwrap_or\n",
             "    let members = book_manifest :: :: workspace_members\n",
             "    std.io.print[Int] :: ((members :: (std.collections.list.new[Str] :: :: call) :: unwrap_or) :: :: len) :: call\n",
-            "    std.io.print[Str] :: ((book_manifest :: \"foo\" :: dep_path) :: \"missing\" :: unwrap_or) :: call\n",
+            "    std.io.print[Str] :: book_manifest.package_version :: call\n",
+            "    std.io.print[Str] :: ((book_manifest :: \"foo\" :: dep_source_kind) :: \"missing\" :: unwrap_or) :: call\n",
+            "    std.io.print[Str] :: ((book_manifest :: \"foo\" :: dep_version) :: \"missing\" :: unwrap_or) :: call\n",
+            "    std.io.print[Str] :: ((book_manifest :: \"foo\" :: dep_registry) :: \"missing\" :: unwrap_or) :: call\n",
+            "    std.io.print[Str] :: ((book_manifest :: \"bar\" :: dep_path) :: \"missing\" :: unwrap_or) :: call\n",
             "    let lock_v1 = \"version = 1\\nworkspace = \\\"demo\\\"\\norder = [\\\"game\\\", \\\"tools\\\"]\\n[deps]\\ngame = [\\\"foo\\\", \\\"bar\\\"]\\n[paths]\\ngame = \\\"grimoires/owned/app/game\\\"\\n[fingerprints]\\ngame = \\\"fp1\\\"\\n[api_fingerprints]\\ngame = \\\"api1\\\"\\n[artifacts]\\ngame = \\\"build/app.artifact.toml\\\"\\n[kinds]\\ngame = \\\"app\\\"\\n[formats]\\ngame = \\\"arcana-aot-v2\\\"\\n\"\n",
             "    let parsed_lock_v1 = std.manifest.parse_lock_v1 :: lock_v1 :: call\n",
             "    if parsed_lock_v1 :: :: is_err:\n",
             "        std.io.print[Str] :: \"lock v1 parse error\" :: call\n",
             "        return 1\n",
-            "    let empty_metadata = std.manifest.LockMetadata :: version = 0, workspace = \"\", ordered_members = (std.collections.list.new[Str] :: :: call) :: call\n",
+            "    let empty_metadata = std.manifest.empty_lock_metadata :: :: call\n",
             "    let empty_deps = std.manifest.LockDependencyTables :: dependency_lists = (std.collections.list.new[std.manifest.NameList] :: :: call), path_entries = (std.collections.list.new[std.manifest.NameValue] :: :: call), fingerprint_entries = (std.collections.list.new[std.manifest.NameValue] :: :: call) :: call\n",
             "    let empty_lookup = std.manifest.LockLookupTables :: dependencies = empty_deps, api_fingerprint_entries = (std.collections.list.new[std.manifest.NameValue] :: :: call) :: call\n",
             "    let empty_output = std.manifest.LockOutputTables :: artifact_entries = (std.collections.list.new[std.manifest.NameValue] :: :: call), kind_entries = (std.collections.list.new[std.manifest.NameValue] :: :: call), format_entries = (std.collections.list.new[std.manifest.NameValue] :: :: call) :: call\n",
+            "    let empty_members = std.manifest.empty_lock_member_tables :: :: call\n",
+            "    let empty_builds = std.manifest.empty_lock_build_tables :: :: call\n",
             "    let lock_manifest_v1 = parsed_lock_v1 :: (std.manifest.LockManifestV1 :: metadata = empty_metadata, lookup_tables = empty_lookup, output_tables = empty_output :: call) :: unwrap_or\n",
             "    let deps = lock_manifest_v1 :: \"game\" :: deps_for\n",
             "    std.io.print[Int] :: ((deps :: (std.collections.list.new[Str] :: :: call) :: unwrap_or) :: :: len) :: call\n",
             "    std.io.print[Str] :: ((lock_manifest_v1 :: \"game\" :: path_for) :: \"missing\" :: unwrap_or) :: call\n",
             "    std.io.print[Str] :: ((lock_manifest_v1 :: \"game\" :: kind_for) :: \"missing\" :: unwrap_or) :: call\n",
             "    std.io.print[Str] :: ((lock_manifest_v1 :: \"game\" :: format_for) :: \"missing\" :: unwrap_or) :: call\n",
-            "    let lock_v2 = \"version = 2\\nworkspace = \\\"demo\\\"\\norder = [\\\"game\\\", \\\"tools\\\"]\\n[paths]\\ngame = \\\"grimoires/owned/app/game\\\"\\ntools = \\\"grimoires/owned/app/tools\\\"\\n[deps]\\ngame = [\\\"foo\\\", \\\"bar\\\"]\\ntools = []\\n[kinds]\\ngame = \\\"app\\\"\\ntools = \\\"lib\\\"\\n[builds]\\n\\n[builds.\\\"game\\\".\\\"internal-aot\\\"]\\nfingerprint = \\\"fp2\\\"\\napi_fingerprint = \\\"api2\\\"\\nartifact = \\\".arcana/artifacts/game/internal-aot/app.artifact.toml\\\"\\nartifact_hash = \\\"hash2\\\"\\nformat = \\\"arcana-aot-v4\\\"\\ntoolchain = \\\"toolchain-1\\\"\\n\\n[builds.\\\"tools\\\".\\\"internal-aot\\\"]\\nfingerprint = \\\"fp3\\\"\\napi_fingerprint = \\\"api3\\\"\\nartifact = \\\".arcana/artifacts/tools/internal-aot/lib.artifact.toml\\\"\\nartifact_hash = \\\"hash3\\\"\\nformat = \\\"arcana-aot-v4\\\"\\ntoolchain = \\\"toolchain-1\\\"\\n\"\n",
+            "    let parsed_lock_generic_v1 = std.manifest.parse_lock :: lock_v1 :: call\n",
+            "    if parsed_lock_generic_v1 :: :: is_err:\n",
+            "        std.io.print[Str] :: \"lock generic v1 parse error\" :: call\n",
+            "        return 1\n",
+            "    let lock_manifest_generic_v1 = parsed_lock_generic_v1 :: (std.manifest.LockManifestV2 :: metadata = empty_metadata, member_tables = empty_members, build_tables = empty_builds :: call) :: unwrap_or\n",
+            "    std.io.print[Str] :: ((lock_manifest_generic_v1 :: \"game\" :: source_kind_for) :: \"missing\" :: unwrap_or) :: call\n",
+            "    std.io.print[Str] :: ((lock_manifest_generic_v1 :: \"game\", \"internal-aot\" :: format_for) :: \"missing\" :: unwrap_or) :: call\n",
+            "    let lock_v3 = \"version = 3\\nworkspace = \\\"demo\\\"\\norder = [\\\"game\\\"]\\n[paths]\\ngame = \\\"grimoires/owned/app/game\\\"\\n[deps]\\ngame = [\\\"foo\\\"]\\n[kinds]\\ngame = \\\"app\\\"\\n[native_products]\\n\\n[native_products.\\\"game\\\".\\\"default\\\"]\\nkind = \\\"cdylib\\\"\\nrole = \\\"export\\\"\\nproducer = \\\"rust\\\"\\nfile = \\\"game.dll\\\"\\ncontract = \\\"arcana-desktop-v1\\\"\\nsidecars = [\\\"game.pdb\\\"]\\n\\n[builds]\\n\\n[builds.\\\"game\\\".\\\"internal-aot\\\"]\\nfingerprint = \\\"fp3\\\"\\napi_fingerprint = \\\"api3\\\"\\nartifact = \\\".arcana/artifacts/game/internal-aot/app.artifact.toml\\\"\\nartifact_hash = \\\"hash3\\\"\\nformat = \\\"arcana-aot-v7\\\"\\ntoolchain = \\\"toolchain-1\\\"\\n\"\n",
+            "    let parsed_lock_v3 = std.manifest.parse_lock :: lock_v3 :: call\n",
+            "    if parsed_lock_v3 :: :: is_err:\n",
+            "        std.io.print[Str] :: \"lock v3 parse error\" :: call\n",
+            "        return 1\n",
+            "    let lock_manifest_v3 = parsed_lock_v3 :: (std.manifest.LockManifestV2 :: metadata = empty_metadata, member_tables = empty_members, build_tables = empty_builds :: call) :: unwrap_or\n",
+            "    std.io.print[Str] :: ((lock_manifest_v3 :: \"game\" :: source_kind_for) :: \"missing\" :: unwrap_or) :: call\n",
+            "    std.io.print[Str] :: ((lock_manifest_v3 :: \"game\", \"default\" :: native_product_kind_for) :: \"missing\" :: unwrap_or) :: call\n",
+            "    let lock_v2 = \"version = 4\\nworkspace = \\\"demo\\\"\\nworkspace_root = \\\"path:game\\\"\\norder = [\\\"path:game\\\", \\\"path:tools\\\", \\\"registry:local:foo@1.2.3\\\", \\\"git:https://example.com/arcana/tooling.git#tag:v1.2.3:tooling\\\"]\\nworkspace_members = [\\\"path:game\\\", \\\"path:tools\\\"]\\n[packages]\\n\\n[packages.\\\"path:game\\\"]\\nname = \\\"game\\\"\\nkind = \\\"app\\\"\\nsource_kind = \\\"path\\\"\\npath = \\\"grimoires/owned/app/game\\\"\\n\\n[packages.\\\"path:tools\\\"]\\nname = \\\"tools\\\"\\nkind = \\\"lib\\\"\\nsource_kind = \\\"path\\\"\\npath = \\\"grimoires/owned/app/tools\\\"\\n\\n[packages.\\\"registry:local:foo@1.2.3\\\"]\\nname = \\\"foo\\\"\\nkind = \\\"lib\\\"\\nsource_kind = \\\"registry\\\"\\nversion = \\\"1.2.3\\\"\\nregistry = \\\"local\\\"\\nchecksum = \\\"sha256:abc123\\\"\\n\\n[packages.\\\"git:https://example.com/arcana/tooling.git#tag:v1.2.3:tooling\\\"]\\nname = \\\"tooling\\\"\\nkind = \\\"lib\\\"\\nsource_kind = \\\"git\\\"\\ngit = \\\"https://example.com/arcana/tooling.git\\\"\\ngit_selector = \\\"tag:v1.2.3\\\"\\n\\n[dependencies]\\n\\n[dependencies.\\\"path:game\\\"]\\nfoo = \\\"registry:local:foo@1.2.3\\\"\\nbar = \\\"path:tools\\\"\\n\\n[dependencies.\\\"path:tools\\\"]\\n\\n[dependencies.\\\"registry:local:foo@1.2.3\\\"]\\n\\n[dependencies.\\\"git:https://example.com/arcana/tooling.git#tag:v1.2.3:tooling\\\"]\\n\\n[native_products]\\n\\n[native_products.\\\"path:game\\\".\\\"default\\\"]\\nkind = \\\"cdylib\\\"\\nrole = \\\"export\\\"\\nproducer = \\\"rust\\\"\\nfile = \\\"game.dll\\\"\\ncontract = \\\"arcana-desktop-v1\\\"\\nrust_cdylib_crate = \\\"arcana_game\\\"\\nsidecars = [\\\"game.pdb\\\", \\\"game.json\\\"]\\n\\n[builds]\\n\\n[builds.\\\"path:game\\\".\\\"internal-aot\\\"]\\nfingerprint = \\\"fp2\\\"\\napi_fingerprint = \\\"api2\\\"\\nartifact = \\\".arcana/artifacts/game/internal-aot/app.artifact.toml\\\"\\nartifact_hash = \\\"hash2\\\"\\nformat = \\\"arcana-aot-v8\\\"\\ntoolchain = \\\"toolchain-1\\\"\\n\\n[builds.\\\"path:tools\\\".\\\"internal-aot\\\"]\\nfingerprint = \\\"fp3\\\"\\napi_fingerprint = \\\"api3\\\"\\nartifact = \\\".arcana/artifacts/tools/internal-aot/lib.artifact.toml\\\"\\nartifact_hash = \\\"hash3\\\"\\nformat = \\\"arcana-aot-v8\\\"\\ntoolchain = \\\"toolchain-1\\\"\\n\\n[builds.\\\"registry:local:foo@1.2.3\\\".\\\"internal-aot\\\"]\\nfingerprint = \\\"fp4\\\"\\napi_fingerprint = \\\"api4\\\"\\nartifact = \\\".arcana/artifacts/foo/internal-aot/lib.artifact.toml\\\"\\nartifact_hash = \\\"hash4\\\"\\nformat = \\\"arcana-aot-v8\\\"\\ntoolchain = \\\"toolchain-1\\\"\\n\\n[builds.\\\"git:https://example.com/arcana/tooling.git#tag:v1.2.3:tooling\\\".\\\"internal-aot\\\"]\\nfingerprint = \\\"fp5\\\"\\napi_fingerprint = \\\"api5\\\"\\nartifact = \\\".arcana/artifacts/tooling/internal-aot/lib.artifact.toml\\\"\\nartifact_hash = \\\"hash5\\\"\\nformat = \\\"arcana-aot-v8\\\"\\ntoolchain = \\\"toolchain-1\\\"\\n\"\n",
             "    let parsed_lock_v2 = std.manifest.parse_lock :: lock_v2 :: call\n",
             "    if parsed_lock_v2 :: :: is_err:\n",
             "        std.io.print[Str] :: \"lock v2 parse error\" :: call\n",
             "        return 1\n",
-            "    let empty_members = std.manifest.LockMemberTables :: dependency_lists = (std.collections.list.new[std.manifest.NameList] :: :: call), path_entries = (std.collections.list.new[std.manifest.NameValue] :: :: call), kind_entries = (std.collections.list.new[std.manifest.NameValue] :: :: call) :: call\n",
-            "    let empty_builds = std.manifest.LockBuildTables :: build_entries = (std.collections.list.new[std.manifest.LockBuildEntry] :: :: call) :: call\n",
             "    let lock_manifest_v2 = parsed_lock_v2 :: (std.manifest.LockManifestV2 :: metadata = empty_metadata, member_tables = empty_members, build_tables = empty_builds :: call) :: unwrap_or\n",
-            "    let targets = lock_manifest_v2 :: \"game\" :: targets_for\n",
+            "    let targets = lock_manifest_v2 :: \"path:game\" :: targets_for\n",
             "    std.io.print[Int] :: ((targets :: (std.collections.list.new[Str] :: :: call) :: unwrap_or) :: :: len) :: call\n",
-            "    std.io.print[Str] :: ((lock_manifest_v2 :: \"game\" :: path_for) :: \"missing\" :: unwrap_or) :: call\n",
-            "    std.io.print[Str] :: ((lock_manifest_v2 :: \"game\" :: kind_for) :: \"missing\" :: unwrap_or) :: call\n",
-            "    std.io.print[Str] :: ((lock_manifest_v2 :: \"game\", \"internal-aot\" :: artifact_for) :: \"missing\" :: unwrap_or) :: call\n",
-            "    std.io.print[Str] :: ((lock_manifest_v2 :: \"game\", \"internal-aot\" :: artifact_hash_for) :: \"missing\" :: unwrap_or) :: call\n",
-            "    std.io.print[Str] :: ((lock_manifest_v2 :: \"game\", \"internal-aot\" :: format_for) :: \"missing\" :: unwrap_or) :: call\n",
-            "    std.io.print[Str] :: ((lock_manifest_v2 :: \"game\", \"internal-aot\" :: toolchain_for) :: \"missing\" :: unwrap_or) :: call\n",
+            "    let package_ids = lock_manifest_v2 :: :: package_ids\n",
+            "    std.io.print[Int] :: ((package_ids :: (std.collections.list.new[Str] :: :: call) :: unwrap_or) :: :: len) :: call\n",
+            "    std.io.print[Str] :: ((lock_manifest_v2 :: :: workspace_root) :: \"missing\" :: unwrap_or) :: call\n",
+            "    std.io.print[Str] :: ((lock_manifest_v2 :: \"path:game\", \"foo\" :: dep_for) :: \"missing\" :: unwrap_or) :: call\n",
+            "    std.io.print[Str] :: ((lock_manifest_v2 :: \"path:game\", \"bar\" :: dep_for) :: \"missing\" :: unwrap_or) :: call\n",
+            "    std.io.print[Str] :: ((lock_manifest_v2 :: \"registry:local:foo@1.2.3\" :: name_for) :: \"missing\" :: unwrap_or) :: call\n",
+            "    std.io.print[Str] :: ((lock_manifest_v2 :: \"registry:local:foo@1.2.3\" :: source_kind_for) :: \"missing\" :: unwrap_or) :: call\n",
+            "    std.io.print[Str] :: ((lock_manifest_v2 :: \"registry:local:foo@1.2.3\" :: version_for) :: \"missing\" :: unwrap_or) :: call\n",
+            "    std.io.print[Str] :: ((lock_manifest_v2 :: \"registry:local:foo@1.2.3\" :: registry_for) :: \"missing\" :: unwrap_or) :: call\n",
+            "    std.io.print[Str] :: ((lock_manifest_v2 :: \"registry:local:foo@1.2.3\" :: checksum_for) :: \"missing\" :: unwrap_or) :: call\n",
+            "    std.io.print[Str] :: ((lock_manifest_v2 :: \"git:https://example.com/arcana/tooling.git#tag:v1.2.3:tooling\" :: source_kind_for) :: \"missing\" :: unwrap_or) :: call\n",
+            "    std.io.print[Str] :: ((lock_manifest_v2 :: \"git:https://example.com/arcana/tooling.git#tag:v1.2.3:tooling\" :: git_for) :: \"missing\" :: unwrap_or) :: call\n",
+            "    std.io.print[Str] :: ((lock_manifest_v2 :: \"git:https://example.com/arcana/tooling.git#tag:v1.2.3:tooling\" :: git_selector_for) :: \"missing\" :: unwrap_or) :: call\n",
+            "    std.io.print[Str] :: ((lock_manifest_v2 :: \"path:game\" :: path_for) :: \"missing\" :: unwrap_or) :: call\n",
+            "    std.io.print[Str] :: ((lock_manifest_v2 :: \"path:game\" :: kind_for) :: \"missing\" :: unwrap_or) :: call\n",
+            "    let native_products = lock_manifest_v2 :: \"path:game\" :: native_product_names_for\n",
+            "    std.io.print[Int] :: ((native_products :: (std.collections.list.new[Str] :: :: call) :: unwrap_or) :: :: len) :: call\n",
+            "    std.io.print[Str] :: ((lock_manifest_v2 :: \"path:game\", \"default\" :: native_product_kind_for) :: \"missing\" :: unwrap_or) :: call\n",
+            "    std.io.print[Str] :: ((lock_manifest_v2 :: \"path:game\", \"default\" :: native_product_role_for) :: \"missing\" :: unwrap_or) :: call\n",
+            "    std.io.print[Str] :: ((lock_manifest_v2 :: \"path:game\", \"default\" :: native_product_producer_for) :: \"missing\" :: unwrap_or) :: call\n",
+            "    std.io.print[Str] :: ((lock_manifest_v2 :: \"path:game\", \"default\" :: native_product_file_for) :: \"missing\" :: unwrap_or) :: call\n",
+            "    std.io.print[Str] :: ((lock_manifest_v2 :: \"path:game\", \"default\" :: native_product_contract_for) :: \"missing\" :: unwrap_or) :: call\n",
+            "    std.io.print[Str] :: ((lock_manifest_v2 :: \"path:game\", \"default\" :: native_product_rust_cdylib_crate_for) :: \"missing\" :: unwrap_or) :: call\n",
+            "    let sidecars = lock_manifest_v2 :: \"path:game\", \"default\" :: native_product_sidecars_for\n",
+            "    std.io.print[Int] :: ((sidecars :: (std.collections.list.new[Str] :: :: call) :: unwrap_or) :: :: len) :: call\n",
+            "    std.io.print[Str] :: ((lock_manifest_v2 :: \"path:game\", \"internal-aot\" :: artifact_for) :: \"missing\" :: unwrap_or) :: call\n",
+            "    std.io.print[Str] :: ((lock_manifest_v2 :: \"path:game\", \"internal-aot\" :: artifact_hash_for) :: \"missing\" :: unwrap_or) :: call\n",
+            "    std.io.print[Str] :: ((lock_manifest_v2 :: \"path:game\", \"internal-aot\" :: format_for) :: \"missing\" :: unwrap_or) :: call\n",
+            "    std.io.print[Str] :: ((lock_manifest_v2 :: \"path:game\", \"internal-aot\" :: toolchain_for) :: \"missing\" :: unwrap_or) :: call\n",
             "    return 0\n",
         ),
     );
@@ -2835,9 +3187,9 @@ fn execute_main_runs_linked_std_manifest_routines() {
     execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
-        &statuses
+        statuses
             .iter()
-            .find(|status| status.member() == "runtime_std_manifest")
+            .find(|status| status.member_name() == "runtime_std_manifest")
             .expect("app artifact status should exist")
             .artifact_rel_path(),
     );
@@ -2850,17 +3202,45 @@ fn execute_main_runs_linked_std_manifest_routines() {
         host.stdout,
         vec![
             "2".to_string(),
-            "../foo".to_string(),
+            "0.1.0".to_string(),
+            "registry".to_string(),
+            "^1.2.3".to_string(),
+            "local".to_string(),
+            "../bar".to_string(),
             "2".to_string(),
             "grimoires/owned/app/game".to_string(),
             "app".to_string(),
             "arcana-aot-v2".to_string(),
+            "path".to_string(),
+            "arcana-aot-v2".to_string(),
+            "path".to_string(),
+            "cdylib".to_string(),
             "1".to_string(),
+            "4".to_string(),
+            "path:game".to_string(),
+            "registry:local:foo@1.2.3".to_string(),
+            "path:tools".to_string(),
+            "foo".to_string(),
+            "registry".to_string(),
+            "1.2.3".to_string(),
+            "local".to_string(),
+            "sha256:abc123".to_string(),
+            "git".to_string(),
+            "https://example.com/arcana/tooling.git".to_string(),
+            "tag:v1.2.3".to_string(),
             "grimoires/owned/app/game".to_string(),
             "app".to_string(),
+            "1".to_string(),
+            "cdylib".to_string(),
+            "export".to_string(),
+            "rust".to_string(),
+            "game.dll".to_string(),
+            "arcana-desktop-v1".to_string(),
+            "arcana_game".to_string(),
+            "2".to_string(),
             ".arcana/artifacts/game/internal-aot/app.artifact.toml".to_string(),
             "hash2".to_string(),
-            "arcana-aot-v4".to_string(),
+            "arcana-aot-v8".to_string(),
             "toolchain-1".to_string(),
         ]
     );
@@ -2918,9 +3298,9 @@ fn execute_main_runs_linked_std_concurrent_routines() {
     execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
-        &statuses
+        statuses
             .iter()
-            .find(|status| status.member() == "runtime_std_concurrent")
+            .find(|status| status.member_name() == "runtime_std_concurrent")
             .expect("app artifact status should exist")
             .artifact_rel_path(),
     );
@@ -3007,9 +3387,9 @@ fn execute_main_runs_linked_std_memory_routines() {
     execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
-        &statuses
+        statuses
             .iter()
-            .find(|status| status.member() == "runtime_std_memory")
+            .find(|status| status.member_name() == "runtime_std_memory")
             .expect("app artifact status should exist")
             .artifact_rel_path(),
     );
@@ -3080,9 +3460,9 @@ fn execute_main_runs_linked_std_memory_borrow_routines() {
     execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
-        &statuses
+        statuses
             .iter()
-            .find(|status| status.member() == "runtime_std_memory_borrow")
+            .find(|status| status.member_name() == "runtime_std_memory_borrow")
             .expect("app artifact status should exist")
             .artifact_rel_path(),
     );
@@ -3182,9 +3562,9 @@ fn execute_main_runs_memory_phrase_attachment_routines() {
     execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
-        &statuses
+        statuses
             .iter()
-            .find(|status| status.member() == "runtime_memory_phrase_attachments")
+            .find(|status| status.member_name() == "runtime_memory_phrase_attachments")
             .expect("app artifact status should exist")
             .artifact_rel_path(),
     );
@@ -3234,9 +3614,9 @@ fn execute_main_runs_local_borrow_and_deref_routines() {
     execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
-        &statuses
+        statuses
             .iter()
-            .find(|status| status.member() == "runtime_local_borrow")
+            .find(|status| status.member_name() == "runtime_local_borrow")
             .expect("app artifact status should exist")
             .artifact_rel_path(),
     );
@@ -3291,9 +3671,9 @@ fn execute_main_runs_linked_std_concurrent_task_thread_routines() {
     execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
-        &statuses
+        statuses
             .iter()
-            .find(|status| status.member() == "runtime_std_concurrent_async")
+            .find(|status| status.member_name() == "runtime_std_concurrent_async")
             .expect("app artifact status should exist")
             .artifact_rel_path(),
     );
@@ -3347,9 +3727,9 @@ fn execute_main_runs_async_main_entrypoint() {
     execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
-        &statuses
+        statuses
             .iter()
-            .find(|status| status.member() == "runtime_async_main")
+            .find(|status| status.member_name() == "runtime_async_main")
             .expect("app artifact status should exist")
             .artifact_rel_path(),
     );
@@ -3396,9 +3776,9 @@ fn execute_main_defers_non_call_spawned_values_until_join() {
     execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
-        &statuses
+        statuses
             .iter()
-            .find(|status| status.member() == "runtime_spawned_values_pending")
+            .find(|status| status.member_name() == "runtime_spawned_values_pending")
             .expect("app artifact status should exist")
             .artifact_rel_path(),
     );
@@ -3454,9 +3834,9 @@ fn execute_main_split_threads_report_distinct_thread_ids() {
     execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
-        &statuses
+        statuses
             .iter()
-            .find(|status| status.member() == "runtime_split_thread_id")
+            .find(|status| status.member_name() == "runtime_split_thread_id")
             .expect("app artifact status should exist")
             .artifact_rel_path(),
     );
@@ -3511,9 +3891,9 @@ fn execute_main_runs_chain_expressions_with_parallel_fanout() {
     execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
-        &statuses
+        statuses
             .iter()
-            .find(|status| status.member() == "runtime_chain")
+            .find(|status| status.member_name() == "runtime_chain")
             .expect("app artifact status should exist")
             .artifact_rel_path(),
     );
@@ -3578,9 +3958,9 @@ fn execute_main_runs_linked_std_host_text_bytes_io_env_routines() {
     execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
-        &statuses
+        statuses
             .iter()
-            .find(|status| status.member() == "runtime_std_host_misc")
+            .find(|status| status.member_name() == "runtime_std_host_misc")
             .expect("app artifact status should exist")
             .artifact_rel_path(),
     );
@@ -3744,9 +4124,9 @@ fn execute_main_runs_linked_std_wrapper_closure_routines() {
     fs::write(&asset_path, "closure").expect("fixture asset should write");
 
     let artifact_path = graph.root_dir.join(
-        &statuses
+        statuses
             .iter()
-            .find(|status| status.member() == "runtime_std_wrapper_closure")
+            .find(|status| status.member_name() == "runtime_std_wrapper_closure")
             .expect("app artifact status should exist")
             .artifact_rel_path(),
     );
@@ -3891,9 +4271,9 @@ fn execute_main_runs_linked_std_fs_bytes_routines() {
     execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
-        &statuses
+        statuses
             .iter()
-            .find(|status| status.member() == "runtime_std_fs_bytes")
+            .find(|status| status.member_name() == "runtime_std_fs_bytes")
             .expect("app artifact status should exist")
             .artifact_rel_path(),
     );
@@ -4025,9 +4405,9 @@ fn execute_main_runs_linked_std_fs_stream_routines() {
     execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
-        &statuses
+        statuses
             .iter()
-            .find(|status| status.member() == "runtime_std_fs_streams")
+            .find(|status| status.member_name() == "runtime_std_fs_streams")
             .expect("app artifact status should exist")
             .artifact_rel_path(),
     );
@@ -4086,9 +4466,9 @@ fn execute_main_runs_local_record_constructor_and_impl_method() {
     execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
-        &statuses
+        statuses
             .iter()
-            .find(|status| status.member() == "runtime_record_method")
+            .find(|status| status.member_name() == "runtime_record_method")
             .expect("app artifact status should exist")
             .artifact_rel_path(),
     );
@@ -4170,9 +4550,9 @@ fn execute_main_runs_linked_std_process_routines() {
     execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
-        &statuses
+        statuses
             .iter()
-            .find(|status| status.member() == "runtime_std_process")
+            .find(|status| status.member_name() == "runtime_std_process")
             .expect("app artifact status should exist")
             .artifact_rel_path(),
     );
@@ -4227,9 +4607,9 @@ fn execute_main_runs_linked_std_option_routines() {
     execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
-        &statuses
+        statuses
             .iter()
-            .find(|status| status.member() == "runtime_std_option")
+            .find(|status| status.member_name() == "runtime_std_option")
             .expect("app artifact status should exist")
             .artifact_rel_path(),
     );
@@ -4283,9 +4663,9 @@ fn execute_main_runs_named_qualifier_path_routines() {
     execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
-        &statuses
+        statuses
             .iter()
-            .find(|status| status.member() == "runtime_named_qualifier_path")
+            .find(|status| status.member_name() == "runtime_named_qualifier_path")
             .expect("app artifact status should exist")
             .artifact_rel_path(),
     );
@@ -4337,9 +4717,9 @@ fn execute_main_runs_linked_std_result_routines() {
     execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
-        &statuses
+        statuses
             .iter()
-            .find(|status| status.member() == "runtime_std_result")
+            .find(|status| status.member_name() == "runtime_std_result")
             .expect("app artifact status should exist")
             .artifact_rel_path(),
     );
@@ -4407,9 +4787,9 @@ fn execute_main_runs_try_qualifier_routines() {
     execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
-        &statuses
+        statuses
             .iter()
-            .find(|status| status.member() == "runtime_try_qualifier")
+            .find(|status| status.member_name() == "runtime_try_qualifier")
             .expect("app artifact status should exist")
             .artifact_rel_path(),
     );
@@ -4455,9 +4835,9 @@ fn execute_main_matches_zero_payload_variant_names() {
     execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
-        &statuses
+        statuses
             .iter()
-            .find(|status| status.member() == "runtime_match_zero_payload_variant")
+            .find(|status| status.member_name() == "runtime_match_zero_payload_variant")
             .expect("app artifact status should exist")
             .artifact_rel_path(),
     );
@@ -4497,9 +4877,9 @@ fn execute_main_preserves_uppercase_match_bindings() {
     execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
-        &statuses
+        statuses
             .iter()
-            .find(|status| status.member() == "runtime_match_uppercase_binding")
+            .find(|status| status.member_name() == "runtime_match_uppercase_binding")
             .expect("app artifact status should exist")
             .artifact_rel_path(),
     );
@@ -4515,13 +4895,27 @@ fn execute_main_preserves_uppercase_match_bindings() {
 #[test]
 fn execute_main_rejects_try_qualifier_arguments() {
     let plan = RuntimePackagePlan {
+        package_id: "try_args_runtime".to_string(),
         package_name: "try_args_runtime".to_string(),
         root_module_id: "try_args_runtime".to_string(),
         direct_deps: Vec::new(),
+        direct_dep_ids: Vec::new(),
+        package_display_names: test_package_display_names_with_deps(
+            "try_args_runtime".to_string(),
+            "try_args_runtime".to_string(),
+            Vec::new(),
+            Vec::new(),
+        ),
+        package_direct_dep_ids: test_package_direct_dep_ids(
+            "try_args_runtime".to_string(),
+            Vec::new(),
+            Vec::new(),
+        ),
         runtime_requirements: Vec::new(),
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::new(),
         entrypoints: vec![RuntimeEntrypointPlan {
+            package_id: test_package_id_for_module("try_args_runtime"),
             module_id: "try_args_runtime".to_string(),
             symbol_name: "main".to_string(),
             symbol_kind: "fn".to_string(),
@@ -4531,6 +4925,7 @@ fn execute_main_rejects_try_qualifier_arguments() {
         }],
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
+            package_id: test_package_id_for_module("try_args_runtime"),
             module_id: "try_args_runtime".to_string(),
             routine_key: "try_args_runtime#sym-0".to_string(),
             symbol_name: "main".to_string(),
@@ -4643,9 +5038,9 @@ fn execute_main_runs_linked_std_collection_method_routines() {
     execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
-        &statuses
+        statuses
             .iter()
-            .find(|status| status.member() == "runtime_std_collection_methods")
+            .find(|status| status.member_name() == "runtime_std_collection_methods")
             .expect("app artifact status should exist")
             .artifact_rel_path(),
     );
@@ -4736,9 +5131,9 @@ fn execute_main_runs_range_index_slice_and_literal_match_routines() {
     execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
-        &statuses
+        statuses
             .iter()
-            .find(|status| status.member() == "runtime_range_index_slice_match")
+            .find(|status| status.member_name() == "runtime_range_index_slice_match")
             .expect("app artifact status should exist")
             .artifact_rel_path(),
     );
@@ -4808,9 +5203,9 @@ fn execute_main_runs_indexed_assignment_routines() {
     execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
-        &statuses
+        statuses
             .iter()
-            .find(|status| status.member() == "runtime_indexed_assignment")
+            .find(|status| status.member_name() == "runtime_indexed_assignment")
             .expect("app artifact status should exist")
             .artifact_rel_path(),
     );
@@ -4835,13 +5230,27 @@ fn execute_main_runs_indexed_assignment_routines() {
 #[test]
 fn execute_main_rejects_use_after_take_move() {
     let plan = RuntimePackagePlan {
+        package_id: "take_move_runtime".to_string(),
         package_name: "take_move_runtime".to_string(),
         root_module_id: "take_move_runtime".to_string(),
         direct_deps: Vec::new(),
+        direct_dep_ids: Vec::new(),
+        package_display_names: test_package_display_names_with_deps(
+            "take_move_runtime".to_string(),
+            "take_move_runtime".to_string(),
+            Vec::new(),
+            Vec::new(),
+        ),
+        package_direct_dep_ids: test_package_direct_dep_ids(
+            "take_move_runtime".to_string(),
+            Vec::new(),
+            Vec::new(),
+        ),
         runtime_requirements: Vec::new(),
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::new(),
         entrypoints: vec![RuntimeEntrypointPlan {
+            package_id: test_package_id_for_module("take_move_runtime"),
             module_id: "take_move_runtime".to_string(),
             symbol_name: "main".to_string(),
             symbol_kind: "fn".to_string(),
@@ -4852,6 +5261,7 @@ fn execute_main_rejects_use_after_take_move() {
         owners: Vec::new(),
         routines: vec![
             RuntimeRoutinePlan {
+                package_id: test_package_id_for_module("take_move_runtime"),
                 module_id: "take_move_runtime".to_string(),
                 routine_key: "take_move_runtime#sym-0".to_string(),
                 symbol_name: "consume".to_string(),
@@ -4877,6 +5287,7 @@ fn execute_main_rejects_use_after_take_move() {
                 }],
             },
             RuntimeRoutinePlan {
+                package_id: test_package_id_for_module("take_move_runtime"),
                 module_id: "take_move_runtime".to_string(),
                 routine_key: "take_move_runtime#sym-1".to_string(),
                 symbol_name: "reuse".to_string(),
@@ -4902,6 +5313,7 @@ fn execute_main_rejects_use_after_take_move() {
                 }],
             },
             RuntimeRoutinePlan {
+                package_id: test_package_id_for_module("take_move_runtime"),
                 module_id: "take_move_runtime".to_string(),
                 routine_key: "take_move_runtime#sym-2".to_string(),
                 symbol_name: "main".to_string(),
@@ -4968,13 +5380,27 @@ fn execute_main_rejects_use_after_take_move() {
 #[test]
 fn execute_main_rejects_direct_intrinsic_take_fallback_reuse() {
     let plan = RuntimePackagePlan {
+        package_id: "take_intrinsic_runtime".to_string(),
         package_name: "take_intrinsic_runtime".to_string(),
         root_module_id: "take_intrinsic_runtime".to_string(),
         direct_deps: Vec::new(),
+        direct_dep_ids: Vec::new(),
+        package_display_names: test_package_display_names_with_deps(
+            "take_intrinsic_runtime".to_string(),
+            "take_intrinsic_runtime".to_string(),
+            Vec::new(),
+            Vec::new(),
+        ),
+        package_direct_dep_ids: test_package_direct_dep_ids(
+            "take_intrinsic_runtime".to_string(),
+            Vec::new(),
+            Vec::new(),
+        ),
         runtime_requirements: Vec::new(),
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::new(),
         entrypoints: vec![RuntimeEntrypointPlan {
+            package_id: test_package_id_for_module("take_intrinsic_runtime"),
             module_id: "take_intrinsic_runtime".to_string(),
             symbol_name: "main".to_string(),
             symbol_kind: "fn".to_string(),
@@ -4984,6 +5410,7 @@ fn execute_main_rejects_direct_intrinsic_take_fallback_reuse() {
         }],
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
+            package_id: test_package_id_for_module("take_intrinsic_runtime"),
             module_id: "take_intrinsic_runtime".to_string(),
             routine_key: "take_intrinsic_runtime#sym-0".to_string(),
             symbol_name: "main".to_string(),
@@ -5096,9 +5523,9 @@ fn execute_main_allows_copy_take_and_reassign_after_take_move() {
     execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
-        &statuses
+        statuses
             .iter()
-            .find(|status| status.member() == "runtime_take_copy_and_reassign")
+            .find(|status| status.member_name() == "runtime_take_copy_and_reassign")
             .expect("app artifact status should exist")
             .artifact_rel_path(),
     );
@@ -5150,9 +5577,9 @@ fn execute_main_runs_apply_and_await_apply_qualifiers() {
     execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
-        &statuses
+        statuses
             .iter()
-            .find(|status| status.member() == "runtime_apply_and_await_apply")
+            .find(|status| status.member_name() == "runtime_apply_and_await_apply")
             .expect("app artifact status should exist")
             .artifact_rel_path(),
     );
@@ -5237,9 +5664,9 @@ fn execute_main_runs_linked_std_ecs_behavior_routines() {
     execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
-        &statuses
+        statuses
             .iter()
-            .find(|status| status.member() == "runtime_std_ecs")
+            .find(|status| status.member_name() == "runtime_std_ecs")
             .expect("app artifact status should exist")
             .artifact_rel_path(),
     );
@@ -5347,9 +5774,9 @@ fn execute_main_runs_owned_app_facade_workspace() {
     execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
-        &statuses
+        statuses
             .iter()
-            .find(|status| status.member() == "runtime_owned_app_facade")
+            .find(|status| status.member_name() == "runtime_owned_app_facade")
             .expect("app artifact status should exist")
             .artifact_rel_path(),
     );
@@ -5446,9 +5873,9 @@ fn execute_main_runs_synthetic_audio_runtime() {
     execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
-        &statuses
+        statuses
             .iter()
-            .find(|status| status.member() == "runtime_std_audio")
+            .find(|status| status.member_name() == "runtime_std_audio")
             .expect("app artifact status should exist")
             .artifact_rel_path(),
     );
@@ -5622,9 +6049,9 @@ fn execute_main_runs_synthetic_window_canvas_events_runtime() {
     execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
-        &statuses
+        statuses
             .iter()
-            .find(|status| status.member() == "runtime_window_canvas")
+            .find(|status| status.member_name() == "runtime_window_canvas")
             .expect("app artifact status should exist")
             .artifact_rel_path(),
     );
@@ -5632,6 +6059,7 @@ fn execute_main_runs_synthetic_window_canvas_events_runtime() {
     let fixture_root = dir.join("fixture");
     let kernel_poll_routine = resolve_routine_index(
         &plan,
+        &plan.package_id,
         &plan.root_module_id,
         &[
             "std".to_string(),
@@ -5643,6 +6071,7 @@ fn execute_main_runs_synthetic_window_canvas_events_runtime() {
     .expect("std.kernel.events.poll should exist");
     let lift_event_routine = resolve_routine_index(
         &plan,
+        &plan.package_id,
         &plan.root_module_id,
         &[
             "std".to_string(),
@@ -5653,6 +6082,7 @@ fn execute_main_runs_synthetic_window_canvas_events_runtime() {
     .expect("std.events.lift_event should exist");
     let poll_routine = resolve_routine_index(
         &plan,
+        &plan.package_id,
         &plan.root_module_id,
         &["std".to_string(), "events".to_string(), "poll".to_string()],
     )
@@ -5888,6 +6318,193 @@ fn execute_main_runs_synthetic_window_canvas_events_runtime() {
 }
 
 #[test]
+fn resolve_routine_index_uses_current_package_dep_id_when_display_names_collide() {
+    let app_v1 = "path:app_v1".to_string();
+    let app_v2 = "path:app_v2".to_string();
+    let core_v1 = "registry:local:core@1.0.0".to_string();
+    let core_v2 = "registry:local:core@2.0.0".to_string();
+    let callable = vec!["core".to_string(), "value".to_string()];
+    let plan = RuntimePackagePlan {
+        package_id: app_v1.clone(),
+        package_name: "app_v1".to_string(),
+        root_module_id: "app_v1".to_string(),
+        direct_deps: vec!["core".to_string()],
+        direct_dep_ids: vec![core_v1.clone()],
+        package_display_names: BTreeMap::from([
+            (app_v1.clone(), "app_v1".to_string()),
+            (app_v2.clone(), "app_v2".to_string()),
+            (core_v1.clone(), "core".to_string()),
+            (core_v2.clone(), "core".to_string()),
+        ]),
+        package_direct_dep_ids: BTreeMap::from([
+            (
+                app_v1.clone(),
+                BTreeMap::from([("core".to_string(), core_v1.clone())]),
+            ),
+            (
+                app_v2.clone(),
+                BTreeMap::from([("core".to_string(), core_v2.clone())]),
+            ),
+            (core_v1.clone(), BTreeMap::new()),
+            (core_v2.clone(), BTreeMap::new()),
+        ]),
+        runtime_requirements: Vec::new(),
+        module_aliases: BTreeMap::new(),
+        opaque_family_types: BTreeMap::new(),
+        entrypoints: Vec::new(),
+        owners: Vec::new(),
+        routines: vec![
+            RuntimeRoutinePlan {
+                package_id: core_v1.clone(),
+                module_id: "core".to_string(),
+                routine_key: "core@1#fn-0".to_string(),
+                symbol_name: "value".to_string(),
+                symbol_kind: "fn".to_string(),
+                exported: true,
+                is_async: false,
+                type_params: Vec::new(),
+                behavior_attrs: BTreeMap::new(),
+                params: Vec::new(),
+                return_type: test_return_type("fn value() -> Int:"),
+                intrinsic_impl: None,
+                impl_target_type: None,
+                impl_trait_path: None,
+                availability: Vec::new(),
+                foreword_rows: Vec::new(),
+                rollups: Vec::new(),
+                statements: Vec::new(),
+            },
+            RuntimeRoutinePlan {
+                package_id: core_v2.clone(),
+                module_id: "core".to_string(),
+                routine_key: "core@2#fn-0".to_string(),
+                symbol_name: "value".to_string(),
+                symbol_kind: "fn".to_string(),
+                exported: true,
+                is_async: false,
+                type_params: Vec::new(),
+                behavior_attrs: BTreeMap::new(),
+                params: Vec::new(),
+                return_type: test_return_type("fn value() -> Int:"),
+                intrinsic_impl: None,
+                impl_target_type: None,
+                impl_trait_path: None,
+                availability: Vec::new(),
+                foreword_rows: Vec::new(),
+                rollups: Vec::new(),
+                statements: Vec::new(),
+            },
+        ],
+    };
+
+    let from_app_v1 = resolve_routine_index(&plan, &app_v1, "app_v1", &callable)
+        .expect("app_v1 should resolve its direct core dependency");
+    let from_app_v2 = resolve_routine_index(&plan, &app_v2, "app_v2", &callable)
+        .expect("app_v2 should resolve its direct core dependency");
+
+    assert_eq!(plan.routines[from_app_v1].package_id, core_v1);
+    assert_eq!(plan.routines[from_app_v2].package_id, core_v2);
+}
+
+#[test]
+fn resolve_routine_index_rejects_globally_unique_package_name_without_direct_dep_visibility() {
+    let app = "path:app".to_string();
+    let helper = "path:helper".to_string();
+    let core = "registry:local:core@1.0.0".to_string();
+    let callable = vec!["core".to_string(), "value".to_string()];
+    let plan = RuntimePackagePlan {
+        package_id: app.clone(),
+        package_name: "app".to_string(),
+        root_module_id: "app".to_string(),
+        direct_deps: vec!["helper".to_string()],
+        direct_dep_ids: vec![helper.clone()],
+        package_display_names: BTreeMap::from([
+            (app.clone(), "app".to_string()),
+            (helper.clone(), "helper".to_string()),
+            (core.clone(), "core".to_string()),
+        ]),
+        package_direct_dep_ids: BTreeMap::from([
+            (
+                app.clone(),
+                BTreeMap::from([("helper".to_string(), helper.clone())]),
+            ),
+            (helper.clone(), BTreeMap::new()),
+            (core.clone(), BTreeMap::new()),
+        ]),
+        runtime_requirements: Vec::new(),
+        module_aliases: BTreeMap::new(),
+        opaque_family_types: BTreeMap::new(),
+        entrypoints: Vec::new(),
+        owners: Vec::new(),
+        routines: vec![RuntimeRoutinePlan {
+            package_id: core,
+            module_id: "core".to_string(),
+            routine_key: "core@1#fn-0".to_string(),
+            symbol_name: "value".to_string(),
+            symbol_kind: "fn".to_string(),
+            exported: true,
+            is_async: false,
+            type_params: Vec::new(),
+            behavior_attrs: BTreeMap::new(),
+            params: Vec::new(),
+            return_type: test_return_type("fn value() -> Int:"),
+            intrinsic_impl: None,
+            impl_target_type: None,
+            impl_trait_path: None,
+            availability: Vec::new(),
+            foreword_rows: Vec::new(),
+            rollups: Vec::new(),
+            statements: Vec::new(),
+        }],
+    };
+
+    let resolved = resolve_routine_index(&plan, &app, "app", &callable);
+    assert!(resolved.is_none());
+}
+
+#[test]
+fn plan_from_artifact_keeps_owner_package_ids_distinct_when_display_names_collide() {
+    let core_v1 = "registry:local:core@1.0.0".to_string();
+    let core_v2 = "registry:local:core@2.0.0".to_string();
+    let owner_path = vec!["core".to_string(), "Session".to_string()];
+    let mut artifact = sample_return_artifact();
+    artifact.owners = vec![
+        AotOwnerArtifact {
+            package_id: core_v1.clone(),
+            module_id: "core".to_string(),
+            owner_path: owner_path.clone(),
+            owner_name: "Session".to_string(),
+            objects: Vec::new(),
+            exits: Vec::new(),
+        },
+        AotOwnerArtifact {
+            package_id: core_v2.clone(),
+            module_id: "core".to_string(),
+            owner_path: owner_path.clone(),
+            owner_name: "Session".to_string(),
+            objects: Vec::new(),
+            exits: Vec::new(),
+        },
+    ];
+
+    let plan = plan_from_artifact(&artifact).expect("runtime plan should build");
+    let key_v1 = owner_state_key(&core_v1, &owner_path);
+    let key_v2 = owner_state_key(&core_v2, &owner_path);
+
+    assert_ne!(key_v1, key_v2);
+    assert_eq!(
+        lookup_runtime_owner_plan(&plan, &core_v1, &owner_path)
+            .map(|owner| owner.package_id.as_str()),
+        Some(core_v1.as_str())
+    );
+    assert_eq!(
+        lookup_runtime_owner_plan(&plan, &core_v2, &owner_path)
+            .map(|owner| owner.package_id.as_str()),
+        Some(core_v2.as_str())
+    );
+}
+
+#[test]
 fn execute_main_runs_synthetic_host_core_workspace_artifact() {
     let dir = temp_workspace_dir("host_tool");
     write_host_core_workspace(&dir);
@@ -5906,9 +6523,9 @@ fn execute_main_runs_synthetic_host_core_workspace_artifact() {
     execute_workspace_build(&graph, &fingerprints, &statuses);
 
     let artifact_path = graph.root_dir.join(
-        &statuses
+        statuses
             .iter()
-            .find(|status| status.member() == "runtime_host_core")
+            .find(|status| status.member_name() == "runtime_host_core")
             .expect("app artifact status should exist")
             .artifact_rel_path(),
     );
@@ -7934,87 +8551,89 @@ fn execute_main_runs_arcana_desktop_extended_event_runner_workspace() {
     write_file(&dir.join("src").join("types.arc"), "// test types\n");
 
     let plan = build_workspace_plan_for_member(&dir, "runtime_desktop_app_runner_events");
-    let mut host = BufferedHost::default();
-    host.next_frame_events = vec![
-        BufferedEvent {
-            kind: 16,
-            window_id: 0,
-            a: 1500,
-            b: 0,
-            flags: 0,
-            text: String::new(),
-            ..BufferedEvent::default()
-        },
-        BufferedEvent {
-            kind: 17,
-            window_id: 0,
-            a: 2,
-            b: 0,
-            flags: 0,
-            text: String::new(),
-            ..BufferedEvent::default()
-        },
-        BufferedEvent {
-            kind: 14,
-            window_id: 0,
-            a: 0,
-            b: 0,
-            flags: 0,
-            text: "hi".to_string(),
-            ..BufferedEvent::default()
-        },
-        BufferedEvent {
-            kind: 15,
-            window_id: 0,
-            a: 0,
-            b: 0,
-            flags: 0,
-            text: "drop.txt".to_string(),
-            ..BufferedEvent::default()
-        },
-        BufferedEvent {
-            kind: 18,
-            window_id: 7,
-            a: 3,
-            b: 4,
-            flags: 0,
-            text: String::new(),
-            ..BufferedEvent::default()
-        },
-        BufferedEvent {
-            kind: 19,
-            window_id: 7,
-            a: 1,
-            b: 1,
-            flags: 0,
-            text: String::new(),
-            ..BufferedEvent::default()
-        },
-        BufferedEvent {
-            kind: 28,
-            window_id: 7,
-            a: 0,
-            b: 120,
-            flags: 0,
-            text: String::new(),
-            ..BufferedEvent::default()
-        },
-        BufferedEvent {
-            kind: 29,
-            window_id: 7,
-            a: 0,
-            b: 1,
-            flags: 0,
-            text: "A".to_string(),
-            key_code: 65,
-            physical_key: 30,
-            logical_key: 65,
-            key_location: 0,
-            pointer_x: 0,
-            pointer_y: 0,
-            repeated: false,
-        },
-    ];
+    let mut host = BufferedHost {
+        next_frame_events: vec![
+            BufferedEvent {
+                kind: 16,
+                window_id: 0,
+                a: 1500,
+                b: 0,
+                flags: 0,
+                text: String::new(),
+                ..BufferedEvent::default()
+            },
+            BufferedEvent {
+                kind: 17,
+                window_id: 0,
+                a: 2,
+                b: 0,
+                flags: 0,
+                text: String::new(),
+                ..BufferedEvent::default()
+            },
+            BufferedEvent {
+                kind: 14,
+                window_id: 0,
+                a: 0,
+                b: 0,
+                flags: 0,
+                text: "hi".to_string(),
+                ..BufferedEvent::default()
+            },
+            BufferedEvent {
+                kind: 15,
+                window_id: 0,
+                a: 0,
+                b: 0,
+                flags: 0,
+                text: "drop.txt".to_string(),
+                ..BufferedEvent::default()
+            },
+            BufferedEvent {
+                kind: 18,
+                window_id: 7,
+                a: 3,
+                b: 4,
+                flags: 0,
+                text: String::new(),
+                ..BufferedEvent::default()
+            },
+            BufferedEvent {
+                kind: 19,
+                window_id: 7,
+                a: 1,
+                b: 1,
+                flags: 0,
+                text: String::new(),
+                ..BufferedEvent::default()
+            },
+            BufferedEvent {
+                kind: 28,
+                window_id: 7,
+                a: 0,
+                b: 120,
+                flags: 0,
+                text: String::new(),
+                ..BufferedEvent::default()
+            },
+            BufferedEvent {
+                kind: 29,
+                window_id: 7,
+                a: 0,
+                b: 1,
+                flags: 0,
+                text: "A".to_string(),
+                key_code: 65,
+                physical_key: 30,
+                logical_key: 65,
+                key_location: 0,
+                pointer_x: 0,
+                pointer_y: 0,
+                repeated: false,
+            },
+        ],
+        ..Default::default()
+    };
 
     let code = execute_main(&plan, &mut host).expect("runtime should execute");
 
@@ -8162,50 +8781,52 @@ fn execute_main_runs_arcana_desktop_settings_and_text_input_workspace() {
 
     let plan =
         build_workspace_plan_for_member(&dir, "runtime_desktop_app_runner_settings_text_input");
-    let mut host = BufferedHost::default();
-    host.next_frame_events = vec![
-        BufferedEvent {
-            kind: 4,
-            window_id: 0,
-            a: 0,
-            b: 0,
-            flags: 0,
-            text: "k".to_string(),
-            key_code: 70,
-            physical_key: 71,
-            logical_key: 72,
-            key_location: 2,
-            repeated: true,
-            ..BufferedEvent::default()
-        },
-        BufferedEvent {
-            kind: 24,
-            window_id: 0,
-            a: 0,
-            b: 0,
-            flags: 0,
-            text: String::new(),
-            ..BufferedEvent::default()
-        },
-        BufferedEvent {
-            kind: 25,
-            window_id: 0,
-            a: 3,
-            b: 0,
-            flags: 0,
-            text: "compose".to_string(),
-            ..BufferedEvent::default()
-        },
-        BufferedEvent {
-            kind: 26,
-            window_id: 0,
-            a: 0,
-            b: 0,
-            flags: 0,
-            text: "done".to_string(),
-            ..BufferedEvent::default()
-        },
-    ];
+    let mut host = BufferedHost {
+        next_frame_events: vec![
+            BufferedEvent {
+                kind: 4,
+                window_id: 0,
+                a: 0,
+                b: 0,
+                flags: 0,
+                text: "k".to_string(),
+                key_code: 70,
+                physical_key: 71,
+                logical_key: 72,
+                key_location: 2,
+                repeated: true,
+                ..BufferedEvent::default()
+            },
+            BufferedEvent {
+                kind: 24,
+                window_id: 0,
+                a: 0,
+                b: 0,
+                flags: 0,
+                text: String::new(),
+                ..BufferedEvent::default()
+            },
+            BufferedEvent {
+                kind: 25,
+                window_id: 0,
+                a: 3,
+                b: 0,
+                flags: 0,
+                text: "compose".to_string(),
+                ..BufferedEvent::default()
+            },
+            BufferedEvent {
+                kind: 26,
+                window_id: 0,
+                a: 0,
+                b: 0,
+                flags: 0,
+                text: "done".to_string(),
+                ..BufferedEvent::default()
+            },
+        ],
+        ..Default::default()
+    };
 
     let code = execute_main(&plan, &mut host).expect("runtime should execute");
 

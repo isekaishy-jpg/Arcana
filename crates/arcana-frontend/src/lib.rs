@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -659,6 +661,7 @@ fn opaque_symbol_is_boundary_unsafe(symbol: &HirSymbol) -> bool {
     )
 }
 
+#[allow(clippy::enum_variant_names)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OpaqueLangFamily {
     FileStreamHandle,
@@ -855,14 +858,13 @@ fn infer_expr_value_type(
     scope: &ValueScope,
     expr: &HirExpr,
 ) -> Option<HirType> {
-    if let HirExpr::MemberAccess { expr, member } = expr {
-        if let HirExpr::Path { segments } = expr.as_ref() {
-            if segments.len() == 1 && scope.contains(&segments[0]) {
-                if let Some(ty) = scope.owner_member_type(&segments[0], member) {
-                    return Some(ty.clone());
-                }
-            }
-        }
+    if let HirExpr::MemberAccess { expr, member } = expr
+        && let HirExpr::Path { segments } = expr.as_ref()
+        && segments.len() == 1
+        && scope.contains(&segments[0])
+        && let Some(ty) = scope.owner_member_type(&segments[0], member)
+    {
+        return Some(ty.clone());
     }
     infer_receiver_expr_type(workspace, resolved_module, scope, expr)
 }
@@ -893,11 +895,10 @@ fn infer_expr_ownership(
         HirExpr::Path { segments } if segments.len() == 1 && scope.contains(&segments[0]) => {
             scope.ownership_of(&segments[0])
         }
-        HirExpr::Unary { op, .. }
-            if matches!(op, HirUnaryOp::BorrowRead | HirUnaryOp::BorrowMut) =>
-        {
-            OwnershipClass::Copy
-        }
+        HirExpr::Unary {
+            op: HirUnaryOp::BorrowRead | HirUnaryOp::BorrowMut,
+            ..
+        } => OwnershipClass::Copy,
         _ => infer_expr_value_type(workspace, resolved_module, type_scope, scope, expr)
             .map(|ty| infer_type_ownership(workspace, resolved_module, type_scope, &ty))
             .unwrap_or_default(),
@@ -955,10 +956,10 @@ fn resolve_qualified_phrase_target_symbol<'a>(
             .map(|resolved| resolved.symbol);
     }
 
-    if let Some(path) = split_simple_path(qualifier) {
-        if let Some(resolved) = lookup_symbol_path(workspace, resolved_module, &path) {
-            return Some(resolved.symbol);
-        }
+    if let Some(path) = split_simple_path(qualifier)
+        && let Some(resolved) = lookup_symbol_path(workspace, resolved_module, &path)
+    {
+        return Some(resolved.symbol);
     }
 
     if is_identifier_text(qualifier) {
@@ -1088,11 +1089,11 @@ fn collect_qualified_phrase_param_exprs<'a>(
     let mut bindings = Vec::new();
     let mut next_positional = 0usize;
 
-    if qualifier != "call" {
-        if let Some(param) = symbol.params.first() {
-            bindings.push((param, subject));
-            next_positional = 1;
-        }
+    if qualifier != "call"
+        && let Some(param) = symbol.params.first()
+    {
+        bindings.push((param, subject));
+        next_positional = 1;
     }
 
     for arg in args {
@@ -1163,16 +1164,17 @@ fn validate_borrow_operand_place(
         return;
     };
 
-    if let Some(name) = expr_place_root_local(expr, scope) {
-        if mutable && !scope.is_mutable(name) {
-            push_type_contract_diagnostic(
-                module_path,
-                span,
-                diagnostics,
-                format!("cannot mutably borrow immutable local `{name}`"),
-            );
-            return;
-        }
+    if let Some(name) = expr_place_root_local(expr, scope)
+        && mutable
+        && !scope.is_mutable(name)
+    {
+        push_type_contract_diagnostic(
+            module_path,
+            span,
+            diagnostics,
+            format!("cannot mutably borrow immutable local `{name}`"),
+        );
+        return;
     }
 
     if mutable && matches!(place_mutability, PlaceMutability::Immutable) {
@@ -2081,10 +2083,10 @@ fn collect_expr_local_borrows(
 ) {
     match expr {
         HirExpr::Unary { op, expr } => {
-            if matches!(op, HirUnaryOp::BorrowRead | HirUnaryOp::BorrowMut) {
-                if let Some(name) = expr_place_root_local(expr, scope) {
-                    borrows.push((name.to_string(), matches!(op, HirUnaryOp::BorrowMut)));
-                }
+            if matches!(op, HirUnaryOp::BorrowRead | HirUnaryOp::BorrowMut)
+                && let Some(name) = expr_place_root_local(expr, scope)
+            {
+                borrows.push((name.to_string(), matches!(op, HirUnaryOp::BorrowMut)));
             }
             collect_expr_local_borrows(expr, scope, borrows);
         }
@@ -2377,10 +2379,10 @@ fn collect_returned_local_borrows(
 ) {
     match expr {
         HirExpr::Unary { op, expr } => {
-            if matches!(op, HirUnaryOp::BorrowRead | HirUnaryOp::BorrowMut) {
-                if let Some(name) = expr_place_root_local(expr, scope) {
-                    roots.insert(name.to_string());
-                }
+            if matches!(op, HirUnaryOp::BorrowRead | HirUnaryOp::BorrowMut)
+                && let Some(name) = expr_place_root_local(expr, scope)
+            {
+                roots.insert(name.to_string());
             }
             collect_returned_local_borrows(expr, scope, roots);
         }
@@ -2740,8 +2742,8 @@ fn validate_hir_semantics(
     resolved: &HirResolvedWorkspace,
 ) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
-    for (package_name, package) in &workspace.packages {
-        let Some(resolved_package) = resolved.package(package_name) else {
+    for (package_id, package) in &workspace.packages {
+        let Some(resolved_package) = resolved.package_by_id(package_id) else {
             continue;
         };
         validate_package_lang_item_semantics(package, &mut diagnostics);
@@ -2838,15 +2840,15 @@ fn validate_module_semantics(
     }
 
     for symbol in &module.symbols {
-        if is_runtime_main_entry_symbol(&package.summary.package_name, &module.module_id, symbol) {
-            if let Err(message) = validate_runtime_main_entry_symbol(symbol) {
-                diagnostics.push(Diagnostic {
-                    path: module_path.clone(),
-                    line: symbol.span.line,
-                    column: symbol.span.column,
-                    message,
-                });
-            }
+        if is_runtime_main_entry_symbol(&package.summary.package_name, &module.module_id, symbol)
+            && let Err(message) = validate_runtime_main_entry_symbol(symbol)
+        {
+            diagnostics.push(Diagnostic {
+                path: module_path.clone(),
+                line: symbol.span.line,
+                column: symbol.span.column,
+                message,
+            });
         }
         if symbol.kind == HirSymbolKind::OpaqueType && is_builtin_type_name(&symbol.name) {
             diagnostics.push(Diagnostic {
@@ -4313,75 +4315,75 @@ fn validate_statement_block_semantics(
                 borrow_state.merge_moves_from(&body_borrows);
             }
             HirStatementKind::Defer { expr } | HirStatementKind::Expr { expr } => {
-                if let HirStatementKind::Expr { .. } = &statement.kind {
-                    if let Some(owner_activation) = resolve_owner_activation_expr(
+                if let HirStatementKind::Expr { .. } = &statement.kind
+                    && let Some(owner_activation) = resolve_owner_activation_expr(
                         workspace,
                         resolved_workspace,
                         resolved_module,
                         expr,
-                    ) {
-                        if let Some(ref message) = owner_activation.invalid {
-                            diagnostics.push(Diagnostic {
-                                path: module_path.to_path_buf(),
-                                line: statement.span.line,
-                                column: statement.span.column,
-                                message: message.clone(),
-                            });
-                        }
-                        if let Some(context) = owner_activation.context {
-                            validate_expr_semantics(
-                                workspace,
-                                resolved_module,
-                                module_path,
-                                type_scope,
-                                scope,
-                                context,
-                                statement.span,
-                                diagnostics,
-                            );
-                            validate_expr_borrow_flow(
-                                workspace,
-                                resolved_module,
-                                type_scope,
-                                module_path,
-                                scope,
-                                context,
-                                statement.span,
-                                borrow_state,
-                                diagnostics,
-                            );
-                            note_expr_moves(
-                                workspace,
-                                resolved_module,
-                                type_scope,
-                                scope,
-                                context,
-                                borrow_state,
-                            );
-                            note_escaping_expr_borrows(borrow_state, context, scope);
-                        }
-                        validate_owner_activation_context(
+                    )
+                {
+                    if let Some(ref message) = owner_activation.invalid {
+                        diagnostics.push(Diagnostic {
+                            path: module_path.to_path_buf(),
+                            line: statement.span.line,
+                            column: statement.span.column,
+                            message: message.clone(),
+                        });
+                    }
+                    if let Some(context) = owner_activation.context {
+                        validate_expr_semantics(
                             workspace,
-                            resolved_workspace,
                             resolved_module,
                             module_path,
                             type_scope,
                             scope,
-                            &owner_activation,
+                            context,
                             statement.span,
                             diagnostics,
                         );
-                        let inserted = scope.activate_owner(&owner_activation.owner, None, false);
-                        for inserted_name in inserted {
-                            activate_current_cleanup_binding(
-                                borrow_state,
-                                scope,
-                                current_block_cleanup_subjects,
-                                &inserted_name,
-                            );
-                        }
-                        continue;
+                        validate_expr_borrow_flow(
+                            workspace,
+                            resolved_module,
+                            type_scope,
+                            module_path,
+                            scope,
+                            context,
+                            statement.span,
+                            borrow_state,
+                            diagnostics,
+                        );
+                        note_expr_moves(
+                            workspace,
+                            resolved_module,
+                            type_scope,
+                            scope,
+                            context,
+                            borrow_state,
+                        );
+                        note_escaping_expr_borrows(borrow_state, context, scope);
                     }
+                    validate_owner_activation_context(
+                        workspace,
+                        resolved_workspace,
+                        resolved_module,
+                        module_path,
+                        type_scope,
+                        scope,
+                        &owner_activation,
+                        statement.span,
+                        diagnostics,
+                    );
+                    let inserted = scope.activate_owner(&owner_activation.owner, None, false);
+                    for inserted_name in inserted {
+                        activate_current_cleanup_binding(
+                            borrow_state,
+                            scope,
+                            current_block_cleanup_subjects,
+                            &inserted_name,
+                        );
+                    }
+                    continue;
                 }
                 validate_expr_semantics(
                     workspace,
@@ -4464,29 +4466,19 @@ fn validate_statement_block_semantics(
                     value,
                     borrow_state,
                 );
-                if let HirAssignTarget::Name { text } = target {
-                    if scope.contains(text) {
-                        borrow_state.clear_local(text);
-                        let ownership = infer_expr_ownership(
-                            workspace,
-                            resolved_module,
-                            type_scope,
-                            scope,
-                            value,
-                        );
-                        let ty = infer_expr_value_type(
-                            workspace,
-                            resolved_module,
-                            type_scope,
-                            scope,
-                            value,
-                        );
-                        scope.ownership.insert(text.clone(), ownership);
-                        if let Some(ty) = ty {
-                            scope.types.insert(text.clone(), ty);
-                        } else {
-                            scope.types.remove(text);
-                        }
+                if let HirAssignTarget::Name { text } = target
+                    && scope.contains(text)
+                {
+                    borrow_state.clear_local(text);
+                    let ownership =
+                        infer_expr_ownership(workspace, resolved_module, type_scope, scope, value);
+                    let ty =
+                        infer_expr_value_type(workspace, resolved_module, type_scope, scope, value);
+                    scope.ownership.insert(text.clone(), ownership);
+                    if let Some(ty) = ty {
+                        scope.types.insert(text.clone(), ty);
+                    } else {
+                        scope.types.remove(text);
                     }
                 }
                 if matches!(target, HirAssignTarget::Name { text } if scope.contains(text)) {
@@ -4514,7 +4506,7 @@ fn validate_assign_target_semantics(
             resolved_module,
             module_path,
             scope,
-            &[text.clone()],
+            std::slice::from_ref(text),
             span,
             "assignment target",
             diagnostics,
@@ -4523,21 +4515,20 @@ fn validate_assign_target_semantics(
             target: inner_target,
             ..
         } => {
-            if let Some(path) = flatten_assign_target_path(target) {
-                if should_resolve_member_path_as_namespace(workspace, resolved_module, scope, &path)
-                {
-                    validate_value_path_segments(
-                        workspace,
-                        resolved_module,
-                        module_path,
-                        scope,
-                        &path,
-                        span,
-                        "assignment target",
-                        diagnostics,
-                    );
-                    return;
-                }
+            if let Some(path) = flatten_assign_target_path(target)
+                && should_resolve_member_path_as_namespace(workspace, resolved_module, scope, &path)
+            {
+                validate_value_path_segments(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    scope,
+                    &path,
+                    span,
+                    "assignment target",
+                    diagnostics,
+                );
+                return;
             }
             validate_assign_target_semantics(
                 workspace,
@@ -5039,21 +5030,20 @@ fn validate_expr_semantics(
             }
         }
         member_expr @ HirExpr::MemberAccess { expr, .. } => {
-            if let Some(path) = flatten_member_expr_path(member_expr) {
-                if should_resolve_member_path_as_namespace(workspace, resolved_module, scope, &path)
-                {
-                    validate_value_path_segments(
-                        workspace,
-                        resolved_module,
-                        module_path,
-                        scope,
-                        &path,
-                        span,
-                        "value expression",
-                        diagnostics,
-                    );
-                    return;
-                }
+            if let Some(path) = flatten_member_expr_path(member_expr)
+                && should_resolve_member_path_as_namespace(workspace, resolved_module, scope, &path)
+            {
+                validate_value_path_segments(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    scope,
+                    &path,
+                    span,
+                    "value expression",
+                    diagnostics,
+                );
+                return;
             }
             validate_expr_semantics(
                 workspace,
@@ -5065,22 +5055,20 @@ fn validate_expr_semantics(
                 span,
                 diagnostics,
             );
-            if let HirExpr::MemberAccess { member, .. } = member_expr {
-                if is_tuple_projection_member(member) {
-                    if let Some(actual) = infer_expr_type(expr) {
-                        if actual != ExprTypeClass::Pair {
-                            push_type_contract_diagnostic(
-                                module_path,
-                                span,
-                                diagnostics,
-                                format!(
-                                    "tuple field access `.{member}` requires a pair value, found {}",
-                                    actual.label()
-                                ),
-                            );
-                        }
-                    }
-                }
+            if let HirExpr::MemberAccess { member, .. } = member_expr
+                && is_tuple_projection_member(member)
+                && let Some(actual) = infer_expr_type(expr)
+                && actual != ExprTypeClass::Pair
+            {
+                push_type_contract_diagnostic(
+                    module_path,
+                    span,
+                    diagnostics,
+                    format!(
+                        "tuple field access `.{member}` requires a pair value, found {}",
+                        actual.label()
+                    ),
+                );
             }
         }
         HirExpr::Index { expr, index } => {
@@ -5431,10 +5419,10 @@ fn value_path_exists(
     if path.is_empty() {
         return false;
     }
-    if let Some(binding) = resolved_module.bindings.get(&path[0]) {
-        if target_path_exists(workspace, &binding.target, &path[1..]) {
-            return true;
-        }
+    if let Some(binding) = resolved_module.bindings.get(&path[0])
+        && target_path_exists(workspace, &binding.target, &path[1..])
+    {
+        return true;
     }
     let Some(package) = visible_package_root_for_module(workspace, resolved_module, &path[0])
     else {
@@ -5453,11 +5441,12 @@ fn target_path_exists(
 ) -> bool {
     match target {
         HirResolvedTarget::Symbol {
-            package_name,
+            package_id,
             module_id,
             symbol_name,
+            ..
         } => {
-            let Some(package) = workspace.package(package_name) else {
+            let Some(package) = workspace.package_by_id(package_id) else {
                 return false;
             };
             let Some(module) = package.module(module_id) else {
@@ -5473,10 +5462,11 @@ fn target_path_exists(
             symbol_tail_exists(symbol, tail)
         }
         HirResolvedTarget::Module {
-            package_name,
+            package_id,
             module_id,
+            ..
         } => {
-            let Some(package) = workspace.package(package_name) else {
+            let Some(package) = workspace.package_by_id(package_id) else {
                 return false;
             };
             let Some(module) = package.module(module_id) else {
@@ -5533,10 +5523,10 @@ fn module_path_exists(
 }
 
 fn module_value_member_exists(module: &HirModuleSummary, member: &str, tail: &[String]) -> bool {
-    if let Some(symbol) = module.symbols.iter().find(|symbol| symbol.name == member) {
-        if symbol_tail_exists(symbol, tail) {
-            return true;
-        }
+    if let Some(symbol) = module.symbols.iter().find(|symbol| symbol.name == member)
+        && symbol_tail_exists(symbol, tail)
+    {
+        return true;
     }
     tail.is_empty()
         && module
@@ -5593,11 +5583,12 @@ fn target_supports_member_namespace(
     match target {
         HirResolvedTarget::Module { .. } => true,
         HirResolvedTarget::Symbol {
-            package_name,
+            package_id,
             module_id,
             symbol_name,
+            ..
         } => workspace
-            .package(package_name)
+            .package_by_id(package_id)
             .and_then(|package| package.module(module_id))
             .and_then(|module| {
                 module
@@ -6112,6 +6103,16 @@ mod tests {
         );
 
         let graph = load_workspace_graph(&root).expect("load graph");
+        let core_id = graph
+            .member("core")
+            .expect("core member should resolve")
+            .package_id
+            .clone();
+        let app_id = graph
+            .member("app")
+            .expect("app member should resolve")
+            .package_id
+            .clone();
         let order = plan_workspace(&graph).expect("plan");
         let first_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
         let first_statuses = plan_build(&graph, &order, &first_fingerprints, None).expect("plan");
@@ -6128,9 +6129,9 @@ mod tests {
         let second_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
         let second_statuses =
             plan_build(&graph, &order, &second_fingerprints, Some(&existing)).expect("plan");
-        assert_eq!(second_statuses[0].member(), "core");
+        assert_eq!(second_statuses[0].member(), core_id);
         assert_eq!(second_statuses[0].disposition(), BuildDisposition::Built);
-        assert_eq!(second_statuses[1].member(), "app");
+        assert_eq!(second_statuses[1].member(), app_id);
         assert_eq!(second_statuses[1].disposition(), BuildDisposition::Built);
 
         fs::remove_dir_all(root).expect("cleanup should succeed");
@@ -6251,6 +6252,16 @@ mod tests {
         );
 
         let graph = load_workspace_graph(&root).expect("load graph");
+        let core_id = graph
+            .member("core")
+            .expect("core member should resolve")
+            .package_id
+            .clone();
+        let app_id = graph
+            .member("app")
+            .expect("app member should resolve")
+            .package_id
+            .clone();
         let order = plan_workspace(&graph).expect("plan");
         let first_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
         let first_statuses = plan_build(&graph, &order, &first_fingerprints, None).expect("plan");
@@ -6267,26 +6278,26 @@ mod tests {
         let second_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
         assert_ne!(
             first_fingerprints
-                .get("core")
+                .get(&core_id)
                 .map(|fingerprint| &fingerprint.source),
             second_fingerprints
-                .get("core")
+                .get(&core_id)
                 .map(|fingerprint| &fingerprint.source)
         );
         assert_eq!(
             first_fingerprints
-                .get("core")
+                .get(&core_id)
                 .map(|fingerprint| &fingerprint.api),
             second_fingerprints
-                .get("core")
+                .get(&core_id)
                 .map(|fingerprint| &fingerprint.api)
         );
 
         let second_statuses =
             plan_build(&graph, &order, &second_fingerprints, Some(&existing)).expect("plan");
-        assert_eq!(second_statuses[0].member(), "core");
+        assert_eq!(second_statuses[0].member(), core_id);
         assert_eq!(second_statuses[0].disposition(), BuildDisposition::Built);
-        assert_eq!(second_statuses[1].member(), "app");
+        assert_eq!(second_statuses[1].member(), app_id);
         assert_eq!(second_statuses[1].disposition(), BuildDisposition::Built);
 
         fs::remove_dir_all(root).expect("cleanup should succeed");
@@ -6419,6 +6430,16 @@ mod tests {
         );
 
         let graph = load_workspace_graph(&root).expect("load graph");
+        let core_id = graph
+            .member("core")
+            .expect("core member should resolve")
+            .package_id
+            .clone();
+        let app_id = graph
+            .member("app")
+            .expect("app member should resolve")
+            .package_id
+            .clone();
         let order = plan_workspace(&graph).expect("plan");
         let first_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
         let first_statuses = plan_build(&graph, &order, &first_fingerprints, None).expect("plan");
@@ -6435,9 +6456,9 @@ mod tests {
         let second_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
         let second_statuses =
             plan_build(&graph, &order, &second_fingerprints, Some(&existing)).expect("plan");
-        assert_eq!(second_statuses[0].member(), "core");
+        assert_eq!(second_statuses[0].member(), core_id);
         assert_eq!(second_statuses[0].disposition(), BuildDisposition::Built);
-        assert_eq!(second_statuses[1].member(), "app");
+        assert_eq!(second_statuses[1].member(), app_id);
         assert_eq!(second_statuses[1].disposition(), BuildDisposition::Built);
 
         fs::remove_dir_all(root).expect("cleanup should succeed");
@@ -6471,6 +6492,16 @@ mod tests {
         );
 
         let graph = load_workspace_graph(&root).expect("load graph");
+        let core_id = graph
+            .member("core")
+            .expect("core member should resolve")
+            .package_id
+            .clone();
+        let app_id = graph
+            .member("app")
+            .expect("app member should resolve")
+            .package_id
+            .clone();
         let order = plan_workspace(&graph).expect("plan");
         let first_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
         let first_statuses = plan_build(&graph, &order, &first_fingerprints, None).expect("plan");
@@ -6487,9 +6518,9 @@ mod tests {
         let second_fingerprints = compute_member_fingerprints(&graph).expect("fingerprints");
         let second_statuses =
             plan_build(&graph, &order, &second_fingerprints, Some(&existing)).expect("plan");
-        assert_eq!(second_statuses[0].member(), "core");
+        assert_eq!(second_statuses[0].member(), core_id);
         assert_eq!(second_statuses[0].disposition(), BuildDisposition::Built);
-        assert_eq!(second_statuses[1].member(), "app");
+        assert_eq!(second_statuses[1].member(), app_id);
         assert_eq!(second_statuses[1].disposition(), BuildDisposition::Built);
 
         fs::remove_dir_all(root).expect("cleanup should succeed");

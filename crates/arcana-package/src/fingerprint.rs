@@ -88,7 +88,10 @@ pub fn compute_workspace_fingerprints(
     for member in &graph.members {
         let source = compute_member_source_fingerprint(member, workspace)?;
         let api = compute_resolved_api_fingerprint(member, workspace, resolved_workspace)?;
-        fingerprints.insert(member.name.clone(), MemberFingerprints { source, api });
+        fingerprints.insert(
+            member.package_id.clone(),
+            MemberFingerprints { source, api },
+        );
     }
 
     Ok(WorkspaceFingerprints::from_parts(
@@ -103,12 +106,17 @@ pub fn compute_workspace_snapshot_id(
 ) -> PackageResult<String> {
     let mut hasher = Sha256::new();
     hasher.update(b"arcana_workspace_snapshot_v1\n");
-    hasher.update(format!("root={}\n", graph.root_name).as_bytes());
+    hasher.update(format!("root={}\n", graph.root_id).as_bytes());
 
     for member in &graph.members {
-        hasher.update(format!("member={}\n", member.name).as_bytes());
+        hasher.update(format!("member={}\n", member.package_id).as_bytes());
+        hasher.update(format!("name={}\n", member.name).as_bytes());
         hasher.update(format!("kind={}\n", member.kind.as_str()).as_bytes());
+        hasher.update(format!("source={:?}\n", member.source_kind).as_bytes());
         hasher.update(format!("rel_dir={}\n", member.rel_dir).as_bytes());
+        if let Some(version) = &member.version {
+            hasher.update(format!("version={version}\n").as_bytes());
+        }
         for dep in &member.deps {
             hasher.update(format!("dep={dep}\n").as_bytes());
         }
@@ -122,8 +130,9 @@ pub fn compute_workspace_snapshot_id(
         }
     }
 
-    for (name, package) in &workspace.packages {
-        hasher.update(format!("package={name}\n").as_bytes());
+    for (package_id, package) in &workspace.packages {
+        hasher.update(format!("package={package_id}\n").as_bytes());
+        hasher.update(format!("package_name={}\n", package.summary.package_name).as_bytes());
         for dep in &package.direct_deps {
             hasher.update(format!("direct_dep={dep}\n").as_bytes());
         }
@@ -149,15 +158,19 @@ fn compute_resolved_api_fingerprint(
     workspace: &HirWorkspaceSummary,
     resolved_workspace: &HirResolvedWorkspace,
 ) -> PackageResult<String> {
-    let package = workspace
-        .package(&member.name)
-        .ok_or_else(|| format!("package `{}` is not loaded in workspace HIR", member.name))?;
+    let package = workspace.package_by_id(&member.package_id).ok_or_else(|| {
+        format!(
+            "package `{}` is not loaded in workspace HIR",
+            member.package_id
+        )
+    })?;
     let resolved_package = resolved_workspace
-        .package(&member.name)
-        .ok_or_else(|| format!("resolved package `{}` is not loaded", member.name))?;
+        .package_by_id(&member.package_id)
+        .ok_or_else(|| format!("resolved package `{}` is not loaded", member.package_id))?;
 
     let mut hasher = Sha256::new();
     hasher.update(b"arcana_resolved_api_v1\n");
+    hasher.update(format!("package_id={}\n", member.package_id).as_bytes());
     hasher.update(format!("name={}\n", member.name).as_bytes());
     hasher.update(format!("kind={}\n", member.kind.as_str()).as_bytes());
     for dep in &member.deps {
@@ -176,11 +189,15 @@ fn compute_member_source_fingerprint(
     member: &WorkspaceMember,
     workspace: &HirWorkspaceSummary,
 ) -> PackageResult<String> {
-    let package = workspace
-        .package(&member.name)
-        .ok_or_else(|| format!("package `{}` is not loaded in workspace HIR", member.name))?;
+    let package = workspace.package_by_id(&member.package_id).ok_or_else(|| {
+        format!(
+            "package `{}` is not loaded in workspace HIR",
+            member.package_id
+        )
+    })?;
     let mut hasher = Sha256::new();
     hasher.update(b"arcana_hir_member_v2\n");
+    hasher.update(format!("package_id={}\n", member.package_id).as_bytes());
     hasher.update(format!("name={}\n", member.name).as_bytes());
     hasher.update(format!("kind={}\n", member.kind.as_str()).as_bytes());
     for dep in &member.deps {
@@ -198,13 +215,14 @@ fn compute_member_source_fingerprint(
         hasher.update(row.as_bytes());
         hasher.update(b"\n");
     }
-    if member.name != "std" && package_uses_implicit_std(package) {
-        if let Some(std_package) = workspace.package("std") {
-            hasher.update(b"implicit_std\n");
-            for row in std_package.summary.hir_fingerprint_rows() {
-                hasher.update(row.as_bytes());
-                hasher.update(b"\n");
-            }
+    if member.name != "std"
+        && package_uses_implicit_std(package)
+        && let Some(std_package) = workspace.package("std")
+    {
+        hasher.update(b"implicit_std\n");
+        for row in std_package.summary.hir_fingerprint_rows() {
+            hasher.update(row.as_bytes());
+            hasher.update(b"\n");
         }
     }
     Ok(format!("sha256:{:x}", hasher.finalize()))
@@ -220,11 +238,17 @@ fn render_member_dependency_setting_rows(member: &WorkspaceMember) -> Vec<String
                 .get(alias)
                 .map(String::as_str)
                 .unwrap_or("");
+            let package_id = member
+                .direct_dep_ids
+                .get(alias)
+                .map(String::as_str)
+                .unwrap_or("");
             let mut native_plugins = spec.native_plugins.clone();
             native_plugins.sort();
             format!(
-                "dep_setting:alias={alias}|package={package_name}|source={:?}|native_delivery={}|native_child={}|native_plugins={}",
-                spec.source,
+                "dep_setting:alias={alias}|package={package_name}|package_id={package_id}|source={:?}|source_label={}|native_delivery={}|native_child={}|native_plugins={}",
+                spec.source.kind(),
+                spec.source.location_label(),
                 spec.native_delivery.as_str(),
                 spec.native_child.as_deref().unwrap_or(""),
                 native_plugins.join(",")

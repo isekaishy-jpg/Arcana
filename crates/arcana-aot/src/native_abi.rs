@@ -102,10 +102,8 @@ fn validate_declared_native_export_rows(artifact: &AotPackageArtifact) -> Result
                 && (*module_id == artifact.root_module_id || module_id.starts_with(&root_prefix))
         })
         .map(|(module_id, _, signature)| {
-            Ok(match declared_native_signature_key(signature)? {
-                Some(signature_key) => Some((module_id.to_string(), signature_key)),
-                None => None,
-            })
+            Ok(declared_native_signature_key(signature)?
+                .map(|signature_key| (module_id.to_string(), signature_key)))
         })
         .collect::<Result<Vec<_>, String>>()?
         .into_iter()

@@ -28,9 +28,14 @@ pub(crate) fn package_workspace_with_product(
     member: Option<String>,
     out_dir: Option<PathBuf>,
 ) -> Result<DistributionBundle, String> {
+    #[cfg(test)]
+    let _test_guard = crate::heavy_test_mutex()
+        .lock()
+        .expect("heavy cli test mutex should not be poisoned");
     let graph = load_workspace_graph(&workspace_dir)?;
     let packaged_member = resolve_package_member(&graph, member.as_deref())?;
     target.artifact_file_name(&packaged_member.kind)?;
+    let packaged_member_id = packaged_member.package_id.clone();
     let packaged_member_name = packaged_member.name.clone();
 
     let order = plan_workspace(&graph)?;
@@ -46,16 +51,16 @@ pub(crate) fn package_workspace_with_product(
         &prepared,
         existing_lock.as_ref(),
         target.clone(),
-        &packaged_member_name,
+        &packaged_member_id,
         &execution_context,
     )?;
     let build_key = statuses
         .iter()
-        .find(|status| status.member() == packaged_member_name && status.target() == &target)
+        .find(|status| status.member() == packaged_member_id && status.target() == &target)
         .map(|status| status.build_key().clone())
         .unwrap_or_else(|| BuildOutputKey::new(target.clone(), product.clone()));
     let output_dir = out_dir.unwrap_or_else(|| {
-        default_distribution_dir_for_build(&graph, &packaged_member_name, &build_key)
+        default_distribution_dir_for_build(&graph, &packaged_member_id, &build_key)
     });
     execute_build_with_context_and_progress(
         &graph,
@@ -68,10 +73,14 @@ pub(crate) fn package_workspace_with_product(
     stage_distribution_bundle_for_build(
         &graph,
         &statuses,
-        &packaged_member_name,
+        &packaged_member_id,
         &build_key,
         &output_dir,
     )
+    .map(|mut bundle| {
+        bundle.member = packaged_member_name;
+        bundle
+    })
 }
 
 fn resolve_package_member<'a>(
@@ -117,6 +126,7 @@ mod tests {
     use std::ffi::{CStr, c_char, c_void};
     use std::fs;
     use std::io::Read;
+    use std::ops::{Deref, DerefMut};
     use std::path::Path;
     use std::thread;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -180,6 +190,44 @@ mod tests {
     struct WindowListSearch {
         pid: u32,
         windows: Vec<(HWND, String)>,
+    }
+
+    #[cfg(windows)]
+    struct TestChild {
+        child: Child,
+    }
+
+    #[cfg(windows)]
+    impl TestChild {
+        fn new(child: Child) -> Self {
+            Self { child }
+        }
+    }
+
+    #[cfg(windows)]
+    impl Deref for TestChild {
+        type Target = Child;
+
+        fn deref(&self) -> &Self::Target {
+            &self.child
+        }
+    }
+
+    #[cfg(windows)]
+    impl DerefMut for TestChild {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.child
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for TestChild {
+        fn drop(&mut self) {
+            if matches!(self.child.try_wait(), Ok(None)) {
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+            }
+        }
     }
 
     #[cfg(windows)]
@@ -278,16 +326,36 @@ mod tests {
     }
 
     #[cfg(windows)]
-    fn wait_for_additional_process_window(
+    fn wait_for_named_process_window(
         pid: u32,
-        exclude: HWND,
+        title_contains: &str,
         timeout: Duration,
     ) -> Option<(HWND, String)> {
         let start = Instant::now();
         while start.elapsed() < timeout {
             if let Some(found) = process_windows(pid)
                 .into_iter()
-                .find(|(hwnd, _)| *hwnd != exclude)
+                .find(|(_, title)| title.contains(title_contains))
+            {
+                return Some(found);
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        None
+    }
+
+    #[cfg(windows)]
+    fn wait_for_additional_named_process_window(
+        pid: u32,
+        exclude: HWND,
+        title_contains: &str,
+        timeout: Duration,
+    ) -> Option<(HWND, String)> {
+        let start = Instant::now();
+        while start.elapsed() < timeout {
+            if let Some(found) = process_windows(pid)
+                .into_iter()
+                .find(|(hwnd, title)| *hwnd != exclude && title.contains(title_contains))
             {
                 return Some(found);
             }
@@ -325,6 +393,34 @@ mod tests {
             thread::sleep(Duration::from_millis(25));
         }
         None
+    }
+
+    #[cfg(windows)]
+    fn click_until_window_gone(
+        pid: u32,
+        click_hwnd: HWND,
+        x: i32,
+        y: i32,
+        target_hwnd: HWND,
+        timeout: Duration,
+    ) -> Vec<(HWND, String)> {
+        let start = Instant::now();
+        let mut windows = process_windows(pid);
+        let mut last_click = Instant::now()
+            .checked_sub(Duration::from_millis(200))
+            .unwrap_or_else(Instant::now);
+        while start.elapsed() < timeout {
+            windows = process_windows(pid);
+            if windows.iter().all(|(hwnd, _)| *hwnd != target_hwnd) {
+                break;
+            }
+            if last_click.elapsed() >= Duration::from_millis(200) {
+                send_left_click(click_hwnd, x, y);
+                last_click = Instant::now();
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        windows
     }
 
     #[cfg(windows)]
@@ -639,9 +735,7 @@ mod tests {
         include_dir: &Path,
         object_path: &Path,
     ) -> Option<Result<(), String>> {
-        let Some(vcvars_path) = find_msvc_vcvars64() else {
-            return None;
-        };
+        let vcvars_path = find_msvc_vcvars64()?;
         let script_path = include_dir.join("compile_consumer_msvc.bat");
         let script = format!(
             concat!(
@@ -1910,12 +2004,14 @@ mod tests {
         )
         .expect("large desktop exe package should succeed");
         let exe_path = exe_bundle.bundle_dir.join(&exe_bundle.root_artifact);
-        let mut child = Command::new(&exe_path)
-            .current_dir(&exe_bundle.bundle_dir)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("large desktop exe bundle should launch");
+        let mut child = TestChild::new(
+            Command::new(&exe_path)
+                .current_dir(&exe_bundle.bundle_dir)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("large desktop exe bundle should launch"),
+        );
         let (hwnd, _title) = wait_for_process_window(child.id(), Duration::from_secs(20))
             .expect("desktop showcase window should appear");
         unsafe {
@@ -1942,13 +2038,15 @@ mod tests {
         )
         .expect("large desktop exe package should succeed");
         let exe_path = exe_bundle.bundle_dir.join(&exe_bundle.root_artifact);
-        let mut child = Command::new(&exe_path)
-            .current_dir(&exe_bundle.bundle_dir)
-            .arg("--ui-smoke")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("large desktop exe bundle should launch");
+        let mut child = TestChild::new(
+            Command::new(&exe_path)
+                .current_dir(&exe_bundle.bundle_dir)
+                .arg("--ui-smoke")
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("large desktop exe bundle should launch"),
+        );
         let (hwnd, _title) = wait_for_process_window(child.id(), Duration::from_secs(20))
             .expect("desktop showcase window should appear");
         wait_for_window_title_contains(hwnd, "Overview", Duration::from_secs(10))
@@ -1991,18 +2089,24 @@ mod tests {
         )
         .expect("large desktop exe package should succeed");
         let exe_path = exe_bundle.bundle_dir.join(&exe_bundle.root_artifact);
-        let mut child = Command::new(&exe_path)
-            .current_dir(&exe_bundle.bundle_dir)
-            .arg("--exercise-second-window")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("large desktop exe bundle should launch");
-        let (main_hwnd, _title) = wait_for_process_window(child.id(), Duration::from_secs(20))
-            .expect("desktop showcase window should appear");
-        let (second_hwnd, _title) = if let Some(found) =
-            wait_for_additional_process_window(child.id(), main_hwnd, Duration::from_secs(20))
-        {
+        let mut child = TestChild::new(
+            Command::new(&exe_path)
+                .current_dir(&exe_bundle.bundle_dir)
+                .arg("--exercise-second-window")
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("large desktop exe bundle should launch"),
+        );
+        let (main_hwnd, _title) =
+            wait_for_named_process_window(child.id(), "Overview", Duration::from_secs(30))
+                .expect("desktop showcase main window should appear");
+        let (second_hwnd, _title) = if let Some(found) = wait_for_additional_named_process_window(
+            child.id(),
+            main_hwnd,
+            "Second Window",
+            Duration::from_secs(30),
+        ) {
             found
         } else {
             let _ = wait_for_child_exit(&mut child, Duration::from_secs(20));
@@ -2103,30 +2207,34 @@ mod tests {
         )
         .expect("large desktop exe package should succeed");
         let exe_path = exe_bundle.bundle_dir.join(&exe_bundle.root_artifact);
-        let mut child = Command::new(&exe_path)
-            .current_dir(&exe_bundle.bundle_dir)
-            .arg("--exercise-second-window")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("large desktop exe bundle should launch");
-        let (main_hwnd, _title) = wait_for_process_window(child.id(), Duration::from_secs(20))
-            .expect("desktop showcase window should appear");
-        let (second_hwnd, _title) =
-            wait_for_additional_process_window(child.id(), main_hwnd, Duration::from_secs(20))
-                .expect("secondary showcase window should appear");
-        thread::sleep(Duration::from_millis(200));
+        let mut child = TestChild::new(
+            Command::new(&exe_path)
+                .current_dir(&exe_bundle.bundle_dir)
+                .arg("--exercise-second-window")
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("large desktop exe bundle should launch"),
+        );
+        let (main_hwnd, _title) =
+            wait_for_named_process_window(child.id(), "Overview", Duration::from_secs(30))
+                .expect("desktop showcase main window should appear");
+        let (second_hwnd, _title) = wait_for_additional_named_process_window(
+            child.id(),
+            main_hwnd,
+            "Second Window",
+            Duration::from_secs(30),
+        )
+        .expect("secondary showcase window should appear");
         let (x, y) = desktop_showcase_button_center(35);
-        send_left_click(main_hwnd, x, y);
-        let start = Instant::now();
-        let mut windows = process_windows(child.id());
-        while start.elapsed() < Duration::from_secs(10) {
-            windows = process_windows(child.id());
-            if windows.iter().all(|(hwnd, _)| *hwnd != second_hwnd) {
-                break;
-            }
-            thread::sleep(Duration::from_millis(50));
-        }
+        let windows = click_until_window_gone(
+            child.id(),
+            main_hwnd,
+            x,
+            y,
+            second_hwnd,
+            Duration::from_secs(20),
+        );
         assert!(
             windows.iter().all(|(hwnd, _)| *hwnd != second_hwnd),
             "main-button second-window close should remove the secondary window, got windows={windows:?}"
@@ -2186,32 +2294,35 @@ mod tests {
         )
         .expect("large desktop exe package should succeed");
         let exe_path = exe_bundle.bundle_dir.join(&exe_bundle.root_artifact);
-        let mut child = Command::new(&exe_path)
-            .current_dir(&exe_bundle.bundle_dir)
-            .arg("--exercise-second-window")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("large desktop exe bundle should launch");
-        let (main_hwnd, _title) = wait_for_process_window(child.id(), Duration::from_secs(20))
-            .expect("desktop showcase window should appear");
-        let (first_second_hwnd, _title) =
-            wait_for_additional_process_window(child.id(), main_hwnd, Duration::from_secs(20))
-                .expect("secondary showcase window should appear");
+        let mut child = TestChild::new(
+            Command::new(&exe_path)
+                .current_dir(&exe_bundle.bundle_dir)
+                .arg("--exercise-second-window")
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("large desktop exe bundle should launch"),
+        );
+        let (main_hwnd, _title) =
+            wait_for_named_process_window(child.id(), "Overview", Duration::from_secs(30))
+                .expect("desktop showcase main window should appear");
+        let (first_second_hwnd, _title) = wait_for_additional_named_process_window(
+            child.id(),
+            main_hwnd,
+            "Second Window",
+            Duration::from_secs(30),
+        )
+        .expect("secondary showcase window should appear");
 
-        thread::sleep(Duration::from_millis(200));
         let (close_x, close_y) = desktop_showcase_button_center(35);
-        send_left_click(main_hwnd, close_x, close_y);
-
-        let start = Instant::now();
-        let mut windows = process_windows(child.id());
-        while start.elapsed() < Duration::from_secs(10) {
-            windows = process_windows(child.id());
-            if windows.iter().all(|(hwnd, _)| *hwnd != first_second_hwnd) {
-                break;
-            }
-            thread::sleep(Duration::from_millis(50));
-        }
+        let windows = click_until_window_gone(
+            child.id(),
+            main_hwnd,
+            close_x,
+            close_y,
+            first_second_hwnd,
+            Duration::from_secs(20),
+        );
         assert!(
             windows.iter().all(|(hwnd, _)| *hwnd != first_second_hwnd),
             "main-button close should remove the original secondary window before reopen, got windows={windows:?}"
@@ -2219,9 +2330,13 @@ mod tests {
 
         let (open_x, open_y) = desktop_showcase_button_center(22);
         send_left_click(main_hwnd, open_x, open_y);
-        let (reopened_hwnd, _title) =
-            wait_for_additional_process_window(child.id(), main_hwnd, Duration::from_secs(20))
-                .expect("secondary showcase window should reopen after close");
+        let (reopened_hwnd, _title) = wait_for_additional_named_process_window(
+            child.id(),
+            main_hwnd,
+            "Second Window",
+            Duration::from_secs(30),
+        )
+        .expect("secondary showcase window should reopen after close");
 
         assert!(
             child

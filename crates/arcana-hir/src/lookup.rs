@@ -2,27 +2,11 @@ use std::collections::BTreeSet;
 
 use super::*;
 
-fn workspace_package_name_for_module<'a>(
-    workspace: &'a HirWorkspaceSummary,
-    module_id: &str,
-) -> Option<&'a str> {
-    workspace
-        .packages
-        .iter()
-        .find_map(|(package_name, package)| {
-            package
-                .module(module_id)
-                .is_some()
-                .then_some(package_name.as_str())
-        })
-}
-
 pub fn current_workspace_package_for_module<'a>(
     workspace: &'a HirWorkspaceSummary,
     resolved_module: &HirResolvedModule,
 ) -> Option<&'a HirWorkspacePackage> {
-    let package_name = workspace_package_name_for_module(workspace, &resolved_module.module_id)?;
-    workspace.package(package_name)
+    workspace.package_by_id(&resolved_module.package_id)
 }
 
 pub fn visible_package_root_for_module<'a>(
@@ -38,8 +22,8 @@ pub fn visible_package_root_for_module<'a>(
         return workspace.package("std");
     }
     current_package
-        .dependency_package_name(root)
-        .and_then(|dependency_name| workspace.package(dependency_name))
+        .dependency_package_id(root)
+        .and_then(|dependency_id| workspace.package_by_id(dependency_id))
 }
 
 pub fn visible_method_package_names_for_module(
@@ -79,11 +63,11 @@ fn symbol_visible_from_package_boundary(
 pub(crate) fn visible_symbol_refs_in_module_for_package<'a>(
     workspace: &'a HirWorkspaceSummary,
     current_package_name: &str,
-    package_name: &str,
+    package_id: &str,
     module_id: &str,
     symbol_name: &str,
 ) -> Vec<HirResolvedSymbolRef<'a>> {
-    let Some(package) = workspace.package(package_name) else {
+    let Some(package) = workspace.package_by_id(package_id) else {
         return Vec::new();
     };
     let Some(module) = package.module(module_id) else {
@@ -102,6 +86,7 @@ pub(crate) fn visible_symbol_refs_in_module_for_package<'a>(
                 )
         })
         .map(|(symbol_index, symbol)| HirResolvedSymbolRef {
+            package_id: &package.package_id,
             package_name: &package.summary.package_name,
             module_id: &module.module_id,
             symbol_index,
@@ -113,14 +98,14 @@ pub(crate) fn visible_symbol_refs_in_module_for_package<'a>(
 fn first_visible_symbol_in_module_for_package<'a>(
     workspace: &'a HirWorkspaceSummary,
     current_package_name: &str,
-    package_name: &str,
+    package_id: &str,
     module_id: &str,
     symbol_name: &str,
 ) -> Option<HirResolvedSymbolRef<'a>> {
     visible_symbol_refs_in_module_for_package(
         workspace,
         current_package_name,
-        package_name,
+        package_id,
         module_id,
         symbol_name,
     )
@@ -146,7 +131,7 @@ fn lookup_package_symbol_path_filtered<'a>(
     first_visible_symbol_in_module_for_package(
         workspace,
         current_package_name,
-        &package.summary.package_name,
+        &package.package_id,
         &module.module_id,
         symbol_name,
     )
@@ -166,7 +151,7 @@ fn lookup_module_symbol_path_filtered<'a>(
         return first_visible_symbol_in_module_for_package(
             workspace,
             current_package_name,
-            &package.summary.package_name,
+            &package.package_id,
             &module.module_id,
             &path[0],
         );
@@ -184,7 +169,7 @@ fn lookup_module_symbol_path_filtered<'a>(
     first_visible_symbol_in_module_for_package(
         workspace,
         current_package_name,
-        &package.summary.package_name,
+        &package.package_id,
         &target_module.module_id,
         symbol_name,
     )
@@ -198,9 +183,10 @@ fn lookup_target_symbol_tail_filtered<'a>(
 ) -> Option<HirResolvedSymbolRef<'a>> {
     match target {
         HirResolvedTarget::Symbol {
-            package_name,
+            package_id,
             module_id,
             symbol_name,
+            ..
         } => {
             if !tail.is_empty() {
                 return None;
@@ -208,16 +194,17 @@ fn lookup_target_symbol_tail_filtered<'a>(
             first_visible_symbol_in_module_for_package(
                 workspace,
                 current_package_name,
-                package_name,
+                package_id,
                 module_id,
                 symbol_name,
             )
         }
         HirResolvedTarget::Module {
-            package_name,
+            package_id,
             module_id,
+            ..
         } => {
-            let package = workspace.package(package_name)?;
+            let package = workspace.package_by_id(package_id)?;
             let module = package.module(module_id)?;
             lookup_module_symbol_path_filtered(
                 workspace,
@@ -238,9 +225,10 @@ fn lookup_symbol_tail_in_resolved_use_target<'a>(
 ) -> Option<HirResolvedSymbolRef<'a>> {
     match target {
         ResolvedUseTarget::Symbol {
-            package_name,
+            package_id,
             module_id,
             symbol_name,
+            ..
         } => {
             if !tail.is_empty() {
                 return None;
@@ -248,16 +236,17 @@ fn lookup_symbol_tail_in_resolved_use_target<'a>(
             first_visible_symbol_in_module_for_package(
                 workspace,
                 current_package_name,
-                package_name,
+                package_id,
                 module_id,
                 symbol_name,
             )
         }
         ResolvedUseTarget::Module {
-            package_name,
+            package_id,
             module_id,
+            ..
         } => {
-            let package = workspace.package(package_name)?;
+            let package = workspace.package_by_id(package_id)?;
             let module = package.module(module_id)?;
             lookup_module_symbol_path_filtered(
                 workspace,
@@ -288,9 +277,9 @@ fn lookup_symbol_path_via_module_directives<'a>(
                 if &binding_name != first {
                     continue;
                 }
-                let (package_name, module_id) =
+                let (package_id, _package_name, module_id) =
                     resolve_module_target(package, workspace, &directive.path).ok()?;
-                let dependency = workspace.package(&package_name)?;
+                let dependency = workspace.package_by_id(&package_id)?;
                 let target_module = dependency.module(&module_id)?;
                 return lookup_module_symbol_path_filtered(
                     workspace,
@@ -348,14 +337,18 @@ pub(crate) fn lookup_symbol_path_in_module_context<'a>(
         });
     }
     if let Some(dependency_name) = package.dependency_package_name(first) {
-        return workspace.package(dependency_name).and_then(|dependency| {
-            lookup_package_symbol_path_filtered(
-                workspace,
-                current_package_name,
-                dependency,
-                &path[1..],
-            )
-        });
+        let dependency_id = package.dependency_package_id(first)?;
+        let _ = dependency_name;
+        return workspace
+            .package_by_id(dependency_id)
+            .and_then(|dependency| {
+                lookup_package_symbol_path_filtered(
+                    workspace,
+                    current_package_name,
+                    dependency,
+                    &path[1..],
+                )
+            });
     }
     lookup_module_symbol_path_filtered(workspace, current_package_name, package, module, path)
         .or_else(|| lookup_symbol_path_via_module_directives(workspace, package, module, path))
@@ -539,6 +532,7 @@ pub fn lookup_method_candidates_for_hir_type<'a>(
                         continue;
                     }
                     candidates.push(HirMethodCandidate {
+                        package_id: &package.package_id,
                         package_name: &package.summary.package_name,
                         module_id: &module.module_id,
                         symbol: method,
@@ -583,6 +577,7 @@ pub fn lookup_method_candidates_for_hir_type<'a>(
                         continue;
                     }
                     candidates.push(HirMethodCandidate {
+                        package_id: &package.package_id,
                         package_name: &package.summary.package_name,
                         module_id: &module.module_id,
                         symbol: method,

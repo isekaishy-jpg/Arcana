@@ -907,10 +907,24 @@ mod tests {
 
     fn base_package() -> IrPackage {
         IrPackage {
+            package_id: "core".to_string(),
             package_name: "core".to_string(),
             root_module_id: "core".to_string(),
             direct_deps: Vec::new(),
+            direct_dep_ids: Vec::new(),
+            package_display_names: test_package_display_names_with_deps(
+                "core".to_string(),
+                "core".to_string(),
+                Vec::new(),
+                Vec::new(),
+            ),
+            package_direct_dep_ids: test_package_direct_dep_ids(
+                "core".to_string(),
+                Vec::new(),
+                Vec::new(),
+            ),
             modules: vec![IrPackageModule {
+                package_id: test_package_id_for_module("core"),
                 module_id: "core".to_string(),
                 symbol_count: 1,
                 item_count: 1,
@@ -930,6 +944,34 @@ mod tests {
         }
     }
 
+    fn test_package_id_for_module(module_id: &str) -> String {
+        module_id.split('.').next().unwrap_or(module_id).to_string()
+    }
+
+    fn test_package_display_names_with_deps(
+        package_id: impl Into<String>,
+        package_name: impl Into<String>,
+        direct_deps: Vec<String>,
+        direct_dep_ids: Vec<String>,
+    ) -> BTreeMap<String, String> {
+        let mut names = BTreeMap::from([(package_id.into(), package_name.into())]);
+        for (dep_name, dep_id) in direct_deps.into_iter().zip(direct_dep_ids) {
+            names.entry(dep_id).or_insert(dep_name);
+        }
+        names
+    }
+
+    fn test_package_direct_dep_ids(
+        package_id: impl Into<String>,
+        direct_deps: Vec<String>,
+        direct_dep_ids: Vec<String>,
+    ) -> BTreeMap<String, BTreeMap<String, String>> {
+        BTreeMap::from([(
+            package_id.into(),
+            direct_deps.into_iter().zip(direct_dep_ids).collect(),
+        )])
+    }
+
     fn test_emit_context(file_name: &str) -> AotEmitContext {
         AotEmitContext {
             root_artifact_file_name: Some(file_name.to_string()),
@@ -942,6 +984,7 @@ mod tests {
     fn lowering_marks_simple_main_as_direct() {
         let mut package = base_package();
         package.entrypoints.push(IrEntrypoint {
+            package_id: test_package_id_for_module("core"),
             module_id: "core".to_string(),
             symbol_name: "main".to_string(),
             symbol_kind: "fn".to_string(),
@@ -949,6 +992,7 @@ mod tests {
             exported: true,
         });
         package.routines.push(IrRoutine {
+            package_id: test_package_id_for_module("core"),
             module_id: "core".to_string(),
             routine_key: "core#fn-0".to_string(),
             symbol_name: "main".to_string(),
@@ -1000,6 +1044,7 @@ mod tests {
     fn lowering_marks_resolved_helper_calls_as_direct() {
         let mut package = base_package();
         package.entrypoints.push(IrEntrypoint {
+            package_id: test_package_id_for_module("core"),
             module_id: "core".to_string(),
             symbol_name: "main".to_string(),
             symbol_kind: "fn".to_string(),
@@ -1008,6 +1053,7 @@ mod tests {
         });
         package.routines.extend([
             IrRoutine {
+                package_id: test_package_id_for_module("core"),
                 module_id: "core".to_string(),
                 routine_key: "core#fn-0".to_string(),
                 symbol_name: "main".to_string(),
@@ -1041,6 +1087,7 @@ mod tests {
                 }],
             },
             IrRoutine {
+                package_id: test_package_id_for_module("core"),
                 module_id: "core".to_string(),
                 routine_key: "core#fn-1".to_string(),
                 symbol_name: "helper".to_string(),
@@ -1101,6 +1148,7 @@ mod tests {
         let mut package = base_package();
         package.routines.extend([
             IrRoutine {
+                package_id: test_package_id_for_module("core"),
                 module_id: "core".to_string(),
                 routine_key: "core#fn-0".to_string(),
                 symbol_name: "answer".to_string(),
@@ -1122,6 +1170,7 @@ mod tests {
                 }],
             },
             IrRoutine {
+                package_id: test_package_id_for_module("core"),
                 module_id: "core".to_string(),
                 routine_key: "core#fn-1".to_string(),
                 symbol_name: "greet".to_string(),
@@ -1147,6 +1196,7 @@ mod tests {
                 }],
             },
             IrRoutine {
+                package_id: test_package_id_for_module("core"),
                 module_id: "core".to_string(),
                 routine_key: "core#fn-2".to_string(),
                 symbol_name: "prefix".to_string(),
@@ -1177,6 +1227,7 @@ mod tests {
                 }],
             },
             IrRoutine {
+                package_id: test_package_id_for_module("core"),
                 module_id: "core".to_string(),
                 routine_key: "core#fn-3".to_string(),
                 symbol_name: "echo_pair".to_string(),
@@ -1200,6 +1251,7 @@ mod tests {
                 }],
             },
             IrRoutine {
+                package_id: test_package_id_for_module("core"),
                 module_id: "core".to_string(),
                 routine_key: "core#fn-4".to_string(),
                 symbol_name: "answer_via_helper".to_string(),
@@ -1230,6 +1282,7 @@ mod tests {
                 }],
             },
             IrRoutine {
+                package_id: test_package_id_for_module("core"),
                 module_id: "core".to_string(),
                 routine_key: "core#fn-5".to_string(),
                 symbol_name: "helper".to_string(),
@@ -1298,6 +1351,7 @@ mod tests {
     fn lowering_directly_exports_edit_root_routines() {
         let mut package = base_package();
         package.routines.push(IrRoutine {
+            package_id: test_package_id_for_module("core"),
             module_id: "core".to_string(),
             routine_key: "core#fn-0".to_string(),
             symbol_name: "bump".to_string(),
@@ -1367,6 +1421,7 @@ mod tests {
         let mut package = base_package();
         package.routines.extend([
             IrRoutine {
+                package_id: test_package_id_for_module("core"),
                 module_id: "core".to_string(),
                 routine_key: "core#fn-0".to_string(),
                 symbol_name: "outer".to_string(),
@@ -1400,6 +1455,7 @@ mod tests {
                 }],
             },
             IrRoutine {
+                package_id: test_package_id_for_module("core"),
                 module_id: "core".to_string(),
                 routine_key: "core#fn-1".to_string(),
                 symbol_name: "helper".to_string(),
@@ -1476,6 +1532,7 @@ mod tests {
     fn lowering_keeps_non_name_edit_write_back_targets_on_runtime_dispatch() {
         let mut package = base_package();
         package.routines.push(IrRoutine {
+            package_id: test_package_id_for_module("core"),
             module_id: "core".to_string(),
             routine_key: "core#fn-0".to_string(),
             symbol_name: "touch_first".to_string(),
@@ -1532,6 +1589,7 @@ mod tests {
     fn lowering_supports_simple_let_blocks() {
         let mut package = base_package();
         package.entrypoints.push(IrEntrypoint {
+            package_id: test_package_id_for_module("core"),
             module_id: "core".to_string(),
             symbol_name: "main".to_string(),
             symbol_kind: "fn".to_string(),
@@ -1539,6 +1597,7 @@ mod tests {
             exported: true,
         });
         package.routines.push(IrRoutine {
+            package_id: test_package_id_for_module("core"),
             module_id: "core".to_string(),
             routine_key: "core#fn-0".to_string(),
             symbol_name: "main".to_string(),
@@ -1596,6 +1655,7 @@ mod tests {
     fn lowering_supports_terminal_if_and_int_ops() {
         let mut package = base_package();
         package.entrypoints.push(IrEntrypoint {
+            package_id: test_package_id_for_module("core"),
             module_id: "core".to_string(),
             symbol_name: "main".to_string(),
             symbol_kind: "fn".to_string(),
@@ -1604,6 +1664,7 @@ mod tests {
         });
         package.routines.extend([
             IrRoutine {
+                package_id: test_package_id_for_module("core"),
                 module_id: "core".to_string(),
                 routine_key: "core#fn-0".to_string(),
                 symbol_name: "main".to_string(),
@@ -1659,6 +1720,7 @@ mod tests {
                 ],
             },
             IrRoutine {
+                package_id: test_package_id_for_module("core"),
                 module_id: "core".to_string(),
                 routine_key: "core#fn-1".to_string(),
                 symbol_name: "helper".to_string(),
@@ -1763,6 +1825,7 @@ mod tests {
         let mut package = base_package();
         package.routines.extend([
             IrRoutine {
+                package_id: test_package_id_for_module("core"),
                 module_id: "core".to_string(),
                 routine_key: "core#fn-0".to_string(),
                 symbol_name: "named_call".to_string(),
@@ -1796,6 +1859,7 @@ mod tests {
                 }],
             },
             IrRoutine {
+                package_id: test_package_id_for_module("core"),
                 module_id: "core".to_string(),
                 routine_key: "core#fn-1".to_string(),
                 symbol_name: "helper".to_string(),
@@ -1843,6 +1907,7 @@ mod tests {
         let mut package = base_package();
         package.routines.extend([
             IrRoutine {
+                package_id: test_package_id_for_module("core"),
                 module_id: "core".to_string(),
                 routine_key: "core#fn-0".to_string(),
                 symbol_name: "attached_call".to_string(),
@@ -1879,6 +1944,7 @@ mod tests {
                 }],
             },
             IrRoutine {
+                package_id: test_package_id_for_module("core"),
                 module_id: "core".to_string(),
                 routine_key: "core#fn-1".to_string(),
                 symbol_name: "helper".to_string(),
@@ -1922,6 +1988,7 @@ mod tests {
     fn lowering_supports_while_mutation_and_loop_control() {
         let mut package = base_package();
         package.entrypoints.push(IrEntrypoint {
+            package_id: test_package_id_for_module("core"),
             module_id: "core".to_string(),
             symbol_name: "main".to_string(),
             symbol_kind: "fn".to_string(),
@@ -1929,6 +1996,7 @@ mod tests {
             exported: true,
         });
         package.routines.push(IrRoutine {
+            package_id: test_package_id_for_module("core"),
             module_id: "core".to_string(),
             routine_key: "core#fn-0".to_string(),
             symbol_name: "main".to_string(),
@@ -2084,6 +2152,7 @@ mod tests {
     fn lowering_supports_statement_calls_and_early_return_in_if() {
         let mut package = base_package();
         package.entrypoints.push(IrEntrypoint {
+            package_id: test_package_id_for_module("core"),
             module_id: "core".to_string(),
             symbol_name: "main".to_string(),
             symbol_kind: "fn".to_string(),
@@ -2092,6 +2161,7 @@ mod tests {
         });
         package.routines.extend([
             IrRoutine {
+                package_id: test_package_id_for_module("core"),
                 module_id: "core".to_string(),
                 routine_key: "core#fn-0".to_string(),
                 symbol_name: "main".to_string(),
@@ -2137,6 +2207,7 @@ mod tests {
                 ],
             },
             IrRoutine {
+                package_id: test_package_id_for_module("core"),
                 module_id: "core".to_string(),
                 routine_key: "core#fn-1".to_string(),
                 symbol_name: "touch".to_string(),

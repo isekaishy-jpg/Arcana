@@ -436,6 +436,34 @@ mod tests {
         IrPackageModule, IrRoutine, IrRoutineParam, parse_routine_type_text,
     };
 
+    fn test_package_id_for_module(module_id: &str) -> String {
+        module_id.split('.').next().unwrap_or(module_id).to_string()
+    }
+
+    fn test_package_display_names_with_deps(
+        package_id: impl Into<String>,
+        package_name: impl Into<String>,
+        direct_deps: Vec<String>,
+        direct_dep_ids: Vec<String>,
+    ) -> BTreeMap<String, String> {
+        let mut names = BTreeMap::from([(package_id.into(), package_name.into())]);
+        for (dep_name, dep_id) in direct_deps.into_iter().zip(direct_dep_ids) {
+            names.entry(dep_id).or_insert(dep_name);
+        }
+        names
+    }
+
+    fn test_package_direct_dep_ids(
+        package_id: impl Into<String>,
+        direct_deps: Vec<String>,
+        direct_dep_ids: Vec<String>,
+    ) -> BTreeMap<String, BTreeMap<String, String>> {
+        BTreeMap::from([(
+            package_id.into(),
+            direct_deps.into_iter().zip(direct_dep_ids).collect(),
+        )])
+    }
+
     fn ty(text: &str) -> crate::IrRoutineType {
         parse_routine_type_text(text).expect("type should parse")
     }
@@ -448,6 +476,7 @@ mod tests {
         statements: Vec<ExecStmt>,
     ) -> IrRoutine {
         IrRoutine {
+            package_id: test_package_id_for_module(module_id),
             module_id: module_id.to_string(),
             routine_key: routine_key.to_string(),
             symbol_name: symbol_name.to_string(),
@@ -490,10 +519,24 @@ mod tests {
     #[test]
     fn derives_canonical_requirements_from_reachable_intrinsics() {
         let package = IrPackage {
+            package_id: "app".to_string(),
             package_name: "app".to_string(),
             root_module_id: "app".to_string(),
             direct_deps: vec!["std".to_string()],
+            direct_dep_ids: vec!["std".to_string()],
+            package_display_names: test_package_display_names_with_deps(
+                "app".to_string(),
+                "app".to_string(),
+                vec!["std".to_string()],
+                vec!["std".to_string()],
+            ),
+            package_direct_dep_ids: test_package_direct_dep_ids(
+                "app".to_string(),
+                vec!["std".to_string()],
+                vec!["std".to_string()],
+            ),
             modules: vec![IrPackageModule {
+                package_id: test_package_id_for_module("app"),
                 module_id: "app".to_string(),
                 symbol_count: 1,
                 item_count: 1,
@@ -508,6 +551,7 @@ mod tests {
             exported_surface_rows: Vec::new(),
             runtime_requirements: Vec::new(),
             entrypoints: vec![IrEntrypoint {
+                package_id: test_package_id_for_module("app"),
                 module_id: "app".to_string(),
                 symbol_name: "main".to_string(),
                 symbol_kind: "fn".to_string(),
@@ -549,10 +593,24 @@ mod tests {
     #[test]
     fn derives_transitive_dependency_requirements_without_unrelated_std_union() {
         let package = IrPackage {
+            package_id: "app".to_string(),
             package_name: "app".to_string(),
             root_module_id: "app".to_string(),
             direct_deps: vec!["core".to_string(), "std".to_string()],
+            direct_dep_ids: vec!["core".to_string(), "std".to_string()],
+            package_display_names: test_package_display_names_with_deps(
+                "app".to_string(),
+                "app".to_string(),
+                vec!["core".to_string(), "std".to_string()],
+                vec!["core".to_string(), "std".to_string()],
+            ),
+            package_direct_dep_ids: test_package_direct_dep_ids(
+                "app".to_string(),
+                vec!["core".to_string(), "std".to_string()],
+                vec!["core".to_string(), "std".to_string()],
+            ),
             modules: vec![IrPackageModule {
+                package_id: test_package_id_for_module("app"),
                 module_id: "app".to_string(),
                 symbol_count: 1,
                 item_count: 1,
@@ -567,6 +625,7 @@ mod tests {
             exported_surface_rows: Vec::new(),
             runtime_requirements: Vec::new(),
             entrypoints: vec![IrEntrypoint {
+                package_id: test_package_id_for_module("app"),
                 module_id: "app".to_string(),
                 symbol_name: "main".to_string(),
                 symbol_kind: "fn".to_string(),
@@ -615,10 +674,24 @@ mod tests {
     #[test]
     fn derives_exported_library_requirements_without_entrypoints() {
         let package = IrPackage {
+            package_id: "core".to_string(),
             package_name: "core".to_string(),
             root_module_id: "core".to_string(),
             direct_deps: vec!["std".to_string()],
+            direct_dep_ids: vec!["std".to_string()],
+            package_display_names: test_package_display_names_with_deps(
+                "core".to_string(),
+                "core".to_string(),
+                vec!["std".to_string()],
+                vec!["std".to_string()],
+            ),
+            package_direct_dep_ids: test_package_direct_dep_ids(
+                "core".to_string(),
+                vec!["std".to_string()],
+                vec!["std".to_string()],
+            ),
             modules: vec![IrPackageModule {
+                package_id: test_package_id_for_module("core"),
                 module_id: "core".to_string(),
                 symbol_count: 1,
                 item_count: 1,
@@ -664,10 +737,24 @@ mod tests {
     #[test]
     fn exported_library_roots_ignore_unrelated_dependency_exports() {
         let package = IrPackage {
+            package_id: "core".to_string(),
             package_name: "core".to_string(),
             root_module_id: "core".to_string(),
             direct_deps: vec!["std".to_string()],
+            direct_dep_ids: vec!["std".to_string()],
+            package_display_names: test_package_display_names_with_deps(
+                "core".to_string(),
+                "core".to_string(),
+                vec!["std".to_string()],
+                vec!["std".to_string()],
+            ),
+            package_direct_dep_ids: test_package_direct_dep_ids(
+                "core".to_string(),
+                vec!["std".to_string()],
+                vec!["std".to_string()],
+            ),
             modules: vec![IrPackageModule {
+                package_id: test_package_id_for_module("core"),
                 module_id: "core".to_string(),
                 symbol_count: 1,
                 item_count: 1,
@@ -720,11 +807,25 @@ mod tests {
     #[test]
     fn rollup_handlers_do_not_use_global_unique_name_fallback() {
         let package = IrPackage {
+            package_id: "app".to_string(),
             package_name: "app".to_string(),
             root_module_id: "app".to_string(),
             direct_deps: vec!["std".to_string()],
+            direct_dep_ids: vec!["std".to_string()],
+            package_display_names: test_package_display_names_with_deps(
+                "app".to_string(),
+                "app".to_string(),
+                vec!["std".to_string()],
+                vec!["std".to_string()],
+            ),
+            package_direct_dep_ids: test_package_direct_dep_ids(
+                "app".to_string(),
+                vec!["std".to_string()],
+                vec!["std".to_string()],
+            ),
             modules: vec![
                 IrPackageModule {
+                    package_id: test_package_id_for_module("app"),
                     module_id: "app".to_string(),
                     symbol_count: 1,
                     item_count: 1,
@@ -735,6 +836,7 @@ mod tests {
                     exported_surface_rows: Vec::new(),
                 },
                 IrPackageModule {
+                    package_id: test_package_id_for_module("helpers"),
                     module_id: "helpers".to_string(),
                     symbol_count: 1,
                     item_count: 1,
@@ -750,6 +852,7 @@ mod tests {
             exported_surface_rows: Vec::new(),
             runtime_requirements: Vec::new(),
             entrypoints: vec![IrEntrypoint {
+                package_id: test_package_id_for_module("app"),
                 module_id: "app".to_string(),
                 symbol_name: "main".to_string(),
                 symbol_kind: "fn".to_string(),
@@ -758,6 +861,7 @@ mod tests {
             }],
             routines: vec![
                 IrRoutine {
+                    package_id: test_package_id_for_module("app"),
                     module_id: "app".to_string(),
                     routine_key: "app#fn-0".to_string(),
                     symbol_name: "main".to_string(),
@@ -783,6 +887,7 @@ mod tests {
                     }],
                 },
                 IrRoutine {
+                    package_id: test_package_id_for_module("helpers"),
                     module_id: "helpers".to_string(),
                     routine_key: "helpers#fn-0".to_string(),
                     symbol_name: "cleanup".to_string(),

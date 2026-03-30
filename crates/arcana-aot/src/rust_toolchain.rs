@@ -8,11 +8,28 @@ use crate::{AotEmitTarget, NativePackagePlan};
 
 use super::rust_codegen::RustNativeProject;
 
+struct NativeProjectDirGuard {
+    project_dir: PathBuf,
+}
+
+impl NativeProjectDirGuard {
+    fn new(project_dir: PathBuf) -> Self {
+        Self { project_dir }
+    }
+}
+
+impl Drop for NativeProjectDirGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.project_dir);
+    }
+}
+
 pub fn compile_rust_native_project(
     project: RustNativeProject,
     plan: NativePackagePlan,
 ) -> Result<AotPackageEmission, String> {
     ensure_native_target_host_supported(plan.target)?;
+    let _cleanup = NativeProjectDirGuard::new(project.project_dir.clone());
     write_rust_native_project(&project)?;
     let target_dir = project.project_dir.join("target");
     let status = Command::new("cargo")
@@ -50,13 +67,14 @@ pub fn compile_rust_native_project(
             bytes,
         })
         .collect::<Vec<_>>();
-    Ok(AotPackageEmission {
+    let emission = AotPackageEmission {
         target: plan.target,
         artifact: plan.artifact,
         primary_artifact_body: plan.artifact_text,
         root_artifact_bytes: Some(root_artifact_bytes),
         support_files,
-    })
+    };
+    Ok(emission)
 }
 
 fn ensure_native_target_host_supported(target: AotEmitTarget) -> Result<(), String> {
@@ -161,4 +179,41 @@ pub fn default_native_project_dir(target: AotEmitTarget, package_name: &str) -> 
         .join("target")
         .join("arcana-native-projects")
         .join(format!("{}_{}_{}", target.format(), package_name, unique))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{NativeProjectDirGuard, repo_root};
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos();
+        repo_root()
+            .join("target")
+            .join("arcana-aot-rust-toolchain-tests")
+            .join(format!("{label}_{unique}"))
+    }
+
+    #[test]
+    fn native_project_dir_guard_removes_partial_project_tree_on_drop() {
+        let dir = temp_dir("cleanup_guard");
+        fs::create_dir_all(dir.join("src")).expect("project dir should be created");
+        fs::write(dir.join("src").join("artifact.toml"), "format = \"test\"\n")
+            .expect("artifact should write");
+
+        {
+            let _guard = NativeProjectDirGuard::new(dir.clone());
+            assert!(dir.exists(), "guard should observe created project dir");
+        }
+
+        assert!(
+            !dir.exists(),
+            "guard should remove partially written native project dir"
+        );
+    }
 }

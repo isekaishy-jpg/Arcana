@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 mod entrypoint;
 mod executable;
 mod routine_signature;
@@ -47,6 +49,7 @@ pub struct IrModule {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IrPackageModule {
+    pub package_id: String,
     pub module_id: String,
     pub symbol_count: usize,
     pub item_count: usize,
@@ -59,6 +62,7 @@ pub struct IrPackageModule {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IrEntrypoint {
+    pub package_id: String,
     pub module_id: String,
     pub symbol_name: String,
     pub symbol_kind: String,
@@ -68,6 +72,7 @@ pub struct IrEntrypoint {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IrRoutine {
+    pub package_id: String,
     pub module_id: String,
     pub routine_key: String,
     pub symbol_name: String,
@@ -106,6 +111,7 @@ pub struct IrOwnerExit {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IrOwnerDecl {
+    pub package_id: String,
     pub module_id: String,
     pub owner_path: Vec<String>,
     pub owner_name: String,
@@ -115,9 +121,13 @@ pub struct IrOwnerDecl {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IrPackage {
+    pub package_id: String,
     pub package_name: String,
     pub root_module_id: String,
     pub direct_deps: Vec<String>,
+    pub direct_dep_ids: Vec<String>,
+    pub package_display_names: BTreeMap<String, String>,
+    pub package_direct_dep_ids: BTreeMap<String, BTreeMap<String, String>>,
     pub modules: Vec<IrPackageModule>,
     pub dependency_edge_count: usize,
     pub dependency_rows: Vec<String>,
@@ -126,6 +136,668 @@ pub struct IrPackage {
     pub entrypoints: Vec<IrEntrypoint>,
     pub routines: Vec<IrRoutine>,
     pub owners: Vec<IrOwnerDecl>,
+}
+
+pub fn disambiguate_package_routine_keys(package: &mut IrPackage) -> Result<(), String> {
+    let mut key_packages = BTreeMap::<String, BTreeSet<String>>::new();
+    for routine in &package.routines {
+        key_packages
+            .entry(routine.routine_key.clone())
+            .or_default()
+            .insert(routine.package_id.clone());
+    }
+    let duplicate_keys = key_packages
+        .into_iter()
+        .filter_map(|(routine_key, package_ids)| (package_ids.len() > 1).then_some(routine_key))
+        .collect::<BTreeSet<_>>();
+    if duplicate_keys.is_empty() {
+        return Ok(());
+    }
+
+    let package_display_names = package.package_display_names.clone();
+    let package_direct_dep_ids = package.package_direct_dep_ids.clone();
+    let mut routine_key_map = BTreeMap::<(String, String), String>::new();
+    for routine in &package.routines {
+        let new_key = if duplicate_keys.contains(&routine.routine_key) {
+            format!("{}|{}", routine.package_id, routine.routine_key)
+        } else {
+            routine.routine_key.clone()
+        };
+        routine_key_map.insert(
+            (routine.package_id.clone(), routine.routine_key.clone()),
+            new_key,
+        );
+    }
+
+    for routine in &mut package.routines {
+        let old_key = routine.routine_key.clone();
+        routine.routine_key = routine_key_map
+            .get(&(routine.package_id.clone(), old_key))
+            .expect("routine key mapping should exist")
+            .clone();
+        rewrite_stmt_block_routine_keys(
+            &package_display_names,
+            &package_direct_dep_ids,
+            &duplicate_keys,
+            &routine_key_map,
+            &routine.package_id,
+            &mut routine.statements,
+        )?;
+    }
+
+    for owner in &mut package.owners {
+        for object in &mut owner.objects {
+            rewrite_owner_routine_key(
+                &package_display_names,
+                &package_direct_dep_ids,
+                &duplicate_keys,
+                &routine_key_map,
+                &owner.package_id,
+                &mut object.init_routine_key,
+            )?;
+            rewrite_owner_routine_key(
+                &package_display_names,
+                &package_direct_dep_ids,
+                &duplicate_keys,
+                &routine_key_map,
+                &owner.package_id,
+                &mut object.init_with_context_routine_key,
+            )?;
+            rewrite_owner_routine_key(
+                &package_display_names,
+                &package_direct_dep_ids,
+                &duplicate_keys,
+                &routine_key_map,
+                &owner.package_id,
+                &mut object.resume_routine_key,
+            )?;
+            rewrite_owner_routine_key(
+                &package_display_names,
+                &package_direct_dep_ids,
+                &duplicate_keys,
+                &routine_key_map,
+                &owner.package_id,
+                &mut object.resume_with_context_routine_key,
+            )?;
+        }
+        for owner_exit in &mut owner.exits {
+            rewrite_expr_routine_keys(
+                &package_display_names,
+                &package_direct_dep_ids,
+                &duplicate_keys,
+                &routine_key_map,
+                &owner.package_id,
+                &mut owner_exit.condition,
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+fn rewrite_owner_routine_key(
+    package_display_names: &BTreeMap<String, String>,
+    package_direct_dep_ids: &BTreeMap<String, BTreeMap<String, String>>,
+    duplicate_keys: &BTreeSet<String>,
+    routine_key_map: &BTreeMap<(String, String), String>,
+    current_package_id: &str,
+    routine_key: &mut Option<String>,
+) -> Result<(), String> {
+    let Some(existing) = routine_key.clone() else {
+        return Ok(());
+    };
+    if !duplicate_keys.contains(&existing) {
+        return Ok(());
+    }
+    let target_package_id = resolve_duplicate_routine_target_package_id(
+        package_display_names,
+        package_direct_dep_ids,
+        current_package_id,
+        &existing,
+    )?;
+    *routine_key = Some(
+        routine_key_map
+            .get(&(target_package_id, existing.clone()))
+            .ok_or_else(|| {
+                format!(
+                    "missing rewritten routine key mapping for `{existing}` from package `{current_package_id}`"
+                )
+            })?
+            .clone(),
+    );
+    Ok(())
+}
+
+fn rewrite_stmt_block_routine_keys(
+    package_display_names: &BTreeMap<String, String>,
+    package_direct_dep_ids: &BTreeMap<String, BTreeMap<String, String>>,
+    duplicate_keys: &BTreeSet<String>,
+    routine_key_map: &BTreeMap<(String, String), String>,
+    current_package_id: &str,
+    statements: &mut [ExecStmt],
+) -> Result<(), String> {
+    for statement in statements {
+        rewrite_stmt_routine_keys(
+            package_display_names,
+            package_direct_dep_ids,
+            duplicate_keys,
+            routine_key_map,
+            current_package_id,
+            statement,
+        )?;
+    }
+    Ok(())
+}
+
+fn rewrite_stmt_routine_keys(
+    package_display_names: &BTreeMap<String, String>,
+    package_direct_dep_ids: &BTreeMap<String, BTreeMap<String, String>>,
+    duplicate_keys: &BTreeSet<String>,
+    routine_key_map: &BTreeMap<(String, String), String>,
+    current_package_id: &str,
+    statement: &mut ExecStmt,
+) -> Result<(), String> {
+    match statement {
+        ExecStmt::Let { value, .. } => rewrite_expr_routine_keys(
+            package_display_names,
+            package_direct_dep_ids,
+            duplicate_keys,
+            routine_key_map,
+            current_package_id,
+            value,
+        ),
+        ExecStmt::Expr { expr, .. } => rewrite_expr_routine_keys(
+            package_display_names,
+            package_direct_dep_ids,
+            duplicate_keys,
+            routine_key_map,
+            current_package_id,
+            expr,
+        ),
+        ExecStmt::ReturnVoid | ExecStmt::Break | ExecStmt::Continue => Ok(()),
+        ExecStmt::ReturnValue { value } => rewrite_expr_routine_keys(
+            package_display_names,
+            package_direct_dep_ids,
+            duplicate_keys,
+            routine_key_map,
+            current_package_id,
+            value,
+        ),
+        ExecStmt::If {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            rewrite_expr_routine_keys(
+                package_display_names,
+                package_direct_dep_ids,
+                duplicate_keys,
+                routine_key_map,
+                current_package_id,
+                condition,
+            )?;
+            rewrite_stmt_block_routine_keys(
+                package_display_names,
+                package_direct_dep_ids,
+                duplicate_keys,
+                routine_key_map,
+                current_package_id,
+                then_branch,
+            )?;
+            rewrite_stmt_block_routine_keys(
+                package_display_names,
+                package_direct_dep_ids,
+                duplicate_keys,
+                routine_key_map,
+                current_package_id,
+                else_branch,
+            )
+        }
+        ExecStmt::While {
+            condition, body, ..
+        } => {
+            rewrite_expr_routine_keys(
+                package_display_names,
+                package_direct_dep_ids,
+                duplicate_keys,
+                routine_key_map,
+                current_package_id,
+                condition,
+            )?;
+            rewrite_stmt_block_routine_keys(
+                package_display_names,
+                package_direct_dep_ids,
+                duplicate_keys,
+                routine_key_map,
+                current_package_id,
+                body,
+            )
+        }
+        ExecStmt::For { iterable, body, .. } => {
+            rewrite_expr_routine_keys(
+                package_display_names,
+                package_direct_dep_ids,
+                duplicate_keys,
+                routine_key_map,
+                current_package_id,
+                iterable,
+            )?;
+            rewrite_stmt_block_routine_keys(
+                package_display_names,
+                package_direct_dep_ids,
+                duplicate_keys,
+                routine_key_map,
+                current_package_id,
+                body,
+            )
+        }
+        ExecStmt::ActivateOwner { context, .. } => {
+            if let Some(context) = context {
+                rewrite_expr_routine_keys(
+                    package_display_names,
+                    package_direct_dep_ids,
+                    duplicate_keys,
+                    routine_key_map,
+                    current_package_id,
+                    context,
+                )?;
+            }
+            Ok(())
+        }
+        ExecStmt::Defer(expr) => rewrite_expr_routine_keys(
+            package_display_names,
+            package_direct_dep_ids,
+            duplicate_keys,
+            routine_key_map,
+            current_package_id,
+            expr,
+        ),
+        ExecStmt::Assign { target, value, .. } => {
+            rewrite_assign_target_routine_keys(
+                package_display_names,
+                package_direct_dep_ids,
+                duplicate_keys,
+                routine_key_map,
+                current_package_id,
+                target,
+            )?;
+            rewrite_expr_routine_keys(
+                package_display_names,
+                package_direct_dep_ids,
+                duplicate_keys,
+                routine_key_map,
+                current_package_id,
+                value,
+            )
+        }
+    }
+}
+
+fn rewrite_assign_target_routine_keys(
+    package_display_names: &BTreeMap<String, String>,
+    package_direct_dep_ids: &BTreeMap<String, BTreeMap<String, String>>,
+    duplicate_keys: &BTreeSet<String>,
+    routine_key_map: &BTreeMap<(String, String), String>,
+    current_package_id: &str,
+    target: &mut ExecAssignTarget,
+) -> Result<(), String> {
+    match target {
+        ExecAssignTarget::Name(_) => Ok(()),
+        ExecAssignTarget::Member { target, .. } => rewrite_assign_target_routine_keys(
+            package_display_names,
+            package_direct_dep_ids,
+            duplicate_keys,
+            routine_key_map,
+            current_package_id,
+            target,
+        ),
+        ExecAssignTarget::Index { target, index } => {
+            rewrite_assign_target_routine_keys(
+                package_display_names,
+                package_direct_dep_ids,
+                duplicate_keys,
+                routine_key_map,
+                current_package_id,
+                target,
+            )?;
+            rewrite_expr_routine_keys(
+                package_display_names,
+                package_direct_dep_ids,
+                duplicate_keys,
+                routine_key_map,
+                current_package_id,
+                index,
+            )
+        }
+    }
+}
+
+fn rewrite_expr_routine_keys(
+    package_display_names: &BTreeMap<String, String>,
+    package_direct_dep_ids: &BTreeMap<String, BTreeMap<String, String>>,
+    duplicate_keys: &BTreeSet<String>,
+    routine_key_map: &BTreeMap<(String, String), String>,
+    current_package_id: &str,
+    expr: &mut ExecExpr,
+) -> Result<(), String> {
+    match expr {
+        ExecExpr::Int(_) | ExecExpr::Bool(_) | ExecExpr::Str(_) | ExecExpr::Path(_) => Ok(()),
+        ExecExpr::Pair { left, right } | ExecExpr::Binary { left, right, .. } => {
+            rewrite_expr_routine_keys(
+                package_display_names,
+                package_direct_dep_ids,
+                duplicate_keys,
+                routine_key_map,
+                current_package_id,
+                left,
+            )?;
+            rewrite_expr_routine_keys(
+                package_display_names,
+                package_direct_dep_ids,
+                duplicate_keys,
+                routine_key_map,
+                current_package_id,
+                right,
+            )
+        }
+        ExecExpr::Collection { items } => {
+            for item in items {
+                rewrite_expr_routine_keys(
+                    package_display_names,
+                    package_direct_dep_ids,
+                    duplicate_keys,
+                    routine_key_map,
+                    current_package_id,
+                    item,
+                )?;
+            }
+            Ok(())
+        }
+        ExecExpr::Match { subject, arms } => {
+            rewrite_expr_routine_keys(
+                package_display_names,
+                package_direct_dep_ids,
+                duplicate_keys,
+                routine_key_map,
+                current_package_id,
+                subject,
+            )?;
+            for arm in arms {
+                rewrite_expr_routine_keys(
+                    package_display_names,
+                    package_direct_dep_ids,
+                    duplicate_keys,
+                    routine_key_map,
+                    current_package_id,
+                    &mut arm.value,
+                )?;
+            }
+            Ok(())
+        }
+        ExecExpr::Chain { steps, .. } => {
+            for step in steps {
+                rewrite_chain_step_routine_keys(
+                    package_display_names,
+                    package_direct_dep_ids,
+                    duplicate_keys,
+                    routine_key_map,
+                    current_package_id,
+                    step,
+                )?;
+            }
+            Ok(())
+        }
+        ExecExpr::MemoryPhrase {
+            arena,
+            init_args,
+            constructor,
+            attached,
+            ..
+        } => {
+            rewrite_expr_routine_keys(
+                package_display_names,
+                package_direct_dep_ids,
+                duplicate_keys,
+                routine_key_map,
+                current_package_id,
+                arena,
+            )?;
+            for arg in init_args {
+                rewrite_expr_routine_keys(
+                    package_display_names,
+                    package_direct_dep_ids,
+                    duplicate_keys,
+                    routine_key_map,
+                    current_package_id,
+                    &mut arg.value,
+                )?;
+            }
+            rewrite_expr_routine_keys(
+                package_display_names,
+                package_direct_dep_ids,
+                duplicate_keys,
+                routine_key_map,
+                current_package_id,
+                constructor,
+            )?;
+            rewrite_header_attachments_routine_keys(
+                package_display_names,
+                package_direct_dep_ids,
+                duplicate_keys,
+                routine_key_map,
+                current_package_id,
+                attached,
+            )
+        }
+        ExecExpr::Member { expr, .. }
+        | ExecExpr::Await { expr }
+        | ExecExpr::Unary { expr, .. }
+        | ExecExpr::Generic { expr, .. } => rewrite_expr_routine_keys(
+            package_display_names,
+            package_direct_dep_ids,
+            duplicate_keys,
+            routine_key_map,
+            current_package_id,
+            expr,
+        ),
+        ExecExpr::Index { expr, index } => {
+            rewrite_expr_routine_keys(
+                package_display_names,
+                package_direct_dep_ids,
+                duplicate_keys,
+                routine_key_map,
+                current_package_id,
+                expr,
+            )?;
+            rewrite_expr_routine_keys(
+                package_display_names,
+                package_direct_dep_ids,
+                duplicate_keys,
+                routine_key_map,
+                current_package_id,
+                index,
+            )
+        }
+        ExecExpr::Slice {
+            expr, start, end, ..
+        } => {
+            rewrite_expr_routine_keys(
+                package_display_names,
+                package_direct_dep_ids,
+                duplicate_keys,
+                routine_key_map,
+                current_package_id,
+                expr,
+            )?;
+            if let Some(start) = start {
+                rewrite_expr_routine_keys(
+                    package_display_names,
+                    package_direct_dep_ids,
+                    duplicate_keys,
+                    routine_key_map,
+                    current_package_id,
+                    start,
+                )?;
+            }
+            if let Some(end) = end {
+                rewrite_expr_routine_keys(
+                    package_display_names,
+                    package_direct_dep_ids,
+                    duplicate_keys,
+                    routine_key_map,
+                    current_package_id,
+                    end,
+                )?;
+            }
+            Ok(())
+        }
+        ExecExpr::Range { start, end, .. } => {
+            if let Some(start) = start {
+                rewrite_expr_routine_keys(
+                    package_display_names,
+                    package_direct_dep_ids,
+                    duplicate_keys,
+                    routine_key_map,
+                    current_package_id,
+                    start,
+                )?;
+            }
+            if let Some(end) = end {
+                rewrite_expr_routine_keys(
+                    package_display_names,
+                    package_direct_dep_ids,
+                    duplicate_keys,
+                    routine_key_map,
+                    current_package_id,
+                    end,
+                )?;
+            }
+            Ok(())
+        }
+        ExecExpr::Phrase {
+            subject,
+            args,
+            resolved_routine,
+            attached,
+            ..
+        } => {
+            rewrite_expr_routine_keys(
+                package_display_names,
+                package_direct_dep_ids,
+                duplicate_keys,
+                routine_key_map,
+                current_package_id,
+                subject,
+            )?;
+            for arg in args {
+                rewrite_expr_routine_keys(
+                    package_display_names,
+                    package_direct_dep_ids,
+                    duplicate_keys,
+                    routine_key_map,
+                    current_package_id,
+                    &mut arg.value,
+                )?;
+            }
+            rewrite_owner_routine_key(
+                package_display_names,
+                package_direct_dep_ids,
+                duplicate_keys,
+                routine_key_map,
+                current_package_id,
+                resolved_routine,
+            )?;
+            rewrite_header_attachments_routine_keys(
+                package_display_names,
+                package_direct_dep_ids,
+                duplicate_keys,
+                routine_key_map,
+                current_package_id,
+                attached,
+            )
+        }
+    }
+}
+
+fn rewrite_chain_step_routine_keys(
+    package_display_names: &BTreeMap<String, String>,
+    package_direct_dep_ids: &BTreeMap<String, BTreeMap<String, String>>,
+    duplicate_keys: &BTreeSet<String>,
+    routine_key_map: &BTreeMap<(String, String), String>,
+    current_package_id: &str,
+    step: &mut ExecChainStep,
+) -> Result<(), String> {
+    rewrite_expr_routine_keys(
+        package_display_names,
+        package_direct_dep_ids,
+        duplicate_keys,
+        routine_key_map,
+        current_package_id,
+        &mut step.stage,
+    )?;
+    for bind_arg in &mut step.bind_args {
+        rewrite_expr_routine_keys(
+            package_display_names,
+            package_direct_dep_ids,
+            duplicate_keys,
+            routine_key_map,
+            current_package_id,
+            bind_arg,
+        )?;
+    }
+    Ok(())
+}
+
+fn rewrite_header_attachments_routine_keys(
+    package_display_names: &BTreeMap<String, String>,
+    package_direct_dep_ids: &BTreeMap<String, BTreeMap<String, String>>,
+    duplicate_keys: &BTreeSet<String>,
+    routine_key_map: &BTreeMap<(String, String), String>,
+    current_package_id: &str,
+    attachments: &mut [ExecHeaderAttachment],
+) -> Result<(), String> {
+    for attachment in attachments {
+        match attachment {
+            ExecHeaderAttachment::Named { value, .. }
+            | ExecHeaderAttachment::Chain { expr: value } => rewrite_expr_routine_keys(
+                package_display_names,
+                package_direct_dep_ids,
+                duplicate_keys,
+                routine_key_map,
+                current_package_id,
+                value,
+            )?,
+        }
+    }
+    Ok(())
+}
+
+fn resolve_duplicate_routine_target_package_id(
+    package_display_names: &BTreeMap<String, String>,
+    package_direct_dep_ids: &BTreeMap<String, BTreeMap<String, String>>,
+    current_package_id: &str,
+    routine_key: &str,
+) -> Result<String, String> {
+    let (module_id, _) = routine_key
+        .split_once('#')
+        .ok_or_else(|| format!("lowered routine key `{routine_key}` is missing `#`"))?;
+    let root = module_id.split('.').next().unwrap_or(module_id);
+    let current_name = package_display_names
+        .get(current_package_id)
+        .ok_or_else(|| format!("missing display name for package `{current_package_id}`"))?;
+    if root == current_name {
+        return Ok(current_package_id.to_string());
+    }
+    package_direct_dep_ids
+        .get(current_package_id)
+        .and_then(|deps| deps.get(root))
+        .cloned()
+        .ok_or_else(|| {
+            format!(
+                "unable to resolve duplicate lowered routine `{routine_key}` from package `{current_package_id}`"
+            )
+        })
 }
 
 impl IrPackage {
@@ -370,6 +1042,42 @@ fn resolved_direct_deps(package: &HirWorkspacePackage) -> Vec<String> {
         .collect()
 }
 
+fn resolved_direct_dep_ids(package: &HirWorkspacePackage) -> Vec<String> {
+    package
+        .direct_dep_ids
+        .values()
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn resolved_direct_dep_package_ids(package: &HirWorkspacePackage) -> BTreeMap<String, String> {
+    package
+        .direct_dep_packages
+        .iter()
+        .filter_map(|(visible_name, package_name)| {
+            package
+                .direct_dep_ids
+                .get(visible_name)
+                .map(|package_id| (package_name.clone(), package_id.clone()))
+        })
+        .collect()
+}
+
+fn resolved_direct_dep_display_names(package: &HirWorkspacePackage) -> BTreeMap<String, String> {
+    package
+        .direct_dep_ids
+        .iter()
+        .filter_map(|(visible_name, package_id)| {
+            package
+                .direct_dep_packages
+                .get(visible_name)
+                .map(|package_name| (package_id.clone(), package_name.clone()))
+        })
+        .collect()
+}
+
 fn encode_surface_text(text: &str) -> String {
     text.replace('\\', "\\\\").replace('\n', "\\n")
 }
@@ -407,10 +1115,20 @@ fn resolved_module_exported_surface_rows(
     module: &HirModuleSummary,
 ) -> Vec<String> {
     let mut rows = module.summary_surface_rows();
-    rows.extend(module.impls.iter().filter_map(|impl_decl| {
-        impl_target_is_public_from_package(workspace, package, module, &impl_decl.target_type)
-            .then(|| render_impl_surface_row(impl_decl))
-    }));
+    rows.extend(
+        module
+            .impls
+            .iter()
+            .filter(|&impl_decl| {
+                impl_target_is_public_from_package(
+                    workspace,
+                    package,
+                    module,
+                    &impl_decl.target_type,
+                )
+            })
+            .map(render_impl_surface_row),
+    );
     rows.sort();
     rows.dedup();
     rows
@@ -754,15 +1472,15 @@ fn resolve_qualified_phrase_target_path(
         });
     }
 
-    if let Some(path) = split_simple_path(qualifier).filter(|path| path.len() > 1) {
-        if let Some(resolved) = lookup_symbol_path(scope.workspace, scope.resolved_module, &path) {
-            let routine_key = resolved_symbol_routine_key(&resolved);
-            return Some(ResolvedPhraseTarget {
-                path: resolved_symbol_path(resolved),
-                routine_key: Some(routine_key),
-                dynamic_dispatch: None,
-            });
-        }
+    if let Some(path) = split_simple_path(qualifier).filter(|path| path.len() > 1)
+        && let Some(resolved) = lookup_symbol_path(scope.workspace, scope.resolved_module, &path)
+    {
+        let routine_key = resolved_symbol_routine_key(&resolved);
+        return Some(ResolvedPhraseTarget {
+            path: resolved_symbol_path(resolved),
+            routine_key: Some(routine_key),
+            dynamic_dispatch: None,
+        });
     }
     None
 }
@@ -830,14 +1548,13 @@ fn resolve_bare_method_target(
 }
 
 fn infer_expr_hir_type(scope: &ResolvedRenderScope<'_>, expr: &HirExpr) -> Option<HirType> {
-    if let HirExpr::MemberAccess { expr, member } = expr {
-        if let HirExpr::Path { segments } = expr.as_ref() {
-            if segments.len() == 1 && scope.value_scope.contains(&segments[0]) {
-                if let Some(ty) = scope.value_scope.owner_member_type(&segments[0], member) {
-                    return Some(ty.clone());
-                }
-            }
-        }
+    if let HirExpr::MemberAccess { expr, member } = expr
+        && let HirExpr::Path { segments } = expr.as_ref()
+        && segments.len() == 1
+        && scope.value_scope.contains(&segments[0])
+        && let Some(ty) = scope.value_scope.owner_member_type(&segments[0], member)
+    {
+        return Some(ty.clone());
     }
     if let Some(inferred) = infer_receiver_expr_type(
         scope.workspace,
@@ -1763,12 +2480,11 @@ fn lower_exec_stmt_resolved(
                 op: lower_assign_op(*op),
                 value: lower_exec_expr_resolved(value, scope),
             };
-            if matches!(op, HirAssignOp::Assign) {
-                if let HirAssignTarget::Name { text } = target {
-                    if let Some(ty) = infer_expr_hir_type(scope, value) {
-                        scope.value_scope.insert(text.clone(), ty);
-                    }
-                }
+            if matches!(op, HirAssignOp::Assign)
+                && let HirAssignTarget::Name { text } = target
+                && let Some(ty) = infer_expr_hir_type(scope, value)
+            {
+                scope.value_scope.insert(text.clone(), ty);
             }
             lowered
         }
@@ -1856,6 +2572,12 @@ fn lower_owner_decl(module: &HirModuleSummary, symbol: &HirSymbol) -> Option<IrO
         return None;
     };
     Some(IrOwnerDecl {
+        package_id: module
+            .module_id
+            .split('.')
+            .next()
+            .unwrap_or(&module.module_id)
+            .to_string(),
         module_id: module.module_id.clone(),
         owner_path: canonical_symbol_path(&module.module_id, &symbol.name),
         owner_name: symbol.name.clone(),
@@ -1972,6 +2694,7 @@ fn lower_owner_decl_resolved(
         &symbol.type_params,
     );
     Ok(Some(IrOwnerDecl {
+        package_id: resolved_module.package_id.clone(),
         module_id: module.module_id.clone(),
         owner_path: canonical_symbol_path(&module.module_id, &symbol.name),
         owner_name: symbol.name.clone(),
@@ -2021,6 +2744,7 @@ fn lower_routine(
     impl_decl: Option<&arcana_hir::HirImplDecl>,
 ) -> IrRoutine {
     IrRoutine {
+        package_id: module_id.split('.').next().unwrap_or(module_id).to_string(),
         module_id: module_id.to_string(),
         routine_key,
         symbol_name: symbol.name.clone(),
@@ -2033,11 +2757,8 @@ fn lower_routine(
         return_type: symbol.return_type.as_ref().map(lower_symbol_routine_type),
         intrinsic_impl: symbol.intrinsic_impl.clone(),
         impl_target_type: impl_decl.map(|decl| lower_symbol_routine_type(&decl.target_type)),
-        impl_trait_path: impl_decl.and_then(|decl| {
-            decl.trait_path
-                .as_ref()
-                .map(|path| canonical_impl_trait_path(path))
-        }),
+        impl_trait_path: impl_decl
+            .and_then(|decl| decl.trait_path.as_ref().map(canonical_impl_trait_path)),
         availability: symbol
             .availability
             .iter()
@@ -2071,6 +2792,7 @@ fn lower_routine_resolved(
             .insert(param.name.clone(), param.ty.clone());
     }
     let routine = IrRoutine {
+        package_id: package.package_id.clone(),
         module_id: module_id.to_string(),
         routine_key,
         symbol_name: symbol.name.clone(),
@@ -2090,11 +2812,8 @@ fn lower_routine_resolved(
         intrinsic_impl: symbol.intrinsic_impl.clone(),
         impl_target_type: impl_decl
             .map(|decl| lower_resolved_routine_type(workspace, resolved_module, &decl.target_type)),
-        impl_trait_path: impl_decl.and_then(|decl| {
-            decl.trait_path
-                .as_ref()
-                .map(|path| canonical_impl_trait_path(path))
-        }),
+        impl_trait_path: impl_decl
+            .and_then(|decl| decl.trait_path.as_ref().map(canonical_impl_trait_path)),
         availability: symbol
             .availability
             .iter()
@@ -2119,6 +2838,7 @@ fn lower_package(package: &HirPackageSummary) -> IrPackage {
         .map(|module| {
             let lowered = lower_module_summary(module);
             IrPackageModule {
+                package_id: package.package_name.clone(),
                 module_id: module.module_id.clone(),
                 symbol_count: lowered.symbol_count,
                 item_count: lowered.item_count,
@@ -2166,6 +2886,7 @@ fn lower_package(package: &HirPackageSummary) -> IrPackage {
                     return None;
                 }
                 Some(IrEntrypoint {
+                    package_id: package.package_name.clone(),
                     module_id: module.module_id.clone(),
                     symbol_name: symbol.name.clone(),
                     symbol_kind: symbol.kind.as_str().to_string(),
@@ -2232,9 +2953,16 @@ fn lower_package(package: &HirPackageSummary) -> IrPackage {
         .collect::<Vec<_>>();
 
     let mut lowered = IrPackage {
+        package_id: package.package_name.clone(),
         package_name: package.package_name.clone(),
         root_module_id: package.package_name.clone(),
         direct_deps: Vec::new(),
+        direct_dep_ids: Vec::new(),
+        package_display_names: BTreeMap::from([(
+            package.package_name.clone(),
+            package.package_name.clone(),
+        )]),
+        package_direct_dep_ids: BTreeMap::from([(package.package_name.clone(), BTreeMap::new())]),
         modules,
         dependency_edge_count: package.dependency_edges.len(),
         dependency_rows,
@@ -2248,10 +2976,46 @@ fn lower_package(package: &HirPackageSummary) -> IrPackage {
     lowered
 }
 
+fn retarget_package_identity(package: &mut IrPackage, package_id: &str) {
+    let old_package_id = package.package_id.clone();
+    package.package_id = package_id.to_string();
+    if let Some(display_name) = package.package_display_names.remove(&old_package_id) {
+        package
+            .package_display_names
+            .insert(package_id.to_string(), display_name);
+    }
+    if let Some(dep_ids) = package.package_direct_dep_ids.remove(&old_package_id) {
+        package
+            .package_direct_dep_ids
+            .insert(package_id.to_string(), dep_ids);
+    }
+    for module in &mut package.modules {
+        module.package_id = package_id.to_string();
+    }
+    for entrypoint in &mut package.entrypoints {
+        entrypoint.package_id = package_id.to_string();
+    }
+    for routine in &mut package.routines {
+        routine.package_id = package_id.to_string();
+    }
+    for owner in &mut package.owners {
+        owner.package_id = package_id.to_string();
+    }
+}
+
 #[cfg(test)]
 fn lower_workspace_package(package: &HirWorkspacePackage) -> IrPackage {
     let mut lowered = lower_package(&package.summary);
+    retarget_package_identity(&mut lowered, &package.package_id);
     lowered.direct_deps = package.direct_deps.iter().cloned().collect();
+    lowered.direct_dep_ids = resolved_direct_dep_ids(package);
+    lowered
+        .package_display_names
+        .extend(resolved_direct_dep_display_names(package));
+    lowered.package_direct_dep_ids.insert(
+        package.package_id.clone(),
+        resolved_direct_dep_package_ids(package),
+    );
     lowered
 }
 
@@ -2261,7 +3025,16 @@ pub fn lower_workspace_package_with_resolution(
     package: &HirWorkspacePackage,
 ) -> Result<IrPackage, String> {
     let mut lowered = lower_package(&package.summary);
+    retarget_package_identity(&mut lowered, &package.package_id);
     lowered.direct_deps = resolved_direct_deps(package);
+    lowered.direct_dep_ids = resolved_direct_dep_ids(package);
+    lowered
+        .package_display_names
+        .extend(resolved_direct_dep_display_names(package));
+    lowered.package_direct_dep_ids.insert(
+        package.package_id.clone(),
+        resolved_direct_dep_package_ids(package),
+    );
     lowered.dependency_rows = package
         .summary
         .dependency_edges
@@ -2269,7 +3042,7 @@ pub fn lower_workspace_package_with_resolution(
         .map(|edge| render_resolved_dependency_row(package, edge))
         .collect();
     lowered.dependency_edge_count = lowered.dependency_rows.len();
-    let Some(resolved_package) = resolved_workspace.package(&package.summary.package_name) else {
+    let Some(resolved_package) = resolved_workspace.package_by_id(&package.package_id) else {
         return Ok(lowered);
     };
     lowered.routines = package
@@ -2511,6 +3284,7 @@ mod tests {
         )
         .expect("layout should build");
         let workspace = build_workspace_package(
+            "desktop".to_string(),
             Path::new("C:/repo/desktop").to_path_buf(),
             BTreeSet::from(["core".to_string(), "std".to_string()]),
             summary,
@@ -2566,6 +3340,7 @@ mod tests {
         )
         .expect("std layout should build");
         let std_workspace = build_workspace_package(
+            "std".to_string(),
             Path::new("C:/repo/std").to_path_buf(),
             BTreeSet::new(),
             std_summary,
@@ -2591,6 +3366,7 @@ mod tests {
         )
         .expect("app layout should build");
         let app_workspace = build_workspace_package(
+            "app".to_string(),
             Path::new("C:/repo/app").to_path_buf(),
             BTreeSet::from(["std".to_string()]),
             app_summary,
@@ -2653,6 +3429,7 @@ mod tests {
         )
         .expect("std layout should build");
         let std_workspace = build_workspace_package(
+            "std".to_string(),
             Path::new("C:/repo/std").to_path_buf(),
             BTreeSet::new(),
             std_summary,
@@ -2687,6 +3464,7 @@ mod tests {
         )
         .expect("app layout should build");
         let app_workspace = build_workspace_package(
+            "app".to_string(),
             Path::new("C:/repo/app").to_path_buf(),
             BTreeSet::from(["std".to_string()]),
             app_summary,
@@ -2755,6 +3533,7 @@ mod tests {
         )
         .expect("std layout should build");
         let std_workspace = build_workspace_package(
+            "std".to_string(),
             Path::new("C:/repo/std").to_path_buf(),
             BTreeSet::new(),
             std_summary,
@@ -2793,6 +3572,7 @@ mod tests {
         )
         .expect("app layout should build");
         let app_workspace = build_workspace_package(
+            "app".to_string(),
             Path::new("C:/repo/app").to_path_buf(),
             BTreeSet::from(["std".to_string()]),
             app_summary,
@@ -2862,6 +3642,7 @@ mod tests {
         )
         .expect("app layout should build");
         let app_workspace = build_workspace_package(
+            "app".to_string(),
             Path::new("C:/repo/app").to_path_buf(),
             BTreeSet::new(),
             app_summary,
@@ -2901,6 +3682,7 @@ mod tests {
         )
         .expect("core layout should build");
         let core_workspace = build_workspace_package(
+            "core".to_string(),
             Path::new("C:/repo/core").to_path_buf(),
             BTreeSet::new(),
             core_summary,
@@ -2928,7 +3710,9 @@ mod tests {
         )
         .expect("app layout should build");
         let app_workspace = build_workspace_package_with_dep_packages(
+            "app".to_string(),
             Path::new("C:/repo/app").to_path_buf(),
+            BTreeMap::from([("util".to_string(), "core".to_string())]),
             BTreeMap::from([("util".to_string(), "core".to_string())]),
             app_summary,
             app_layout,
@@ -2987,6 +3771,7 @@ mod tests {
         )
         .expect("app layout should build");
         let app_workspace = build_workspace_package(
+            "app".to_string(),
             Path::new("C:/repo/app").to_path_buf(),
             BTreeSet::new(),
             app_summary,
@@ -3051,6 +3836,7 @@ mod tests {
         )
         .expect("app layout should build");
         let app_workspace = build_workspace_package(
+            "app".to_string(),
             Path::new("C:/repo/app").to_path_buf(),
             BTreeSet::new(),
             app_summary,
@@ -3110,6 +3896,7 @@ mod tests {
         )
         .expect("core layout should build");
         let core_workspace = build_workspace_package(
+            "core".to_string(),
             Path::new("C:/repo/core").to_path_buf(),
             BTreeSet::new(),
             core_summary,

@@ -12,6 +12,7 @@ pub type RuntimeParamPlan = IrRoutineParam;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeRoutinePlan {
+    pub package_id: String,
     pub module_id: String,
     pub routine_key: String,
     pub symbol_name: String,
@@ -33,6 +34,7 @@ pub struct RuntimeRoutinePlan {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeEntrypointPlan {
+    pub package_id: String,
     pub module_id: String,
     pub symbol_name: String,
     pub symbol_kind: String,
@@ -43,6 +45,7 @@ pub struct RuntimeEntrypointPlan {
 
 pub(crate) fn lower_routine(routine: &AotRoutineArtifact) -> RuntimeRoutinePlan {
     RuntimeRoutinePlan {
+        package_id: routine.package_id.clone(),
         module_id: routine.module_id.clone(),
         routine_key: routine.routine_key.clone(),
         symbol_name: routine.symbol_name.clone(),
@@ -71,7 +74,8 @@ pub(crate) fn lower_entrypoint(
         .iter()
         .enumerate()
         .find(|(_, routine)| {
-            routine.module_id == entrypoint.module_id
+            routine.package_id == entrypoint.package_id
+                && routine.module_id == entrypoint.module_id
                 && routine.symbol_name == entrypoint.symbol_name
                 && routine.symbol_kind == entrypoint.symbol_kind
         })
@@ -85,6 +89,7 @@ pub(crate) fn lower_entrypoint(
         validate_runtime_main_entry_contract(routine.params.len(), routine.return_type.as_ref())?;
     }
     Ok(RuntimeEntrypointPlan {
+        package_id: entrypoint.package_id.clone(),
         module_id: entrypoint.module_id.clone(),
         symbol_name: entrypoint.symbol_name.clone(),
         symbol_kind: entrypoint.symbol_kind.clone(),

@@ -12,13 +12,16 @@ use arcana_cabi::{
 };
 use serde::Deserialize;
 
-const DISTRIBUTION_BUNDLE_FORMAT: &str = "arcana-distribution-bundle-v1";
+const DISTRIBUTION_BUNDLE_FORMAT: &str = "arcana-distribution-bundle-v2";
+const DISTRIBUTION_BUNDLE_FORMAT_V1: &str = "arcana-distribution-bundle-v1";
 const DISTRIBUTION_MANIFEST_FILE: &str = "arcana.bundle.toml";
 const NATIVE_PRODUCT_TEMP_PROBES_ENV: &str = "ARCANA_NATIVE_PRODUCT_TEMP_PROBES";
-const EMBEDDED_DISTRIBUTION_MANIFEST_MAGIC: &[u8] = b"ARCANA_DIST_MANIFEST_V1\0";
+const EMBEDDED_DISTRIBUTION_MANIFEST_MAGIC: &[u8] = b"ARCANA_DIST_MANIFEST_V2\0";
+const EMBEDDED_DISTRIBUTION_MANIFEST_MAGIC_V1: &[u8] = b"ARCANA_DIST_MANIFEST_V1\0";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeNativeProductInfo {
+    pub package_id: String,
     pub package_name: String,
     pub product_name: String,
     pub role: ArcanaCabiProductRole,
@@ -31,6 +34,7 @@ pub struct RuntimeNativeProductInfo {
 pub struct RuntimeChildBindingInfo {
     pub consumer_member: String,
     pub dependency_alias: String,
+    pub package_id: String,
     pub package_name: String,
     pub product_name: String,
 }
@@ -189,7 +193,7 @@ impl RuntimeNativeProductCatalog {
                             "{}:{}=>{}:{}",
                             consumer,
                             alias,
-                            binding.product.package_name,
+                            binding.product.package_id,
                             binding.product.product_name
                         )
                     })
@@ -208,12 +212,8 @@ impl RuntimeNativeProductCatalog {
                 ));
             }
             let ((_binding_key_consumer, _binding_key_alias), binding) = candidate_bindings[0];
-            return run_active_child_binding_entrypoint(
-                binding,
-                package_image_text,
-                main_routine_key,
-            )
-            .map(Some);
+            run_active_child_binding_entrypoint(binding, package_image_text, main_routine_key)
+                .map(Some)
         }
 
         #[cfg(not(windows))]
@@ -238,21 +238,21 @@ impl RuntimeNativeProductCatalog {
                             "consumer={} alias={} package={} product={}",
                             binding.consumer_member,
                             binding.dependency_alias,
-                            binding.package_name,
+                            binding.package_id,
                             binding.product_name
                         ),
                     );
                     continue;
                 }
                 let product = self
-                    .find_product(&binding.package_name, &binding.product_name)
+                    .find_product_by_id(&binding.package_id, &binding.product_name)
                     .cloned()
                     .ok_or_else(|| {
                         format!(
                             "child binding `{}` -> `{}` references missing native product `{}:{}`",
                             binding.consumer_member,
                             binding.dependency_alias,
-                            binding.package_name,
+                            binding.package_id,
                             binding.product_name
                         )
                     })?;
@@ -261,12 +261,12 @@ impl RuntimeNativeProductCatalog {
                         "child binding `{}` -> `{}` references `{}`:`{}` with role `{}` instead of `child`",
                         binding.consumer_member,
                         binding.dependency_alias,
-                        binding.package_name,
+                        binding.package_id,
                         binding.product_name,
                         product.role.as_str()
                     ));
                 }
-                let product_key = (product.package_name.clone(), product.product_name.clone());
+                let product_key = (product.package_id.clone(), product.product_name.clone());
                 if !self.loaded_children.contains_key(&product_key) {
                     let library = LoadedNativeLibrary::load(&self.bundle_dir, &product)?;
                     self.loaded_children.insert(product_key.clone(), library);
@@ -274,7 +274,7 @@ impl RuntimeNativeProductCatalog {
                 let library = self.loaded_children.get(&product_key).ok_or_else(|| {
                     format!(
                         "loaded child library entry missing for `{}:{}`",
-                        product.package_name, product.product_name
+                        product.package_id, product.product_name
                     )
                 })?;
                 let instance = library.create_instance()?;
@@ -284,7 +284,7 @@ impl RuntimeNativeProductCatalog {
                         "consumer={} alias={} package={} product={} file={}",
                         binding.consumer_member,
                         binding.dependency_alias,
-                        product.package_name,
+                        product.package_id,
                         product.product_name,
                         product.file
                     ),
@@ -318,7 +318,7 @@ impl RuntimeNativeProductCatalog {
                     },
                 );
             }
-            return Ok(());
+            Ok(())
         }
 
         #[cfg(not(windows))]
@@ -341,17 +341,57 @@ impl RuntimeNativeProductCatalog {
     ) -> Result<RuntimeNativePluginHandle, String> {
         #[cfg(windows)]
         {
+            let matches = self
+                .products
+                .iter()
+                .filter(|product| {
+                    product.package_name == package_name && product.product_name == product_name
+                })
+                .collect::<Vec<_>>();
+            let package_id = match matches.as_slice() {
+                [] => {
+                    return Err(format!(
+                        "bundle does not declare native product `{package_name}:{product_name}`"
+                    ));
+                }
+                [product] => product.package_id.clone(),
+                _ => {
+                    let candidates = matches
+                        .iter()
+                        .map(|product| format!("{}:{}", product.package_id, product.product_name))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return Err(format!(
+                        "bundle declares multiple native products named `{package_name}:{product_name}`; select by package id instead: {candidates}"
+                    ));
+                }
+            };
+            self.open_plugin_by_package_id(&package_id, product_name)
+        }
+
+        #[cfg(not(windows))]
+        {
+            let _ = (package_name, product_name);
+            Err("native plugin products currently require a Windows host".to_string())
+        }
+    }
+
+    pub fn open_plugin_by_package_id(
+        &mut self,
+        package_id: &str,
+        product_name: &str,
+    ) -> Result<RuntimeNativePluginHandle, String> {
+        #[cfg(windows)]
+        {
             let product = self
-                .find_product(package_name, product_name)
+                .find_product_by_id(package_id, product_name)
                 .cloned()
                 .ok_or_else(|| {
-                    format!(
-                        "bundle does not declare native product `{package_name}:{product_name}`"
-                    )
+                    format!("bundle does not declare native product `{package_id}:{product_name}`")
                 })?;
             if product.role != ArcanaCabiProductRole::Plugin {
                 return Err(format!(
-                    "native product `{package_name}:{product_name}` uses role `{}` instead of `plugin`",
+                    "native product `{package_id}:{product_name}` uses role `{}` instead of `plugin`",
                     product.role.as_str()
                 ));
             }
@@ -360,17 +400,17 @@ impl RuntimeNativeProductCatalog {
             let destroy_instance = library.destroy_instance;
             let describe_instance = library.plugin_describe_instance.ok_or_else(|| {
                 format!(
-                    "native plugin product `{package_name}:{product_name}` is missing `describe_instance` ops"
+                    "native plugin product `{package_id}:{product_name}` is missing `describe_instance` ops"
                 )
             })?;
             let use_instance = library.plugin_use_instance.ok_or_else(|| {
                 format!(
-                    "native plugin product `{package_name}:{product_name}` is missing `use_instance` ops"
+                    "native plugin product `{package_id}:{product_name}` is missing `use_instance` ops"
                 )
             })?;
             let owned_bytes_free = library.owned_bytes_free.ok_or_else(|| {
                 format!(
-                    "native plugin product `{package_name}:{product_name}` is missing `owned_bytes_free` ops"
+                    "native plugin product `{package_id}:{product_name}` is missing `owned_bytes_free` ops"
                 )
             })?;
             let handle = RuntimeNativePluginHandle(self.next_plugin_handle);
@@ -379,7 +419,7 @@ impl RuntimeNativeProductCatalog {
                 "open_plugin",
                 format!(
                     "handle={} package={} product={} contract={}",
-                    handle.0, product.package_name, product.product_name, product.contract_id
+                    handle.0, product.package_id, product.product_name, product.contract_id
                 ),
             );
             self.open_plugins.insert(
@@ -396,12 +436,12 @@ impl RuntimeNativeProductCatalog {
                     _library: library,
                 },
             );
-            return Ok(handle);
+            Ok(handle)
         }
 
         #[cfg(not(windows))]
         {
-            let _ = (package_name, product_name);
+            let _ = (package_id, product_name);
             Err("native plugin products currently require a Windows host".to_string())
         }
     }
@@ -415,7 +455,7 @@ impl RuntimeNativeProductCatalog {
                 .ok_or_else(|| format!("invalid RuntimeNativePluginHandle `{}`", handle.0))?;
             drop(plugin);
             native_product_probe("release_plugin", format!("handle={}", handle.0));
-            return Ok(());
+            Ok(())
         }
 
         #[cfg(not(windows))]
@@ -448,7 +488,7 @@ impl RuntimeNativeProductCatalog {
                     handle.0, plugin.product.package_name, plugin.product.product_name, description
                 ),
             );
-            return Ok(description);
+            Ok(description)
         }
 
         #[cfg(not(windows))]
@@ -481,7 +521,7 @@ impl RuntimeNativeProductCatalog {
                     response.len()
                 ),
             );
-            return Ok(response);
+            Ok(response)
         }
 
         #[cfg(not(windows))]
@@ -491,13 +531,13 @@ impl RuntimeNativeProductCatalog {
         }
     }
 
-    fn find_product(
+    fn find_product_by_id(
         &self,
-        package_name: &str,
+        package_id: &str,
         product_name: &str,
     ) -> Option<&RuntimeNativeProductInfo> {
         self.products.iter().find(|product| {
-            product.package_name == package_name && product.product_name == product_name
+            product.package_id == package_id && product.product_name == product_name
         })
     }
 }
@@ -562,7 +602,8 @@ fn load_bundle_native_products_from_text(
     let manifest = toml::from_str::<DistributionBundleManifest>(text).map_err(|e| {
         format!("failed to parse distribution bundle manifest `{manifest_label}`: {e}",)
     })?;
-    if manifest.format != DISTRIBUTION_BUNDLE_FORMAT {
+    let is_v1 = manifest.format == DISTRIBUTION_BUNDLE_FORMAT_V1;
+    if manifest.format != DISTRIBUTION_BUNDLE_FORMAT && !is_v1 {
         return Err(format!(
             "unsupported distribution bundle format `{}` in `{manifest_label}`",
             manifest.format
@@ -584,7 +625,9 @@ fn load_bundle_native_products_from_text(
                     "bundle_manifest_product_missing_support_file",
                     format!(
                         "package={} product={} file={}",
-                        product.package_name, product.product_name, product.file
+                        product.package_id.as_deref().unwrap_or(&product.package_name),
+                        product.product_name,
+                        product.file
                     ),
                 );
                 return Err(format!(
@@ -595,8 +638,20 @@ fn load_bundle_native_products_from_text(
                     product.file
                 ));
             }
+            let package_name = product.package_name;
+            let package_id = match product.package_id {
+                Some(package_id) if !package_id.is_empty() => package_id,
+                _ if is_v1 => package_name.clone(),
+                _ => {
+                    return Err(format!(
+                        "distribution bundle manifest `{manifest_label}` is missing `package_id` for native product `{}:{}`",
+                        package_name, product.product_name
+                    ));
+                }
+            };
             Ok(RuntimeNativeProductInfo {
-                package_name: product.package_name,
+                package_id,
+                package_name,
                 product_name: product.product_name,
                 role,
                 contract_id: product.contract_id,
@@ -610,42 +665,63 @@ fn load_bundle_native_products_from_text(
     products.sort_by(|left, right| {
         left.package_name
             .cmp(&right.package_name)
+            .then_with(|| left.package_id.cmp(&right.package_id))
             .then_with(|| left.product_name.cmp(&right.product_name))
     });
 
     let child_bindings = manifest
         .child_bindings
         .into_iter()
-        .map(|binding| RuntimeChildBindingInfo {
-            consumer_member: binding.consumer_member,
-            dependency_alias: binding.dependency_alias,
-            package_name: binding.package_name,
-            product_name: binding.product_name,
+        .map(|binding| {
+            let package_name = binding.package_name;
+            let package_id = match binding.package_id {
+                Some(package_id) if !package_id.is_empty() => package_id,
+                _ if is_v1 => package_name.clone(),
+                _ => {
+                    return Err(format!(
+                        "distribution bundle manifest `{manifest_label}` is missing `package_id` for child binding `{}` -> `{}`",
+                        binding.consumer_member, binding.dependency_alias
+                    ));
+                }
+            };
+            Ok(RuntimeChildBindingInfo {
+                consumer_member: binding.consumer_member,
+                dependency_alias: binding.dependency_alias,
+                package_id,
+                package_name,
+                product_name: binding.product_name,
+            })
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, String>>()?;
 
     for binding in &child_bindings {
         let product = products
             .iter()
             .find(|product| {
-                product.package_name == binding.package_name
+                product.package_id == binding.package_id
                     && product.product_name == binding.product_name
             })
             .ok_or_else(|| {
                 format!(
                     "distribution bundle manifest `{}` references missing child product `{}:{}` for binding `{}` -> `{}`",
                     manifest_label,
-                    binding.package_name,
+                    binding.package_id,
                     binding.product_name,
                     binding.consumer_member,
                     binding.dependency_alias
                 )
             })?;
+        if product.package_name != binding.package_name {
+            return Err(format!(
+                "distribution bundle manifest `{}` binds package id `{}` as `{}`, but the matching native product declares package name `{}`",
+                manifest_label, binding.package_id, binding.package_name, product.package_name
+            ));
+        }
         if product.role != ArcanaCabiProductRole::Child {
             return Err(format!(
                 "distribution bundle manifest `{}` references `{}`:`{}` as a child binding, but its role is `{}`",
                 manifest_label,
-                binding.package_name,
+                binding.package_id,
                 binding.product_name,
                 product.role.as_str()
             ));
@@ -654,18 +730,33 @@ fn load_bundle_native_products_from_text(
     let runtime_child_binding =
         manifest
             .runtime_child_binding
-            .map(|binding| RuntimeChildBindingInfo {
-                consumer_member: binding.consumer_member,
-                dependency_alias: binding.dependency_alias,
-                package_name: binding.package_name,
-                product_name: binding.product_name,
-            });
+            .map(|binding| {
+                let package_name = binding.package_name;
+                let package_id = match binding.package_id {
+                    Some(package_id) if !package_id.is_empty() => package_id,
+                    _ if is_v1 => package_name.clone(),
+                    _ => {
+                        return Err(format!(
+                            "distribution bundle manifest `{manifest_label}` is missing `package_id` for runtime child binding `{}` -> `{}`",
+                            binding.consumer_member, binding.dependency_alias
+                        ));
+                    }
+                };
+                Ok(RuntimeChildBindingInfo {
+                    consumer_member: binding.consumer_member,
+                    dependency_alias: binding.dependency_alias,
+                    package_id,
+                    package_name,
+                    product_name: binding.product_name,
+                })
+            })
+            .transpose()?;
     if let Some(binding) = &runtime_child_binding {
         if manifest.member.as_deref() != Some(binding.consumer_member.as_str()) {
             return Err(format!(
                 "distribution bundle manifest `{}` sets runtime child binding `{}:{}` for consumer `{}`, but bundle root member is `{}`",
                 manifest_label,
-                binding.package_name,
+                binding.package_id,
                 binding.product_name,
                 binding.consumer_member,
                 manifest.member.as_deref().unwrap_or("<unknown>")
@@ -675,7 +766,7 @@ fn load_bundle_native_products_from_text(
             return Err(format!(
                 "distribution bundle manifest `{}` sets runtime child binding `{}:{}` for `{}` -> `{}`, but that binding is not listed in `[[child_bindings]]`",
                 manifest_label,
-                binding.package_name,
+                binding.package_id,
                 binding.product_name,
                 binding.consumer_member,
                 binding.dependency_alias
@@ -687,7 +778,7 @@ fn load_bundle_native_products_from_text(
                 "consumer={} alias={} package={} product={}",
                 binding.consumer_member,
                 binding.dependency_alias,
-                binding.package_name,
+                binding.package_id,
                 binding.product_name
             ),
         );
@@ -707,7 +798,7 @@ fn load_bundle_native_products_from_text(
                     "{}:{}=>{}:{}",
                     binding.consumer_member,
                     binding.dependency_alias,
-                    binding.package_name,
+                    binding.package_id,
                     binding.product_name
                 ))
                 .unwrap_or_else(|| "<none>".to_string())
@@ -743,10 +834,19 @@ fn read_embedded_distribution_manifest(
     if bytes.len() < trailer_len {
         return Ok(None);
     }
-    let magic_start = bytes.len() - EMBEDDED_DISTRIBUTION_MANIFEST_MAGIC.len();
-    if &bytes[magic_start..] != EMBEDDED_DISTRIBUTION_MANIFEST_MAGIC {
+    let magic_start = if bytes.len() >= EMBEDDED_DISTRIBUTION_MANIFEST_MAGIC.len()
+        && &bytes[bytes.len() - EMBEDDED_DISTRIBUTION_MANIFEST_MAGIC.len()..]
+            == EMBEDDED_DISTRIBUTION_MANIFEST_MAGIC
+    {
+        bytes.len() - EMBEDDED_DISTRIBUTION_MANIFEST_MAGIC.len()
+    } else if bytes.len() >= EMBEDDED_DISTRIBUTION_MANIFEST_MAGIC_V1.len()
+        && &bytes[bytes.len() - EMBEDDED_DISTRIBUTION_MANIFEST_MAGIC_V1.len()..]
+            == EMBEDDED_DISTRIBUTION_MANIFEST_MAGIC_V1
+    {
+        bytes.len() - EMBEDDED_DISTRIBUTION_MANIFEST_MAGIC_V1.len()
+    } else {
         return Ok(None);
-    }
+    };
     let len_start = magic_start - std::mem::size_of::<u64>();
     let payload_len = u64::from_le_bytes(
         bytes[len_start..magic_start]
@@ -786,6 +886,8 @@ struct DistributionBundleManifest {
 
 #[derive(Debug, Deserialize)]
 struct DistributionBundleNativeProduct {
+    #[serde(default)]
+    package_id: Option<String>,
     package_name: String,
     product_name: String,
     role: String,
@@ -799,6 +901,8 @@ struct DistributionBundleNativeProduct {
 struct DistributionBundleChildBinding {
     consumer_member: String,
     dependency_alias: String,
+    #[serde(default)]
+    package_id: Option<String>,
     package_name: String,
     product_name: String,
 }
@@ -1349,7 +1453,7 @@ mod tests {
         fs::write(
             dir.join("arcana.bundle.toml"),
             concat!(
-                "format = \"arcana-distribution-bundle-v1\"\n",
+                "format = \"arcana-distribution-bundle-v2\"\n",
                 "member = \"app\"\n",
                 "target = \"windows-exe\"\n",
                 "target_format = \"arcana-native-exe-v1\"\n",
@@ -1360,15 +1464,18 @@ mod tests {
                 "\n[runtime_child_binding]\n",
                 "consumer_member = \"app\"\n",
                 "dependency_alias = \"arcana_desktop\"\n",
+                "package_id = \"arcana_desktop\"\n",
                 "package_name = \"arcana_desktop\"\n",
                 "product_name = \"default\"\n",
                 "\n[[native_products]]\n",
+                "package_id = \"arcana_desktop\"\n",
                 "package_name = \"arcana_desktop\"\n",
                 "product_name = \"default\"\n",
                 "role = \"child\"\n",
                 "contract_id = \"arcana.cabi.child.v1\"\n",
                 "file = \"arcwin.dll\"\n",
                 "\n[[native_products]]\n",
+                "package_id = \"tooling\"\n",
                 "package_name = \"tooling\"\n",
                 "product_name = \"tools\"\n",
                 "role = \"plugin\"\n",
@@ -1377,6 +1484,7 @@ mod tests {
                 "\n[[child_bindings]]\n",
                 "consumer_member = \"app\"\n",
                 "dependency_alias = \"arcana_desktop\"\n",
+                "package_id = \"arcana_desktop\"\n",
                 "package_name = \"arcana_desktop\"\n",
                 "product_name = \"default\"\n",
             ),
@@ -1391,6 +1499,7 @@ mod tests {
             Some(&RuntimeChildBindingInfo {
                 consumer_member: "app".to_string(),
                 dependency_alias: "arcana_desktop".to_string(),
+                package_id: "arcana_desktop".to_string(),
                 package_name: "arcana_desktop".to_string(),
                 product_name: "default".to_string(),
             })
@@ -1454,7 +1563,7 @@ mod tests {
         fs::write(
             dir.join("arcana.bundle.toml"),
             concat!(
-                "format = \"arcana-distribution-bundle-v1\"\n",
+                "format = \"arcana-distribution-bundle-v2\"\n",
                 "member = \"app\"\n",
                 "target = \"windows-exe\"\n",
                 "target_format = \"arcana-native-exe-v1\"\n",
@@ -1465,15 +1574,18 @@ mod tests {
                 "\n[runtime_child_binding]\n",
                 "consumer_member = \"app\"\n",
                 "dependency_alias = \"arcana_desktop\"\n",
+                "package_id = \"arcana_desktop\"\n",
                 "package_name = \"arcana_desktop\"\n",
                 "product_name = \"default\"\n",
                 "\n[[native_products]]\n",
+                "package_id = \"arcana_desktop\"\n",
                 "package_name = \"arcana_desktop\"\n",
                 "product_name = \"default\"\n",
                 "role = \"child\"\n",
                 "contract_id = \"arcana.cabi.child.v1\"\n",
                 "file = \"arcwin.dll\"\n",
                 "\n[[native_products]]\n",
+                "package_id = \"tooling\"\n",
                 "package_name = \"tooling\"\n",
                 "product_name = \"default\"\n",
                 "role = \"child\"\n",
@@ -1482,11 +1594,13 @@ mod tests {
                 "\n[[child_bindings]]\n",
                 "consumer_member = \"app\"\n",
                 "dependency_alias = \"arcana_desktop\"\n",
+                "package_id = \"arcana_desktop\"\n",
                 "package_name = \"arcana_desktop\"\n",
                 "product_name = \"default\"\n",
                 "\n[[child_bindings]]\n",
                 "consumer_member = \"tooling\"\n",
                 "dependency_alias = \"tools\"\n",
+                "package_id = \"tooling\"\n",
                 "package_name = \"tooling\"\n",
                 "product_name = \"default\"\n",
             ),
@@ -1500,6 +1614,7 @@ mod tests {
             Some(&RuntimeChildBindingInfo {
                 consumer_member: "app".to_string(),
                 dependency_alias: "arcana_desktop".to_string(),
+                package_id: "arcana_desktop".to_string(),
                 package_name: "arcana_desktop".to_string(),
                 product_name: "default".to_string(),
             })
@@ -1525,6 +1640,50 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn bundle_native_product_catalog_rejects_plugin_open_by_ambiguous_package_name() {
+        let dir = temp_dir("bundle_native_products_plugin_ambiguity");
+        fs::write(dir.join("tooling_v1.dll"), b"not-a-real-dll").expect("dummy dll should write");
+        fs::write(dir.join("tooling_v2.dll"), b"not-a-real-dll").expect("dummy dll should write");
+        fs::write(
+            dir.join("arcana.bundle.toml"),
+            concat!(
+                "format = \"arcana-distribution-bundle-v2\"\n",
+                "member = \"app\"\n",
+                "target = \"windows-exe\"\n",
+                "target_format = \"arcana-native-exe-v1\"\n",
+                "root_artifact = \"app.exe\"\n",
+                "artifact_hash = \"sha256:test\"\n",
+                "toolchain = \"toolchain\"\n",
+                "support_files = [\"tooling_v1.dll\", \"tooling_v2.dll\"]\n",
+                "\n[[native_products]]\n",
+                "package_id = \"registry:local:tooling@1.0.0\"\n",
+                "package_name = \"tooling\"\n",
+                "product_name = \"tools\"\n",
+                "role = \"plugin\"\n",
+                "contract_id = \"arcana.cabi.plugin.v1\"\n",
+                "file = \"tooling_v1.dll\"\n",
+                "\n[[native_products]]\n",
+                "package_id = \"registry:local:tooling@2.0.0\"\n",
+                "package_name = \"tooling\"\n",
+                "product_name = \"tools\"\n",
+                "role = \"plugin\"\n",
+                "contract_id = \"arcana.cabi.plugin.v1\"\n",
+                "file = \"tooling_v2.dll\"\n",
+            ),
+        )
+        .expect("bundle manifest should write");
+
+        let mut catalog = load_bundle_native_products(&dir).expect("catalog should load");
+        let err = catalog
+            .open_plugin("tooling", "tools")
+            .expect_err("ambiguous package-name plugin open should fail");
+        assert!(err.contains("multiple native products named"), "{err}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn bundle_native_product_catalog_falls_back_when_only_transitive_child_bindings_exist() {
         let dir = temp_dir("bundle_native_products_transitive_only");
         build_instance_product(
@@ -1538,7 +1697,7 @@ mod tests {
         fs::write(
             dir.join("arcana.bundle.toml"),
             concat!(
-                "format = \"arcana-distribution-bundle-v1\"\n",
+                "format = \"arcana-distribution-bundle-v2\"\n",
                 "member = \"app\"\n",
                 "target = \"windows-exe\"\n",
                 "target_format = \"arcana-native-exe-v1\"\n",
@@ -1547,6 +1706,7 @@ mod tests {
                 "toolchain = \"toolchain\"\n",
                 "support_files = [\"tooling_default.dll\"]\n",
                 "\n[[native_products]]\n",
+                "package_id = \"tooling\"\n",
                 "package_name = \"tooling\"\n",
                 "product_name = \"default\"\n",
                 "role = \"child\"\n",
@@ -1555,6 +1715,7 @@ mod tests {
                 "\n[[child_bindings]]\n",
                 "consumer_member = \"tooling\"\n",
                 "dependency_alias = \"tools\"\n",
+                "package_id = \"tooling\"\n",
                 "package_name = \"tooling\"\n",
                 "product_name = \"default\"\n",
             ),
@@ -1592,7 +1753,7 @@ mod tests {
         let root_artifact = dir.join("app.exe");
         fs::write(&root_artifact, b"MZembedded-test").expect("root artifact should write");
         let manifest_text = concat!(
-            "format = \"arcana-distribution-bundle-v1\"\n",
+            "format = \"arcana-distribution-bundle-v2\"\n",
             "member = \"app\"\n",
             "target = \"windows-exe\"\n",
             "target_format = \"arcana-native-exe-v1\"\n",
@@ -1603,9 +1764,11 @@ mod tests {
             "\n[runtime_child_binding]\n",
             "consumer_member = \"app\"\n",
             "dependency_alias = \"arcana_desktop\"\n",
+            "package_id = \"arcana_desktop\"\n",
             "package_name = \"arcana_desktop\"\n",
             "product_name = \"default\"\n",
             "\n[[native_products]]\n",
+            "package_id = \"arcana_desktop\"\n",
             "package_name = \"arcana_desktop\"\n",
             "product_name = \"default\"\n",
             "role = \"child\"\n",
@@ -1614,6 +1777,7 @@ mod tests {
             "\n[[child_bindings]]\n",
             "consumer_member = \"app\"\n",
             "dependency_alias = \"arcana_desktop\"\n",
+            "package_id = \"arcana_desktop\"\n",
             "package_name = \"arcana_desktop\"\n",
             "product_name = \"default\"\n",
         );
@@ -1645,6 +1809,7 @@ mod tests {
             Some(&RuntimeChildBindingInfo {
                 consumer_member: "app".to_string(),
                 dependency_alias: "arcana_desktop".to_string(),
+                package_id: "arcana_desktop".to_string(),
                 package_name: "arcana_desktop".to_string(),
                 product_name: "default".to_string(),
             })

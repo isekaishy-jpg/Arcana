@@ -13,15 +13,16 @@ The current native path is Windows-first and already packages a real desktop sho
 ## Status
 
 What is working now:
-- deterministic path-only package and workspace planning
+- deterministic package and workspace planning with local path deps plus a local versioned registry source
 - `arcana check`, `arcana build`, `arcana run`, and `arcana package`
+- `arcana publish <workspace-dir> --member <member>` for machine-local versioned lib publication
 - typed frontend and internal IR/runtime execution for the approved pre-selfhost language surface
 - native Windows `exe` / `dll` packaging
 - rewrite-owned desktop, graphics, and text grimoires sufficient to drive the checked-in desktop showcase
 
 What is not done yet:
 - selfhost
-- Git or registry dependencies
+- named remote registries and Git dependencies
 - stable public backend artifact contracts
 - first-party `arcana test`, `arcana format`, and `arcana review`
 
@@ -66,6 +67,7 @@ arcana check <path>
 arcana build <workspace-dir> [--plan] [--target <target>]
 arcana run <workspace-dir> [--target <target>] [--member <member>] [-- <args...>]
 arcana package <workspace-dir> [--target <target>] [--member <member>] [--out-dir <dir>]
+arcana publish <workspace-dir> --member <member>
 ```
 
 Supported build targets today:
@@ -74,7 +76,8 @@ Supported build targets today:
 - `windows-dll`
 
 Dependency source support today:
-- local path dependencies only
+- local path dependencies
+- local published versioned dependencies from the built-in `local` registry source
 
 ## Desktop Showcase
 
@@ -117,7 +120,7 @@ Current rewrite authority order:
 ## Current Boundaries
 
 - no pre-selfhost language expansion
-- no Git or registry dependencies yet
+- no remote registry or Git dependencies yet
 - no stable public backend artifact contract yet
 - `std` is rewrite-owned first-party surface, not archived MeadowLang architecture to preserve wholesale
 - owned grimoires sit above the substrate and are meant to own their public contracts rather than act as thin wrappers over third-party crates

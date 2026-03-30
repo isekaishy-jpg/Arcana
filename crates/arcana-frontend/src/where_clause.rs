@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 use std::path::Path;
 
 use arcana_hir::{
@@ -118,21 +120,19 @@ fn validate_projection_predicate(
     );
     if let Some(trait_symbol_ref) =
         resolve_trait_symbol_from_trait_ref(workspace, resolved_module, trait_ref)
+        && let HirSymbolBody::Trait { assoc_types, .. } = &trait_symbol_ref.symbol.body
+        && !assoc_types.iter().any(|item| item.name == assoc)
     {
-        if let HirSymbolBody::Trait { assoc_types, .. } = &trait_symbol_ref.symbol.body {
-            if !assoc_types.iter().any(|item| item.name == assoc) {
-                diagnostics.push(Diagnostic {
-                    path: module_path.to_path_buf(),
-                    line: span.line,
-                    column: span.column,
-                    message: format!(
-                        "trait `{}` does not declare associated type `{}`",
-                        trait_ref.render(),
-                        assoc
-                    ),
-                });
-            }
-        }
+        diagnostics.push(Diagnostic {
+            path: module_path.to_path_buf(),
+            line: span.line,
+            column: span.column,
+            message: format!(
+                "trait `{}` does not declare associated type `{}`",
+                trait_ref.render(),
+                assoc
+            ),
+        });
     }
     validate_type_surface(
         workspace,

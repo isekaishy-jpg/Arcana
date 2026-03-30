@@ -125,15 +125,20 @@ mod tests {
     fn sample_launch_artifact() -> AotPackageArtifact {
         AotPackageArtifact {
             format: AOT_INTERNAL_FORMAT.to_string(),
+            package_id: "app".to_string(),
             package_name: "app".to_string(),
             root_module_id: "app".to_string(),
             direct_deps: Vec::new(),
+            direct_dep_ids: Vec::new(),
+            package_display_names: BTreeMap::from([("app".to_string(), "app".to_string())]),
+            package_direct_dep_ids: BTreeMap::from([("app".to_string(), BTreeMap::new())]),
             module_count: 1,
             dependency_edge_count: 0,
             dependency_rows: Vec::new(),
             exported_surface_rows: vec!["module=app:export:fn:fn main() -> Int:".to_string()],
             runtime_requirements: Vec::new(),
             entrypoints: vec![AotEntrypointArtifact {
+                package_id: "app".to_string(),
                 module_id: "app".to_string(),
                 symbol_name: "main".to_string(),
                 symbol_kind: "fn".to_string(),
@@ -141,6 +146,7 @@ mod tests {
                 exported: true,
             }],
             routines: vec![AotRoutineArtifact {
+                package_id: "app".to_string(),
                 module_id: "app".to_string(),
                 routine_key: "app#fn-0".to_string(),
                 symbol_name: "main".to_string(),
@@ -163,6 +169,7 @@ mod tests {
             }],
             owners: Vec::new(),
             modules: vec![AotPackageModuleArtifact {
+                package_id: "app".to_string(),
                 module_id: "app".to_string(),
                 symbol_count: 1,
                 item_count: 1,

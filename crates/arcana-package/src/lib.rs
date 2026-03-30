@@ -17,6 +17,8 @@ mod build;
 mod build_identity;
 mod distribution;
 mod fingerprint;
+mod publish;
+mod versioning;
 
 pub type PackageResult<T> = Result<T, String>;
 
@@ -36,13 +38,19 @@ pub use fingerprint::{
     MemberFingerprints, WorkspaceFingerprints, compute_workspace_fingerprints,
     compute_workspace_snapshot_id,
 };
+pub use publish::publish_workspace_member;
+pub use versioning::{GitSelector, PackageId, SemverVersion, SourceId, VersionReq};
 
-pub(crate) const LOCKFILE_VERSION: i64 = 3;
-pub(crate) const LEGACY_LOCKFILE_VERSION: i64 = 2;
-pub(crate) const OLDER_LOCKFILE_VERSION: i64 = 1;
+pub(crate) const LOCKFILE_VERSION: i64 = 4;
+pub(crate) const LEGACY_LOCKFILE_VERSION: i64 = 3;
+pub(crate) const OLDER_LOCKFILE_VERSION: i64 = 2;
+pub(crate) const OLDEST_LOCKFILE_VERSION: i64 = 1;
 pub(crate) const CACHE_DIR: &str = ".arcana";
 pub(crate) const ARTIFACT_DIR: &str = "artifacts";
 pub(crate) const LOGS_DIR: &str = "logs";
+pub(crate) const DEFAULT_REGISTRY_NAME: &str = "local";
+pub(crate) const LOCAL_REGISTRY_METADATA_FILE: &str = "package.toml";
+pub(crate) const LOCAL_REGISTRY_SNAPSHOT_DIR: &str = "snapshot";
 
 pub(crate) fn collect_validated_support_file_paths<'a, I>(paths: I) -> PackageResult<Vec<String>>
 where
@@ -240,8 +248,53 @@ impl GrimoireKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DependencySource {
     Path,
-    Git,
     Registry,
+    Git,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DependencySourceSpec {
+    Path {
+        location: String,
+    },
+    Registry {
+        registry_name: Option<String>,
+        version: VersionReq,
+        checksum: Option<String>,
+    },
+    Git {
+        url: String,
+        selector: Option<GitSelector>,
+    },
+}
+
+impl DependencySourceSpec {
+    pub fn kind(&self) -> DependencySource {
+        match self {
+            Self::Path { .. } => DependencySource::Path,
+            Self::Registry { .. } => DependencySource::Registry,
+            Self::Git { .. } => DependencySource::Git,
+        }
+    }
+
+    pub fn location_label(&self) -> String {
+        match self {
+            Self::Path { location } => location.clone(),
+            Self::Registry {
+                registry_name,
+                version,
+                ..
+            } => format!(
+                "{}:{}",
+                registry_name.as_deref().unwrap_or(DEFAULT_REGISTRY_NAME),
+                version
+            ),
+            Self::Git { url, selector } => match selector {
+                Some(selector) => format!("{url}#{}", selector.render()),
+                None => url.clone(),
+            },
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -308,8 +361,8 @@ pub struct NativeProductSpec {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DependencySpec {
-    pub source: DependencySource,
-    pub location: String,
+    pub package: String,
+    pub source: DependencySourceSpec,
     pub native_delivery: NativeDependencyDelivery,
     pub native_child: Option<String>,
     pub native_plugins: Vec<String>,
@@ -328,6 +381,7 @@ impl DependencySpec {
 pub struct Manifest {
     pub name: String,
     pub kind: GrimoireKind,
+    pub version: Option<SemverVersion>,
     pub workspace_members: Vec<String>,
     pub deps: BTreeMap<String, DependencySpec>,
     pub native_products: BTreeMap<String, NativeProductSpec>,
@@ -335,26 +389,75 @@ pub struct Manifest {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkspaceMember {
+    pub package_id: String,
+    pub source_id: String,
     pub name: String,
     pub kind: GrimoireKind,
+    pub version: Option<SemverVersion>,
+    pub source_kind: DependencySource,
     pub rel_dir: String,
     pub abs_dir: PathBuf,
     pub deps: Vec<String>,
     pub direct_dep_packages: BTreeMap<String, String>,
+    pub direct_dep_ids: BTreeMap<String, String>,
     pub direct_dep_specs: BTreeMap<String, DependencySpec>,
+    pub registry_name: Option<String>,
+    pub checksum: Option<String>,
+    pub git_url: Option<String>,
+    pub git_selector: Option<String>,
     pub native_products: BTreeMap<String, NativeProductSpec>,
+}
+
+impl WorkspaceMember {
+    pub fn display_label(&self) -> String {
+        match (&self.source_kind, &self.version) {
+            (DependencySource::Registry, Some(version)) => format!("{}@{}", self.name, version),
+            _ => self.name.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkspaceGraph {
     pub root_name: String,
+    pub root_id: String,
     pub root_dir: PathBuf,
     pub members: Vec<WorkspaceMember>,
 }
 
 impl WorkspaceGraph {
-    pub fn member(&self, name: &str) -> Option<&WorkspaceMember> {
-        self.members.iter().find(|member| member.name == name)
+    pub fn member(&self, key: &str) -> Option<&WorkspaceMember> {
+        if let Some(member) = self.members.iter().find(|member| member.package_id == key) {
+            return Some(member);
+        }
+        let mut local_matches = self.members.iter().filter(|member| {
+            member.name == key
+                && member.source_kind == DependencySource::Path
+                && !member.package_id.starts_with("path:..")
+        });
+        let first = local_matches.next()?;
+        if local_matches.next().is_some() {
+            return None;
+        }
+        Some(first)
+    }
+
+    pub fn member_by_id(&self, package_id: &str) -> Option<&WorkspaceMember> {
+        self.members
+            .iter()
+            .find(|member| member.package_id == package_id)
+    }
+
+    pub fn local_member(&self, name: &str) -> Option<&WorkspaceMember> {
+        self.members
+            .iter()
+            .find(|member| member.name == name && member.source_kind == DependencySource::Path)
+    }
+
+    pub fn workspace_members(&self) -> impl Iterator<Item = &WorkspaceMember> {
+        self.members
+            .iter()
+            .filter(|member| member.source_kind == DependencySource::Path)
     }
 }
 
@@ -383,9 +486,17 @@ pub struct LockNativeProductEntry {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LockMember {
-    pub path: String,
+    pub name: String,
     pub deps: Vec<String>,
+    pub dep_bindings: BTreeMap<String, String>,
     pub kind: GrimoireKind,
+    pub source_kind: DependencySource,
+    pub path: Option<String>,
+    pub version: Option<SemverVersion>,
+    pub registry_name: Option<String>,
+    pub checksum: Option<String>,
+    pub git_url: Option<String>,
+    pub git_selector: Option<String>,
     pub native_products: BTreeMap<String, LockNativeProductEntry>,
     pub targets: BTreeMap<BuildOutputKey, LockTargetEntry>,
 }
@@ -416,25 +527,276 @@ impl LockMember {
 pub struct Lockfile {
     pub version: i64,
     pub workspace: String,
+    pub workspace_root: String,
     pub order: Vec<String>,
+    pub workspace_members: Vec<String>,
     pub members: BTreeMap<String, LockMember>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PendingMember {
+    package_id: String,
+    source_id: String,
     name: String,
     kind: GrimoireKind,
+    version: Option<SemverVersion>,
+    source_kind: DependencySource,
     abs_dir: PathBuf,
     rel_dir: String,
-    dep_bindings: Vec<(String, PathBuf, DependencySpec)>,
+    dep_bindings: Vec<(String, String, String, DependencySpec)>,
+    registry_name: Option<String>,
+    checksum: Option<String>,
+    git_url: Option<String>,
+    git_selector: Option<String>,
     native_products: BTreeMap<String, NativeProductSpec>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct LockMemberBase {
-    path: String,
+    name: String,
     deps: Vec<String>,
+    dep_bindings: BTreeMap<String, String>,
     kind: GrimoireKind,
+    source_kind: DependencySource,
+    path: Option<String>,
+    version: Option<SemverVersion>,
+    registry_name: Option<String>,
+    checksum: Option<String>,
+    git_url: Option<String>,
+    git_selector: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PendingLoad {
+    Path {
+        abs_dir: PathBuf,
+    },
+    Registry {
+        registry_name: String,
+        package_name: String,
+        version: SemverVersion,
+    },
+    Git {
+        url: String,
+        selector: Option<GitSelector>,
+        package_name: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ResolvedDependency {
+    package_id: String,
+    display_name: String,
+    pending_load: Option<PendingLoad>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SourceBackendKind {
+    Path,
+    Registry,
+    Git,
+}
+
+struct ResolveDependencyRequest<'a> {
+    root_dir: &'a Path,
+    depender_package_id: &'a str,
+    dep_name: &'a str,
+    dep: &'a DependencySpec,
+    base_dir: &'a Path,
+    existing_lock: Option<&'a Lockfile>,
+}
+
+struct LoadPendingMemberRequest<'a> {
+    root_dir: &'a Path,
+    pending: PendingLoad,
+    existing_lock: Option<&'a Lockfile>,
+    pending_by_id: &'a BTreeMap<String, PendingMember>,
+    path_name_to_id: &'a mut HashMap<String, String>,
+    queue: &'a mut VecDeque<PendingLoad>,
+}
+
+impl SourceBackendKind {
+    fn for_spec(spec: &DependencySourceSpec) -> Self {
+        match spec {
+            DependencySourceSpec::Path { .. } => Self::Path,
+            DependencySourceSpec::Registry { .. } => Self::Registry,
+            DependencySourceSpec::Git { .. } => Self::Git,
+        }
+    }
+
+    fn for_pending(pending: &PendingLoad) -> Self {
+        match pending {
+            PendingLoad::Path { .. } => Self::Path,
+            PendingLoad::Registry { .. } => Self::Registry,
+            PendingLoad::Git { .. } => Self::Git,
+        }
+    }
+
+    fn resolve_dependency(
+        self,
+        request: ResolveDependencyRequest<'_>,
+    ) -> PackageResult<ResolvedDependency> {
+        match self {
+            Self::Path => {
+                let DependencySourceSpec::Path { location } = &request.dep.source else {
+                    return Err(
+                        "internal error: path backend received non-path dependency source"
+                            .to_string(),
+                    );
+                };
+                resolve_path_dependency(request.root_dir, location, request.base_dir)
+            }
+            Self::Registry => {
+                let DependencySourceSpec::Registry {
+                    registry_name,
+                    version,
+                    checksum,
+                } = &request.dep.source
+                else {
+                    return Err(
+                        "internal error: registry backend received non-registry dependency source"
+                            .to_string(),
+                    );
+                };
+                resolve_registry_dependency(
+                    request.depender_package_id,
+                    request.dep_name,
+                    &request.dep.package,
+                    registry_name.as_deref(),
+                    version,
+                    checksum.as_deref(),
+                    request.existing_lock,
+                )
+            }
+            Self::Git => {
+                let DependencySourceSpec::Git { url, selector } = &request.dep.source else {
+                    return Err(
+                        "internal error: git backend received non-git dependency source"
+                            .to_string(),
+                    );
+                };
+                resolve_git_dependency(
+                    request.dep_name,
+                    &request.dep.package,
+                    url,
+                    selector.as_ref(),
+                )
+            }
+        }
+    }
+
+    fn pending_package_id(self, root_dir: &Path, pending: &PendingLoad) -> PackageResult<String> {
+        match self {
+            Self::Path => {
+                let PendingLoad::Path { abs_dir } = pending else {
+                    return Err(
+                        "internal error: path backend received non-path pending load".to_string(),
+                    );
+                };
+                Ok(PackageId::Path {
+                    rel_path: relative_from_root(abs_dir, root_dir)?,
+                }
+                .render())
+            }
+            Self::Registry => {
+                let PendingLoad::Registry {
+                    registry_name,
+                    package_name,
+                    version,
+                } = pending
+                else {
+                    return Err(
+                        "internal error: registry backend received non-registry pending load"
+                            .to_string(),
+                    );
+                };
+                Ok(PackageId::Registry {
+                    registry_name: registry_name.clone(),
+                    package_name: package_name.clone(),
+                    version: version.clone(),
+                }
+                .render())
+            }
+            Self::Git => {
+                let PendingLoad::Git {
+                    url,
+                    selector,
+                    package_name,
+                } = pending
+                else {
+                    return Err(
+                        "internal error: git backend received non-git pending load".to_string()
+                    );
+                };
+                Ok(PackageId::Git {
+                    url: url.clone(),
+                    selector: selector
+                        .as_ref()
+                        .map(|selector| selector.render())
+                        .unwrap_or_else(|| "head".to_string()),
+                    package_name: package_name.clone(),
+                }
+                .render())
+            }
+        }
+    }
+
+    fn load_pending_member(
+        self,
+        request: LoadPendingMemberRequest<'_>,
+    ) -> PackageResult<PendingMember> {
+        match self {
+            Self::Path => {
+                let PendingLoad::Path { abs_dir } = request.pending else {
+                    return Err(
+                        "internal error: path backend received non-path pending load".to_string(),
+                    );
+                };
+                load_path_pending_member(
+                    request.root_dir,
+                    abs_dir,
+                    request.existing_lock,
+                    request.pending_by_id,
+                    request.path_name_to_id,
+                    request.queue,
+                )
+            }
+            Self::Registry => {
+                let PendingLoad::Registry {
+                    registry_name,
+                    package_name,
+                    version,
+                } = request.pending
+                else {
+                    return Err(
+                        "internal error: registry backend received non-registry pending load"
+                            .to_string(),
+                    );
+                };
+                load_registry_pending_member(
+                    request.root_dir,
+                    registry_name,
+                    package_name,
+                    version,
+                    request.existing_lock,
+                    request.queue,
+                )
+            }
+            Self::Git => {
+                let PendingLoad::Git {
+                    url,
+                    selector,
+                    package_name,
+                } = request.pending
+                else {
+                    return Err(
+                        "internal error: git backend received non-git pending load".to_string()
+                    );
+                };
+                load_git_pending_member(url, selector, package_name)
+            }
+        }
+    }
 }
 
 pub fn parse_manifest(path: &Path) -> PackageResult<Manifest> {
@@ -469,6 +831,16 @@ pub fn parse_manifest(path: &Path) -> PackageResult<Manifest> {
             ));
         }
     };
+    let version = table
+        .get("version")
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or_else(|| format!("`version` in `{}` must be a string", path.display()))
+        })
+        .transpose()?
+        .map(SemverVersion::parse)
+        .transpose()?;
 
     let workspace_members = table
         .get("workspace")
@@ -482,12 +854,6 @@ pub fn parse_manifest(path: &Path) -> PackageResult<Manifest> {
     if let Some(dep_table) = table.get("deps").and_then(toml::Value::as_table) {
         for (name, value) in dep_table {
             let spec = parse_dependency_spec(name, value, path)?;
-            if spec.source != DependencySource::Path {
-                return Err(format!(
-                    "dependency `{name}` in `{}` uses unsupported source; only `path` is enabled before selfhost",
-                    path.display()
-                ));
-            }
             deps.insert(name.clone(), spec);
         }
     }
@@ -496,6 +862,7 @@ pub fn parse_manifest(path: &Path) -> PackageResult<Manifest> {
     Ok(Manifest {
         name,
         kind,
+        version,
         workspace_members,
         deps,
         native_products,
@@ -504,9 +871,14 @@ pub fn parse_manifest(path: &Path) -> PackageResult<Manifest> {
 
 pub fn load_workspace_graph(root_dir: &Path) -> PackageResult<WorkspaceGraph> {
     let root_dir = canonicalize_dir(root_dir)?;
+    let existing_lock = read_lockfile(&root_dir.join("Arcana.lock"))?;
     let root_manifest_path = root_dir.join("book.toml");
     let root_manifest = parse_manifest(&root_manifest_path)?;
     let root_name = root_manifest.name.clone();
+    let root_id = PackageId::Path {
+        rel_path: ".".to_string(),
+    }
+    .render();
 
     let mut seed_paths = root_manifest
         .workspace_members
@@ -517,87 +889,586 @@ pub fn load_workspace_graph(root_dir: &Path) -> PackageResult<WorkspaceGraph> {
         seed_paths.push(root_dir.clone());
     }
 
-    let mut queue = VecDeque::from(seed_paths);
-    let mut pending_by_dir = BTreeMap::<PathBuf, PendingMember>::new();
-    let mut name_to_dir = HashMap::<String, PathBuf>::new();
-    let mut visited = BTreeSet::<PathBuf>::new();
+    let mut queue = seed_paths
+        .into_iter()
+        .map(|abs_dir| PendingLoad::Path { abs_dir })
+        .collect::<VecDeque<_>>();
+    let mut pending_by_id = BTreeMap::<String, PendingMember>::new();
+    let mut path_name_to_id = HashMap::<String, String>::new();
+    let mut visited = BTreeSet::<String>::new();
 
-    while let Some(abs_dir) = queue.pop_front() {
-        if !visited.insert(abs_dir.clone()) {
+    while let Some(item) = queue.pop_front() {
+        let package_id = pending_load_package_id(&root_dir, &item)?;
+        if !visited.insert(package_id) {
             continue;
         }
-
-        let manifest_path = abs_dir.join("book.toml");
-        let manifest = parse_manifest(&manifest_path)?;
-        validate_grimoire_layout(&abs_dir, &manifest.kind)?;
-        let rel_dir = relative_from_root(&abs_dir, &root_dir)?;
-        if let Some(existing) = name_to_dir.insert(manifest.name.clone(), abs_dir.clone()) {
-            if existing != abs_dir {
-                return Err(format!(
-                    "duplicate grimoire name `{}` at `{}` and `{}`",
-                    manifest.name,
-                    existing.display(),
-                    abs_dir.display()
-                ));
-            }
-        }
-
-        let mut dep_bindings = Vec::new();
-        for (dep_name, dep) in &manifest.deps {
-            let dep_dir = canonicalize_dir(&abs_dir.join(&dep.location))?;
-            dep_bindings.push((dep_name.clone(), dep_dir.clone(), dep.clone()));
-            queue.push_back(dep_dir);
-        }
-
-        pending_by_dir.insert(
-            abs_dir.clone(),
-            PendingMember {
-                name: manifest.name,
-                kind: manifest.kind,
-                abs_dir,
-                rel_dir,
-                dep_bindings,
-                native_products: manifest.native_products,
-            },
-        );
+        let pending = load_pending_member(
+            &root_dir,
+            item,
+            existing_lock.as_ref(),
+            &pending_by_id,
+            &mut path_name_to_id,
+            &mut queue,
+        )?;
+        pending_by_id.insert(pending.package_id.clone(), pending);
     }
 
-    let mut members = pending_by_dir
+    let mut members = pending_by_id
         .values()
         .map(|member| {
             let mut deps = BTreeSet::new();
             let mut direct_dep_packages = BTreeMap::new();
+            let mut direct_dep_ids = BTreeMap::new();
             let mut direct_dep_specs = BTreeMap::new();
-            for (dep_name, path, spec) in &member.dep_bindings {
-                let dep = pending_by_dir.get(path).ok_or_else(|| {
+            for (dep_name, dep_package_id, dep_display_name, spec) in &member.dep_bindings {
+                let dep = pending_by_id.get(dep_package_id).ok_or_else(|| {
                     format!(
-                        "dependency at `{}` was not loaded into the workspace graph",
-                        path.display()
+                        "dependency `{dep_name}` for `{}` resolved package `{dep_package_id}`, but that package is missing from the workspace graph",
+                        member.name
                     )
                 })?;
-                deps.insert(dep.name.clone());
-                direct_dep_packages.insert(dep_name.clone(), dep.name.clone());
+                deps.insert(dep.package_id.clone());
+                direct_dep_packages.insert(dep_name.clone(), dep_display_name.clone());
+                direct_dep_ids.insert(dep_name.clone(), dep.package_id.clone());
                 direct_dep_specs.insert(dep_name.clone(), spec.clone());
             }
             Ok(WorkspaceMember {
+                package_id: member.package_id.clone(),
+                source_id: member.source_id.clone(),
                 name: member.name.clone(),
                 kind: member.kind.clone(),
+                version: member.version.clone(),
+                source_kind: member.source_kind.clone(),
                 rel_dir: member.rel_dir.clone(),
                 abs_dir: member.abs_dir.clone(),
                 deps: deps.into_iter().collect(),
                 direct_dep_packages,
+                direct_dep_ids,
                 direct_dep_specs,
+                registry_name: member.registry_name.clone(),
+                checksum: member.checksum.clone(),
+                git_url: member.git_url.clone(),
+                git_selector: member.git_selector.clone(),
                 native_products: member.native_products.clone(),
             })
         })
         .collect::<PackageResult<Vec<_>>>()?;
 
-    members.sort_by(|a, b| a.name.cmp(&b.name));
+    members.sort_by(|a, b| PackageId::compare_rendered(&a.package_id, &b.package_id));
     Ok(WorkspaceGraph {
         root_name,
+        root_id,
         root_dir,
         members,
     })
+}
+
+fn resolve_workspace_dependency(
+    root_dir: &Path,
+    depender_package_id: &str,
+    dep_name: &str,
+    dep: &DependencySpec,
+    base_dir: &Path,
+    existing_lock: Option<&Lockfile>,
+) -> PackageResult<(String, String, Option<PendingLoad>)> {
+    let resolved =
+        SourceBackendKind::for_spec(&dep.source).resolve_dependency(ResolveDependencyRequest {
+            root_dir,
+            depender_package_id,
+            dep_name,
+            dep,
+            base_dir,
+            existing_lock,
+        })?;
+    Ok((
+        resolved.package_id,
+        resolved.display_name,
+        resolved.pending_load,
+    ))
+}
+
+fn resolve_path_dependency(
+    root_dir: &Path,
+    location: &str,
+    base_dir: &Path,
+) -> PackageResult<ResolvedDependency> {
+    let dep_dir = canonicalize_dir(&base_dir.join(location))?;
+    let dep_manifest = parse_manifest(&dep_dir.join("book.toml"))?;
+    let dep_package_id = PackageId::Path {
+        rel_path: relative_from_root(&dep_dir, root_dir)?,
+    }
+    .render();
+    Ok(ResolvedDependency {
+        package_id: dep_package_id,
+        display_name: dep_manifest.name,
+        pending_load: Some(PendingLoad::Path { abs_dir: dep_dir }),
+    })
+}
+
+fn resolve_registry_dependency(
+    depender_package_id: &str,
+    dep_name: &str,
+    package_name: &str,
+    registry_name: Option<&str>,
+    version: &VersionReq,
+    checksum: Option<&str>,
+    existing_lock: Option<&Lockfile>,
+) -> PackageResult<ResolvedDependency> {
+    let registry_name = registry_name.unwrap_or(DEFAULT_REGISTRY_NAME).to_string();
+    if registry_name != DEFAULT_REGISTRY_NAME {
+        return Err(format!(
+            "dependency `{dep_name}` uses registry `{registry_name}`, but only `registry = \"{DEFAULT_REGISTRY_NAME}\"` is enabled in this phase"
+        ));
+    }
+    let locked_version = existing_lock
+        .and_then(|lock| lock.members.get(depender_package_id))
+        .and_then(|member| member.dep_bindings.get(dep_name))
+        .and_then(|package_id| match PackageId::parse(package_id) {
+            Ok(PackageId::Registry {
+                registry_name,
+                package_name: locked_package_name,
+                version: locked_version,
+            }) if registry_name == DEFAULT_REGISTRY_NAME
+                && locked_package_name == package_name
+                && version.matches(&locked_version)
+                && local_registry_manifest_path(
+                    DEFAULT_REGISTRY_NAME,
+                    &locked_package_name,
+                    &locked_version,
+                )
+                .map(|path| path.is_file())
+                .unwrap_or(false) =>
+            {
+                Some(locked_version)
+            }
+            _ => None,
+        });
+    let resolved_version = match locked_version {
+        Some(version) => version,
+        None => resolve_local_registry_version(&registry_name, package_name, version)?,
+    };
+    validate_local_registry_dependency_checksum(
+        dep_name,
+        &registry_name,
+        package_name,
+        &resolved_version,
+        checksum,
+    )?;
+    Ok(ResolvedDependency {
+        package_id: PackageId::Registry {
+            registry_name: registry_name.clone(),
+            package_name: package_name.to_string(),
+            version: resolved_version.clone(),
+        }
+        .render(),
+        display_name: package_name.to_string(),
+        pending_load: Some(PendingLoad::Registry {
+            registry_name,
+            package_name: package_name.to_string(),
+            version: resolved_version,
+        }),
+    })
+}
+
+fn resolve_git_dependency(
+    dep_name: &str,
+    package_name: &str,
+    url: &str,
+    selector: Option<&GitSelector>,
+) -> PackageResult<ResolvedDependency> {
+    let _recognized_source = PendingLoad::Git {
+        url: url.to_string(),
+        selector: selector.cloned(),
+        package_name: package_name.to_string(),
+    };
+    let selector_text = selector.as_ref().map(|selector| selector.render());
+    let detail = selector_text
+        .as_deref()
+        .map(|value| format!("{url}#{value}"))
+        .unwrap_or_else(|| url.to_string());
+    let _ = package_name;
+    Err(format!(
+        "dependency `{dep_name}` uses `git` ({detail}), which is recognized but not enabled yet"
+    ))
+}
+
+fn pending_load_package_id(root_dir: &Path, pending: &PendingLoad) -> PackageResult<String> {
+    SourceBackendKind::for_pending(pending).pending_package_id(root_dir, pending)
+}
+
+fn load_pending_member(
+    root_dir: &Path,
+    pending: PendingLoad,
+    existing_lock: Option<&Lockfile>,
+    pending_by_id: &BTreeMap<String, PendingMember>,
+    path_name_to_id: &mut HashMap<String, String>,
+    queue: &mut VecDeque<PendingLoad>,
+) -> PackageResult<PendingMember> {
+    let backend = SourceBackendKind::for_pending(&pending);
+    backend.load_pending_member(LoadPendingMemberRequest {
+        root_dir,
+        pending,
+        existing_lock,
+        pending_by_id,
+        path_name_to_id,
+        queue,
+    })
+}
+
+fn load_path_pending_member(
+    root_dir: &Path,
+    abs_dir: PathBuf,
+    existing_lock: Option<&Lockfile>,
+    pending_by_id: &BTreeMap<String, PendingMember>,
+    path_name_to_id: &mut HashMap<String, String>,
+    queue: &mut VecDeque<PendingLoad>,
+) -> PackageResult<PendingMember> {
+    let rel_dir = relative_from_root(&abs_dir, root_dir)?;
+    let package_id = PackageId::Path {
+        rel_path: rel_dir.clone(),
+    }
+    .render();
+    let manifest_path = abs_dir.join("book.toml");
+    let manifest = parse_manifest(&manifest_path)?;
+    validate_grimoire_layout(&abs_dir, &manifest.kind)?;
+    if let Some(existing_id) = path_name_to_id.insert(manifest.name.clone(), package_id.clone())
+        && existing_id != package_id
+    {
+        let existing = pending_by_id
+            .get(&existing_id)
+            .map(|member| member.abs_dir.display().to_string())
+            .unwrap_or(existing_id);
+        return Err(format!(
+            "duplicate local grimoire name `{}` at `{existing}` and `{}`",
+            manifest.name,
+            abs_dir.display()
+        ));
+    }
+
+    let dep_bindings = resolve_pending_member_dependencies(
+        root_dir,
+        &package_id,
+        &abs_dir,
+        &manifest,
+        existing_lock,
+        queue,
+    )?;
+
+    Ok(PendingMember {
+        package_id,
+        source_id: SourceId::Path(rel_dir.clone()).render(),
+        name: manifest.name,
+        kind: manifest.kind,
+        version: manifest.version,
+        source_kind: DependencySource::Path,
+        abs_dir,
+        rel_dir,
+        dep_bindings,
+        registry_name: None,
+        checksum: None,
+        git_url: None,
+        git_selector: None,
+        native_products: manifest.native_products,
+    })
+}
+
+fn load_registry_pending_member(
+    root_dir: &Path,
+    registry_name: String,
+    package_name: String,
+    version: SemverVersion,
+    existing_lock: Option<&Lockfile>,
+    queue: &mut VecDeque<PendingLoad>,
+) -> PackageResult<PendingMember> {
+    let package_id = PackageId::Registry {
+        registry_name: registry_name.clone(),
+        package_name: package_name.clone(),
+        version: version.clone(),
+    }
+    .render();
+    let manifest = read_local_registry_manifest(&registry_name, &package_name, &version)?;
+    let published_checksum =
+        read_local_registry_published_checksum(&registry_name, &package_name, &version)?;
+    let snapshot_dir = local_registry_snapshot_dir(&registry_name, &package_name, &version)?;
+    validate_grimoire_layout(&snapshot_dir, &manifest.kind)?;
+    let arcana_home = arcana_home_dir()?;
+    let rel_dir = relative_from_root(&snapshot_dir, &arcana_home)?;
+    let dep_bindings = resolve_pending_member_dependencies(
+        root_dir,
+        &package_id,
+        &snapshot_dir,
+        &manifest,
+        existing_lock,
+        queue,
+    )?;
+
+    Ok(PendingMember {
+        package_id,
+        source_id: SourceId::Registry {
+            registry_name: registry_name.clone(),
+        }
+        .render(),
+        name: manifest.name,
+        kind: manifest.kind,
+        version: manifest.version,
+        source_kind: DependencySource::Registry,
+        abs_dir: snapshot_dir,
+        rel_dir,
+        dep_bindings,
+        registry_name: Some(registry_name),
+        checksum: published_checksum,
+        git_url: None,
+        git_selector: None,
+        native_products: manifest.native_products,
+    })
+}
+
+fn load_git_pending_member(
+    url: String,
+    selector: Option<GitSelector>,
+    package_name: String,
+) -> PackageResult<PendingMember> {
+    let detail = selector
+        .as_ref()
+        .map(GitSelector::render)
+        .map(|value| format!("{url}#{value}"))
+        .unwrap_or_else(|| url.clone());
+    Err(format!(
+        "git source loading is recognized but not enabled yet for package `{package_name}` ({detail})"
+    ))
+}
+
+fn resolve_pending_member_dependencies(
+    root_dir: &Path,
+    package_id: &str,
+    base_dir: &Path,
+    manifest: &Manifest,
+    existing_lock: Option<&Lockfile>,
+    queue: &mut VecDeque<PendingLoad>,
+) -> PackageResult<Vec<(String, String, String, DependencySpec)>> {
+    let mut dep_bindings = Vec::new();
+    for (dep_name, dep) in &manifest.deps {
+        let (dep_package_id, dep_display_name, pending_load) = resolve_workspace_dependency(
+            root_dir,
+            package_id,
+            dep_name,
+            dep,
+            base_dir,
+            existing_lock,
+        )?;
+        dep_bindings.push((
+            dep_name.clone(),
+            dep_package_id.clone(),
+            dep_display_name,
+            dep.clone(),
+        ));
+        if let Some(pending_load) = pending_load {
+            queue.push_back(pending_load);
+        }
+    }
+    validate_direct_dependency_versions(&manifest.name, &dep_bindings)?;
+    Ok(dep_bindings)
+}
+
+fn validate_direct_dependency_versions(
+    package_name: &str,
+    dep_bindings: &[(String, String, String, DependencySpec)],
+) -> PackageResult<()> {
+    let mut resolved_by_display = BTreeMap::<String, String>::new();
+    for (_alias, dep_package_id, dep_display_name, _spec) in dep_bindings {
+        if let Some(existing) =
+            resolved_by_display.insert(dep_display_name.clone(), dep_package_id.clone())
+            && existing != *dep_package_id
+        {
+            return Err(format!(
+                "package `{package_name}` resolves multiple direct versions of `{dep_display_name}` (`{existing}` and `{dep_package_id}`); same-member side-by-side versions are not enabled yet"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn resolve_local_registry_version(
+    registry_name: &str,
+    package_name: &str,
+    req: &VersionReq,
+) -> PackageResult<SemverVersion> {
+    let versions = list_local_registry_versions(registry_name, package_name)?;
+    versions
+        .into_iter()
+        .filter(|candidate| req.matches(candidate))
+        .max()
+        .ok_or_else(|| {
+            format!(
+                "registry package `{package_name}` has no published version matching `{req}` in registry `{registry_name}`"
+            )
+        })
+}
+
+fn list_local_registry_versions(
+    registry_name: &str,
+    package_name: &str,
+) -> PackageResult<Vec<SemverVersion>> {
+    let package_root = local_registry_package_root(registry_name, package_name)?;
+    if !package_root.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut versions = Vec::new();
+    for entry in fs::read_dir(&package_root).map_err(|e| {
+        format!(
+            "failed to read local registry package directory `{}`: {e}",
+            package_root.display()
+        )
+    })? {
+        let entry = entry.map_err(|e| format!("failed to read registry entry: {e}"))?;
+        if !entry.path().is_dir() {
+            continue;
+        }
+        let Some(version_text) = entry.file_name().to_str().map(ToString::to_string) else {
+            continue;
+        };
+        if let Ok(version) = SemverVersion::parse(&version_text) {
+            versions.push(version);
+        }
+    }
+    Ok(versions)
+}
+
+fn read_local_registry_manifest(
+    registry_name: &str,
+    package_name: &str,
+    version: &SemverVersion,
+) -> PackageResult<Manifest> {
+    let manifest_path = local_registry_manifest_path(registry_name, package_name, version)?;
+    let manifest = parse_manifest(&manifest_path)?;
+    if manifest.name != package_name {
+        return Err(format!(
+            "registry metadata `{}` declares package `{}` instead of `{package_name}`",
+            manifest_path.display(),
+            manifest.name
+        ));
+    }
+    if manifest.version.as_ref() != Some(version) {
+        return Err(format!(
+            "registry metadata `{}` declares version `{}` instead of `{version}`",
+            manifest_path.display(),
+            manifest
+                .version
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "<missing>".to_string())
+        ));
+    }
+    Ok(manifest)
+}
+
+fn read_local_registry_published_checksum(
+    registry_name: &str,
+    package_name: &str,
+    version: &SemverVersion,
+) -> PackageResult<Option<String>> {
+    let manifest_path = local_registry_manifest_path(registry_name, package_name, version)?;
+    let text = fs::read_to_string(&manifest_path).map_err(|e| {
+        format!(
+            "failed to read registry metadata `{}`: {e}",
+            manifest_path.display()
+        )
+    })?;
+    let parsed = text.parse::<toml::Value>().map_err(|e| {
+        format!(
+            "failed to parse registry metadata `{}` as TOML: {e}",
+            manifest_path.display()
+        )
+    })?;
+    Ok(parsed
+        .get("published_checksum")
+        .and_then(toml::Value::as_str)
+        .map(ToString::to_string))
+}
+
+fn validate_local_registry_dependency_checksum(
+    dep_name: &str,
+    registry_name: &str,
+    package_name: &str,
+    version: &SemverVersion,
+    expected_checksum: Option<&str>,
+) -> PackageResult<()> {
+    let Some(expected_checksum) = expected_checksum else {
+        return Ok(());
+    };
+    let published_checksum =
+        read_local_registry_published_checksum(registry_name, package_name, version)?;
+    match published_checksum.as_deref() {
+        Some(actual_checksum) if actual_checksum == expected_checksum => Ok(()),
+        Some(actual_checksum) => Err(format!(
+            "dependency `{dep_name}` requested checksum `{expected_checksum}` for `{package_name}@{version}`, but registry `{registry_name}` published `{actual_checksum}`"
+        )),
+        None => Err(format!(
+            "dependency `{dep_name}` requested checksum `{expected_checksum}` for `{package_name}@{version}`, but registry `{registry_name}` has no published checksum"
+        )),
+    }
+}
+
+pub(crate) fn arcana_home_dir() -> PackageResult<PathBuf> {
+    if let Some(path) = std::env::var_os("ARCANA_HOME") {
+        return Ok(PathBuf::from(path));
+    }
+    if let Some(path) = std::env::var_os("USERPROFILE") {
+        return Ok(PathBuf::from(path).join(".arcana"));
+    }
+    if let Some(path) = std::env::var_os("HOME") {
+        return Ok(PathBuf::from(path).join(".arcana"));
+    }
+    Err(
+        "unable to resolve `ARCANA_HOME`; set the environment variable or a home directory"
+            .to_string(),
+    )
+}
+
+pub(crate) fn local_registry_root(registry_name: &str) -> PackageResult<PathBuf> {
+    Ok(arcana_home_dir()?
+        .join("sources")
+        .join("registry")
+        .join(registry_name))
+}
+
+pub(crate) fn local_registry_package_root(
+    registry_name: &str,
+    package_name: &str,
+) -> PackageResult<PathBuf> {
+    Ok(local_registry_root(registry_name)?
+        .join("packages")
+        .join(package_name))
+}
+
+pub(crate) fn local_registry_package_dir(
+    registry_name: &str,
+    package_name: &str,
+    version: &SemverVersion,
+) -> PackageResult<PathBuf> {
+    Ok(local_registry_package_root(registry_name, package_name)?.join(version.to_string()))
+}
+
+pub(crate) fn local_registry_manifest_path(
+    registry_name: &str,
+    package_name: &str,
+    version: &SemverVersion,
+) -> PackageResult<PathBuf> {
+    Ok(
+        local_registry_package_dir(registry_name, package_name, version)?
+            .join(LOCAL_REGISTRY_METADATA_FILE),
+    )
+}
+
+pub(crate) fn local_registry_snapshot_dir(
+    registry_name: &str,
+    package_name: &str,
+    version: &SemverVersion,
+) -> PackageResult<PathBuf> {
+    Ok(
+        local_registry_package_dir(registry_name, package_name, version)?
+            .join(LOCAL_REGISTRY_SNAPSHOT_DIR),
+    )
 }
 
 pub fn load_workspace_hir(root_dir: &Path) -> PackageResult<HirWorkspaceSummary> {
@@ -612,6 +1483,12 @@ pub fn load_workspace_hir_from_graph(
 ) -> PackageResult<HirWorkspaceSummary> {
     let root_dir = canonicalize_dir(root_dir)?;
     let mut packages = Vec::new();
+    let implicit_std = find_implicit_std(&root_dir)?
+        .map(|std_dir| {
+            let manifest = parse_manifest(&std_dir.join("book.toml"))?;
+            Ok::<_, String>((std_dir, manifest))
+        })
+        .transpose()?;
 
     let root_manifest = parse_manifest(&root_dir.join("book.toml"))?;
     let root_already_in_graph = graph
@@ -619,25 +1496,41 @@ pub fn load_workspace_hir_from_graph(
         .iter()
         .any(|member| member.abs_dir == root_dir);
     if !root_already_in_graph && has_root_module(&root_dir, &root_manifest.kind) {
-        packages.push(load_package_hir_with_dep_packages(
+        let mut package = load_package_hir_with_dep_packages(
+            &PackageId::Path {
+                rel_path: ".".to_string(),
+            }
+            .render(),
             &root_dir,
             &root_manifest.name,
             &root_manifest.kind,
             resolve_manifest_dependency_packages(&root_dir, &root_manifest)?,
-        )?);
+            resolve_manifest_dependency_ids(&root_dir, &root_manifest)?,
+        )?;
+        attach_implicit_std_dependency(&mut package, implicit_std.as_ref());
+        packages.push(package);
     }
 
     for member in &graph.members {
-        packages.push(load_member_hir_package(member)?);
+        let mut package = load_package_hir_with_dep_packages(
+            &member.package_id,
+            &member.abs_dir,
+            &member.name,
+            &member.kind,
+            member.direct_dep_packages.clone(),
+            member.direct_dep_ids.clone(),
+        )?;
+        attach_implicit_std_dependency(&mut package, implicit_std.as_ref());
+        packages.push(package);
     }
 
-    if let Some(std_dir) = find_implicit_std(&root_dir)? {
-        let manifest = parse_manifest(&std_dir.join("book.toml"))?;
+    if let Some((std_dir, manifest)) = implicit_std {
         let has_std = packages
             .iter()
             .any(|package| package.summary.package_name == manifest.name);
         if !has_std {
             packages.push(load_package_hir(
+                "path:std",
                 &std_dir,
                 &manifest.name,
                 &manifest.kind,
@@ -649,12 +1542,43 @@ pub fn load_workspace_hir_from_graph(
     build_workspace_summary(packages)
 }
 
+fn attach_implicit_std_dependency(
+    package: &mut HirWorkspacePackage,
+    implicit_std: Option<&(PathBuf, Manifest)>,
+) {
+    let Some((_std_dir, std_manifest)) = implicit_std else {
+        return;
+    };
+    if package.summary.package_name == std_manifest.name {
+        return;
+    }
+    let uses_std = package.summary.dependency_edges.iter().any(|edge| {
+        edge.target_path
+            .first()
+            .is_some_and(|segment| segment == "std")
+    });
+    if !uses_std {
+        return;
+    }
+    package.direct_deps.insert("path:std".to_string());
+    package
+        .direct_dep_packages
+        .entry("std".to_string())
+        .or_insert_with(|| std_manifest.name.clone());
+    package
+        .direct_dep_ids
+        .entry("std".to_string())
+        .or_insert_with(|| "path:std".to_string());
+}
+
 pub fn load_member_hir_package(member: &WorkspaceMember) -> PackageResult<HirWorkspacePackage> {
     load_package_hir_with_dep_packages(
+        &member.package_id,
         &member.abs_dir,
         &member.name,
         &member.kind,
         member.direct_dep_packages.clone(),
+        member.direct_dep_ids.clone(),
     )
 }
 
@@ -662,7 +1586,7 @@ pub fn plan_workspace(graph: &WorkspaceGraph) -> PackageResult<Vec<String>> {
     let indegree = graph
         .members
         .iter()
-        .map(|member| (member.name.clone(), member.deps.len()))
+        .map(|member| (member.package_id.clone(), member.deps.len()))
         .collect::<HashMap<_, _>>();
     let mut indegree = indegree;
     let mut dependents = HashMap::<String, Vec<String>>::new();
@@ -671,7 +1595,7 @@ pub fn plan_workspace(graph: &WorkspaceGraph) -> PackageResult<Vec<String>> {
             dependents
                 .entry(dep.clone())
                 .or_default()
-                .push(member.name.clone());
+                .push(member.package_id.clone());
         }
     }
 
@@ -679,7 +1603,7 @@ pub fn plan_workspace(graph: &WorkspaceGraph) -> PackageResult<Vec<String>> {
         .members
         .iter()
         .filter(|member| member.deps.is_empty())
-        .map(|member| member.name.clone())
+        .map(|member| member.package_id.clone())
         .collect::<Vec<_>>();
     ready.sort();
     let mut ordered = Vec::with_capacity(graph.members.len());
@@ -727,13 +1651,14 @@ pub fn read_lockfile(path: &Path) -> PackageResult<Option<Lockfile>> {
         .and_then(toml::Value::as_integer)
         .ok_or_else(|| format!("missing `version` in `{}`", path.display()))?;
     let lockfile = match version {
-        LOCKFILE_VERSION | LEGACY_LOCKFILE_VERSION => {
-            read_lockfile_build_table(table, path, version)?
+        LOCKFILE_VERSION => read_lockfile_build_table(table, path, version)?,
+        LEGACY_LOCKFILE_VERSION | OLDER_LOCKFILE_VERSION => {
+            read_lockfile_legacy_build_table(table, path, version)?
         }
-        OLDER_LOCKFILE_VERSION => read_lockfile_v1(table, path, version)?,
+        OLDEST_LOCKFILE_VERSION => read_lockfile_v1(table, path, version)?,
         _ => {
             return Err(format!(
-                "unsupported lockfile version `{version}` in `{}`; expected {LOCKFILE_VERSION}, {LEGACY_LOCKFILE_VERSION}, or {OLDER_LOCKFILE_VERSION}",
+                "unsupported lockfile version `{version}` in `{}`; expected {LOCKFILE_VERSION}, {LEGACY_LOCKFILE_VERSION}, {OLDER_LOCKFILE_VERSION}, or {OLDEST_LOCKFILE_VERSION}",
                 path.display()
             ));
         }
@@ -747,33 +1672,63 @@ fn read_lockfile_build_table(
     version: i64,
 ) -> PackageResult<Lockfile> {
     let workspace = read_lockfile_workspace(table, path)?;
+    let workspace_root = table
+        .get("workspace_root")
+        .and_then(toml::Value::as_str)
+        .map(ToString::to_string)
+        .ok_or_else(|| format!("missing `workspace_root` in `{}`", path.display()))?;
     let order = read_lockfile_order(table)?;
+    let workspace_members = table
+        .get("workspace_members")
+        .map(parse_string_array)
+        .transpose()?
+        .unwrap_or_default();
     let base_members = read_lockfile_member_bases(table, path)?;
     let native_products = read_lockfile_native_products(table, path)?;
+    let dependencies = read_lockfile_dependencies(table, path)?;
     let builds = table
         .get("builds")
         .and_then(toml::Value::as_table)
         .ok_or_else(|| format!("missing `[builds]` in `{}`", path.display()))?;
 
     let mut members = BTreeMap::new();
-    for (name, base) in base_members {
-        let member_native_products = native_products.get(&name).cloned().unwrap_or_default();
+    for (package_id, base) in base_members {
+        let member_native_products = native_products
+            .get(&package_id)
+            .or_else(|| native_products.get(&base.name))
+            .cloned()
+            .unwrap_or_default();
+        let dep_bindings = dependencies.get(&package_id).cloned().unwrap_or_default();
+        let deps = dep_bindings
+            .values()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
         let targets = builds
-            .get(&name)
+            .get(&package_id)
             .map(|value| {
-                let target_table = value
-                    .as_table()
-                    .ok_or_else(|| format!("lockfile build entry for `{name}` must be a table"))?;
-                read_lock_target_entries(name.as_str(), target_table)
+                let target_table = value.as_table().ok_or_else(|| {
+                    format!("lockfile build entry for `{package_id}` must be a table")
+                })?;
+                read_lock_target_entries(package_id.as_str(), target_table)
             })
             .transpose()?
             .unwrap_or_default();
         members.insert(
-            name,
+            package_id,
             LockMember {
-                path: base.path,
-                deps: base.deps,
+                name: base.name,
+                deps,
+                dep_bindings,
                 kind: base.kind,
+                source_kind: base.source_kind,
+                path: base.path,
+                version: base.version,
+                registry_name: base.registry_name,
+                checksum: base.checksum,
+                git_url: base.git_url,
+                git_selector: base.git_selector,
                 native_products: member_native_products,
                 targets,
             },
@@ -783,7 +1738,100 @@ fn read_lockfile_build_table(
     Ok(Lockfile {
         version,
         workspace,
+        workspace_root,
         order,
+        workspace_members,
+        members,
+    })
+}
+
+fn read_lockfile_legacy_build_table(
+    table: &toml::value::Table,
+    path: &Path,
+    version: i64,
+) -> PackageResult<Lockfile> {
+    let workspace = read_lockfile_workspace(table, path)?;
+    let order = read_lockfile_order(table)?;
+    let base_members = read_lockfile_member_bases_legacy(table, path)?;
+    let native_products = read_lockfile_native_products(table, path)?;
+    let builds = table
+        .get("builds")
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| format!("missing `[builds]` in `{}`", path.display()))?;
+
+    let workspace_root = base_members
+        .iter()
+        .find_map(|(package_id, base)| {
+            (base.path.as_deref() == Some(".")).then_some(package_id.clone())
+        })
+        .unwrap_or_else(|| {
+            base_members
+                .keys()
+                .next()
+                .cloned()
+                .unwrap_or_else(|| "path:.".to_string())
+        });
+    let workspace_members = base_members.keys().cloned().collect::<Vec<_>>();
+    let order = order
+        .into_iter()
+        .map(|entry| {
+            base_members
+                .get(&entry)
+                .map(|_| entry.clone())
+                .or_else(|| {
+                    base_members
+                        .iter()
+                        .find(|(_id, base)| base.name == entry)
+                        .map(|(id, _)| id.clone())
+                })
+                .unwrap_or(entry)
+        })
+        .collect::<Vec<_>>();
+
+    let mut members = BTreeMap::new();
+    for (package_id, base) in base_members {
+        let member_native_products = native_products
+            .get(&package_id)
+            .or_else(|| native_products.get(&base.name))
+            .cloned()
+            .unwrap_or_default();
+        let targets = builds
+            .get(&base.name)
+            .or_else(|| builds.get(&package_id))
+            .map(|value| {
+                let target_table = value.as_table().ok_or_else(|| {
+                    format!("lockfile build entry for `{package_id}` must be a table")
+                })?;
+                read_lock_target_entries(package_id.as_str(), target_table)
+            })
+            .transpose()?
+            .unwrap_or_default();
+        members.insert(
+            package_id,
+            LockMember {
+                name: base.name,
+                deps: base.deps,
+                dep_bindings: base.dep_bindings,
+                kind: base.kind,
+                source_kind: base.source_kind,
+                path: base.path,
+                version: base.version,
+                registry_name: base.registry_name,
+                checksum: base.checksum,
+                git_url: base.git_url,
+                git_selector: base.git_selector,
+                native_products: member_native_products,
+                targets,
+            },
+        );
+    }
+
+    Ok(Lockfile {
+        version,
+        workspace,
+        workspace_root,
+        order,
+        workspace_members,
         members,
     })
 }
@@ -795,7 +1843,7 @@ fn read_lockfile_v1(
 ) -> PackageResult<Lockfile> {
     let workspace = read_lockfile_workspace(table, path)?;
     let order = read_lockfile_order(table)?;
-    let base_members = read_lockfile_member_bases(table, path)?;
+    let base_members = read_lockfile_member_bases_legacy(table, path)?;
     let toolchain = table
         .get("toolchain")
         .and_then(toml::Value::as_str)
@@ -821,43 +1869,81 @@ fn read_lockfile_v1(
         .ok_or_else(|| format!("missing `[formats]` in `{}`", path.display()))?;
 
     let mut members = BTreeMap::new();
-    for (name, base) in base_members {
+    let workspace_root = base_members
+        .iter()
+        .find_map(|(package_id, base)| {
+            (base.path.as_deref() == Some(".")).then_some(package_id.clone())
+        })
+        .unwrap_or_else(|| {
+            base_members
+                .keys()
+                .next()
+                .cloned()
+                .unwrap_or_else(|| "path:.".to_string())
+        });
+    let workspace_members = base_members.keys().cloned().collect::<Vec<_>>();
+    let order = order
+        .into_iter()
+        .map(|entry| {
+            base_members
+                .get(&entry)
+                .map(|_| entry.clone())
+                .or_else(|| {
+                    base_members
+                        .iter()
+                        .find(|(_id, base)| base.name == entry)
+                        .map(|(id, _)| id.clone())
+                })
+                .unwrap_or(entry)
+        })
+        .collect::<Vec<_>>();
+    for (package_id, base) in base_members {
         let fingerprint = fingerprints
-            .get(&name)
+            .get(&base.name)
+            .or_else(|| fingerprints.get(&package_id))
             .and_then(toml::Value::as_str)
-            .ok_or_else(|| format!("missing fingerprint for `{name}`"))?
+            .ok_or_else(|| format!("missing fingerprint for `{}`", base.name))?
             .to_string();
         let api_fingerprint = api_fingerprints
-            .get(&name)
+            .get(&base.name)
+            .or_else(|| api_fingerprints.get(&package_id))
             .and_then(toml::Value::as_str)
-            .ok_or_else(|| format!("missing api fingerprint for `{name}`"))?
+            .ok_or_else(|| format!("missing api fingerprint for `{}`", base.name))?
             .to_string();
         let artifact = artifacts
-            .get(&name)
+            .get(&base.name)
+            .or_else(|| artifacts.get(&package_id))
             .and_then(toml::Value::as_str)
-            .ok_or_else(|| format!("missing artifact path for `{name}`"))?
+            .ok_or_else(|| format!("missing artifact path for `{}`", base.name))?
             .to_string();
         let artifact_hash = match artifact_hashes {
             Some(hashes) => hashes
-                .get(&name)
+                .get(&base.name)
+                .or_else(|| hashes.get(&package_id))
                 .and_then(toml::Value::as_str)
-                .ok_or_else(|| format!("missing artifact hash for `{name}`"))?
+                .ok_or_else(|| format!("missing artifact hash for `{}`", base.name))?
                 .to_string(),
             None => String::new(),
         };
         let format = formats
-            .get(&name)
+            .get(&base.name)
+            .or_else(|| formats.get(&package_id))
             .and_then(toml::Value::as_str)
-            .ok_or_else(|| format!("missing format for `{name}`"))?
+            .ok_or_else(|| format!("missing format for `{}`", base.name))?
             .to_string();
         let target = match targets
-            .and_then(|target_rows| target_rows.get(&name))
+            .and_then(|target_rows| {
+                target_rows
+                    .get(&base.name)
+                    .or_else(|| target_rows.get(&package_id))
+            })
             .and_then(toml::Value::as_str)
         {
             Some(target) => BuildTarget::from_storage_key(target),
             None => infer_build_target_from_format(&format).ok_or_else(|| {
                 format!(
-                    "missing target for `{name}` and unable to infer one from format `{format}`"
+                    "missing target for `{}` and unable to infer one from format `{format}`",
+                    base.name
                 )
             })?,
         };
@@ -878,11 +1964,19 @@ fn read_lockfile_v1(
             );
         }
         members.insert(
-            name,
+            package_id,
             LockMember {
-                path: base.path,
+                name: base.name,
                 deps: base.deps,
+                dep_bindings: base.dep_bindings,
                 kind: base.kind,
+                source_kind: base.source_kind,
+                path: base.path,
+                version: base.version,
+                registry_name: base.registry_name,
+                checksum: base.checksum,
+                git_url: base.git_url,
+                git_selector: base.git_selector,
                 native_products: BTreeMap::new(),
                 targets: target_entries,
             },
@@ -892,7 +1986,9 @@ fn read_lockfile_v1(
     Ok(Lockfile {
         version,
         workspace,
+        workspace_root,
         order,
+        workspace_members,
         members,
     })
 }
@@ -993,7 +2089,128 @@ fn read_lockfile_order(table: &toml::value::Table) -> PackageResult<Vec<String>>
         .map(|order| order.unwrap_or_default())
 }
 
+fn read_lockfile_dependencies(
+    table: &toml::value::Table,
+    path: &Path,
+) -> PackageResult<BTreeMap<String, BTreeMap<String, String>>> {
+    let Some(dependency_table) = table.get("dependencies").and_then(toml::Value::as_table) else {
+        return Ok(BTreeMap::new());
+    };
+    let mut dependencies = BTreeMap::new();
+    for (package_id, value) in dependency_table {
+        let binding_table = value.as_table().ok_or_else(|| {
+            format!(
+                "lockfile dependency entry for `{package_id}` in `{}` must be a table",
+                path.display()
+            )
+        })?;
+        let mut bindings = BTreeMap::new();
+        for (alias, dep_id) in binding_table {
+            let dep_id = dep_id.as_str().ok_or_else(|| {
+                format!(
+                    "lockfile dependency `{package_id}.{alias}` in `{}` must be a string",
+                    path.display()
+                )
+            })?;
+            bindings.insert(alias.clone(), dep_id.to_string());
+        }
+        dependencies.insert(package_id.clone(), bindings);
+    }
+    Ok(dependencies)
+}
+
 fn read_lockfile_member_bases(
+    table: &toml::value::Table,
+    path: &Path,
+) -> PackageResult<BTreeMap<String, LockMemberBase>> {
+    let packages = table
+        .get("packages")
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| format!("missing `[packages]` in `{}`", path.display()))?;
+
+    let mut members = BTreeMap::new();
+    for (package_id, value) in packages {
+        let package = value.as_table().ok_or_else(|| {
+            format!(
+                "lockfile package entry for `{package_id}` in `{}` must be a table",
+                path.display()
+            )
+        })?;
+        let name =
+            required_lockfile_string_field(package, path, &format!("packages.{package_id}.name"))?;
+        let kind = match required_lockfile_string_field(
+            package,
+            path,
+            &format!("packages.{package_id}.kind"),
+        )?
+        .as_str()
+        {
+            "app" => GrimoireKind::App,
+            "lib" => GrimoireKind::Lib,
+            other => return Err(format!("unsupported kind `{other}` for `{package_id}`")),
+        };
+        let source_kind = match required_lockfile_string_field(
+            package,
+            path,
+            &format!("packages.{package_id}.source_kind"),
+        )?
+        .as_str()
+        {
+            "path" => DependencySource::Path,
+            "registry" => DependencySource::Registry,
+            "git" => DependencySource::Git,
+            other => {
+                return Err(format!(
+                    "unsupported source kind `{other}` for `{package_id}`"
+                ));
+            }
+        };
+        let path_value = package
+            .get("path")
+            .and_then(toml::Value::as_str)
+            .map(ToString::to_string);
+        let version = package
+            .get("version")
+            .and_then(toml::Value::as_str)
+            .map(SemverVersion::parse)
+            .transpose()?;
+        let registry_name = package
+            .get("registry")
+            .and_then(toml::Value::as_str)
+            .map(ToString::to_string);
+        let checksum = package
+            .get("checksum")
+            .and_then(toml::Value::as_str)
+            .map(ToString::to_string);
+        let git_url = package
+            .get("git")
+            .and_then(toml::Value::as_str)
+            .map(ToString::to_string);
+        let git_selector = package
+            .get("git_selector")
+            .and_then(toml::Value::as_str)
+            .map(ToString::to_string);
+        members.insert(
+            package_id.clone(),
+            LockMemberBase {
+                name,
+                deps: Vec::new(),
+                dep_bindings: BTreeMap::new(),
+                kind,
+                source_kind,
+                path: path_value,
+                version,
+                registry_name,
+                checksum,
+                git_url,
+                git_selector,
+            },
+        );
+    }
+    Ok(members)
+}
+
+fn read_lockfile_member_bases_legacy(
     table: &toml::value::Table,
     path: &Path,
 ) -> PackageResult<BTreeMap<String, LockMemberBase>> {
@@ -1030,14 +2247,43 @@ fn read_lockfile_member_bases(
             "lib" => GrimoireKind::Lib,
             other => return Err(format!("unsupported kind `{other}` for `{name}`")),
         };
+        let package_id = PackageId::Path {
+            rel_path: path.clone(),
+        }
+        .render();
         members.insert(
-            name.clone(),
+            package_id,
             LockMemberBase {
-                path,
+                name: name.clone(),
+                path: Some(path),
                 deps: dep_list,
+                dep_bindings: BTreeMap::new(),
                 kind,
+                source_kind: DependencySource::Path,
+                version: None,
+                registry_name: None,
+                checksum: None,
+                git_url: None,
+                git_selector: None,
             },
         );
+    }
+    let name_to_id = members
+        .iter()
+        .map(|(package_id, base)| (base.name.clone(), package_id.clone()))
+        .collect::<BTreeMap<_, _>>();
+    for member in members.values_mut() {
+        member.dep_bindings = member
+            .deps
+            .iter()
+            .filter_map(|dep_name| {
+                name_to_id
+                    .get(dep_name)
+                    .cloned()
+                    .map(|dep_id| (dep_name.clone(), dep_id))
+            })
+            .collect();
+        member.deps = member.dep_bindings.values().cloned().collect();
     }
     Ok(members)
 }
@@ -1167,8 +2413,10 @@ fn parse_dependency_spec(
 ) -> PackageResult<DependencySpec> {
     if let Some(path) = value.as_str() {
         return Ok(DependencySpec {
-            source: DependencySource::Path,
-            location: path.to_string(),
+            package: name.to_string(),
+            source: DependencySourceSpec::Path {
+                location: path.to_string(),
+            },
             native_delivery: NativeDependencyDelivery::Baked,
             native_child: None,
             native_plugins: Vec::new(),
@@ -1180,6 +2428,40 @@ fn parse_dependency_spec(
             manifest_path.display()
         ));
     };
+    let reserved_keys = [
+        "path",
+        "package",
+        "version",
+        "registry",
+        "git",
+        "rev",
+        "tag",
+        "branch",
+        "checksum",
+        "native_delivery",
+        "native_child",
+        "native_plugins",
+    ];
+    for key in table.keys() {
+        if !reserved_keys.contains(&key.as_str()) {
+            return Err(format!(
+                "dependency `{name}` in `{}` uses unsupported key `{key}`",
+                manifest_path.display()
+            ));
+        }
+    }
+    let package = table
+        .get("package")
+        .map(|value| {
+            value.as_str().map(ToString::to_string).ok_or_else(|| {
+                format!(
+                    "dependency `{name}` in `{}` must set `package` as a string",
+                    manifest_path.display()
+                )
+            })
+        })
+        .transpose()?
+        .unwrap_or_else(|| name.to_string());
     let native_delivery = match table.get("native_delivery") {
         Some(value) => NativeDependencyDelivery::parse(value.as_str().ok_or_else(|| {
             format!(
@@ -1235,35 +2517,103 @@ fn parse_dependency_spec(
             ),
         );
     }
-    if let Some(path) = table.get("path").and_then(toml::Value::as_str) {
+    let path = table.get("path").and_then(toml::Value::as_str);
+    let version = table
+        .get("version")
+        .map(|value| {
+            value.as_str().ok_or_else(|| {
+                format!(
+                    "dependency `{name}` in `{}` must set `version` as a string",
+                    manifest_path.display()
+                )
+            })
+        })
+        .transpose()?;
+    let registry = table.get("registry").and_then(toml::Value::as_str);
+    let checksum = table
+        .get("checksum")
+        .map(|value| {
+            value.as_str().map(ToString::to_string).ok_or_else(|| {
+                format!(
+                    "dependency `{name}` in `{}` must set `checksum` as a string",
+                    manifest_path.display()
+                )
+            })
+        })
+        .transpose()?;
+    let git = table.get("git").and_then(toml::Value::as_str);
+    let rev = table.get("rev").and_then(toml::Value::as_str);
+    let tag = table.get("tag").and_then(toml::Value::as_str);
+    let branch = table.get("branch").and_then(toml::Value::as_str);
+    let selector_count =
+        usize::from(rev.is_some()) + usize::from(tag.is_some()) + usize::from(branch.is_some());
+    if selector_count > 1 {
+        return Err(format!(
+            "dependency `{name}` in `{}` may set only one of `rev`, `tag`, or `branch`",
+            manifest_path.display()
+        ));
+    }
+    let source_count =
+        usize::from(path.is_some()) + usize::from(version.is_some()) + usize::from(git.is_some());
+    if source_count == 0 {
+        return Err(format!(
+            "dependency `{name}` in `{}` must set `path`, `version`, or `git`",
+            manifest_path.display()
+        ));
+    }
+    if source_count > 1 {
+        return Err(format!(
+            "dependency `{name}` in `{}` must use exactly one source kind",
+            manifest_path.display()
+        ));
+    }
+    if let Some(path) = path {
+        if version.is_some() || registry.is_some() || git.is_some() || selector_count > 0 {
+            return Err(format!(
+                "dependency `{name}` in `{}` cannot mix `path` with versioned or git settings",
+                manifest_path.display()
+            ));
+        }
         return Ok(DependencySpec {
-            source: DependencySource::Path,
-            location: path.to_string(),
+            package,
+            source: DependencySourceSpec::Path {
+                location: path.to_string(),
+            },
             native_delivery,
             native_child,
             native_plugins,
         });
     }
-    if let Some(git) = table.get("git").and_then(toml::Value::as_str) {
+    if let Some(git) = git {
         return Ok(DependencySpec {
-            source: DependencySource::Git,
-            location: git.to_string(),
+            package,
+            source: DependencySourceSpec::Git {
+                url: git.to_string(),
+                selector: rev
+                    .map(|value| GitSelector::Rev(value.to_string()))
+                    .or_else(|| tag.map(|value| GitSelector::Tag(value.to_string())))
+                    .or_else(|| branch.map(|value| GitSelector::Branch(value.to_string()))),
+            },
             native_delivery,
             native_child,
             native_plugins,
         });
     }
-    if let Some(registry) = table.get("registry").and_then(toml::Value::as_str) {
+    if let Some(version) = version {
         return Ok(DependencySpec {
-            source: DependencySource::Registry,
-            location: registry.to_string(),
+            package,
+            source: DependencySourceSpec::Registry {
+                registry_name: registry.map(ToString::to_string),
+                version: VersionReq::parse(version)?,
+                checksum,
+            },
             native_delivery,
             native_child,
             native_plugins,
         });
     }
     Err(format!(
-        "dependency `{name}` in `{}` must set `path`, `git`, or `registry`",
+        "dependency `{name}` in `{}` must set `path`, `version`, or `git`",
         manifest_path.display()
     ))
 }
@@ -1422,33 +2772,56 @@ fn validate_grimoire_layout(dir: &Path, kind: &GrimoireKind) -> PackageResult<()
 }
 
 fn load_package_hir(
+    package_id: &str,
     root_dir: &Path,
     name: &str,
     kind: &GrimoireKind,
     direct_deps: BTreeSet<String>,
 ) -> PackageResult<HirWorkspacePackage> {
-    let direct_dep_packages = direct_deps
+    let direct_dep_packages: BTreeMap<String, String> = direct_deps
         .into_iter()
         .map(|dep| (dep.clone(), dep))
         .collect();
-    load_package_hir_with_dep_packages(root_dir, name, kind, direct_dep_packages)
+    load_package_hir_with_dep_packages(
+        package_id,
+        root_dir,
+        name,
+        kind,
+        direct_dep_packages.clone(),
+        direct_dep_packages
+            .iter()
+            .map(|(alias, package_name)| (alias.clone(), package_name.clone()))
+            .collect(),
+    )
 }
 
 fn load_package_hir_with_dep_packages(
+    package_id: &str,
     root_dir: &Path,
     name: &str,
     kind: &GrimoireKind,
     direct_dep_packages: BTreeMap<String, String>,
+    direct_dep_ids: BTreeMap<String, String>,
 ) -> PackageResult<HirWorkspacePackage> {
     let files = collect_arc_files(&root_dir.join("src"))?;
-    build_package_hir(root_dir, name, kind, direct_dep_packages, &files)
+    build_package_hir(
+        package_id,
+        root_dir,
+        name,
+        kind,
+        direct_dep_packages,
+        direct_dep_ids,
+        &files,
+    )
 }
 
 fn build_package_hir(
+    package_id: &str,
     root_dir: &Path,
     name: &str,
     kind: &GrimoireKind,
     direct_dep_packages: BTreeMap<String, String>,
+    direct_dep_ids: BTreeMap<String, String>,
     files: &[PathBuf],
 ) -> PackageResult<HirWorkspacePackage> {
     let src_dir = root_dir.join("src");
@@ -1482,16 +2855,15 @@ fn build_package_hir(
                 root_dir.display()
             ));
         }
-        if !relative_key.is_empty() {
-            if relative_to_absolute
+        if !relative_key.is_empty()
+            && relative_to_absolute
                 .insert(relative_key.clone(), module.module_id.clone())
                 .is_some()
-            {
-                return Err(format!(
-                    "duplicate module path `{relative_key}` in `{}`",
-                    root_dir.display()
-                ));
-            }
+        {
+            return Err(format!(
+                "duplicate module path `{relative_key}` in `{}`",
+                root_dir.display()
+            ));
         }
         modules.push(module);
     }
@@ -1499,8 +2871,10 @@ fn build_package_hir(
     let summary = build_package_summary(name.to_string(), modules);
     let layout = build_package_layout(&summary, module_paths, relative_to_absolute)?;
     arcana_hir::build_workspace_package_with_dep_packages(
+        package_id.to_string(),
         root_dir.to_path_buf(),
         direct_dep_packages,
+        direct_dep_ids,
         summary,
         layout,
     )
@@ -1512,11 +2886,42 @@ fn resolve_manifest_dependency_packages(
 ) -> PackageResult<BTreeMap<String, String>> {
     let mut direct_dep_packages = BTreeMap::new();
     for (dep_name, dep) in &manifest.deps {
-        let dep_dir = canonicalize_dir(&root_dir.join(&dep.location))?;
-        let dep_manifest = parse_manifest(&dep_dir.join("book.toml"))?;
-        direct_dep_packages.insert(dep_name.clone(), dep_manifest.name);
+        match &dep.source {
+            DependencySourceSpec::Path { location } => {
+                let dep_dir = canonicalize_dir(&root_dir.join(location))?;
+                let dep_manifest = parse_manifest(&dep_dir.join("book.toml"))?;
+                direct_dep_packages.insert(dep_name.clone(), dep_manifest.name);
+            }
+            DependencySourceSpec::Registry { .. } | DependencySourceSpec::Git { .. } => {
+                direct_dep_packages.insert(dep_name.clone(), dep.package.clone());
+            }
+        }
     }
     Ok(direct_dep_packages)
+}
+
+fn resolve_manifest_dependency_ids(
+    root_dir: &Path,
+    manifest: &Manifest,
+) -> PackageResult<BTreeMap<String, String>> {
+    let lock = read_lockfile(&root_dir.join("Arcana.lock"))?;
+    let package_id = PackageId::Path {
+        rel_path: ".".to_string(),
+    }
+    .render();
+    let mut direct_dep_ids = BTreeMap::new();
+    for (dep_name, dep) in &manifest.deps {
+        let (dep_package_id, _dep_display_name, _pending_load) = resolve_workspace_dependency(
+            root_dir,
+            &package_id,
+            dep_name,
+            dep,
+            root_dir,
+            lock.as_ref(),
+        )?;
+        direct_dep_ids.insert(dep_name.clone(), dep_package_id);
+    }
+    Ok(direct_dep_ids)
 }
 
 fn collect_arc_files(dir: &Path) -> PackageResult<Vec<PathBuf>> {
@@ -1678,11 +3083,73 @@ mod tests {
         (prepared, statuses)
     }
 
-    fn status<'a>(statuses: &'a [BuildStatus], member: &str) -> &'a BuildStatus {
-        statuses
+    fn member_id(graph: &WorkspaceGraph, member: &str) -> String {
+        graph
+            .member(member)
+            .unwrap_or_else(|| panic!("member `{member}` should exist"))
+            .package_id
+            .clone()
+    }
+
+    fn order_display_names(graph: &WorkspaceGraph, order: &[String]) -> Vec<String> {
+        order
             .iter()
-            .find(|status| status.member == member)
-            .expect("status should exist")
+            .map(|member| {
+                graph
+                    .member(member)
+                    .map(|member| member.name.clone())
+                    .unwrap_or_else(|| member.clone())
+            })
+            .collect()
+    }
+
+    fn lock_member<'a>(
+        lock: &'a Lockfile,
+        graph: Option<&WorkspaceGraph>,
+        member: &str,
+    ) -> &'a LockMember {
+        if let Some(found) = lock.members.get(member) {
+            return found;
+        }
+        if let Some(graph) = graph {
+            let package_id = member_id(graph, member);
+            if let Some(found) = lock.members.get(&package_id) {
+                return found;
+            }
+        }
+        let legacy_path_id = PackageId::Path {
+            rel_path: member.to_string(),
+        }
+        .render();
+        lock.members
+            .get(&legacy_path_id)
+            .unwrap_or_else(|| panic!("lock member `{member}` should exist"))
+    }
+
+    fn fingerprint_member<'a>(
+        fingerprints: &'a WorkspaceFingerprints,
+        graph: &WorkspaceGraph,
+        member: &str,
+    ) -> &'a MemberFingerprints {
+        let package_id = member_id(graph, member);
+        fingerprints
+            .member(&package_id)
+            .expect("member fingerprint should exist")
+    }
+
+    fn status<'a>(statuses: &'a [BuildStatus], member: &str) -> &'a BuildStatus {
+        if let Some(status) = statuses.iter().find(|status| status.member == member) {
+            return status;
+        }
+        let mut matching = statuses
+            .iter()
+            .filter(|status| status.member_name == member);
+        let first = matching.next().expect("status should exist");
+        assert!(
+            matching.next().is_none(),
+            "status lookup by display name `{member}` is ambiguous"
+        );
+        first
     }
 
     #[test]
@@ -1834,7 +3301,7 @@ mod tests {
         assert_eq!(bundle.root_artifact, "app.exe");
         assert!(bundle.support_files.is_empty());
         let manifest_text = &bundle.manifest_text;
-        assert!(manifest_text.contains("format = \"arcana-distribution-bundle-v1\""));
+        assert!(manifest_text.contains("format = \"arcana-distribution-bundle-v2\""));
         assert!(bundle.bundle_dir.join("app.exe").is_file());
         assert!(
             !bundle.bundle_dir.join("arcana.bundle.toml").exists(),
@@ -2349,7 +3816,7 @@ mod tests {
         assert_eq!(
             statuses
                 .iter()
-                .map(|status| (status.member.clone(), status.target.clone()))
+                .map(|status| (status.member_name().to_string(), status.target.clone()))
                 .collect::<Vec<_>>(),
             vec![
                 ("util".to_string(), BuildTarget::internal_aot()),
@@ -2370,32 +3837,22 @@ mod tests {
             .expect("read lockfile")
             .expect("lockfile should exist");
         assert!(
-            lock.members
-                .get("app")
-                .expect("app member should remain in lockfile")
-                .targets
-                .is_empty(),
+            lock_member(&lock, Some(&graph), "app").targets.is_empty(),
             "unbuilt app member should keep an empty target set"
         );
         assert!(
-            lock.members
-                .get("workspace")
-                .expect("root workspace member should remain in lockfile")
+            lock_member(&lock, Some(&graph), "workspace")
                 .targets
                 .is_empty(),
             "unbuilt root workspace member should keep an empty target set"
         );
         assert!(
-            lock.members
-                .get("util")
-                .expect("util member should exist")
+            lock_member(&lock, Some(&graph), "util")
                 .target(&BuildTarget::internal_aot())
                 .is_some()
         );
         assert!(
-            lock.members
-                .get("core")
-                .expect("core member should exist")
+            lock_member(&lock, Some(&graph), "core")
                 .target(&BuildTarget::windows_dll())
                 .is_some()
         );
@@ -2406,17 +3863,22 @@ mod tests {
     fn disposition_map(statuses: &[BuildStatus]) -> BTreeMap<String, BuildDisposition> {
         statuses
             .iter()
-            .map(|status| (status.member.clone(), status.disposition))
+            .map(|status| (status.member_name.clone(), status.disposition))
             .collect()
     }
 
     fn assert_dispositions(statuses: &[BuildStatus], expected: &[(&str, BuildDisposition)]) {
-        let actual = disposition_map(statuses);
-        let expected = expected
-            .iter()
-            .map(|(member, disposition)| ((*member).to_string(), *disposition))
-            .collect::<BTreeMap<_, _>>();
-        assert_eq!(actual, expected);
+        assert_eq!(
+            statuses.len(),
+            expected.len(),
+            "expected {} statuses but saw {}: {:?}",
+            expected.len(),
+            statuses.len(),
+            disposition_map(statuses)
+        );
+        for (member, disposition) in expected {
+            assert_eq!(status(statuses, member).disposition(), *disposition);
+        }
     }
 
     fn execute_planned_build(
@@ -2424,18 +3886,63 @@ mod tests {
         prepared: &PreparedBuild,
         statuses: &[BuildStatus],
     ) -> PackageResult<PathBuf> {
-        execute_build(graph, &prepared, statuses)
+        execute_build(graph, prepared, statuses)
     }
 
     #[test]
-    fn parse_manifest_rejects_non_path_deps() {
+    fn parse_manifest_recognizes_but_gates_git_deps() {
         let dir = temp_dir("manifest_git_dep");
         write_file(
             &dir.join("book.toml"),
             "name = \"app\"\nkind = \"app\"\n[deps]\ncore = { git = \"https://example.com/repo\" }\n",
         );
-        let err = parse_manifest(&dir.join("book.toml")).expect_err("expected git rejection");
-        assert!(err.contains("only `path` is enabled"));
+        let manifest = parse_manifest(&dir.join("book.toml")).expect("manifest should parse");
+        assert!(matches!(
+            manifest
+                .deps
+                .get("core")
+                .expect("git dep should exist")
+                .source,
+            DependencySourceSpec::Git { .. }
+        ));
+        write_file(
+            &dir.join("src").join("shelf.arc"),
+            "fn main() -> Int:\n    return 0\n",
+        );
+        write_file(&dir.join("src").join("types.arc"), "// types\n");
+        let err = load_workspace_graph(&dir).expect_err("expected git gating");
+        assert!(err.contains("recognized but not enabled yet"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_manifest_recognizes_but_gates_nonlocal_registry_deps() {
+        let dir = temp_dir("manifest_remote_registry_dep");
+        write_file(
+            &dir.join("book.toml"),
+            concat!(
+                "name = \"app\"\n",
+                "kind = \"app\"\n",
+                "[deps]\n",
+                "core = { version = \"^1.2.3\", registry = \"central\" }\n",
+            ),
+        );
+        let manifest = parse_manifest(&dir.join("book.toml")).expect("manifest should parse");
+        assert!(matches!(
+            manifest
+                .deps
+                .get("core")
+                .expect("registry dep should exist")
+                .source,
+            DependencySourceSpec::Registry { .. }
+        ));
+        write_file(
+            &dir.join("src").join("shelf.arc"),
+            "fn main() -> Int:\n    return 0\n",
+        );
+        write_file(&dir.join("src").join("types.arc"), "// types\n");
+        let err = load_workspace_graph(&dir).expect_err("expected registry gating");
+        assert!(err.contains("only `registry = \"local\"` is enabled in this phase"));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -2494,13 +4001,13 @@ mod tests {
                 .iter()
                 .map(|member| member.name.as_str())
                 .collect::<Vec<_>>(),
-            vec!["app", "core", "workspace"]
+            vec!["workspace", "app", "core"]
         );
         let root = graph
             .member("workspace")
             .expect("root package should be in workspace graph");
         assert_eq!(root.rel_dir, ".");
-        assert_eq!(root.deps, vec!["core".to_string()]);
+        assert_eq!(root.deps, vec![member_id(&graph, "core")]);
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -2533,10 +4040,14 @@ mod tests {
 
         let graph = load_workspace_graph(&dir).expect("load graph");
         let app = graph.member("app").expect("app should exist");
-        assert_eq!(app.deps, vec!["core".to_string()]);
+        assert_eq!(app.deps, vec![member_id(&graph, "core")]);
         assert_eq!(
             app.direct_dep_packages.get("util"),
             Some(&"core".to_string())
+        );
+        assert_eq!(
+            app.direct_dep_ids.get("util"),
+            Some(&member_id(&graph, "core"))
         );
         assert_eq!(
             app.direct_dep_specs
@@ -2583,6 +4094,10 @@ mod tests {
             .expect("desktop dependency spec should exist");
         assert_eq!(spec.native_delivery, NativeDependencyDelivery::Dll);
         assert_eq!(
+            app.direct_dep_ids.get("desktop"),
+            Some(&member_id(&graph, "arcana_desktop"))
+        );
+        assert_eq!(
             app.direct_dep_packages.get("desktop"),
             Some(&"arcana_desktop".to_string())
         );
@@ -2623,6 +4138,15 @@ mod tests {
                 .any(|edge| edge.target_path
                     == vec!["std".to_string(), "io".to_string(), "print".to_string()])
         );
+        assert_eq!(
+            workspace
+                .package("workspace")
+                .expect("root package should exist")
+                .direct_dep_ids
+                .get("std")
+                .map(String::as_str),
+            Some("path:std")
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -2652,7 +4176,7 @@ mod tests {
         let second = plan_workspace(&graph).expect("plan");
         assert_eq!(first, second);
         assert_eq!(
-            first,
+            order_display_names(&graph, &first),
             vec!["core".to_string(), "gfx".to_string(), "app".to_string()]
         );
         let _ = fs::remove_dir_all(&dir);
@@ -2679,11 +4203,38 @@ mod tests {
         let first = render_lockfile(&graph, &order, &statuses, None).expect("render");
         let second = render_lockfile(&graph, &order, &statuses, None).expect("render");
         assert_eq!(first, second);
-        assert!(first.contains("version = 3"));
+        assert!(first.contains("version = 4"));
+        assert!(first.contains("workspace_root = \"path:.\""));
         assert!(first.contains("[builds]"));
         assert!(first.contains("internal-aot"));
-        assert!(first.contains("[builds.\"app\".\"internal-aot\"]"));
+        assert!(first.contains("[builds.\"path:app\".\"internal-aot\"]"));
         assert!(first.contains("artifact_hash"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn render_lockfile_uses_v4_package_sections() {
+        let dir = temp_dir("lock_v4");
+        write_file(
+            &dir.join("book.toml"),
+            "name = \"app\"\nkind = \"app\"\n[workspace]\nmembers = [\"core\"]\n[deps]\ncore = { path = \"core\" }\n",
+        );
+        write_grimoire(&dir.join("core"), GrimoireKind::Lib, "core", &[]);
+        write_file(
+            &dir.join("src").join("shelf.arc"),
+            "fn main() -> Int:\n    return 0\n",
+        );
+        write_file(&dir.join("src").join("types.arc"), "// types\n");
+        let graph = load_workspace_graph(&dir).expect("load graph");
+        let order = plan_workspace(&graph).expect("plan");
+        let (prepared, statuses) = plan_test_build(&graph, &order, None);
+        execute_planned_build(&graph, &prepared, &statuses).expect("execute build");
+        let rendered = render_lockfile(&graph, &order, &statuses, None).expect("render");
+        assert!(rendered.contains("version = 4"));
+        assert!(rendered.contains("workspace_root = \"path:.\""));
+        assert!(rendered.contains("[packages.\"path:.\"]"));
+        assert!(rendered.contains("[dependencies.\"path:.\"]"));
+        assert!(rendered.contains("[builds.\"path:.\".\"internal-aot\"]"));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -2723,7 +4274,7 @@ mod tests {
         let lock = read_lockfile(&lock_path)
             .expect("lockfile should parse")
             .expect("lockfile should exist");
-        let app = lock.members.get("app").expect("app member should exist");
+        let app = lock_member(&lock, None, "app");
         assert!(app.target(&BuildTarget::internal_aot()).is_some());
 
         let _ = fs::remove_dir_all(&dir);
@@ -2762,8 +4313,72 @@ mod tests {
         let lock = read_lockfile(&lock_path)
             .expect("stale lockfile should parse")
             .expect("lockfile should exist");
-        let app = lock.members.get("app").expect("app member should exist");
+        let app = lock_member(&lock, None, "app");
         assert!(app.target(&BuildTarget::internal_aot()).is_none());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_lockfile_preserves_git_package_metadata() {
+        let dir = temp_dir("git_lockfile_metadata");
+        let lock_path = dir.join("Arcana.lock");
+        let git_id = "git:https://example.com/arcana/tooling.git#tag:v1.2.3:tool";
+        write_file(
+            &lock_path,
+            &format!(
+                concat!(
+                    "version = 4\n",
+                    "workspace = \"ws\"\n",
+                    "workspace_root = \"path:.\"\n",
+                    "order = [\"path:.\", \"{git_id}\"]\n",
+                    "workspace_members = [\"path:.\"]\n\n",
+                    "[packages.\"path:.\"]\n",
+                    "name = \"app\"\n",
+                    "kind = \"app\"\n",
+                    "source_kind = \"path\"\n",
+                    "path = \".\"\n\n",
+                    "[packages.\"{git_id}\"]\n",
+                    "name = \"tool\"\n",
+                    "kind = \"lib\"\n",
+                    "source_kind = \"git\"\n",
+                    "git = \"https://example.com/arcana/tooling.git\"\n",
+                    "git_selector = \"tag:v1.2.3\"\n\n",
+                    "[dependencies.\"path:.\"]\n",
+                    "tool = \"{git_id}\"\n\n",
+                    "[builds.\"path:.\".\"internal-aot\"]\n",
+                    "fingerprint = \"fp-app\"\n",
+                    "api_fingerprint = \"api-app\"\n",
+                    "artifact = \".arcana/artifacts/app/internal-aot/app.artifact.toml\"\n",
+                    "artifact_hash = \"sha256:app\"\n",
+                    "format = \"{format}\"\n",
+                    "toolchain = \"toolchain-1\"\n\n",
+                    "[builds.\"{git_id}\".\"internal-aot\"]\n",
+                    "fingerprint = \"fp-tool\"\n",
+                    "api_fingerprint = \"api-tool\"\n",
+                    "artifact = \".arcana/artifacts/tool/internal-aot/lib.artifact.toml\"\n",
+                    "artifact_hash = \"sha256:tool\"\n",
+                    "format = \"{format}\"\n",
+                    "toolchain = \"toolchain-1\"\n",
+                ),
+                git_id = git_id,
+                format = AOT_INTERNAL_FORMAT,
+            ),
+        );
+
+        let lock = read_lockfile(&lock_path)
+            .expect("lockfile should parse")
+            .expect("lockfile should exist");
+        let app = lock_member(&lock, None, "path:.");
+        assert_eq!(app.dep_bindings.get("tool"), Some(&git_id.to_string()));
+        let tool = lock.members.get(git_id).expect("git package should exist");
+        assert_eq!(tool.name, "tool");
+        assert_eq!(tool.source_kind, DependencySource::Git);
+        assert_eq!(
+            tool.git_url.as_deref(),
+            Some("https://example.com/arcana/tooling.git")
+        );
+        assert_eq!(tool.git_selector.as_deref(), Some("tag:v1.2.3"));
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -2801,7 +4416,7 @@ mod tests {
         let lock = read_lockfile(&lock_path)
             .expect("legacy lockfile should parse")
             .expect("lockfile should exist");
-        let app = lock.members.get("app").expect("app member should exist");
+        let app = lock_member(&lock, None, "app");
         assert!(app.target(&BuildTarget::windows_exe()).is_some());
 
         let _ = fs::remove_dir_all(&dir);
@@ -2845,7 +4460,10 @@ mod tests {
 
         let graph = load_workspace_graph(&dir).expect("load graph");
         let order = plan_workspace(&graph).expect("plan");
-        assert_eq!(order, vec!["app".to_string(), "workspace".to_string()]);
+        assert_eq!(
+            order_display_names(&graph, &order),
+            vec!["workspace".to_string(), "app".to_string()]
+        );
 
         let (prepared, statuses) = plan_test_build(&graph, &order, None);
         execute_planned_build(&graph, &prepared, &statuses).expect("execute build");
@@ -2853,11 +4471,8 @@ mod tests {
         let lock = read_lockfile(&lock_path)
             .expect("read lockfile")
             .expect("lockfile should exist");
-        let root = lock
-            .members
-            .get("workspace")
-            .expect("root package should be written to lockfile");
-        assert_eq!(root.path, ".");
+        let root = lock_member(&lock, Some(&graph), "workspace");
+        assert_eq!(root.path.as_deref(), Some("."));
         let target = root
             .target(&BuildTarget::internal_aot())
             .expect("root package should include the internal-aot artifact");
@@ -3065,7 +4680,7 @@ mod tests {
         fs::write(
             &lock_path,
             format!(
-                "{stale_lock}\n[builds.\"app\".\"future-exe\"]\n\
+                "{stale_lock}\n[builds.\"path:.\".\"future-exe\"]\n\
 fingerprint = \"future-fp\"\n\
 api_fingerprint = \"future-api\"\n\
 artifact = \".arcana/artifacts/app/future-exe/future-fp/app.exe\"\n\
@@ -3084,7 +4699,7 @@ toolchain = \"future-toolchain\"\n"
         write_lockfile(&graph, &order, &second_statuses).expect("lockfile");
 
         let rendered = fs::read_to_string(&lock_path).expect("lockfile should exist");
-        assert!(rendered.contains("[builds.\"app\".\"future-exe\"]"));
+        assert!(rendered.contains("[builds.\"path:.\".\"future-exe\"]"));
         assert!(rendered.contains(".arcana/artifacts/app/future-exe/future-fp/app.exe"));
 
         let _ = fs::remove_dir_all(&dir);
@@ -3589,10 +5204,10 @@ toolchain = \"future-toolchain\"\n"
             let graph = load_workspace_graph(dir).expect("load graph");
             let workspace = load_workspace_hir_from_graph(dir, &graph).expect("workspace");
             let resolved_workspace = arcana_hir::resolve_workspace(&workspace).expect("resolve");
-            compute_workspace_fingerprints(&graph, &workspace, &resolved_workspace)
-                .expect("fingerprints")
-                .member(member)
-                .expect("member fingerprint should exist")
+            let fingerprints =
+                compute_workspace_fingerprints(&graph, &workspace, &resolved_workspace)
+                    .expect("fingerprints");
+            fingerprint_member(&fingerprints, &graph, member)
                 .api()
                 .to_string()
         }
@@ -3643,10 +5258,10 @@ toolchain = \"future-toolchain\"\n"
             let graph = load_workspace_graph(dir).expect("load graph");
             let workspace = load_workspace_hir_from_graph(dir, &graph).expect("workspace");
             let resolved_workspace = arcana_hir::resolve_workspace(&workspace).expect("resolve");
-            compute_workspace_fingerprints(&graph, &workspace, &resolved_workspace)
-                .expect("fingerprints")
-                .member(member)
-                .expect("member fingerprint should exist")
+            let fingerprints =
+                compute_workspace_fingerprints(&graph, &workspace, &resolved_workspace)
+                    .expect("fingerprints");
+            fingerprint_member(&fingerprints, &graph, member)
                 .api()
                 .to_string()
         }
@@ -3707,10 +5322,10 @@ toolchain = \"future-toolchain\"\n"
             let graph = load_workspace_graph(dir).expect("graph should load");
             let workspace = load_workspace_hir_from_graph(dir, &graph).expect("workspace");
             let resolved_workspace = arcana_hir::resolve_workspace(&workspace).expect("resolve");
-            compute_workspace_fingerprints(&graph, &workspace, &resolved_workspace)
-                .expect("fingerprints")
-                .member(member)
-                .expect("member fingerprint should exist")
+            let fingerprints =
+                compute_workspace_fingerprints(&graph, &workspace, &resolved_workspace)
+                    .expect("fingerprints");
+            fingerprint_member(&fingerprints, &graph, member)
                 .source()
                 .to_string()
         }
@@ -3760,10 +5375,10 @@ toolchain = \"future-toolchain\"\n"
             let graph = load_workspace_graph(dir).expect("graph should load");
             let workspace = load_workspace_hir_from_graph(dir, &graph).expect("workspace");
             let resolved_workspace = arcana_hir::resolve_workspace(&workspace).expect("resolve");
-            compute_workspace_fingerprints(&graph, &workspace, &resolved_workspace)
-                .expect("fingerprints")
-                .member(member)
-                .expect("member fingerprint should exist")
+            let fingerprints =
+                compute_workspace_fingerprints(&graph, &workspace, &resolved_workspace)
+                    .expect("fingerprints");
+            fingerprint_member(&fingerprints, &graph, member)
                 .source()
                 .to_string()
         }
@@ -3833,10 +5448,10 @@ toolchain = \"future-toolchain\"\n"
             let graph = load_workspace_graph(dir).expect("graph should load");
             let workspace = load_workspace_hir_from_graph(dir, &graph).expect("workspace");
             let resolved_workspace = arcana_hir::resolve_workspace(&workspace).expect("resolve");
-            compute_workspace_fingerprints(&graph, &workspace, &resolved_workspace)
-                .expect("fingerprints")
-                .member(member)
-                .expect("member fingerprint should exist")
+            let fingerprints =
+                compute_workspace_fingerprints(&graph, &workspace, &resolved_workspace)
+                    .expect("fingerprints");
+            fingerprint_member(&fingerprints, &graph, member)
                 .source()
                 .to_string()
         }
@@ -3895,10 +5510,10 @@ toolchain = \"future-toolchain\"\n"
             let graph = load_workspace_graph(dir).expect("graph should load");
             let workspace = load_workspace_hir_from_graph(dir, &graph).expect("workspace");
             let resolved_workspace = arcana_hir::resolve_workspace(&workspace).expect("resolve");
-            compute_workspace_fingerprints(&graph, &workspace, &resolved_workspace)
-                .expect("fingerprints")
-                .member(member)
-                .expect("member fingerprint should exist")
+            let fingerprints =
+                compute_workspace_fingerprints(&graph, &workspace, &resolved_workspace)
+                    .expect("fingerprints");
+            fingerprint_member(&fingerprints, &graph, member)
                 .source()
                 .to_string()
         }
@@ -3986,10 +5601,7 @@ toolchain = \"future-toolchain\"\n"
         let lock = read_lockfile(&lock_path)
             .expect("lockfile should read")
             .expect("lockfile should exist");
-        let desktop = lock
-            .members
-            .get("desktop")
-            .expect("desktop member should exist");
+        let desktop = lock_member(&lock, Some(&graph), "desktop");
         let product = desktop
             .native_products
             .get("default")

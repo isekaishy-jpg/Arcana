@@ -91,6 +91,34 @@ mod tests {
             .collect()
     }
 
+    fn test_package_id_for_module(module_id: &str) -> String {
+        module_id.split('.').next().unwrap_or(module_id).to_string()
+    }
+
+    fn test_package_display_names_with_deps(
+        package_id: impl Into<String>,
+        package_name: impl Into<String>,
+        direct_deps: Vec<String>,
+        direct_dep_ids: Vec<String>,
+    ) -> BTreeMap<String, String> {
+        let mut names = BTreeMap::from([(package_id.into(), package_name.into())]);
+        for (dep_name, dep_id) in direct_deps.into_iter().zip(direct_dep_ids) {
+            names.entry(dep_id).or_insert(dep_name);
+        }
+        names
+    }
+
+    fn test_package_direct_dep_ids(
+        package_id: impl Into<String>,
+        direct_deps: Vec<String>,
+        direct_dep_ids: Vec<String>,
+    ) -> BTreeMap<String, BTreeMap<String, String>> {
+        BTreeMap::from([(
+            package_id.into(),
+            direct_deps.into_iter().zip(direct_dep_ids).collect(),
+        )])
+    }
+
     fn test_emit_context(file_name: &str) -> AotEmitContext {
         AotEmitContext {
             root_artifact_file_name: Some(file_name.to_string()),
@@ -148,9 +176,22 @@ mod tests {
     fn base_surface_validation_artifact() -> AotPackageArtifact {
         AotPackageArtifact {
             format: AOT_INTERNAL_FORMAT.to_string(),
+            package_id: "tool".to_string(),
             package_name: "tool".to_string(),
             root_module_id: "tool".to_string(),
             direct_deps: Vec::new(),
+            direct_dep_ids: Vec::new(),
+            package_display_names: test_package_display_names_with_deps(
+                "tool".to_string(),
+                "tool".to_string(),
+                Vec::new(),
+                Vec::new(),
+            ),
+            package_direct_dep_ids: test_package_direct_dep_ids(
+                test_package_id_for_module("tool"),
+                Vec::new(),
+                Vec::new(),
+            ),
             module_count: 1,
             dependency_edge_count: 0,
             dependency_rows: Vec::new(),
@@ -158,6 +199,7 @@ mod tests {
             runtime_requirements: Vec::new(),
             entrypoints: Vec::new(),
             routines: vec![AotRoutineArtifact {
+                package_id: test_package_id_for_module("tool"),
                 module_id: "tool".to_string(),
                 routine_key: "tool#fn-0".to_string(),
                 symbol_name: "main".to_string(),
@@ -178,6 +220,7 @@ mod tests {
             }],
             owners: Vec::new(),
             modules: vec![AotPackageModuleArtifact {
+                package_id: test_package_id_for_module("tool"),
                 module_id: "tool".to_string(),
                 symbol_count: 1,
                 item_count: 1,
@@ -202,11 +245,25 @@ mod tests {
     #[test]
     fn compile_package_emits_backend_contract_artifact() {
         let artifact = compile_package(&IrPackage {
+            package_id: "winspell".to_string(),
             package_name: "winspell".to_string(),
             root_module_id: "winspell".to_string(),
             direct_deps: vec!["std".to_string()],
+            direct_dep_ids: vec!["std".to_string()],
+            package_display_names: test_package_display_names_with_deps(
+                "winspell".to_string(),
+                "winspell".to_string(),
+                vec!["std".to_string()],
+                vec!["std".to_string()],
+            ),
+            package_direct_dep_ids: test_package_direct_dep_ids(
+                "winspell".to_string(),
+                vec!["std".to_string()],
+                vec!["std".to_string()],
+            ),
             modules: vec![
                 IrPackageModule {
+                    package_id: test_package_id_for_module("winspell"),
                     module_id: "winspell".to_string(),
                     symbol_count: 1,
                     item_count: 3,
@@ -217,6 +274,7 @@ mod tests {
                     exported_surface_rows: vec!["export:fn:fn open() -> Int:".to_string()],
                 },
                 IrPackageModule {
+                    package_id: test_package_id_for_module("winspell.window"),
                     module_id: "winspell.window".to_string(),
                     symbol_count: 2,
                     item_count: 5,
@@ -235,6 +293,7 @@ mod tests {
             exported_surface_rows: vec!["module=winspell:export:fn:fn open() -> Int:".to_string()],
             runtime_requirements: vec!["std.canvas".to_string()],
             entrypoints: vec![IrEntrypoint {
+                package_id: test_package_id_for_module("winspell"),
                 module_id: "winspell".to_string(),
                 symbol_name: "main".to_string(),
                 symbol_kind: "fn".to_string(),
@@ -242,6 +301,7 @@ mod tests {
                 exported: true,
             }],
             routines: vec![IrRoutine {
+                package_id: test_package_id_for_module("winspell"),
                 module_id: "winspell".to_string(),
                 routine_key: "winspell#fn-0".to_string(),
                 symbol_name: "main".to_string(),
@@ -272,10 +332,24 @@ mod tests {
     #[test]
     fn emit_package_internal_artifact_matches_rendered_body() {
         let mut package = IrPackage {
+            package_id: "tool".to_string(),
             package_name: "tool".to_string(),
             root_module_id: "tool".to_string(),
             direct_deps: Vec::new(),
+            direct_dep_ids: Vec::new(),
+            package_display_names: test_package_display_names_with_deps(
+                "tool".to_string(),
+                "tool".to_string(),
+                Vec::new(),
+                Vec::new(),
+            ),
+            package_direct_dep_ids: test_package_direct_dep_ids(
+                "tool".to_string(),
+                Vec::new(),
+                Vec::new(),
+            ),
             modules: vec![IrPackageModule {
+                package_id: test_package_id_for_module("tool"),
                 module_id: "tool".to_string(),
                 symbol_count: 1,
                 item_count: 1,
@@ -291,6 +365,7 @@ mod tests {
             runtime_requirements: Vec::new(),
             entrypoints: Vec::new(),
             routines: vec![IrRoutine {
+                package_id: test_package_id_for_module("tool"),
                 module_id: "tool".to_string(),
                 routine_key: "tool#fn-0".to_string(),
                 symbol_name: "main".to_string(),
@@ -331,10 +406,24 @@ mod tests {
     #[test]
     fn native_emit_targets_compile_generated_artifacts() {
         let package = IrPackage {
+            package_id: "tool".to_string(),
             package_name: "tool".to_string(),
             root_module_id: "tool".to_string(),
             direct_deps: Vec::new(),
+            direct_dep_ids: Vec::new(),
+            package_display_names: test_package_display_names_with_deps(
+                "tool".to_string(),
+                "tool".to_string(),
+                Vec::new(),
+                Vec::new(),
+            ),
+            package_direct_dep_ids: test_package_direct_dep_ids(
+                "tool".to_string(),
+                Vec::new(),
+                Vec::new(),
+            ),
             modules: vec![IrPackageModule {
+                package_id: test_package_id_for_module("tool"),
                 module_id: "tool".to_string(),
                 symbol_count: 0,
                 item_count: 0,
@@ -349,6 +438,7 @@ mod tests {
             exported_surface_rows: vec!["module=tool:export:fn:fn main() -> Int:".to_string()],
             runtime_requirements: Vec::new(),
             entrypoints: vec![IrEntrypoint {
+                package_id: test_package_id_for_module("tool"),
                 module_id: "tool".to_string(),
                 symbol_name: "main".to_string(),
                 symbol_kind: "fn".to_string(),
@@ -356,6 +446,7 @@ mod tests {
                 exported: true,
             }],
             routines: vec![IrRoutine {
+                package_id: test_package_id_for_module("tool"),
                 module_id: "tool".to_string(),
                 routine_key: "tool#fn-0".to_string(),
                 symbol_name: "main".to_string(),
@@ -461,10 +552,24 @@ mod tests {
     #[test]
     fn native_package_plan_resolves_main_routine_key() {
         let mut package = IrPackage {
+            package_id: "tool".to_string(),
             package_name: "tool".to_string(),
             root_module_id: "tool".to_string(),
             direct_deps: Vec::new(),
+            direct_dep_ids: Vec::new(),
+            package_display_names: test_package_display_names_with_deps(
+                "tool".to_string(),
+                "tool".to_string(),
+                Vec::new(),
+                Vec::new(),
+            ),
+            package_direct_dep_ids: test_package_direct_dep_ids(
+                "tool".to_string(),
+                Vec::new(),
+                Vec::new(),
+            ),
             modules: vec![IrPackageModule {
+                package_id: test_package_id_for_module("tool"),
                 module_id: "tool".to_string(),
                 symbol_count: 1,
                 item_count: 1,
@@ -479,6 +584,7 @@ mod tests {
             exported_surface_rows: Vec::new(),
             runtime_requirements: Vec::new(),
             entrypoints: vec![IrEntrypoint {
+                package_id: test_package_id_for_module("tool"),
                 module_id: "tool".to_string(),
                 symbol_name: "main".to_string(),
                 symbol_kind: "fn".to_string(),
@@ -486,6 +592,7 @@ mod tests {
                 exported: true,
             }],
             routines: vec![IrRoutine {
+                package_id: test_package_id_for_module("tool"),
                 module_id: "tool".to_string(),
                 routine_key: "tool#fn-0".to_string(),
                 symbol_name: "main".to_string(),
@@ -528,10 +635,24 @@ mod tests {
     #[test]
     fn native_package_plan_rejects_missing_main_entrypoint_for_windows_exe() {
         let package = IrPackage {
+            package_id: "tool".to_string(),
             package_name: "tool".to_string(),
             root_module_id: "tool".to_string(),
             direct_deps: Vec::new(),
+            direct_dep_ids: Vec::new(),
+            package_display_names: test_package_display_names_with_deps(
+                "tool".to_string(),
+                "tool".to_string(),
+                Vec::new(),
+                Vec::new(),
+            ),
+            package_direct_dep_ids: test_package_direct_dep_ids(
+                "tool".to_string(),
+                Vec::new(),
+                Vec::new(),
+            ),
             modules: vec![IrPackageModule {
+                package_id: test_package_id_for_module("tool"),
                 module_id: "tool".to_string(),
                 symbol_count: 0,
                 item_count: 0,
@@ -565,10 +686,24 @@ mod tests {
     #[test]
     fn native_bundle_manifest_roundtrips_windows_dll_export_contract() {
         let mut package = IrPackage {
+            package_id: "core".to_string(),
             package_name: "core".to_string(),
             root_module_id: "core".to_string(),
             direct_deps: Vec::new(),
+            direct_dep_ids: Vec::new(),
+            package_display_names: test_package_display_names_with_deps(
+                "core".to_string(),
+                "core".to_string(),
+                Vec::new(),
+                Vec::new(),
+            ),
+            package_direct_dep_ids: test_package_direct_dep_ids(
+                "core".to_string(),
+                Vec::new(),
+                Vec::new(),
+            ),
             modules: vec![IrPackageModule {
+                package_id: test_package_id_for_module("core"),
                 module_id: "core".to_string(),
                 symbol_count: 1,
                 item_count: 1,
@@ -584,6 +719,7 @@ mod tests {
             runtime_requirements: Vec::new(),
             entrypoints: Vec::new(),
             routines: vec![IrRoutine {
+                package_id: test_package_id_for_module("core"),
                 module_id: "core".to_string(),
                 routine_key: "core#fn-0".to_string(),
                 symbol_name: "answer".to_string(),
@@ -663,10 +799,24 @@ mod tests {
     #[test]
     fn native_bundle_manifest_preserves_string_and_byte_exports() {
         let mut package = IrPackage {
+            package_id: "core".to_string(),
             package_name: "core".to_string(),
             root_module_id: "core".to_string(),
             direct_deps: Vec::new(),
+            direct_dep_ids: Vec::new(),
+            package_display_names: test_package_display_names_with_deps(
+                "core".to_string(),
+                "core".to_string(),
+                Vec::new(),
+                Vec::new(),
+            ),
+            package_direct_dep_ids: test_package_direct_dep_ids(
+                "core".to_string(),
+                Vec::new(),
+                Vec::new(),
+            ),
             modules: vec![IrPackageModule {
+                package_id: test_package_id_for_module("core"),
                 module_id: "core".to_string(),
                 symbol_count: 2,
                 item_count: 2,
@@ -683,6 +833,7 @@ mod tests {
             entrypoints: Vec::new(),
             routines: vec![
                 IrRoutine {
+                    package_id: test_package_id_for_module("core"),
                     module_id: "core".to_string(),
                     routine_key: "core#fn-0".to_string(),
                     symbol_name: "greet".to_string(),
@@ -704,6 +855,7 @@ mod tests {
                     }],
                 },
                 IrRoutine {
+                    package_id: test_package_id_for_module("core"),
                     module_id: "core".to_string(),
                     routine_key: "core#fn-1".to_string(),
                     symbol_name: "prefix".to_string(),
@@ -762,9 +914,22 @@ mod tests {
     fn collect_native_exports_excludes_dependency_generic_surface() {
         let artifact = AotPackageArtifact {
             format: AOT_INTERNAL_FORMAT.to_string(),
+            package_id: "core".to_string(),
             package_name: "core".to_string(),
             root_module_id: "core".to_string(),
             direct_deps: vec!["std".to_string()],
+            direct_dep_ids: vec!["std".to_string()],
+            package_display_names: test_package_display_names_with_deps(
+                "core".to_string(),
+                "core".to_string(),
+                vec!["std".to_string()],
+                vec!["std".to_string()],
+            ),
+            package_direct_dep_ids: test_package_direct_dep_ids(
+                test_package_id_for_module("std.array"),
+                vec!["std".to_string()],
+                vec!["std".to_string()],
+            ),
             module_count: 2,
             dependency_edge_count: 1,
             dependency_rows: vec!["source=core:import:std.array:".to_string()],
@@ -773,6 +938,7 @@ mod tests {
             entrypoints: Vec::new(),
             routines: vec![
                 AotRoutineArtifact {
+                    package_id: test_package_id_for_module("core"),
                     module_id: "core".to_string(),
                     routine_key: "core#fn-0".to_string(),
                     symbol_name: "answer".to_string(),
@@ -794,6 +960,7 @@ mod tests {
                     }],
                 },
                 AotRoutineArtifact {
+                    package_id: test_package_id_for_module("std.array"),
                     module_id: "std.array".to_string(),
                     routine_key: "std.array#sym-0".to_string(),
                     symbol_name: "len".to_string(),
@@ -818,6 +985,7 @@ mod tests {
             owners: Vec::new(),
             modules: vec![
                 AotPackageModuleArtifact {
+                    package_id: test_package_id_for_module("core"),
                     module_id: "core".to_string(),
                     symbol_count: 1,
                     item_count: 1,
@@ -828,6 +996,7 @@ mod tests {
                     exported_surface_rows: vec!["export:fn:fn answer() -> Int:".to_string()],
                 },
                 AotPackageModuleArtifact {
+                    package_id: test_package_id_for_module("std.array"),
                     module_id: "std.array".to_string(),
                     symbol_count: 1,
                     item_count: 1,
@@ -852,10 +1021,24 @@ mod tests {
     #[test]
     fn native_bundle_manifest_preserves_pair_exports() {
         let mut package = IrPackage {
+            package_id: "core".to_string(),
             package_name: "core".to_string(),
             root_module_id: "core".to_string(),
             direct_deps: Vec::new(),
+            direct_dep_ids: Vec::new(),
+            package_display_names: test_package_display_names_with_deps(
+                "core".to_string(),
+                "core".to_string(),
+                Vec::new(),
+                Vec::new(),
+            ),
+            package_direct_dep_ids: test_package_direct_dep_ids(
+                "core".to_string(),
+                Vec::new(),
+                Vec::new(),
+            ),
             modules: vec![IrPackageModule {
+                package_id: test_package_id_for_module("core"),
                 module_id: "core".to_string(),
                 symbol_count: 1,
                 item_count: 1,
@@ -871,6 +1054,7 @@ mod tests {
             runtime_requirements: Vec::new(),
             entrypoints: Vec::new(),
             routines: vec![IrRoutine {
+                package_id: test_package_id_for_module("core"),
                 module_id: "core".to_string(),
                 routine_key: "core#fn-0".to_string(),
                 symbol_name: "echo_pair".to_string(),
@@ -923,9 +1107,22 @@ mod tests {
     fn package_artifact_roundtrips() {
         let artifact = AotPackageArtifact {
             format: AOT_INTERNAL_FORMAT.to_string(),
+            package_id: "tool".to_string(),
             package_name: "tool".to_string(),
             root_module_id: "tool".to_string(),
             direct_deps: vec!["std".to_string()],
+            direct_dep_ids: vec!["std".to_string()],
+            package_display_names: test_package_display_names_with_deps(
+                "tool".to_string(),
+                "tool".to_string(),
+                vec!["std".to_string()],
+                vec!["std".to_string()],
+            ),
+            package_direct_dep_ids: test_package_direct_dep_ids(
+                test_package_id_for_module("tool"),
+                vec!["std".to_string()],
+                vec!["std".to_string()],
+            ),
             module_count: 1,
             dependency_edge_count: 1,
             dependency_rows: vec!["source=tool:import:std.io:".to_string()],
@@ -934,6 +1131,7 @@ mod tests {
             ],
             runtime_requirements: vec!["std.io".to_string()],
             entrypoints: vec![AotEntrypointArtifact {
+                package_id: test_package_id_for_module("tool"),
                 module_id: "tool".to_string(),
                 symbol_name: "main".to_string(),
                 symbol_kind: "fn".to_string(),
@@ -941,6 +1139,7 @@ mod tests {
                 exported: true,
             }],
             routines: vec![AotRoutineArtifact {
+                package_id: test_package_id_for_module("tool"),
                 module_id: "tool".to_string(),
                 routine_key: "tool#fn-0".to_string(),
                 symbol_name: "main".to_string(),
@@ -981,6 +1180,7 @@ mod tests {
             }],
             owners: Vec::new(),
             modules: vec![AotPackageModuleArtifact {
+                package_id: test_package_id_for_module("tool"),
                 module_id: "tool".to_string(),
                 symbol_count: 1,
                 item_count: 2,
@@ -999,10 +1199,24 @@ mod tests {
     #[test]
     fn parse_package_artifact_rejects_mismatched_module_count() {
         let mut artifact = compile_package(&IrPackage {
+            package_id: "tool".to_string(),
             package_name: "tool".to_string(),
             root_module_id: "tool".to_string(),
             direct_deps: Vec::new(),
+            direct_dep_ids: Vec::new(),
+            package_display_names: test_package_display_names_with_deps(
+                "tool".to_string(),
+                "tool".to_string(),
+                Vec::new(),
+                Vec::new(),
+            ),
+            package_direct_dep_ids: test_package_direct_dep_ids(
+                "tool".to_string(),
+                Vec::new(),
+                Vec::new(),
+            ),
             modules: vec![IrPackageModule {
+                package_id: test_package_id_for_module("tool"),
                 module_id: "tool".to_string(),
                 symbol_count: 1,
                 item_count: 1,
@@ -1018,6 +1232,7 @@ mod tests {
             runtime_requirements: Vec::new(),
             entrypoints: Vec::new(),
             routines: vec![IrRoutine {
+                package_id: test_package_id_for_module("tool"),
                 module_id: "tool".to_string(),
                 routine_key: "tool#fn-0".to_string(),
                 symbol_name: "helper".to_string(),
@@ -1054,9 +1269,22 @@ mod tests {
     fn validate_package_artifact_rejects_ambiguous_entrypoint_routines() {
         let artifact = AotPackageArtifact {
             format: AOT_INTERNAL_FORMAT.to_string(),
+            package_id: "tool".to_string(),
             package_name: "tool".to_string(),
             root_module_id: "tool".to_string(),
             direct_deps: Vec::new(),
+            direct_dep_ids: Vec::new(),
+            package_display_names: test_package_display_names_with_deps(
+                "tool".to_string(),
+                "tool".to_string(),
+                Vec::new(),
+                Vec::new(),
+            ),
+            package_direct_dep_ids: test_package_direct_dep_ids(
+                test_package_id_for_module("tool"),
+                Vec::new(),
+                Vec::new(),
+            ),
             module_count: 1,
             dependency_edge_count: 0,
             dependency_rows: Vec::new(),
@@ -1066,6 +1294,7 @@ mod tests {
             ],
             runtime_requirements: Vec::new(),
             entrypoints: vec![AotEntrypointArtifact {
+                package_id: test_package_id_for_module("tool"),
                 module_id: "tool".to_string(),
                 symbol_name: "main".to_string(),
                 symbol_kind: "fn".to_string(),
@@ -1074,6 +1303,7 @@ mod tests {
             }],
             routines: vec![
                 AotRoutineArtifact {
+                    package_id: test_package_id_for_module("tool"),
                     module_id: "tool".to_string(),
                     routine_key: "tool#fn-0".to_string(),
                     symbol_name: "main".to_string(),
@@ -1093,6 +1323,7 @@ mod tests {
                     statements: Vec::new(),
                 },
                 AotRoutineArtifact {
+                    package_id: test_package_id_for_module("tool"),
                     module_id: "tool".to_string(),
                     routine_key: "tool#fn-1".to_string(),
                     symbol_name: "main".to_string(),
@@ -1114,6 +1345,7 @@ mod tests {
             ],
             owners: Vec::new(),
             modules: vec![AotPackageModuleArtifact {
+                package_id: test_package_id_for_module("tool"),
                 module_id: "tool".to_string(),
                 symbol_count: 1,
                 item_count: 1,
@@ -1130,16 +1362,33 @@ mod tests {
 
         let err = validate_package_artifact(&artifact)
             .expect_err("artifact should reject ambiguous entrypoint routines");
-        assert!(err.contains("entrypoint `tool.main` is ambiguous"), "{err}");
+        assert!(
+            err.contains("entrypoint `tool::tool.main` is ambiguous across routines"),
+            "{err}"
+        );
     }
 
     #[test]
     fn parse_package_artifact_rejects_invalid_structured_params() {
         let mut artifact = compile_package(&IrPackage {
+            package_id: "tool".to_string(),
             package_name: "tool".to_string(),
             root_module_id: "tool".to_string(),
             direct_deps: Vec::new(),
+            direct_dep_ids: Vec::new(),
+            package_display_names: test_package_display_names_with_deps(
+                "tool".to_string(),
+                "tool".to_string(),
+                Vec::new(),
+                Vec::new(),
+            ),
+            package_direct_dep_ids: test_package_direct_dep_ids(
+                "tool".to_string(),
+                Vec::new(),
+                Vec::new(),
+            ),
             modules: vec![IrPackageModule {
+                package_id: test_package_id_for_module("tool"),
                 module_id: "tool".to_string(),
                 symbol_count: 1,
                 item_count: 1,
@@ -1155,6 +1404,7 @@ mod tests {
             runtime_requirements: Vec::new(),
             entrypoints: Vec::new(),
             routines: vec![IrRoutine {
+                package_id: test_package_id_for_module("tool"),
                 module_id: "tool".to_string(),
                 routine_key: "tool#fn-0".to_string(),
                 symbol_name: "helper".to_string(),
@@ -1192,9 +1442,22 @@ mod tests {
     fn validate_package_artifact_rejects_malformed_module_directive_rows() {
         let artifact = AotPackageArtifact {
             format: AOT_INTERNAL_FORMAT.to_string(),
+            package_id: "tool".to_string(),
             package_name: "tool".to_string(),
             root_module_id: "tool".to_string(),
             direct_deps: Vec::new(),
+            direct_dep_ids: Vec::new(),
+            package_display_names: test_package_display_names_with_deps(
+                "tool".to_string(),
+                "tool".to_string(),
+                Vec::new(),
+                Vec::new(),
+            ),
+            package_direct_dep_ids: test_package_direct_dep_ids(
+                test_package_id_for_module("tool"),
+                Vec::new(),
+                Vec::new(),
+            ),
             module_count: 1,
             dependency_edge_count: 0,
             dependency_rows: Vec::new(),
@@ -1202,6 +1465,7 @@ mod tests {
             runtime_requirements: Vec::new(),
             entrypoints: Vec::new(),
             routines: vec![AotRoutineArtifact {
+                package_id: test_package_id_for_module("tool"),
                 module_id: "tool".to_string(),
                 routine_key: "tool#fn-0".to_string(),
                 symbol_name: "helper".to_string(),
@@ -1222,6 +1486,7 @@ mod tests {
             }],
             owners: Vec::new(),
             modules: vec![AotPackageModuleArtifact {
+                package_id: test_package_id_for_module("tool"),
                 module_id: "tool".to_string(),
                 symbol_count: 1,
                 item_count: 1,
@@ -1310,6 +1575,7 @@ mod tests {
     fn collect_native_exports_rejects_stale_declared_export_rows() {
         let mut artifact = base_surface_validation_artifact();
         artifact.routines = vec![AotRoutineArtifact {
+            package_id: test_package_id_for_module("tool"),
             module_id: "tool".to_string(),
             routine_key: "tool#fn-0".to_string(),
             symbol_name: "answer".to_string(),

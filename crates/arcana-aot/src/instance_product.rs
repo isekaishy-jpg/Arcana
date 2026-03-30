@@ -20,6 +20,35 @@ pub struct AotCompiledInstanceProduct {
     pub output_path: PathBuf,
 }
 
+struct NativeInstanceBuildGuard {
+    paths: Vec<PathBuf>,
+    active: bool,
+}
+
+impl NativeInstanceBuildGuard {
+    fn new(paths: Vec<PathBuf>) -> Self {
+        Self {
+            paths,
+            active: true,
+        }
+    }
+
+    fn dismiss(&mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for NativeInstanceBuildGuard {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        for path in self.paths.iter().rev() {
+            let _ = fs::remove_dir_all(path);
+        }
+    }
+}
+
 pub fn compile_instance_product(
     spec: &AotInstanceProductSpec,
     project_dir: &Path,
@@ -59,6 +88,8 @@ pub fn compile_instance_product(
         ),
     );
 
+    let mut cleanup =
+        NativeInstanceBuildGuard::new(vec![target_dir.to_path_buf(), project_dir.to_path_buf()]);
     write_instance_product_project(project_dir, spec)?;
 
     fs::create_dir_all(target_dir).map_err(|e| {
@@ -131,6 +162,7 @@ pub fn compile_instance_product(
         ),
     );
 
+    cleanup.dismiss();
     Ok(AotCompiledInstanceProduct { output_path })
 }
 
@@ -505,11 +537,26 @@ fn native_product_probe(event: &str, message: impl AsRef<str>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        AotInstanceProductSpec, render_instance_product_cargo_toml, render_instance_product_lib_rs,
+        AotInstanceProductSpec, NativeInstanceBuildGuard, render_instance_product_cargo_toml,
+        render_instance_product_lib_rs, repo_root,
     };
     use arcana_cabi::{
         ARCANA_CABI_CHILD_CONTRACT_ID, ARCANA_CABI_PLUGIN_CONTRACT_ID, ArcanaCabiProductRole,
     };
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos();
+        repo_root()
+            .join("target")
+            .join("arcana-aot-instance-product-tests")
+            .join(format!("{label}_{unique}"))
+    }
 
     fn child_spec() -> AotInstanceProductSpec {
         AotInstanceProductSpec {
@@ -554,5 +601,60 @@ mod tests {
         assert!(lib_rs.contains("describe_instance"));
         assert!(lib_rs.contains("use_instance"));
         assert!(lib_rs.contains("\"plugin\\0\""));
+    }
+
+    #[test]
+    fn native_instance_build_guard_removes_paths_until_dismissed() {
+        let cleanup_root = temp_dir("cleanup_guard");
+        let cleanup_project = cleanup_root.join("project");
+        let cleanup_target = cleanup_root.join("target");
+        fs::create_dir_all(cleanup_project.join("src")).expect("project dir should be created");
+        fs::create_dir_all(cleanup_target.join("debug")).expect("target dir should be created");
+        {
+            let _guard = NativeInstanceBuildGuard::new(vec![
+                cleanup_target.clone(),
+                cleanup_project.clone(),
+            ]);
+            assert!(
+                cleanup_project.exists(),
+                "project dir should exist while guarded"
+            );
+            assert!(
+                cleanup_target.exists(),
+                "target dir should exist while guarded"
+            );
+        }
+        assert!(
+            !cleanup_project.exists(),
+            "active guard should remove generated project dir on drop"
+        );
+        assert!(
+            !cleanup_target.exists(),
+            "active guard should remove generated target dir on drop"
+        );
+
+        let retained_root = temp_dir("cleanup_guard_retained");
+        let retained_project = retained_root.join("project");
+        let retained_target = retained_root.join("target");
+        fs::create_dir_all(retained_project.join("src"))
+            .expect("retained project dir should exist");
+        fs::create_dir_all(retained_target.join("debug"))
+            .expect("retained target dir should exist");
+        {
+            let mut guard = NativeInstanceBuildGuard::new(vec![
+                retained_target.clone(),
+                retained_project.clone(),
+            ]);
+            guard.dismiss();
+        }
+        assert!(
+            retained_project.exists(),
+            "dismissed guard should preserve project dir"
+        );
+        assert!(
+            retained_target.exists(),
+            "dismissed guard should preserve target dir"
+        );
+        let _ = fs::remove_dir_all(&retained_root);
     }
 }

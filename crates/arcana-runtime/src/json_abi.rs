@@ -100,7 +100,6 @@ pub fn execute_exported_json_abi_routine(
         .iter()
         .enumerate()
         .find(|(_, routine)| json_abi_callable(plan, routine) && routine.routine_key == routine_key)
-        .map(|(index, routine)| (index, routine))
         .ok_or_else(|| format!("json abi routine `{routine_key}` is not exported or callable"))?;
     validate_runtime_requirements_supported(plan, host)?;
     let converted_args = args
@@ -189,7 +188,7 @@ fn json_abi_path_is_runtime_opaque(plan: &RuntimePackagePlan, rendered: &str) ->
             || plan
                 .opaque_family_types
                 .get(family.lang_item_name())
-                .is_some_and(|entries| entries.iter().any(|entry| entry == &rendered))
+                .is_some_and(|entries| entries.iter().any(|entry| entry == rendered))
     })
 }
 

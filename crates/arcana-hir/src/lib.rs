@@ -753,9 +753,11 @@ impl HirPackageLayout {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HirWorkspacePackage {
+    pub package_id: String,
     pub root_dir: PathBuf,
     pub direct_deps: BTreeSet<String>,
     pub direct_dep_packages: BTreeMap<String, String>,
+    pub direct_dep_ids: BTreeMap<String, String>,
     pub summary: HirPackageSummary,
     pub layout: HirPackageLayout,
 }
@@ -779,6 +781,10 @@ impl HirWorkspacePackage {
             .map(String::as_str)
     }
 
+    pub fn dependency_package_id(&self, visible_name: &str) -> Option<&str> {
+        self.direct_dep_ids.get(visible_name).map(String::as_str)
+    }
+
     pub fn dependency_module_id(&self, path: &[String]) -> Option<String> {
         let (visible_name, suffix) = path.split_first()?;
         let dependency_name = self.dependency_package_name(visible_name)?;
@@ -792,11 +798,34 @@ impl HirWorkspacePackage {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct HirWorkspaceSummary {
     pub packages: BTreeMap<String, HirWorkspacePackage>,
+    package_names: BTreeMap<String, Vec<String>>,
+    module_packages: BTreeMap<String, Vec<String>>,
 }
 
 impl HirWorkspaceSummary {
     pub fn package(&self, name: &str) -> Option<&HirWorkspacePackage> {
-        self.packages.get(name)
+        let ids = self.package_names.get(name)?;
+        let [package_id] = ids.as_slice() else {
+            return None;
+        };
+        self.packages.get(package_id)
+    }
+
+    pub fn package_by_id(&self, package_id: &str) -> Option<&HirWorkspacePackage> {
+        self.packages.get(package_id)
+    }
+
+    pub fn package_id_for_module(&self, module_id: &str) -> Option<&str> {
+        let package_ids = self.module_packages.get(module_id)?;
+        let [package_id] = package_ids.as_slice() else {
+            return None;
+        };
+        Some(package_id.as_str())
+    }
+
+    pub fn package_for_module(&self, module_id: &str) -> Option<&HirWorkspacePackage> {
+        self.package_id_for_module(module_id)
+            .and_then(|package_id| self.package_by_id(package_id))
     }
 
     pub fn package_count(&self) -> usize {
@@ -814,10 +843,12 @@ impl HirWorkspaceSummary {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HirResolvedTarget {
     Module {
+        package_id: String,
         package_name: String,
         module_id: String,
     },
     Symbol {
+        package_id: String,
         package_name: String,
         module_id: String,
         symbol_name: String,
@@ -863,6 +894,7 @@ pub struct HirResolvedDirective {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HirResolvedModule {
+    pub package_id: String,
     pub module_id: String,
     pub bindings: BTreeMap<String, HirResolvedBinding>,
     pub directives: Vec<HirResolvedDirective>,
@@ -870,6 +902,7 @@ pub struct HirResolvedModule {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HirResolvedPackage {
+    pub package_id: String,
     pub package_name: String,
     pub modules: BTreeMap<String, HirResolvedModule>,
 }
@@ -883,16 +916,26 @@ impl HirResolvedPackage {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct HirResolvedWorkspace {
     pub packages: BTreeMap<String, HirResolvedPackage>,
+    package_names: BTreeMap<String, Vec<String>>,
 }
 
 impl HirResolvedWorkspace {
     pub fn package(&self, package_name: &str) -> Option<&HirResolvedPackage> {
-        self.packages.get(package_name)
+        let ids = self.package_names.get(package_name)?;
+        let [package_id] = ids.as_slice() else {
+            return None;
+        };
+        self.packages.get(package_id)
+    }
+
+    pub fn package_by_id(&self, package_id: &str) -> Option<&HirResolvedPackage> {
+        self.packages.get(package_id)
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct HirMethodCandidate<'a> {
+    pub package_id: &'a str,
     pub package_name: &'a str,
     pub module_id: &'a str,
     pub symbol: &'a HirSymbol,
@@ -1063,6 +1106,7 @@ pub trait HirLocalTypeLookup {
 
 #[derive(Clone, Copy, Debug)]
 pub struct HirResolvedSymbolRef<'a> {
+    pub package_id: &'a str,
     pub package_name: &'a str,
     pub module_id: &'a str,
     pub symbol_index: usize,
@@ -1230,7 +1274,7 @@ fn symbol_return_type(
     workspace: &HirWorkspaceSummary,
     symbol_ref: HirResolvedSymbolRef<'_>,
 ) -> Option<HirType> {
-    let package = workspace.package(symbol_ref.package_name)?;
+    let package = workspace.package_by_id(symbol_ref.package_id)?;
     let module = package.module(symbol_ref.module_id)?;
     if let Some(return_type) = &symbol_ref.symbol.return_type {
         return Some(canonicalize_hir_type_in_module(
@@ -1268,7 +1312,7 @@ fn symbol_call_return_type(
             explicit_args,
         ));
     }
-    let package = workspace.package(symbol_ref.package_name)?;
+    let package = workspace.package_by_id(symbol_ref.package_id)?;
     let module = package.module(symbol_ref.module_id)?;
     let return_type = symbol_ref.symbol.return_type.as_ref()?;
     let canonical_return = canonicalize_hir_type_in_module(workspace, package, module, return_type);
@@ -1312,10 +1356,10 @@ fn infer_call_target_return_hir_type<L: HirLocalTypeLookup>(
     }
     if path.len() >= 2 {
         let enum_path = path[..path.len() - 1].to_vec();
-        if let Some(enum_ref) = lookup_symbol_path(workspace, resolved_module, &enum_path) {
-            if matches!(enum_ref.symbol.kind, HirSymbolKind::Enum) {
-                return symbol_call_return_type(workspace, enum_ref, &generic_args);
-            }
+        if let Some(enum_ref) = lookup_symbol_path(workspace, resolved_module, &enum_path)
+            && matches!(enum_ref.symbol.kind, HirSymbolKind::Enum)
+        {
+            return symbol_call_return_type(workspace, enum_ref, &generic_args);
         }
     }
     let _ = locals;
@@ -1339,7 +1383,7 @@ fn infer_member_access_hir_type<L: HirLocalTypeLookup>(
         _ => return None,
     };
     let declared_receiver = build_symbol_result_type(symbol_ref.module_id, symbol_ref.symbol, &[]);
-    let package = workspace.package(symbol_ref.package_name)?;
+    let package = workspace.package_by_id(symbol_ref.package_id)?;
     let module = package.module(symbol_ref.module_id)?;
     let canonical_declared =
         canonicalize_hir_type_in_module(workspace, package, module, &declared_receiver);
@@ -1769,7 +1813,7 @@ fn resolve_module_target(
     package: &HirWorkspacePackage,
     workspace: &HirWorkspaceSummary,
     path: &[String],
-) -> Result<(String, String), String> {
+) -> Result<(String, String, String), String> {
     if path.is_empty() {
         return Err("missing module path".to_string());
     }
@@ -1781,6 +1825,7 @@ fn resolve_module_target(
             .module(&key)
             .map(|module| {
                 (
+                    package.package_id.clone(),
                     package.summary.package_name.clone(),
                     module.module_id.clone(),
                 )
@@ -1797,6 +1842,7 @@ fn resolve_module_target(
                     .module(&key)
                     .map(|module| {
                         (
+                            std_package.package_id.clone(),
                             std_package.summary.package_name.clone(),
                             module.module_id.clone(),
                         )
@@ -1805,12 +1851,12 @@ fn resolve_module_target(
             });
     }
 
-    if let Some(dependency_name) = package.dependency_package_name(first) {
+    if let Some(dependency_package_id) = package.dependency_package_id(first) {
         let dependency_module_id = package
             .dependency_module_id(path)
             .ok_or_else(|| format!("unresolved module `{key}`"))?;
         return workspace
-            .package(dependency_name)
+            .package_by_id(dependency_package_id)
             .ok_or_else(|| {
                 format!(
                     "dependency `{first}` is not loaded for `{}`",
@@ -1822,6 +1868,7 @@ fn resolve_module_target(
                     .module(&dependency_module_id)
                     .map(|module| {
                         (
+                            dependency.package_id.clone(),
                             dependency.summary.package_name.clone(),
                             module.module_id.clone(),
                         )
@@ -1832,12 +1879,17 @@ fn resolve_module_target(
 
     if let Some(module) = package.resolve_relative_module(path) {
         return Ok((
+            package.package_id.clone(),
             package.summary.package_name.clone(),
             module.module_id.clone(),
         ));
     }
 
-    if workspace.package(first).is_some() {
+    if workspace
+        .packages
+        .values()
+        .any(|dependency| dependency.summary.package_name == *first)
+    {
         return Err(format!(
             "package `{first}` is not a direct dependency of `{}`",
             package.summary.package_name
@@ -1849,10 +1901,12 @@ fn resolve_module_target(
 
 enum ResolvedUseTarget {
     Module {
+        package_id: String,
         package_name: String,
         module_id: String,
     },
     Symbol {
+        package_id: String,
         package_name: String,
         module_id: String,
         symbol_name: String,
@@ -1870,12 +1924,14 @@ fn resolve_use_target(
 
     for prefix_len in (1..=path.len()).rev() {
         let prefix = &path[..prefix_len];
-        let Ok((package_name, module_id)) = resolve_module_target(package, workspace, prefix)
+        let Ok((package_id, package_name, module_id)) =
+            resolve_module_target(package, workspace, prefix)
         else {
             continue;
         };
         if prefix_len == path.len() {
             return Ok(ResolvedUseTarget::Module {
+                package_id,
                 package_name,
                 module_id,
             });
@@ -1893,12 +1949,13 @@ fn resolve_use_target(
         let visible_symbols = visible_symbol_refs_in_module_for_package(
             workspace,
             &package.summary.package_name,
-            &package_name,
+            &package_id,
             &module_id,
             symbol_name,
         );
         if visible_symbols.len() == 1 {
             return Ok(ResolvedUseTarget::Symbol {
+                package_id,
                 package_name,
                 module_id,
                 symbol_name: symbol_name.clone(),
@@ -1914,17 +1971,19 @@ fn resolve_use_target(
         ));
     }
 
-    if let Some(first) = path.first() {
-        if workspace.package(first).is_some()
-            && first != &package.summary.package_name
-            && first != "std"
-            && package.dependency_package_name(first).is_none()
-        {
-            return Err(format!(
-                "package `{first}` is not a direct dependency of `{}`",
-                package.summary.package_name
-            ));
-        }
+    if let Some(first) = path.first()
+        && workspace
+            .packages
+            .values()
+            .any(|candidate| candidate.summary.package_name == *first)
+        && first != &package.summary.package_name
+        && first != "std"
+        && package.dependency_package_name(first).is_none()
+    {
+        return Err(format!(
+            "package `{first}` is not a direct dependency of `{}`",
+            package.summary.package_name
+        ));
     }
 
     Err(format!("unresolved module path `{}`", path.join(".")))
@@ -2019,6 +2078,7 @@ pub fn build_package_layout(
 }
 
 pub fn build_workspace_package(
+    package_id: String,
     root_dir: PathBuf,
     direct_deps: BTreeSet<String>,
     summary: HirPackageSummary,
@@ -2028,12 +2088,24 @@ pub fn build_workspace_package(
         .iter()
         .map(|name| (name.clone(), name.clone()))
         .collect();
-    build_workspace_package_with_dep_packages(root_dir, direct_dep_packages, summary, layout)
+    build_workspace_package_with_dep_packages(
+        package_id,
+        root_dir,
+        direct_dep_packages,
+        direct_deps
+            .iter()
+            .map(|name| (name.clone(), name.clone()))
+            .collect(),
+        summary,
+        layout,
+    )
 }
 
 pub fn build_workspace_package_with_dep_packages(
+    package_id: String,
     root_dir: PathBuf,
     direct_dep_packages: BTreeMap<String, String>,
+    direct_dep_ids: BTreeMap<String, String>,
     summary: HirPackageSummary,
     layout: HirPackageLayout,
 ) -> Result<HirWorkspacePackage, String> {
@@ -2046,11 +2118,13 @@ pub fn build_workspace_package_with_dep_packages(
         ));
     }
 
-    let direct_deps = direct_dep_packages.keys().cloned().collect();
+    let direct_deps = direct_dep_ids.values().cloned().collect();
     Ok(HirWorkspacePackage {
+        package_id,
         root_dir,
         direct_deps,
         direct_dep_packages,
+        direct_dep_ids,
         summary,
         layout,
     })
@@ -2060,14 +2134,33 @@ pub fn build_workspace_summary(
     packages: Vec<HirWorkspacePackage>,
 ) -> Result<HirWorkspaceSummary, String> {
     let mut package_map = BTreeMap::new();
+    let mut package_names = BTreeMap::<String, Vec<String>>::new();
+    let mut module_packages = BTreeMap::<String, Vec<String>>::new();
     for package in packages {
-        let name = package.summary.package_name.clone();
-        if package_map.insert(name.clone(), package).is_some() {
-            return Err(format!("duplicate package `{name}` in workspace summary"));
+        let package_id = package.package_id.clone();
+        if package_map
+            .insert(package_id.clone(), package.clone())
+            .is_some()
+        {
+            return Err(format!(
+                "duplicate package id `{package_id}` in workspace summary"
+            ));
+        }
+        package_names
+            .entry(package.summary.package_name.clone())
+            .or_default()
+            .push(package_id.clone());
+        for module in &package.summary.modules {
+            let owners = module_packages.entry(module.module_id.clone()).or_default();
+            if !owners.iter().any(|existing| existing == &package_id) {
+                owners.push(package_id.clone());
+            }
         }
     }
     Ok(HirWorkspaceSummary {
         packages: package_map,
+        package_names,
+        module_packages,
     })
 }
 
@@ -2075,6 +2168,7 @@ pub fn resolve_workspace(
     workspace: &HirWorkspaceSummary,
 ) -> Result<HirResolvedWorkspace, Vec<HirResolutionError>> {
     let mut packages = BTreeMap::new();
+    let mut package_names = BTreeMap::<String, Vec<String>>::new();
     let mut errors = Vec::new();
 
     for package in workspace.packages.values() {
@@ -2100,6 +2194,7 @@ pub fn resolve_workspace(
                         local_name: symbol.name.clone(),
                         origin: HirBindingOrigin::LocalSymbol,
                         target: HirResolvedTarget::Symbol {
+                            package_id: package.package_id.clone(),
                             package_name: package.summary.package_name.clone(),
                             module_id: module.module_id.clone(),
                             symbol_name: symbol.name.clone(),
@@ -2114,7 +2209,8 @@ pub fn resolve_workspace(
                 let target = match directive.kind {
                     HirDirectiveKind::Import | HirDirectiveKind::Reexport => {
                         resolve_module_target(package, workspace, &directive.path).map(
-                            |(package_name, module_id)| HirResolvedTarget::Module {
+                            |(package_id, package_name, module_id)| HirResolvedTarget::Module {
+                                package_id,
                                 package_name,
                                 module_id,
                             },
@@ -2124,17 +2220,21 @@ pub fn resolve_workspace(
                         resolve_use_target(package, workspace, &directive.path).map(
                             |resolved_target| match resolved_target {
                                 ResolvedUseTarget::Module {
+                                    package_id,
                                     package_name,
                                     module_id,
                                 } => HirResolvedTarget::Module {
+                                    package_id,
                                     package_name,
                                     module_id,
                                 },
                                 ResolvedUseTarget::Symbol {
+                                    package_id,
                                     package_name,
                                     module_id,
                                     symbol_name,
                                 } => HirResolvedTarget::Symbol {
+                                    package_id,
                                     package_name,
                                     module_id,
                                     symbol_name,
@@ -2208,6 +2308,7 @@ pub fn resolve_workspace(
             modules.insert(
                 module.module_id.clone(),
                 HirResolvedModule {
+                    package_id: package.package_id.clone(),
                     module_id: module.module_id.clone(),
                     bindings,
                     directives,
@@ -2216,16 +2317,24 @@ pub fn resolve_workspace(
         }
 
         packages.insert(
-            package.summary.package_name.clone(),
+            package.package_id.clone(),
             HirResolvedPackage {
+                package_id: package.package_id.clone(),
                 package_name: package.summary.package_name.clone(),
                 modules,
             },
         );
+        package_names
+            .entry(package.summary.package_name.clone())
+            .or_default()
+            .push(package.package_id.clone());
     }
 
     if errors.is_empty() {
-        Ok(HirResolvedWorkspace { packages })
+        Ok(HirResolvedWorkspace {
+            packages,
+            package_names,
+        })
     } else {
         Err(errors)
     }
@@ -2796,17 +2905,18 @@ fn lower_statement(statement: &arcana_syntax::Statement) -> HirStatement {
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     use super::freeze::FROZEN_HIR_NODE_KINDS;
     use super::{
         HirAssignOp, HirAssignTarget, HirBinaryOp, HirChainConnector, HirChainIntroducer,
         HirChainStep, HirDirectiveKind, HirExpr, HirForewordApp, HirForewordArg,
-        HirHeaderAttachment, HirMatchPattern, HirPhraseArg, HirStatement, HirStatementKind,
-        HirSymbolBody, HirSymbolKind, HirTraitRef, HirType, HirUnaryOp, HirWhereClause,
-        build_package_layout, build_package_summary, build_workspace_package,
-        build_workspace_summary, derive_source_module_path, lookup_method_candidates_for_hir_type,
-        lookup_symbol_path, lower_module_text, parse_hir_type, resolve_workspace,
+        HirHeaderAttachment, HirMatchPattern, HirPackageLayout, HirPackageSummary, HirPhraseArg,
+        HirStatement, HirStatementKind, HirSymbolBody, HirSymbolKind, HirTraitRef, HirType,
+        HirUnaryOp, HirWhereClause, HirWorkspacePackage, build_package_layout,
+        build_package_summary, build_workspace_summary, derive_source_module_path,
+        lookup_method_candidates_for_hir_type, lookup_symbol_path, lower_module_text,
+        parse_hir_type, resolve_workspace,
     };
 
     fn expr_is_path(expr: &HirExpr, name: &str) -> bool {
@@ -3974,6 +4084,37 @@ mod tests {
         );
     }
 
+    fn build_workspace_package(
+        root_dir: PathBuf,
+        direct_deps: BTreeSet<String>,
+        summary: HirPackageSummary,
+        layout: HirPackageLayout,
+    ) -> Result<HirWorkspacePackage, String> {
+        let package_id = summary.package_name.clone();
+        super::build_workspace_package(package_id, root_dir, direct_deps, summary, layout)
+    }
+
+    fn build_workspace_package_with_dep_packages(
+        root_dir: PathBuf,
+        direct_dep_packages: BTreeMap<String, String>,
+        summary: HirPackageSummary,
+        layout: HirPackageLayout,
+    ) -> Result<HirWorkspacePackage, String> {
+        let package_id = summary.package_name.clone();
+        let direct_dep_ids = direct_dep_packages
+            .iter()
+            .map(|(alias, package_id)| (alias.clone(), package_id.clone()))
+            .collect();
+        super::build_workspace_package_with_dep_packages(
+            package_id,
+            root_dir,
+            direct_dep_packages,
+            direct_dep_ids,
+            summary,
+            layout,
+        )
+    }
+
     #[test]
     fn build_workspace_summary_indexes_module_paths() {
         let book = lower_module_text(
@@ -4094,6 +4235,7 @@ mod tests {
                 .expect("alias should resolve")
                 .target,
             super::HirResolvedTarget::Module {
+                package_id: "std".to_string(),
                 package_name: "std".to_string(),
                 module_id: "std.io".to_string(),
             }
@@ -4104,6 +4246,7 @@ mod tests {
                 .expect("symbol should resolve")
                 .target,
             super::HirResolvedTarget::Symbol {
+                package_id: "std".to_string(),
                 package_name: "std".to_string(),
                 module_id: "std.io".to_string(),
                 symbol_name: "print".to_string(),
@@ -4156,7 +4299,7 @@ mod tests {
             BTreeMap::new(),
         )
         .expect("app layout should build");
-        let app_package = super::build_workspace_package_with_dep_packages(
+        let app_package = build_workspace_package_with_dep_packages(
             Path::new("C:/repo/app").to_path_buf(),
             BTreeMap::from([("util".to_string(), "core".to_string())]),
             app_summary,
@@ -4178,6 +4321,7 @@ mod tests {
                 .expect("alias symbol should resolve")
                 .target,
             super::HirResolvedTarget::Symbol {
+                package_id: "core".to_string(),
                 package_name: "core".to_string(),
                 module_id: "core".to_string(),
                 symbol_name: "value".to_string(),
@@ -4736,7 +4880,7 @@ mod tests {
             BTreeMap::new(),
         )
         .expect("app layout should build");
-        let app_package = super::build_workspace_package_with_dep_packages(
+        let app_package = build_workspace_package_with_dep_packages(
             Path::new("C:/repo/app").to_path_buf(),
             BTreeMap::from([("util".to_string(), "core".to_string())]),
             app_summary,

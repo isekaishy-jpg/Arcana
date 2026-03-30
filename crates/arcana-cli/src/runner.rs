@@ -50,6 +50,10 @@ pub(crate) fn prepare_run_workspace(
     target: BuildTarget,
     member: Option<&str>,
 ) -> Result<PreparedRun, String> {
+    #[cfg(test)]
+    let _test_guard = crate::heavy_test_mutex()
+        .lock()
+        .expect("heavy cli test mutex should not be poisoned");
     if matches!(target, BuildTarget::WindowsDll) {
         return Err(
             "`arcana run` does not support the non-executable `windows-dll` target".to_string(),
@@ -58,6 +62,7 @@ pub(crate) fn prepare_run_workspace(
 
     let graph = load_workspace_graph(workspace_dir)?;
     let runnable_member = resolve_run_member(&graph, member)?;
+    let runnable_member_id = runnable_member.package_id.clone();
     let runnable_member_name = runnable_member.name.clone();
 
     let order = plan_workspace(&graph)?;
@@ -86,7 +91,7 @@ pub(crate) fn prepare_run_workspace(
 
     let status = statuses
         .iter()
-        .find(|status| status.member() == runnable_member_name)
+        .find(|status| status.member() == runnable_member_id && status.target() == &target)
         .ok_or_else(|| {
             format!("missing build status for runnable member `{runnable_member_name}`")
         })?;
@@ -98,7 +103,7 @@ pub(crate) fn prepare_run_workspace(
             let bundle = stage_distribution_bundle(
                 &graph,
                 &statuses,
-                &runnable_member_name,
+                &runnable_member_id,
                 &BuildTarget::WindowsExe,
                 &bundle_dir,
             )?;
@@ -271,7 +276,7 @@ mod tests {
             concat!(
                 "import std.fs\n",
                 "fn main() -> Int:\n",
-                "    if std.fs.exists :: \"arcana.bundle.toml\" :: call:\n",
+                "    if std.fs.exists :: \"app.exe\" :: call:\n",
                 "        return 0\n",
                 "    return 9\n",
             ),

@@ -1,11 +1,13 @@
 use std::env;
 use std::path::PathBuf;
+#[cfg(test)]
+use std::sync::{Mutex, OnceLock};
 
 use arcana_frontend::{check_path, check_workspace_graph};
 use arcana_package::{
     BuildTarget, execute_build_with_context_and_progress, load_workspace_graph, parse_build_target,
     plan_build_for_target_with_context, plan_workspace, prepare_build_from_workspace,
-    read_lockfile, write_lockfile,
+    publish_workspace_member, read_lockfile, write_lockfile,
 };
 
 mod build_context;
@@ -13,6 +15,14 @@ mod launcher;
 mod package_cmd;
 mod runner;
 mod runtime_exec;
+
+type ParsedPackageArgs = (BuildTarget, Option<String>, Option<String>, Option<PathBuf>);
+
+#[cfg(test)]
+pub(crate) fn heavy_test_mutex() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 fn main() {
     let code = match real_main() {
@@ -131,6 +141,18 @@ fn real_main() -> Result<i32, String> {
             );
             Ok(0)
         }
+        "publish" => {
+            let Some(path) = args.next() else {
+                return Err("usage: arcana publish <workspace-dir> --member <member>".to_string());
+            };
+            let rest = args.collect::<Vec<_>>();
+            let member = parse_publish_args(&rest)?;
+            let published = publish_workspace_member(&PathBuf::from(path), &member)?;
+            for package in published {
+                println!("published {package}");
+            }
+            Ok(0)
+        }
         other => Err(format!("unknown command `{other}`")),
     }
 }
@@ -204,6 +226,7 @@ fn print_help() {
     println!(
         "  arcana package <workspace-dir> [--target <target>] [--product <name>] [--member <member>] [--out-dir <dir>]"
     );
+    println!("  arcana publish <workspace-dir> --member <member>");
     println!(
         "    targets: internal-aot, windows-exe, windows-dll (native product target; legacy export name)"
     );
@@ -240,9 +263,7 @@ fn parse_run_args(args: &[String]) -> Result<(BuildTarget, Option<String>, Vec<S
     Ok((target, member, Vec::new()))
 }
 
-fn parse_package_args(
-    args: &[String],
-) -> Result<(BuildTarget, Option<String>, Option<String>, Option<PathBuf>), String> {
+fn parse_package_args(args: &[String]) -> Result<ParsedPackageArgs, String> {
     let usage = "usage: arcana package <workspace-dir> [--target <target>] [--product <name>] [--member <member>] [--out-dir <dir>]";
     let mut target = BuildTarget::internal_aot();
     let mut product = None;
@@ -283,4 +304,12 @@ fn parse_package_args(
         }
     }
     Ok((target, product, member, out_dir))
+}
+
+fn parse_publish_args(args: &[String]) -> Result<String, String> {
+    let usage = "usage: arcana publish <workspace-dir> --member <member>";
+    if args.len() != 2 || args[0] != "--member" {
+        return Err(usage.to_string());
+    }
+    Ok(args[1].clone())
 }

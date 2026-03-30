@@ -1,3 +1,8 @@
+#![allow(clippy::large_enum_variant)]
+#![allow(clippy::ptr_arg)]
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::type_complexity)]
+
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::io::{Read, Seek, Write};
@@ -68,6 +73,7 @@ pub struct RuntimeOwnerExitPlan {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeOwnerPlan {
+    pub package_id: String,
     pub module_id: String,
     pub owner_path: Vec<String>,
     pub owner_name: String,
@@ -77,9 +83,13 @@ pub struct RuntimeOwnerPlan {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimePackagePlan {
+    pub package_id: String,
     pub package_name: String,
     pub root_module_id: String,
     pub direct_deps: Vec<String>,
+    pub direct_dep_ids: Vec<String>,
+    pub package_display_names: BTreeMap<String, String>,
+    pub package_direct_dep_ids: BTreeMap<String, BTreeMap<String, String>>,
     pub runtime_requirements: Vec<String>,
     pub module_aliases: BTreeMap<String, BTreeMap<String, Vec<String>>>,
     #[serde(default)]
@@ -1378,7 +1388,7 @@ pub trait RuntimeHost {
         Err("process execution is disabled on this runtime host".to_string())
     }
     fn text_len_bytes(&mut self, text: &str) -> Result<i64, String> {
-        Ok(i64::try_from(text.len()).map_err(|_| "text length does not fit in i64".to_string())?)
+        i64::try_from(text.len()).map_err(|_| "text length does not fit in i64".to_string())
     }
     fn text_byte_at(&mut self, text: &str, index: usize) -> Result<i64, String> {
         let bytes = text.as_bytes();
@@ -3243,7 +3253,10 @@ impl RuntimeHost for BufferedHost {
         let mut remaining_events = Vec::new();
         let mut pending_events = Vec::new();
         for event in std::mem::take(&mut self.next_frame_events) {
-            if event.window_id == 0 || session_window_ids.contains(&event.window_id) {
+            if buffered_device_event_kind(event.kind)
+                || event.window_id == 0
+                || session_window_ids.contains(&event.window_id)
+            {
                 pending_events.push(event);
             } else {
                 remaining_events.push(event);
@@ -3934,6 +3947,8 @@ struct RuntimePoolArenaState {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RuntimeRollupFrame {
     rollups: Vec<ParsedPageRollup>,
+    current_package_id: String,
+    current_module_id: String,
     owner_scope_depth: usize,
     subjects: BTreeMap<String, RuntimeTrackedRollupSubject>,
 }
@@ -3949,6 +3964,7 @@ struct RuntimeDeferredCall {
     callable: Vec<String>,
     resolved_routine: Option<String>,
     dynamic_dispatch: Option<ParsedDynamicDispatch>,
+    current_package_id: String,
     current_module_id: String,
     type_args: Vec<String>,
     call_args: Vec<RuntimeCallArg>,
@@ -3960,6 +3976,7 @@ struct RuntimeDeferredCall {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RuntimeDeferredExpr {
     expr: ParsedExpr,
+    current_package_id: String,
     current_module_id: String,
     aliases: BTreeMap<String, Vec<String>>,
     type_bindings: RuntimeTypeBindings,
@@ -4145,6 +4162,7 @@ enum RuntimeIntrinsic {
     TextInputCompositionAreaSize,
     TextInputSetCompositionArea,
     TextInputClearCompositionArea,
+    StdTimeMonotonicNowMs,
     TimeMonotonicNowMs,
     TimeMonotonicNowNs,
     ConcurrentSleep,
@@ -4226,18 +4244,34 @@ enum RuntimeIntrinsic {
     TextSliceBytes,
     TextStartsWith,
     TextEndsWith,
+    TextFind,
+    TextContains,
+    TextTrimStart,
+    TextTrimEnd,
+    TextTrim,
+    TextSplit,
+    TextJoin,
+    TextRepeat,
     TextSplitLines,
     TextFromInt,
+    TextToIntTry,
     BytesFromStrUtf8,
     BytesToStrUtf8,
     BytesLen,
     BytesAt,
     BytesSlice,
     BytesSha256Hex,
+    OptionIsSome,
+    OptionIsNone,
+    OptionUnwrapOr,
     ResultOk,
     ResultErr,
+    ResultIsOk,
+    ResultIsErr,
+    ResultUnwrapOr,
     ListNew,
     ListLen,
+    ListIsEmpty,
     ListPush,
     ListPop,
     ListTryPopOr,
@@ -4265,6 +4299,11 @@ enum RuntimeIntrinsic {
 
 fn lower_owner(owner: &AotOwnerArtifact) -> RuntimeOwnerPlan {
     RuntimeOwnerPlan {
+        package_id: if owner.package_id.is_empty() {
+            owner.owner_path.first().cloned().unwrap_or_default()
+        } else {
+            owner.package_id.clone()
+        },
         module_id: owner.module_id.clone(),
         owner_path: owner.owner_path.clone(),
         owner_name: owner.owner_name.clone(),
@@ -4329,12 +4368,21 @@ fn parse_lang_item_row(row: &str) -> Result<(String, String, Vec<String>), Strin
     ))
 }
 
+fn module_alias_scope_key(package_id: &str, module_id: &str) -> String {
+    format!("{package_id}|{module_id}")
+}
+
 fn build_module_aliases(
     artifact: &AotPackageArtifact,
 ) -> Result<BTreeMap<String, BTreeMap<String, Vec<String>>>, String> {
     let mut aliases = BTreeMap::<String, BTreeMap<String, Vec<String>>>::new();
     for module in &artifact.modules {
-        let module_aliases = aliases.entry(module.module_id.clone()).or_default();
+        let module_aliases = aliases
+            .entry(module_alias_scope_key(
+                &module.package_id,
+                &module.module_id,
+            ))
+            .or_default();
         for row in &module.directive_rows {
             let (module_id, kind, path, alias) = parse_module_directive_row(row)?;
             if module_id != module.module_id {
@@ -4399,9 +4447,13 @@ pub fn plan_from_artifact(artifact: &AotPackageArtifact) -> Result<RuntimePackag
         .map(|entrypoint| lower_entrypoint(entrypoint, &routines))
         .collect::<Result<Vec<_>, String>>()?;
     let plan = RuntimePackagePlan {
+        package_id: artifact.package_id.clone(),
         package_name: artifact.package_name.clone(),
         root_module_id: artifact.root_module_id.clone(),
         direct_deps: artifact.direct_deps.clone(),
+        direct_dep_ids: artifact.direct_dep_ids.clone(),
+        package_display_names: artifact.package_display_names.clone(),
+        package_direct_dep_ids: artifact.package_direct_dep_ids.clone(),
         runtime_requirements: artifact.runtime_requirements.clone(),
         module_aliases: build_module_aliases(artifact)?,
         opaque_family_types: build_opaque_family_types(artifact)?,
@@ -4429,12 +4481,14 @@ fn validate_runtime_rollup_handlers(plan: &RuntimePackagePlan) -> Result<(), Str
         for rollup in &routine.rollups {
             validate_runtime_rollup_handler_callable_path(
                 plan,
+                &routine.package_id,
                 &routine.module_id,
                 &rollup.handler_path,
             )?;
         }
         validate_runtime_rollup_handlers_in_statements(
             plan,
+            &routine.package_id,
             &routine.module_id,
             &routine.statements,
         )?;
@@ -4444,6 +4498,7 @@ fn validate_runtime_rollup_handlers(plan: &RuntimePackagePlan) -> Result<(), Str
 
 fn validate_runtime_rollup_handlers_in_statements(
     plan: &RuntimePackagePlan,
+    current_package_id: &str,
     current_module_id: &str,
     statements: &[ParsedStmt],
 ) -> Result<(), String> {
@@ -4453,6 +4508,7 @@ fn validate_runtime_rollup_handlers_in_statements(
                 for rollup in rollups {
                     validate_runtime_rollup_handler_callable_path(
                         plan,
+                        current_package_id,
                         current_module_id,
                         &rollup.handler_path,
                     )?;
@@ -4467,17 +4523,20 @@ fn validate_runtime_rollup_handlers_in_statements(
                 for rollup in rollups {
                     validate_runtime_rollup_handler_callable_path(
                         plan,
+                        current_package_id,
                         current_module_id,
                         &rollup.handler_path,
                     )?;
                 }
                 validate_runtime_rollup_handlers_in_statements(
                     plan,
+                    current_package_id,
                     current_module_id,
                     then_branch,
                 )?;
                 validate_runtime_rollup_handlers_in_statements(
                     plan,
+                    current_package_id,
                     current_module_id,
                     else_branch,
                 )?;
@@ -4486,11 +4545,17 @@ fn validate_runtime_rollup_handlers_in_statements(
                 for rollup in rollups {
                     validate_runtime_rollup_handler_callable_path(
                         plan,
+                        current_package_id,
                         current_module_id,
                         &rollup.handler_path,
                     )?;
                 }
-                validate_runtime_rollup_handlers_in_statements(plan, current_module_id, body)?;
+                validate_runtime_rollup_handlers_in_statements(
+                    plan,
+                    current_package_id,
+                    current_module_id,
+                    body,
+                )?;
             }
             ParsedStmt::Let { .. }
             | ParsedStmt::ReturnVoid
@@ -4724,56 +4789,138 @@ fn pop_runtime_call_frame(state: &mut RuntimeExecutionState) {
     state.call_stack.pop();
 }
 
-fn resolve_routine_index(
-    plan: &RuntimePackagePlan,
-    current_module_id: &str,
-    callable_path: &[String],
-) -> Option<usize> {
-    let (module_id, symbol_name) = match callable_path {
-        [] => return None,
-        [symbol_name] => (current_module_id.to_string(), symbol_name.clone()),
-        _ => (
-            callable_path[..callable_path.len() - 1].join("."),
-            callable_path.last()?.clone(),
-        ),
-    };
-    plan.routines
-        .iter()
-        .position(|routine| routine.module_id == module_id && routine.symbol_name == symbol_name)
-        .or_else(|| {
-            let prefixed_module = if module_id == plan.root_module_id
-                || module_id.starts_with(&(plan.root_module_id.clone() + "."))
-            {
-                module_id.clone()
-            } else {
-                format!("{}.{}", plan.root_module_id, module_id)
-            };
-            plan.routines.iter().position(|routine| {
-                routine.module_id == prefixed_module && routine.symbol_name == symbol_name
-            })
-        })
+fn current_package_name<'a>(
+    plan: &'a RuntimePackagePlan,
+    current_package_id: &str,
+) -> Option<&'a str> {
+    plan.package_display_names
+        .get(current_package_id)
+        .map(String::as_str)
 }
 
-fn resolve_routine_candidate_indices(
+fn resolve_visible_package_id_for_root<'a>(
+    plan: &'a RuntimePackagePlan,
+    current_package_id: &'a str,
+    root: &str,
+) -> Option<&'a str> {
+    if current_package_name(plan, current_package_id) == Some(root) {
+        return Some(current_package_id);
+    }
+    if let Some(package_id) = plan
+        .package_direct_dep_ids
+        .get(current_package_id)
+        .and_then(|deps| deps.get(root))
+    {
+        return Some(package_id.as_str());
+    }
+    None
+}
+
+fn resolve_routine_module_targets(
     plan: &RuntimePackagePlan,
+    current_package_id: &str,
     current_module_id: &str,
     callable_path: &[String],
-) -> Vec<usize> {
+) -> Vec<(String, String, String)> {
     let (module_id, symbol_name) = match callable_path {
         [] => return Vec::new(),
-        [symbol_name] => (current_module_id.to_string(), symbol_name.clone()),
+        [symbol_name] => {
+            return vec![(
+                current_package_id.to_string(),
+                current_module_id.to_string(),
+                symbol_name.clone(),
+            )];
+        }
         _ => (
             callable_path[..callable_path.len() - 1].join("."),
             callable_path.last().cloned().unwrap_or_default(),
         ),
     };
-    plan.routines
-        .iter()
-        .enumerate()
-        .filter_map(|(index, routine)| {
-            (routine.module_id == module_id && routine.symbol_name == symbol_name).then_some(index)
-        })
-        .collect()
+
+    let mut targets = Vec::new();
+    let mut seen = BTreeSet::new();
+    let root = callable_path
+        .first()
+        .map(String::as_str)
+        .unwrap_or_default();
+    if let Some(package_id) = resolve_visible_package_id_for_root(plan, current_package_id, root) {
+        let target = (
+            package_id.to_string(),
+            module_id.clone(),
+            symbol_name.clone(),
+        );
+        seen.insert(target.clone());
+        targets.push(target);
+        return targets;
+    }
+
+    let local_target = (
+        current_package_id.to_string(),
+        module_id.clone(),
+        symbol_name.clone(),
+    );
+    seen.insert(local_target.clone());
+    targets.push(local_target);
+
+    if let Some(package_name) = current_package_name(plan, current_package_id) {
+        let prefixed_module = if module_id == package_name
+            || module_id.starts_with(&(package_name.to_string() + "."))
+        {
+            module_id.clone()
+        } else {
+            format!("{package_name}.{module_id}")
+        };
+        let prefixed_target = (current_package_id.to_string(), prefixed_module, symbol_name);
+        if seen.insert(prefixed_target.clone()) {
+            targets.push(prefixed_target);
+        }
+    }
+
+    targets
+}
+
+fn resolve_routine_index(
+    plan: &RuntimePackagePlan,
+    current_package_id: &str,
+    current_module_id: &str,
+    callable_path: &[String],
+) -> Option<usize> {
+    for (package_id, module_id, symbol_name) in
+        resolve_routine_module_targets(plan, current_package_id, current_module_id, callable_path)
+    {
+        if let Some(index) = plan.routines.iter().position(|routine| {
+            routine.package_id == package_id
+                && routine.module_id == module_id
+                && routine.symbol_name == symbol_name
+        }) {
+            return Some(index);
+        }
+    }
+    None
+}
+
+fn resolve_routine_candidate_indices(
+    plan: &RuntimePackagePlan,
+    current_package_id: &str,
+    current_module_id: &str,
+    callable_path: &[String],
+) -> Vec<usize> {
+    let mut candidates = Vec::new();
+    let mut seen = BTreeSet::new();
+    for (package_id, module_id, symbol_name) in
+        resolve_routine_module_targets(plan, current_package_id, current_module_id, callable_path)
+    {
+        for (index, routine) in plan.routines.iter().enumerate() {
+            if routine.package_id == package_id
+                && routine.module_id == module_id
+                && routine.symbol_name == symbol_name
+                && seen.insert(index)
+            {
+                candidates.push(index);
+            }
+        }
+    }
+    candidates
 }
 
 fn resolve_method_candidate_indices_by_name(
@@ -4970,6 +5117,11 @@ fn resolve_runtime_intrinsic_path(callable_path: &[String]) -> Option<RuntimeInt
         ["std", "concurrent", "thread_id"] | ["std", "kernel", "concurrency", "thread_id"] => {
             Some(RuntimeIntrinsic::ConcurrentThreadId)
         }
+        ["std", "time", "monotonic_now_ms"] => Some(RuntimeIntrinsic::StdTimeMonotonicNowMs),
+        ["std", "kernel", "time", "monotonic_now_ms"] => Some(RuntimeIntrinsic::TimeMonotonicNowMs),
+        ["std", "time", "monotonic_now_ns"] | ["std", "kernel", "time", "monotonic_now_ns"] => {
+            Some(RuntimeIntrinsic::TimeMonotonicNowNs)
+        }
         ["std", "kernel", "concurrency", "task_done"] => Some(RuntimeIntrinsic::ConcurrentTaskDone),
         ["std", "kernel", "concurrency", "task_join"] => Some(RuntimeIntrinsic::ConcurrentTaskJoin),
         ["std", "kernel", "concurrency", "thread_done"] => {
@@ -5074,12 +5226,21 @@ fn resolve_runtime_intrinsic_path(callable_path: &[String]) -> Option<RuntimeInt
         ["std", "text", "ends_with"] | ["std", "kernel", "text", "text_ends_with"] => {
             Some(RuntimeIntrinsic::TextEndsWith)
         }
+        ["std", "text", "find"] => Some(RuntimeIntrinsic::TextFind),
+        ["std", "text", "contains"] => Some(RuntimeIntrinsic::TextContains),
+        ["std", "text", "trim_start"] => Some(RuntimeIntrinsic::TextTrimStart),
+        ["std", "text", "trim_end"] => Some(RuntimeIntrinsic::TextTrimEnd),
+        ["std", "text", "trim"] => Some(RuntimeIntrinsic::TextTrim),
+        ["std", "text", "split"] => Some(RuntimeIntrinsic::TextSplit),
+        ["std", "text", "join"] => Some(RuntimeIntrinsic::TextJoin),
+        ["std", "text", "repeat"] => Some(RuntimeIntrinsic::TextRepeat),
         ["std", "text", "split_lines"] | ["std", "kernel", "text", "text_split_lines"] => {
             Some(RuntimeIntrinsic::TextSplitLines)
         }
         ["std", "text", "from_int"] | ["std", "kernel", "text", "text_from_int"] => {
             Some(RuntimeIntrinsic::TextFromInt)
         }
+        ["std", "text", "to_int"] => Some(RuntimeIntrinsic::TextToIntTry),
         ["std", "bytes", "from_str_utf8"] | ["std", "kernel", "text", "bytes_from_str_utf8"] => {
             Some(RuntimeIntrinsic::BytesFromStrUtf8)
         }
@@ -5101,10 +5262,20 @@ fn resolve_runtime_intrinsic_path(callable_path: &[String]) -> Option<RuntimeInt
         ["std", "collections", "list", "new"] | ["std", "kernel", "collections", "list_new"] => {
             Some(RuntimeIntrinsic::ListNew)
         }
-        ["std", "kernel", "collections", "list_len"] => Some(RuntimeIntrinsic::ListLen),
-        ["std", "kernel", "collections", "list_push"] => Some(RuntimeIntrinsic::ListPush),
-        ["std", "kernel", "collections", "list_pop"] => Some(RuntimeIntrinsic::ListPop),
-        ["std", "kernel", "collections", "list_try_pop_or"] => Some(RuntimeIntrinsic::ListTryPopOr),
+        ["std", "collections", "list", "len"] | ["std", "kernel", "collections", "list_len"] => {
+            Some(RuntimeIntrinsic::ListLen)
+        }
+        ["std", "collections", "list", "is_empty"] => Some(RuntimeIntrinsic::ListIsEmpty),
+        ["std", "collections", "list", "push"] | ["std", "kernel", "collections", "list_push"] => {
+            Some(RuntimeIntrinsic::ListPush)
+        }
+        ["std", "collections", "list", "pop"] | ["std", "kernel", "collections", "list_pop"] => {
+            Some(RuntimeIntrinsic::ListPop)
+        }
+        ["std", "collections", "list", "try_pop_or"]
+        | ["std", "kernel", "collections", "list_try_pop_or"] => {
+            Some(RuntimeIntrinsic::ListTryPopOr)
+        }
         ["std", "kernel", "collections", "array_new"] => Some(RuntimeIntrinsic::ArrayNew),
         ["std", "kernel", "collections", "array_len"] => Some(RuntimeIntrinsic::ArrayLen),
         ["std", "kernel", "collections", "array_from_list"] => {
@@ -5118,8 +5289,79 @@ fn resolve_runtime_intrinsic_path(callable_path: &[String]) -> Option<RuntimeInt
         ["std", "kernel", "collections", "map_set"] => Some(RuntimeIntrinsic::MapSet),
         ["std", "kernel", "collections", "map_remove"] => Some(RuntimeIntrinsic::MapRemove),
         ["std", "kernel", "collections", "map_try_get_or"] => Some(RuntimeIntrinsic::MapTryGetOr),
+        ["std", "audio", "default_output"] | ["std", "kernel", "audio", "default_output"] => {
+            Some(RuntimeIntrinsic::AudioDefaultOutputTry)
+        }
+        ["std", "audio", "output_close"] | ["std", "kernel", "audio", "output_close"] => {
+            Some(RuntimeIntrinsic::AudioOutputClose)
+        }
+        ["std", "audio", "output_sample_rate_hz"]
+        | ["std", "kernel", "audio", "output_sample_rate_hz"] => {
+            Some(RuntimeIntrinsic::AudioOutputSampleRateHz)
+        }
+        ["std", "audio", "output_channels"] | ["std", "kernel", "audio", "output_channels"] => {
+            Some(RuntimeIntrinsic::AudioOutputChannels)
+        }
+        ["std", "audio", "buffer_load_wav"] | ["std", "kernel", "audio", "buffer_load_wav"] => {
+            Some(RuntimeIntrinsic::AudioBufferLoadWavTry)
+        }
+        ["std", "audio", "buffer_frames"] | ["std", "kernel", "audio", "buffer_frames"] => {
+            Some(RuntimeIntrinsic::AudioBufferFrames)
+        }
+        ["std", "audio", "buffer_channels"] | ["std", "kernel", "audio", "buffer_channels"] => {
+            Some(RuntimeIntrinsic::AudioBufferChannels)
+        }
+        ["std", "audio", "buffer_sample_rate_hz"]
+        | ["std", "kernel", "audio", "buffer_sample_rate_hz"] => {
+            Some(RuntimeIntrinsic::AudioBufferSampleRateHz)
+        }
+        ["std", "audio", "play_buffer"] | ["std", "kernel", "audio", "play_buffer"] => {
+            Some(RuntimeIntrinsic::AudioPlayBufferTry)
+        }
+        ["std", "audio", "output_set_gain_milli"]
+        | ["std", "kernel", "audio", "output_set_gain_milli"] => {
+            Some(RuntimeIntrinsic::AudioOutputSetGainMilli)
+        }
+        ["std", "audio", "stop"] | ["std", "kernel", "audio", "playback_stop"] => {
+            Some(RuntimeIntrinsic::AudioPlaybackStop)
+        }
+        ["std", "audio", "pause"] | ["std", "kernel", "audio", "playback_pause"] => {
+            Some(RuntimeIntrinsic::AudioPlaybackPause)
+        }
+        ["std", "audio", "resume"] | ["std", "kernel", "audio", "playback_resume"] => {
+            Some(RuntimeIntrinsic::AudioPlaybackResume)
+        }
+        ["std", "audio", "playing"] | ["std", "kernel", "audio", "playback_playing"] => {
+            Some(RuntimeIntrinsic::AudioPlaybackPlaying)
+        }
+        ["std", "audio", "paused"] | ["std", "kernel", "audio", "playback_paused"] => {
+            Some(RuntimeIntrinsic::AudioPlaybackPaused)
+        }
+        ["std", "audio", "finished"] | ["std", "kernel", "audio", "playback_finished"] => {
+            Some(RuntimeIntrinsic::AudioPlaybackFinished)
+        }
+        ["std", "audio", "set_gain_milli"]
+        | ["std", "kernel", "audio", "playback_set_gain_milli"] => {
+            Some(RuntimeIntrinsic::AudioPlaybackSetGainMilli)
+        }
+        ["std", "audio", "set_looping"] | ["std", "kernel", "audio", "playback_set_looping"] => {
+            Some(RuntimeIntrinsic::AudioPlaybackSetLooping)
+        }
+        ["std", "audio", "looping"] | ["std", "kernel", "audio", "playback_looping"] => {
+            Some(RuntimeIntrinsic::AudioPlaybackLooping)
+        }
+        ["std", "audio", "position_frames"]
+        | ["std", "kernel", "audio", "playback_position_frames"] => {
+            Some(RuntimeIntrinsic::AudioPlaybackPositionFrames)
+        }
+        ["std", "option", "is_some"] => Some(RuntimeIntrinsic::OptionIsSome),
+        ["std", "option", "is_none"] => Some(RuntimeIntrinsic::OptionIsNone),
+        ["std", "option", "unwrap_or"] => Some(RuntimeIntrinsic::OptionUnwrapOr),
         ["Result", "Ok"] | ["std", "result", "Result", "Ok"] => Some(RuntimeIntrinsic::ResultOk),
         ["Result", "Err"] | ["std", "result", "Result", "Err"] => Some(RuntimeIntrinsic::ResultErr),
+        ["std", "result", "is_ok"] => Some(RuntimeIntrinsic::ResultIsOk),
+        ["std", "result", "is_err"] => Some(RuntimeIntrinsic::ResultIsErr),
+        ["std", "result", "unwrap_or"] => Some(RuntimeIntrinsic::ResultUnwrapOr),
         _ => None,
     }
 }
@@ -5613,10 +5855,10 @@ fn read_runtime_local_value(scopes: &[RuntimeScope], name: &str) -> Result<Runti
     Ok(local.value.clone())
 }
 
-fn lookup_local_mut_by_handle<'a>(
-    scopes: &'a mut [RuntimeScope],
+fn lookup_local_mut_by_handle(
+    scopes: &mut [RuntimeScope],
     handle: RuntimeLocalHandle,
-) -> Option<&'a mut RuntimeLocal> {
+) -> Option<&mut RuntimeLocal> {
     scopes.iter_mut().rev().find_map(|scope| {
         scope
             .locals
@@ -5625,10 +5867,10 @@ fn lookup_local_mut_by_handle<'a>(
     })
 }
 
-fn lookup_local_with_name_by_handle<'a>(
-    scopes: &'a [RuntimeScope],
+fn lookup_local_with_name_by_handle(
+    scopes: &[RuntimeScope],
     handle: RuntimeLocalHandle,
-) -> Option<(&'a str, &'a RuntimeLocal)> {
+) -> Option<(&str, &RuntimeLocal)> {
     scopes.iter().rev().find_map(|scope| {
         scope
             .locals
@@ -5641,6 +5883,8 @@ fn push_runtime_rollup_frame(
     state: &mut RuntimeExecutionState,
     rollups: &[ParsedPageRollup],
     scopes: &[RuntimeScope],
+    current_package_id: &str,
+    current_module_id: &str,
 ) {
     if rollups.is_empty() {
         return;
@@ -5660,6 +5904,8 @@ fn push_runtime_rollup_frame(
         .collect::<BTreeMap<_, _>>();
     state.rollup_frames.push(RuntimeRollupFrame {
         rollups: rollups.to_vec(),
+        current_package_id: current_package_id.to_string(),
+        current_module_id: current_module_id.to_string(),
         owner_scope_depth: scopes.len(),
         subjects,
     });
@@ -5748,17 +5994,46 @@ fn apply_runtime_availability_attachments(
     }
 }
 
-fn owner_state_key(owner_path: &[String]) -> String {
-    owner_path.join(".")
+fn owner_state_key(package_id: &str, owner_path: &[String]) -> String {
+    format!("{package_id}|{}", owner_path.join("."))
+}
+
+fn parse_owner_state_key(owner_key: &str) -> (String, Vec<String>) {
+    if let Some((package_id, owner_path)) = owner_key.split_once('|') {
+        return (
+            package_id.to_string(),
+            owner_path
+                .split('.')
+                .filter(|segment| !segment.is_empty())
+                .map(ToString::to_string)
+                .collect(),
+        );
+    }
+    let owner_path = owner_key
+        .split('.')
+        .filter(|segment| !segment.is_empty())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    (owner_path.first().cloned().unwrap_or_default(), owner_path)
 }
 
 fn lookup_runtime_owner_plan<'a>(
     plan: &'a RuntimePackagePlan,
+    package_id: &str,
     owner_path: &[String],
 ) -> Option<&'a RuntimeOwnerPlan> {
     plan.owners
         .iter()
-        .find(|owner| owner.owner_path == owner_path)
+        .find(|owner| owner.package_id == package_id && owner.owner_path == owner_path)
+}
+
+fn resolve_visible_package_id_for_path<'a>(
+    plan: &'a RuntimePackagePlan,
+    current_package_id: &'a str,
+    path: &[String],
+) -> Option<&'a str> {
+    let root = path.first().map(String::as_str)?;
+    resolve_visible_package_id_for_root(plan, current_package_id, root)
 }
 
 fn attached_object_is_visible(scopes: &[RuntimeScope], object_path: &[String], name: &str) -> bool {
@@ -5783,12 +6058,12 @@ fn collect_active_owner_keys_from_scopes(scopes: &[RuntimeScope]) -> Vec<String>
                 RuntimeValue::OwnerHandle(owner_key) => {
                     active.insert(owner_key.clone());
                 }
-                RuntimeValue::Ref(reference) => match &reference.target {
-                    RuntimeReferenceTarget::OwnerObject { owner_key, .. } => {
+                RuntimeValue::Ref(reference) => {
+                    if let RuntimeReferenceTarget::OwnerObject { owner_key, .. } = &reference.target
+                    {
                         active.insert(owner_key.clone());
                     }
-                    _ => {}
-                },
+                }
                 _ => {}
             }
         }
@@ -5833,6 +6108,7 @@ fn activate_attached_runtime_owners_for_current_scope(
     scopes: &mut Vec<RuntimeScope>,
     inherited_active_owner_keys: &[String],
     plan: &RuntimePackagePlan,
+    current_package_id: &str,
     state: &mut RuntimeExecutionState,
 ) -> Result<(), String> {
     let attached_owners = scopes
@@ -5841,17 +6117,24 @@ fn activate_attached_runtime_owners_for_current_scope(
         .attached_owners
         .clone();
     for attached_owner in attached_owners {
-        let owner_key = owner_state_key(&attached_owner.owner_path);
+        let Some(owner_package_id) = resolve_visible_package_id_for_path(
+            plan,
+            current_package_id,
+            &attached_owner.owner_path,
+        ) else {
+            continue;
+        };
+        let owner_key = owner_state_key(owner_package_id, &attached_owner.owner_path);
         if !owner_key_active_on_execution_path(scopes, inherited_active_owner_keys, &owner_key) {
             continue;
         }
-        let owner =
-            lookup_runtime_owner_plan(plan, &attached_owner.owner_path).ok_or_else(|| {
-                format!(
-                    "runtime availability attachment `{}` resolves to an unknown owner",
-                    attached_owner.owner_path.join(".")
-                )
-            })?;
+        let owner = lookup_runtime_owner_plan(plan, owner_package_id, &attached_owner.owner_path)
+            .ok_or_else(|| {
+            format!(
+                "runtime availability attachment `{}` resolves to an unknown owner",
+                attached_owner.owner_path.join(".")
+            )
+        })?;
         let binding = if attached_owner.local_name == owner.owner_name {
             None
         } else {
@@ -5866,6 +6149,7 @@ fn activate_attached_runtime_objects_for_current_scope(
     scopes: &mut Vec<RuntimeScope>,
     inherited_active_owner_keys: &[String],
     plan: &RuntimePackagePlan,
+    current_package_id: &str,
     state: &mut RuntimeExecutionState,
 ) -> Result<(), String> {
     let attached_objects = scopes
@@ -5874,11 +6158,19 @@ fn activate_attached_runtime_objects_for_current_scope(
         .attached_objects
         .clone();
     for attached_object in attached_objects {
+        let attached_package_id = resolve_visible_package_id_for_path(
+            plan,
+            current_package_id,
+            &attached_object.object_path,
+        );
         let matches = plan
             .owners
             .iter()
             .filter_map(|owner| {
-                let owner_key = owner_state_key(&owner.owner_path);
+                if attached_package_id != Some(owner.package_id.as_str()) {
+                    return None;
+                }
+                let owner_key = owner_state_key(&owner.package_id, &owner.owner_path);
                 if !owner_key_active_on_execution_path(
                     scopes,
                     inherited_active_owner_keys,
@@ -5906,7 +6198,8 @@ fn activate_attached_runtime_objects_for_current_scope(
             continue;
         };
         let scope_depth = scopes.len().saturating_sub(1);
-        let inherited_value = inherited_attached_object_value(scopes, plan, &attached_object)?;
+        let inherited_value =
+            inherited_attached_object_value(scopes, plan, current_package_id, &attached_object)?;
         let scope = scopes
             .last_mut()
             .ok_or_else(|| "runtime scope stack is empty".to_string())?;
@@ -5938,17 +6231,21 @@ fn activate_attached_runtime_objects_for_current_scope(
 
 fn owner_object_matches_attachment(
     plan: &RuntimePackagePlan,
+    current_package_id: &str,
     owner_key: &str,
     object_name: &str,
     attached_object: &RuntimeAttachedObject,
 ) -> Result<bool, String> {
-    let owner_path = owner_key
-        .split('.')
-        .map(ToString::to_string)
-        .collect::<Vec<_>>();
-    let owner = lookup_runtime_owner_plan(plan, &owner_path).ok_or_else(|| {
-        format!("runtime owner `{owner_key}` is not declared in the package plan")
-    })?;
+    let (owner_package_id, owner_path) = parse_owner_state_key(owner_key);
+    let attached_package_id =
+        resolve_visible_package_id_for_path(plan, current_package_id, &attached_object.object_path);
+    if attached_package_id != Some(owner_package_id.as_str()) {
+        return Ok(false);
+    }
+    let owner =
+        lookup_runtime_owner_plan(plan, &owner_package_id, &owner_path).ok_or_else(|| {
+            format!("runtime owner `{owner_key}` is not declared in the package plan")
+        })?;
     let object = lookup_runtime_owner_object_plan(owner, object_name)?;
     Ok(object.local_name == attached_object.local_name
         && object.type_path == attached_object.object_path)
@@ -5957,6 +6254,7 @@ fn owner_object_matches_attachment(
 fn inherited_attached_object_value(
     scopes: &[RuntimeScope],
     plan: &RuntimePackagePlan,
+    current_package_id: &str,
     attached_object: &RuntimeAttachedObject,
 ) -> Result<Option<RuntimeValue>, String> {
     let mut matches = Vec::new();
@@ -5978,7 +6276,13 @@ fn inherited_attached_object_value(
         if !members.is_empty() {
             continue;
         }
-        if owner_object_matches_attachment(plan, owner_key, object_name, attached_object)? {
+        if owner_object_matches_attachment(
+            plan,
+            current_package_id,
+            owner_key,
+            object_name,
+            attached_object,
+        )? {
             let pair = (owner_key.clone(), object_name.clone(), local.value.clone());
             if !matches.iter().any(|(seen_owner, seen_object, _)| {
                 seen_owner == owner_key && seen_object == object_name
@@ -6032,10 +6336,11 @@ fn lookup_runtime_owner_object_plan<'a>(
 
 fn realize_owner_object_value(
     plan: &RuntimePackagePlan,
+    owner_package_id: &str,
     owner_path: &[String],
     object_name: &str,
 ) -> Result<RuntimeValue, String> {
-    let owner = lookup_runtime_owner_plan(plan, owner_path).ok_or_else(|| {
+    let owner = lookup_runtime_owner_plan(plan, owner_package_id, owner_path).ok_or_else(|| {
         format!(
             "runtime owner `{}` is not declared in the package plan",
             owner_path.join(".")
@@ -6063,6 +6368,7 @@ fn resolve_routine_index_by_key(
 fn execute_owner_object_lifecycle_hook(
     scopes: &mut Vec<RuntimeScope>,
     plan: &RuntimePackagePlan,
+    current_package_id: &str,
     current_module_id: &str,
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
@@ -6071,16 +6377,14 @@ fn execute_owner_object_lifecycle_hook(
     owner_key: &str,
     object_name: &str,
 ) -> Result<(), String> {
-    let owner_path = owner_key
-        .split('.')
-        .map(ToString::to_string)
-        .collect::<Vec<_>>();
-    let owner = lookup_runtime_owner_plan(plan, &owner_path).ok_or_else(|| {
-        format!(
-            "runtime owner `{}` is not declared in the package plan",
-            owner_key
-        )
-    })?;
+    let (owner_package_id, owner_path) = parse_owner_state_key(owner_key);
+    let owner =
+        lookup_runtime_owner_plan(plan, &owner_package_id, &owner_path).ok_or_else(|| {
+            format!(
+                "runtime owner `{}` is not declared in the package plan",
+                owner_key
+            )
+        })?;
     let object = lookup_runtime_owner_object_plan(owner, object_name)?;
 
     let (current_value, activation_context, needs_init, needs_resume) = {
@@ -6097,7 +6401,8 @@ fn execute_owner_object_lifecycle_hook(
                 owner_state.pending_init.contains(object_name),
             ),
             None => {
-                let value = realize_owner_object_value(plan, &owner_path, object_name)?;
+                let value =
+                    realize_owner_object_value(plan, &owner_package_id, &owner_path, object_name)?;
                 owner_state
                     .objects
                     .insert(object_name.to_string(), value.clone());
@@ -6204,10 +6509,7 @@ fn execute_owner_object_lifecycle_hook(
                 object_name
             )
         })?;
-        let owner_state = state
-            .owners
-            .entry(owner_key.to_string())
-            .or_insert_with(RuntimeOwnerState::default);
+        let owner_state = state.owners.entry(owner_key.to_string()).or_default();
         owner_state
             .objects
             .insert(object_name.to_string(), updated_value);
@@ -6217,6 +6519,7 @@ fn execute_owner_object_lifecycle_hook(
         evaluate_owner_exit_checkpoints(
             &owner_keys,
             plan,
+            current_package_id,
             current_module_id,
             aliases,
             type_bindings,
@@ -6241,6 +6544,7 @@ fn execute_owner_object_lifecycle_hook(
 fn owner_object_root_value(
     scopes: &mut Vec<RuntimeScope>,
     plan: &RuntimePackagePlan,
+    current_package_id: &str,
     current_module_id: &str,
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
@@ -6249,10 +6553,7 @@ fn owner_object_root_value(
     owner_key: &str,
     object_name: &str,
 ) -> Result<RuntimeValue, String> {
-    let owner_path = owner_key
-        .split('.')
-        .map(ToString::to_string)
-        .collect::<Vec<_>>();
+    let (_owner_package_id, owner_path) = parse_owner_state_key(owner_key);
     let owner_state = state
         .owners
         .get(owner_key)
@@ -6264,6 +6565,7 @@ fn owner_object_root_value(
     execute_owner_object_lifecycle_hook(
         scopes,
         plan,
+        current_package_id,
         current_module_id,
         aliases,
         type_bindings,
@@ -6342,6 +6644,7 @@ fn release_scope_owner_activations(state: &mut RuntimeExecutionState, owner_keys
 fn evaluate_owner_exit_checkpoints(
     owner_keys: &[String],
     plan: &RuntimePackagePlan,
+    current_package_id: &str,
     current_module_id: &str,
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
@@ -6354,11 +6657,9 @@ fn evaluate_owner_exit_checkpoints(
         if !unique_keys.insert(owner_key.clone()) {
             continue;
         }
-        let owner_path = owner_key
-            .split('.')
-            .map(ToString::to_string)
-            .collect::<Vec<_>>();
-        let Some(owner) = lookup_runtime_owner_plan(plan, &owner_path).cloned() else {
+        let (owner_package_id, owner_path) = parse_owner_state_key(owner_key);
+        let Some(owner) = lookup_runtime_owner_plan(plan, &owner_package_id, &owner_path).cloned()
+        else {
             return Err(format!(
                 "runtime owner `{}` is not declared in the package plan",
                 owner_key
@@ -6376,6 +6677,7 @@ fn evaluate_owner_exit_checkpoints(
             let condition = eval_expr(
                 &owner_exit.condition,
                 plan,
+                current_package_id,
                 current_module_id,
                 &mut exit_scopes,
                 aliases,
@@ -6390,10 +6692,7 @@ fn evaluate_owner_exit_checkpoints(
             }
         }
         if let Some(owner_exit) = selected_exit {
-            let owner_state = state
-                .owners
-                .entry(owner_key.clone())
-                .or_insert_with(RuntimeOwnerState::default);
+            let owner_state = state.owners.entry(owner_key.clone()).or_default();
             owner_state
                 .objects
                 .retain(|name, _| owner_exit.holds.iter().any(|hold| hold == name));
@@ -6535,6 +6834,7 @@ fn runtime_reference_members(target: &RuntimeReferenceTarget) -> &[String] {
 fn runtime_reference_root_value(
     scopes: &mut Vec<RuntimeScope>,
     plan: &RuntimePackagePlan,
+    current_package_id: &str,
     current_module_id: &str,
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
@@ -6558,6 +6858,7 @@ fn runtime_reference_root_value(
         } => owner_object_root_value(
             scopes,
             plan,
+            current_package_id,
             current_module_id,
             aliases,
             type_bindings,
@@ -6646,6 +6947,7 @@ fn assign_member_chain(
 fn read_runtime_reference(
     scopes: &mut Vec<RuntimeScope>,
     plan: &RuntimePackagePlan,
+    current_package_id: &str,
     current_module_id: &str,
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
@@ -6656,6 +6958,7 @@ fn read_runtime_reference(
     let mut value = runtime_reference_root_value(
         scopes,
         plan,
+        current_package_id,
         current_module_id,
         aliases,
         type_bindings,
@@ -6672,6 +6975,7 @@ fn read_runtime_reference(
 fn write_runtime_reference(
     scopes: &mut Vec<RuntimeScope>,
     plan: &RuntimePackagePlan,
+    current_package_id: &str,
     current_module_id: &str,
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
@@ -6689,6 +6993,7 @@ fn write_runtime_reference(
             let _ = runtime_reference_root_value(
                 scopes,
                 plan,
+                current_package_id,
                 current_module_id,
                 aliases,
                 type_bindings,
@@ -6702,6 +7007,7 @@ fn write_runtime_reference(
         let root = runtime_reference_root_value(
             scopes,
             plan,
+            current_package_id,
             current_module_id,
             aliases,
             type_bindings,
@@ -6725,10 +7031,7 @@ fn write_runtime_reference(
             object_name,
             ..
         } => {
-            let owner_state = state
-                .owners
-                .entry(owner_key.clone())
-                .or_insert_with(RuntimeOwnerState::default);
+            let owner_state = state.owners.entry(owner_key.clone()).or_default();
             owner_state
                 .objects
                 .insert(object_name.clone(), updated_root);
@@ -6739,6 +7042,7 @@ fn write_runtime_reference(
             evaluate_owner_exit_checkpoints(
                 &active_owners,
                 plan,
+                current_package_id,
                 current_module_id,
                 aliases,
                 type_bindings,
@@ -6956,6 +7260,15 @@ fn arcana_window_id_record(id: i64) -> RuntimeValue {
     fields.insert("value".to_string(), RuntimeValue::Int(id));
     RuntimeValue::Record {
         name: "arcana_desktop.types.WindowId".to_string(),
+        fields,
+    }
+}
+
+fn std_types_core_monotonic_time_ms_record(value: i64) -> RuntimeValue {
+    let mut fields = BTreeMap::new();
+    fields.insert("value".to_string(), RuntimeValue::Int(value));
+    RuntimeValue::Record {
+        name: "std.types.core.MonotonicTimeMs".to_string(),
         fields,
     }
 }
@@ -9461,6 +9774,137 @@ fn runtime_behavior_step(
     Ok(0)
 }
 
+fn runtime_text_is_space_byte(byte: i64) -> bool {
+    matches!(byte, 32 | 9 | 10 | 13)
+}
+
+fn runtime_text_find(
+    host: &mut dyn RuntimeHost,
+    text: &str,
+    start: i64,
+    needle: &str,
+) -> Result<i64, String> {
+    let total = host.text_len_bytes(text)?;
+    let needle_len = host.text_len_bytes(needle)?;
+    let mut index = start.max(0);
+    if needle_len == 0 {
+        return Ok(index.min(total));
+    }
+    while index + needle_len <= total {
+        if host.text_slice_bytes(text, index as usize, (index + needle_len) as usize)? == needle {
+            return Ok(index);
+        }
+        index += 1;
+    }
+    Ok(-1)
+}
+
+fn runtime_text_trim_start(host: &mut dyn RuntimeHost, text: &str) -> Result<String, String> {
+    let total = host.text_len_bytes(text)?;
+    let mut index = 0;
+    while index < total && runtime_text_is_space_byte(host.text_byte_at(text, index as usize)?) {
+        index += 1;
+    }
+    host.text_slice_bytes(text, index as usize, total as usize)
+}
+
+fn runtime_text_trim_end(host: &mut dyn RuntimeHost, text: &str) -> Result<String, String> {
+    let mut end = host.text_len_bytes(text)?;
+    while end > 0 && runtime_text_is_space_byte(host.text_byte_at(text, (end - 1) as usize)?) {
+        end -= 1;
+    }
+    host.text_slice_bytes(text, 0, end as usize)
+}
+
+fn runtime_text_trim(host: &mut dyn RuntimeHost, text: &str) -> Result<String, String> {
+    let trimmed_start = runtime_text_trim_start(host, text)?;
+    runtime_text_trim_end(host, &trimmed_start)
+}
+
+fn runtime_text_split(
+    host: &mut dyn RuntimeHost,
+    text: &str,
+    delim: &str,
+) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    let total = host.text_len_bytes(text)?;
+    let delim_len = host.text_len_bytes(delim)?;
+    if delim_len == 0 {
+        out.push(host.text_slice_bytes(text, 0, total as usize)?);
+        return Ok(out);
+    }
+    let mut start = 0;
+    while start <= total {
+        let next = runtime_text_find(host, text, start, delim)?;
+        if next < 0 {
+            out.push(host.text_slice_bytes(text, start as usize, total as usize)?);
+            return Ok(out);
+        }
+        out.push(host.text_slice_bytes(text, start as usize, next as usize)?);
+        start = next + delim_len;
+    }
+    Ok(out)
+}
+
+fn runtime_text_join(parts: Vec<String>, delim: &str) -> String {
+    let mut out = String::new();
+    let mut first = true;
+    for part in parts {
+        if first {
+            out = part;
+            first = false;
+        } else {
+            out.push_str(delim);
+            out.push_str(&part);
+        }
+    }
+    out
+}
+
+fn runtime_text_repeat(text: &str, count: i64) -> String {
+    if count <= 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    for _ in 0..count {
+        out.push_str(text);
+    }
+    out
+}
+
+fn runtime_text_to_int(
+    host: &mut dyn RuntimeHost,
+    text: &str,
+) -> Result<Result<i64, String>, String> {
+    let value = runtime_text_trim(host, text)?;
+    let total = host.text_len_bytes(&value)?;
+    if total == 0 {
+        return Ok(Err("expected integer text".to_string()));
+    }
+    let mut sign = 1;
+    let mut index = 0;
+    let first = host.text_byte_at(&value, 0)?;
+    if first == 45 {
+        sign = -1;
+        index = 1;
+    } else if first == 43 {
+        index = 1;
+    }
+    if index >= total {
+        return Ok(Err("expected integer digits".to_string()));
+    }
+    let mut out = 0i64;
+    while index < total {
+        let byte = host.text_byte_at(&value, index as usize)?;
+        if !(48..=57).contains(&byte) {
+            return Ok(Err("invalid digit in integer text".to_string()));
+        }
+        out = out * 10 + (byte - 48);
+        index += 1;
+    }
+    Ok(Ok(out * sign))
+}
+
 fn expect_single_arg(mut args: Vec<RuntimeValue>, name: &str) -> Result<RuntimeValue, String> {
     if args.len() != 1 {
         return Err(format!("{name} expects one argument"));
@@ -9472,6 +9916,7 @@ fn collect_call_args(
     args: &[ParsedPhraseArg],
     attached: &[ParsedHeaderAttachment],
     plan: &RuntimePackagePlan,
+    current_package_id: &str,
     current_module_id: &str,
     scopes: &mut Vec<RuntimeScope>,
     aliases: &BTreeMap<String, Vec<String>>,
@@ -9488,6 +9933,7 @@ fn collect_call_args(
                 value: eval_expr(
                     &arg.value,
                     plan,
+                    current_package_id,
                     current_module_id,
                     scopes,
                     aliases,
@@ -9505,6 +9951,7 @@ fn collect_call_args(
                 eval_expr(
                     value,
                     plan,
+                    current_package_id,
                     current_module_id,
                     scopes,
                     aliases,
@@ -9518,6 +9965,7 @@ fn collect_call_args(
                 eval_expr(
                     expr,
                     plan,
+                    current_package_id,
                     current_module_id,
                     scopes,
                     aliases,
@@ -9935,14 +10383,10 @@ fn expr_to_assign_target(expr: &ParsedExpr) -> Option<ParsedAssignTarget> {
             index: (**index).clone(),
         }),
         ParsedExpr::Generic { expr, .. } => expr_to_assign_target(expr),
-        ParsedExpr::Unary { op, expr }
-            if matches!(
-                op,
-                ParsedUnaryOp::BorrowRead | ParsedUnaryOp::BorrowMut | ParsedUnaryOp::Deref
-            ) =>
-        {
-            expr_to_assign_target(expr)
-        }
+        ParsedExpr::Unary {
+            op: ParsedUnaryOp::BorrowRead | ParsedUnaryOp::BorrowMut | ParsedUnaryOp::Deref,
+            expr,
+        } => expr_to_assign_target(expr),
         _ => None,
     }
 }
@@ -10052,6 +10496,7 @@ fn resolve_assign_target_place(
 fn read_assign_target_value(
     scopes: &mut Vec<RuntimeScope>,
     plan: &RuntimePackagePlan,
+    current_package_id: &str,
     current_module_id: &str,
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
@@ -10063,6 +10508,7 @@ fn read_assign_target_value(
     read_runtime_reference(
         scopes,
         plan,
+        current_package_id,
         current_module_id,
         aliases,
         type_bindings,
@@ -10078,6 +10524,7 @@ fn read_assign_target_value(
 fn write_assign_target_value(
     scopes: &mut Vec<RuntimeScope>,
     plan: &RuntimePackagePlan,
+    current_package_id: &str,
     current_module_id: &str,
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
@@ -10095,6 +10542,7 @@ fn write_assign_target_value(
     write_runtime_reference(
         scopes,
         plan,
+        current_package_id,
         current_module_id,
         aliases,
         type_bindings,
@@ -10114,6 +10562,7 @@ fn assign_runtime_index_value(
     value: RuntimeValue,
     scopes: &mut Vec<RuntimeScope>,
     plan: &RuntimePackagePlan,
+    current_package_id: &str,
     current_module_id: &str,
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
@@ -10124,6 +10573,7 @@ fn assign_runtime_index_value(
         base,
         scopes,
         plan,
+        current_package_id,
         current_module_id,
         aliases,
         type_bindings,
@@ -10151,6 +10601,7 @@ fn assign_runtime_index_value(
 fn read_assign_target_value_runtime(
     target: &ParsedAssignTarget,
     plan: &RuntimePackagePlan,
+    current_package_id: &str,
     current_module_id: &str,
     scopes: &mut Vec<RuntimeScope>,
     aliases: &BTreeMap<String, Vec<String>>,
@@ -10163,6 +10614,7 @@ fn read_assign_target_value_runtime(
             read_assign_target_value_runtime(
                 target,
                 plan,
+                current_package_id,
                 current_module_id,
                 scopes,
                 aliases,
@@ -10173,6 +10625,7 @@ fn read_assign_target_value_runtime(
             eval_expr(
                 index,
                 plan,
+                current_package_id,
                 current_module_id,
                 scopes,
                 aliases,
@@ -10183,6 +10636,7 @@ fn read_assign_target_value_runtime(
             .map_err(runtime_eval_message)?,
             scopes,
             plan,
+            current_package_id,
             current_module_id,
             aliases,
             type_bindings,
@@ -10192,6 +10646,7 @@ fn read_assign_target_value_runtime(
         _ => read_assign_target_value(
             scopes,
             plan,
+            current_package_id,
             current_module_id,
             aliases,
             type_bindings,
@@ -10206,6 +10661,7 @@ fn write_assign_target_value_runtime(
     target: &ParsedAssignTarget,
     value: RuntimeValue,
     plan: &RuntimePackagePlan,
+    current_package_id: &str,
     current_module_id: &str,
     scopes: &mut Vec<RuntimeScope>,
     aliases: &BTreeMap<String, Vec<String>>,
@@ -10222,6 +10678,7 @@ fn write_assign_target_value_runtime(
                 read_assign_target_value_runtime(
                     base_target,
                     plan,
+                    current_package_id,
                     current_module_id,
                     scopes,
                     aliases,
@@ -10232,6 +10689,7 @@ fn write_assign_target_value_runtime(
                 eval_expr(
                     index,
                     plan,
+                    current_package_id,
                     current_module_id,
                     scopes,
                     aliases,
@@ -10243,6 +10701,7 @@ fn write_assign_target_value_runtime(
                 value,
                 scopes,
                 plan,
+                current_package_id,
                 current_module_id,
                 aliases,
                 type_bindings,
@@ -10253,6 +10712,7 @@ fn write_assign_target_value_runtime(
                 base_target,
                 updated,
                 plan,
+                current_package_id,
                 current_module_id,
                 scopes,
                 aliases,
@@ -10264,6 +10724,7 @@ fn write_assign_target_value_runtime(
         _ => write_assign_target_value(
             scopes,
             plan,
+            current_package_id,
             current_module_id,
             aliases,
             type_bindings,
@@ -10370,6 +10831,7 @@ fn intrinsic_take_arg_indices(intrinsic: RuntimeIntrinsic) -> &'static [usize] {
 fn write_back_call_args(
     scopes: &mut Vec<RuntimeScope>,
     plan: &RuntimePackagePlan,
+    current_package_id: &str,
     current_module_id: &str,
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
@@ -10398,6 +10860,7 @@ fn write_back_call_args(
         write_assign_target_value(
             scopes,
             plan,
+            current_package_id,
             current_module_id,
             aliases,
             type_bindings,
@@ -10427,6 +10890,7 @@ fn consume_take_call_args(
 fn write_back_bound_args(
     scopes: &mut Vec<RuntimeScope>,
     plan: &RuntimePackagePlan,
+    current_package_id: &str,
     current_module_id: &str,
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
@@ -10458,6 +10922,7 @@ fn write_back_bound_args(
         write_assign_target_value(
             scopes,
             plan,
+            current_package_id,
             current_module_id,
             aliases,
             type_bindings,
@@ -10512,6 +10977,7 @@ fn eval_runtime_member_value(
     member: &str,
     scopes: &mut Vec<RuntimeScope>,
     plan: &RuntimePackagePlan,
+    current_package_id: &str,
     current_module_id: &str,
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
@@ -10523,6 +10989,7 @@ fn eval_runtime_member_value(
             let value = read_runtime_reference(
                 scopes,
                 plan,
+                current_package_id,
                 current_module_id,
                 aliases,
                 type_bindings,
@@ -10540,6 +11007,7 @@ fn read_runtime_value_if_ref(
     value: RuntimeValue,
     scopes: &mut Vec<RuntimeScope>,
     plan: &RuntimePackagePlan,
+    current_package_id: &str,
     current_module_id: &str,
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
@@ -10550,6 +11018,7 @@ fn read_runtime_value_if_ref(
         RuntimeValue::Ref(reference) => read_runtime_reference(
             scopes,
             plan,
+            current_package_id,
             current_module_id,
             aliases,
             type_bindings,
@@ -10603,6 +11072,7 @@ fn eval_runtime_index_value(
     index: RuntimeValue,
     scopes: &mut Vec<RuntimeScope>,
     plan: &RuntimePackagePlan,
+    current_package_id: &str,
     current_module_id: &str,
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
@@ -10613,6 +11083,7 @@ fn eval_runtime_index_value(
         base,
         scopes,
         plan,
+        current_package_id,
         current_module_id,
         aliases,
         type_bindings,
@@ -10648,6 +11119,7 @@ fn eval_runtime_slice_value(
     inclusive_end: bool,
     scopes: &mut Vec<RuntimeScope>,
     plan: &RuntimePackagePlan,
+    current_package_id: &str,
     current_module_id: &str,
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
@@ -10658,6 +11130,7 @@ fn eval_runtime_slice_value(
         base,
         scopes,
         plan,
+        current_package_id,
         current_module_id,
         aliases,
         type_bindings,
@@ -10722,6 +11195,7 @@ fn eval_runtime_slice_value(
 fn eval_optional_runtime_int_expr(
     expr: Option<&ParsedExpr>,
     plan: &RuntimePackagePlan,
+    current_package_id: &str,
     current_module_id: &str,
     scopes: &mut Vec<RuntimeScope>,
     aliases: &BTreeMap<String, Vec<String>>,
@@ -10730,30 +11204,31 @@ fn eval_optional_runtime_int_expr(
     host: &mut dyn RuntimeHost,
     context: &str,
 ) -> RuntimeEvalResult<Option<i64>> {
-    Ok(expr
-        .map(|expr| {
-            expect_int(
-                eval_expr(
-                    expr,
-                    plan,
-                    current_module_id,
-                    scopes,
-                    aliases,
-                    type_bindings,
-                    state,
-                    host,
-                )?,
-                context,
-            )
-            .map_err(RuntimeEvalSignal::from)
-        })
-        .transpose()?)
+    expr.map(|expr| {
+        expect_int(
+            eval_expr(
+                expr,
+                plan,
+                current_package_id,
+                current_module_id,
+                scopes,
+                aliases,
+                type_bindings,
+                state,
+                host,
+            )?,
+            context,
+        )
+        .map_err(RuntimeEvalSignal::from)
+    })
+    .transpose()
 }
 
 fn eval_match_expr(
     subject: &ParsedExpr,
     arms: &[ParsedMatchArm],
     plan: &RuntimePackagePlan,
+    current_package_id: &str,
     current_module_id: &str,
     scopes: &mut Vec<RuntimeScope>,
     aliases: &BTreeMap<String, Vec<String>>,
@@ -10764,6 +11239,7 @@ fn eval_match_expr(
     let subject = eval_expr(
         subject,
         plan,
+        current_package_id,
         current_module_id,
         scopes,
         aliases,
@@ -10785,6 +11261,7 @@ fn eval_match_expr(
             let result = eval_expr(
                 &arm.value,
                 plan,
+                current_package_id,
                 current_module_id,
                 scopes,
                 aliases,
@@ -10814,6 +11291,7 @@ fn try_construct_record_value(
     args: &[ParsedPhraseArg],
     attached: &[ParsedHeaderAttachment],
     plan: &RuntimePackagePlan,
+    current_package_id: &str,
     current_module_id: &str,
     scopes: &mut Vec<RuntimeScope>,
     aliases: &BTreeMap<String, Vec<String>>,
@@ -10844,6 +11322,7 @@ fn try_construct_record_value(
             eval_expr(
                 &arg.value,
                 plan,
+                current_package_id,
                 current_module_id,
                 scopes,
                 aliases,
@@ -10880,6 +11359,7 @@ fn try_construct_variant_value(
     args: &[ParsedPhraseArg],
     attached: &[ParsedHeaderAttachment],
     plan: &RuntimePackagePlan,
+    current_package_id: &str,
     current_module_id: &str,
     scopes: &mut Vec<RuntimeScope>,
     aliases: &BTreeMap<String, Vec<String>>,
@@ -10898,6 +11378,7 @@ fn try_construct_variant_value(
         payload.push(eval_expr(
             &arg.value,
             plan,
+            current_package_id,
             current_module_id,
             scopes,
             aliases,
@@ -10944,6 +11425,7 @@ fn into_iterable_values(value: RuntimeValue) -> Result<Vec<RuntimeValue>, String
 
 fn resolve_routine_index_for_call(
     plan: &RuntimePackagePlan,
+    current_package_id: &str,
     current_module_id: &str,
     callable: &[String],
     call_args: &[RuntimeCallArg],
@@ -10964,7 +11446,9 @@ fn resolve_routine_index_for_call(
         None if bare_receiver_lookup => {
             resolve_method_candidate_indices_by_name(plan, &callable[0])
         }
-        None => resolve_routine_candidate_indices(plan, current_module_id, callable),
+        None => {
+            resolve_routine_candidate_indices(plan, current_package_id, current_module_id, callable)
+        }
     };
     if candidates.is_empty() {
         return Ok(None);
@@ -11064,6 +11548,7 @@ fn resolve_routine_index_for_call(
 
 fn resolve_rollup_handler_callable_path(
     plan: &RuntimePackagePlan,
+    current_package_id: &str,
     current_module_id: &str,
     handler_path: &[String],
 ) -> Vec<String> {
@@ -11072,7 +11557,10 @@ fn resolve_rollup_handler_callable_path(
     };
     if let Some(prefix) = plan
         .module_aliases
-        .get(current_module_id)
+        .get(&module_alias_scope_key(
+            current_package_id,
+            current_module_id,
+        ))
         .and_then(|aliases| aliases.get(first))
     {
         let mut callable = prefix.clone();
@@ -11084,11 +11572,19 @@ fn resolve_rollup_handler_callable_path(
 
 fn validate_runtime_rollup_handler_callable_path(
     plan: &RuntimePackagePlan,
+    current_package_id: &str,
     current_module_id: &str,
     handler_path: &[String],
 ) -> Result<Vec<String>, String> {
-    let callable = resolve_rollup_handler_callable_path(plan, current_module_id, handler_path);
-    if let Some(routine_index) = resolve_routine_index(plan, current_module_id, &callable) {
+    let callable = resolve_rollup_handler_callable_path(
+        plan,
+        current_package_id,
+        current_module_id,
+        handler_path,
+    );
+    if let Some(routine_index) =
+        resolve_routine_index(plan, current_package_id, current_module_id, &callable)
+    {
         let routine = plan.routines.get(routine_index).ok_or_else(|| {
             format!(
                 "runtime rollup handler `{}` resolved to invalid routine index `{routine_index}`",
@@ -11119,6 +11615,7 @@ fn execute_call_by_path(
     callable: &[String],
     resolved_routine: Option<&str>,
     dynamic_dispatch: Option<&ParsedDynamicDispatch>,
+    current_package_id: &str,
     current_module_id: &str,
     type_args: Vec<String>,
     call_args: Vec<RuntimeCallArg>,
@@ -11134,6 +11631,7 @@ fn execute_call_by_path(
     }
     if let Some(routine_index) = resolve_routine_index_for_call(
         plan,
+        current_package_id,
         current_module_id,
         callable,
         &call_args,
@@ -11165,6 +11663,7 @@ fn execute_call_by_path(
         write_back_bound_args(
             scopes,
             plan,
+            current_package_id,
             current_module_id,
             &BTreeMap::new(),
             &BTreeMap::new(),
@@ -11193,6 +11692,7 @@ fn execute_call_by_path(
     write_back_call_args(
         scopes,
         plan,
+        current_package_id,
         current_module_id,
         &BTreeMap::new(),
         &BTreeMap::new(),
@@ -11212,6 +11712,7 @@ fn execute_runtime_apply_phrase(
     resolved_callable: Option<&[String]>,
     resolved_routine: Option<&str>,
     plan: &RuntimePackagePlan,
+    current_package_id: &str,
     current_module_id: &str,
     scopes: &mut Vec<RuntimeScope>,
     aliases: &BTreeMap<String, Vec<String>>,
@@ -11225,7 +11726,7 @@ fn execute_runtime_apply_phrase(
         .or_else(|| resolve_callable_path(subject, aliases))
         .ok_or_else(|| format!("unsupported runtime callable `{subject:?}`"))?;
     let type_args = resolve_runtime_type_args(&extract_generic_type_args(subject), type_bindings);
-    if resolve_routine_index(plan, current_module_id, &callable).is_none()
+    if resolve_routine_index(plan, current_package_id, current_module_id, &callable).is_none()
         && resolve_runtime_intrinsic_path(&callable).is_none()
     {
         if let Some(record) = try_construct_record_value(
@@ -11234,6 +11735,7 @@ fn execute_runtime_apply_phrase(
             args,
             attached,
             plan,
+            current_package_id,
             current_module_id,
             scopes,
             aliases,
@@ -11248,6 +11750,7 @@ fn execute_runtime_apply_phrase(
             args,
             attached,
             plan,
+            current_package_id,
             current_module_id,
             scopes,
             aliases,
@@ -11263,6 +11766,7 @@ fn execute_runtime_apply_phrase(
         args,
         attached,
         plan,
+        current_package_id,
         current_module_id,
         scopes,
         aliases,
@@ -11274,6 +11778,7 @@ fn execute_runtime_apply_phrase(
         &callable,
         resolved_routine,
         None,
+        current_package_id,
         current_module_id,
         type_args,
         call_args,
@@ -11295,6 +11800,7 @@ fn execute_runtime_method_call(
     resolved_routine: Option<&str>,
     dynamic_dispatch: Option<&ParsedDynamicDispatch>,
     plan: &RuntimePackagePlan,
+    current_package_id: &str,
     current_module_id: &str,
     scopes: &mut Vec<RuntimeScope>,
     aliases: &BTreeMap<String, Vec<String>>,
@@ -11306,6 +11812,7 @@ fn execute_runtime_method_call(
         eval_expr(
             subject,
             plan,
+            current_package_id,
             current_module_id,
             scopes,
             aliases,
@@ -11315,6 +11822,7 @@ fn execute_runtime_method_call(
         )?,
         scopes,
         plan,
+        current_package_id,
         current_module_id,
         aliases,
         type_bindings,
@@ -11334,6 +11842,7 @@ fn execute_runtime_method_call(
         args,
         attached,
         plan,
+        current_package_id,
         current_module_id,
         scopes,
         aliases,
@@ -11345,6 +11854,7 @@ fn execute_runtime_method_call(
         &callable,
         resolved_routine,
         dynamic_dispatch,
+        current_package_id,
         current_module_id,
         type_args,
         call_args,
@@ -11363,6 +11873,7 @@ fn execute_runtime_named_qualifier_call(
     attached: &[ParsedHeaderAttachment],
     qualifier: &str,
     plan: &RuntimePackagePlan,
+    current_package_id: &str,
     current_module_id: &str,
     scopes: &mut Vec<RuntimeScope>,
     aliases: &BTreeMap<String, Vec<String>>,
@@ -11374,6 +11885,7 @@ fn execute_runtime_named_qualifier_call(
         eval_expr(
             subject,
             plan,
+            current_package_id,
             current_module_id,
             scopes,
             aliases,
@@ -11383,6 +11895,7 @@ fn execute_runtime_named_qualifier_call(
         )?,
         scopes,
         plan,
+        current_package_id,
         current_module_id,
         aliases,
         type_bindings,
@@ -11403,6 +11916,7 @@ fn execute_runtime_named_qualifier_call(
         args,
         attached,
         plan,
+        current_package_id,
         current_module_id,
         scopes,
         aliases,
@@ -11414,6 +11928,7 @@ fn execute_runtime_named_qualifier_call(
         &callable,
         None,
         None,
+        current_package_id,
         current_module_id,
         type_args,
         call_args,
@@ -11435,6 +11950,7 @@ fn eval_qualifier(
     resolved_routine: Option<&str>,
     dynamic_dispatch: Option<&ParsedDynamicDispatch>,
     plan: &RuntimePackagePlan,
+    current_package_id: &str,
     current_module_id: &str,
     scopes: &mut Vec<RuntimeScope>,
     aliases: &BTreeMap<String, Vec<String>>,
@@ -11451,6 +11967,7 @@ fn eval_qualifier(
         resolved_routine,
         dynamic_dispatch,
         plan,
+        current_package_id,
         current_module_id,
         scopes,
         aliases,
@@ -11486,6 +12003,7 @@ fn eval_try_qualifier(
     args: &[ParsedPhraseArg],
     attached: &[ParsedHeaderAttachment],
     plan: &RuntimePackagePlan,
+    current_package_id: &str,
     current_module_id: &str,
     scopes: &mut Vec<RuntimeScope>,
     aliases: &BTreeMap<String, Vec<String>>,
@@ -11504,6 +12022,7 @@ fn eval_try_qualifier(
     try_unwrap_runtime_result(eval_expr(
         subject,
         plan,
+        current_package_id,
         current_module_id,
         scopes,
         aliases,
@@ -13491,6 +14010,14 @@ fn execute_runtime_core_intrinsic(
             host.text_input_clear_composition_area(window)?;
             Ok(RuntimeValue::Unit)
         }
+        RuntimeIntrinsic::StdTimeMonotonicNowMs => {
+            if !args.is_empty() {
+                return Err("monotonic_now_ms expects zero arguments".to_string());
+            }
+            Ok(std_types_core_monotonic_time_ms_record(
+                host.monotonic_now_ms()?,
+            ))
+        }
         RuntimeIntrinsic::TimeMonotonicNowMs => {
             if !args.is_empty() {
                 return Err("monotonic_now_ms expects zero arguments".to_string());
@@ -14440,6 +14967,71 @@ fn execute_runtime_core_intrinsic(
                 &expect_str(args[1].clone(), "text_ends_with")?,
             )?))
         }
+        RuntimeIntrinsic::TextFind => {
+            if args.len() != 3 {
+                return Err("text_find expects three arguments".to_string());
+            }
+            let text = expect_str(args[0].clone(), "text_find")?;
+            let start = expect_int(args[1].clone(), "text_find")?;
+            let needle = expect_str(args[2].clone(), "text_find")?;
+            Ok(RuntimeValue::Int(runtime_text_find(
+                host, &text, start, &needle,
+            )?))
+        }
+        RuntimeIntrinsic::TextContains => {
+            if args.len() != 2 {
+                return Err("text_contains expects two arguments".to_string());
+            }
+            let text = expect_str(args[0].clone(), "text_contains")?;
+            let needle = expect_str(args[1].clone(), "text_contains")?;
+            Ok(RuntimeValue::Bool(
+                runtime_text_find(host, &text, 0, &needle)? >= 0,
+            ))
+        }
+        RuntimeIntrinsic::TextTrimStart => {
+            let text = expect_str(
+                expect_single_arg(args, "text_trim_start")?,
+                "text_trim_start",
+            )?;
+            Ok(RuntimeValue::Str(runtime_text_trim_start(host, &text)?))
+        }
+        RuntimeIntrinsic::TextTrimEnd => {
+            let text = expect_str(expect_single_arg(args, "text_trim_end")?, "text_trim_end")?;
+            Ok(RuntimeValue::Str(runtime_text_trim_end(host, &text)?))
+        }
+        RuntimeIntrinsic::TextTrim => {
+            let text = expect_str(expect_single_arg(args, "text_trim")?, "text_trim")?;
+            Ok(RuntimeValue::Str(runtime_text_trim(host, &text)?))
+        }
+        RuntimeIntrinsic::TextSplit => {
+            if args.len() != 2 {
+                return Err("text_split expects two arguments".to_string());
+            }
+            let text = expect_str(args[0].clone(), "text_split")?;
+            let delim = expect_str(args[1].clone(), "text_split")?;
+            Ok(RuntimeValue::List(
+                runtime_text_split(host, &text, &delim)?
+                    .into_iter()
+                    .map(RuntimeValue::Str)
+                    .collect(),
+            ))
+        }
+        RuntimeIntrinsic::TextJoin => {
+            if args.len() != 2 {
+                return Err("text_join expects two arguments".to_string());
+            }
+            let parts = expect_string_list(args[0].clone(), "text_join")?;
+            let delim = expect_str(args[1].clone(), "text_join")?;
+            Ok(RuntimeValue::Str(runtime_text_join(parts, &delim)))
+        }
+        RuntimeIntrinsic::TextRepeat => {
+            if args.len() != 2 {
+                return Err("text_repeat expects two arguments".to_string());
+            }
+            let text = expect_str(args[0].clone(), "text_repeat")?;
+            let count = expect_int(args[1].clone(), "text_repeat")?;
+            Ok(RuntimeValue::Str(runtime_text_repeat(&text, count)))
+        }
         RuntimeIntrinsic::TextSplitLines => {
             let text = expect_str(
                 expect_single_arg(args, "text_split_lines")?,
@@ -14455,6 +15047,13 @@ fn execute_runtime_core_intrinsic(
         RuntimeIntrinsic::TextFromInt => {
             let value = expect_int(expect_single_arg(args, "text_from_int")?, "text_from_int")?;
             Ok(RuntimeValue::Str(host.text_from_int(value)?))
+        }
+        RuntimeIntrinsic::TextToIntTry => {
+            let text = expect_str(expect_single_arg(args, "text_to_int")?, "text_to_int")?;
+            Ok(match runtime_text_to_int(host, &text)? {
+                Ok(value) => ok_variant(RuntimeValue::Int(value)),
+                Err(message) => err_variant(message),
+            })
         }
         RuntimeIntrinsic::BytesFromStrUtf8 => {
             let text = expect_str(
@@ -14516,6 +15115,54 @@ fn execute_runtime_core_intrinsic(
             )?;
             Ok(RuntimeValue::Str(host.bytes_sha256_hex(&bytes)?))
         }
+        RuntimeIntrinsic::OptionIsSome => {
+            let value = expect_single_arg(args, "option_is_some")?;
+            match value {
+                RuntimeValue::Variant { name, payload } => {
+                    if variant_name_matches(&name, "Option.Some") && payload.len() == 1 {
+                        Ok(RuntimeValue::Bool(true))
+                    } else if variant_name_matches(&name, "Option.None") && payload.is_empty() {
+                        Ok(RuntimeValue::Bool(false))
+                    } else {
+                        Err("option_is_some expects Option".to_string())
+                    }
+                }
+                _ => Err("option_is_some expects Option".to_string()),
+            }
+        }
+        RuntimeIntrinsic::OptionIsNone => {
+            let value = expect_single_arg(args, "option_is_none")?;
+            match value {
+                RuntimeValue::Variant { name, payload } => {
+                    if variant_name_matches(&name, "Option.Some") && payload.len() == 1 {
+                        Ok(RuntimeValue::Bool(false))
+                    } else if variant_name_matches(&name, "Option.None") && payload.is_empty() {
+                        Ok(RuntimeValue::Bool(true))
+                    } else {
+                        Err("option_is_none expects Option".to_string())
+                    }
+                }
+                _ => Err("option_is_none expects Option".to_string()),
+            }
+        }
+        RuntimeIntrinsic::OptionUnwrapOr => {
+            if args.len() != 2 {
+                return Err("option_unwrap_or expects two arguments".to_string());
+            }
+            let fallback = args[1].clone();
+            match args[0].clone() {
+                RuntimeValue::Variant { name, mut payload } => {
+                    if variant_name_matches(&name, "Option.Some") && payload.len() == 1 {
+                        Ok(payload.remove(0))
+                    } else if variant_name_matches(&name, "Option.None") && payload.is_empty() {
+                        Ok(fallback)
+                    } else {
+                        Err("option_unwrap_or expects Option".to_string())
+                    }
+                }
+                _ => Err("option_unwrap_or expects Option".to_string()),
+            }
+        }
         RuntimeIntrinsic::ResultOk => match args.len() {
             0 => Ok(ok_variant(RuntimeValue::Unit)),
             1 => Ok(ok_variant(
@@ -14526,6 +15173,54 @@ fn execute_runtime_core_intrinsic(
         RuntimeIntrinsic::ResultErr => {
             let value = expect_str(expect_single_arg(args, "Result.Err")?, "Result.Err")?;
             Ok(err_variant(value))
+        }
+        RuntimeIntrinsic::ResultIsOk => {
+            let value = expect_single_arg(args, "result_is_ok")?;
+            match value {
+                RuntimeValue::Variant { name, payload } if payload.len() == 1 => {
+                    if variant_name_matches(&name, "Result.Ok") {
+                        Ok(RuntimeValue::Bool(true))
+                    } else if variant_name_matches(&name, "Result.Err") {
+                        Ok(RuntimeValue::Bool(false))
+                    } else {
+                        Err("result_is_ok expects Result".to_string())
+                    }
+                }
+                _ => Err("result_is_ok expects Result".to_string()),
+            }
+        }
+        RuntimeIntrinsic::ResultIsErr => {
+            let value = expect_single_arg(args, "result_is_err")?;
+            match value {
+                RuntimeValue::Variant { name, payload } if payload.len() == 1 => {
+                    if variant_name_matches(&name, "Result.Ok") {
+                        Ok(RuntimeValue::Bool(false))
+                    } else if variant_name_matches(&name, "Result.Err") {
+                        Ok(RuntimeValue::Bool(true))
+                    } else {
+                        Err("result_is_err expects Result".to_string())
+                    }
+                }
+                _ => Err("result_is_err expects Result".to_string()),
+            }
+        }
+        RuntimeIntrinsic::ResultUnwrapOr => {
+            if args.len() != 2 {
+                return Err("result_unwrap_or expects two arguments".to_string());
+            }
+            let fallback = args[1].clone();
+            match args[0].clone() {
+                RuntimeValue::Variant { name, mut payload } if payload.len() == 1 => {
+                    if variant_name_matches(&name, "Result.Ok") {
+                        Ok(payload.remove(0))
+                    } else if variant_name_matches(&name, "Result.Err") {
+                        Ok(fallback)
+                    } else {
+                        Err("result_unwrap_or expects Result".to_string())
+                    }
+                }
+                _ => Err("result_unwrap_or expects Result".to_string()),
+            }
         }
         RuntimeIntrinsic::ListNew => {
             if !args.is_empty() {
@@ -14541,6 +15236,13 @@ fn execute_runtime_core_intrinsic(
             Ok(RuntimeValue::Int(i64::try_from(values.len()).map_err(
                 |_| "list length does not fit in i64".to_string(),
             )?))
+        }
+        RuntimeIntrinsic::ListIsEmpty => {
+            let value = expect_single_arg(args, "list_is_empty")?;
+            let RuntimeValue::List(values) = value else {
+                return Err("list_is_empty expects List".to_string());
+            };
+            Ok(RuntimeValue::Bool(values.is_empty()))
         }
         RuntimeIntrinsic::ListPush => {
             if args.len() != 2 {
@@ -14921,6 +15623,7 @@ fn build_runtime_call_args_from_chain_stage(
     stage: &ParsedChainStep,
     input: Option<RuntimeValue>,
     plan: &RuntimePackagePlan,
+    current_package_id: &str,
     current_module_id: &str,
     scopes: &mut Vec<RuntimeScope>,
     aliases: &BTreeMap<String, Vec<String>>,
@@ -14946,6 +15649,7 @@ fn build_runtime_call_args_from_chain_stage(
             value: eval_expr(
                 bound,
                 plan,
+                current_package_id,
                 current_module_id,
                 scopes,
                 aliases,
@@ -14961,12 +15665,14 @@ fn build_runtime_call_args_from_chain_stage(
 
 fn reject_edit_chain_stage_call(
     callable: &[String],
+    current_package_id: &str,
     current_module_id: &str,
     call_args: &[RuntimeCallArg],
     plan: &RuntimePackagePlan,
 ) -> RuntimeEvalResult<()> {
     if let Some(routine_index) = resolve_routine_index_for_call(
         plan,
+        current_package_id,
         current_module_id,
         callable,
         call_args,
@@ -15009,6 +15715,7 @@ fn execute_runtime_chain_stage(
     input: Option<RuntimeValue>,
     allow_async: bool,
     plan: &RuntimePackagePlan,
+    current_package_id: &str,
     current_module_id: &str,
     scopes: &mut Vec<RuntimeScope>,
     aliases: &BTreeMap<String, Vec<String>>,
@@ -15020,6 +15727,7 @@ fn execute_runtime_chain_stage(
         stage,
         input,
         plan,
+        current_package_id,
         current_module_id,
         scopes,
         aliases,
@@ -15027,11 +15735,18 @@ fn execute_runtime_chain_stage(
         state,
         host,
     )?;
-    reject_edit_chain_stage_call(&callable, current_module_id, &call_args, plan)?;
+    reject_edit_chain_stage_call(
+        &callable,
+        current_package_id,
+        current_module_id,
+        &call_args,
+        plan,
+    )?;
     Ok(execute_call_by_path(
         &callable,
         None,
         None,
+        current_package_id,
         current_module_id,
         type_args,
         call_args,
@@ -15049,6 +15764,7 @@ fn spawn_runtime_chain_stage(
     stage: &ParsedChainStep,
     input: RuntimeValue,
     plan: &RuntimePackagePlan,
+    current_package_id: &str,
     current_module_id: &str,
     scopes: &mut Vec<RuntimeScope>,
     aliases: &BTreeMap<String, Vec<String>>,
@@ -15060,6 +15776,7 @@ fn spawn_runtime_chain_stage(
         stage,
         Some(input),
         plan,
+        current_package_id,
         current_module_id,
         scopes,
         aliases,
@@ -15067,9 +15784,16 @@ fn spawn_runtime_chain_stage(
         state,
         host,
     )?;
-    reject_edit_chain_stage_call(&callable, current_module_id, &call_args, plan)?;
+    reject_edit_chain_stage_call(
+        &callable,
+        current_package_id,
+        current_module_id,
+        &call_args,
+        plan,
+    )?;
     if let Some(routine_index) = resolve_routine_index_for_call(
         plan,
+        current_package_id,
         current_module_id,
         &callable,
         &call_args,
@@ -15098,6 +15822,7 @@ fn spawn_runtime_chain_stage(
         callable,
         resolved_routine: None,
         dynamic_dispatch: None,
+        current_package_id: current_package_id.to_string(),
         current_module_id: current_module_id.to_string(),
         type_args: type_args.clone(),
         call_args,
@@ -15122,6 +15847,7 @@ fn eval_runtime_chain_expr(
     introducer: ParsedChainIntroducer,
     steps: &[ParsedChainStep],
     plan: &RuntimePackagePlan,
+    current_package_id: &str,
     current_module_id: &str,
     scopes: &mut Vec<RuntimeScope>,
     aliases: &BTreeMap<String, Vec<String>>,
@@ -15143,6 +15869,7 @@ fn eval_runtime_chain_expr(
         None,
         true,
         plan,
+        current_package_id,
         current_module_id,
         scopes,
         aliases,
@@ -15162,6 +15889,7 @@ fn eval_runtime_chain_expr(
                     Some(current),
                     true,
                     plan,
+                    current_package_id,
                     current_module_id,
                     scopes,
                     aliases,
@@ -15189,6 +15917,7 @@ fn eval_runtime_chain_expr(
                     Some(seed.clone()),
                     true,
                     plan,
+                    current_package_id,
                     current_module_id,
                     scopes,
                     aliases,
@@ -15206,6 +15935,7 @@ fn eval_runtime_chain_expr(
                     stage,
                     Some(seed.clone()),
                     plan,
+                    current_package_id,
                     current_module_id,
                     &mut scopes.clone(),
                     aliases,
@@ -15217,6 +15947,7 @@ fn eval_runtime_chain_expr(
                 .and_then(|(callable, _, call_args)| {
                     resolve_routine_index_for_call(
                         plan,
+                        current_package_id,
                         current_module_id,
                         &callable,
                         &call_args,
@@ -15240,6 +15971,7 @@ fn eval_runtime_chain_expr(
                     stage,
                     seed.clone(),
                     plan,
+                    current_package_id,
                     current_module_id,
                     scopes,
                     aliases,
@@ -15283,6 +16015,7 @@ fn execute_deferred_work(
                 callable,
                 resolved_routine,
                 dynamic_dispatch,
+                current_package_id,
                 current_module_id,
                 type_args,
                 call_args,
@@ -15296,6 +16029,7 @@ fn execute_deferred_work(
                 &callable,
                 resolved_routine.as_deref(),
                 dynamic_dispatch.as_ref(),
+                &current_package_id,
                 &current_module_id,
                 type_args,
                 call_args,
@@ -15312,6 +16046,7 @@ fn execute_deferred_work(
         RuntimeDeferredWork::Expr(pending) => {
             let RuntimeDeferredExpr {
                 expr,
+                current_package_id,
                 current_module_id,
                 aliases,
                 type_bindings,
@@ -15328,6 +16063,7 @@ fn execute_deferred_work(
             let result = eval_expr(
                 &expr,
                 plan,
+                &current_package_id,
                 &current_module_id,
                 &mut scopes,
                 &aliases,
@@ -15430,6 +16166,7 @@ fn capture_spawned_phrase_call(
     resolved_routine: Option<&str>,
     dynamic_dispatch: Option<&ParsedDynamicDispatch>,
     plan: &RuntimePackagePlan,
+    current_package_id: &str,
     current_module_id: &str,
     scopes: &mut Vec<RuntimeScope>,
     aliases: &BTreeMap<String, Vec<String>>,
@@ -15453,6 +16190,7 @@ fn capture_spawned_phrase_call(
                 args,
                 attached,
                 plan,
+                current_package_id,
                 current_module_id,
                 scopes,
                 aliases,
@@ -15472,6 +16210,7 @@ fn capture_spawned_phrase_call(
             let receiver = eval_expr(
                 subject,
                 plan,
+                current_package_id,
                 current_module_id,
                 scopes,
                 aliases,
@@ -15497,6 +16236,7 @@ fn capture_spawned_phrase_call(
                 args,
                 attached,
                 plan,
+                current_package_id,
                 current_module_id,
                 scopes,
                 aliases,
@@ -15510,6 +16250,7 @@ fn capture_spawned_phrase_call(
             let receiver = eval_expr(
                 subject,
                 plan,
+                current_package_id,
                 current_module_id,
                 scopes,
                 aliases,
@@ -15530,6 +16271,7 @@ fn capture_spawned_phrase_call(
                 args,
                 attached,
                 plan,
+                current_package_id,
                 current_module_id,
                 scopes,
                 aliases,
@@ -15550,6 +16292,7 @@ fn capture_spawned_phrase_call(
 
     if let Some(routine_index) = resolve_routine_index_for_call(
         plan,
+        current_package_id,
         current_module_id,
         &callable,
         &call_args,
@@ -15595,6 +16338,7 @@ fn capture_spawned_phrase_call(
         callable,
         resolved_routine: call_routine,
         dynamic_dispatch: call_dynamic_dispatch,
+        current_package_id: current_package_id.to_string(),
         current_module_id: current_module_id.to_string(),
         type_args: type_args.clone(),
         call_args,
@@ -15617,6 +16361,7 @@ fn capture_spawned_phrase_call(
 fn spawn_runtime_expr(
     op: ParsedUnaryOp,
     expr: &ParsedExpr,
+    current_package_id: &str,
     current_module_id: &str,
     scopes: &[RuntimeScope],
     aliases: &BTreeMap<String, Vec<String>>,
@@ -15630,6 +16375,7 @@ fn spawn_runtime_expr(
     };
     let pending = RuntimePendingState::Pending(RuntimeDeferredWork::Expr(RuntimeDeferredExpr {
         expr: expr.clone(),
+        current_package_id: current_package_id.to_string(),
         current_module_id: current_module_id.to_string(),
         aliases: aliases.clone(),
         type_bindings: type_bindings.clone(),
@@ -15679,6 +16425,7 @@ fn eval_spawn_expr(
     op: ParsedUnaryOp,
     expr: &ParsedExpr,
     plan: &RuntimePackagePlan,
+    current_package_id: &str,
     current_module_id: &str,
     scopes: &mut Vec<RuntimeScope>,
     aliases: &BTreeMap<String, Vec<String>>,
@@ -15696,8 +16443,7 @@ fn eval_spawn_expr(
         dynamic_dispatch,
         attached,
     } = expr
-    {
-        if let Some(spawned) = capture_spawned_phrase_call(
+        && let Some(spawned) = capture_spawned_phrase_call(
             op,
             subject,
             args,
@@ -15708,19 +16454,21 @@ fn eval_spawn_expr(
             resolved_routine.as_deref(),
             dynamic_dispatch.as_ref(),
             plan,
+            current_package_id,
             current_module_id,
             scopes,
             aliases,
             type_bindings,
             state,
             host,
-        )? {
-            return Ok(spawned);
-        }
+        )?
+    {
+        return Ok(spawned);
     }
     Ok(spawn_runtime_expr(
         op,
         expr,
+        current_package_id,
         current_module_id,
         scopes,
         aliases,
@@ -15732,6 +16480,7 @@ fn eval_spawn_expr(
 fn eval_expr(
     expr: &ParsedExpr,
     plan: &RuntimePackagePlan,
+    current_package_id: &str,
     current_module_id: &str,
     scopes: &mut Vec<RuntimeScope>,
     aliases: &BTreeMap<String, Vec<String>>,
@@ -15747,6 +16496,7 @@ fn eval_expr(
             Box::new(eval_expr(
                 left,
                 plan,
+                current_package_id,
                 current_module_id,
                 scopes,
                 aliases,
@@ -15757,6 +16507,7 @@ fn eval_expr(
             Box::new(eval_expr(
                 right,
                 plan,
+                current_package_id,
                 current_module_id,
                 scopes,
                 aliases,
@@ -15772,6 +16523,7 @@ fn eval_expr(
                     eval_expr(
                         item,
                         plan,
+                        current_package_id,
                         current_module_id,
                         scopes,
                         aliases,
@@ -15786,6 +16538,7 @@ fn eval_expr(
             subject,
             arms,
             plan,
+            current_package_id,
             current_module_id,
             scopes,
             aliases,
@@ -15802,6 +16555,7 @@ fn eval_expr(
             *introducer,
             steps,
             plan,
+            current_package_id,
             current_module_id,
             scopes,
             aliases,
@@ -15819,6 +16573,7 @@ fn eval_expr(
             let base = eval_expr(
                 expr,
                 plan,
+                current_package_id,
                 current_module_id,
                 scopes,
                 aliases,
@@ -15831,6 +16586,7 @@ fn eval_expr(
                 member,
                 scopes,
                 plan,
+                current_package_id,
                 current_module_id,
                 aliases,
                 type_bindings,
@@ -15842,6 +16598,7 @@ fn eval_expr(
             eval_expr(
                 expr,
                 plan,
+                current_package_id,
                 current_module_id,
                 scopes,
                 aliases,
@@ -15852,6 +16609,7 @@ fn eval_expr(
             eval_expr(
                 index,
                 plan,
+                current_package_id,
                 current_module_id,
                 scopes,
                 aliases,
@@ -15861,6 +16619,7 @@ fn eval_expr(
             )?,
             scopes,
             plan,
+            current_package_id,
             current_module_id,
             aliases,
             type_bindings,
@@ -15876,6 +16635,7 @@ fn eval_expr(
             eval_expr(
                 expr,
                 plan,
+                current_package_id,
                 current_module_id,
                 scopes,
                 aliases,
@@ -15889,6 +16649,7 @@ fn eval_expr(
                     eval_expr(
                         expr,
                         plan,
+                        current_package_id,
                         current_module_id,
                         scopes,
                         aliases,
@@ -15903,6 +16664,7 @@ fn eval_expr(
                     eval_expr(
                         expr,
                         plan,
+                        current_package_id,
                         current_module_id,
                         scopes,
                         aliases,
@@ -15915,6 +16677,7 @@ fn eval_expr(
             *inclusive_end,
             scopes,
             plan,
+            current_package_id,
             current_module_id,
             aliases,
             type_bindings,
@@ -15929,6 +16692,7 @@ fn eval_expr(
             start: eval_optional_runtime_int_expr(
                 start.as_deref(),
                 plan,
+                current_package_id,
                 current_module_id,
                 scopes,
                 aliases,
@@ -15940,6 +16704,7 @@ fn eval_expr(
             end: eval_optional_runtime_int_expr(
                 end.as_deref(),
                 plan,
+                current_package_id,
                 current_module_id,
                 scopes,
                 aliases,
@@ -15953,6 +16718,7 @@ fn eval_expr(
         ParsedExpr::Generic { expr, .. } => eval_expr(
             expr,
             plan,
+            current_package_id,
             current_module_id,
             scopes,
             aliases,
@@ -15964,6 +16730,7 @@ fn eval_expr(
             eval_expr(
                 expr,
                 plan,
+                current_package_id,
                 current_module_id,
                 scopes,
                 aliases,
@@ -15980,6 +16747,7 @@ fn eval_expr(
                 *op,
                 expr,
                 plan,
+                current_package_id,
                 current_module_id,
                 scopes,
                 aliases,
@@ -16012,6 +16780,7 @@ fn eval_expr(
                     eval_expr(
                         expr,
                         plan,
+                        current_package_id,
                         current_module_id,
                         scopes,
                         aliases,
@@ -16024,6 +16793,7 @@ fn eval_expr(
                 Ok(read_runtime_reference(
                     scopes,
                     plan,
+                    current_package_id,
                     current_module_id,
                     aliases,
                     type_bindings,
@@ -16036,6 +16806,7 @@ fn eval_expr(
                 eval_expr(
                     expr,
                     plan,
+                    current_package_id,
                     current_module_id,
                     scopes,
                     aliases,
@@ -16049,6 +16820,7 @@ fn eval_expr(
                 eval_expr(
                     expr,
                     plan,
+                    current_package_id,
                     current_module_id,
                     scopes,
                     aliases,
@@ -16062,6 +16834,7 @@ fn eval_expr(
                 eval_expr(
                     expr,
                     plan,
+                    current_package_id,
                     current_module_id,
                     scopes,
                     aliases,
@@ -16078,6 +16851,7 @@ fn eval_expr(
                     eval_expr(
                         left,
                         plan,
+                        current_package_id,
                         current_module_id,
                         scopes,
                         aliases,
@@ -16094,6 +16868,7 @@ fn eval_expr(
                         eval_expr(
                             right,
                             plan,
+                            current_package_id,
                             current_module_id,
                             scopes,
                             aliases,
@@ -16110,6 +16885,7 @@ fn eval_expr(
                     eval_expr(
                         left,
                         plan,
+                        current_package_id,
                         current_module_id,
                         scopes,
                         aliases,
@@ -16126,6 +16902,7 @@ fn eval_expr(
                         eval_expr(
                             right,
                             plan,
+                            current_package_id,
                             current_module_id,
                             scopes,
                             aliases,
@@ -16141,6 +16918,7 @@ fn eval_expr(
                 let left = eval_expr(
                     left,
                     plan,
+                    current_package_id,
                     current_module_id,
                     scopes,
                     aliases,
@@ -16151,6 +16929,7 @@ fn eval_expr(
                 let right = eval_expr(
                     right,
                     plan,
+                    current_package_id,
                     current_module_id,
                     scopes,
                     aliases,
@@ -16178,6 +16957,7 @@ fn eval_expr(
                 resolved_callable.as_deref(),
                 resolved_routine.as_deref(),
                 plan,
+                current_package_id,
                 current_module_id,
                 scopes,
                 aliases,
@@ -16192,6 +16972,7 @@ fn eval_expr(
                 attached,
                 qualifier,
                 plan,
+                current_package_id,
                 current_module_id,
                 scopes,
                 aliases,
@@ -16208,6 +16989,7 @@ fn eval_expr(
                 resolved_routine.as_deref(),
                 dynamic_dispatch.as_ref(),
                 plan,
+                current_package_id,
                 current_module_id,
                 scopes,
                 aliases,
@@ -16220,6 +17002,7 @@ fn eval_expr(
                 args,
                 attached,
                 plan,
+                current_package_id,
                 current_module_id,
                 scopes,
                 aliases,
@@ -16234,6 +17017,7 @@ fn eval_expr(
                 resolved_callable.as_deref(),
                 None,
                 plan,
+                current_package_id,
                 current_module_id,
                 scopes,
                 aliases,
@@ -16248,6 +17032,7 @@ fn eval_expr(
                         eval_expr(
                             subject,
                             plan,
+                            current_package_id,
                             current_module_id,
                             scopes,
                             aliases,
@@ -16267,6 +17052,7 @@ fn eval_expr(
                     None,
                     None,
                     plan,
+                    current_package_id,
                     current_module_id,
                     scopes,
                     aliases,
@@ -16294,6 +17080,7 @@ fn eval_expr(
             let arena_value = eval_expr(
                 arena,
                 plan,
+                current_package_id,
                 current_module_id,
                 scopes,
                 aliases,
@@ -16308,6 +17095,7 @@ fn eval_expr(
                 None,
                 None,
                 plan,
+                current_package_id,
                 current_module_id,
                 scopes,
                 aliases,
@@ -16341,6 +17129,7 @@ fn apply_assign(
     op: ParsedAssignOp,
     value: RuntimeValue,
     plan: &RuntimePackagePlan,
+    current_package_id: &str,
     current_module_id: &str,
     scopes: &mut Vec<RuntimeScope>,
     aliases: &BTreeMap<String, Vec<String>>,
@@ -16354,6 +17143,7 @@ fn apply_assign(
         let current = read_assign_target_value_runtime(
             target,
             plan,
+            current_package_id,
             current_module_id,
             scopes,
             aliases,
@@ -16367,6 +17157,7 @@ fn apply_assign(
         target,
         updated,
         plan,
+        current_package_id,
         current_module_id,
         scopes,
         aliases,
@@ -16378,6 +17169,7 @@ fn apply_assign(
 
 fn run_scope_defers(
     plan: &RuntimePackagePlan,
+    current_package_id: &str,
     current_module_id: &str,
     scopes: &mut Vec<RuntimeScope>,
     aliases: &BTreeMap<String, Vec<String>>,
@@ -16396,6 +17188,7 @@ fn run_scope_defers(
         let _ = eval_expr(
             &expr,
             plan,
+            current_package_id,
             current_module_id,
             scopes,
             aliases,
@@ -16410,11 +17203,12 @@ fn run_scope_defers(
 fn execute_page_rollups(
     frame: RuntimeRollupFrame,
     plan: &RuntimePackagePlan,
-    current_module_id: &str,
     scopes: &mut Vec<RuntimeScope>,
     state: &mut RuntimeExecutionState,
     host: &mut dyn RuntimeHost,
 ) -> RuntimeEvalResult<()> {
+    let current_package_id = frame.current_package_id.clone();
+    let current_module_id = frame.current_module_id.clone();
     for rollup in frame.rollups.into_iter().rev() {
         if rollup.kind != "cleanup" {
             return Err(format!("unsupported runtime rollup kind `{}`", rollup.kind).into());
@@ -16426,16 +17220,18 @@ fn execute_page_rollups(
         else {
             continue;
         };
-        let callable = validate_runtime_rollup_handler_callable_path(
+        let callable = resolve_rollup_handler_callable_path(
             plan,
-            current_module_id,
+            &current_package_id,
+            &current_module_id,
             &rollup.handler_path,
-        )?;
+        );
         let _ = execute_call_by_path(
             &callable,
             None,
             None,
-            current_module_id,
+            &current_package_id,
+            &current_module_id,
             Vec::new(),
             vec![RuntimeCallArg {
                 name: None,
@@ -16457,15 +17253,14 @@ fn finish_runtime_rollups<T>(
     result: RuntimeEvalResult<T>,
     frame: Option<RuntimeRollupFrame>,
     plan: &RuntimePackagePlan,
-    current_module_id: &str,
     scopes: &mut Vec<RuntimeScope>,
     state: &mut RuntimeExecutionState,
     host: &mut dyn RuntimeHost,
 ) -> RuntimeEvalResult<T> {
-    if let Some(frame) = frame {
-        if !matches!(result, Err(RuntimeEvalSignal::Message(_))) {
-            execute_page_rollups(frame, plan, current_module_id, scopes, state, host)?;
-        }
+    if let Some(frame) = frame
+        && !matches!(result, Err(RuntimeEvalSignal::Message(_)))
+    {
+        execute_page_rollups(frame, plan, scopes, state, host)?;
     }
     result
 }
@@ -16476,20 +17271,40 @@ fn execute_scoped_block(
     scopes: &mut Vec<RuntimeScope>,
     scope: RuntimeScope,
     plan: &RuntimePackagePlan,
+    current_package_id: &str,
     current_module_id: &str,
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
     host: &mut dyn RuntimeHost,
 ) -> RuntimeEvalResult<FlowSignal> {
-    push_runtime_rollup_frame(state, rollups, scopes);
+    push_runtime_rollup_frame(
+        state,
+        rollups,
+        scopes,
+        current_package_id,
+        current_module_id,
+    );
     scopes.push(scope);
-    activate_attached_runtime_owners_for_current_scope(scopes, &[], plan, state)?;
-    activate_attached_runtime_objects_for_current_scope(scopes, &[], plan, state)?;
+    activate_attached_runtime_owners_for_current_scope(
+        scopes,
+        &[],
+        plan,
+        current_package_id,
+        state,
+    )?;
+    activate_attached_runtime_objects_for_current_scope(
+        scopes,
+        &[],
+        plan,
+        current_package_id,
+        state,
+    )?;
     let result = execute_statements(
         statements,
         scopes,
         plan,
+        current_package_id,
         current_module_id,
         aliases,
         type_bindings,
@@ -16498,6 +17313,7 @@ fn execute_scoped_block(
     );
     let defer_result = run_scope_defers(
         plan,
+        current_package_id,
         current_module_id,
         scopes,
         aliases,
@@ -16514,11 +17330,11 @@ fn execute_scoped_block(
     } else {
         pop_runtime_rollup_frame(state)
     };
-    let result =
-        finish_runtime_rollups(result, frame, plan, current_module_id, scopes, state, host);
+    let result = finish_runtime_rollups(result, frame, plan, scopes, state, host);
     if let Err(err) = evaluate_owner_exit_checkpoints(
         &exited_scope.activated_owner_keys,
         plan,
+        current_package_id,
         current_module_id,
         aliases,
         type_bindings,
@@ -16536,6 +17352,7 @@ fn execute_statements(
     statements: &[ParsedStmt],
     scopes: &mut Vec<RuntimeScope>,
     plan: &RuntimePackagePlan,
+    current_package_id: &str,
     current_module_id: &str,
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
@@ -16552,6 +17369,7 @@ fn execute_statements(
                 let value = eval_expr(
                     value,
                     plan,
+                    current_package_id,
                     current_module_id,
                     scopes,
                     aliases,
@@ -16574,11 +17392,18 @@ fn execute_statements(
                 FlowSignal::Next
             }
             ParsedStmt::Expr { expr, rollups } => {
-                push_runtime_rollup_frame(state, rollups, scopes);
+                push_runtime_rollup_frame(
+                    state,
+                    rollups,
+                    scopes,
+                    current_package_id,
+                    current_module_id,
+                );
                 finish_runtime_rollups(
                     eval_expr(
                         expr,
                         plan,
+                        current_package_id,
                         current_module_id,
                         scopes,
                         aliases,
@@ -16593,7 +17418,6 @@ fn execute_statements(
                         pop_runtime_rollup_frame(state)
                     },
                     plan,
-                    current_module_id,
                     scopes,
                     state,
                     host,
@@ -16601,18 +17425,17 @@ fn execute_statements(
                 FlowSignal::Next
             }
             ParsedStmt::ReturnVoid => FlowSignal::Return(RuntimeValue::Unit),
-            ParsedStmt::ReturnValue { value } => FlowSignal::Return(match value {
-                expr => eval_expr(
-                    expr,
-                    plan,
-                    current_module_id,
-                    scopes,
-                    aliases,
-                    type_bindings,
-                    state,
-                    host,
-                )?,
-            }),
+            ParsedStmt::ReturnValue { value } => FlowSignal::Return(eval_expr(
+                value,
+                plan,
+                current_package_id,
+                current_module_id,
+                scopes,
+                aliases,
+                type_bindings,
+                state,
+                host,
+            )?),
             ParsedStmt::If {
                 condition,
                 then_branch,
@@ -16624,6 +17447,7 @@ fn execute_statements(
                     eval_expr(
                         condition,
                         plan,
+                        current_package_id,
                         current_module_id,
                         scopes,
                         aliases,
@@ -16641,6 +17465,7 @@ fn execute_statements(
                         scopes,
                         scope,
                         plan,
+                        current_package_id,
                         current_module_id,
                         aliases,
                         type_bindings,
@@ -16658,6 +17483,7 @@ fn execute_statements(
                         scopes,
                         scope,
                         plan,
+                        current_package_id,
                         current_module_id,
                         aliases,
                         type_bindings,
@@ -16672,13 +17498,20 @@ fn execute_statements(
                 rollups,
                 availability,
             } => {
-                push_runtime_rollup_frame(state, rollups, scopes);
+                push_runtime_rollup_frame(
+                    state,
+                    rollups,
+                    scopes,
+                    current_package_id,
+                    current_module_id,
+                );
                 let result = (|| -> RuntimeEvalResult<FlowSignal> {
                     loop {
                         if !expect_bool(
                             eval_expr(
                                 condition,
                                 plan,
+                                current_package_id,
                                 current_module_id,
                                 scopes,
                                 aliases,
@@ -16698,6 +17531,7 @@ fn execute_statements(
                             scopes,
                             scope,
                             plan,
+                            current_package_id,
                             current_module_id,
                             aliases,
                             type_bindings,
@@ -16718,7 +17552,6 @@ fn execute_statements(
                         pop_runtime_rollup_frame(state)
                     },
                     plan,
-                    current_module_id,
                     scopes,
                     state,
                     host,
@@ -16731,11 +17564,18 @@ fn execute_statements(
                 rollups,
                 availability,
             } => {
-                push_runtime_rollup_frame(state, rollups, scopes);
+                push_runtime_rollup_frame(
+                    state,
+                    rollups,
+                    scopes,
+                    current_package_id,
+                    current_module_id,
+                );
                 let result = (|| -> RuntimeEvalResult<FlowSignal> {
                     let values = into_iterable_values(eval_expr(
                         iterable,
                         plan,
+                        current_package_id,
                         current_module_id,
                         scopes,
                         aliases,
@@ -16761,6 +17601,7 @@ fn execute_statements(
                             scopes,
                             scope,
                             plan,
+                            current_package_id,
                             current_module_id,
                             aliases,
                             type_bindings,
@@ -16788,7 +17629,6 @@ fn execute_statements(
                         pop_runtime_rollup_frame(state)
                     },
                     plan,
-                    current_module_id,
                     scopes,
                     state,
                     host,
@@ -16812,13 +17652,22 @@ fn execute_statements(
                 else {
                     unreachable!();
                 };
-                let owner = lookup_runtime_owner_plan(plan, owner_path).ok_or_else(|| {
-                    format!(
-                        "runtime owner activation `{}` resolves to an unknown owner",
-                        owner_path.join(".")
-                    )
-                })?;
-                let owner_key = owner_state_key(owner_path);
+                let owner_package_id =
+                    resolve_visible_package_id_for_path(plan, current_package_id, owner_path)
+                        .ok_or_else(|| {
+                            format!(
+                                "runtime owner activation `{}` resolves to an unknown owner",
+                                owner_path.join(".")
+                            )
+                        })?;
+                let owner = lookup_runtime_owner_plan(plan, owner_package_id, owner_path)
+                    .ok_or_else(|| {
+                        format!(
+                            "runtime owner activation `{}` resolves to an unknown owner",
+                            owner_path.join(".")
+                        )
+                    })?;
+                let owner_key = owner_state_key(owner_package_id, owner_path);
                 let had_prior_active_state = state
                     .owners
                     .get(&owner_key)
@@ -16830,6 +17679,7 @@ fn execute_statements(
                         eval_expr(
                             expr,
                             plan,
+                            current_package_id,
                             current_module_id,
                             scopes,
                             aliases,
@@ -16843,6 +17693,7 @@ fn execute_statements(
                     evaluate_owner_exit_checkpoints(
                         std::slice::from_ref(&owner_key),
                         plan,
+                        current_package_id,
                         current_module_id,
                         aliases,
                         type_bindings,
@@ -16852,10 +17703,7 @@ fn execute_statements(
                     )
                     .map_err(RuntimeEvalSignal::from)?;
                 }
-                let owner_state = state
-                    .owners
-                    .entry(owner_key.clone())
-                    .or_insert_with(RuntimeOwnerState::default);
+                let owner_state = state.owners.entry(owner_key.clone()).or_default();
                 if owner_state.active_bindings == 0 {
                     owner_state.activation_context = context_value;
                     owner_state.pending_init.clear();
@@ -16871,6 +17719,7 @@ fn execute_statements(
                 let value = eval_expr(
                     value,
                     plan,
+                    current_package_id,
                     current_module_id,
                     scopes,
                     aliases,
@@ -16883,6 +17732,7 @@ fn execute_statements(
                     *op,
                     value,
                     plan,
+                    current_package_id,
                     current_module_id,
                     scopes,
                     aliases,
@@ -16957,7 +17807,10 @@ fn execute_routine_call_with_state(
         }
         let aliases = plan
             .module_aliases
-            .get(&routine.module_id)
+            .get(&module_alias_scope_key(
+                &routine.package_id,
+                &routine.module_id,
+            ))
             .cloned()
             .unwrap_or_default();
         let resolved_type_args = if type_args.is_empty() {
@@ -16976,10 +17829,18 @@ fn execute_routine_call_with_state(
             state.async_context_depth += 1;
         }
         let outcome = (|| -> Result<RoutineExecutionOutcome, String> {
-            let mut initial_scope = RuntimeScope::default();
-            initial_scope.inherited_active_owner_keys = inherited_active_owner_keys.to_vec();
+            let mut initial_scope = RuntimeScope {
+                inherited_active_owner_keys: inherited_active_owner_keys.to_vec(),
+                ..Default::default()
+            };
             apply_runtime_availability_attachments(&mut initial_scope, &routine.availability);
-            push_runtime_rollup_frame(state, &routine.rollups, &[]);
+            push_runtime_rollup_frame(
+                state,
+                &routine.rollups,
+                &[],
+                &routine.package_id,
+                &routine.module_id,
+            );
             for (param, value) in routine.params.iter().zip(args) {
                 insert_runtime_local(
                     state,
@@ -16996,18 +17857,21 @@ fn execute_routine_call_with_state(
                 &mut scopes,
                 inherited_active_owner_keys,
                 plan,
+                &routine.package_id,
                 state,
             )?;
             activate_attached_runtime_objects_for_current_scope(
                 &mut scopes,
                 inherited_active_owner_keys,
                 plan,
+                &routine.package_id,
                 state,
             )?;
             let result = execute_statements(
                 &routine.statements,
                 &mut scopes,
                 plan,
+                &routine.package_id,
                 &routine.module_id,
                 &aliases,
                 &type_bindings,
@@ -17016,6 +17880,7 @@ fn execute_routine_call_with_state(
             );
             let defer_result = run_scope_defers(
                 plan,
+                &routine.package_id,
                 &routine.module_id,
                 &mut scopes,
                 &aliases,
@@ -17031,20 +17896,14 @@ fn execute_routine_call_with_state(
                 Ok(()) => {}
                 Err(RuntimeEvalSignal::Message(message)) => return Err(message),
                 Err(RuntimeEvalSignal::Return(value)) => {
-                    if let Some(frame) = routine_rollup_frame {
-                        execute_page_rollups(
-                            frame,
-                            plan,
-                            &routine.module_id,
-                            &mut scopes,
-                            state,
-                            host,
-                        )
-                        .map_err(runtime_eval_message)?;
+                    if let Some(frame) = routine_rollup_frame.clone() {
+                        execute_page_rollups(frame, plan, &mut scopes, state, host)
+                            .map_err(runtime_eval_message)?;
                     }
                     evaluate_owner_exit_checkpoints(
                         &final_scope.activated_owner_keys,
                         plan,
+                        &routine.package_id,
                         &routine.module_id,
                         &aliases,
                         &type_bindings,
@@ -17072,15 +17931,16 @@ fn execute_routine_call_with_state(
                     return Ok(RoutineExecutionOutcome { value, final_args });
                 }
             }
-            if let Some(frame) = routine_rollup_frame {
-                if !matches!(result, Err(RuntimeEvalSignal::Message(_))) {
-                    execute_page_rollups(frame, plan, &routine.module_id, &mut scopes, state, host)
-                        .map_err(runtime_eval_message)?;
-                }
+            if let Some(frame) = routine_rollup_frame.clone()
+                && !matches!(result, Err(RuntimeEvalSignal::Message(_)))
+            {
+                execute_page_rollups(frame, plan, &mut scopes, state, host)
+                    .map_err(runtime_eval_message)?;
             }
             evaluate_owner_exit_checkpoints(
                 &final_scope.activated_owner_keys,
                 plan,
+                &routine.package_id,
                 &routine.module_id,
                 &aliases,
                 &type_bindings,
@@ -17267,7 +18127,7 @@ pub fn execute_current_bundle_entrypoint(
 pub fn current_process_runtime_host() -> Result<Box<dyn RuntimeHost>, String> {
     #[cfg(windows)]
     {
-        return Ok(Box::new(NativeProcessHost::current()?));
+        Ok(Box::new(NativeProcessHost::current()?))
     }
 
     #[cfg(not(windows))]

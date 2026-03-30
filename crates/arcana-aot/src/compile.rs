@@ -23,6 +23,7 @@ fn compile_module_artifact(module: &IrPackageModule) -> AotPackageModuleArtifact
         item_count: module.item_count,
     });
     AotPackageModuleArtifact {
+        package_id: module.package_id.clone(),
         module_id: module.module_id.clone(),
         symbol_count: compiled.symbol_count,
         item_count: compiled.item_count,
@@ -36,6 +37,7 @@ fn compile_module_artifact(module: &IrPackageModule) -> AotPackageModuleArtifact
 
 fn compile_entrypoint(entrypoint: &IrEntrypoint) -> AotEntrypointArtifact {
     AotEntrypointArtifact {
+        package_id: entrypoint.package_id.clone(),
         module_id: entrypoint.module_id.clone(),
         symbol_name: entrypoint.symbol_name.clone(),
         symbol_kind: entrypoint.symbol_kind.clone(),
@@ -46,6 +48,7 @@ fn compile_entrypoint(entrypoint: &IrEntrypoint) -> AotEntrypointArtifact {
 
 fn compile_routine(routine: &IrRoutine) -> AotRoutineArtifact {
     AotRoutineArtifact {
+        package_id: routine.package_id.clone(),
         module_id: routine.module_id.clone(),
         routine_key: routine.routine_key.clone(),
         symbol_name: routine.symbol_name.clone(),
@@ -87,6 +90,7 @@ fn compile_owner_exit(owner_exit: &IrOwnerExit) -> AotOwnerExitArtifact {
 
 fn compile_owner(owner: &IrOwnerDecl) -> AotOwnerArtifact {
     AotOwnerArtifact {
+        package_id: owner.package_id.clone(),
         module_id: owner.module_id.clone(),
         owner_path: owner.owner_path.clone(),
         owner_name: owner.owner_name.clone(),
@@ -98,9 +102,13 @@ fn compile_owner(owner: &IrOwnerDecl) -> AotOwnerArtifact {
 pub fn compile_package(package: &IrPackage) -> AotPackageArtifact {
     AotPackageArtifact {
         format: AOT_INTERNAL_FORMAT.to_string(),
+        package_id: package.package_id.clone(),
         package_name: package.package_name.clone(),
         root_module_id: package.root_module_id.clone(),
         direct_deps: package.direct_deps.clone(),
+        direct_dep_ids: package.direct_dep_ids.clone(),
+        package_display_names: package.package_display_names.clone(),
+        package_direct_dep_ids: package.package_direct_dep_ids.clone(),
         module_count: package.module_count(),
         dependency_edge_count: package.dependency_edge_count,
         dependency_rows: package.dependency_rows.clone(),

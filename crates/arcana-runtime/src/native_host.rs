@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::c_void;
 use std::io::{self, BufRead, Write};
@@ -215,12 +217,11 @@ fn push_pending_raw_input_event(
                 dx: last_dx,
                 dy: last_dy,
             }) = pending.last_mut()
+                && *last_device_id == device_id
             {
-                if *last_device_id == device_id {
-                    *last_dx = last_dx.saturating_add(dx);
-                    *last_dy = last_dy.saturating_add(dy);
-                    return;
-                }
+                *last_dx = last_dx.saturating_add(dx);
+                *last_dy = last_dy.saturating_add(dy);
+                return;
             }
             pending.push(PendingRawInputEvent::MouseMotion { device_id, dx, dy });
         }
@@ -372,13 +373,15 @@ struct NativeAudioPlayback {
 
 impl NativeProcessHost {
     pub fn current() -> Result<Self, String> {
-        let mut base = BufferedHost::default();
-        base.args = std::env::args().skip(1).collect();
-        base.env = std::env::vars().collect();
-        base.allow_process = true;
-        base.cwd = std::env::current_dir()
-            .map(|path| path.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let base = BufferedHost {
+            args: std::env::args().skip(1).collect(),
+            env: std::env::vars().collect(),
+            allow_process: true,
+            cwd: std::env::current_dir()
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            ..Default::default()
+        };
         Ok(Self {
             base,
             started: Instant::now(),
@@ -2457,10 +2460,7 @@ impl RuntimeHost for NativeProcessHost {
             .map(|event| Self::event_with_window_id(window, event))
             .collect::<VecDeque<_>>();
         let input = Self::snapshot_frame_input(window_state);
-        Ok(self.insert_frame(BufferedAppFrame {
-            events: VecDeque::from(events),
-            input,
-        }))
+        Ok(self.insert_frame(BufferedAppFrame { events, input }))
     }
 
     fn events_poll(
@@ -3607,7 +3607,7 @@ fn apply_theme_override(hwnd: HWND, code: i64) {
 
 fn apply_composition_area(
     hwnd: HWND,
-    active: bool,
+    _active: bool,
     position: (i64, i64),
     size: (i64, i64),
 ) -> Result<(), String> {
@@ -3616,12 +3616,8 @@ fn apply_composition_area(
         return Ok(());
     }
     let result = (|| {
-        let mut comp = COMPOSITIONFORM {
-            dwStyle: if active {
-                CFS_FORCE_POSITION
-            } else {
-                CFS_FORCE_POSITION
-            },
+        let comp = COMPOSITIONFORM {
+            dwStyle: CFS_FORCE_POSITION,
             ptCurrentPos: POINT {
                 x: i32::try_from(position.0)
                     .map_err(|_| "composition x does not fit in i32".to_string())?,
@@ -3639,16 +3635,16 @@ fn apply_composition_area(
                     .map_err(|_| "composition bottom does not fit in i32".to_string())?,
             },
         };
-        let mut candidate = CANDIDATEFORM {
+        let candidate = CANDIDATEFORM {
             dwIndex: 0,
             dwStyle: CFS_CANDIDATEPOS,
             ptCurrentPos: comp.ptCurrentPos,
             rcArea: comp.rcArea,
         };
-        if unsafe { ImmSetCompositionWindow(himc, &mut comp) } == 0 {
+        if unsafe { ImmSetCompositionWindow(himc, &comp) } == 0 {
             return Err("failed to update IME composition window".to_string());
         }
-        if unsafe { ImmSetCandidateWindow(himc, &mut candidate) } == 0 {
+        if unsafe { ImmSetCandidateWindow(himc, &candidate) } == 0 {
             return Err("failed to update IME candidate window".to_string());
         }
         Ok(())
@@ -4204,17 +4200,17 @@ unsafe extern "system" fn arcana_window_proc(
                 return 0;
             }
             let _ = (|| -> Result<(), String> {
-                if (lparam as u32 & GCS_COMPSTR) != 0 {
-                    if let Some(text) = read_ime_composition_string(himc, GCS_COMPSTR)? {
-                        let caret = read_ime_cursor_position(himc).unwrap_or(0);
-                        state.push_composition_event(EVENT_TEXT_COMPOSITION_UPDATED, text, caret);
-                    }
+                if (lparam as u32 & GCS_COMPSTR) != 0
+                    && let Some(text) = read_ime_composition_string(himc, GCS_COMPSTR)?
+                {
+                    let caret = read_ime_cursor_position(himc).unwrap_or(0);
+                    state.push_composition_event(EVENT_TEXT_COMPOSITION_UPDATED, text, caret);
                 }
-                if (lparam as u32 & GCS_RESULTSTR) != 0 {
-                    if let Some(text) = read_ime_composition_string(himc, GCS_RESULTSTR)? {
-                        state.composition_committed = true;
-                        state.push_composition_event(EVENT_TEXT_COMPOSITION_COMMITTED, text, 0);
-                    }
+                if (lparam as u32 & GCS_RESULTSTR) != 0
+                    && let Some(text) = read_ime_composition_string(himc, GCS_RESULTSTR)?
+                {
+                    state.composition_committed = true;
+                    state.push_composition_event(EVENT_TEXT_COMPOSITION_COMMITTED, text, 0);
                 }
                 Ok(())
             })();
@@ -4325,17 +4321,17 @@ unsafe extern "system" fn arcana_window_proc(
             let mut pending = pending_raw_input_events().lock().ok();
             if raw.header.dwType == RIM_TYPEMOUSE {
                 let mouse = unsafe { raw.data.mouse };
-                if mouse.usFlags == MOUSE_MOVE_RELATIVE || mouse.lLastX != 0 || mouse.lLastY != 0 {
-                    if let Some(pending) = pending.as_mut() {
-                        push_pending_raw_input_event(
-                            pending,
-                            PendingRawInputEvent::MouseMotion {
-                                device_id,
-                                dx: i64::from(mouse.lLastX),
-                                dy: i64::from(mouse.lLastY),
-                            },
-                        );
-                    }
+                if (mouse.usFlags == MOUSE_MOVE_RELATIVE || mouse.lLastX != 0 || mouse.lLastY != 0)
+                    && let Some(pending) = pending.as_mut()
+                {
+                    push_pending_raw_input_event(
+                        pending,
+                        PendingRawInputEvent::MouseMotion {
+                            device_id,
+                            dx: i64::from(mouse.lLastX),
+                            dy: i64::from(mouse.lLastY),
+                        },
+                    );
                 }
                 let button_flags = unsafe { mouse.Anonymous.Anonymous.usButtonFlags };
                 let button_data = unsafe { mouse.Anonymous.Anonymous.usButtonData };
@@ -4351,13 +4347,13 @@ unsafe extern "system" fn arcana_window_proc(
                         );
                     }
                 }
-                if let Some((dx, dy)) = raw_mouse_wheel_delta(button_flags, button_data) {
-                    if let Some(pending) = pending.as_mut() {
-                        push_pending_raw_input_event(
-                            pending,
-                            PendingRawInputEvent::MouseWheel { device_id, dx, dy },
-                        );
-                    }
+                if let Some((dx, dy)) = raw_mouse_wheel_delta(button_flags, button_data)
+                    && let Some(pending) = pending.as_mut()
+                {
+                    push_pending_raw_input_event(
+                        pending,
+                        PendingRawInputEvent::MouseWheel { device_id, dx, dy },
+                    );
                 }
             } else if raw.header.dwType == RIM_TYPEKEYBOARD {
                 let keyboard = unsafe { raw.data.keyboard };
@@ -4655,7 +4651,7 @@ fn decode_wav_pcm16_samples(
     if sample_bytes == 0 {
         return Err("wav bits-per-sample must be non-zero".to_string());
     }
-    if data.len() % sample_bytes != 0 {
+    if !data.len().is_multiple_of(sample_bytes) {
         return Err("wav sample data is not aligned to the declared sample width".to_string());
     }
     let sample_count = data.len() / sample_bytes;
@@ -4828,7 +4824,7 @@ fn clipboard_write_block(format: u32, bytes: &[u8]) -> Result<(), String> {
     if unsafe { EmptyClipboard() } == 0 {
         return Err("failed to clear Windows clipboard".to_string());
     }
-    let handle = unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes.len()) } as *mut c_void;
+    let handle = unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes.len()) };
     if handle.is_null() {
         return Err("failed to allocate Windows clipboard block".to_string());
     }
@@ -4847,7 +4843,7 @@ fn clipboard_write_block(format: u32, bytes: &[u8]) -> Result<(), String> {
     unsafe {
         GlobalUnlock(handle);
     }
-    let stored = unsafe { SetClipboardData(format, handle) } as *mut c_void;
+    let stored = unsafe { SetClipboardData(format, handle) };
     if stored.is_null() {
         unsafe {
             GlobalFree(handle);
@@ -4862,7 +4858,7 @@ fn clipboard_read_block(format: u32) -> Result<Vec<u8>, String> {
     if unsafe { IsClipboardFormatAvailable(format) } == 0 {
         return Err("requested Windows clipboard format is not available".to_string());
     }
-    let handle = unsafe { GetClipboardData(format) } as *mut c_void;
+    let handle = unsafe { GetClipboardData(format) };
     if handle.is_null() {
         return Err("failed to access Windows clipboard data".to_string());
     }

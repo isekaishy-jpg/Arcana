@@ -47,10 +47,10 @@
   - invalidate downstream members transitively when exported API fingerprints change,
   - support no-op rebuilds and selective rebuilds before the backend milestone is considered complete.
 - Package manager scope before selfhost is fixed:
-  - support local path dependencies and workspaces only,
-  - ship `Arcana.lock` v1,
-  - internally model future dependency sources as path/git/registry, but enable only path in the CLI and manifest validator,
-  - registry and Git transport stay post-selfhost.
+  - support local path dependencies, workspaces, and the built-in machine-local published `local` registry source,
+  - ship the current `Arcana.lock` format with source-aware package ids,
+  - internally model future dependency sources as path/git/registry, but keep named remote registries and Git transport disabled,
+  - remote registry and Git transport stay post-selfhost.
 - Public interfaces before selfhost:
   - `book.toml` remains the package manifest,
   - `Arcana.lock` remains the lockfile,
@@ -127,6 +127,6 @@
 ## Assumptions and Defaults
 - The frozen baseline is the current Arcana v0 language contract plus the existing selfhost language matrix.
 - Pre-selfhost work may change manifests, lockfiles, caches, host APIs, backend internals, and package tooling, but may not change the source language.
-- Path dependencies are the only supported dependency source until after selfhost.
-- `Arcana.lock` is restarted at `version = 1` in the new repo rather than inheriting MeadowLang’s lockfile schema wholesale.
+- Path dependencies and the built-in machine-local `local` registry source are the only supported dependency sources until after selfhost.
+- `Arcana.lock` now uses the rewrite-owned `version = 4` source-aware schema rather than inheriting MeadowLang’s lockfile contract wholesale.
 - Early host/app substrate support means “supported before selfhost”, not “before the frontend exists”; runnable demos arrive with the first AOT backend milestone.

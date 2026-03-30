@@ -3,7 +3,7 @@ use arcana_ir::{
 };
 use serde::{Deserialize, Serialize};
 
-pub const AOT_INTERNAL_FORMAT: &str = "arcana-aot-v7";
+pub const AOT_INTERNAL_FORMAT: &str = "arcana-aot-v8";
 
 pub type AotRoutineParamArtifact = IrRoutineParam;
 
@@ -16,6 +16,7 @@ pub struct AotArtifact {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AotPackageModuleArtifact {
+    pub package_id: String,
     pub module_id: String,
     pub symbol_count: usize,
     pub item_count: usize,
@@ -28,6 +29,7 @@ pub struct AotPackageModuleArtifact {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AotEntrypointArtifact {
+    pub package_id: String,
     pub module_id: String,
     pub symbol_name: String,
     pub symbol_kind: String,
@@ -37,6 +39,7 @@ pub struct AotEntrypointArtifact {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AotRoutineArtifact {
+    pub package_id: String,
     pub module_id: String,
     pub routine_key: String,
     pub symbol_name: String,
@@ -83,6 +86,8 @@ pub struct AotOwnerExitArtifact {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AotOwnerArtifact {
+    #[serde(default)]
+    pub package_id: String,
     pub module_id: String,
     pub owner_path: Vec<String>,
     pub owner_name: String,
@@ -93,9 +98,14 @@ pub struct AotOwnerArtifact {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AotPackageArtifact {
     pub format: String,
+    pub package_id: String,
     pub package_name: String,
     pub root_module_id: String,
     pub direct_deps: Vec<String>,
+    pub direct_dep_ids: Vec<String>,
+    pub package_display_names: std::collections::BTreeMap<String, String>,
+    pub package_direct_dep_ids:
+        std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
     pub module_count: usize,
     pub dependency_edge_count: usize,
     pub dependency_rows: Vec<String>,

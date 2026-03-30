@@ -13,6 +13,13 @@ pub use type_surface::{
     validate_tuple_type_contract,
 };
 
+type ParsedFunctionTail = (
+    Vec<String>,
+    Option<SurfaceWhereClause>,
+    Vec<ParamDecl>,
+    Option<SurfaceType>,
+);
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Span {
     pub line: usize,
@@ -1094,7 +1101,7 @@ fn parse_symbol_header(trimmed: &str, span: Span) -> Option<SymbolDecl> {
         let Some(rest) = rest.strip_prefix(' ') else {
             continue;
         };
-        let signature = parse_symbol_signature(kind.clone(), rest)?;
+        let signature = parse_symbol_signature(kind, rest)?;
         return Some(SymbolDecl {
             name: signature.name,
             kind,
@@ -1372,14 +1379,7 @@ fn parse_symbol_signature(kind: SymbolKind, rest: &str) -> Option<ParsedSymbolSi
     })
 }
 
-fn parse_function_signature_tail(
-    tail: &str,
-) -> Option<(
-    Vec<String>,
-    Option<SurfaceWhereClause>,
-    Vec<ParamDecl>,
-    Option<SurfaceType>,
-)> {
+fn parse_function_signature_tail(tail: &str) -> Option<ParsedFunctionTail> {
     let tail = tail.trim();
     let (type_params, where_clause, remainder) = parse_type_params_and_where(tail)?;
     let remainder = remainder.trim();
@@ -1398,14 +1398,7 @@ fn parse_function_signature_tail(
     Some((type_params, where_clause, params, return_type))
 }
 
-fn parse_named_type_tail(
-    tail: &str,
-) -> Option<(
-    Vec<String>,
-    Option<SurfaceWhereClause>,
-    Vec<ParamDecl>,
-    Option<SurfaceType>,
-)> {
+fn parse_named_type_tail(tail: &str) -> Option<ParsedFunctionTail> {
     let (type_params, where_clause, remainder) = parse_type_params_and_where(tail.trim())?;
     if !remainder.trim().is_empty() {
         return None;
@@ -2000,17 +1993,17 @@ fn parse_statement_block(
         }
         statement.forewords = std::mem::take(&mut pending_forewords);
         let mut next_index = index + 1;
-        if let StatementKind::If { else_branch, .. } = &mut statement.kind {
-            if let Some(next) = entries.get(next_index) {
-                if next.text == "else:" {
-                    *else_branch = Some(parse_statement_block(&next.children, loop_depth)?);
-                    next_index += 1;
-                } else if next.text.starts_with("else ") {
-                    return Err(format!(
-                        "{}:{}: malformed `else` clause",
-                        next.span.line, next.span.column
-                    ));
-                }
+        if let StatementKind::If { else_branch, .. } = &mut statement.kind
+            && let Some(next) = entries.get(next_index)
+        {
+            if next.text == "else:" {
+                *else_branch = Some(parse_statement_block(&next.children, loop_depth)?);
+                next_index += 1;
+            } else if next.text.starts_with("else ") {
+                return Err(format!(
+                    "{}:{}: malformed `else` clause",
+                    next.span.line, next.span.column
+                ));
             }
         }
 
@@ -2350,24 +2343,23 @@ fn parse_non_tuple_comma_expression(text: &str) -> Result<Option<Expr>, String> 
     if let Some(expr) = parse_chain_expression(trimmed)? {
         return Ok(Some(expr));
     }
-    if memory_before_comma {
-        if let Some(expr) = parse_memory_phrase(trimmed)? {
-            if matches!(
-                &expr,
-                Expr::MemoryPhrase { constructor, .. } if is_memory_constructor_like(constructor)
-            ) {
-                return Ok(Some(expr));
-            }
-        }
+    if memory_before_comma
+        && let Some(expr) = parse_memory_phrase(trimmed)?
+        && matches!(
+            &expr,
+            Expr::MemoryPhrase { constructor, .. } if is_memory_constructor_like(constructor)
+        )
+    {
+        return Ok(Some(expr));
     }
-    if qualified_before_comma {
-        if matches!(
+    if qualified_before_comma
+        && matches!(
             parse_qualified_phrase(trimmed)?,
             Some(Expr::QualifiedPhrase { ref qualifier, .. })
                 if classify_qualified_phrase_qualifier(qualifier).is_some()
-        ) {
-            return parse_qualified_phrase(trimmed);
-        }
+        )
+    {
+        return parse_qualified_phrase(trimmed);
     }
     Ok(None)
 }
@@ -3140,13 +3132,13 @@ fn parse_access_expression(text: &str) -> Result<Option<Expr>, String> {
         if base.is_empty() {
             return Ok(None);
         }
-        if is_path_like(base) {
-            if let Some(type_args) = parse_generic_arg_types(inside) {
-                return Ok(Some(Expr::GenericApply {
-                    expr: Box::new(parse_expression_core(base)?),
-                    type_args,
-                }));
-            }
+        if is_path_like(base)
+            && let Some(type_args) = parse_generic_arg_types(inside)
+        {
+            return Ok(Some(Expr::GenericApply {
+                expr: Box::new(parse_expression_core(base)?),
+                type_args,
+            }));
         }
         if let Some((start, end, inclusive_end)) = parse_range_parts(inside) {
             return Ok(Some(Expr::Slice {
@@ -3291,13 +3283,14 @@ fn parse_assign_target(text: &str) -> Result<AssignTarget, String> {
     let trimmed = text.trim();
     if let Some((base, inside)) = split_trailing_bracket_suffix(trimmed) {
         let base = base.trim();
-        if !base.is_empty() && should_parse_index_brackets(inside) {
-            if let Ok(index) = parse_expression_core(inside.trim()) {
-                return Ok(AssignTarget::Index {
-                    target: Box::new(parse_assign_target(base)?),
-                    index,
-                });
-            }
+        if !base.is_empty()
+            && should_parse_index_brackets(inside)
+            && let Ok(index) = parse_expression_core(inside.trim())
+        {
+            return Ok(AssignTarget::Index {
+                target: Box::new(parse_assign_target(base)?),
+                index,
+            });
         }
     }
 
@@ -5258,10 +5251,10 @@ fn validate_statement_rollup_contract(statements: &[Statement]) -> Result<(), St
                 }
             }
             let mut initially_active = BTreeSet::new();
-            if let StatementKind::For { binding, .. } = &statement.kind {
-                if cleanup_subjects.contains(binding) {
-                    initially_active.insert(binding.clone());
-                }
+            if let StatementKind::For { binding, .. } = &statement.kind
+                && cleanup_subjects.contains(binding)
+            {
+                initially_active.insert(binding.clone());
             }
             match &statement.kind {
                 StatementKind::If {
@@ -5360,13 +5353,13 @@ fn validate_rollup_reassignment_contract(
 ) -> Result<(), String> {
     let mut active = active_subjects.clone();
     for statement in statements {
-        if let Some(name) = assignment_target_name(statement) {
-            if active.contains(name) {
-                return Err(format!(
-                    "{}:{}: cleanup subject `{}` cannot be reassigned after activation",
-                    statement.span.line, statement.span.column, name
-                ));
-            }
+        if let Some(name) = assignment_target_name(statement)
+            && active.contains(name)
+        {
+            return Err(format!(
+                "{}:{}: cleanup subject `{}` cannot be reassigned after activation",
+                statement.span.line, statement.span.column, name
+            ));
         }
 
         match &statement.kind {
@@ -5694,7 +5687,7 @@ fn validate_raw_function_header_tuple_contract(text: &str, span: Span) -> Result
     Ok(())
 }
 
-fn extract_raw_function_signature_parts<'a>(text: &'a str) -> Option<(&'a str, Option<&'a str>)> {
+fn extract_raw_function_signature_parts(text: &str) -> Option<(&str, Option<&str>)> {
     let rest = text.strip_prefix("export ").unwrap_or(text).trim_start();
     let rest = rest.strip_prefix("async ").unwrap_or(rest).trim_start();
     let rest = if rest.starts_with("behavior") {
@@ -5837,7 +5830,7 @@ fn looks_like_tuple_binding(text: &str) -> bool {
     tuple_parts_if_whole(text).is_some()
 }
 
-fn tuple_parts_if_whole<'a>(text: &'a str) -> Option<Vec<&'a str>> {
+fn tuple_parts_if_whole(text: &str) -> Option<Vec<&str>> {
     let trimmed = text.trim();
     if !trimmed.starts_with('(') || !trimmed.ends_with(')') {
         return None;

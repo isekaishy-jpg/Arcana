@@ -636,17 +636,18 @@ pub fn hir_type_matches(
     if declared == actual {
         return true;
     }
-    if let HirTypeKind::Path(path) = &declared.kind {
-        if path.segments.len() == 1 && hir_simple_placeholder(&path.segments[0]) {
-            let Some(key) = bindings.binding_id(&path.segments[0]) else {
-                return false;
-            };
-            if let Some(existing) = substitutions.get(&key) {
-                return existing == actual;
-            }
-            substitutions.insert(key, actual.clone());
-            return true;
+    if let HirTypeKind::Path(path) = &declared.kind
+        && path.segments.len() == 1
+        && hir_simple_placeholder(&path.segments[0])
+    {
+        let Some(key) = bindings.binding_id(&path.segments[0]) else {
+            return false;
+        };
+        if let Some(existing) = substitutions.get(&key) {
+            return existing == actual;
         }
+        substitutions.insert(key, actual.clone());
+        return true;
     }
     match (&declared.kind, &actual.kind) {
         (

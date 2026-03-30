@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -204,7 +206,7 @@ pub fn cached_artifact_matches_status(
     let Ok(artifact) = parse_package_artifact(&text) else {
         return false;
     };
-    if artifact.package_name != expected_member {
+    if artifact.package_id != expected_member {
         return false;
     }
     cached_emission_hash_for_output_path(output_path, expected_target, &text)
@@ -445,6 +447,7 @@ fn escape_toml(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use arcana_aot::{AOT_INTERNAL_FORMAT, AotPackageModuleArtifact};
@@ -473,12 +476,53 @@ mod tests {
         dir
     }
 
+    fn test_package_id_for_module(module_id: &str) -> String {
+        module_id.split('.').next().unwrap_or(module_id).to_string()
+    }
+
+    fn test_package_display_names_with_deps(
+        package_id: impl Into<String>,
+        package_name: impl Into<String>,
+        direct_deps: Vec<String>,
+        direct_dep_ids: Vec<String>,
+    ) -> BTreeMap<String, String> {
+        let mut names = BTreeMap::from([(package_id.into(), package_name.into())]);
+        for (dep_name, dep_id) in direct_deps.into_iter().zip(direct_dep_ids) {
+            names.entry(dep_id).or_insert(dep_name);
+        }
+        names
+    }
+
+    fn test_package_direct_dep_ids(
+        package_id: impl Into<String>,
+        direct_deps: Vec<String>,
+        direct_dep_ids: Vec<String>,
+    ) -> BTreeMap<String, BTreeMap<String, String>> {
+        BTreeMap::from([(
+            package_id.into(),
+            direct_deps.into_iter().zip(direct_dep_ids).collect(),
+        )])
+    }
+
     fn dummy_artifact() -> AotPackageArtifact {
         AotPackageArtifact {
             format: AOT_INTERNAL_FORMAT.to_string(),
+            package_id: "tool".to_string(),
             package_name: "tool".to_string(),
             root_module_id: "tool".to_string(),
             direct_deps: Vec::new(),
+            direct_dep_ids: Vec::new(),
+            package_display_names: test_package_display_names_with_deps(
+                "tool".to_string(),
+                "tool".to_string(),
+                Vec::new(),
+                Vec::new(),
+            ),
+            package_direct_dep_ids: test_package_direct_dep_ids(
+                test_package_id_for_module("tool"),
+                Vec::new(),
+                Vec::new(),
+            ),
             module_count: 1,
             dependency_edge_count: 0,
             dependency_rows: Vec::new(),
@@ -488,6 +532,7 @@ mod tests {
             routines: Vec::new(),
             owners: Vec::new(),
             modules: vec![AotPackageModuleArtifact {
+                package_id: test_package_id_for_module("tool"),
                 module_id: "tool".to_string(),
                 symbol_count: 0,
                 item_count: 0,

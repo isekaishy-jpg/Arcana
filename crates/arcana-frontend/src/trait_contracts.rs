@@ -58,8 +58,7 @@ pub(crate) fn workspace_has_trait_impl(
         if !visible_packages.contains(&package.summary.package_name) {
             continue;
         }
-        let Some(resolved_package) = resolved_workspace.package(&package.summary.package_name)
-        else {
+        let Some(resolved_package) = resolved_workspace.package_by_id(&package.package_id) else {
             continue;
         };
         let foreign_package = current_package_name

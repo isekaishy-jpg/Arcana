@@ -380,6 +380,9 @@ fn validate_foreword_row(text: &str) -> Result<(), String> {
 }
 
 pub fn validate_package_artifact(artifact: &AotPackageArtifact) -> Result<(), String> {
+    if artifact.package_id.is_empty() {
+        return Err("backend artifact package id must not be empty".to_string());
+    }
     if artifact.package_name.is_empty() {
         return Err("backend artifact package name must not be empty".to_string());
     }
@@ -419,16 +422,84 @@ pub fn validate_package_artifact(artifact: &AotPackageArtifact) -> Result<(), St
             ));
         }
     }
+    let mut direct_dep_ids = BTreeSet::new();
+    for dep_id in &artifact.direct_dep_ids {
+        if dep_id.is_empty() {
+            return Err("backend artifact direct dependency ids must not be empty".to_string());
+        }
+        if dep_id == &artifact.package_id {
+            return Err(format!(
+                "backend artifact package `{}` cannot list itself as a direct dependency id",
+                artifact.package_id
+            ));
+        }
+        if !direct_dep_ids.insert(dep_id.as_str()) {
+            return Err(format!(
+                "backend artifact package `{}` lists duplicate direct dependency id `{dep_id}`",
+                artifact.package_id
+            ));
+        }
+    }
+    if artifact.package_display_names.is_empty() {
+        return Err("backend artifact package display-name table must not be empty".to_string());
+    }
+    if !artifact
+        .package_display_names
+        .contains_key(&artifact.package_id)
+    {
+        return Err(format!(
+            "backend artifact package display-name table is missing root package `{}`",
+            artifact.package_id
+        ));
+    }
+    for (package_id, package_name) in &artifact.package_display_names {
+        if package_id.is_empty() || package_name.is_empty() {
+            return Err("backend artifact package display names must not be empty".to_string());
+        }
+    }
+    for (package_id, dep_ids) in &artifact.package_direct_dep_ids {
+        if !artifact.package_display_names.contains_key(package_id) {
+            return Err(format!(
+                "backend artifact dependency-id table references unknown package `{package_id}`"
+            ));
+        }
+        for (package_name, dep_id) in dep_ids {
+            if package_name.is_empty() || dep_id.is_empty() {
+                return Err(format!(
+                    "backend artifact package `{package_id}` has an empty dependency mapping"
+                ));
+            }
+            if !artifact.package_display_names.contains_key(dep_id) {
+                return Err(format!(
+                    "backend artifact package `{package_id}` references unknown dependency id `{dep_id}`"
+                ));
+            }
+        }
+    }
 
     let mut module_ids = BTreeSet::new();
+    let mut module_keys = BTreeSet::new();
     for module in &artifact.modules {
+        if module.package_id.is_empty() {
+            return Err("backend artifact module package ids must not be empty".to_string());
+        }
+        if !artifact
+            .package_display_names
+            .contains_key(&module.package_id)
+        {
+            return Err(format!(
+                "backend artifact module `{}` references unknown package `{}`",
+                module.module_id, module.package_id
+            ));
+        }
         if module.module_id.is_empty() {
             return Err("backend artifact module ids must not be empty".to_string());
         }
-        if !module_ids.insert(module.module_id.as_str()) {
+        module_ids.insert(module.module_id.as_str());
+        if !module_keys.insert((module.package_id.as_str(), module.module_id.as_str())) {
             return Err(format!(
-                "backend artifact contains duplicate module `{}`",
-                module.module_id
+                "backend artifact contains duplicate module `{}::{}`",
+                module.package_id, module.module_id
             ));
         }
         for row in &module.directive_rows {
@@ -459,10 +530,13 @@ pub fn validate_package_artifact(artifact: &AotPackageArtifact) -> Result<(), St
             validate_module_surface_row(row)?;
         }
     }
-    if !module_ids.contains(artifact.root_module_id.as_str()) {
+    if !module_keys.contains(&(
+        artifact.package_id.as_str(),
+        artifact.root_module_id.as_str(),
+    )) {
         return Err(format!(
-            "backend artifact root module `{}` is missing from module table",
-            artifact.root_module_id
+            "backend artifact root module `{}` is missing from the root package `{}`",
+            artifact.root_module_id, artifact.package_id
         ));
     }
 
@@ -509,6 +583,12 @@ pub fn validate_package_artifact(artifact: &AotPackageArtifact) -> Result<(), St
         if routine.routine_key.is_empty() {
             return Err("backend artifact routine keys must not be empty".to_string());
         }
+        if routine.package_id.is_empty() {
+            return Err(format!(
+                "backend artifact routine `{}` has an empty package id",
+                routine.routine_key
+            ));
+        }
         if routine.module_id.is_empty() {
             return Err(format!(
                 "backend artifact routine `{}` has an empty module id",
@@ -527,10 +607,19 @@ pub fn validate_package_artifact(artifact: &AotPackageArtifact) -> Result<(), St
                 routine.routine_key
             ));
         }
-        if !module_ids.contains(routine.module_id.as_str()) {
+        if !artifact
+            .package_display_names
+            .contains_key(&routine.package_id)
+        {
             return Err(format!(
-                "backend artifact routine `{}` references undeclared module `{}`",
-                routine.routine_key, routine.module_id
+                "backend artifact routine `{}` references unknown package `{}`",
+                routine.routine_key, routine.package_id
+            ));
+        }
+        if !module_keys.contains(&(routine.package_id.as_str(), routine.module_id.as_str())) {
+            return Err(format!(
+                "backend artifact routine `{}` references undeclared module `{}::{}`",
+                routine.routine_key, routine.package_id, routine.module_id
             ));
         }
         if !routine_keys.insert(routine.routine_key.as_str()) {
@@ -555,13 +644,13 @@ pub fn validate_package_artifact(artifact: &AotPackageArtifact) -> Result<(), St
                 routine.routine_key
             ));
         }
-        if let Some(trait_path) = &routine.impl_trait_path {
-            if trait_path.is_empty() || trait_path.iter().any(|segment| segment.is_empty()) {
-                return Err(format!(
-                    "backend artifact routine `{}` has an invalid impl trait path",
-                    routine.routine_key
-                ));
-            }
+        if let Some(trait_path) = &routine.impl_trait_path
+            && (trait_path.is_empty() || trait_path.iter().any(|segment| segment.is_empty()))
+        {
+            return Err(format!(
+                "backend artifact routine `{}` has an invalid impl trait path",
+                routine.routine_key
+            ));
         }
         if routine
             .return_type
@@ -611,6 +700,9 @@ pub fn validate_package_artifact(artifact: &AotPackageArtifact) -> Result<(), St
 
     let mut entrypoint_keys = BTreeSet::new();
     for entrypoint in &artifact.entrypoints {
+        if entrypoint.package_id.is_empty() {
+            return Err("backend artifact entrypoint package ids must not be empty".to_string());
+        }
         if entrypoint.module_id.is_empty() {
             return Err("backend artifact entrypoint module ids must not be empty".to_string());
         }
@@ -620,27 +712,43 @@ pub fn validate_package_artifact(artifact: &AotPackageArtifact) -> Result<(), St
         if entrypoint.symbol_kind.is_empty() {
             return Err("backend artifact entrypoint kinds must not be empty".to_string());
         }
-        if !module_ids.contains(entrypoint.module_id.as_str()) {
+        if !artifact
+            .package_display_names
+            .contains_key(&entrypoint.package_id)
+        {
             return Err(format!(
-                "backend artifact entrypoint `{}.{}` references undeclared module",
-                entrypoint.module_id, entrypoint.symbol_name
+                "backend artifact entrypoint `{}::{}` references unknown package",
+                entrypoint.package_id, entrypoint.symbol_name
+            ));
+        }
+        if !module_keys.contains(&(
+            entrypoint.package_id.as_str(),
+            entrypoint.module_id.as_str(),
+        )) {
+            return Err(format!(
+                "backend artifact entrypoint `{}::{}.{}` references undeclared module",
+                entrypoint.package_id, entrypoint.module_id, entrypoint.symbol_name
             ));
         }
         let key = format!(
-            "{}:{}:{}",
-            entrypoint.module_id, entrypoint.symbol_kind, entrypoint.symbol_name
+            "{}:{}:{}:{}",
+            entrypoint.package_id,
+            entrypoint.module_id,
+            entrypoint.symbol_kind,
+            entrypoint.symbol_name
         );
         if !entrypoint_keys.insert(key) {
             return Err(format!(
-                "backend artifact contains duplicate entrypoint `{}.{}`",
-                entrypoint.module_id, entrypoint.symbol_name
+                "backend artifact contains duplicate entrypoint `{}::{}.{}`",
+                entrypoint.package_id, entrypoint.module_id, entrypoint.symbol_name
             ));
         }
         let matches = artifact
             .routines
             .iter()
             .filter(|routine| {
-                routine.module_id == entrypoint.module_id
+                routine.package_id == entrypoint.package_id
+                    && routine.module_id == entrypoint.module_id
                     && routine.symbol_name == entrypoint.symbol_name
                     && routine.symbol_kind == entrypoint.symbol_kind
             })
@@ -648,28 +756,28 @@ pub fn validate_package_artifact(artifact: &AotPackageArtifact) -> Result<(), St
         match matches.as_slice() {
             [] => {
                 return Err(format!(
-                    "backend artifact entrypoint `{}.{}` has no matching routine",
-                    entrypoint.module_id, entrypoint.symbol_name
+                    "backend artifact entrypoint `{}::{}.{}` has no matching routine",
+                    entrypoint.package_id, entrypoint.module_id, entrypoint.symbol_name
                 ));
             }
             [routine] => {
                 if routine.is_async != entrypoint.is_async {
                     return Err(format!(
-                        "backend artifact entrypoint `{}.{}` async metadata does not match its routine",
-                        entrypoint.module_id, entrypoint.symbol_name
+                        "backend artifact entrypoint `{}::{}.{}` async metadata does not match its routine",
+                        entrypoint.package_id, entrypoint.module_id, entrypoint.symbol_name
                     ));
                 }
                 if routine.exported != entrypoint.exported {
                     return Err(format!(
-                        "backend artifact entrypoint `{}.{}` export metadata does not match its routine",
-                        entrypoint.module_id, entrypoint.symbol_name
+                        "backend artifact entrypoint `{}::{}.{}` export metadata does not match its routine",
+                        entrypoint.package_id, entrypoint.module_id, entrypoint.symbol_name
                     ));
                 }
             }
             _ => {
                 return Err(format!(
-                    "backend artifact entrypoint `{}.{}` is ambiguous across routines",
-                    entrypoint.module_id, entrypoint.symbol_name
+                    "backend artifact entrypoint `{}::{}.{}` is ambiguous across routines",
+                    entrypoint.package_id, entrypoint.module_id, entrypoint.symbol_name
                 ));
             }
         }

@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -322,7 +324,7 @@ fn boundary_symbol_is_safe(
 
     let nested_scope = TypeScope::default().with_params(&symbol_ref.symbol.type_params);
     let owner_module = resolved_workspace
-        .package(symbol_ref.package_name)
+        .package_by_id(symbol_ref.package_id)
         .and_then(|package| package.module(symbol_ref.module_id))
         .unwrap_or(resolved_module);
     match &symbol_ref.symbol.body {

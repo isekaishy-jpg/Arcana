@@ -27,13 +27,13 @@ pub(crate) fn render_directive_fingerprint(directive: &HirDirective) -> String {
         directive
             .path
             .iter()
-            .map(|segment| quote_fingerprint_text(segment))
+            .map(quote_fingerprint_text)
             .collect::<Vec<_>>()
             .join(","),
         directive
             .alias
             .as_ref()
-            .map(|alias| quote_fingerprint_text(alias))
+            .map(quote_fingerprint_text)
             .unwrap_or_else(|| "none".to_string()),
         directive
             .forewords
@@ -51,7 +51,7 @@ pub(crate) fn render_lang_item_fingerprint(lang_item: &HirLangItem) -> String {
         lang_item
             .target
             .iter()
-            .map(|segment| quote_fingerprint_text(segment))
+            .map(quote_fingerprint_text)
             .collect::<Vec<_>>()
             .join(",")
     )
@@ -73,13 +73,13 @@ pub fn render_symbol_fingerprint(symbol: &HirSymbol) -> String {
         symbol
             .type_params
             .iter()
-            .map(|param| quote_fingerprint_text(param))
+            .map(quote_fingerprint_text)
             .collect::<Vec<_>>()
             .join(","),
         symbol
             .where_clause
             .as_ref()
-            .map(|clause| quote_fingerprint_text(clause))
+            .map(quote_fingerprint_text)
             .unwrap_or_else(|| "none".to_string()),
         symbol
             .behavior_attrs
@@ -102,7 +102,7 @@ pub fn render_symbol_fingerprint(symbol: &HirSymbol) -> String {
         symbol
             .intrinsic_impl
             .as_ref()
-            .map(|intrinsic| quote_fingerprint_text(intrinsic))
+            .map(quote_fingerprint_text)
             .unwrap_or_else(|| "none".to_string()),
         render_symbol_body_fingerprint(&symbol.body),
         symbol
@@ -146,7 +146,7 @@ fn render_foreword_arg_fingerprint(arg: &HirForewordArg) -> String {
         "arg(name={}|value={})",
         arg.name
             .as_ref()
-            .map(|name| quote_fingerprint_text(name))
+            .map(quote_fingerprint_text)
             .unwrap_or_else(|| "none".to_string()),
         quote_fingerprint_text(&arg.value)
     )
@@ -231,7 +231,7 @@ fn render_enum_variant_fingerprint(variant: &HirEnumVariant) -> String {
         variant
             .payload
             .as_ref()
-            .map(|payload| quote_fingerprint_text(payload))
+            .map(quote_fingerprint_text)
             .unwrap_or_else(|| "none".to_string())
     )
 }
@@ -242,7 +242,7 @@ fn render_owner_object_fingerprint(object: &HirOwnerObject) -> String {
         object
             .type_path
             .iter()
-            .map(|segment| quote_fingerprint_text(segment))
+            .map(quote_fingerprint_text)
             .collect::<Vec<_>>()
             .join(","),
         quote_fingerprint_text(&object.local_name)
@@ -257,7 +257,7 @@ fn render_owner_exit_fingerprint(owner_exit: &HirOwnerExit) -> String {
         owner_exit
             .holds
             .iter()
-            .map(|hold| quote_fingerprint_text(hold))
+            .map(quote_fingerprint_text)
             .collect::<Vec<_>>()
             .join(",")
     )
@@ -270,7 +270,7 @@ fn render_trait_assoc_type_fingerprint(assoc_type: &super::HirTraitAssocType) ->
         assoc_type
             .default_ty
             .as_ref()
-            .map(|default_ty| quote_fingerprint_text(default_ty))
+            .map(quote_fingerprint_text)
             .unwrap_or_else(|| "none".to_string())
     )
 }
@@ -284,13 +284,13 @@ pub(crate) fn render_impl_fingerprint(impl_decl: &HirImplDecl) -> String {
         impl_decl
             .type_params
             .iter()
-            .map(|param| quote_fingerprint_text(param))
+            .map(quote_fingerprint_text)
             .collect::<Vec<_>>()
             .join(","),
         impl_decl
             .trait_path
             .as_ref()
-            .map(|trait_path| quote_fingerprint_text(trait_path))
+            .map(quote_fingerprint_text)
             .unwrap_or_else(|| "none".to_string()),
         quote_fingerprint_text(&impl_decl.target_type),
         impl_decl
@@ -308,7 +308,7 @@ pub(crate) fn render_impl_fingerprint(impl_decl: &HirImplDecl) -> String {
         impl_decl
             .body_entries
             .iter()
-            .map(|entry| quote_fingerprint_text(entry))
+            .map(quote_fingerprint_text)
             .collect::<Vec<_>>()
             .join(",")
     )
@@ -321,7 +321,7 @@ fn render_impl_assoc_type_fingerprint(assoc_type: &HirImplAssocTypeBinding) -> S
         assoc_type
             .value_ty
             .as_ref()
-            .map(|value_ty| quote_fingerprint_text(value_ty))
+            .map(quote_fingerprint_text)
             .unwrap_or_else(|| "none".to_string())
     )
 }
@@ -334,7 +334,7 @@ fn render_rollup_fingerprint(rollup: &HirPageRollup) -> String {
         rollup
             .handler_path
             .iter()
-            .map(|segment| quote_fingerprint_text(segment))
+            .map(quote_fingerprint_text)
             .collect::<Vec<_>>()
             .join(",")
     )
@@ -371,7 +371,7 @@ fn render_availability_attachment_fingerprint(attachment: &HirAvailabilityAttach
         attachment
             .path
             .iter()
-            .map(|segment| quote_fingerprint_text(segment))
+            .map(quote_fingerprint_text)
             .collect::<Vec<_>>()
             .join(",")
     )
@@ -476,7 +476,7 @@ pub fn render_expr_fingerprint(expr: &HirExpr) -> String {
             "path([{}])",
             segments
                 .iter()
-                .map(|segment| quote_fingerprint_text(segment))
+                .map(quote_fingerprint_text)
                 .collect::<Vec<_>>()
                 .join(",")
         ),
@@ -618,7 +618,7 @@ pub fn render_expr_fingerprint(expr: &HirExpr) -> String {
             render_expr_fingerprint(expr),
             type_args
                 .iter()
-                .map(|arg| quote_fingerprint_text(arg))
+                .map(quote_fingerprint_text)
                 .collect::<Vec<_>>()
                 .join(",")
         ),
@@ -718,12 +718,12 @@ pub(crate) fn render_dependency_edge_fingerprint(edge: &HirModuleDependency) -> 
         edge.kind.as_str(),
         edge.target_path
             .iter()
-            .map(|segment| quote_fingerprint_text(segment))
+            .map(quote_fingerprint_text)
             .collect::<Vec<_>>()
             .join(","),
         edge.alias
             .as_ref()
-            .map(|alias| quote_fingerprint_text(alias))
+            .map(quote_fingerprint_text)
             .unwrap_or_else(|| "none".to_string())
     )
 }
