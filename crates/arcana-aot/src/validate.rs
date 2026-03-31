@@ -1,7 +1,9 @@
 use std::collections::BTreeSet;
 
 use crate::artifact::AotPackageArtifact;
-use arcana_ir::{IrRoutineType, IrRoutineTypeKind, parse_memory_spec_surface_row};
+use arcana_ir::{
+    IrForewordRetention, IrRoutineType, IrRoutineTypeKind, parse_memory_spec_surface_row,
+};
 
 fn strip_prefix_suffix<'a>(text: &'a str, prefix: &str, suffix: &str) -> Result<&'a str, String> {
     text.strip_prefix(prefix)
@@ -38,21 +40,8 @@ fn decode_escaped_row_text(text: &str, quoted: bool) -> Result<String, String> {
     Ok(out)
 }
 
-fn decode_row_string(text: &str) -> Result<String, String> {
-    decode_escaped_row_text(text, true)
-}
-
 fn validate_surface_text_encoding(text: &str) -> Result<(), String> {
     decode_escaped_row_text(text, false).map(|_| ())
-}
-
-fn decode_source_string_literal(text: &str) -> Result<String, String> {
-    let source = decode_row_string(text)?;
-    if source.starts_with('"') && source.ends_with('"') && source.len() >= 2 {
-        decode_row_string(&source)
-    } else {
-        Ok(source)
-    }
 }
 
 fn is_identifier_text(text: &str) -> bool {
@@ -357,28 +346,117 @@ fn validate_routine_type(ty: &IrRoutineType) -> bool {
     }
 }
 
-fn validate_foreword_row(text: &str) -> Result<(), String> {
-    let Some(open) = text.find('(') else {
-        return Err(format!("malformed backend artifact foreword row `{text}`"));
-    };
-    if !text.ends_with(')') {
-        return Err(format!("malformed backend artifact foreword row `{text}`"));
+fn validate_foreword_metadata_entry(
+    module_keys: &BTreeSet<(&str, &str)>,
+    entry: &arcana_ir::IrForewordMetadata,
+) -> Result<(), String> {
+    if entry.qualified_name.is_empty() {
+        return Err("backend artifact foreword index entry names must not be empty".to_string());
     }
-    let name = text[..open].trim();
-    if !is_identifier_text(name) {
-        return Err(format!("malformed backend artifact foreword row `{text}`"));
+    if entry.package_id.is_empty() || entry.module_id.is_empty() {
+        return Err(format!(
+            "backend artifact foreword index entry `{}` must reference a non-empty package and module",
+            entry.qualified_name
+        ));
     }
-    let args = &text[open + 1..text.len() - 1];
-    for arg in split_top_level_items(args, ',') {
-        if let Some((name, value)) = arg.split_once('=') {
-            if !is_identifier_text(name.trim()) {
-                return Err(format!("malformed backend artifact foreword row `{text}`"));
-            }
-            decode_source_string_literal(value.trim())?;
-        } else {
-            decode_source_string_literal(arg.trim())?;
+    if !module_keys.contains(&(entry.package_id.as_str(), entry.module_id.as_str())) {
+        return Err(format!(
+            "backend artifact foreword index entry `{}` references undeclared module `{}::{}`",
+            entry.qualified_name, entry.package_id, entry.module_id
+        ));
+    }
+    if entry.target_kind.is_empty() || entry.target_path.is_empty() {
+        return Err(format!(
+            "backend artifact foreword index entry `{}` must declare a target kind and path",
+            entry.qualified_name
+        ));
+    }
+    match entry.retention {
+        IrForewordRetention::Compile
+        | IrForewordRetention::Tooling
+        | IrForewordRetention::Runtime => {}
+    }
+    for arg in &entry.args {
+        if arg.name.as_deref().is_some_and(str::is_empty) {
+            return Err(format!(
+                "backend artifact foreword index entry `{}` contains an empty payload field name",
+                entry.qualified_name
+            ));
         }
     }
+    if let Some(generated_by) = &entry.generated_by {
+        validate_generated_by(
+            &format!(
+                "backend artifact foreword index entry `{}`",
+                entry.qualified_name
+            ),
+            generated_by,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_generated_by(
+    context: &str,
+    generated_by: &arcana_ir::IrForewordGeneratedBy,
+) -> Result<(), String> {
+    if generated_by.applied_name.is_empty() || generated_by.resolved_name.is_empty() {
+        return Err(format!(
+            "{context} has incomplete generating foreword names"
+        ));
+    }
+    if generated_by.provider_package_id.is_empty() {
+        return Err(format!(
+            "{context} must declare a generating provider package id"
+        ));
+    }
+    if generated_by.owner_kind.is_empty() || generated_by.owner_path.is_empty() {
+        return Err(format!(
+            "{context} must declare a generating owner kind and path"
+        ));
+    }
+    match generated_by.retention {
+        IrForewordRetention::Compile
+        | IrForewordRetention::Tooling
+        | IrForewordRetention::Runtime => {}
+    }
+    for arg in &generated_by.args {
+        if arg.name.as_deref().is_some_and(str::is_empty) {
+            return Err(format!(
+                "{context} contains an empty generating payload field name"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_foreword_registration_row(
+    row: &arcana_ir::IrForewordRegistrationRow,
+) -> Result<(), String> {
+    if split_simple_path(&row.namespace).is_none() {
+        return Err(format!(
+            "backend artifact foreword registration row `{}` must declare a valid namespace",
+            row.key
+        ));
+    }
+    if row.key.is_empty() {
+        return Err(
+            "backend artifact foreword registration rows must declare a non-empty key".to_string(),
+        );
+    }
+    if row.target_kind.is_empty() || row.target_path.is_empty() {
+        return Err(format!(
+            "backend artifact foreword registration row `{}:{}` must declare a target kind and path",
+            row.namespace, row.key
+        ));
+    }
+    validate_generated_by(
+        &format!(
+            "backend artifact foreword registration row `{}:{}`",
+            row.namespace, row.key
+        ),
+        &row.generated_by,
+    )?;
     Ok(())
 }
 
@@ -690,15 +768,13 @@ pub fn validate_package_artifact(artifact: &AotPackageArtifact) -> Result<(), St
                 &param.ty,
             )?;
         }
-        for row in &routine.foreword_rows {
-            if row.is_empty() {
-                return Err(format!(
-                    "backend artifact routine `{}` contains an empty foreword row",
-                    routine.routine_key
-                ));
-            }
-            validate_foreword_row(row)?;
-        }
+    }
+
+    for entry in &artifact.foreword_index {
+        validate_foreword_metadata_entry(&module_keys, entry)?;
+    }
+    for row in &artifact.foreword_registrations {
+        validate_foreword_registration_row(row)?;
     }
 
     let mut entrypoint_keys = BTreeSet::new();

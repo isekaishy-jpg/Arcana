@@ -5,9 +5,10 @@ use std::path::Path;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    DEFAULT_REGISTRY_NAME, DependencySource, DependencySourceSpec, LOCAL_REGISTRY_METADATA_FILE,
-    LOCAL_REGISTRY_SNAPSHOT_DIR, NativeProductSpec, PackageResult, SemverVersion, WorkspaceGraph,
-    WorkspaceMember, load_workspace_graph, local_registry_package_dir,
+    DEFAULT_REGISTRY_NAME, DependencySource, DependencySourceSpec, ForewordAdapterProductSpec,
+    LOCAL_REGISTRY_METADATA_FILE, LOCAL_REGISTRY_SNAPSHOT_DIR, NativeProductSpec, PackageResult,
+    SemverVersion, WorkspaceGraph, WorkspaceMember, load_workspace_graph,
+    local_registry_package_dir,
 };
 
 pub fn publish_workspace_member(
@@ -215,6 +216,7 @@ fn render_published_manifest(
         &member.native_products,
         native_product_sidecar_hashes,
     );
+    render_foreword_products(&mut out, &member.foreword_products);
     Ok(out)
 }
 
@@ -296,6 +298,9 @@ fn render_published_dependency(
             format_string_array(&spec.native_plugins)
         ));
     }
+    if spec.executable_forewords {
+        fields.push("executable_forewords = true".to_string());
+    }
     Ok(format!("{{ {} }}", fields.join(", ")))
 }
 
@@ -342,6 +347,30 @@ fn render_native_products(
     }
 }
 
+fn render_foreword_products(
+    out: &mut String,
+    products: &BTreeMap<String, ForewordAdapterProductSpec>,
+) {
+    if products.is_empty() {
+        return;
+    }
+    out.push_str("\n[toolchain.foreword_products]\n");
+    for (name, product) in products {
+        out.push_str(&format!(
+            "{} = {{ path = \"{}\"",
+            quote_toml_key(name),
+            escape_toml(&product.path),
+        ));
+        if let Some(runner) = &product.runner {
+            out.push_str(&format!(", runner = \"{}\"", escape_toml(runner)));
+        }
+        if !product.args.is_empty() {
+            out.push_str(&format!(", args = {}", format_string_array(&product.args)));
+        }
+        out.push_str(" }\n");
+    }
+}
+
 fn collect_snapshot_paths(member: &WorkspaceMember) -> PackageResult<Vec<String>> {
     let mut paths = Vec::new();
     collect_relative_files(&member.abs_dir.join("src"), &member.abs_dir, &mut paths)?;
@@ -350,6 +379,9 @@ fn collect_snapshot_paths(member: &WorkspaceMember) -> PackageResult<Vec<String>
         for sidecar in &product.sidecars {
             paths.push(sidecar.clone());
         }
+    }
+    for product in member.foreword_products.values() {
+        paths.push(product.path.clone());
     }
     paths.sort();
     paths.dedup();
@@ -718,6 +750,56 @@ mod tests {
         assert!(
             metadata.contains(&expected),
             "published metadata should record the sidecar checksum `{expected}`: {metadata}"
+        );
+    }
+
+    #[test]
+    fn publish_preserves_foreword_adapter_products() {
+        let _guard = env_lock().lock().expect("env lock should acquire");
+        let home = temp_dir("home_foreword_products");
+        let core = temp_dir("core_foreword_products");
+        write_file(
+            &core.join("book.toml"),
+            concat!(
+                "name = \"core\"\n",
+                "kind = \"lib\"\n",
+                "version = \"1.0.0\"\n",
+                "[toolchain.foreword_products.adapter]\n",
+                "path = \"forewords/adapter.cmd\"\n",
+                "runner = \"cmd\"\n",
+                "args = [\"/c\"]\n",
+            ),
+        );
+        write_file(
+            &core.join("src").join("book.arc"),
+            "fn util() -> Int:\n    return 1\n",
+        );
+        write_file(&core.join("src").join("types.arc"), "// types\n");
+        write_file(
+            &core.join("forewords").join("adapter.cmd"),
+            "@echo off\r\necho {}\r\n",
+        );
+
+        unsafe {
+            std::env::set_var("ARCANA_HOME", &home);
+        }
+        publish_workspace_member(&core, "core").expect("publish should succeed");
+
+        let metadata_path = local_registry_package_dir(
+            DEFAULT_REGISTRY_NAME,
+            "core",
+            &SemverVersion::parse("1.0.0").expect("version should parse"),
+        )
+        .expect("package dir should resolve")
+        .join(LOCAL_REGISTRY_METADATA_FILE);
+        let metadata = fs::read_to_string(&metadata_path).expect("metadata should read");
+        assert!(
+            metadata.contains("[toolchain.foreword_products]"),
+            "published metadata should preserve foreword products: {metadata}"
+        );
+        assert!(
+            metadata.contains("path = \"forewords/adapter.cmd\""),
+            "published metadata should keep foreword product path: {metadata}"
         );
     }
 

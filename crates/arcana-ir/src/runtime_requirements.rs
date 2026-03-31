@@ -601,7 +601,8 @@ mod tests {
             impl_target_type: None,
             impl_trait_path: None,
             availability: Vec::new(),
-            foreword_rows: Vec::new(),
+            inline_hint: false,
+            cold_hint: false,
             cleanup_footers: Vec::new(),
             statements,
         }
@@ -675,6 +676,8 @@ mod tests {
             dependency_rows: Vec::new(),
             exported_surface_rows: Vec::new(),
             runtime_requirements: Vec::new(),
+            foreword_index: Vec::new(),
+            foreword_registrations: Vec::new(),
             entrypoints: vec![IrEntrypoint {
                 package_id: test_package_id_for_module("app"),
                 module_id: "app".to_string(),
@@ -945,6 +948,8 @@ mod tests {
             dependency_rows: Vec::new(),
             exported_surface_rows: Vec::new(),
             runtime_requirements: Vec::new(),
+            foreword_index: Vec::new(),
+            foreword_registrations: Vec::new(),
             entrypoints: vec![IrEntrypoint {
                 package_id: test_package_id_for_module("app"),
                 module_id: "app".to_string(),
@@ -1069,6 +1074,8 @@ mod tests {
             dependency_rows: Vec::new(),
             exported_surface_rows: Vec::new(),
             runtime_requirements: Vec::new(),
+            foreword_index: Vec::new(),
+            foreword_registrations: Vec::new(),
             entrypoints: vec![IrEntrypoint {
                 package_id: test_package_id_for_module("app"),
                 module_id: "app".to_string(),
@@ -1143,6 +1150,8 @@ mod tests {
             dependency_rows: Vec::new(),
             exported_surface_rows: Vec::new(),
             runtime_requirements: Vec::new(),
+            foreword_index: Vec::new(),
+            foreword_registrations: Vec::new(),
             entrypoints: vec![IrEntrypoint {
                 package_id: test_package_id_for_module("app"),
                 module_id: "app".to_string(),
@@ -1224,6 +1233,8 @@ mod tests {
             dependency_rows: Vec::new(),
             exported_surface_rows: Vec::new(),
             runtime_requirements: Vec::new(),
+            foreword_index: Vec::new(),
+            foreword_registrations: Vec::new(),
             entrypoints: Vec::new(),
             routines: vec![
                 routine(
@@ -1287,6 +1298,8 @@ mod tests {
             dependency_rows: Vec::new(),
             exported_surface_rows: Vec::new(),
             runtime_requirements: Vec::new(),
+            foreword_index: Vec::new(),
+            foreword_registrations: Vec::new(),
             entrypoints: Vec::new(),
             routines: vec![
                 routine(
@@ -1370,6 +1383,8 @@ mod tests {
             dependency_rows: Vec::new(),
             exported_surface_rows: Vec::new(),
             runtime_requirements: Vec::new(),
+            foreword_index: Vec::new(),
+            foreword_registrations: Vec::new(),
             entrypoints: vec![IrEntrypoint {
                 package_id: test_package_id_for_module("app"),
                 module_id: "app".to_string(),
@@ -1395,7 +1410,8 @@ mod tests {
                     impl_target_type: None,
                     impl_trait_path: None,
                     availability: Vec::new(),
-                    foreword_rows: Vec::new(),
+                    inline_hint: false,
+                    cold_hint: false,
                     cleanup_footers: vec![ExecCleanupFooter {
                         kind: "cleanup".to_string(),
                         binding_id: 0,
@@ -1428,7 +1444,8 @@ mod tests {
                     impl_target_type: None,
                     impl_trait_path: None,
                     availability: Vec::new(),
-                    foreword_rows: Vec::new(),
+                    inline_hint: false,
+                    cold_hint: false,
                     cleanup_footers: Vec::new(),
                     statements: Vec::new(),
                 },
@@ -1439,3 +1456,8 @@ mod tests {
         assert!(derive_runtime_requirements(&package).is_empty());
     }
 }
+
+
+
+
+

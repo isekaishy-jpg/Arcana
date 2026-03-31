@@ -49,6 +49,7 @@ Enabled dependency forms:
 core = { path = "../core" }
 foo = { version = "^1.2.3" }
 foo_v1 = { package = "foo", version = "~1.4.0", registry = "local" }
+tool = { path = "../tool", executable_forewords = true }
 ```
 
 Recognized-but-disabled future forms:
@@ -72,6 +73,24 @@ Reserved dependency keys:
 - `native_delivery`
 - `native_child`
 - `native_plugins`
+- `executable_forewords`
+
+Additional top-level toolchain manifest surface in v1:
+
+```toml
+[toolchain.foreword_products.rewrite]
+path = "forewords/rewrite.cmd"
+runner = "cmd"
+args = ["/c"]
+```
+
+Toolchain foreword product rules:
+- these products are package-owned toolchain artifacts, not runtime native products
+- `path` is required and is relative to the package root
+- `runner` and `args` are optional launch indirection for the adapter executable/script
+- when `runner` is present, `args` are passed to the runner before the product `path`
+- toolchain foreword products participate in source fingerprints and publish snapshots
+- executable foreword handlers resolve these products by package-local product name
 
 Version requirement grammar in v1:
 - exact pins
@@ -108,6 +127,9 @@ Rules:
   - if one member directly resolves two aliases to the same display `package_name` with different `package_id`, resolution fails
   - this restriction does not remove the internal ability for future same-member side-by-side support
 - different members and transitive branches may resolve different versions of the same display package
+- `executable_forewords = true` is a dependency-edge opt-in:
+  - it grants the depender permission to execute executable foreword handlers exported by that dependency
+  - omission leaves dependency-provided executable forewords rejected during frontend validation
 
 ## Local Registry And Publish
 

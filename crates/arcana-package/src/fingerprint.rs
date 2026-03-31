@@ -12,6 +12,11 @@ use sha2::{Digest, Sha256};
 
 use crate::{PackageResult, WorkspaceGraph, WorkspaceMember};
 
+fn quote_fingerprint_text(text: impl ToString) -> String {
+    let escaped = text.to_string().replace('\\', "\\\\").replace('|', "\\|");
+    escaped.replace('[', "\\[").replace(']', "\\]")
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemberFingerprints {
     pub source: String,
@@ -128,6 +133,10 @@ pub fn compute_workspace_snapshot_id(
             hasher.update(row.as_bytes());
             hasher.update(b"\n");
         }
+        for row in render_member_foreword_product_rows(member)? {
+            hasher.update(row.as_bytes());
+            hasher.update(b"\n");
+        }
     }
 
     for (package_id, package) in &workspace.packages {
@@ -211,6 +220,10 @@ fn compute_member_source_fingerprint(
         hasher.update(row.as_bytes());
         hasher.update(b"\n");
     }
+    for row in render_member_foreword_product_rows(member)? {
+        hasher.update(row.as_bytes());
+        hasher.update(b"\n");
+    }
     for row in package.summary.hir_fingerprint_rows() {
         hasher.update(row.as_bytes());
         hasher.update(b"\n");
@@ -246,12 +259,13 @@ fn render_member_dependency_setting_rows(member: &WorkspaceMember) -> Vec<String
             let mut native_plugins = spec.native_plugins.clone();
             native_plugins.sort();
             format!(
-                "dep_setting:alias={alias}|package={package_name}|package_id={package_id}|source={:?}|source_label={}|native_delivery={}|native_child={}|native_plugins={}",
+                "dep_setting:alias={alias}|package={package_name}|package_id={package_id}|source={:?}|source_label={}|native_delivery={}|native_child={}|native_plugins={}|executable_forewords={}",
                 spec.source.kind(),
                 spec.source.location_label(),
                 spec.native_delivery.as_str(),
                 spec.native_child.as_deref().unwrap_or(""),
-                native_plugins.join(",")
+                native_plugins.join(","),
+                spec.executable_forewords
             )
         })
         .collect::<Vec<_>>();
@@ -280,6 +294,52 @@ fn render_member_native_product_rows(member: &WorkspaceMember) -> PackageResult<
     }
     rows.sort();
     Ok(rows)
+}
+
+fn render_member_foreword_product_rows(member: &WorkspaceMember) -> PackageResult<Vec<String>> {
+    let mut rows = Vec::new();
+    for (name, product) in &member.foreword_products {
+        rows.push(format!(
+            "foreword_product:name={name}|path={}|runner={}|args={}|hash={}",
+            product.path,
+            product.runner.as_deref().unwrap_or(""),
+            product.args.join(","),
+            render_foreword_product_hash(member, product)?
+        ));
+    }
+    rows.sort();
+    Ok(rows)
+}
+
+fn render_foreword_product_hash(
+    member: &WorkspaceMember,
+    product: &crate::ForewordAdapterProductSpec,
+) -> PackageResult<String> {
+    let product_path = member.abs_dir.join(&product.path);
+    match fs::read(&product_path) {
+        Ok(bytes) => {
+            let mut hasher = Sha256::new();
+            hasher.update(b"arcana_foreword_product_v1\n");
+            hasher.update(product.path.as_bytes());
+            hasher.update(b"\n");
+            if let Some(runner) = &product.runner {
+                hasher.update(runner.as_bytes());
+            }
+            hasher.update(b"\n");
+            for arg in &product.args {
+                hasher.update(arg.as_bytes());
+                hasher.update(b"\n");
+            }
+            hasher.update(&bytes);
+            Ok(format!("sha256:{:x}", hasher.finalize()))
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok("missing".to_string()),
+        Err(err) => Err(format!(
+            "failed to read foreword product `{}` for `{}`: {err}",
+            product_path.display(),
+            member.name
+        )),
+    }
 }
 
 fn render_native_product_sidecar_hash(
@@ -364,6 +424,23 @@ fn resolved_module_api_rows(
             rows.push(format!(
                 "impl:{}",
                 render_impl_api_fingerprint(workspace, resolved_module, impl_decl)
+            ));
+        }
+    }
+
+    for entry in &module.emitted_foreword_metadata {
+        if entry.public {
+            rows.push(format!(
+                "emitted_foreword:{}",
+                render_emitted_foreword_api_fingerprint(workspace, resolved_module, entry)
+            ));
+        }
+    }
+    for row in &module.foreword_registrations {
+        if row.public {
+            rows.push(format!(
+                "foreword_registration:{}",
+                render_foreword_registration_api_fingerprint(workspace, resolved_module, row)
             ));
         }
     }
@@ -546,7 +623,106 @@ fn append_symbol_contract_metadata(
         base.push_str("|intrinsic=");
         base.push_str(intrinsic_impl);
     }
+    if let Some(generated_by) = &symbol.generated_by {
+        base.push_str("|generated_by=");
+        base.push_str(&render_generated_by_api_fingerprint(
+            workspace,
+            resolved_module,
+            generated_by,
+        ));
+    }
+    if let Some(generated_name_key) = &symbol.generated_name_key {
+        base.push_str("|generated_name_key=");
+        base.push_str(&quote_fingerprint_text(generated_name_key));
+    }
     base
+}
+
+fn render_generated_by_api_fingerprint(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    generated_by: &arcana_hir::HirGeneratedByForeword,
+) -> String {
+    format!(
+        "generated(applied={}|resolved={}|provider={}|owner_kind={}|owner_path={}|retention={}|args=[{}])",
+        quote_fingerprint_text(&generated_by.applied_name),
+        quote_fingerprint_text(&generated_by.resolved_name),
+        quote_fingerprint_text(&generated_by.provider_package_id),
+        quote_fingerprint_text(&generated_by.owner_kind),
+        quote_fingerprint_text(&generated_by.owner_path),
+        generated_by.retention.as_str(),
+        generated_by
+            .args
+            .iter()
+            .map(|arg| match &arg.name {
+                Some(name) => format!(
+                    "{name}={}",
+                    quote_fingerprint_text(canonicalize_foreword_arg_value(
+                        workspace,
+                        resolved_module,
+                        &arg.value,
+                    ))
+                ),
+                None => quote_fingerprint_text(canonicalize_foreword_arg_value(
+                    workspace,
+                    resolved_module,
+                    &arg.value,
+                )),
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
+fn render_emitted_foreword_api_fingerprint(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    entry: &arcana_hir::HirEmittedForewordMetadata,
+) -> String {
+    format!(
+        "name={}|target_kind={}|target_path={}|retention={}|args=[{}]|generated_by={}",
+        quote_fingerprint_text(&entry.qualified_name),
+        quote_fingerprint_text(&entry.target_kind),
+        quote_fingerprint_text(&entry.target_path),
+        entry.retention.as_str(),
+        entry
+            .args
+            .iter()
+            .map(|arg| match &arg.name {
+                Some(name) => format!(
+                    "{name}={}",
+                    quote_fingerprint_text(canonicalize_foreword_arg_value(
+                        workspace,
+                        resolved_module,
+                        &arg.value,
+                    ))
+                ),
+                None => quote_fingerprint_text(canonicalize_foreword_arg_value(
+                    workspace,
+                    resolved_module,
+                    &arg.value,
+                )),
+            })
+            .collect::<Vec<_>>()
+            .join(","),
+        render_generated_by_api_fingerprint(workspace, resolved_module, &entry.generated_by)
+    )
+}
+
+fn render_foreword_registration_api_fingerprint(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    row: &arcana_hir::HirForewordRegistrationRow,
+) -> String {
+    format!(
+        "namespace={}|key={}|value={}|target_kind={}|target_path={}|generated_by={}",
+        quote_fingerprint_text(&row.namespace),
+        quote_fingerprint_text(&row.key),
+        quote_fingerprint_text(&row.value),
+        quote_fingerprint_text(&row.target_kind),
+        quote_fingerprint_text(&row.target_path),
+        render_generated_by_api_fingerprint(workspace, resolved_module, &row.generated_by)
+    )
 }
 
 fn render_foreword_api_fingerprint(
@@ -927,6 +1103,18 @@ fn render_impl_api_fingerprint(
             .join(","),
     );
     rendered.push(']');
+    if let Some(generated_by) = &impl_decl.generated_by {
+        rendered.push_str("|generated_by=");
+        rendered.push_str(&render_generated_by_api_fingerprint(
+            workspace,
+            resolved_module,
+            generated_by,
+        ));
+    }
+    if let Some(generated_name_key) = &impl_decl.generated_name_key {
+        rendered.push_str("|generated_name_key=");
+        rendered.push_str(&quote_fingerprint_text(generated_name_key));
+    }
     rendered
 }
 

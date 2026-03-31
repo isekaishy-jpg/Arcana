@@ -45,6 +45,10 @@ mod native_host;
 mod native_product_loader;
 mod package_image;
 mod routine_plan;
+pub use arcana_ir::{
+    IrForewordArg, IrForewordEntryKind, IrForewordGeneratedBy, IrForewordMetadata,
+    IrForewordRegistrationRow, IrForewordRetention,
+};
 pub use json_abi::{
     RUNTIME_JSON_ABI_FORMAT, execute_exported_json_abi_routine, render_exported_json_abi_manifest,
 };
@@ -104,6 +108,10 @@ pub struct RuntimePackagePlan {
     pub package_display_names: BTreeMap<String, String>,
     pub package_direct_dep_ids: BTreeMap<String, BTreeMap<String, String>>,
     pub runtime_requirements: Vec<String>,
+    #[serde(default)]
+    pub foreword_index: Vec<IrForewordMetadata>,
+    #[serde(default)]
+    pub foreword_registrations: Vec<IrForewordRegistrationRow>,
     pub module_aliases: BTreeMap<String, BTreeMap<String, Vec<String>>>,
     #[serde(default)]
     pub opaque_family_types: BTreeMap<String, Vec<String>>,
@@ -117,6 +125,116 @@ impl RuntimePackagePlan {
         self.entrypoints
             .iter()
             .find(|entry| entry.symbol_kind == "fn" && entry.symbol_name == "main")
+    }
+
+    pub fn forewords(&self) -> &[IrForewordMetadata] {
+        &self.foreword_index
+    }
+
+    pub fn foreword_registrations(&self) -> &[IrForewordRegistrationRow] {
+        &self.foreword_registrations
+    }
+
+    pub fn public_foreword_registrations(&self) -> Vec<&IrForewordRegistrationRow> {
+        self.foreword_registrations
+            .iter()
+            .filter(|row| row.public)
+            .collect()
+    }
+
+    pub fn foreword_registrations_for_target(
+        &self,
+        target_kind: &str,
+        target_path: &str,
+    ) -> Vec<&IrForewordRegistrationRow> {
+        self.foreword_registrations
+            .iter()
+            .filter(|row| row.target_kind == target_kind && row.target_path == target_path)
+            .collect()
+    }
+
+    pub fn public_foreword_registrations_for_target(
+        &self,
+        target_kind: &str,
+        target_path: &str,
+    ) -> Vec<&IrForewordRegistrationRow> {
+        self.foreword_registrations
+            .iter()
+            .filter(|row| {
+                row.public && row.target_kind == target_kind && row.target_path == target_path
+            })
+            .collect()
+    }
+
+    pub fn runtime_retained_forewords(&self) -> Vec<&IrForewordMetadata> {
+        self.foreword_index
+            .iter()
+            .filter(|entry| entry.retention == IrForewordRetention::Runtime)
+            .collect()
+    }
+
+    pub fn public_runtime_retained_forewords(&self) -> Vec<&IrForewordMetadata> {
+        self.foreword_index
+            .iter()
+            .filter(|entry| entry.public && entry.retention == IrForewordRetention::Runtime)
+            .collect()
+    }
+
+    pub fn runtime_retained_forewords_for_package(
+        &self,
+        package_id: &str,
+    ) -> Vec<&IrForewordMetadata> {
+        self.foreword_index
+            .iter()
+            .filter(|entry| {
+                entry.package_id == package_id && entry.retention == IrForewordRetention::Runtime
+            })
+            .collect()
+    }
+
+    pub fn public_runtime_retained_forewords_for_package(
+        &self,
+        package_id: &str,
+    ) -> Vec<&IrForewordMetadata> {
+        self.foreword_index
+            .iter()
+            .filter(|entry| {
+                entry.public
+                    && entry.package_id == package_id
+                    && entry.retention == IrForewordRetention::Runtime
+            })
+            .collect()
+    }
+
+    pub fn runtime_retained_forewords_for_target(
+        &self,
+        target_kind: &str,
+        target_path: &str,
+    ) -> Vec<&IrForewordMetadata> {
+        self.foreword_index
+            .iter()
+            .filter(|entry| {
+                entry.retention == IrForewordRetention::Runtime
+                    && entry.target_kind == target_kind
+                    && entry.target_path == target_path
+            })
+            .collect()
+    }
+
+    pub fn public_runtime_retained_forewords_for_target(
+        &self,
+        target_kind: &str,
+        target_path: &str,
+    ) -> Vec<&IrForewordMetadata> {
+        self.foreword_index
+            .iter()
+            .filter(|entry| {
+                entry.public
+                    && entry.retention == IrForewordRetention::Runtime
+                    && entry.target_kind == target_kind
+                    && entry.target_path == target_path
+            })
+            .collect()
     }
 }
 
@@ -4710,6 +4828,8 @@ pub fn plan_from_artifact(artifact: &AotPackageArtifact) -> Result<RuntimePackag
         package_display_names: artifact.package_display_names.clone(),
         package_direct_dep_ids: artifact.package_direct_dep_ids.clone(),
         runtime_requirements: artifact.runtime_requirements.clone(),
+        foreword_index: artifact.foreword_index.clone(),
+        foreword_registrations: artifact.foreword_registrations.clone(),
         module_aliases: build_module_aliases(artifact)?,
         opaque_family_types: build_opaque_family_types(artifact)?,
         entrypoints,

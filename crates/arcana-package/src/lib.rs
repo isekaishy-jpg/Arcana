@@ -8,8 +8,8 @@ use arcana_aot::{
 };
 use arcana_cabi::ArcanaCabiProductRole;
 use arcana_hir::{
-    HirWorkspacePackage, HirWorkspaceSummary, build_package_layout, build_package_summary,
-    build_workspace_summary, derive_source_module_path, lower_module_text,
+    HirForewordAdapterProduct, HirWorkspacePackage, HirWorkspaceSummary, build_package_layout,
+    build_package_summary, build_workspace_summary, derive_source_module_path, lower_module_text,
 };
 use pathdiff::diff_paths;
 
@@ -360,12 +360,21 @@ pub struct NativeProductSpec {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ForewordAdapterProductSpec {
+    pub name: String,
+    pub path: String,
+    pub runner: Option<String>,
+    pub args: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DependencySpec {
     pub package: String,
     pub source: DependencySourceSpec,
     pub native_delivery: NativeDependencyDelivery,
     pub native_child: Option<String>,
     pub native_plugins: Vec<String>,
+    pub executable_forewords: bool,
 }
 
 impl DependencySpec {
@@ -385,6 +394,7 @@ pub struct Manifest {
     pub workspace_members: Vec<String>,
     pub deps: BTreeMap<String, DependencySpec>,
     pub native_products: BTreeMap<String, NativeProductSpec>,
+    pub foreword_products: BTreeMap<String, ForewordAdapterProductSpec>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -406,6 +416,7 @@ pub struct WorkspaceMember {
     pub git_url: Option<String>,
     pub git_selector: Option<String>,
     pub native_products: BTreeMap<String, NativeProductSpec>,
+    pub foreword_products: BTreeMap<String, ForewordAdapterProductSpec>,
 }
 
 impl WorkspaceMember {
@@ -549,6 +560,7 @@ struct PendingMember {
     git_url: Option<String>,
     git_selector: Option<String>,
     native_products: BTreeMap<String, NativeProductSpec>,
+    foreword_products: BTreeMap<String, ForewordAdapterProductSpec>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -858,6 +870,7 @@ pub fn parse_manifest(path: &Path) -> PackageResult<Manifest> {
         }
     }
     let native_products = parse_native_products(table, path)?;
+    let foreword_products = parse_foreword_products(table, path)?;
 
     Ok(Manifest {
         name,
@@ -866,6 +879,7 @@ pub fn parse_manifest(path: &Path) -> PackageResult<Manifest> {
         workspace_members,
         deps,
         native_products,
+        foreword_products,
     })
 }
 
@@ -950,6 +964,7 @@ pub fn load_workspace_graph(root_dir: &Path) -> PackageResult<WorkspaceGraph> {
                 git_url: member.git_url.clone(),
                 git_selector: member.git_selector.clone(),
                 native_products: member.native_products.clone(),
+                foreword_products: member.foreword_products.clone(),
             })
         })
         .collect::<PackageResult<Vec<_>>>()?;
@@ -1169,6 +1184,7 @@ fn load_path_pending_member(
         git_url: None,
         git_selector: None,
         native_products: manifest.native_products,
+        foreword_products: manifest.foreword_products,
     })
 }
 
@@ -1220,6 +1236,7 @@ fn load_registry_pending_member(
         git_url: None,
         git_selector: None,
         native_products: manifest.native_products,
+        foreword_products: manifest.foreword_products,
     })
 }
 
@@ -1507,6 +1524,8 @@ pub fn load_workspace_hir_from_graph(
             resolve_manifest_dependency_packages(&root_dir, &root_manifest)?,
             resolve_manifest_dependency_ids(&root_dir, &root_manifest)?,
         )?;
+        package.executable_foreword_deps = executable_foreword_aliases(&root_manifest.deps);
+        package.foreword_products = lower_foreword_products(&root_manifest.foreword_products);
         attach_implicit_std_dependency(&mut package, implicit_std.as_ref());
         packages.push(package);
     }
@@ -1520,6 +1539,8 @@ pub fn load_workspace_hir_from_graph(
             member.direct_dep_packages.clone(),
             member.direct_dep_ids.clone(),
         )?;
+        package.executable_foreword_deps = executable_foreword_aliases(&member.direct_dep_specs);
+        package.foreword_products = lower_foreword_products(&member.foreword_products);
         attach_implicit_std_dependency(&mut package, implicit_std.as_ref());
         packages.push(package);
     }
@@ -1529,13 +1550,15 @@ pub fn load_workspace_hir_from_graph(
             .iter()
             .any(|package| package.summary.package_name == manifest.name);
         if !has_std {
-            packages.push(load_package_hir(
+            let mut package = load_package_hir(
                 "path:std",
                 &std_dir,
                 &manifest.name,
                 &manifest.kind,
                 BTreeSet::new(),
-            )?);
+            )?;
+            package.foreword_products = lower_foreword_products(&manifest.foreword_products);
+            packages.push(package);
         }
     }
 
@@ -1571,15 +1594,44 @@ fn attach_implicit_std_dependency(
         .or_insert_with(|| "path:std".to_string());
 }
 
+fn executable_foreword_aliases(specs: &BTreeMap<String, DependencySpec>) -> BTreeSet<String> {
+    specs
+        .iter()
+        .filter_map(|(alias, spec)| spec.executable_forewords.then_some(alias.clone()))
+        .collect()
+}
+
+fn lower_foreword_products(
+    products: &BTreeMap<String, ForewordAdapterProductSpec>,
+) -> BTreeMap<String, HirForewordAdapterProduct> {
+    products
+        .iter()
+        .map(|(name, product)| {
+            (
+                name.clone(),
+                HirForewordAdapterProduct {
+                    name: product.name.clone(),
+                    path: product.path.clone(),
+                    runner: product.runner.clone(),
+                    args: product.args.clone(),
+                },
+            )
+        })
+        .collect()
+}
+
 pub fn load_member_hir_package(member: &WorkspaceMember) -> PackageResult<HirWorkspacePackage> {
-    load_package_hir_with_dep_packages(
+    let mut package = load_package_hir_with_dep_packages(
         &member.package_id,
         &member.abs_dir,
         &member.name,
         &member.kind,
         member.direct_dep_packages.clone(),
         member.direct_dep_ids.clone(),
-    )
+    )?;
+    package.executable_foreword_deps = executable_foreword_aliases(&member.direct_dep_specs);
+    package.foreword_products = lower_foreword_products(&member.foreword_products);
+    Ok(package)
 }
 
 pub fn plan_workspace(graph: &WorkspaceGraph) -> PackageResult<Vec<String>> {
@@ -2420,6 +2472,7 @@ fn parse_dependency_spec(
             native_delivery: NativeDependencyDelivery::Baked,
             native_child: None,
             native_plugins: Vec::new(),
+            executable_forewords: false,
         });
     }
     let Some(table) = value.as_table() else {
@@ -2441,6 +2494,7 @@ fn parse_dependency_spec(
         "native_delivery",
         "native_child",
         "native_plugins",
+        "executable_forewords",
     ];
     for key in table.keys() {
         if !reserved_keys.contains(&key.as_str()) {
@@ -2487,6 +2541,18 @@ fn parse_dependency_spec(
         .map(parse_string_array)
         .transpose()?
         .unwrap_or_default();
+    let executable_forewords = table
+        .get("executable_forewords")
+        .map(|value| {
+            value.as_bool().ok_or_else(|| {
+                format!(
+                    "dependency `{name}` in `{}` must set `executable_forewords` as a bool",
+                    manifest_path.display()
+                )
+            })
+        })
+        .transpose()?
+        .unwrap_or(false);
     if native_delivery == NativeDependencyDelivery::Dll
         && native_child
             .as_deref()
@@ -2582,6 +2648,7 @@ fn parse_dependency_spec(
             native_delivery,
             native_child,
             native_plugins,
+            executable_forewords,
         });
     }
     if let Some(git) = git {
@@ -2597,6 +2664,7 @@ fn parse_dependency_spec(
             native_delivery,
             native_child,
             native_plugins,
+            executable_forewords,
         });
     }
     if let Some(version) = version {
@@ -2610,6 +2678,7 @@ fn parse_dependency_spec(
             native_delivery,
             native_child,
             native_plugins,
+            executable_forewords,
         });
     }
     Err(format!(
@@ -2739,6 +2808,74 @@ fn parse_native_products(
                 contract,
                 rust_cdylib_crate,
                 sidecars,
+            },
+        );
+    }
+    Ok(parsed)
+}
+
+fn parse_foreword_products(
+    table: &toml::value::Table,
+    manifest_path: &Path,
+) -> PackageResult<BTreeMap<String, ForewordAdapterProductSpec>> {
+    let Some(products) = table
+        .get("toolchain")
+        .and_then(toml::Value::as_table)
+        .and_then(|toolchain| toolchain.get("foreword_products"))
+        .and_then(toml::Value::as_table)
+    else {
+        return Ok(BTreeMap::new());
+    };
+    let mut parsed = BTreeMap::new();
+    for (name, value) in products {
+        let product = value.as_table().ok_or_else(|| {
+            format!(
+                "foreword product `{name}` in `{}` must be a table",
+                manifest_path.display()
+            )
+        })?;
+        let path = product
+            .get("path")
+            .and_then(toml::Value::as_str)
+            .ok_or_else(|| {
+                format!(
+                    "foreword product `{name}` in `{}` is missing `path`",
+                    manifest_path.display()
+                )
+            })?
+            .to_string();
+        validate_support_file_relative_path(&path)?;
+        let runner = product
+            .get("runner")
+            .map(|value| {
+                value.as_str().map(ToString::to_string).ok_or_else(|| {
+                    format!(
+                        "foreword product `{name}` in `{}` must set `runner` as a string",
+                        manifest_path.display()
+                    )
+                })
+            })
+            .transpose()?;
+        let args = product
+            .get("args")
+            .map(parse_string_array)
+            .transpose()?
+            .unwrap_or_default();
+        for key in product.keys() {
+            if !matches!(key.as_str(), "path" | "runner" | "args") {
+                return Err(format!(
+                    "foreword product `{name}` in `{}` uses unsupported key `{key}`",
+                    manifest_path.display()
+                ));
+            }
+        }
+        parsed.insert(
+            name.clone(),
+            ForewordAdapterProductSpec {
+                name: name.clone(),
+                path,
+                runner,
+                args,
             },
         );
     }
@@ -3943,6 +4080,33 @@ mod tests {
         write_file(&dir.join("src").join("types.arc"), "// types\n");
         let err = load_workspace_graph(&dir).expect_err("expected registry gating");
         assert!(err.contains("only `registry = \"local\"` is enabled in this phase"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_manifest_reads_foreword_adapter_products() {
+        let dir = temp_dir("manifest_foreword_products");
+        write_file(
+            &dir.join("book.toml"),
+            concat!(
+                "name = \"tool\"\n",
+                "kind = \"lib\"\n",
+                "[toolchain.foreword_products.adapter]\n",
+                "path = \"forewords/adapter.cmd\"\n",
+                "runner = \"cmd\"\n",
+                "args = [\"/c\"]\n",
+            ),
+        );
+
+        let manifest = parse_manifest(&dir.join("book.toml")).expect("manifest should parse");
+        let product = manifest
+            .foreword_products
+            .get("adapter")
+            .expect("foreword product should exist");
+        assert_eq!(product.path, "forewords/adapter.cmd");
+        assert_eq!(product.runner.as_deref(), Some("cmd"));
+        assert_eq!(product.args, vec!["/c"]);
+
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -5548,6 +5712,64 @@ toolchain = \"future-toolchain\"\n"
         assert_ne!(
             first, second,
             "native product sidecar content changes should affect the source fingerprint"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn foreword_product_manifest_changes_update_source_fingerprint() {
+        fn member_source_fingerprint(dir: &Path, member: &str) -> String {
+            let graph = load_workspace_graph(dir).expect("graph should load");
+            let workspace = load_workspace_hir_from_graph(dir, &graph).expect("workspace");
+            let resolved_workspace = arcana_hir::resolve_workspace(&workspace).expect("resolve");
+            let fingerprints =
+                compute_workspace_fingerprints(&graph, &workspace, &resolved_workspace)
+                    .expect("fingerprints");
+            fingerprint_member(&fingerprints, &graph, member)
+                .source()
+                .to_string()
+        }
+
+        let dir = temp_dir("foreword_product_manifest_fingerprint");
+        write_file(
+            &dir.join("book.toml"),
+            concat!(
+                "name = \"tool\"\n",
+                "kind = \"lib\"\n",
+                "[toolchain.foreword_products.adapter]\n",
+                "path = \"forewords/adapter.cmd\"\n",
+            ),
+        );
+        write_file(
+            &dir.join("src/book.arc"),
+            "export fn ready() -> Int:\n    return 1\n",
+        );
+        write_file(&dir.join("src/types.arc"), "// tool types\n");
+        write_file(
+            &dir.join("forewords/adapter.cmd"),
+            "@echo off\r\necho {}\r\n",
+        );
+
+        let first = member_source_fingerprint(&dir, "tool");
+        write_file(
+            &dir.join("book.toml"),
+            concat!(
+                "name = \"tool\"\n",
+                "kind = \"lib\"\n",
+                "[toolchain.foreword_products.adapter]\n",
+                "path = \"forewords/adapter2.cmd\"\n",
+            ),
+        );
+        write_file(
+            &dir.join("forewords/adapter2.cmd"),
+            "@echo off\r\necho {}\r\n",
+        );
+        let second = member_source_fingerprint(&dir, "tool");
+
+        assert_ne!(
+            first, second,
+            "foreword product manifest changes should affect the source fingerprint"
         );
 
         let _ = fs::remove_dir_all(&dir);

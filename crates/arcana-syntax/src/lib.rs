@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use arcana_language_law::{
     ConstructCompletionKind, HeadedModifierKeyword, MemoryDetailKey, MemoryFamily,
@@ -59,6 +59,204 @@ pub struct ModuleDirective {
     pub path: Vec<String>,
     pub alias: Option<String>,
     pub forewords: Vec<ForewordApp>,
+    pub span: Span,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForewordTier {
+    Basic,
+    Executable,
+}
+
+impl ForewordTier {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Basic => "basic",
+            Self::Executable => "executable",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForewordVisibility {
+    Package,
+    Public,
+}
+
+impl ForewordVisibility {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Package => "package",
+            Self::Public => "public",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForewordRetention {
+    Compile,
+    Tooling,
+    Runtime,
+}
+
+impl ForewordRetention {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Compile => "compile",
+            Self::Tooling => "tooling",
+            Self::Runtime => "runtime",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForewordAction {
+    Metadata,
+    Transform,
+}
+
+impl ForewordAction {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Metadata => "metadata",
+            Self::Transform => "transform",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForewordPhase {
+    Frontend,
+}
+
+impl ForewordPhase {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Frontend => "frontend",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForewordPayloadType {
+    Bool,
+    Int,
+    Str,
+    Symbol,
+    Path,
+}
+
+impl ForewordPayloadType {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Bool => "Bool",
+            Self::Int => "Int",
+            Self::Str => "Str",
+            Self::Symbol => "Symbol",
+            Self::Path => "Path",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ForewordDefinitionTarget {
+    Import,
+    Reexport,
+    Use,
+    Function,
+    Record,
+    Object,
+    Owner,
+    Enum,
+    OpaqueType,
+    Trait,
+    Behavior,
+    System,
+    Const,
+    TraitMethod,
+    ImplMethod,
+    Field,
+    Param,
+}
+
+impl ForewordDefinitionTarget {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Import => "import",
+            Self::Reexport => "reexport",
+            Self::Use => "use",
+            Self::Function => "fn",
+            Self::Record => "record",
+            Self::Object => "obj",
+            Self::Owner => "owner",
+            Self::Enum => "enum",
+            Self::OpaqueType => "opaque_type",
+            Self::Trait => "trait",
+            Self::Behavior => "behavior",
+            Self::System => "system",
+            Self::Const => "const",
+            Self::TraitMethod => "trait_method",
+            Self::ImplMethod => "impl_method",
+            Self::Field => "field",
+            Self::Param => "param",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ForewordPayloadField {
+    pub name: String,
+    pub optional: bool,
+    pub ty: ForewordPayloadType,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ForewordDefinitionDecl {
+    pub qualified_name: Vec<String>,
+    pub tier: ForewordTier,
+    pub visibility: ForewordVisibility,
+    pub phase: ForewordPhase,
+    pub action: ForewordAction,
+    pub targets: Vec<ForewordDefinitionTarget>,
+    pub retention: ForewordRetention,
+    pub payload: Vec<ForewordPayloadField>,
+    pub repeatable: bool,
+    pub conflicts: Vec<Vec<String>>,
+    pub diagnostic_namespace: Option<String>,
+    pub handler: Option<Vec<String>>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ForewordHandlerDecl {
+    pub qualified_name: Vec<String>,
+    pub phase: ForewordPhase,
+    pub protocol: String,
+    pub product: String,
+    pub entry: String,
+    pub span: Span,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForewordAliasKind {
+    Alias,
+    Reexport,
+}
+
+impl ForewordAliasKind {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Alias => "alias",
+            Self::Reexport => "reexport",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ForewordAliasDecl {
+    pub kind: ForewordAliasKind,
+    pub source_name: Vec<String>,
+    pub alias_name: Vec<String>,
     pub span: Span,
 }
 
@@ -151,12 +349,15 @@ pub struct ParamDecl {
     pub mode: Option<ParamMode>,
     pub name: String,
     pub ty: SurfaceType,
+    pub forewords: Vec<ForewordApp>,
+    pub span: Span,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FieldDecl {
     pub name: String,
     pub ty: SurfaceType,
+    pub forewords: Vec<ForewordApp>,
     pub span: Span,
 }
 
@@ -181,14 +382,66 @@ pub struct BehaviorAttr {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ForewordArgValue {
+    Raw(String),
+    Bool(bool),
+    Int(i64),
+    Str(String),
+    Symbol(String),
+    Path(Vec<String>),
+}
+
+impl ForewordArgValue {
+    pub fn parse(source: &str) -> Self {
+        let trimmed = source.trim();
+        if let Some(unquoted) = unquote_double_quoted_literal(trimmed) {
+            return Self::Str(unquoted.to_string());
+        }
+        if trimmed == "true" {
+            return Self::Bool(true);
+        }
+        if trimmed == "false" {
+            return Self::Bool(false);
+        }
+        if let Ok(value) = trimmed.parse::<i64>() {
+            return Self::Int(value);
+        }
+        if is_path_like(trimmed) {
+            let segments = trimmed
+                .split('.')
+                .map(|segment| segment.to_string())
+                .collect();
+            if !trimmed.contains('.') {
+                return Self::Symbol(trimmed.to_string());
+            }
+            return Self::Path(segments);
+        }
+        Self::Raw(trimmed.to_string())
+    }
+
+    pub fn render(&self) -> String {
+        match self {
+            Self::Raw(value) => value.clone(),
+            Self::Bool(value) => value.to_string(),
+            Self::Int(value) => value.to_string(),
+            Self::Str(value) => format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\"")),
+            Self::Symbol(value) => value.clone(),
+            Self::Path(segments) => segments.join("."),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ForewordArg {
     pub name: Option<String>,
     pub value: String,
+    pub typed_value: ForewordArgValue,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ForewordApp {
     pub name: String,
+    pub path: Vec<String>,
     pub args: Vec<ForewordArg>,
     pub span: Span,
 }
@@ -704,6 +957,9 @@ pub struct ParsedModule {
     pub directives: Vec<ModuleDirective>,
     pub lang_items: Vec<LangItemDecl>,
     pub memory_specs: Vec<MemorySpecDecl>,
+    pub foreword_definitions: Vec<ForewordDefinitionDecl>,
+    pub foreword_handlers: Vec<ForewordHandlerDecl>,
+    pub foreword_aliases: Vec<ForewordAliasDecl>,
     pub symbols: Vec<SymbolDecl>,
     pub impls: Vec<ImplDecl>,
 }
@@ -733,6 +989,9 @@ pub fn parse_module(source: &str) -> Result<ParsedModule, String> {
     let mut directives = Vec::new();
     let mut lang_items = Vec::new();
     let mut memory_specs = Vec::new();
+    let mut foreword_definitions = Vec::new();
+    let mut foreword_handlers = Vec::new();
+    let mut foreword_aliases = Vec::new();
     let mut symbols = Vec::new();
     let mut impls = Vec::new();
     let mut pending_forewords = Vec::new();
@@ -759,6 +1018,63 @@ pub fn parse_module(source: &str) -> Result<ParsedModule, String> {
                 "{}:{}: cleanup footer without a valid owning header",
                 entry.span.line, entry.span.column
             ));
+        }
+        if let Some(alias) = parse_foreword_alias_decl(&entry.text, entry.span)? {
+            if !pending_availability.is_empty() {
+                let span = pending_availability[0].span;
+                return Err(format!(
+                    "{}:{}: availability attachments cannot target foreword aliases",
+                    span.line, span.column
+                ));
+            }
+            if !pending_forewords.is_empty() {
+                let foreword = &pending_forewords[0];
+                return Err(format!(
+                    "{}:{}: forewords cannot target foreword aliases",
+                    foreword.span.line, foreword.span.column
+                ));
+            }
+            foreword_aliases.push(alias);
+            index += 1;
+            continue;
+        }
+        if let Some(handler) = parse_foreword_handler_decl(entry)? {
+            if !pending_availability.is_empty() {
+                let span = pending_availability[0].span;
+                return Err(format!(
+                    "{}:{}: availability attachments cannot target foreword handlers",
+                    span.line, span.column
+                ));
+            }
+            if !pending_forewords.is_empty() {
+                let foreword = &pending_forewords[0];
+                return Err(format!(
+                    "{}:{}: forewords cannot target foreword handlers",
+                    foreword.span.line, foreword.span.column
+                ));
+            }
+            foreword_handlers.push(handler);
+            index += 1;
+            continue;
+        }
+        if let Some(definition) = parse_foreword_definition_decl(entry)? {
+            if !pending_availability.is_empty() {
+                let span = pending_availability[0].span;
+                return Err(format!(
+                    "{}:{}: availability attachments cannot target foreword declarations",
+                    span.line, span.column
+                ));
+            }
+            if !pending_forewords.is_empty() {
+                let foreword = &pending_forewords[0];
+                return Err(format!(
+                    "{}:{}: forewords cannot target foreword declarations",
+                    foreword.span.line, foreword.span.column
+                ));
+            }
+            foreword_definitions.push(definition);
+            index += 1;
+            continue;
         }
         if let Some(mut directive) = parse_directive(&entry.text, entry.span)? {
             directive.forewords = std::mem::take(&mut pending_forewords);
@@ -879,6 +1195,9 @@ pub fn parse_module(source: &str) -> Result<ParsedModule, String> {
         directives,
         lang_items,
         memory_specs,
+        foreword_definitions,
+        foreword_handlers,
+        foreword_aliases,
         symbols,
         impls,
     };
@@ -1065,6 +1384,522 @@ fn parse_lang_item(trimmed: &str, span: Span) -> Result<Option<LangItemDecl>, St
     }))
 }
 
+fn parse_foreword_alias_decl(
+    trimmed: &str,
+    span: Span,
+) -> Result<Option<ForewordAliasDecl>, String> {
+    let (kind, rest) = if let Some(rest) = trimmed.strip_prefix("foreword alias ") {
+        (ForewordAliasKind::Alias, rest)
+    } else if let Some(rest) = trimmed.strip_prefix("foreword reexport ") {
+        (ForewordAliasKind::Reexport, rest)
+    } else {
+        return Ok(None);
+    };
+    let (source_name, alias_name) = if let Some((alias_name, source_name)) = rest.split_once(" = ")
+    {
+        (source_name, alias_name)
+    } else if let Some((source_name, alias_name)) = rest.split_once(" as ") {
+        (source_name, alias_name)
+    } else {
+        return Err(format!(
+            "{}:{}: malformed foreword {} declaration",
+            span.line,
+            span.column,
+            kind.as_str()
+        ));
+    };
+    let source_name = parse_path(source_name).map_err(|_| {
+        format!(
+            "{}:{}: malformed foreword {} declaration",
+            span.line,
+            span.column,
+            kind.as_str()
+        )
+    })?;
+    let alias_name = parse_path(alias_name).map_err(|_| {
+        format!(
+            "{}:{}: malformed foreword {} declaration",
+            span.line,
+            span.column,
+            kind.as_str()
+        )
+    })?;
+    Ok(Some(ForewordAliasDecl {
+        kind,
+        source_name,
+        alias_name,
+        span,
+    }))
+}
+
+fn parse_foreword_field_entries(
+    entries: &[RawBlockEntry],
+    label: &str,
+    span: Span,
+) -> Result<BTreeMap<String, (String, Span)>, String> {
+    if entries.is_empty() {
+        return Err(format!(
+            "{}:{}: `{label}` is missing its declaration body",
+            span.line, span.column
+        ));
+    }
+    let mut fields = BTreeMap::new();
+    for entry in entries {
+        if !entry.children.is_empty() {
+            return Err(format!(
+                "{}:{}: `{label}` fields cannot own nested blocks",
+                entry.span.line, entry.span.column
+            ));
+        }
+        let Some((key, value)) = entry.text.split_once('=') else {
+            return Err(format!(
+                "{}:{}: malformed `{label}` field `{}`",
+                entry.span.line, entry.span.column, entry.text
+            ));
+        };
+        let key = key.trim();
+        let value = value.trim();
+        if !is_identifier(key) || value.is_empty() {
+            return Err(format!(
+                "{}:{}: malformed `{label}` field `{}`",
+                entry.span.line, entry.span.column, entry.text
+            ));
+        }
+        if fields
+            .insert(key.to_string(), (value.to_string(), entry.span))
+            .is_some()
+        {
+            return Err(format!(
+                "{}:{}: duplicate `{label}` field `{key}`",
+                entry.span.line, entry.span.column
+            ));
+        }
+    }
+    Ok(fields)
+}
+
+fn parse_foreword_scalar_text(value: &str) -> Option<String> {
+    if let Some(text) = unquote_double_quoted_literal(value) {
+        return Some(text.to_string());
+    }
+    is_path_like(value).then(|| value.trim().to_string())
+}
+
+fn parse_foreword_bool_field(value: &str, span: Span, label: &str) -> Result<bool, String> {
+    match value.trim() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(format!(
+            "{}:{}: `{label}` must be `true` or `false`",
+            span.line, span.column
+        )),
+    }
+}
+
+fn parse_foreword_path_field(value: &str, span: Span, label: &str) -> Result<Vec<String>, String> {
+    parse_path(value.trim()).map_err(|_| {
+        format!(
+            "{}:{}: `{label}` must be a qualified path",
+            span.line, span.column
+        )
+    })
+}
+
+fn parse_foreword_path_array(
+    value: &str,
+    span: Span,
+    label: &str,
+) -> Result<Vec<Vec<String>>, String> {
+    let inner = value
+        .trim()
+        .strip_prefix('[')
+        .and_then(|text| text.strip_suffix(']'))
+        .ok_or_else(|| {
+            format!(
+                "{}:{}: `{label}` must be a `[ ... ]` list",
+                span.line, span.column
+            )
+        })?;
+    if inner.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    split_top_level(inner, ',')
+        .into_iter()
+        .map(|part| parse_foreword_path_field(part.trim(), span, label))
+        .collect()
+}
+
+fn parse_foreword_target_name(name: &str) -> Option<ForewordDefinitionTarget> {
+    match name.trim() {
+        "import" => Some(ForewordDefinitionTarget::Import),
+        "reexport" => Some(ForewordDefinitionTarget::Reexport),
+        "use" => Some(ForewordDefinitionTarget::Use),
+        "fn" => Some(ForewordDefinitionTarget::Function),
+        "record" => Some(ForewordDefinitionTarget::Record),
+        "obj" => Some(ForewordDefinitionTarget::Object),
+        "owner" => Some(ForewordDefinitionTarget::Owner),
+        "enum" => Some(ForewordDefinitionTarget::Enum),
+        "opaque_type" => Some(ForewordDefinitionTarget::OpaqueType),
+        "trait" => Some(ForewordDefinitionTarget::Trait),
+        "behavior" => Some(ForewordDefinitionTarget::Behavior),
+        "system" => Some(ForewordDefinitionTarget::System),
+        "const" => Some(ForewordDefinitionTarget::Const),
+        "trait_method" => Some(ForewordDefinitionTarget::TraitMethod),
+        "impl_method" => Some(ForewordDefinitionTarget::ImplMethod),
+        "field" => Some(ForewordDefinitionTarget::Field),
+        "param" => Some(ForewordDefinitionTarget::Param),
+        _ => None,
+    }
+}
+
+fn parse_foreword_target_array(
+    value: &str,
+    span: Span,
+) -> Result<Vec<ForewordDefinitionTarget>, String> {
+    let inner = value
+        .trim()
+        .strip_prefix('[')
+        .and_then(|text| text.strip_suffix(']'))
+        .ok_or_else(|| {
+            format!(
+                "{}:{}: `targets` must be a `[ ... ]` list",
+                span.line, span.column
+            )
+        })?;
+    if inner.trim().is_empty() {
+        return Err(format!(
+            "{}:{}: `targets` must not be empty",
+            span.line, span.column
+        ));
+    }
+    let mut targets = Vec::new();
+    for part in split_top_level(inner, ',') {
+        let Some(target) = parse_foreword_target_name(part.trim()) else {
+            return Err(format!(
+                "{}:{}: unsupported foreword target `{}`",
+                span.line,
+                span.column,
+                part.trim()
+            ));
+        };
+        targets.push(target);
+    }
+    Ok(targets)
+}
+
+fn parse_foreword_payload_type(value: &str) -> Option<ForewordPayloadType> {
+    match value.trim() {
+        "Bool" => Some(ForewordPayloadType::Bool),
+        "Int" => Some(ForewordPayloadType::Int),
+        "Str" => Some(ForewordPayloadType::Str),
+        "Symbol" => Some(ForewordPayloadType::Symbol),
+        "Path" => Some(ForewordPayloadType::Path),
+        _ => None,
+    }
+}
+
+fn parse_foreword_payload_schema(
+    value: &str,
+    span: Span,
+) -> Result<Vec<ForewordPayloadField>, String> {
+    let inner = value
+        .trim()
+        .strip_prefix('[')
+        .and_then(|text| text.strip_suffix(']'))
+        .ok_or_else(|| {
+            format!(
+                "{}:{}: `payload` must be a `[ ... ]` list",
+                span.line, span.column
+            )
+        })?;
+    if inner.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut fields = Vec::new();
+    for part in split_top_level(inner, ',') {
+        let Some((name, ty)) = part.trim().split_once(':') else {
+            return Err(format!(
+                "{}:{}: malformed payload field `{}`",
+                span.line,
+                span.column,
+                part.trim()
+            ));
+        };
+        let name = name.trim();
+        let optional = name.ends_with('?');
+        let name = name.trim_end_matches('?').trim();
+        if !is_identifier(name) {
+            return Err(format!(
+                "{}:{}: malformed payload field `{}`",
+                span.line,
+                span.column,
+                part.trim()
+            ));
+        }
+        let Some(ty) = parse_foreword_payload_type(ty.trim()) else {
+            return Err(format!(
+                "{}:{}: unsupported payload field type `{}`",
+                span.line,
+                span.column,
+                ty.trim()
+            ));
+        };
+        fields.push(ForewordPayloadField {
+            name: name.to_string(),
+            optional,
+            ty,
+        });
+    }
+    Ok(fields)
+}
+
+fn parse_foreword_definition_decl(
+    entry: &RawBlockEntry,
+) -> Result<Option<ForewordDefinitionDecl>, String> {
+    if entry.text.starts_with("foreword handler ")
+        || entry.text.starts_with("foreword alias ")
+        || entry.text.starts_with("foreword reexport ")
+    {
+        return Ok(None);
+    }
+    let Some(rest) = entry.text.strip_prefix("foreword ") else {
+        return Ok(None);
+    };
+    let Some(name_text) = rest.trim().strip_suffix(':') else {
+        return Err(format!(
+            "{}:{}: malformed foreword declaration",
+            entry.span.line, entry.span.column
+        ));
+    };
+    let qualified_name = parse_path(name_text).map_err(|_| {
+        format!(
+            "{}:{}: malformed foreword declaration",
+            entry.span.line, entry.span.column
+        )
+    })?;
+    let fields = parse_foreword_field_entries(&entry.children, "foreword", entry.span)?;
+    let (tier, tier_span) = fields.get("tier").ok_or_else(|| {
+        format!(
+            "{}:{}: `foreword` is missing required field `tier`",
+            entry.span.line, entry.span.column
+        )
+    })?;
+    let tier = match tier.trim() {
+        "basic" => ForewordTier::Basic,
+        "executable" => ForewordTier::Executable,
+        _ => {
+            return Err(format!(
+                "{}:{}: `tier` must be `basic` or `executable`",
+                tier_span.line, tier_span.column
+            ));
+        }
+    };
+    let visibility = match fields
+        .get("visibility")
+        .map(|(value, _)| value.trim())
+        .unwrap_or("package")
+    {
+        "package" => ForewordVisibility::Package,
+        "public" => ForewordVisibility::Public,
+        _ => {
+            let span = fields
+                .get("visibility")
+                .map(|(_, span)| *span)
+                .unwrap_or(entry.span);
+            return Err(format!(
+                "{}:{}: `visibility` must be `package` or `public`",
+                span.line, span.column
+            ));
+        }
+    };
+    let phase = match fields
+        .get("phase")
+        .map(|(value, _)| value.trim())
+        .unwrap_or("frontend")
+    {
+        "frontend" => ForewordPhase::Frontend,
+        _ => {
+            let span = fields
+                .get("phase")
+                .map(|(_, span)| *span)
+                .unwrap_or(entry.span);
+            return Err(format!(
+                "{}:{}: `phase` must be `frontend`",
+                span.line, span.column
+            ));
+        }
+    };
+    let action = match fields
+        .get("action")
+        .map(|(value, _)| value.trim())
+        .unwrap_or("metadata")
+    {
+        "metadata" => ForewordAction::Metadata,
+        "transform" => ForewordAction::Transform,
+        _ => {
+            let span = fields
+                .get("action")
+                .map(|(_, span)| *span)
+                .unwrap_or(entry.span);
+            return Err(format!(
+                "{}:{}: `action` must be `metadata` or `transform`",
+                span.line, span.column
+            ));
+        }
+    };
+    let (targets, target_span) = fields.get("targets").ok_or_else(|| {
+        format!(
+            "{}:{}: `foreword` is missing required field `targets`",
+            entry.span.line, entry.span.column
+        )
+    })?;
+    let targets = parse_foreword_target_array(targets, *target_span)?;
+    let (retention, retention_span) = fields.get("retention").ok_or_else(|| {
+        format!(
+            "{}:{}: `foreword` is missing required field `retention`",
+            entry.span.line, entry.span.column
+        )
+    })?;
+    let retention = match retention.trim() {
+        "compile" => ForewordRetention::Compile,
+        "tooling" => ForewordRetention::Tooling,
+        "runtime" => ForewordRetention::Runtime,
+        _ => {
+            return Err(format!(
+                "{}:{}: `retention` must be `compile`, `tooling`, or `runtime`",
+                retention_span.line, retention_span.column
+            ));
+        }
+    };
+    let payload = fields
+        .get("payload")
+        .map(|(value, span)| parse_foreword_payload_schema(value, *span))
+        .transpose()?
+        .unwrap_or_default();
+    let repeatable = fields
+        .get("repeatable")
+        .map(|(value, span)| parse_foreword_bool_field(value, *span, "repeatable"))
+        .transpose()?
+        .unwrap_or(false);
+    let conflicts = fields
+        .get("conflicts")
+        .map(|(value, span)| parse_foreword_path_array(value, *span, "conflicts"))
+        .transpose()?
+        .unwrap_or_default();
+    let diagnostic_namespace = fields
+        .get("diagnostic_namespace")
+        .map(|(value, span)| {
+            parse_foreword_scalar_text(value).ok_or_else(|| {
+                format!(
+                    "{}:{}: `diagnostic_namespace` must be a string or symbol path",
+                    span.line, span.column
+                )
+            })
+        })
+        .transpose()?;
+    let handler = fields
+        .get("handler")
+        .map(|(value, span)| parse_foreword_path_field(value, *span, "handler"))
+        .transpose()?;
+    Ok(Some(ForewordDefinitionDecl {
+        qualified_name,
+        tier,
+        visibility,
+        phase,
+        action,
+        targets,
+        retention,
+        payload,
+        repeatable,
+        conflicts,
+        diagnostic_namespace,
+        handler,
+        span: entry.span,
+    }))
+}
+
+fn parse_foreword_handler_decl(
+    entry: &RawBlockEntry,
+) -> Result<Option<ForewordHandlerDecl>, String> {
+    let Some(rest) = entry.text.strip_prefix("foreword handler ") else {
+        return Ok(None);
+    };
+    let Some(name_text) = rest.trim().strip_suffix(':') else {
+        return Err(format!(
+            "{}:{}: malformed foreword handler declaration",
+            entry.span.line, entry.span.column
+        ));
+    };
+    let qualified_name = parse_path(name_text).map_err(|_| {
+        format!(
+            "{}:{}: malformed foreword handler declaration",
+            entry.span.line, entry.span.column
+        )
+    })?;
+    let fields = parse_foreword_field_entries(&entry.children, "foreword handler", entry.span)?;
+    let phase = match fields
+        .get("phase")
+        .map(|(value, _)| value.trim())
+        .unwrap_or("frontend")
+    {
+        "frontend" => ForewordPhase::Frontend,
+        _ => {
+            let span = fields
+                .get("phase")
+                .map(|(_, span)| *span)
+                .unwrap_or(entry.span);
+            return Err(format!(
+                "{}:{}: `phase` must be `frontend`",
+                span.line, span.column
+            ));
+        }
+    };
+    let (protocol, protocol_span) = fields.get("protocol").ok_or_else(|| {
+        format!(
+            "{}:{}: `foreword handler` is missing required field `protocol`",
+            entry.span.line, entry.span.column
+        )
+    })?;
+    let protocol = parse_foreword_scalar_text(protocol).ok_or_else(|| {
+        format!(
+            "{}:{}: `protocol` must be a string or symbol",
+            protocol_span.line, protocol_span.column
+        )
+    })?;
+    let (product, product_span) = fields.get("product").ok_or_else(|| {
+        format!(
+            "{}:{}: `foreword handler` is missing required field `product`",
+            entry.span.line, entry.span.column
+        )
+    })?;
+    let product = parse_foreword_scalar_text(product).ok_or_else(|| {
+        format!(
+            "{}:{}: `product` must be a string or symbol",
+            product_span.line, product_span.column
+        )
+    })?;
+    let (entry_name, entry_span) = fields.get("entry").ok_or_else(|| {
+        format!(
+            "{}:{}: `foreword handler` is missing required field `entry`",
+            entry.span.line, entry.span.column
+        )
+    })?;
+    let entry_name = parse_foreword_scalar_text(entry_name).ok_or_else(|| {
+        format!(
+            "{}:{}: `entry` must be a string or symbol",
+            entry_span.line, entry_span.column
+        )
+    })?;
+    Ok(Some(ForewordHandlerDecl {
+        qualified_name,
+        phase,
+        protocol,
+        product,
+        entry: entry_name,
+        span: entry.span,
+    }))
+}
+
 fn parse_foreword_app(trimmed: &str, span: Span) -> Result<Option<ForewordApp>, String> {
     let Some(rest) = trimmed.strip_prefix('#') else {
         return Ok(None);
@@ -1080,24 +1915,72 @@ fn parse_foreword_app(trimmed: &str, span: Span) -> Result<Option<ForewordApp>, 
             return Err(format!("{}:{}: malformed foreword", span.line, span.column));
         }
         let name = rest[..open_idx].trim();
-        if !is_identifier(name) {
-            return Err(format!("{}:{}: malformed foreword", span.line, span.column));
-        }
+        let path = parse_path(name)
+            .map_err(|_| format!("{}:{}: malformed foreword", span.line, span.column))?;
         let args = parse_foreword_args(&rest[open_idx + 1..close_idx], span)?;
         return Ok(Some(ForewordApp {
-            name: name.to_string(),
+            name: path.join("."),
+            path,
             args,
             span,
         }));
     }
-    if !is_identifier(rest) {
-        return Err(format!("{}:{}: malformed foreword", span.line, span.column));
-    }
+    let path = parse_path(rest)
+        .map_err(|_| format!("{}:{}: malformed foreword", span.line, span.column))?;
     Ok(Some(ForewordApp {
-        name: rest.to_string(),
+        name: path.join("."),
+        path,
         args: Vec::new(),
         span,
     }))
+}
+
+fn split_leading_foreword_segment(source: &str) -> Option<(&str, &str)> {
+    let trimmed = source.trim_start();
+    if !trimmed.starts_with('#') {
+        return None;
+    }
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escape = false;
+    for (index, ch) in trimmed.char_indices() {
+        if in_string {
+            if escape {
+                escape = false;
+            } else if ch == '\\' {
+                escape = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '[' => depth += 1,
+            ']' => depth = depth.saturating_sub(1),
+            c if c.is_whitespace() && depth == 0 => {
+                return Some((&trimmed[..index], trimmed[index..].trim_start()));
+            }
+            _ => {}
+        }
+    }
+    Some((trimmed, ""))
+}
+
+fn parse_leading_foreword_apps(
+    source: &str,
+    span: Span,
+) -> Result<(Vec<ForewordApp>, String), String> {
+    let mut rest = source.trim();
+    let mut forewords = Vec::new();
+    while let Some((token, next)) = split_leading_foreword_segment(rest) {
+        let Some(foreword) = parse_foreword_app(token, span)? else {
+            break;
+        };
+        forewords.push(foreword);
+        rest = next;
+    }
+    Ok((forewords, rest.to_string()))
 }
 
 fn parse_foreword_args(source: &str, span: Span) -> Result<Vec<ForewordArg>, String> {
@@ -1126,11 +2009,13 @@ fn parse_foreword_args(source: &str, span: Span) -> Result<Vec<ForewordArg>, Str
             args.push(ForewordArg {
                 name: Some(name.to_string()),
                 value: value.to_string(),
+                typed_value: ForewordArgValue::parse(value),
             });
         } else {
             args.push(ForewordArg {
                 name: None,
                 value: part.to_string(),
+                typed_value: ForewordArgValue::parse(part),
             });
         }
     }
@@ -1240,7 +2125,7 @@ fn parse_symbol_header(trimmed: &str, span: Span) -> Option<SymbolDecl> {
         let Some(rest) = rest.strip_prefix(' ') else {
             continue;
         };
-        let signature = parse_symbol_signature(kind, rest)?;
+        let signature = parse_symbol_signature(kind, rest, span)?;
         return Some(SymbolDecl {
             name: signature.name,
             kind,
@@ -1302,7 +2187,7 @@ fn parse_behavior_symbol(rest: &str, exported: bool, span: Span) -> Option<Symbo
     let attrs = parse_behavior_attrs(&rest[open_idx + 1..close_idx]).ok()?;
     let after_attrs = rest[close_idx + 1..].trim();
     let fn_rest = after_attrs.strip_prefix("fn ")?;
-    let signature = parse_symbol_signature(SymbolKind::Fn, fn_rest)?;
+    let signature = parse_symbol_signature(SymbolKind::Fn, fn_rest, span)?;
     Some(SymbolDecl {
         name: signature.name,
         kind: SymbolKind::Behavior,
@@ -1338,7 +2223,7 @@ fn parse_system_symbol(rest: &str, exported: bool, span: Span) -> Option<SymbolD
     let attrs = parse_behavior_attrs(&rest[open_idx + 1..close_idx]).ok()?;
     let after_attrs = rest[close_idx + 1..].trim();
     let fn_rest = after_attrs.strip_prefix("fn ")?;
-    let signature = parse_symbol_signature(SymbolKind::Fn, fn_rest)?;
+    let signature = parse_symbol_signature(SymbolKind::Fn, fn_rest, span)?;
     Some(SymbolDecl {
         name: signature.name,
         kind: SymbolKind::System,
@@ -1368,7 +2253,7 @@ fn parse_intrinsic_symbol(rest: &str, exported: bool, span: Span) -> Option<Symb
     if binding.is_empty() || !is_path_like(binding) {
         return None;
     }
-    let signature = parse_symbol_signature(SymbolKind::Fn, signature_text.trim())?;
+    let signature = parse_symbol_signature(SymbolKind::Fn, signature_text.trim(), span)?;
     Some(SymbolDecl {
         name: signature.name,
         kind: SymbolKind::Fn,
@@ -1492,13 +2377,17 @@ struct ParsedSymbolSignature {
     return_type: Option<SurfaceType>,
 }
 
-fn parse_symbol_signature(kind: SymbolKind, rest: &str) -> Option<ParsedSymbolSignature> {
+fn parse_symbol_signature(
+    kind: SymbolKind,
+    rest: &str,
+    span: Span,
+) -> Option<ParsedSymbolSignature> {
     let rest = rest.trim();
     let header = rest.strip_suffix(':').unwrap_or(rest).trim();
     let name = parse_symbol_name(header)?;
     let after_name = &header[name.len()..];
     let (type_params, where_clause, params, return_type) = match kind {
-        SymbolKind::Fn | SymbolKind::System => parse_function_signature_tail(after_name)?,
+        SymbolKind::Fn | SymbolKind::System => parse_function_signature_tail(after_name, span)?,
         SymbolKind::Record
         | SymbolKind::Object
         | SymbolKind::Enum
@@ -1518,13 +2407,13 @@ fn parse_symbol_signature(kind: SymbolKind, rest: &str) -> Option<ParsedSymbolSi
     })
 }
 
-fn parse_function_signature_tail(tail: &str) -> Option<ParsedFunctionTail> {
+fn parse_function_signature_tail(tail: &str, span: Span) -> Option<ParsedFunctionTail> {
     let tail = tail.trim();
     let (type_params, where_clause, remainder) = parse_type_params_and_where(tail)?;
     let remainder = remainder.trim();
     let open_idx = remainder.find('(')?;
     let close_idx = find_matching_delim(remainder, open_idx, '(', ')')?;
-    let params = parse_param_list(&remainder[open_idx + 1..close_idx]).ok()?;
+    let params = parse_param_list(&remainder[open_idx + 1..close_idx], span).ok()?;
     let after_params = remainder[close_idx + 1..].trim();
     let return_type = after_params.strip_prefix("->").and_then(|ty| {
         let ty = ty.trim();
@@ -1631,7 +2520,7 @@ fn parse_type_params_and_where(
     Some((type_params, where_clause, &tail[close_idx + 1..]))
 }
 
-fn parse_param_list(source: &str) -> Result<Vec<ParamDecl>, String> {
+fn parse_param_list(source: &str, span: Span) -> Result<Vec<ParamDecl>, String> {
     let source = source.trim();
     if source.is_empty() {
         return Ok(Vec::new());
@@ -1644,6 +2533,8 @@ fn parse_param_list(source: &str) -> Result<Vec<ParamDecl>, String> {
             continue;
         }
 
+        let (forewords, part) = parse_leading_foreword_apps(part, span)?;
+        let part = part.trim();
         let (mode, rest) = if let Some(rest) = part.strip_prefix("read ") {
             (Some(ParamMode::Read), rest)
         } else if let Some(rest) = part.strip_prefix("edit ") {
@@ -1667,6 +2558,8 @@ fn parse_param_list(source: &str) -> Result<Vec<ParamDecl>, String> {
             name: name.to_string(),
             ty: parse_surface_type(ty)
                 .map_err(|message| format!("malformed parameter `{part}`: {message}"))?,
+            forewords,
+            span,
         });
     }
 
@@ -1842,12 +2735,34 @@ fn parse_symbol_body(kind: &SymbolKind, entries: &[RawBlockEntry]) -> Result<Sym
             }
             Ok(SymbolBody::None)
         }
-        SymbolKind::Record => Ok(SymbolBody::Record {
-            fields: entries
-                .iter()
-                .filter_map(|entry| parse_field_decl(&entry.text, entry.span))
-                .collect(),
-        }),
+        SymbolKind::Record => {
+            let mut fields = Vec::new();
+            let mut pending_forewords = Vec::new();
+            for entry in entries {
+                if let Some(foreword) = parse_foreword_app(&entry.text, entry.span)? {
+                    pending_forewords.push(foreword);
+                    continue;
+                }
+                let Some(field) = parse_field_decl(
+                    &entry.text,
+                    entry.span,
+                    std::mem::take(&mut pending_forewords),
+                ) else {
+                    return Err(format!(
+                        "{}:{}: unsupported `record` item syntax: `{}`",
+                        entry.span.line, entry.span.column, entry.text
+                    ));
+                };
+                fields.push(field);
+            }
+            if let Some(foreword) = pending_forewords.first() {
+                return Err(format!(
+                    "{}:{}: foreword without a valid target",
+                    foreword.span.line, foreword.span.column
+                ));
+            }
+            Ok(SymbolBody::Record { fields })
+        }
         SymbolKind::Object => {
             let mut fields = Vec::new();
             let mut methods = Vec::new();
@@ -1866,14 +2781,11 @@ fn parse_symbol_body(kind: &SymbolKind, entries: &[RawBlockEntry]) -> Result<Sym
                         entry.span.line, entry.span.column
                     ));
                 }
-                if let Some(field) = parse_field_decl(&entry.text, entry.span) {
-                    if !pending_forewords.is_empty() {
-                        let foreword = &pending_forewords[0];
-                        return Err(format!(
-                            "{}:{}: forewords cannot target object fields in v1",
-                            foreword.span.line, foreword.span.column
-                        ));
-                    }
+                if let Some(field) = parse_field_decl(
+                    &entry.text,
+                    entry.span,
+                    std::mem::take(&mut pending_forewords),
+                ) {
                     fields.push(field);
                     index += 1;
                     continue;
@@ -4666,7 +5578,7 @@ fn find_top_level_keyword(text: &str, keyword: &str) -> Option<usize> {
     None
 }
 
-fn parse_field_decl(trimmed: &str, span: Span) -> Option<FieldDecl> {
+fn parse_field_decl(trimmed: &str, span: Span, forewords: Vec<ForewordApp>) -> Option<FieldDecl> {
     let (name, ty) = trimmed.split_once(':')?;
     let name = name.trim();
     let ty = ty.trim();
@@ -4676,6 +5588,7 @@ fn parse_field_decl(trimmed: &str, span: Span) -> Option<FieldDecl> {
     Some(FieldDecl {
         name: name.to_string(),
         ty: parse_surface_type(ty).ok()?,
+        forewords,
         span,
     })
 }
@@ -4991,6 +5904,24 @@ enum ForewordTarget {
     Behavior,
     System,
     Const,
+    Field,
+    Param,
+}
+
+fn is_builtin_foreword_name(name: &str) -> bool {
+    matches!(
+        name,
+        "deprecated"
+            | "only"
+            | "test"
+            | "allow"
+            | "deny"
+            | "inline"
+            | "cold"
+            | "boundary"
+            | "stage"
+            | "chain"
+    )
 }
 
 fn validate_module_foreword_contract(parsed: &ParsedModule) -> Result<(), String> {
@@ -5032,6 +5963,9 @@ fn symbol_foreword_target(kind: SymbolKind) -> ForewordTarget {
 }
 
 fn foreword_target_allows(target: ForewordTarget, foreword_name: &str) -> bool {
+    if !is_builtin_foreword_name(foreword_name) {
+        return false;
+    }
     match foreword_name {
         "deprecated" => matches!(
             target,
@@ -5045,6 +5979,8 @@ fn foreword_target_allows(target: ForewordTarget, foreword_name: &str) -> bool {
                 | ForewordTarget::TraitMethod
                 | ForewordTarget::ImplMethod
                 | ForewordTarget::Const
+                | ForewordTarget::Field
+                | ForewordTarget::Param
         ),
         "only" => true,
         "test" => matches!(target, ForewordTarget::Function),
@@ -5065,6 +6001,8 @@ fn foreword_target_allows(target: ForewordTarget, foreword_name: &str) -> bool {
                 | ForewordTarget::TraitMethod
                 | ForewordTarget::ImplMethod
                 | ForewordTarget::Const
+                | ForewordTarget::Field
+                | ForewordTarget::Param
         ),
         "inline" | "cold" => matches!(
             target,
@@ -5092,6 +6030,9 @@ fn validate_symbol_foreword_contract(
     inherited_boundary_target: Option<&str>,
 ) -> Result<(), String> {
     let boundary_target = validate_foreword_list(&symbol.forewords, target, Some(symbol))?;
+    for param in &symbol.params {
+        validate_foreword_list(&param.forewords, ForewordTarget::Param, None)?;
+    }
     let active_boundary_target = boundary_target.as_deref().or(inherited_boundary_target);
     validate_statement_foreword_contract(
         &symbol.statements,
@@ -5109,6 +6050,14 @@ fn validate_symbol_foreword_contract(
             )?;
         }
     }
+    match &symbol.body {
+        SymbolBody::Record { fields } | SymbolBody::Object { fields, .. } => {
+            for field in fields {
+                validate_foreword_list(&field.forewords, ForewordTarget::Field, None)?;
+            }
+        }
+        _ => {}
+    }
     Ok(())
 }
 
@@ -5119,12 +6068,23 @@ fn validate_foreword_list(
 ) -> Result<Option<String>, String> {
     let mut boundary_target = None;
     let mut saw_stage = false;
+    let mut saw_inline = false;
+    let mut saw_cold = false;
     for foreword in forewords {
-        if !foreword_target_allows(target, foreword.name.as_str()) {
+        if foreword.path.len() == 1 && !is_builtin_foreword_name(&foreword.name) {
+            return Err(format!(
+                "{}:{}: user-defined forewords must use qualified names",
+                foreword.span.line, foreword.span.column
+            ));
+        }
+        if foreword.path.len() == 1 && !foreword_target_allows(target, foreword.name.as_str()) {
             return Err(format!(
                 "{}:{}: `#{}` is not a valid foreword for this target",
                 foreword.span.line, foreword.span.column, foreword.name
             ));
+        }
+        if foreword.path.len() > 1 {
+            continue;
         }
         match foreword.name.as_str() {
             "deprecated" => validate_deprecated_payload(foreword)?,
@@ -5138,7 +6098,26 @@ fn validate_foreword_list(
                 }
             }
             "allow" | "deny" => validate_lint_payload(foreword)?,
-            "inline" | "cold" => validate_empty_foreword_payload(foreword)?,
+            "inline" => {
+                validate_empty_foreword_payload(foreword)?;
+                if saw_cold {
+                    return Err(format!(
+                        "{}:{}: `#inline` conflicts with `#cold` on the same target",
+                        foreword.span.line, foreword.span.column
+                    ));
+                }
+                saw_inline = true;
+            }
+            "cold" => {
+                validate_empty_foreword_payload(foreword)?;
+                if saw_inline {
+                    return Err(format!(
+                        "{}:{}: `#cold` conflicts with `#inline` on the same target",
+                        foreword.span.line, foreword.span.column
+                    ));
+                }
+                saw_cold = true;
+            }
             "boundary" => {
                 let target_name = parse_boundary_payload(foreword)?;
                 if boundary_target.replace(target_name).is_some() {
@@ -5182,7 +6161,11 @@ fn validate_deprecated_payload(foreword: &ForewordApp) -> Result<(), String> {
         ));
     }
     match &foreword.args[0] {
-        ForewordArg { name: None, value } if is_double_quoted_literal(value) => Ok(()),
+        ForewordArg {
+            name: None,
+            typed_value: ForewordArgValue::Str(_),
+            ..
+        } => Ok(()),
         _ => Err(format!(
             "{}:{}: invalid payload for foreword `#deprecated`: expected one string argument",
             foreword.span.line, foreword.span.column
@@ -5198,29 +6181,18 @@ fn validate_lint_payload(foreword: &ForewordApp) -> Result<(), String> {
         ));
     }
     for arg in &foreword.args {
-        let Some(value) = arg.name.as_ref().is_none().then_some(arg.value.as_str()) else {
+        let Some(value) = arg.name.as_ref().is_none().then_some(&arg.typed_value) else {
             return Err(format!(
                 "{}:{}: invalid payload for foreword: lint names must be positional symbols",
                 foreword.span.line, foreword.span.column
             ));
         };
-        if !is_path_like(value) {
-            return Err(format!(
-                "{}:{}: invalid payload for foreword: lint names must be positional symbols",
-                foreword.span.line, foreword.span.column
-            ));
-        }
         if !matches!(
             value,
-            "deprecated_use"
-                | "unknown_foreword"
-                | "invalid_foreword_target"
-                | "invalid_foreword_payload"
-                | "type_like_name"
-                | "anon_shape_positional"
+            ForewordArgValue::Symbol(_) | ForewordArgValue::Path(_)
         ) {
             return Err(format!(
-                "{}:{}: invalid payload for foreword: unknown lint `{value}`",
+                "{}:{}: invalid payload for foreword: lint names must be positional symbols",
                 foreword.span.line, foreword.span.column
             ));
         }
@@ -5228,11 +6200,11 @@ fn validate_lint_payload(foreword: &ForewordApp) -> Result<(), String> {
     Ok(())
 }
 
-fn parse_foreword_symbol_or_string(value: &str) -> Option<String> {
-    if let Some(unquoted) = unquote_double_quoted_literal(value) {
-        return Some(unquoted.to_string());
+fn foreword_arg_symbol_or_string(value: &ForewordArgValue) -> Option<String> {
+    match value {
+        ForewordArgValue::Str(value) | ForewordArgValue::Symbol(value) => Some(value.clone()),
+        _ => None,
     }
-    is_identifier(value).then(|| value.to_string())
 }
 
 fn parse_foreword_path_or_string(value: &str) -> Option<String> {
@@ -5256,7 +6228,7 @@ fn parse_boundary_payload(foreword: &ForewordApp) -> Result<String, String> {
             foreword.span.line, foreword.span.column
         ));
     }
-    let Some(target) = parse_foreword_symbol_or_string(arg.value.as_str()) else {
+    let Some(target) = foreword_arg_symbol_or_string(&arg.typed_value) else {
         return Err(format!(
             "{}:{}: invalid payload for foreword `#boundary`: `target` must be a string or symbol",
             foreword.span.line, foreword.span.column
@@ -5286,7 +6258,7 @@ fn evaluate_only_foreword(foreword: &ForewordApp) -> Result<bool, String> {
                 foreword.span.line, foreword.span.column
             ));
         };
-        let Some(value) = parse_foreword_symbol_or_string(arg.value.as_str()) else {
+        let Some(value) = foreword_arg_symbol_or_string(&arg.typed_value) else {
             return Err(format!(
                 "{}:{}: invalid payload for foreword `#only`: `os`/`arch` require string or symbol values",
                 foreword.span.line, foreword.span.column
@@ -5685,10 +6657,6 @@ pub fn is_builtin_boundary_unsafe_type_name(name: &str) -> bool {
     builtin_type_info(name).is_some_and(|info| info.boundary_unsafe)
 }
 
-fn is_double_quoted_literal(value: &str) -> bool {
-    unquote_double_quoted_literal(value).is_some()
-}
-
 fn unquote_double_quoted_literal(value: &str) -> Option<&str> {
     let trimmed = value.trim();
     if trimmed.len() >= 2 && trimmed.starts_with('"') && trimmed.ends_with('"') {
@@ -5704,7 +6672,7 @@ fn validate_statement_foreword_contract(
 ) -> Result<(), String> {
     for statement in statements {
         for foreword in &statement.forewords {
-            if foreword.name != "chain" {
+            if foreword.path.len() != 1 || foreword.name != "chain" {
                 return Err(format!(
                     "{}:{}: `#{}` is not a valid statement-level contract",
                     foreword.span.line, foreword.span.column, foreword.name
@@ -6827,10 +7795,11 @@ mod tests {
     use super::freeze::{FROZEN_AST_NODE_KINDS, FROZEN_TOKEN_KINDS};
     use super::{
         AssignTarget, BUILTIN_TYPE_INFOS, BinaryOp, ChainConnector, ChainIntroducer, ChainStep,
-        DirectiveKind, Expr, ForewordApp, ForewordArg, HeaderAttachment, MatchPattern,
-        OpaqueBoundaryPolicy, OpaqueOwnershipPolicy, OpaqueTypePolicy, ParamMode, PhraseArg,
-        Statement, StatementKind, SurfaceTraitRef, SurfaceType, SurfaceWhereClause, SymbolBody,
-        SymbolKind, UnaryOp, builtin_type_info, parse_module,
+        DirectiveKind, Expr, ForewordAliasKind, ForewordApp, ForewordArg,
+        ForewordDefinitionTarget, HeaderAttachment, MatchPattern, OpaqueBoundaryPolicy,
+        OpaqueOwnershipPolicy, OpaqueTypePolicy, ParamMode, PhraseArg, Statement, StatementKind,
+        SurfaceTraitRef, SurfaceType, SurfaceWhereClause, SymbolBody, SymbolKind, UnaryOp,
+        builtin_type_info, parse_module,
     };
 
     fn expr_is_path(expr: &Expr, name: &str) -> bool {
@@ -7371,6 +8340,90 @@ mod tests {
         assert_eq!(parsed.symbols[1].forewords[0].name, "stage");
         assert_eq!(parsed.symbols[1].statements[0].forewords[0].name, "chain");
         assert!(parsed.symbols[2].intrinsic_impl.is_some());
+    }
+
+    #[test]
+    fn parse_module_collects_foreword_handlers_aliases_reexports_and_member_targets() {
+        let parsed = parse_module(
+            concat!(
+                "foreword tool.exec.trace:\n",
+                "    tier = executable\n",
+                "    visibility = public\n",
+                "    action = metadata\n",
+                "    targets = [fn, field, param]\n",
+                "    retention = runtime\n",
+                "    payload = [label: Str]\n",
+                "    handler = tool.exec.trace_handler\n",
+                "foreword handler tool.exec.trace_handler:\n",
+                "    protocol = \"stdio-v1\"\n",
+                "    product = \"trace\"\n",
+                "    entry = \"main\"\n",
+                "foreword alias tool.exec.local = tool.exec.trace\n",
+                "foreword reexport tool.exec.public = tool.exec.trace\n",
+                "record Box:\n",
+                "    #tool.exec.local[label = \"field\"]\n",
+                "    value: Int\n",
+                "#tool.exec.trace[label = \"fn\"]\n",
+                "fn helper(#tool.exec.public[label = \"param\"] value: Int) -> Int:\n",
+                "    return value\n",
+            ),
+        )
+        .expect("module should parse");
+
+        assert_eq!(parsed.foreword_definitions.len(), 1);
+        let definition = &parsed.foreword_definitions[0];
+        assert_eq!(definition.qualified_name, vec!["tool", "exec", "trace"]);
+        assert_eq!(
+            definition.handler.as_ref(),
+            Some(&vec![
+                "tool".to_string(),
+                "exec".to_string(),
+                "trace_handler".to_string(),
+            ])
+        );
+        assert_eq!(
+            definition.targets,
+            vec![
+                ForewordDefinitionTarget::Function,
+                ForewordDefinitionTarget::Field,
+                ForewordDefinitionTarget::Param,
+            ]
+        );
+
+        assert_eq!(parsed.foreword_handlers.len(), 1);
+        assert_eq!(
+            parsed.foreword_handlers[0].qualified_name,
+            vec!["tool", "exec", "trace_handler"]
+        );
+        assert_eq!(parsed.foreword_handlers[0].protocol, "stdio-v1");
+        assert_eq!(parsed.foreword_handlers[0].product, "trace");
+        assert_eq!(parsed.foreword_handlers[0].entry, "main");
+
+        assert_eq!(parsed.foreword_aliases.len(), 2);
+        assert_eq!(parsed.foreword_aliases[0].kind, ForewordAliasKind::Alias);
+        assert_eq!(parsed.foreword_aliases[0].alias_name, vec!["tool", "exec", "local"]);
+        assert_eq!(parsed.foreword_aliases[1].kind, ForewordAliasKind::Reexport);
+        assert_eq!(parsed.foreword_aliases[1].alias_name, vec!["tool", "exec", "public"]);
+
+        let record = parsed
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "Box")
+            .expect("record should parse");
+        match &record.body {
+            SymbolBody::Record { fields } => {
+                assert_eq!(fields[0].forewords[0].path, vec!["tool", "exec", "local"]);
+            }
+            other => panic!("expected record body, got {other:?}"),
+        }
+
+        let helper = parsed
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "helper")
+            .expect("helper should parse");
+        assert_eq!(helper.forewords[0].path, vec!["tool", "exec", "trace"]);
+        assert_eq!(helper.params[0].forewords[0].path, vec!["tool", "exec", "public"]);
     }
 
     #[test]
@@ -8283,7 +9336,11 @@ mod tests {
                                 if name == "chain"
                                     && matches!(
                                         args.as_slice(),
-                                        [ForewordArg { name: Some(arg_name), value }]
+                                        [ForewordArg {
+                                            name: Some(arg_name),
+                                            value,
+                                            ..
+                                        }]
                                             if arg_name == "phase" && value == "update"
                                     )
                         )
@@ -8330,7 +9387,11 @@ mod tests {
                                 if name == "chain"
                                     && matches!(
                                         args.as_slice(),
-                                        [ForewordArg { name: Some(arg_name), value }]
+                                        [ForewordArg {
+                                            name: Some(arg_name),
+                                            value,
+                                            ..
+                                        }]
                                             if arg_name == "phase" && value == "update"
                                     )
                         )

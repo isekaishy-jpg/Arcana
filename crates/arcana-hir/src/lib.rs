@@ -70,6 +70,212 @@ pub struct HirDirective {
     pub span: Span,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HirForewordTier {
+    Basic,
+    Executable,
+}
+
+impl HirForewordTier {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Basic => "basic",
+            Self::Executable => "executable",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HirForewordVisibility {
+    Package,
+    Public,
+}
+
+impl HirForewordVisibility {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Package => "package",
+            Self::Public => "public",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HirForewordRetention {
+    Compile,
+    Tooling,
+    Runtime,
+}
+
+impl HirForewordRetention {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Compile => "compile",
+            Self::Tooling => "tooling",
+            Self::Runtime => "runtime",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HirForewordAction {
+    Metadata,
+    Transform,
+}
+
+impl HirForewordAction {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Metadata => "metadata",
+            Self::Transform => "transform",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HirForewordPhase {
+    Frontend,
+}
+
+impl HirForewordPhase {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Frontend => "frontend",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HirForewordPayloadType {
+    Bool,
+    Int,
+    Str,
+    Symbol,
+    Path,
+}
+
+impl HirForewordPayloadType {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Bool => "Bool",
+            Self::Int => "Int",
+            Self::Str => "Str",
+            Self::Symbol => "Symbol",
+            Self::Path => "Path",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum HirForewordDefinitionTarget {
+    Import,
+    Reexport,
+    Use,
+    Function,
+    Record,
+    Object,
+    Owner,
+    Enum,
+    OpaqueType,
+    Trait,
+    Behavior,
+    System,
+    Const,
+    TraitMethod,
+    ImplMethod,
+    Field,
+    Param,
+}
+
+impl HirForewordDefinitionTarget {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Import => "import",
+            Self::Reexport => "reexport",
+            Self::Use => "use",
+            Self::Function => "fn",
+            Self::Record => "record",
+            Self::Object => "obj",
+            Self::Owner => "owner",
+            Self::Enum => "enum",
+            Self::OpaqueType => "opaque_type",
+            Self::Trait => "trait",
+            Self::Behavior => "behavior",
+            Self::System => "system",
+            Self::Const => "const",
+            Self::TraitMethod => "trait_method",
+            Self::ImplMethod => "impl_method",
+            Self::Field => "field",
+            Self::Param => "param",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HirForewordPayloadField {
+    pub name: String,
+    pub optional: bool,
+    pub ty: HirForewordPayloadType,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HirForewordDefinition {
+    pub qualified_name: Vec<String>,
+    pub tier: HirForewordTier,
+    pub visibility: HirForewordVisibility,
+    pub phase: HirForewordPhase,
+    pub action: HirForewordAction,
+    pub targets: Vec<HirForewordDefinitionTarget>,
+    pub retention: HirForewordRetention,
+    pub payload: Vec<HirForewordPayloadField>,
+    pub repeatable: bool,
+    pub conflicts: Vec<Vec<String>>,
+    pub diagnostic_namespace: Option<String>,
+    pub handler: Option<Vec<String>>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HirForewordHandler {
+    pub qualified_name: Vec<String>,
+    pub phase: HirForewordPhase,
+    pub protocol: String,
+    pub product: String,
+    pub entry: String,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HirForewordAdapterProduct {
+    pub name: String,
+    pub path: String,
+    pub runner: Option<String>,
+    pub args: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HirForewordAliasKind {
+    Alias,
+    Reexport,
+}
+
+impl HirForewordAliasKind {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Alias => "alias",
+            Self::Reexport => "reexport",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HirForewordAlias {
+    pub kind: HirForewordAliasKind,
+    pub source_name: Vec<String>,
+    pub alias_name: Vec<String>,
+    pub span: Span,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum HirSymbolKind {
     Fn,
@@ -155,6 +361,8 @@ pub struct HirSymbol {
     pub body: HirSymbolBody,
     pub statements: Vec<HirStatement>,
     pub cleanup_footers: Vec<HirCleanupFooter>,
+    pub generated_by: Option<HirGeneratedByForeword>,
+    pub generated_name_key: Option<String>,
     pub span: Span,
 }
 
@@ -180,13 +388,39 @@ pub struct HirParam {
     pub mode: Option<HirParamMode>,
     pub name: String,
     pub ty: HirType,
+    pub forewords: Vec<HirForewordApp>,
+    pub span: Span,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HirField {
     pub name: String,
     pub ty: HirType,
+    pub forewords: Vec<HirForewordApp>,
     pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HirForewordArgValue {
+    Raw(String),
+    Bool(bool),
+    Int(i64),
+    Str(String),
+    Symbol(String),
+    Path(Vec<String>),
+}
+
+impl HirForewordArgValue {
+    pub fn render(&self) -> String {
+        match self {
+            Self::Raw(value) => value.clone(),
+            Self::Bool(value) => value.to_string(),
+            Self::Int(value) => value.to_string(),
+            Self::Str(value) => format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\"")),
+            Self::Symbol(value) => value.clone(),
+            Self::Path(segments) => segments.join("."),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -199,13 +433,48 @@ pub struct HirBehaviorAttr {
 pub struct HirForewordArg {
     pub name: Option<String>,
     pub value: String,
+    pub typed_value: HirForewordArgValue,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HirForewordApp {
     pub name: String,
+    pub path: Vec<String>,
     pub args: Vec<HirForewordArg>,
     pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HirGeneratedByForeword {
+    pub applied_name: String,
+    pub resolved_name: String,
+    pub provider_package_id: String,
+    pub owner_kind: String,
+    pub owner_path: String,
+    pub retention: HirForewordRetention,
+    pub args: Vec<HirForewordArg>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HirEmittedForewordMetadata {
+    pub qualified_name: String,
+    pub target_kind: String,
+    pub target_path: String,
+    pub retention: HirForewordRetention,
+    pub args: Vec<HirForewordArg>,
+    pub public: bool,
+    pub generated_by: HirGeneratedByForeword,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HirForewordRegistrationRow {
+    pub namespace: String,
+    pub key: String,
+    pub value: String,
+    pub target_kind: String,
+    pub target_path: String,
+    pub public: bool,
+    pub generated_by: HirGeneratedByForeword,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -686,6 +955,8 @@ pub struct HirImplDecl {
     pub assoc_types: Vec<HirImplAssocTypeBinding>,
     pub methods: Vec<HirSymbol>,
     pub body_entries: Vec<String>,
+    pub generated_by: Option<HirGeneratedByForeword>,
+    pub generated_name_key: Option<String>,
     pub span: Span,
 }
 
@@ -704,6 +975,11 @@ pub struct HirModuleSummary {
     pub directives: Vec<HirDirective>,
     pub lang_items: Vec<HirLangItem>,
     pub memory_specs: Vec<HirMemorySpecDecl>,
+    pub foreword_definitions: Vec<HirForewordDefinition>,
+    pub foreword_handlers: Vec<HirForewordHandler>,
+    pub foreword_aliases: Vec<HirForewordAlias>,
+    pub emitted_foreword_metadata: Vec<HirEmittedForewordMetadata>,
+    pub foreword_registrations: Vec<HirForewordRegistrationRow>,
     pub symbols: Vec<HirSymbol>,
     pub impls: Vec<HirImplDecl>,
 }
@@ -731,6 +1007,40 @@ impl HirModuleSummary {
             .filter(|directive| directive.kind == HirDirectiveKind::Reexport)
             .map(|directive| format!("reexport:{}", directive.path.join(".")))
             .collect::<Vec<_>>();
+        rows.extend(
+            self.foreword_definitions
+                .iter()
+                .filter(|definition| definition.visibility == HirForewordVisibility::Public)
+                .map(|definition| format!("foreword:{}", definition.qualified_name.join("."))),
+        );
+        rows.extend(
+            self.foreword_aliases
+                .iter()
+                .filter(|alias| alias.kind == HirForewordAliasKind::Reexport)
+                .map(|alias| format!("foreword_reexport:{}", alias.alias_name.join("."))),
+        );
+        rows.extend(
+            self.emitted_foreword_metadata
+                .iter()
+                .filter(|entry| entry.public)
+                .map(|entry| {
+                    format!(
+                        "emitted_foreword:{}:{}:{}",
+                        entry.qualified_name, entry.target_kind, entry.target_path
+                    )
+                }),
+        );
+        rows.extend(
+            self.foreword_registrations
+                .iter()
+                .filter(|row| row.public)
+                .map(|row| {
+                    format!(
+                        "foreword_registration:{}:{}:{}:{}",
+                        row.namespace, row.key, row.target_kind, row.target_path
+                    )
+                }),
+        );
         rows.extend(
             self.symbols
                 .iter()
@@ -763,6 +1073,31 @@ impl HirModuleSummary {
             self.memory_specs
                 .iter()
                 .map(render::render_memory_spec_fingerprint),
+        );
+        rows.extend(
+            self.foreword_definitions
+                .iter()
+                .map(render::render_foreword_definition_fingerprint),
+        );
+        rows.extend(
+            self.foreword_handlers
+                .iter()
+                .map(render::render_foreword_handler_fingerprint),
+        );
+        rows.extend(
+            self.foreword_aliases
+                .iter()
+                .map(render::render_foreword_alias_fingerprint),
+        );
+        rows.extend(
+            self.emitted_foreword_metadata
+                .iter()
+                .map(render::render_emitted_foreword_metadata_fingerprint),
+        );
+        rows.extend(
+            self.foreword_registrations
+                .iter()
+                .map(render::render_foreword_registration_fingerprint),
         );
         rows.extend(self.symbols.iter().map(render::render_symbol_fingerprint));
         rows.extend(self.impls.iter().map(render::render_impl_fingerprint));
@@ -878,6 +1213,8 @@ pub struct HirWorkspacePackage {
     pub direct_deps: BTreeSet<String>,
     pub direct_dep_packages: BTreeMap<String, String>,
     pub direct_dep_ids: BTreeMap<String, String>,
+    pub executable_foreword_deps: BTreeSet<String>,
+    pub foreword_products: BTreeMap<String, HirForewordAdapterProduct>,
     pub summary: HirPackageSummary,
     pub layout: HirPackageLayout,
 }
@@ -1857,6 +2194,23 @@ pub fn lower_parsed_module(
             .iter()
             .map(lower_memory_spec_decl)
             .collect(),
+        foreword_definitions: parsed
+            .foreword_definitions
+            .iter()
+            .map(lower_foreword_definition)
+            .collect(),
+        foreword_handlers: parsed
+            .foreword_handlers
+            .iter()
+            .map(lower_foreword_handler)
+            .collect(),
+        foreword_aliases: parsed
+            .foreword_aliases
+            .iter()
+            .map(lower_foreword_alias)
+            .collect(),
+        emitted_foreword_metadata: Vec::new(),
+        foreword_registrations: Vec::new(),
         symbols: parsed
             .symbols
             .iter()
@@ -1877,6 +2231,8 @@ pub fn lower_parsed_module(
                         mode: param.mode.as_ref().map(lower_param_mode),
                         name: param.name.clone(),
                         ty: type_surface::lower_surface_type(&param.ty),
+                        forewords: lower_forewords(&param.forewords),
+                        span: param.span,
                     })
                     .collect(),
                 return_type: symbol
@@ -1898,6 +2254,8 @@ pub fn lower_parsed_module(
                 body: lower_symbol_body(&symbol.body),
                 statements: lower_statements(&symbol.statements),
                 cleanup_footers: lower_cleanup_footers(&symbol.cleanup_footers),
+                generated_by: None,
+                generated_name_key: None,
                 span: symbol.span,
             })
             .collect(),
@@ -1929,6 +2287,8 @@ pub fn lower_parsed_module(
                     .map(lower_trait_or_impl_method)
                     .collect(),
                 body_entries: impl_decl.body_entries.clone(),
+                generated_by: None,
+                generated_name_key: None,
                 span: impl_decl.span,
             })
             .collect(),
@@ -2251,6 +2611,8 @@ pub fn build_workspace_package_with_dep_packages(
         direct_deps,
         direct_dep_packages,
         direct_dep_ids,
+        executable_foreword_deps: BTreeSet::new(),
+        foreword_products: BTreeMap::new(),
         summary,
         layout,
     })
@@ -2558,6 +2920,7 @@ fn lower_symbol_body(body: &arcana_syntax::SymbolBody) -> HirSymbolBody {
                 .map(|field| HirField {
                     name: field.name.clone(),
                     ty: type_surface::lower_surface_type(&field.ty),
+                    forewords: lower_forewords(&field.forewords),
                     span: field.span,
                 })
                 .collect(),
@@ -2568,6 +2931,7 @@ fn lower_symbol_body(body: &arcana_syntax::SymbolBody) -> HirSymbolBody {
                 .map(|field| HirField {
                     name: field.name.clone(),
                     ty: type_surface::lower_surface_type(&field.ty),
+                    forewords: lower_forewords(&field.forewords),
                     span: field.span,
                 })
                 .collect(),
@@ -2643,6 +3007,8 @@ fn lower_trait_or_impl_method(method: &arcana_syntax::SymbolDecl) -> HirSymbol {
                 mode: param.mode.as_ref().map(lower_param_mode),
                 name: param.name.clone(),
                 ty: type_surface::lower_surface_type(&param.ty),
+                forewords: lower_forewords(&param.forewords),
+                span: param.span,
             })
             .collect(),
         return_type: method
@@ -2664,6 +3030,8 @@ fn lower_trait_or_impl_method(method: &arcana_syntax::SymbolDecl) -> HirSymbol {
         body: lower_symbol_body(&method.body),
         statements: lower_statements(&method.statements),
         cleanup_footers: lower_cleanup_footers(&method.cleanup_footers),
+        generated_by: None,
+        generated_name_key: None,
         span: method.span,
     }
 }
@@ -2685,17 +3053,164 @@ fn lower_forewords(forewords: &[arcana_syntax::ForewordApp]) -> Vec<HirForewordA
         .iter()
         .map(|foreword| HirForewordApp {
             name: foreword.name.clone(),
+            path: foreword.path.clone(),
             args: foreword
                 .args
                 .iter()
                 .map(|arg| HirForewordArg {
                     name: arg.name.clone(),
                     value: arg.value.clone(),
+                    typed_value: match &arg.typed_value {
+                        arcana_syntax::ForewordArgValue::Raw(value) => {
+                            HirForewordArgValue::Raw(value.clone())
+                        }
+                        arcana_syntax::ForewordArgValue::Bool(value) => {
+                            HirForewordArgValue::Bool(*value)
+                        }
+                        arcana_syntax::ForewordArgValue::Int(value) => {
+                            HirForewordArgValue::Int(*value)
+                        }
+                        arcana_syntax::ForewordArgValue::Str(value) => {
+                            HirForewordArgValue::Str(value.clone())
+                        }
+                        arcana_syntax::ForewordArgValue::Symbol(value) => {
+                            HirForewordArgValue::Symbol(value.clone())
+                        }
+                        arcana_syntax::ForewordArgValue::Path(value) => {
+                            HirForewordArgValue::Path(value.clone())
+                        }
+                    },
                 })
                 .collect(),
             span: foreword.span,
         })
         .collect()
+}
+
+fn lower_foreword_definition(
+    definition: &arcana_syntax::ForewordDefinitionDecl,
+) -> HirForewordDefinition {
+    HirForewordDefinition {
+        qualified_name: definition.qualified_name.clone(),
+        tier: match definition.tier {
+            arcana_syntax::ForewordTier::Basic => HirForewordTier::Basic,
+            arcana_syntax::ForewordTier::Executable => HirForewordTier::Executable,
+        },
+        visibility: match definition.visibility {
+            arcana_syntax::ForewordVisibility::Package => HirForewordVisibility::Package,
+            arcana_syntax::ForewordVisibility::Public => HirForewordVisibility::Public,
+        },
+        phase: match definition.phase {
+            arcana_syntax::ForewordPhase::Frontend => HirForewordPhase::Frontend,
+        },
+        action: match definition.action {
+            arcana_syntax::ForewordAction::Metadata => HirForewordAction::Metadata,
+            arcana_syntax::ForewordAction::Transform => HirForewordAction::Transform,
+        },
+        targets: definition
+            .targets
+            .iter()
+            .map(|target| match target {
+                arcana_syntax::ForewordDefinitionTarget::Import => {
+                    HirForewordDefinitionTarget::Import
+                }
+                arcana_syntax::ForewordDefinitionTarget::Reexport => {
+                    HirForewordDefinitionTarget::Reexport
+                }
+                arcana_syntax::ForewordDefinitionTarget::Use => HirForewordDefinitionTarget::Use,
+                arcana_syntax::ForewordDefinitionTarget::Function => {
+                    HirForewordDefinitionTarget::Function
+                }
+                arcana_syntax::ForewordDefinitionTarget::Record => {
+                    HirForewordDefinitionTarget::Record
+                }
+                arcana_syntax::ForewordDefinitionTarget::Object => {
+                    HirForewordDefinitionTarget::Object
+                }
+                arcana_syntax::ForewordDefinitionTarget::Owner => {
+                    HirForewordDefinitionTarget::Owner
+                }
+                arcana_syntax::ForewordDefinitionTarget::Enum => HirForewordDefinitionTarget::Enum,
+                arcana_syntax::ForewordDefinitionTarget::OpaqueType => {
+                    HirForewordDefinitionTarget::OpaqueType
+                }
+                arcana_syntax::ForewordDefinitionTarget::Trait => {
+                    HirForewordDefinitionTarget::Trait
+                }
+                arcana_syntax::ForewordDefinitionTarget::Behavior => {
+                    HirForewordDefinitionTarget::Behavior
+                }
+                arcana_syntax::ForewordDefinitionTarget::System => {
+                    HirForewordDefinitionTarget::System
+                }
+                arcana_syntax::ForewordDefinitionTarget::Const => {
+                    HirForewordDefinitionTarget::Const
+                }
+                arcana_syntax::ForewordDefinitionTarget::TraitMethod => {
+                    HirForewordDefinitionTarget::TraitMethod
+                }
+                arcana_syntax::ForewordDefinitionTarget::ImplMethod => {
+                    HirForewordDefinitionTarget::ImplMethod
+                }
+                arcana_syntax::ForewordDefinitionTarget::Field => {
+                    HirForewordDefinitionTarget::Field
+                }
+                arcana_syntax::ForewordDefinitionTarget::Param => {
+                    HirForewordDefinitionTarget::Param
+                }
+            })
+            .collect(),
+        retention: match definition.retention {
+            arcana_syntax::ForewordRetention::Compile => HirForewordRetention::Compile,
+            arcana_syntax::ForewordRetention::Tooling => HirForewordRetention::Tooling,
+            arcana_syntax::ForewordRetention::Runtime => HirForewordRetention::Runtime,
+        },
+        payload: definition
+            .payload
+            .iter()
+            .map(|field| HirForewordPayloadField {
+                name: field.name.clone(),
+                optional: field.optional,
+                ty: match field.ty {
+                    arcana_syntax::ForewordPayloadType::Bool => HirForewordPayloadType::Bool,
+                    arcana_syntax::ForewordPayloadType::Int => HirForewordPayloadType::Int,
+                    arcana_syntax::ForewordPayloadType::Str => HirForewordPayloadType::Str,
+                    arcana_syntax::ForewordPayloadType::Symbol => HirForewordPayloadType::Symbol,
+                    arcana_syntax::ForewordPayloadType::Path => HirForewordPayloadType::Path,
+                },
+            })
+            .collect(),
+        repeatable: definition.repeatable,
+        conflicts: definition.conflicts.clone(),
+        diagnostic_namespace: definition.diagnostic_namespace.clone(),
+        handler: definition.handler.clone(),
+        span: definition.span,
+    }
+}
+
+fn lower_foreword_handler(handler: &arcana_syntax::ForewordHandlerDecl) -> HirForewordHandler {
+    HirForewordHandler {
+        qualified_name: handler.qualified_name.clone(),
+        phase: match handler.phase {
+            arcana_syntax::ForewordPhase::Frontend => HirForewordPhase::Frontend,
+        },
+        protocol: handler.protocol.clone(),
+        product: handler.product.clone(),
+        entry: handler.entry.clone(),
+        span: handler.span,
+    }
+}
+
+fn lower_foreword_alias(alias: &arcana_syntax::ForewordAliasDecl) -> HirForewordAlias {
+    HirForewordAlias {
+        kind: match alias.kind {
+            arcana_syntax::ForewordAliasKind::Alias => HirForewordAliasKind::Alias,
+            arcana_syntax::ForewordAliasKind::Reexport => HirForewordAliasKind::Reexport,
+        },
+        source_name: alias.source_name.clone(),
+        alias_name: alias.alias_name.clone(),
+        span: alias.span,
+    }
 }
 
 fn lower_cleanup_footers(
@@ -3183,13 +3698,13 @@ mod tests {
     use super::freeze::FROZEN_HIR_NODE_KINDS;
     use super::{
         HirAssignOp, HirAssignTarget, HirBinaryOp, HirChainConnector, HirChainIntroducer,
-        HirChainStep, HirDirectiveKind, HirExpr, HirForewordApp, HirForewordArg,
-        HirHeaderAttachment, HirMatchPattern, HirPackageLayout, HirPackageSummary, HirPhraseArg,
-        HirStatement, HirStatementKind, HirSymbolBody, HirSymbolKind, HirTraitRef, HirType,
-        HirUnaryOp, HirWhereClause, HirWorkspacePackage, build_package_layout,
-        build_package_summary, build_workspace_summary, derive_source_module_path,
-        lookup_method_candidates_for_hir_type, lookup_symbol_path, lower_module_text,
-        parse_hir_type, resolve_workspace,
+        HirChainStep, HirDirectiveKind, HirExpr, HirForewordAliasKind, HirForewordApp,
+        HirForewordArg, HirForewordRetention, HirForewordTier, HirHeaderAttachment,
+        HirMatchPattern, HirPackageLayout, HirPackageSummary, HirPhraseArg, HirStatement,
+        HirStatementKind, HirSymbolBody, HirSymbolKind, HirTraitRef, HirType, HirUnaryOp,
+        HirWhereClause, HirWorkspacePackage, build_package_layout, build_package_summary,
+        build_workspace_summary, derive_source_module_path, lookup_method_candidates_for_hir_type,
+        lookup_symbol_path, lower_module_text, parse_hir_type, resolve_workspace,
     };
 
     fn expr_is_path(expr: &HirExpr, name: &str) -> bool {
@@ -3476,6 +3991,81 @@ mod tests {
             module.symbols[2].intrinsic_impl.as_deref(),
             Some("HostTextLenBytes")
         );
+    }
+
+    #[test]
+    fn lower_module_text_captures_foreword_handlers_aliases_reexports_and_member_targets() {
+        let module = lower_module_text(
+            "surface",
+            concat!(
+                "foreword tool.exec.trace:\n",
+                "    tier = executable\n",
+                "    visibility = public\n",
+                "    action = metadata\n",
+                "    targets = [fn, field, param]\n",
+                "    retention = runtime\n",
+                "    payload = [label: Str]\n",
+                "    handler = tool.exec.trace_handler\n",
+                "foreword handler tool.exec.trace_handler:\n",
+                "    protocol = \"stdio-v1\"\n",
+                "    product = \"trace\"\n",
+                "    entry = \"main\"\n",
+                "foreword alias tool.exec.local = tool.exec.trace\n",
+                "foreword reexport tool.exec.public = tool.exec.trace\n",
+                "record Box:\n",
+                "    #tool.exec.local[label = \"field\"]\n",
+                "    value: Int\n",
+                "#tool.exec.trace[label = \"fn\"]\n",
+                "fn helper(#tool.exec.public[label = \"param\"] value: Int) -> Int:\n",
+                "    return value\n",
+            ),
+        )
+        .expect("lowering should pass");
+
+        assert_eq!(module.foreword_definitions.len(), 1);
+        let definition = &module.foreword_definitions[0];
+        assert_eq!(definition.qualified_name, vec!["tool", "exec", "trace"]);
+        assert_eq!(definition.tier, HirForewordTier::Executable);
+        assert_eq!(definition.retention, HirForewordRetention::Runtime);
+        assert_eq!(
+            definition.handler.as_ref(),
+            Some(&vec![
+                "tool".to_string(),
+                "exec".to_string(),
+                "trace_handler".to_string(),
+            ])
+        );
+
+        assert_eq!(module.foreword_handlers.len(), 1);
+        assert_eq!(
+            module.foreword_handlers[0].qualified_name,
+            vec!["tool", "exec", "trace_handler"]
+        );
+        assert_eq!(module.foreword_handlers[0].protocol, "stdio-v1");
+
+        assert_eq!(module.foreword_aliases.len(), 2);
+        assert_eq!(module.foreword_aliases[0].kind, HirForewordAliasKind::Alias);
+        assert_eq!(module.foreword_aliases[1].kind, HirForewordAliasKind::Reexport);
+
+        let record = module
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "Box")
+            .expect("record should lower");
+        match &record.body {
+            HirSymbolBody::Record { fields } => {
+                assert_eq!(fields[0].forewords[0].path, vec!["tool", "exec", "local"]);
+            }
+            other => panic!("expected record body, got {other:?}"),
+        }
+
+        let helper = module
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "helper")
+            .expect("helper should lower");
+        assert_eq!(helper.forewords[0].path, vec!["tool", "exec", "trace"]);
+        assert_eq!(helper.params[0].forewords[0].path, vec!["tool", "exec", "public"]);
     }
 
     #[test]
@@ -4127,7 +4717,11 @@ mod tests {
                                 if name == "chain"
                                     && matches!(
                                         args.as_slice(),
-                                        [HirForewordArg { name: Some(arg_name), value }]
+                                        [HirForewordArg {
+                                            name: Some(arg_name),
+                                            value,
+                                            ..
+                                        }]
                                             if arg_name == "phase" && value == "update"
                                     )
                         )
@@ -4174,7 +4768,11 @@ mod tests {
                                 if name == "chain"
                                     && matches!(
                                         args.as_slice(),
-                                        [HirForewordArg { name: Some(arg_name), value }]
+                                        [HirForewordArg {
+                                            name: Some(arg_name),
+                                            value,
+                                            ..
+                                        }]
                                             if arg_name == "phase" && value == "plan"
                                     )
                         )

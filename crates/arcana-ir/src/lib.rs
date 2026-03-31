@@ -9,16 +9,19 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
+use serde::{Deserialize, Serialize};
+
 use arcana_hir::{
     HirAssignOp, HirAssignTarget, HirBinaryOp, HirChainConnector, HirChainIntroducer, HirChainStep,
     HirCleanupFooter, HirDirectiveKind, HirExpr, HirForewordApp, HirForewordArg,
-    HirHeaderAttachment, HirLocalTypeLookup, HirMatchPattern, HirModule, HirModuleDependency,
-    HirModuleSummary, HirPackageSummary, HirPath, HirPhraseArg, HirPredicate, HirResolvedModule,
-    HirResolvedWorkspace, HirStatement, HirStatementKind, HirSymbol, HirSymbolBody, HirSymbolKind,
-    HirType, HirTypeBindingScope, HirTypeKind, HirTypeSubstitutions, HirUnaryOp, HirWhereClause,
-    HirWorkspacePackage, HirWorkspaceSummary, canonicalize_hir_type_in_module,
-    current_workspace_package_for_module, hir_type_matches, impl_target_is_public_from_package,
-    infer_receiver_expr_type, lookup_method_candidates_for_hir_type, lookup_symbol_path,
+    HirHeaderAttachment, HirImplDecl, HirLocalTypeLookup, HirMatchPattern, HirModule,
+    HirModuleDependency, HirModuleSummary, HirPackageSummary, HirPath, HirPhraseArg, HirPredicate,
+    HirResolvedModule, HirResolvedWorkspace, HirStatement, HirStatementKind, HirSymbol,
+    HirSymbolBody, HirSymbolKind, HirType, HirTypeBindingScope, HirTypeKind, HirTypeSubstitutions,
+    HirUnaryOp, HirWhereClause, HirWorkspacePackage, HirWorkspaceSummary,
+    canonicalize_hir_type_in_module, current_workspace_package_for_module, hir_type_matches,
+    impl_target_is_public_from_package, infer_receiver_expr_type,
+    lookup_method_candidates_for_hir_type, lookup_symbol_path,
     match_name_resolves_to_zero_payload_variant, render_symbol_signature,
     routine_key_for_impl_method, routine_key_for_object_method, routine_key_for_symbol,
 };
@@ -73,6 +76,122 @@ pub struct IrEntrypoint {
     pub exported: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IrForewordArgValue {
+    #[serde(rename = "raw")]
+    Raw(String),
+    #[serde(rename = "bool")]
+    Bool(bool),
+    #[serde(rename = "int")]
+    Int(i64),
+    #[serde(rename = "str")]
+    Str(String),
+    #[serde(rename = "symbol")]
+    Symbol(String),
+    #[serde(rename = "path")]
+    Path(Vec<String>),
+}
+
+impl Default for IrForewordArgValue {
+    fn default() -> Self {
+        Self::Raw(String::new())
+    }
+}
+
+impl IrForewordArgValue {
+    pub fn render(&self) -> String {
+        match self {
+            Self::Raw(value) => value.clone(),
+            Self::Bool(value) => value.to_string(),
+            Self::Int(value) => value.to_string(),
+            Self::Str(value) => format!("\"{}\"", quote_text(value)),
+            Self::Symbol(value) => value.clone(),
+            Self::Path(segments) => segments.join("."),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IrForewordArg {
+    pub name: Option<String>,
+    pub value: String,
+    #[serde(default)]
+    pub typed_value: IrForewordArgValue,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IrForewordRetention {
+    Compile,
+    Tooling,
+    Runtime,
+}
+
+impl IrForewordRetention {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Compile => "compile",
+            Self::Tooling => "tooling",
+            Self::Runtime => "runtime",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IrForewordEntryKind {
+    #[default]
+    Attached,
+    Generated,
+    Emitted,
+}
+
+impl IrForewordEntryKind {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Attached => "attached",
+            Self::Generated => "generated",
+            Self::Emitted => "emitted",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IrForewordGeneratedBy {
+    pub applied_name: String,
+    pub resolved_name: String,
+    pub provider_package_id: String,
+    pub owner_kind: String,
+    pub owner_path: String,
+    pub retention: IrForewordRetention,
+    pub args: Vec<IrForewordArg>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IrForewordMetadata {
+    #[serde(default)]
+    pub entry_kind: IrForewordEntryKind,
+    pub qualified_name: String,
+    pub package_id: String,
+    pub module_id: String,
+    pub target_kind: String,
+    pub target_path: String,
+    pub retention: IrForewordRetention,
+    pub args: Vec<IrForewordArg>,
+    pub public: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generated_by: Option<IrForewordGeneratedBy>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IrForewordRegistrationRow {
+    pub namespace: String,
+    pub key: String,
+    pub value: String,
+    pub target_kind: String,
+    pub target_path: String,
+    pub public: bool,
+    pub generated_by: IrForewordGeneratedBy,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IrRoutine {
     pub package_id: String,
@@ -90,7 +209,8 @@ pub struct IrRoutine {
     pub impl_target_type: Option<IrRoutineType>,
     pub impl_trait_path: Option<Vec<String>>,
     pub availability: Vec<ExecAvailabilityAttachment>,
-    pub foreword_rows: Vec<String>,
+    pub inline_hint: bool,
+    pub cold_hint: bool,
     pub cleanup_footers: Vec<ExecCleanupFooter>,
     pub statements: Vec<ExecStmt>,
 }
@@ -136,6 +256,8 @@ pub struct IrPackage {
     pub dependency_rows: Vec<String>,
     pub exported_surface_rows: Vec<String>,
     pub runtime_requirements: Vec<String>,
+    pub foreword_index: Vec<IrForewordMetadata>,
+    pub foreword_registrations: Vec<IrForewordRegistrationRow>,
     pub entrypoints: Vec<IrEntrypoint>,
     pub routines: Vec<IrRoutine>,
     pub owners: Vec<IrOwnerDecl>,
@@ -1483,23 +1605,486 @@ fn decode_source_string_literal(text: &str) -> Result<String, String> {
     }
 }
 
-fn render_foreword_arg(arg: &HirForewordArg) -> String {
-    match &arg.name {
-        Some(name) => format!("{name}=\"{}\"", quote_text(&arg.value)),
-        None => format!("\"{}\"", quote_text(&arg.value)),
+fn symbol_has_builtin_foreword(symbol: &HirSymbol, name: &str) -> bool {
+    symbol
+        .forewords
+        .iter()
+        .any(|app| app.path.len() == 1 && app.name == name)
+}
+
+#[derive(Clone, Debug)]
+struct IrResolvedForewordExport {
+    exposed_name: Vec<String>,
+    retention: IrForewordRetention,
+    public: bool,
+}
+
+#[derive(Default)]
+struct IrForewordRegistry {
+    exports: BTreeMap<(String, String), IrResolvedForewordExport>,
+}
+
+fn lower_foreword_retention(retention: arcana_hir::HirForewordRetention) -> IrForewordRetention {
+    match retention {
+        arcana_hir::HirForewordRetention::Compile => IrForewordRetention::Compile,
+        arcana_hir::HirForewordRetention::Tooling => IrForewordRetention::Tooling,
+        arcana_hir::HirForewordRetention::Runtime => IrForewordRetention::Runtime,
     }
 }
 
-fn render_foreword_row(app: &HirForewordApp) -> String {
-    format!(
-        "{}({})",
-        app.name,
-        app.args
-            .iter()
-            .map(render_foreword_arg)
-            .collect::<Vec<_>>()
-            .join(",")
-    )
+fn lower_foreword_arg(arg: &HirForewordArg) -> IrForewordArg {
+    IrForewordArg {
+        name: arg.name.clone(),
+        value: arg.value.clone(),
+        typed_value: match &arg.typed_value {
+            arcana_hir::HirForewordArgValue::Raw(value) => IrForewordArgValue::Raw(value.clone()),
+            arcana_hir::HirForewordArgValue::Bool(value) => IrForewordArgValue::Bool(*value),
+            arcana_hir::HirForewordArgValue::Int(value) => IrForewordArgValue::Int(*value),
+            arcana_hir::HirForewordArgValue::Str(value) => IrForewordArgValue::Str(value.clone()),
+            arcana_hir::HirForewordArgValue::Symbol(value) => {
+                IrForewordArgValue::Symbol(value.clone())
+            }
+            arcana_hir::HirForewordArgValue::Path(value) => IrForewordArgValue::Path(value.clone()),
+        },
+    }
+}
+
+fn lower_foreword_args(args: &[HirForewordArg]) -> Vec<IrForewordArg> {
+    args.iter().map(lower_foreword_arg).collect()
+}
+
+fn lower_generated_by(generated_by: &arcana_hir::HirGeneratedByForeword) -> IrForewordGeneratedBy {
+    IrForewordGeneratedBy {
+        applied_name: generated_by.applied_name.clone(),
+        resolved_name: generated_by.resolved_name.clone(),
+        provider_package_id: generated_by.provider_package_id.clone(),
+        owner_kind: generated_by.owner_kind.clone(),
+        owner_path: generated_by.owner_path.clone(),
+        retention: lower_foreword_retention(generated_by.retention),
+        args: lower_foreword_args(&generated_by.args),
+    }
+}
+
+fn impl_target_path(module_id: &str, impl_decl: &HirImplDecl) -> String {
+    let target = impl_decl.target_type.to_string();
+    let container = match &impl_decl.trait_path {
+        Some(trait_path) => format!("{target}:{}", arcana_hir::render_hir_trait_ref(trait_path)),
+        None => target,
+    };
+    format!("{module_id}::impl({container})")
+}
+
+fn build_ir_foreword_registry(workspace: &HirWorkspaceSummary) -> IrForewordRegistry {
+    let mut registry = IrForewordRegistry::default();
+    let mut local_defs = BTreeMap::<(String, String), arcana_hir::HirForewordDefinition>::new();
+    for package in workspace.packages.values() {
+        let package_name = &package.summary.package_name;
+        for module in &package.summary.modules {
+            for definition in &module.foreword_definitions {
+                if definition.qualified_name.len() < 2
+                    || definition.qualified_name[0] != *package_name
+                {
+                    continue;
+                }
+                local_defs.insert(
+                    (
+                        package.package_id.clone(),
+                        definition.qualified_name[1..].join("."),
+                    ),
+                    definition.clone(),
+                );
+            }
+        }
+    }
+
+    for package in workspace.packages.values() {
+        for ((provider_package_id, tail), definition) in &local_defs {
+            if provider_package_id != &package.package_id {
+                continue;
+            }
+            registry.exports.insert(
+                (package.package_id.clone(), tail.clone()),
+                IrResolvedForewordExport {
+                    exposed_name: definition.qualified_name.clone(),
+                    retention: lower_foreword_retention(definition.retention),
+                    public: definition.visibility == arcana_hir::HirForewordVisibility::Public,
+                },
+            );
+        }
+        for module in &package.summary.modules {
+            for alias in &module.foreword_aliases {
+                if alias.alias_name.len() < 2 || alias.source_name.len() < 2 {
+                    continue;
+                }
+                let provider_package_id = if alias.source_name[0] == package.summary.package_name {
+                    package.package_id.clone()
+                } else if let Some(dep_id) = package.direct_dep_ids.get(&alias.source_name[0]) {
+                    dep_id.clone()
+                } else if let Some((alias_name, _)) = package
+                    .direct_dep_packages
+                    .iter()
+                    .find(|(_, dep_name)| **dep_name == alias.source_name[0])
+                {
+                    let Some(dep_id) = package.direct_dep_ids.get(alias_name) else {
+                        continue;
+                    };
+                    dep_id.clone()
+                } else {
+                    continue;
+                };
+                let Some(definition) = local_defs.get(&(
+                    provider_package_id.clone(),
+                    alias.source_name[1..].join("."),
+                )) else {
+                    continue;
+                };
+                if provider_package_id != package.package_id
+                    && definition.visibility != arcana_hir::HirForewordVisibility::Public
+                {
+                    continue;
+                }
+                registry.exports.insert(
+                    (package.package_id.clone(), alias.alias_name[1..].join(".")),
+                    IrResolvedForewordExport {
+                        exposed_name: alias.alias_name.clone(),
+                        retention: lower_foreword_retention(definition.retention),
+                        public: alias.kind == arcana_hir::HirForewordAliasKind::Reexport,
+                    },
+                );
+            }
+        }
+    }
+    registry
+}
+
+fn resolve_ir_foreword_export<'a>(
+    package: &HirWorkspacePackage,
+    app: &HirForewordApp,
+    registry: &'a IrForewordRegistry,
+) -> Option<&'a IrResolvedForewordExport> {
+    if app.path.len() < 2 {
+        return None;
+    }
+    let package_id = if app.path[0] == package.summary.package_name {
+        package.package_id.clone()
+    } else if let Some(dep_id) = package.direct_dep_ids.get(&app.path[0]) {
+        dep_id.clone()
+    } else if let Some((alias, _)) = package
+        .direct_dep_packages
+        .iter()
+        .find(|(_, dep_name)| **dep_name == app.path[0])
+    {
+        package.direct_dep_ids.get(alias)?.clone()
+    } else {
+        return None;
+    };
+    let export = registry
+        .exports
+        .get(&(package_id.clone(), app.path[1..].join(".")))?;
+    if package_id == package.package_id || export.public {
+        Some(export)
+    } else {
+        None
+    }
+}
+
+fn lower_foreword_index_entries(
+    package: &HirWorkspacePackage,
+    module_id: &str,
+    apps: &[HirForewordApp],
+    target_kind: &str,
+    target_path: String,
+    target_public: bool,
+    target_generated_by: Option<&arcana_hir::HirGeneratedByForeword>,
+    registry: &IrForewordRegistry,
+    out: &mut Vec<IrForewordMetadata>,
+) {
+    for app in apps {
+        let (qualified_name, retention) = if app.path.len() == 1 {
+            (app.path.join("."), IrForewordRetention::Compile)
+        } else if let Some(export) = resolve_ir_foreword_export(package, app, registry) {
+            (export.exposed_name.join("."), export.retention.clone())
+        } else {
+            (app.path.join("."), IrForewordRetention::Compile)
+        };
+        out.push(IrForewordMetadata {
+            entry_kind: IrForewordEntryKind::Attached,
+            qualified_name,
+            package_id: package.package_id.clone(),
+            module_id: module_id.to_string(),
+            target_kind: target_kind.to_string(),
+            target_path: target_path.clone(),
+            retention,
+            args: lower_foreword_args(&app.args),
+            public: target_public,
+            generated_by: target_generated_by.map(lower_generated_by),
+        });
+    }
+}
+
+fn lower_generated_foreword_index_entry(
+    package: &HirWorkspacePackage,
+    module_id: &str,
+    target_kind: &str,
+    target_path: String,
+    public: bool,
+    generated_by: &arcana_hir::HirGeneratedByForeword,
+    out: &mut Vec<IrForewordMetadata>,
+) {
+    out.push(IrForewordMetadata {
+        entry_kind: IrForewordEntryKind::Generated,
+        qualified_name: generated_by.resolved_name.clone(),
+        package_id: package.package_id.clone(),
+        module_id: module_id.to_string(),
+        target_kind: target_kind.to_string(),
+        target_path,
+        retention: lower_foreword_retention(generated_by.retention),
+        args: lower_foreword_args(&generated_by.args),
+        public,
+        generated_by: Some(lower_generated_by(generated_by)),
+    });
+}
+
+fn lower_emitted_foreword_index_entry(
+    package: &HirWorkspacePackage,
+    module_id: &str,
+    entry: &arcana_hir::HirEmittedForewordMetadata,
+    out: &mut Vec<IrForewordMetadata>,
+) {
+    out.push(IrForewordMetadata {
+        entry_kind: IrForewordEntryKind::Emitted,
+        qualified_name: entry.qualified_name.clone(),
+        package_id: package.package_id.clone(),
+        module_id: module_id.to_string(),
+        target_kind: entry.target_kind.clone(),
+        target_path: entry.target_path.clone(),
+        retention: lower_foreword_retention(entry.retention),
+        args: lower_foreword_args(&entry.args),
+        public: entry.public,
+        generated_by: Some(lower_generated_by(&entry.generated_by)),
+    });
+}
+
+fn lower_foreword_registration_row(
+    row: &arcana_hir::HirForewordRegistrationRow,
+) -> IrForewordRegistrationRow {
+    IrForewordRegistrationRow {
+        namespace: row.namespace.clone(),
+        key: row.key.clone(),
+        value: row.value.clone(),
+        target_kind: row.target_kind.clone(),
+        target_path: row.target_path.clone(),
+        public: row.public,
+        generated_by: lower_generated_by(&row.generated_by),
+    }
+}
+
+fn lower_symbol_foreword_index_entries(
+    package: &HirWorkspacePackage,
+    module: &HirModuleSummary,
+    symbol: &HirSymbol,
+    target_kind: &str,
+    public: bool,
+    inherited_generated_by: Option<&arcana_hir::HirGeneratedByForeword>,
+    registry: &IrForewordRegistry,
+    out: &mut Vec<IrForewordMetadata>,
+) {
+    let symbol_target_path = format!("{}.{}", module.module_id, symbol.name);
+    let target_generated_by = symbol.generated_by.as_ref().or(inherited_generated_by);
+    if let Some(generated_by) = symbol.generated_by.as_ref() {
+        lower_generated_foreword_index_entry(
+            package,
+            &module.module_id,
+            target_kind,
+            symbol_target_path.clone(),
+            public,
+            generated_by,
+            out,
+        );
+    }
+    lower_foreword_index_entries(
+        package,
+        &module.module_id,
+        &symbol.forewords,
+        target_kind,
+        symbol_target_path.clone(),
+        public,
+        target_generated_by,
+        registry,
+        out,
+    );
+    for param in &symbol.params {
+        lower_foreword_index_entries(
+            package,
+            &module.module_id,
+            &param.forewords,
+            "param",
+            format!("{}.{}({})", module.module_id, symbol.name, param.name),
+            public,
+            target_generated_by,
+            registry,
+            out,
+        );
+    }
+    match &symbol.body {
+        HirSymbolBody::Record { fields } => {
+            for field in fields {
+                lower_foreword_index_entries(
+                    package,
+                    &module.module_id,
+                    &field.forewords,
+                    "field",
+                    format!("{}.{}.{}", module.module_id, symbol.name, field.name),
+                    public,
+                    target_generated_by,
+                    registry,
+                    out,
+                );
+            }
+        }
+        HirSymbolBody::Object { fields, methods } => {
+            for field in fields {
+                lower_foreword_index_entries(
+                    package,
+                    &module.module_id,
+                    &field.forewords,
+                    "field",
+                    format!("{}.{}.{}", module.module_id, symbol.name, field.name),
+                    public,
+                    target_generated_by,
+                    registry,
+                    out,
+                );
+            }
+            for method in methods {
+                lower_symbol_foreword_index_entries(
+                    package,
+                    module,
+                    method,
+                    "impl_method",
+                    public,
+                    target_generated_by,
+                    registry,
+                    out,
+                );
+            }
+        }
+        HirSymbolBody::Trait { methods, .. } => {
+            for method in methods {
+                lower_symbol_foreword_index_entries(
+                    package,
+                    module,
+                    method,
+                    "trait_method",
+                    public,
+                    target_generated_by,
+                    registry,
+                    out,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+fn lower_package_foreword_index(
+    workspace: &HirWorkspaceSummary,
+    package: &HirWorkspacePackage,
+) -> Vec<IrForewordMetadata> {
+    let registry = build_ir_foreword_registry(workspace);
+    let mut index = Vec::new();
+    for module in &package.summary.modules {
+        for directive in &module.directives {
+            let target_kind = match directive.kind {
+                HirDirectiveKind::Import => "import",
+                HirDirectiveKind::Use => "use",
+                HirDirectiveKind::Reexport => "reexport",
+            };
+            lower_foreword_index_entries(
+                package,
+                &module.module_id,
+                &directive.forewords,
+                target_kind,
+                format!("{}:{}", module.module_id, directive.path.join(".")),
+                directive.kind == HirDirectiveKind::Reexport,
+                None,
+                &registry,
+                &mut index,
+            );
+        }
+        for entry in &module.emitted_foreword_metadata {
+            lower_emitted_foreword_index_entry(package, &module.module_id, entry, &mut index);
+        }
+        for symbol in &module.symbols {
+            lower_symbol_foreword_index_entries(
+                package,
+                module,
+                symbol,
+                symbol.kind.as_str(),
+                symbol.exported,
+                None,
+                &registry,
+                &mut index,
+            );
+        }
+        for impl_decl in &module.impls {
+            if let Some(generated_by) = impl_decl.generated_by.as_ref() {
+                lower_generated_foreword_index_entry(
+                    package,
+                    &module.module_id,
+                    "impl",
+                    impl_target_path(&module.module_id, impl_decl),
+                    false,
+                    generated_by,
+                    &mut index,
+                );
+            }
+            for method in &impl_decl.methods {
+                lower_symbol_foreword_index_entries(
+                    package,
+                    module,
+                    method,
+                    "impl_method",
+                    false,
+                    impl_decl.generated_by.as_ref(),
+                    &registry,
+                    &mut index,
+                );
+            }
+        }
+    }
+    index.sort_by(|left, right| {
+        left.qualified_name
+            .cmp(&right.qualified_name)
+            .then_with(|| left.module_id.cmp(&right.module_id))
+            .then_with(|| left.target_path.cmp(&right.target_path))
+            .then_with(|| left.target_kind.cmp(&right.target_kind))
+            .then_with(|| left.entry_kind.as_str().cmp(right.entry_kind.as_str()))
+    });
+    index
+}
+
+fn lower_package_foreword_registrations(
+    package: &HirWorkspacePackage,
+) -> Vec<IrForewordRegistrationRow> {
+    let mut rows = package
+        .summary
+        .modules
+        .iter()
+        .flat_map(|module| {
+            module
+                .foreword_registrations
+                .iter()
+                .map(lower_foreword_registration_row)
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        left.namespace
+            .cmp(&right.namespace)
+            .then_with(|| left.key.cmp(&right.key))
+            .then_with(|| left.target_path.cmp(&right.target_path))
+    });
+    rows
 }
 
 fn is_identifier_text(text: &str) -> bool {
@@ -4071,7 +4656,8 @@ fn lower_routine(
             .iter()
             .map(lower_availability_attachment_exec)
             .collect(),
-        foreword_rows: symbol.forewords.iter().map(render_foreword_row).collect(),
+        inline_hint: symbol_has_builtin_foreword(symbol, "inline"),
+        cold_hint: symbol_has_builtin_foreword(symbol, "cold"),
         cleanup_footers: symbol.cleanup_footers.iter().map(lower_rollup).collect(),
         statements: lower_exec_stmt_block(&symbol.statements),
     }
@@ -4131,7 +4717,8 @@ fn lower_routine_resolved(
             .iter()
             .map(|attachment| lower_availability_attachment_exec_resolved(attachment, &scope))
             .collect::<Result<Vec<_>, _>>()?,
-        foreword_rows: symbol.forewords.iter().map(render_foreword_row).collect(),
+        inline_hint: symbol_has_builtin_foreword(symbol, "inline"),
+        cold_hint: symbol_has_builtin_foreword(symbol, "cold"),
         cleanup_footers: lower_resolved_symbol_cleanup_footers(
             &scope,
             symbol,
@@ -4286,6 +4873,8 @@ fn lower_package(package: &HirPackageSummary) -> IrPackage {
         dependency_rows,
         exported_surface_rows: package.summary_surface_rows(),
         runtime_requirements: Vec::new(),
+        foreword_index: Vec::new(),
+        foreword_registrations: Vec::new(),
         entrypoints,
         routines,
         owners,
@@ -4334,6 +4923,12 @@ fn lower_workspace_package(package: &HirWorkspacePackage) -> IrPackage {
         package.package_id.clone(),
         resolved_direct_dep_package_ids(package),
     );
+    let mut isolated_workspace = HirWorkspaceSummary::default();
+    isolated_workspace
+        .packages
+        .insert(package.package_id.clone(), package.clone());
+    lowered.foreword_index = lower_package_foreword_index(&isolated_workspace, package);
+    lowered.foreword_registrations = lower_package_foreword_registrations(package);
     lowered
 }
 
@@ -4360,6 +4955,8 @@ pub fn lower_workspace_package_with_resolution(
         .map(|edge| render_resolved_dependency_row(package, edge))
         .collect();
     lowered.dependency_edge_count = lowered.dependency_rows.len();
+    lowered.foreword_index = lower_package_foreword_index(workspace, package);
+    lowered.foreword_registrations = lower_package_foreword_registrations(package);
     let Some(resolved_package) = resolved_workspace.package_by_id(&package.package_id) else {
         return Ok(lowered);
     };

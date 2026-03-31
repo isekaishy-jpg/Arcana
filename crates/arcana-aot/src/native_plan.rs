@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use arcana_cabi::{
     ARCANA_CABI_CONTRACT_VERSION_V1, ARCANA_CABI_EXPORT_CONTRACT_ID, ArcanaCabiProductRole,
 };
@@ -8,6 +10,12 @@ use crate::emit::{AotEmitContext, AotEmitTarget, AotNativeProduct, AotRuntimeBin
 use crate::native_abi::{NativeExport, collect_native_exports};
 use crate::validate::validate_package_artifact;
 use crate::{compile_package, render_package_artifact};
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct NativeRoutineHints {
+    pub inline_hint: bool,
+    pub cold_hint: bool,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NativeLaunchPlan {
@@ -24,6 +32,7 @@ pub struct NativePackagePlan {
     pub artifact: AotPackageArtifact,
     pub artifact_text: String,
     pub launch: NativeLaunchPlan,
+    pub(crate) routine_hints: BTreeMap<String, NativeRoutineHints>,
 }
 
 pub fn build_native_package_plan(
@@ -40,6 +49,7 @@ pub fn build_native_package_plan(
     let artifact = compile_package(package);
     validate_package_artifact(&artifact)?;
     let artifact_text = render_package_artifact(&artifact);
+    let routine_hints = collect_routine_hints(package);
     let launch = match target {
         AotEmitTarget::WindowsExeBundle => NativeLaunchPlan::Executable {
             main_routine_key: find_main_routine_key(&artifact)?,
@@ -69,7 +79,22 @@ pub fn build_native_package_plan(
         artifact,
         artifact_text,
         launch,
+        routine_hints,
     })
+}
+
+fn collect_routine_hints(package: &IrPackage) -> BTreeMap<String, NativeRoutineHints> {
+    let mut hints = BTreeMap::new();
+    for routine in &package.routines {
+        hints.insert(
+            routine.routine_key.clone(),
+            NativeRoutineHints {
+                inline_hint: routine.inline_hint,
+                cold_hint: routine.cold_hint,
+            },
+        );
+    }
+    hints
 }
 
 fn find_main_routine_key(artifact: &AotPackageArtifact) -> Result<String, String> {

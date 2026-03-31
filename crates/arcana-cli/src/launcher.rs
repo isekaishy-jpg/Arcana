@@ -137,6 +137,8 @@ mod tests {
             dependency_rows: Vec::new(),
             exported_surface_rows: vec!["module=app:export:fn:fn main() -> Int:".to_string()],
             runtime_requirements: Vec::new(),
+            foreword_index: Vec::new(),
+            foreword_registrations: Vec::new(),
             entrypoints: vec![AotEntrypointArtifact {
                 package_id: "app".to_string(),
                 module_id: "app".to_string(),
@@ -161,7 +163,6 @@ mod tests {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
                 cleanup_footers: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Int(7),
@@ -215,3 +216,4 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 }
+

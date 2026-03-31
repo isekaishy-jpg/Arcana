@@ -38,6 +38,7 @@ dependencies = [
  "arcana-package",
  "arcana-runtime",
  "libloading",
+ "serde_json",
  "toml",
  "windows-sys",
 ]
@@ -51,6 +52,9 @@ dependencies = [
  "arcana-language-law",
  "arcana-package",
  "arcana-syntax",
+ "serde",
+ "serde_json",
+ "sha2",
  "toml",
 ]
 

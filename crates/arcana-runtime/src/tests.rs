@@ -19,7 +19,10 @@ use arcana_aot::{
     AotPackageModuleArtifact, AotRoutineArtifact, AotRoutineParamArtifact, render_package_artifact,
 };
 use arcana_frontend::{check_workspace_graph, compute_member_fingerprints_for_checked_workspace};
-use arcana_ir::{IrRoutineType, IrRoutineTypeKind, parse_routine_type_text};
+use arcana_ir::{
+    IrForewordArg, IrForewordMetadata, IrForewordRetention, IrRoutineType, IrRoutineTypeKind,
+    parse_routine_type_text,
+};
 use arcana_package::{execute_build, load_workspace_graph, plan_workspace, prepare_build};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -565,6 +568,8 @@ fn sample_return_artifact() -> AotPackageArtifact {
         dependency_rows: vec!["source=hello:import:std.io:".to_string()],
         exported_surface_rows: vec!["module=hello:export:fn:fn main() -> Int:".to_string()],
         runtime_requirements: vec!["std.io".to_string()],
+        foreword_index: Vec::new(),
+        foreword_registrations: Vec::new(),
         entrypoints: vec![AotEntrypointArtifact {
             package_id: test_package_id_for_module("hello"),
             module_id: "hello".to_string(),
@@ -589,7 +594,6 @@ fn sample_return_artifact() -> AotPackageArtifact {
             impl_target_type: None,
             impl_trait_path: None,
             availability: Vec::new(),
-            foreword_rows: Vec::new(),
             cleanup_footers: Vec::new(),
             statements: vec![
                 parse_stmt("stmt(core=return(int(7)),forewords=[],cleanup_footers=[])")
@@ -629,6 +633,8 @@ fn sample_print_artifact() -> AotPackageArtifact {
             ],
             exported_surface_rows: vec![],
             runtime_requirements: vec!["std.io".to_string()],
+            foreword_index: Vec::new(),
+            foreword_registrations: Vec::new(),
             entrypoints: vec![AotEntrypointArtifact {
                 package_id: test_package_id_for_module("hello"),
                 module_id: "hello".to_string(),
@@ -653,7 +659,6 @@ fn sample_print_artifact() -> AotPackageArtifact {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
                 cleanup_footers: Vec::new(),
                 statements: vec![parse_stmt("stmt(core=expr(phrase(subject=generic(expr=member(path(io), print),types=[Str]),args=[str(\"\\\"hello, arcana\\\"\")],qualifier=call,attached=[])),forewords=[],cleanup_footers=[])")
                     .expect("statement should parse")],
@@ -691,6 +696,8 @@ fn sample_stmt_metadata_artifact() -> AotPackageArtifact {
             dependency_rows: Vec::new(),
             exported_surface_rows: vec!["module=metadata:export:fn:fn main() -> Int:".to_string()],
             runtime_requirements: Vec::new(),
+            foreword_index: Vec::new(),
+            foreword_registrations: Vec::new(),
             entrypoints: vec![AotEntrypointArtifact {
                 package_id: test_package_id_for_module("metadata"),
                 module_id: "metadata".to_string(),
@@ -716,7 +723,6 @@ fn sample_stmt_metadata_artifact() -> AotPackageArtifact {
                     impl_target_type: None,
                     impl_trait_path: None,
                     availability: Vec::new(),
-                    foreword_rows: vec!["test()".to_string()],
                     cleanup_footers: vec![parse_cleanup_footer_row("cleanup:scope:metadata.cleanup")
                         .expect("cleanup footer should parse")],
                     statements: vec![parse_stmt(
@@ -734,15 +740,14 @@ fn sample_stmt_metadata_artifact() -> AotPackageArtifact {
                     is_async: false,
                     type_params: Vec::new(),
                     behavior_attrs: BTreeMap::new(),
-                    params: test_params(&["mode=:name=scope:ty=Int".to_string()]),
-                    return_type: test_return_type("fn cleanup(scope: Int) -> Int:"),
+                    params: test_params(&["mode=take:name=scope:ty=Int".to_string()]),
+                    return_type: test_return_type("fn cleanup(take scope: Int) -> Result[Unit, Str]:"),
                     intrinsic_impl: None,
                     impl_target_type: None,
                     impl_trait_path: None,
                     availability: Vec::new(),
-                    foreword_rows: Vec::new(),
                     cleanup_footers: Vec::new(),
-                    statements: vec![parse_stmt("stmt(core=return(int(0)),forewords=[],cleanup_footers=[])")
+                    statements: vec![parse_stmt("stmt(core=return(phrase(subject=generic(expr=path(Result.Ok),types=[Unit,Str]),args=[],qualifier=call,attached=[])),forewords=[],cleanup_footers=[])")
                         .expect("statement should parse")],
                 },
             ],
@@ -778,6 +783,8 @@ fn sample_attachment_foreword_artifact() -> AotPackageArtifact {
                 "module=attachment:export:fn:fn main() -> Int:".to_string(),
             ],
             runtime_requirements: vec!["std.io".to_string()],
+            foreword_index: Vec::new(),
+            foreword_registrations: Vec::new(),
             entrypoints: vec![AotEntrypointArtifact {
                 package_id: test_package_id_for_module("attachment"),
                 module_id: "attachment".to_string(),
@@ -802,7 +809,6 @@ fn sample_attachment_foreword_artifact() -> AotPackageArtifact {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
                 cleanup_footers: Vec::new(),
                 statements: vec![
                     parse_stmt(
@@ -1066,6 +1072,8 @@ fn resolve_routine_index_for_call_prefers_lowered_routine_identity() {
             Vec::new(),
         ),
         runtime_requirements: Vec::new(),
+        foreword_index: Vec::new(),
+        foreword_registrations: Vec::new(),
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
@@ -1092,7 +1100,6 @@ fn resolve_routine_index_for_call_prefers_lowered_routine_identity() {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
                 cleanup_footers: Vec::new(),
                 statements: Vec::new(),
             },
@@ -1117,7 +1124,6 @@ fn resolve_routine_index_for_call_prefers_lowered_routine_identity() {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
                 cleanup_footers: Vec::new(),
                 statements: Vec::new(),
             },
@@ -1165,6 +1171,8 @@ fn runtime_dynamic_bare_method_fallback_matches_receiver_type_args() {
             Vec::new(),
         ),
         runtime_requirements: Vec::new(),
+        foreword_index: Vec::new(),
+        foreword_registrations: Vec::new(),
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
@@ -1193,7 +1201,6 @@ fn runtime_dynamic_bare_method_fallback_matches_receiver_type_args() {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
                 cleanup_footers: Vec::new(),
                 statements: Vec::new(),
             },
@@ -1220,7 +1227,6 @@ fn runtime_dynamic_bare_method_fallback_matches_receiver_type_args() {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
                 cleanup_footers: Vec::new(),
                 statements: Vec::new(),
             },
@@ -1270,6 +1276,8 @@ fn runtime_dynamic_bare_method_fallback_matches_opaque_family_receiver() {
             Vec::new(),
         ),
         runtime_requirements: Vec::new(),
+        foreword_index: Vec::new(),
+        foreword_registrations: Vec::new(),
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::from([(
             "window_handle".to_string(),
@@ -1298,7 +1306,6 @@ fn runtime_dynamic_bare_method_fallback_matches_opaque_family_receiver() {
             impl_target_type: None,
             impl_trait_path: None,
             availability: Vec::new(),
-            foreword_rows: Vec::new(),
             cleanup_footers: Vec::new(),
             statements: Vec::new(),
         }],
@@ -1360,6 +1367,8 @@ fn runtime_dynamic_bare_method_fallback_keeps_owner_identity() {
             Vec::new(),
         ),
         runtime_requirements: Vec::new(),
+        foreword_index: Vec::new(),
+        foreword_registrations: Vec::new(),
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
@@ -1386,7 +1395,6 @@ fn runtime_dynamic_bare_method_fallback_keeps_owner_identity() {
                 impl_target_type: Some(owner_counter),
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
                 cleanup_footers: Vec::new(),
                 statements: Vec::new(),
             },
@@ -1411,7 +1419,6 @@ fn runtime_dynamic_bare_method_fallback_keeps_owner_identity() {
                 impl_target_type: Some(owner_timer),
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
                 cleanup_footers: Vec::new(),
                 statements: Vec::new(),
             },
@@ -1461,6 +1468,8 @@ fn runtime_dynamic_bare_method_fallback_rejects_wrong_sole_candidate() {
             Vec::new(),
         ),
         runtime_requirements: Vec::new(),
+        foreword_index: Vec::new(),
+        foreword_registrations: Vec::new(),
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
@@ -1486,7 +1495,6 @@ fn runtime_dynamic_bare_method_fallback_rejects_wrong_sole_candidate() {
             impl_target_type: Some(self_type),
             impl_trait_path: None,
             availability: Vec::new(),
-            foreword_rows: Vec::new(),
             cleanup_footers: Vec::new(),
             statements: Vec::new(),
         }],
@@ -1540,6 +1548,8 @@ fn runtime_dynamic_bare_method_fallback_rejects_qualified_leaf_collision() {
             Vec::new(),
         ),
         runtime_requirements: Vec::new(),
+        foreword_index: Vec::new(),
+        foreword_registrations: Vec::new(),
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
@@ -1565,7 +1575,6 @@ fn runtime_dynamic_bare_method_fallback_rejects_qualified_leaf_collision() {
             impl_target_type: Some(self_type),
             impl_trait_path: None,
             availability: Vec::new(),
-            foreword_rows: Vec::new(),
             cleanup_footers: Vec::new(),
             statements: Vec::new(),
         }],
@@ -1649,6 +1658,8 @@ fn runtime_json_abi_executes_exported_routine() {
             Vec::new(),
         ),
         runtime_requirements: Vec::new(),
+        foreword_index: Vec::new(),
+        foreword_registrations: Vec::new(),
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
@@ -1674,7 +1685,6 @@ fn runtime_json_abi_executes_exported_routine() {
             impl_target_type: None,
             impl_trait_path: None,
             availability: Vec::new(),
-            foreword_rows: Vec::new(),
             cleanup_footers: Vec::new(),
             statements: vec![ParsedStmt::ReturnValue {
                 value: ParsedExpr::Binary {
@@ -1715,6 +1725,8 @@ fn runtime_json_abi_manifest_records_cabi_param_metadata() {
             Vec::new(),
         ),
         runtime_requirements: Vec::new(),
+        foreword_index: Vec::new(),
+        foreword_registrations: Vec::new(),
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
@@ -1740,7 +1752,6 @@ fn runtime_json_abi_manifest_records_cabi_param_metadata() {
             impl_target_type: None,
             impl_trait_path: None,
             availability: Vec::new(),
-            foreword_rows: Vec::new(),
             cleanup_footers: Vec::new(),
             statements: vec![ParsedStmt::ReturnValue {
                 value: ParsedExpr::Path(vec!["value".to_string()]),
@@ -1785,6 +1796,8 @@ fn runtime_json_abi_manifest_projects_default_read_source_mode() {
             Vec::new(),
         ),
         runtime_requirements: Vec::new(),
+        foreword_index: Vec::new(),
+        foreword_registrations: Vec::new(),
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
@@ -1810,7 +1823,6 @@ fn runtime_json_abi_manifest_projects_default_read_source_mode() {
             impl_target_type: None,
             impl_trait_path: None,
             availability: Vec::new(),
-            foreword_rows: Vec::new(),
             cleanup_footers: Vec::new(),
             statements: vec![ParsedStmt::ReturnValue {
                 value: ParsedExpr::Path(vec!["value".to_string()]),
@@ -1851,6 +1863,8 @@ fn runtime_json_abi_writes_back_edit_arguments() {
             Vec::new(),
         ),
         runtime_requirements: Vec::new(),
+        foreword_index: Vec::new(),
+        foreword_registrations: Vec::new(),
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
@@ -1876,7 +1890,6 @@ fn runtime_json_abi_writes_back_edit_arguments() {
             impl_target_type: None,
             impl_trait_path: None,
             availability: Vec::new(),
-            foreword_rows: Vec::new(),
             cleanup_footers: Vec::new(),
             statements: vec![
                 ParsedStmt::Assign {
@@ -1923,6 +1936,8 @@ fn runtime_json_abi_manifest_omits_unsupported_owner_reference_and_opaque_routin
             Vec::new(),
         ),
         runtime_requirements: Vec::new(),
+        foreword_index: Vec::new(),
+        foreword_registrations: Vec::new(),
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::from([(
             "window_handle".to_string(),
@@ -1952,7 +1967,6 @@ fn runtime_json_abi_manifest_omits_unsupported_owner_reference_and_opaque_routin
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
                 cleanup_footers: Vec::new(),
                 statements: vec![ParsedStmt::ReturnValue {
                     value: ParsedExpr::Path(vec!["value".to_string()]),
@@ -1979,7 +1993,6 @@ fn runtime_json_abi_manifest_omits_unsupported_owner_reference_and_opaque_routin
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
                 cleanup_footers: Vec::new(),
                 statements: Vec::new(),
             },
@@ -2006,7 +2019,6 @@ fn runtime_json_abi_manifest_omits_unsupported_owner_reference_and_opaque_routin
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
                 cleanup_footers: Vec::new(),
                 statements: Vec::new(),
             },
@@ -2031,7 +2043,6 @@ fn runtime_json_abi_manifest_omits_unsupported_owner_reference_and_opaque_routin
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
                 cleanup_footers: Vec::new(),
                 statements: Vec::new(),
             },
@@ -2070,6 +2081,8 @@ fn runtime_json_abi_rejects_executing_unsupported_exported_routine() {
             Vec::new(),
         ),
         runtime_requirements: Vec::new(),
+        foreword_index: Vec::new(),
+        foreword_registrations: Vec::new(),
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
@@ -2095,7 +2108,6 @@ fn runtime_json_abi_rejects_executing_unsupported_exported_routine() {
             impl_target_type: None,
             impl_trait_path: None,
             availability: Vec::new(),
-            foreword_rows: Vec::new(),
             cleanup_footers: Vec::new(),
             statements: Vec::new(),
         }],
@@ -2128,6 +2140,8 @@ fn runtime_native_abi_executes_exported_routine() {
             Vec::new(),
         ),
         runtime_requirements: Vec::new(),
+        foreword_index: Vec::new(),
+        foreword_registrations: Vec::new(),
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
@@ -2153,7 +2167,6 @@ fn runtime_native_abi_executes_exported_routine() {
             impl_target_type: None,
             impl_trait_path: None,
             availability: Vec::new(),
-            foreword_rows: Vec::new(),
             cleanup_footers: Vec::new(),
             statements: vec![ParsedStmt::ReturnValue {
                 value: ParsedExpr::Binary {
@@ -2196,6 +2209,8 @@ fn runtime_native_abi_supports_string_and_byte_values() {
             Vec::new(),
         ),
         runtime_requirements: Vec::new(),
+        foreword_index: Vec::new(),
+        foreword_registrations: Vec::new(),
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
@@ -2222,7 +2237,6 @@ fn runtime_native_abi_supports_string_and_byte_values() {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
                 cleanup_footers: Vec::new(),
                 statements: vec![ParsedStmt::ReturnValue {
                     value: ParsedExpr::Binary {
@@ -2253,7 +2267,6 @@ fn runtime_native_abi_supports_string_and_byte_values() {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
                 cleanup_footers: Vec::new(),
                 statements: vec![ParsedStmt::ReturnValue {
                     value: ParsedExpr::Slice {
@@ -2287,7 +2300,6 @@ fn runtime_native_abi_supports_string_and_byte_values() {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
                 cleanup_footers: Vec::new(),
                 statements: vec![ParsedStmt::ReturnValue {
                     value: ParsedExpr::Path(vec!["pair".to_string()]),
@@ -2359,6 +2371,8 @@ fn runtime_native_abi_writes_back_edit_arguments() {
             Vec::new(),
         ),
         runtime_requirements: Vec::new(),
+        foreword_index: Vec::new(),
+        foreword_registrations: Vec::new(),
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
@@ -2384,7 +2398,6 @@ fn runtime_native_abi_writes_back_edit_arguments() {
             impl_target_type: None,
             impl_trait_path: None,
             availability: Vec::new(),
-            foreword_rows: Vec::new(),
             cleanup_footers: Vec::new(),
             statements: vec![
                 ParsedStmt::Assign {
@@ -2473,6 +2486,236 @@ fn execute_main_accepts_attachment_foreword_metadata() {
     let code = execute_main(&plan, &mut host).expect("runtime should execute");
     assert_eq!(code, 0);
     assert_eq!(host.stdout, vec!["2".to_string()]);
+}
+
+#[test]
+fn runtime_plan_exposes_runtime_retained_foreword_index() {
+    let mut artifact = sample_return_artifact();
+    artifact.foreword_index = vec![
+        IrForewordMetadata {
+            entry_kind: arcana_ir::IrForewordEntryKind::Attached,
+            qualified_name: "tool.meta.cache".to_string(),
+            package_id: test_package_id_for_module("hello"),
+            module_id: "hello".to_string(),
+            target_kind: "fn".to_string(),
+            target_path: "hello.main".to_string(),
+            retention: IrForewordRetention::Runtime,
+            args: vec![IrForewordArg {
+                name: Some("slot".to_string()),
+                value: "\"menu\"".to_string(),
+                typed_value: arcana_ir::IrForewordArgValue::Str("menu".to_string()),
+            }],
+            public: true,
+            generated_by: None,
+        },
+        IrForewordMetadata {
+            entry_kind: arcana_ir::IrForewordEntryKind::Attached,
+            qualified_name: "tool.meta.secret".to_string(),
+            package_id: test_package_id_for_module("hello"),
+            module_id: "hello".to_string(),
+            target_kind: "fn".to_string(),
+            target_path: "hello.secret".to_string(),
+            retention: IrForewordRetention::Runtime,
+            args: Vec::new(),
+            public: false,
+            generated_by: None,
+        },
+    ];
+
+    let plan = plan_from_artifact(&artifact).expect("runtime plan should build");
+    assert_eq!(plan.forewords().len(), 2);
+    assert_eq!(plan.runtime_retained_forewords().len(), 2);
+    assert_eq!(plan.public_runtime_retained_forewords().len(), 1);
+    assert_eq!(
+        plan.runtime_retained_forewords_for_target("fn", "hello.main")
+            .len(),
+        1
+    );
+    assert_eq!(
+        plan.public_runtime_retained_forewords_for_target("fn", "hello.main")
+            .len(),
+        1
+    );
+    assert_eq!(
+        plan.public_runtime_retained_forewords_for_target("fn", "hello.secret")
+            .len(),
+        0
+    );
+    assert_eq!(
+        plan.runtime_retained_forewords_for_target("fn", "hello.main")[0].args[0]
+            .name
+            .as_deref(),
+        Some("slot")
+    );
+}
+
+#[test]
+fn runtime_plan_preserves_generated_foreword_provenance() {
+    let mut artifact = sample_return_artifact();
+    artifact.foreword_index = vec![IrForewordMetadata {
+        entry_kind: arcana_ir::IrForewordEntryKind::Generated,
+        qualified_name: "tool.exec.rewrite".to_string(),
+        package_id: test_package_id_for_module("hello"),
+        module_id: "hello".to_string(),
+        target_kind: "fn".to_string(),
+        target_path: "hello.helper".to_string(),
+        retention: IrForewordRetention::Tooling,
+        args: Vec::new(),
+        public: true,
+        generated_by: Some(arcana_ir::IrForewordGeneratedBy {
+            applied_name: "tool.exec.rewrite".to_string(),
+            resolved_name: "tool.exec.rewrite".to_string(),
+            provider_package_id: "tool.pkg".to_string(),
+            owner_kind: "fn".to_string(),
+            owner_path: "hello.main".to_string(),
+            retention: IrForewordRetention::Tooling,
+            args: Vec::new(),
+        }),
+    }];
+
+    let plan = plan_from_artifact(&artifact).expect("runtime plan should build");
+    let entry = plan
+        .forewords()
+        .first()
+        .expect("generated provenance entry should exist");
+    assert_eq!(entry.entry_kind, arcana_ir::IrForewordEntryKind::Generated);
+    let generated_by = entry
+        .generated_by
+        .as_ref()
+        .expect("generated provenance should survive");
+    assert_eq!(generated_by.owner_path, "hello.main");
+    assert_eq!(generated_by.provider_package_id, "tool.pkg");
+}
+
+#[test]
+fn runtime_plan_exposes_foreword_registrations() {
+    let mut artifact = sample_return_artifact();
+    artifact.foreword_registrations = vec![
+        arcana_ir::IrForewordRegistrationRow {
+            namespace: "tool.exec.registry".to_string(),
+            key: "helper".to_string(),
+            value: "runtime".to_string(),
+            target_kind: "fn".to_string(),
+            target_path: "hello.helper".to_string(),
+            public: true,
+            generated_by: arcana_ir::IrForewordGeneratedBy {
+                applied_name: "tool.exec.rewrite".to_string(),
+                resolved_name: "tool.exec.rewrite".to_string(),
+                provider_package_id: "tool.pkg".to_string(),
+                owner_kind: "fn".to_string(),
+                owner_path: "hello.main".to_string(),
+                retention: IrForewordRetention::Tooling,
+                args: Vec::new(),
+            },
+        },
+        arcana_ir::IrForewordRegistrationRow {
+            namespace: "tool.exec.registry".to_string(),
+            key: "private".to_string(),
+            value: "hidden".to_string(),
+            target_kind: "fn".to_string(),
+            target_path: "hello.secret".to_string(),
+            public: false,
+            generated_by: arcana_ir::IrForewordGeneratedBy {
+                applied_name: "tool.exec.rewrite".to_string(),
+                resolved_name: "tool.exec.rewrite".to_string(),
+                provider_package_id: "tool.pkg".to_string(),
+                owner_kind: "fn".to_string(),
+                owner_path: "hello.main".to_string(),
+                retention: IrForewordRetention::Tooling,
+                args: Vec::new(),
+            },
+        },
+    ];
+
+    let plan = plan_from_artifact(&artifact).expect("runtime plan should build");
+    assert_eq!(plan.foreword_registrations().len(), 2);
+    assert_eq!(plan.public_foreword_registrations().len(), 1);
+    assert_eq!(
+        plan.foreword_registrations_for_target("fn", "hello.helper")
+            .len(),
+        1
+    );
+    assert_eq!(
+        plan.public_foreword_registrations_for_target("fn", "hello.helper")
+            .len(),
+        1
+    );
+    assert_eq!(
+        plan.public_foreword_registrations_for_target("fn", "hello.secret")
+            .len(),
+        0
+    );
+    let row = plan
+        .public_foreword_registrations()
+        .into_iter()
+        .next()
+        .expect("public registration row should exist");
+    assert_eq!(row.namespace, "tool.exec.registry");
+    assert_eq!(row.key, "helper");
+    assert_eq!(row.target_path, "hello.helper");
+    let generated_by = &row.generated_by;
+    assert_eq!(generated_by.owner_path, "hello.main");
+    assert_eq!(generated_by.provider_package_id, "tool.pkg");
+}
+
+#[test]
+fn runtime_plan_supports_package_id_stable_foreword_lookup() {
+    let mut artifact = sample_return_artifact();
+    artifact
+        .package_display_names
+        .insert("dep.pkg".to_string(), "dep".to_string());
+    artifact.modules.push(AotPackageModuleArtifact {
+        package_id: "dep.pkg".to_string(),
+        module_id: "dep.util".to_string(),
+        symbol_count: 1,
+        item_count: 1,
+        line_count: 1,
+        non_empty_line_count: 1,
+        directive_rows: Vec::new(),
+        lang_item_rows: Vec::new(),
+        exported_surface_rows: Vec::new(),
+    });
+    artifact.module_count = artifact.modules.len();
+    artifact.foreword_index = vec![
+        IrForewordMetadata {
+            entry_kind: arcana_ir::IrForewordEntryKind::Attached,
+            qualified_name: "tool.meta.cache".to_string(),
+            package_id: test_package_id_for_module("hello"),
+            module_id: "hello".to_string(),
+            target_kind: "fn".to_string(),
+            target_path: "hello.main".to_string(),
+            retention: IrForewordRetention::Runtime,
+            args: Vec::new(),
+            public: true,
+            generated_by: None,
+        },
+        IrForewordMetadata {
+            entry_kind: arcana_ir::IrForewordEntryKind::Attached,
+            qualified_name: "tool.meta.cache".to_string(),
+            package_id: "dep.pkg".to_string(),
+            module_id: "dep.util".to_string(),
+            target_kind: "fn".to_string(),
+            target_path: "dep.util.helper".to_string(),
+            retention: IrForewordRetention::Runtime,
+            args: Vec::new(),
+            public: false,
+            generated_by: None,
+        },
+    ];
+
+    let plan = plan_from_artifact(&artifact).expect("runtime plan should build");
+    assert_eq!(plan.runtime_retained_forewords_for_package("hello").len(), 1);
+    assert_eq!(
+        plan.public_runtime_retained_forewords_for_package("hello")
+            .len(),
+        1
+    );
+    assert_eq!(plan.runtime_retained_forewords_for_package("dep.pkg").len(), 1);
+    assert_eq!(
+        plan.public_runtime_retained_forewords_for_package("dep.pkg")
+            .len(),
+        0
+    );
 }
 
 #[test]
@@ -2766,6 +3009,8 @@ fn execute_main_manual_routine_cleanup_footers_run_after_defers() {
             Vec::new(),
         ),
         runtime_requirements: Vec::new(),
+        foreword_index: Vec::new(),
+        foreword_registrations: Vec::new(),
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::new(),
         entrypoints: vec![RuntimeEntrypointPlan {
@@ -2800,7 +3045,6 @@ fn execute_main_manual_routine_cleanup_footers_run_after_defers() {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
                 cleanup_footers: vec![ParsedCleanupFooter {
                     binding_id: 0,
                     kind: "cleanup".to_string(),
@@ -2872,7 +3116,6 @@ fn execute_main_manual_routine_cleanup_footers_run_after_defers() {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
                 cleanup_footers: Vec::new(),
                 statements: vec![
                     ParsedStmt::Expr {
@@ -2917,7 +3160,6 @@ fn execute_main_manual_routine_cleanup_footers_run_after_defers() {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
                 cleanup_footers: Vec::new(),
                 statements: Vec::new(),
             },
@@ -5746,6 +5988,8 @@ fn execute_main_rejects_try_qualifier_arguments() {
             Vec::new(),
         ),
         runtime_requirements: Vec::new(),
+        foreword_index: Vec::new(),
+        foreword_registrations: Vec::new(),
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::new(),
         entrypoints: vec![RuntimeEntrypointPlan {
@@ -5774,7 +6018,6 @@ fn execute_main_rejects_try_qualifier_arguments() {
             impl_target_type: None,
             impl_trait_path: None,
             availability: Vec::new(),
-            foreword_rows: Vec::new(),
             cleanup_footers: Vec::new(),
             statements: vec![
                 ParsedStmt::Let {
@@ -6082,6 +6325,8 @@ fn execute_main_rejects_use_after_take_move() {
             Vec::new(),
         ),
         runtime_requirements: Vec::new(),
+        foreword_index: Vec::new(),
+        foreword_registrations: Vec::new(),
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::new(),
         entrypoints: vec![RuntimeEntrypointPlan {
@@ -6116,7 +6361,6 @@ fn execute_main_rejects_use_after_take_move() {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
                 cleanup_footers: Vec::new(),
                 statements: vec![ParsedStmt::ReturnValue {
                     value: ParsedExpr::Int(1),
@@ -6143,7 +6387,6 @@ fn execute_main_rejects_use_after_take_move() {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
                 cleanup_footers: Vec::new(),
                 statements: vec![ParsedStmt::ReturnValue {
                     value: ParsedExpr::Int(0),
@@ -6165,7 +6408,6 @@ fn execute_main_rejects_use_after_take_move() {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
                 cleanup_footers: Vec::new(),
                 statements: vec![
                     ParsedStmt::Let {
@@ -6235,6 +6477,8 @@ fn execute_main_rejects_direct_intrinsic_take_fallback_reuse() {
             Vec::new(),
         ),
         runtime_requirements: Vec::new(),
+        foreword_index: Vec::new(),
+        foreword_registrations: Vec::new(),
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::new(),
         entrypoints: vec![RuntimeEntrypointPlan {
@@ -6263,7 +6507,6 @@ fn execute_main_rejects_direct_intrinsic_take_fallback_reuse() {
             impl_target_type: None,
             impl_trait_path: None,
             availability: Vec::new(),
-            foreword_rows: Vec::new(),
             cleanup_footers: Vec::new(),
             statements: vec![
                 ParsedStmt::Let {
@@ -7188,6 +7431,8 @@ fn resolve_routine_index_uses_current_package_dep_id_when_display_names_collide(
             (core_v2.clone(), BTreeMap::new()),
         ]),
         runtime_requirements: Vec::new(),
+        foreword_index: Vec::new(),
+        foreword_registrations: Vec::new(),
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
@@ -7209,7 +7454,6 @@ fn resolve_routine_index_uses_current_package_dep_id_when_display_names_collide(
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
                 cleanup_footers: Vec::new(),
                 statements: Vec::new(),
             },
@@ -7229,7 +7473,6 @@ fn resolve_routine_index_uses_current_package_dep_id_when_display_names_collide(
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
                 cleanup_footers: Vec::new(),
                 statements: Vec::new(),
             },
@@ -7271,6 +7514,8 @@ fn resolve_routine_index_rejects_globally_unique_package_name_without_direct_dep
             (core.clone(), BTreeMap::new()),
         ]),
         runtime_requirements: Vec::new(),
+        foreword_index: Vec::new(),
+        foreword_registrations: Vec::new(),
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
@@ -7291,7 +7536,6 @@ fn resolve_routine_index_rejects_globally_unique_package_name_without_direct_dep
             impl_target_type: None,
             impl_trait_path: None,
             availability: Vec::new(),
-            foreword_rows: Vec::new(),
             cleanup_footers: Vec::new(),
             statements: Vec::new(),
         }],
@@ -9890,3 +10134,4 @@ fn execute_main_runs_arcana_desktop_ecs_adapter_workspace() {
 
     let _ = fs::remove_dir_all(dir);
 }
+

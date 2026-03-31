@@ -1,6 +1,7 @@
 # Foreword Deferred Roadmap
 
-This ledger is authoritative for deferred foreword work.  
+This ledger is authoritative for deferred foreword work.
+
 Required fields per entry:
 - `id`
 - `title`
@@ -13,41 +14,32 @@ Required fields per entry:
 
 ---
 
-Trigger Condition Template (required single-line format):
+Trigger Condition Template:
 - `trigger_condition: ready_when=<objective readiness>; verify=<objective verification>; blocked_by=<current blocker>`
 
 id: FW-D1
-title: #derive transform foreword
-reason_deferred: v1 is limited to compiler-owned metadata validation and lint/deprecation control to keep parser/type pipeline risk bounded.
-target_window: next metadata expansion window
-trigger_condition: ready_when=v1 warning/lint infra is green and `arcana test --list` is shipped; verify=parser regression suite stays green across consecutive post-change runs; blocked_by=open parser or metadata validation regressions.
-owner: Arcana compiler team
-acceptance_criteria: `#derive[...]` parses, validates targets/payloads, and performs deterministic transform expansion with compile tests.
+title: `#derive` convenience foreword
+reason_deferred: v1 now supports user-defined and executable forewords, but it does not ship a compiler-owned derive convenience layer.
+target_window: post-v1 metadata expansion
+trigger_condition: ready_when=the current executable/basic foreword lane is stable across selfhost fixtures; verify=derive expansion is deterministic across repeated frontend runs; blocked_by=missing approved derive library contract.
+owner: Arcana language team
+acceptance_criteria: `#derive[...]` expands through an approved deterministic contract with target and payload validation plus coverage for repeated builds.
 status: deferred
 
 id: FW-D2
-title: user-defined forewords (`foreword ...`)
-reason_deferred: owner-dispatch and conflict semantics are not finalized in v1.
-target_window: after FW-D1 completion
-trigger_condition: ready_when=FW-D1 is done and owner-dispatch/conflict rules are spec-locked; verify=compiler accepts valid user foreword definitions and rejects conflicts deterministically; blocked_by=unresolved owner dispatch or conflict semantics.
-owner: Arcana language team
-acceptance_criteria: user-defined foreword definitions compile, attach/validate by target, and dispatch by owner phase with deterministic diagnostics.
+title: user-defined statement and expression targets
+reason_deferred: v1 keeps user-defined forewords on declarations, methods, fields, and parameters only.
+target_window: parser local-target window
+trigger_condition: ready_when=placement and diagnostics law for local targets is approved; verify=parser and frontend suites pass with no precedence regressions; blocked_by=unapproved statement/expression attachment model.
+owner: Arcana parser/compiler team
+acceptance_criteria: user-defined forewords can target statements/expressions with clear placement rules, deterministic transforms, and no precedence regressions.
 status: deferred
 
 id: FW-D3
-title: runtime-retained metadata and introspection
-reason_deferred: bytecode/runtime metadata carriage and reflection surface are not part of v1 compiler-only forewords.
-target_window: runtime metadata window
-trigger_condition: ready_when=reflection API milestone and bytecode metadata carriage design are approved; verify=runtime/tooling can load retained metadata with retention-policy tests green; blocked_by=missing runtime metadata carriage contract.
-owner: Arcana VM/runtime team
-acceptance_criteria: retained foreword metadata is emitted, loadable at runtime/tooling, and covered by retention-policy tests.
-status: deferred
-
-id: FW-D4
-title: statement/expression foreword targets
-reason_deferred: local-target attachment increases parser and diagnostics complexity beyond v1 declaration-only scope.
-target_window: parser local-target window
-trigger_condition: ready_when=parser complexity budget and local-target diagnostics model are approved; verify=statement/expression target attachment tests pass with no precedence regressions; blocked_by=unlocked local-target placement/diagnostics rules.
-owner: Arcana parser/compiler team
-acceptance_criteria: statement/expression target attachment parses and validates with clear scope/placement diagnostics and no precedence regressions.
+title: multi-phase foreword execution beyond `frontend`
+reason_deferred: v1 freezes execution to frontend validation/expansion only.
+target_window: post-selfhost compiler phase expansion
+trigger_condition: ready_when=additional compiler phase ownership is approved; verify=phase ordering and artifact carriage tests stay deterministic across rebuilds; blocked_by=missing approved cross-phase execution contract.
+owner: Arcana compiler team
+acceptance_criteria: additional phases are explicit in spec and executable forewords can target them without ambiguous ordering or duplicate execution.
 status: deferred

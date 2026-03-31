@@ -4,6 +4,7 @@ use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::rc::Rc;
 
 mod api_fingerprint;
@@ -14,6 +15,9 @@ mod type_resolve;
 mod type_validate;
 mod where_clause;
 
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
 use arcana_hir::{
     HirAssignTarget, HirBinaryOp, HirChainStep, HirExpr, HirHeaderAttachment, HirImplDecl,
     HirLocalTypeLookup, HirMatchPattern, HirModule, HirModuleSummary, HirPath, HirPhraseArg,
@@ -22,8 +26,8 @@ use arcana_hir::{
     HirWorkspaceSummary, canonicalize_hir_type_in_module, collect_hir_type_refs,
     current_workspace_package_for_module, infer_receiver_expr_type,
     lookup_method_candidates_for_hir_type, lower_module_text,
-    match_name_resolves_to_zero_payload_variant, render_symbol_signature, resolve_workspace,
-    visible_package_root_for_module,
+    match_name_resolves_to_zero_payload_variant, render_symbol_fingerprint,
+    render_symbol_signature, resolve_workspace, visible_package_root_for_module,
 };
 use arcana_ir::{is_runtime_main_entry_symbol, validate_runtime_main_entry_symbol};
 use arcana_language_law::{
@@ -52,12 +56,18 @@ pub struct CheckSummary {
     pub non_empty_lines: usize,
     pub directive_count: usize,
     pub symbol_count: usize,
+    pub warning_count: usize,
 }
 
 pub struct CheckedWorkspace {
     summary: CheckSummary,
     pub(crate) workspace: HirWorkspaceSummary,
     pub(crate) resolved_workspace: HirResolvedWorkspace,
+    warnings: Vec<CheckWarning>,
+    discovered_tests: Vec<DiscoveredTest>,
+    foreword_catalog: Vec<ForewordCatalogEntry>,
+    foreword_index: Vec<ForewordIndexEntry>,
+    foreword_registrations: Vec<ForewordRegistrationRow>,
 }
 
 impl CheckedWorkspace {
@@ -69,9 +79,406 @@ impl CheckedWorkspace {
         (self.workspace, self.resolved_workspace)
     }
 
-    fn into_summary(self) -> CheckSummary {
+    pub fn warnings(&self) -> &[CheckWarning] {
+        &self.warnings
+    }
+
+    pub fn discovered_tests(&self) -> &[DiscoveredTest] {
+        &self.discovered_tests
+    }
+
+    pub fn foreword_catalog(&self) -> &[ForewordCatalogEntry] {
+        &self.foreword_catalog
+    }
+
+    pub fn foreword_index(&self) -> &[ForewordIndexEntry] {
+        &self.foreword_index
+    }
+
+    pub fn foreword_registrations(&self) -> &[ForewordRegistrationRow] {
+        &self.foreword_registrations
+    }
+
+    pub fn into_summary(self) -> CheckSummary {
         self.summary
     }
+}
+
+#[cfg(windows)]
+fn displayable_path(path: &Path) -> String {
+    let rendered = path.as_os_str().to_string_lossy();
+    if let Some(stripped) = rendered.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{stripped}")
+    } else if let Some(stripped) = rendered.strip_prefix(r"\\?\") {
+        stripped.to_string()
+    } else {
+        rendered.into_owned()
+    }
+}
+
+#[cfg(not(windows))]
+fn displayable_path(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct CheckWarning {
+    pub path: PathBuf,
+    pub line: usize,
+    pub column: usize,
+    pub message: String,
+}
+
+impl CheckWarning {
+    pub fn render(&self) -> String {
+        format!(
+            "{}:{}:{}: {}",
+            displayable_path(&self.path),
+            self.line,
+            self.column,
+            self.message
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct DiscoveredTest {
+    pub package_id: String,
+    pub module_id: String,
+    pub symbol_name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ForewordCatalogEntry {
+    pub provider_package_id: String,
+    pub exposed_name: String,
+    pub qualified_name: String,
+    pub tier: String,
+    pub visibility: String,
+    pub action: String,
+    pub retention: String,
+    pub targets: Vec<String>,
+    pub diagnostic_namespace: Option<String>,
+    pub handler: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ForewordGeneratedBy {
+    pub applied_name: String,
+    pub resolved_name: String,
+    pub provider_package_id: String,
+    pub owner_kind: String,
+    pub owner_path: String,
+    pub args: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ForewordIndexEntry {
+    pub entry_kind: String,
+    pub qualified_name: String,
+    pub package_id: String,
+    pub module_id: String,
+    pub target_kind: String,
+    pub target_path: String,
+    pub retention: String,
+    pub args: Vec<String>,
+    pub public: bool,
+    pub generated_by: Option<ForewordGeneratedBy>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ForewordRegistrationRow {
+    pub namespace: String,
+    pub key: String,
+    pub value: String,
+    pub target_kind: String,
+    pub target_path: String,
+    pub public: bool,
+    pub generated_by: ForewordGeneratedBy,
+}
+
+#[derive(Clone, Debug)]
+enum ResolvedForewordExportKind {
+    Builtin,
+    User,
+}
+
+#[derive(Clone, Debug)]
+struct ResolvedForewordExport {
+    kind: ResolvedForewordExportKind,
+    provider_package_id: String,
+    exposed_package_id: String,
+    exposed_name: Vec<String>,
+    definition: arcana_hir::HirForewordDefinition,
+    handler: Option<arcana_hir::HirForewordHandler>,
+    public: bool,
+}
+
+impl ResolvedForewordExport {
+    fn catalog_tier(&self) -> &'static str {
+        match self.kind {
+            ResolvedForewordExportKind::Builtin => "builtin",
+            ResolvedForewordExportKind::User => self.definition.tier.as_str(),
+        }
+    }
+
+    fn is_builtin(&self) -> bool {
+        matches!(self.kind, ResolvedForewordExportKind::Builtin)
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct ForewordRegistry {
+    exports: BTreeMap<(String, String), ResolvedForewordExport>,
+    catalog: Vec<ForewordCatalogEntry>,
+    errors: Vec<Diagnostic>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct ExecutedTransformKey {
+    package_id: String,
+    module_id: String,
+    target_kind: String,
+    target_path: String,
+    line: usize,
+    column: usize,
+    qualified_name: String,
+    args: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+struct ExecutedTransform {
+    response: ForewordAdapterResponse,
+    generated_by: arcana_hir::HirGeneratedByForeword,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "kind", content = "value")]
+enum AdapterPayloadValueSnapshot {
+    Raw(String),
+    Bool(bool),
+    Int(i64),
+    Str(String),
+    Symbol(String),
+    Path(Vec<String>),
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct AdapterPayloadArgSnapshot {
+    name: Option<String>,
+    rendered: String,
+    value: AdapterPayloadValueSnapshot,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct AdapterForewordSnapshot {
+    applied_name: String,
+    resolved_name: String,
+    tier: String,
+    visibility: String,
+    phase: String,
+    action: String,
+    retention: String,
+    targets: Vec<String>,
+    diagnostic_namespace: Option<String>,
+    payload_schema: Vec<AdapterPayloadFieldSnapshot>,
+    repeatable: bool,
+    conflicts: Vec<String>,
+    args: Vec<AdapterPayloadArgSnapshot>,
+    provider_package_id: String,
+    exposed_package_id: String,
+    handler: Option<String>,
+    entry: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct AdapterPayloadFieldSnapshot {
+    name: String,
+    optional: bool,
+    ty: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct AdapterPackageSnapshot {
+    package_id: String,
+    package_name: String,
+    root_dir: String,
+    module_id: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct AdapterFieldSnapshot {
+    name: String,
+    ty: String,
+    forewords: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct AdapterParamSnapshot {
+    mode: Option<String>,
+    name: String,
+    ty: String,
+    forewords: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct AdapterSymbolSnapshot {
+    kind: String,
+    name: String,
+    exported: bool,
+    is_async: bool,
+    signature: String,
+    type_params: Vec<String>,
+    params: Vec<AdapterParamSnapshot>,
+    return_type: Option<String>,
+    forewords: Vec<String>,
+    fields: Vec<AdapterFieldSnapshot>,
+    methods: Vec<AdapterSymbolSnapshot>,
+    variants: Vec<String>,
+    assoc_types: Vec<String>,
+    body_fingerprint: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct AdapterDirectiveSnapshot {
+    kind: String,
+    path: String,
+    alias: Option<String>,
+    forewords: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct AdapterTargetSnapshot {
+    kind: String,
+    path: String,
+    public: bool,
+    owner_kind: String,
+    owner_symbol: Option<AdapterSymbolSnapshot>,
+    owner_directive: Option<AdapterDirectiveSnapshot>,
+    selected_field: Option<AdapterFieldSnapshot>,
+    selected_param: Option<AdapterParamSnapshot>,
+    selected_method_name: Option<String>,
+    container_kind: Option<String>,
+    container_name: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct AdapterCatalogEntry {
+    exposed_name: String,
+    qualified_name: String,
+    tier: String,
+    action: String,
+    retention: String,
+    targets: Vec<String>,
+    provider_package_id: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct AdapterArtifactIdentity {
+    product_name: String,
+    product_path: String,
+    runner: Option<String>,
+    args: Vec<String>,
+    product_digest: Option<String>,
+    runner_digest: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct MaterializedForewordAdapterArtifact {
+    product_program: String,
+    product_arg_path: String,
+    runner_program: Option<String>,
+    args: Vec<String>,
+    product_digest: Option<String>,
+    runner_digest: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ForewordAdapterRequest {
+    version: String,
+    protocol: String,
+    cache_key: String,
+    toolchain_version: String,
+    dependency_opt_in_enabled: bool,
+    package: AdapterPackageSnapshot,
+    foreword: AdapterForewordSnapshot,
+    target: AdapterTargetSnapshot,
+    visible_forewords: Vec<AdapterCatalogEntry>,
+    artifact: AdapterArtifactIdentity,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct AdapterResponseArg {
+    #[serde(default)]
+    name: Option<String>,
+    value: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct AdapterEmittedMetadataDescriptor {
+    #[serde(default)]
+    qualified_name: Option<String>,
+    #[serde(default)]
+    target_kind: Option<String>,
+    #[serde(default)]
+    target_path: Option<String>,
+    #[serde(default)]
+    retention: Option<String>,
+    #[serde(default)]
+    args: Vec<AdapterResponseArg>,
+    #[serde(default)]
+    public: Option<bool>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct AdapterRegistrationRowDescriptor {
+    namespace: String,
+    key: String,
+    value: String,
+    #[serde(default)]
+    target_kind: Option<String>,
+    #[serde(default)]
+    target_path: Option<String>,
+    #[serde(default)]
+    public: Option<bool>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ForewordAdapterResponse {
+    #[serde(default)]
+    version: String,
+    #[serde(default)]
+    diagnostics: Vec<ForewordAdapterDiagnostic>,
+    #[serde(default)]
+    replace_owner: Option<String>,
+    #[serde(default)]
+    replace_directive: Option<String>,
+    #[serde(default)]
+    append_symbols: Vec<String>,
+    #[serde(default)]
+    append_impls: Vec<String>,
+    #[serde(default)]
+    emitted_metadata: Vec<AdapterEmittedMetadataDescriptor>,
+    #[serde(default)]
+    registration_rows: Vec<AdapterRegistrationRowDescriptor>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ForewordAdapterDiagnostic {
+    severity: String,
+    message: String,
+    #[serde(default)]
+    lint: Option<String>,
+}
+
+#[derive(Default)]
+struct SemanticValidation {
+    errors: Vec<Diagnostic>,
+    warnings: Vec<CheckWarning>,
+    discovered_tests: Vec<DiscoveredTest>,
+    foreword_catalog: Vec<ForewordCatalogEntry>,
+    foreword_index: Vec<ForewordIndexEntry>,
+    foreword_registrations: Vec<ForewordRegistrationRow>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -86,7 +493,7 @@ impl Diagnostic {
     fn render(&self) -> String {
         format!(
             "{}:{}:{}: {}",
-            self.path.display(),
+            displayable_path(&self.path),
             self.line,
             self.column,
             self.message
@@ -502,6 +909,22 @@ fn infer_expr_type(expr: &HirExpr) -> Option<ExprTypeClass> {
         },
         _ => None,
     }
+}
+
+fn builtin_scalar_expr_type(expr_type: ExprTypeClass) -> Option<HirType> {
+    let name = match expr_type {
+        ExprTypeClass::Bool => "Bool",
+        ExprTypeClass::Int => "Int",
+        ExprTypeClass::Str => "Str",
+        ExprTypeClass::Pair | ExprTypeClass::Collection => return None,
+    };
+    Some(HirType {
+        kind: HirTypeKind::Path(HirPath {
+            segments: vec![name.to_string()],
+            span: Span::default(),
+        }),
+        span: Span::default(),
+    })
 }
 
 fn push_type_contract_diagnostic(
@@ -931,6 +1354,7 @@ fn infer_expr_value_type(
         return Some(ty.clone());
     }
     infer_receiver_expr_type(workspace, resolved_module, scope, expr)
+        .or_else(|| infer_expr_type(expr).and_then(builtin_scalar_expr_type))
 }
 
 fn assign_target_to_expr(target: &HirAssignTarget) -> HirExpr {
@@ -2832,14 +3256,8 @@ pub fn compute_member_fingerprints_for_checked_workspace(
 pub fn compute_member_fingerprints(
     graph: &WorkspaceGraph,
 ) -> Result<WorkspaceFingerprints, String> {
-    let workspace = load_package_workspace_hir_from_graph(&graph.root_dir, graph)?;
-    let resolved_workspace = resolve_workspace(&workspace)
-        .map_err(|errors| render_resolution_errors(&workspace, errors))?;
-    api_fingerprint::compute_member_fingerprints_for_workspace(
-        graph,
-        &workspace,
-        &resolved_workspace,
-    )
+    let checked = check_workspace_graph(graph)?;
+    api_fingerprint::compute_member_fingerprints_for_checked_workspace(graph, &checked)
 }
 
 pub fn lower_to_hir(summary: &CheckSummary) -> HirModule {
@@ -2860,6 +3278,7 @@ fn check_file(path: &Path) -> Result<CheckSummary, String> {
         non_empty_lines: hir.non_empty_line_count,
         directive_count: hir.directives.len(),
         symbol_count: hir.symbols.len(),
+        warning_count: 0,
     })
 }
 
@@ -2915,20 +3334,32 @@ fn render_resolution_errors(
 }
 
 fn validate_packages(workspace: HirWorkspaceSummary) -> Result<CheckedWorkspace, String> {
-    let summary = summarize_workspace(&workspace);
+    let (workspace, transform_warnings) = apply_executable_foreword_transforms(workspace)?;
+    let (workspace, metadata_warnings) = apply_executable_foreword_metadata(workspace)?;
+    let workspace = populate_basic_foreword_registrations(workspace);
+    let mut summary = summarize_workspace(&workspace);
     let resolved_workspace = resolve_workspace(&workspace)
         .map_err(|errors| render_resolution_errors(&workspace, errors))?;
-    let diagnostics = validate_hir_semantics(&workspace, &resolved_workspace);
+    let mut validation = validate_hir_semantics(&workspace, &resolved_workspace);
+    let mut warnings = transform_warnings;
+    warnings.extend(metadata_warnings);
+    warnings.append(&mut validation.warnings);
+    summary.warning_count = warnings.len();
 
-    if diagnostics.is_empty() {
+    if validation.errors.is_empty() {
         return Ok(CheckedWorkspace {
             summary,
             workspace,
             resolved_workspace,
+            warnings,
+            discovered_tests: validation.discovered_tests,
+            foreword_catalog: validation.foreword_catalog,
+            foreword_index: validation.foreword_index,
+            foreword_registrations: validation.foreword_registrations,
         });
     }
 
-    Err(render_diagnostics(diagnostics))
+    Err(render_diagnostics(validation.errors))
 }
 
 fn summarize_workspace(workspace: &HirWorkspaceSummary) -> CheckSummary {
@@ -2964,31 +3395,4749 @@ fn render_diagnostics(mut diagnostics: Vec<Diagnostic>) -> String {
         .join("\n")
 }
 
+fn render_foreword_args(app: &arcana_hir::HirForewordApp) -> Vec<String> {
+    app.args
+        .iter()
+        .map(|arg| match &arg.name {
+            Some(name) => format!("{name}={}", arg.typed_value.render()),
+            None => arg.typed_value.render(),
+        })
+        .collect()
+}
+
+fn render_hir_foreword_args(args: &[arcana_hir::HirForewordArg]) -> Vec<String> {
+    args.iter()
+        .map(|arg| match &arg.name {
+            Some(name) => format!("{name}={}", arg.typed_value.render()),
+            None => arg.typed_value.render(),
+        })
+        .collect()
+}
+
+fn lower_adapter_payload_value(
+    value: &arcana_hir::HirForewordArgValue,
+) -> AdapterPayloadValueSnapshot {
+    match value {
+        arcana_hir::HirForewordArgValue::Raw(value) => {
+            AdapterPayloadValueSnapshot::Raw(value.clone())
+        }
+        arcana_hir::HirForewordArgValue::Bool(value) => AdapterPayloadValueSnapshot::Bool(*value),
+        arcana_hir::HirForewordArgValue::Int(value) => AdapterPayloadValueSnapshot::Int(*value),
+        arcana_hir::HirForewordArgValue::Str(value) => {
+            AdapterPayloadValueSnapshot::Str(value.clone())
+        }
+        arcana_hir::HirForewordArgValue::Symbol(value) => {
+            AdapterPayloadValueSnapshot::Symbol(value.clone())
+        }
+        arcana_hir::HirForewordArgValue::Path(value) => {
+            AdapterPayloadValueSnapshot::Path(value.clone())
+        }
+    }
+}
+
+fn lower_adapter_payload_args(
+    args: &[arcana_hir::HirForewordArg],
+) -> Vec<AdapterPayloadArgSnapshot> {
+    args.iter()
+        .map(|arg| AdapterPayloadArgSnapshot {
+            name: arg.name.clone(),
+            rendered: arg.typed_value.render(),
+            value: lower_adapter_payload_value(&arg.typed_value),
+        })
+        .collect()
+}
+
+fn lower_generated_by(generated_by: &arcana_hir::HirGeneratedByForeword) -> ForewordGeneratedBy {
+    ForewordGeneratedBy {
+        applied_name: generated_by.applied_name.clone(),
+        resolved_name: generated_by.resolved_name.clone(),
+        provider_package_id: generated_by.provider_package_id.clone(),
+        owner_kind: generated_by.owner_kind.clone(),
+        owner_path: generated_by.owner_path.clone(),
+        args: render_hir_foreword_args(&generated_by.args),
+    }
+}
+
+fn lower_response_args(args: &[AdapterResponseArg]) -> Vec<arcana_hir::HirForewordArg> {
+    args.iter()
+        .map(|arg| arcana_hir::HirForewordArg {
+            name: arg.name.clone(),
+            value: arg.value.clone(),
+            typed_value: classify_hir_foreword_arg_value(&arg.value),
+        })
+        .collect()
+}
+
+fn classify_hir_foreword_arg_value(source: &str) -> arcana_hir::HirForewordArgValue {
+    let trimmed = source.trim();
+    if let Some(unquoted) = trimmed
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+    {
+        return arcana_hir::HirForewordArgValue::Str(unquoted.to_string());
+    }
+    if trimmed == "true" {
+        return arcana_hir::HirForewordArgValue::Bool(true);
+    }
+    if trimmed == "false" {
+        return arcana_hir::HirForewordArgValue::Bool(false);
+    }
+    if let Ok(value) = trimmed.parse::<i64>() {
+        return arcana_hir::HirForewordArgValue::Int(value);
+    }
+    if let Some(path) = split_simple_path(trimmed) {
+        if path.len() == 1 {
+            return arcana_hir::HirForewordArgValue::Symbol(path[0].clone());
+        }
+        return arcana_hir::HirForewordArgValue::Path(path);
+    }
+    arcana_hir::HirForewordArgValue::Raw(trimmed.to_string())
+}
+
+fn parse_adapter_retention(text: &str) -> Option<arcana_hir::HirForewordRetention> {
+    match text.trim() {
+        "compile" => Some(arcana_hir::HirForewordRetention::Compile),
+        "tooling" => Some(arcana_hir::HirForewordRetention::Tooling),
+        "runtime" => Some(arcana_hir::HirForewordRetention::Runtime),
+        _ => None,
+    }
+}
+
+fn collect_emitted_metadata(
+    module_path: &Path,
+    app: &arcana_hir::HirForewordApp,
+    owner_public: bool,
+    generated_by: &arcana_hir::HirGeneratedByForeword,
+    descriptors: &[AdapterEmittedMetadataDescriptor],
+    errors: &mut Vec<Diagnostic>,
+) -> Vec<arcana_hir::HirEmittedForewordMetadata> {
+    let mut emitted = Vec::new();
+    for descriptor in descriptors {
+        let qualified_name = descriptor
+            .qualified_name
+            .clone()
+            .unwrap_or_else(|| generated_by.resolved_name.clone());
+        if split_simple_path(&qualified_name).is_none() {
+            errors.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: app.span.line,
+                column: app.span.column,
+                message: format!(
+                    "foreword adapter emitted metadata uses invalid qualified_name `{qualified_name}`"
+                ),
+            });
+            continue;
+        }
+        let target_kind = descriptor
+            .target_kind
+            .clone()
+            .unwrap_or_else(|| generated_by.owner_kind.clone());
+        let target_path = descriptor
+            .target_path
+            .clone()
+            .unwrap_or_else(|| generated_by.owner_path.clone());
+        if target_kind.trim().is_empty() || target_path.trim().is_empty() {
+            errors.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: app.span.line,
+                column: app.span.column,
+                message:
+                    "foreword adapter emitted metadata must provide a non-empty target_kind and target_path"
+                        .to_string(),
+            });
+            continue;
+        }
+        let retention = match descriptor.retention.as_deref() {
+            Some(value) => match parse_adapter_retention(value) {
+                Some(retention) => retention,
+                None => {
+                    errors.push(Diagnostic {
+                        path: module_path.to_path_buf(),
+                        line: app.span.line,
+                        column: app.span.column,
+                        message: format!(
+                            "foreword adapter emitted metadata uses unsupported retention `{value}`"
+                        ),
+                    });
+                    continue;
+                }
+            },
+            None => generated_by.retention,
+        };
+        emitted.push(arcana_hir::HirEmittedForewordMetadata {
+            qualified_name,
+            target_kind,
+            target_path,
+            retention,
+            args: lower_response_args(&descriptor.args),
+            public: descriptor.public.unwrap_or(owner_public),
+            generated_by: generated_by.clone(),
+        });
+    }
+    emitted
+}
+
+fn collect_registration_rows(
+    module_path: &Path,
+    app: &arcana_hir::HirForewordApp,
+    owner_public: bool,
+    generated_by: &arcana_hir::HirGeneratedByForeword,
+    rows: &[AdapterRegistrationRowDescriptor],
+    errors: &mut Vec<Diagnostic>,
+) -> Vec<arcana_hir::HirForewordRegistrationRow> {
+    let mut registrations = Vec::new();
+    for row in rows {
+        if split_simple_path(&row.namespace).is_none() {
+            errors.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: app.span.line,
+                column: app.span.column,
+                message: format!(
+                    "foreword adapter registration row uses invalid namespace `{}`",
+                    row.namespace
+                ),
+            });
+            continue;
+        }
+        if row.key.trim().is_empty() {
+            errors.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: app.span.line,
+                column: app.span.column,
+                message: "foreword adapter registration row key must not be empty".to_string(),
+            });
+            continue;
+        }
+        let target_kind = row
+            .target_kind
+            .clone()
+            .unwrap_or_else(|| generated_by.owner_kind.clone());
+        let target_path = row
+            .target_path
+            .clone()
+            .unwrap_or_else(|| generated_by.owner_path.clone());
+        if target_kind.trim().is_empty() || target_path.trim().is_empty() {
+            errors.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: app.span.line,
+                column: app.span.column,
+                message:
+                    "foreword adapter registration rows must provide a non-empty target_kind and target_path"
+                        .to_string(),
+            });
+            continue;
+        }
+        registrations.push(arcana_hir::HirForewordRegistrationRow {
+            namespace: row.namespace.clone(),
+            key: row.key.clone(),
+            value: row.value.clone(),
+            target_kind,
+            target_path,
+            public: row.public.unwrap_or(owner_public),
+            generated_by: generated_by.clone(),
+        });
+    }
+    registrations
+}
+
+const BUILTIN_FOREWORD_PROVIDER_PACKAGE_ID: &str = "arcana.builtin";
+
+fn builtin_foreword_catalog_entry(
+    exposed_name: &str,
+    action: &str,
+    targets: &[&str],
+) -> ForewordCatalogEntry {
+    ForewordCatalogEntry {
+        provider_package_id: BUILTIN_FOREWORD_PROVIDER_PACKAGE_ID.to_string(),
+        exposed_name: exposed_name.to_string(),
+        qualified_name: exposed_name.to_string(),
+        tier: "builtin".to_string(),
+        visibility: "public".to_string(),
+        action: action.to_string(),
+        retention: "compile".to_string(),
+        targets: targets.iter().map(|target| (*target).to_string()).collect(),
+        diagnostic_namespace: None,
+        handler: None,
+    }
+}
+
+fn builtin_foreword_catalog_entries() -> Vec<ForewordCatalogEntry> {
+    vec![
+        builtin_foreword_catalog_entry(
+            "deprecated",
+            "metadata",
+            &[
+                "fn",
+                "record",
+                "obj",
+                "owner",
+                "enum",
+                "opaque_type",
+                "trait",
+                "trait_method",
+                "impl_method",
+                "const",
+                "field",
+                "param",
+            ],
+        ),
+        builtin_foreword_catalog_entry(
+            "only",
+            "metadata",
+            &[
+                "import",
+                "reexport",
+                "use",
+                "trait",
+                "behavior",
+                "system",
+                "fn",
+                "record",
+                "obj",
+                "owner",
+                "enum",
+                "opaque_type",
+                "trait_method",
+                "impl_method",
+                "const",
+                "field",
+                "param",
+            ],
+        ),
+        builtin_foreword_catalog_entry("test", "metadata", &["fn"]),
+        builtin_foreword_catalog_entry(
+            "allow",
+            "metadata",
+            &[
+                "import",
+                "reexport",
+                "use",
+                "trait",
+                "behavior",
+                "system",
+                "fn",
+                "record",
+                "obj",
+                "owner",
+                "enum",
+                "opaque_type",
+                "trait_method",
+                "impl_method",
+                "const",
+                "field",
+                "param",
+            ],
+        ),
+        builtin_foreword_catalog_entry(
+            "deny",
+            "metadata",
+            &[
+                "import",
+                "reexport",
+                "use",
+                "trait",
+                "behavior",
+                "system",
+                "fn",
+                "record",
+                "obj",
+                "owner",
+                "enum",
+                "opaque_type",
+                "trait_method",
+                "impl_method",
+                "const",
+                "field",
+                "param",
+            ],
+        ),
+        builtin_foreword_catalog_entry(
+            "inline",
+            "metadata",
+            &["fn", "trait_method", "impl_method"],
+        ),
+        builtin_foreword_catalog_entry("cold", "metadata", &["fn", "trait_method", "impl_method"]),
+        builtin_foreword_catalog_entry("boundary", "metadata", &["fn", "impl_method"]),
+        builtin_foreword_catalog_entry(
+            "stage",
+            "metadata",
+            &["fn", "trait_method", "impl_method", "behavior", "system"],
+        ),
+        builtin_foreword_catalog_entry("chain", "metadata", &["statement.chain"]),
+    ]
+}
+
+fn builtin_foreword_targets(targets: &[arcana_hir::HirForewordDefinitionTarget]) -> Vec<String> {
+    targets
+        .iter()
+        .map(|target| target.as_str().to_string())
+        .collect()
+}
+
+fn builtin_foreword_export(
+    name: &str,
+    targets: Vec<arcana_hir::HirForewordDefinitionTarget>,
+) -> ResolvedForewordExport {
+    ResolvedForewordExport {
+        kind: ResolvedForewordExportKind::Builtin,
+        provider_package_id: BUILTIN_FOREWORD_PROVIDER_PACKAGE_ID.to_string(),
+        exposed_package_id: BUILTIN_FOREWORD_PROVIDER_PACKAGE_ID.to_string(),
+        exposed_name: vec![name.to_string()],
+        definition: arcana_hir::HirForewordDefinition {
+            qualified_name: vec![name.to_string()],
+            tier: arcana_hir::HirForewordTier::Basic,
+            visibility: arcana_hir::HirForewordVisibility::Public,
+            phase: arcana_hir::HirForewordPhase::Frontend,
+            action: arcana_hir::HirForewordAction::Metadata,
+            targets,
+            retention: arcana_hir::HirForewordRetention::Compile,
+            payload: Vec::new(),
+            repeatable: false,
+            conflicts: Vec::new(),
+            diagnostic_namespace: None,
+            handler: None,
+            span: Span { line: 0, column: 0 },
+        },
+        handler: None,
+        public: true,
+    }
+}
+
+fn builtin_foreword_exports() -> Vec<ResolvedForewordExport> {
+    use arcana_hir::HirForewordDefinitionTarget as Target;
+
+    vec![
+        builtin_foreword_export(
+            "deprecated",
+            vec![
+                Target::Function,
+                Target::Record,
+                Target::Object,
+                Target::Owner,
+                Target::Enum,
+                Target::OpaqueType,
+                Target::Trait,
+                Target::TraitMethod,
+                Target::ImplMethod,
+                Target::Const,
+                Target::Field,
+                Target::Param,
+            ],
+        ),
+        builtin_foreword_export(
+            "only",
+            vec![
+                Target::Import,
+                Target::Reexport,
+                Target::Use,
+                Target::Trait,
+                Target::Behavior,
+                Target::System,
+                Target::Function,
+                Target::Record,
+                Target::Object,
+                Target::Owner,
+                Target::Enum,
+                Target::OpaqueType,
+                Target::TraitMethod,
+                Target::ImplMethod,
+                Target::Const,
+                Target::Field,
+                Target::Param,
+            ],
+        ),
+        builtin_foreword_export("test", vec![Target::Function]),
+        builtin_foreword_export(
+            "allow",
+            vec![
+                Target::Import,
+                Target::Reexport,
+                Target::Use,
+                Target::Trait,
+                Target::Behavior,
+                Target::System,
+                Target::Function,
+                Target::Record,
+                Target::Object,
+                Target::Owner,
+                Target::Enum,
+                Target::OpaqueType,
+                Target::TraitMethod,
+                Target::ImplMethod,
+                Target::Const,
+                Target::Field,
+                Target::Param,
+            ],
+        ),
+        builtin_foreword_export(
+            "deny",
+            vec![
+                Target::Import,
+                Target::Reexport,
+                Target::Use,
+                Target::Trait,
+                Target::Behavior,
+                Target::System,
+                Target::Function,
+                Target::Record,
+                Target::Object,
+                Target::Owner,
+                Target::Enum,
+                Target::OpaqueType,
+                Target::TraitMethod,
+                Target::ImplMethod,
+                Target::Const,
+                Target::Field,
+                Target::Param,
+            ],
+        ),
+        builtin_foreword_export(
+            "inline",
+            vec![Target::Function, Target::TraitMethod, Target::ImplMethod],
+        ),
+        builtin_foreword_export(
+            "cold",
+            vec![Target::Function, Target::TraitMethod, Target::ImplMethod],
+        ),
+        builtin_foreword_export("boundary", vec![Target::Function, Target::ImplMethod]),
+        builtin_foreword_export(
+            "stage",
+            vec![
+                Target::Function,
+                Target::TraitMethod,
+                Target::ImplMethod,
+                Target::Behavior,
+                Target::System,
+            ],
+        ),
+    ]
+}
+
+fn build_adapter_payload_schema(
+    definition: &arcana_hir::HirForewordDefinition,
+) -> Vec<AdapterPayloadFieldSnapshot> {
+    definition
+        .payload
+        .iter()
+        .map(|field| AdapterPayloadFieldSnapshot {
+            name: field.name.clone(),
+            optional: field.optional,
+            ty: field.ty.as_str().to_string(),
+        })
+        .collect()
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
+
+fn hash_json_hex<T: Serialize>(value: &T) -> String {
+    let bytes = serde_json::to_vec(value).expect("cache key inputs should serialize");
+    sha256_hex(&bytes)
+}
+
+fn digest_path_contents(path: &Path) -> Option<String> {
+    let bytes = fs::read(path).ok()?;
+    Some(sha256_hex(&bytes))
+}
+
+#[cfg(windows)]
+fn external_process_path(path: &Path) -> PathBuf {
+    let rendered = path.as_os_str().to_string_lossy();
+    if let Some(stripped) = rendered.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{stripped}"))
+    } else if let Some(stripped) = rendered.strip_prefix(r"\\?\") {
+        PathBuf::from(stripped)
+    } else {
+        path.to_path_buf()
+    }
+}
+
+#[cfg(not(windows))]
+fn external_process_path(path: &Path) -> PathBuf {
+    path.to_path_buf()
+}
+
+fn external_process_path_string(path: &Path) -> String {
+    external_process_path(path).to_string_lossy().to_string()
+}
+
+fn resolve_adapter_runner_program(provider_package: &HirWorkspacePackage, runner: &str) -> String {
+    let runner_path = Path::new(runner);
+    if runner_path.is_absolute() || runner_path.components().count() == 1 {
+        external_process_path_string(runner_path)
+    } else {
+        external_process_path_string(&provider_package.root_dir.join(runner_path))
+    }
+}
+
+fn materialized_foreword_adapter_root(
+    provider_package: &HirWorkspacePackage,
+    product: &arcana_hir::HirForewordAdapterProduct,
+) -> PathBuf {
+    let product_path = provider_package.root_dir.join(&product.path);
+    let runner = product
+        .runner
+        .as_ref()
+        .map(|runner| resolve_adapter_runner_program(provider_package, runner));
+    let seed = hash_json_hex(&(
+        &provider_package.package_id,
+        &product.name,
+        &product.path,
+        &product.args,
+        runner.as_ref(),
+        digest_path_contents(&product_path),
+        runner.as_ref().and_then(|program| {
+            let path = Path::new(program);
+            (path.is_absolute() || program.contains(std::path::MAIN_SEPARATOR))
+                .then(|| digest_path_contents(path))
+                .flatten()
+        }),
+    ));
+    provider_package
+        .root_dir
+        .join(".arcana")
+        .join("foreword-products")
+        .join(seed)
+}
+
+fn copy_adapter_artifact_if_needed(source: &Path, target: &Path) -> Result<(), String> {
+    if source == target {
+        return Ok(());
+    }
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(|err| {
+            format!(
+                "failed to create foreword adapter artifact directory `{}`: {err}",
+                parent.display()
+            )
+        })?;
+    }
+    let source_bytes = fs::read(source).map_err(|err| {
+        format!(
+            "failed to read foreword adapter artifact `{}`: {err}",
+            source.display()
+        )
+    })?;
+    let target_matches = fs::read(target)
+        .ok()
+        .is_some_and(|existing| existing == source_bytes);
+    if !target_matches {
+        fs::write(target, &source_bytes).map_err(|err| {
+            format!(
+                "failed to write foreword adapter artifact `{}`: {err}",
+                target.display()
+            )
+        })?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(source)
+            .map_err(|err| {
+                format!(
+                    "failed to read foreword adapter artifact metadata `{}`: {err}",
+                    source.display()
+                )
+            })?
+            .permissions();
+        perms.set_mode(perms.mode() | 0o111);
+        fs::set_permissions(target, perms).map_err(|err| {
+            format!(
+                "failed to update foreword adapter artifact permissions `{}`: {err}",
+                target.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn copy_adapter_sidecars_if_present(source: &Path, target: &Path) -> Result<(), String> {
+    let Some(parent) = source.parent() else {
+        return Ok(());
+    };
+    let Some(stem) = source.file_stem() else {
+        return Ok(());
+    };
+    for entry in fs::read_dir(parent).map_err(|err| {
+        format!(
+            "failed to enumerate foreword adapter sidecars in `{}`: {err}",
+            parent.display()
+        )
+    })? {
+        let entry = entry.map_err(|err| {
+            format!(
+                "failed to inspect foreword adapter sidecar in `{}`: {err}",
+                parent.display()
+            )
+        })?;
+        let sidecar = entry.path();
+        if sidecar == source || sidecar.file_stem() != Some(stem) || !sidecar.is_file() {
+            continue;
+        }
+        let sidecar_target = target
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(entry.file_name());
+        copy_adapter_artifact_if_needed(&sidecar, &sidecar_target)?;
+    }
+    Ok(())
+}
+
+fn materialize_foreword_adapter_artifact(
+    provider_package: &HirWorkspacePackage,
+    product: &arcana_hir::HirForewordAdapterProduct,
+) -> Result<MaterializedForewordAdapterArtifact, String> {
+    let root = materialized_foreword_adapter_root(provider_package, product);
+    let source_product_path = provider_package.root_dir.join(&product.path);
+    let product_file_name = source_product_path
+        .file_name()
+        .ok_or_else(|| {
+            format!(
+                "foreword adapter `{}` has invalid product path `{}`",
+                product.name, product.path
+            )
+        })?
+        .to_owned();
+    let staged_product_path = root.join(product_file_name);
+    copy_adapter_artifact_if_needed(&source_product_path, &staged_product_path)?;
+    copy_adapter_sidecars_if_present(&source_product_path, &staged_product_path)?;
+
+    let (runner_program, runner_digest) = if let Some(runner) = &product.runner {
+        let resolved_runner = resolve_adapter_runner_program(provider_package, runner);
+        let runner_path = Path::new(&resolved_runner);
+        if runner_path.is_absolute() || resolved_runner.contains(std::path::MAIN_SEPARATOR) {
+            let runner_file_name = runner_path.file_name().ok_or_else(|| {
+                format!(
+                    "foreword adapter `{}` has invalid runner path `{resolved_runner}`",
+                    product.name
+                )
+            })?;
+            let staged_runner_path = root.join(runner_file_name);
+            copy_adapter_artifact_if_needed(runner_path, &staged_runner_path)?;
+            copy_adapter_sidecars_if_present(runner_path, &staged_runner_path)?;
+            (
+                Some(external_process_path_string(&staged_runner_path)),
+                digest_path_contents(&staged_runner_path),
+            )
+        } else {
+            (Some(resolved_runner), None)
+        }
+    } else {
+        (None, None)
+    };
+
+    Ok(MaterializedForewordAdapterArtifact {
+        product_program: external_process_path_string(&staged_product_path),
+        product_arg_path: external_process_path_string(&staged_product_path),
+        runner_program,
+        args: product.args.clone(),
+        product_digest: digest_path_contents(&staged_product_path),
+        runner_digest,
+    })
+}
+
+fn build_adapter_artifact_identity(
+    provider_package: &HirWorkspacePackage,
+    product: &arcana_hir::HirForewordAdapterProduct,
+) -> AdapterArtifactIdentity {
+    let materialized = materialize_foreword_adapter_artifact(provider_package, product)
+        .unwrap_or_else(|_| MaterializedForewordAdapterArtifact {
+            product_program: external_process_path_string(
+                &provider_package.root_dir.join(&product.path),
+            ),
+            product_arg_path: external_process_path_string(
+                &provider_package.root_dir.join(&product.path),
+            ),
+            runner_program: product
+                .runner
+                .as_ref()
+                .map(|runner| resolve_adapter_runner_program(provider_package, runner)),
+            args: product.args.clone(),
+            product_digest: digest_path_contents(&provider_package.root_dir.join(&product.path)),
+            runner_digest: product.runner.as_ref().and_then(|runner| {
+                let program = resolve_adapter_runner_program(provider_package, runner);
+                let path = Path::new(&program);
+                (path.is_absolute() || program.contains(std::path::MAIN_SEPARATOR))
+                    .then(|| digest_path_contents(path))
+                    .flatten()
+            }),
+        });
+    AdapterArtifactIdentity {
+        product_name: product.name.clone(),
+        product_path: materialized.product_arg_path,
+        runner: materialized.runner_program,
+        args: materialized.args,
+        product_digest: materialized.product_digest,
+        runner_digest: materialized.runner_digest,
+    }
+}
+
+fn build_foreword_definition_schema_hash(definition: &arcana_hir::HirForewordDefinition) -> String {
+    #[derive(Serialize)]
+    struct ForewordDefinitionSchema<'a> {
+        qualified_name: &'a [String],
+        tier: &'static str,
+        visibility: &'static str,
+        phase: &'static str,
+        action: &'static str,
+        targets: Vec<&'static str>,
+        retention: &'static str,
+        payload: Vec<(&'a str, bool, &'static str)>,
+        repeatable: bool,
+        conflicts: &'a [Vec<String>],
+        diagnostic_namespace: &'a Option<String>,
+        handler: &'a Option<Vec<String>>,
+    }
+
+    hash_json_hex(&ForewordDefinitionSchema {
+        qualified_name: &definition.qualified_name,
+        tier: definition.tier.as_str(),
+        visibility: definition.visibility.as_str(),
+        phase: definition.phase.as_str(),
+        action: definition.action.as_str(),
+        targets: definition
+            .targets
+            .iter()
+            .map(|target| target.as_str())
+            .collect(),
+        retention: definition.retention.as_str(),
+        payload: definition
+            .payload
+            .iter()
+            .map(|field| (field.name.as_str(), field.optional, field.ty.as_str()))
+            .collect(),
+        repeatable: definition.repeatable,
+        conflicts: &definition.conflicts,
+        diagnostic_namespace: &definition.diagnostic_namespace,
+        handler: &definition.handler,
+    })
+}
+
+fn build_foreword_adapter_cache_key(
+    package: &HirWorkspacePackage,
+    export: &ResolvedForewordExport,
+    handler: &arcana_hir::HirForewordHandler,
+    product: &arcana_hir::HirForewordAdapterProduct,
+    target: &AdapterTargetSnapshot,
+    rendered_args: &[String],
+    visible_forewords: &[AdapterCatalogEntry],
+    dependency_opt_in_enabled: bool,
+    artifact: &AdapterArtifactIdentity,
+) -> String {
+    #[derive(Serialize)]
+    struct ForewordAdapterCacheSeed<'a> {
+        protocol_version: &'a str,
+        toolchain_version: &'a str,
+        definition_schema_hash: String,
+        handler_binding: String,
+        adapter_artifact_identity: &'a AdapterArtifactIdentity,
+        visible_dependency_foreword_registry: &'a [AdapterCatalogEntry],
+        dependency_opt_in_enabled: bool,
+        consumer_package_id: &'a str,
+        provider_package_id: &'a str,
+        exposed_package_id: &'a str,
+        applied_name: String,
+        resolved_name: String,
+        target_kind: &'a str,
+        target_path: &'a str,
+        target_public: bool,
+        args: &'a [String],
+    }
+
+    hash_json_hex(&ForewordAdapterCacheSeed {
+        protocol_version: FOREWORD_ADAPTER_PROTOCOL_VERSION,
+        toolchain_version: env!("CARGO_PKG_VERSION"),
+        definition_schema_hash: build_foreword_definition_schema_hash(&export.definition),
+        handler_binding: format!(
+            "{}:{}:{}:{}",
+            handler.qualified_name.join("."),
+            handler.protocol,
+            product.name,
+            handler.entry
+        ),
+        adapter_artifact_identity: artifact,
+        visible_dependency_foreword_registry: visible_forewords,
+        dependency_opt_in_enabled,
+        consumer_package_id: &package.package_id,
+        provider_package_id: &export.provider_package_id,
+        exposed_package_id: &export.exposed_package_id,
+        applied_name: export.exposed_name.join("."),
+        resolved_name: export.definition.qualified_name.join("."),
+        target_kind: &target.kind,
+        target_path: &target.path,
+        target_public: target.public,
+        args: rendered_args,
+    })
+}
+
+fn build_foreword_registry(workspace: &HirWorkspaceSummary) -> ForewordRegistry {
+    let mut registry = ForewordRegistry::default();
+    registry.catalog.extend(builtin_foreword_catalog_entries());
+    for export in builtin_foreword_exports() {
+        registry.exports.insert(
+            (
+                export.exposed_package_id.clone(),
+                export.exposed_name.join("."),
+            ),
+            export,
+        );
+    }
+    let mut local_defs = BTreeMap::<(String, String), arcana_hir::HirForewordDefinition>::new();
+    let mut local_handlers = BTreeMap::<(String, String), arcana_hir::HirForewordHandler>::new();
+
+    for package in workspace.packages.values() {
+        let package_name = &package.summary.package_name;
+        for module in &package.summary.modules {
+            let module_path = package
+                .module_path(&module.module_id)
+                .cloned()
+                .unwrap_or_else(|| package.root_dir.join("src").join("unknown.arc"));
+            for definition in &module.foreword_definitions {
+                if definition.qualified_name.len() < 2
+                    || definition.qualified_name[0] != *package_name
+                {
+                    registry.errors.push(Diagnostic {
+                        path: module_path.clone(),
+                        line: definition.span.line,
+                        column: definition.span.column,
+                        message: format!(
+                            "foreword `{}` must use the owning package root `{}`",
+                            definition.qualified_name.join("."),
+                            package_name
+                        ),
+                    });
+                    continue;
+                }
+                let tail = definition.qualified_name[1..].join(".");
+                if local_defs
+                    .insert(
+                        (package.package_id.clone(), tail.clone()),
+                        definition.clone(),
+                    )
+                    .is_some()
+                {
+                    registry.errors.push(Diagnostic {
+                        path: module_path.clone(),
+                        line: definition.span.line,
+                        column: definition.span.column,
+                        message: format!(
+                            "duplicate foreword definition `{}`",
+                            definition.qualified_name.join(".")
+                        ),
+                    });
+                }
+            }
+            for handler in &module.foreword_handlers {
+                if handler.qualified_name.len() < 2 || handler.qualified_name[0] != *package_name {
+                    registry.errors.push(Diagnostic {
+                        path: module_path.clone(),
+                        line: handler.span.line,
+                        column: handler.span.column,
+                        message: format!(
+                            "foreword handler `{}` must use the owning package root `{}`",
+                            handler.qualified_name.join("."),
+                            package_name
+                        ),
+                    });
+                    continue;
+                }
+                let tail = handler.qualified_name[1..].join(".");
+                if local_handlers
+                    .insert((package.package_id.clone(), tail.clone()), handler.clone())
+                    .is_some()
+                {
+                    registry.errors.push(Diagnostic {
+                        path: module_path.clone(),
+                        line: handler.span.line,
+                        column: handler.span.column,
+                        message: format!(
+                            "duplicate foreword handler `{}`",
+                            handler.qualified_name.join(".")
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
+    for package in workspace.packages.values() {
+        let package_name = &package.summary.package_name;
+        for ((provider_package_id, tail), definition) in &local_defs {
+            if provider_package_id != &package.package_id {
+                continue;
+            }
+            let handler = definition.handler.as_ref().and_then(|path| {
+                if path.len() < 2 {
+                    return None;
+                }
+                local_handlers
+                    .get(&(provider_package_id.clone(), path[1..].join(".")))
+                    .cloned()
+            });
+            let exposed_name = definition.qualified_name.clone();
+            let public = definition.visibility == arcana_hir::HirForewordVisibility::Public;
+            registry.catalog.push(ForewordCatalogEntry {
+                provider_package_id: provider_package_id.clone(),
+                exposed_name: exposed_name.join("."),
+                qualified_name: definition.qualified_name.join("."),
+                tier: definition.tier.as_str().to_string(),
+                visibility: definition.visibility.as_str().to_string(),
+                action: definition.action.as_str().to_string(),
+                retention: definition.retention.as_str().to_string(),
+                targets: definition
+                    .targets
+                    .iter()
+                    .map(|target| target.as_str().to_string())
+                    .collect(),
+                diagnostic_namespace: definition.diagnostic_namespace.clone(),
+                handler: handler.as_ref().map(|item| item.qualified_name.join(".")),
+            });
+            registry.exports.insert(
+                (package.package_id.clone(), tail.clone()),
+                ResolvedForewordExport {
+                    kind: ResolvedForewordExportKind::User,
+                    provider_package_id: provider_package_id.clone(),
+                    exposed_package_id: package.package_id.clone(),
+                    exposed_name,
+                    definition: definition.clone(),
+                    handler,
+                    public,
+                },
+            );
+        }
+        for module in &package.summary.modules {
+            let module_path = package
+                .module_path(&module.module_id)
+                .cloned()
+                .unwrap_or_else(|| package.root_dir.join("src").join("unknown.arc"));
+            for alias in &module.foreword_aliases {
+                if alias.alias_name.len() < 2 || alias.alias_name[0] != *package_name {
+                    registry.errors.push(Diagnostic {
+                        path: module_path.clone(),
+                        line: alias.span.line,
+                        column: alias.span.column,
+                        message: format!(
+                            "foreword alias `{}` must use the owning package root `{}`",
+                            alias.alias_name.join("."),
+                            package_name
+                        ),
+                    });
+                    continue;
+                }
+                if alias.source_name.len() < 2 {
+                    registry.errors.push(Diagnostic {
+                        path: module_path.clone(),
+                        line: alias.span.line,
+                        column: alias.span.column,
+                        message: "foreword aliases must reference a qualified source foreword"
+                            .to_string(),
+                    });
+                    continue;
+                }
+                let provider_package_id = if alias.source_name[0] == *package_name {
+                    package.package_id.clone()
+                } else if let Some(dep_id) = package.direct_dep_ids.get(&alias.source_name[0]) {
+                    dep_id.clone()
+                } else if let Some((_, dep_id)) = package
+                    .direct_dep_packages
+                    .iter()
+                    .find(|(_, dep_name)| **dep_name == alias.source_name[0])
+                    .and_then(|(alias_name, _)| {
+                        package
+                            .direct_dep_ids
+                            .get(alias_name)
+                            .map(|dep_id| (alias_name, dep_id))
+                    })
+                {
+                    dep_id.clone()
+                } else {
+                    registry.errors.push(Diagnostic {
+                        path: module_path.clone(),
+                        line: alias.span.line,
+                        column: alias.span.column,
+                        message: format!(
+                            "foreword alias source package `{}` is not visible here",
+                            alias.source_name[0]
+                        ),
+                    });
+                    continue;
+                };
+                let source_tail = alias.source_name[1..].join(".");
+                let Some(definition) = local_defs
+                    .get(&(provider_package_id.clone(), source_tail.clone()))
+                    .cloned()
+                else {
+                    registry.errors.push(Diagnostic {
+                        path: module_path.clone(),
+                        line: alias.span.line,
+                        column: alias.span.column,
+                        message: format!(
+                            "foreword alias source `{}` is not defined",
+                            alias.source_name.join(".")
+                        ),
+                    });
+                    continue;
+                };
+                if provider_package_id != package.package_id
+                    && definition.visibility != arcana_hir::HirForewordVisibility::Public
+                {
+                    registry.errors.push(Diagnostic {
+                        path: module_path.clone(),
+                        line: alias.span.line,
+                        column: alias.span.column,
+                        message: format!(
+                            "foreword alias source `{}` is not public",
+                            alias.source_name.join(".")
+                        ),
+                    });
+                    continue;
+                }
+                let handler = definition.handler.as_ref().and_then(|path| {
+                    if path.len() < 2 {
+                        return None;
+                    }
+                    local_handlers
+                        .get(&(provider_package_id.clone(), path[1..].join(".")))
+                        .cloned()
+                });
+                let exposed_tail = alias.alias_name[1..].join(".");
+                let public = alias.kind == arcana_hir::HirForewordAliasKind::Reexport;
+                if registry
+                    .exports
+                    .insert(
+                        (package.package_id.clone(), exposed_tail),
+                        ResolvedForewordExport {
+                            kind: ResolvedForewordExportKind::User,
+                            provider_package_id: provider_package_id.clone(),
+                            exposed_package_id: package.package_id.clone(),
+                            exposed_name: alias.alias_name.clone(),
+                            definition: definition.clone(),
+                            handler: handler.clone(),
+                            public,
+                        },
+                    )
+                    .is_some()
+                {
+                    registry.errors.push(Diagnostic {
+                        path: module_path.clone(),
+                        line: alias.span.line,
+                        column: alias.span.column,
+                        message: format!(
+                            "duplicate exposed foreword name `{}`",
+                            alias.alias_name.join(".")
+                        ),
+                    });
+                    continue;
+                }
+                registry.catalog.push(ForewordCatalogEntry {
+                    provider_package_id,
+                    exposed_name: alias.alias_name.join("."),
+                    qualified_name: definition.qualified_name.join("."),
+                    tier: definition.tier.as_str().to_string(),
+                    visibility: if public { "public" } else { "package" }.to_string(),
+                    action: definition.action.as_str().to_string(),
+                    retention: definition.retention.as_str().to_string(),
+                    targets: definition
+                        .targets
+                        .iter()
+                        .map(|target| target.as_str().to_string())
+                        .collect(),
+                    diagnostic_namespace: definition.diagnostic_namespace.clone(),
+                    handler: handler.as_ref().map(|item| item.qualified_name.join(".")),
+                });
+            }
+        }
+    }
+
+    registry.catalog.sort_by(|left, right| {
+        left.exposed_name
+            .cmp(&right.exposed_name)
+            .then_with(|| left.provider_package_id.cmp(&right.provider_package_id))
+    });
+    registry
+}
+
+fn resolve_foreword_export<'a>(
+    package: &HirWorkspacePackage,
+    app: &arcana_hir::HirForewordApp,
+    registry: &'a ForewordRegistry,
+) -> Option<&'a ResolvedForewordExport> {
+    if app.path.len() == 1 {
+        return registry.exports.get(&(
+            BUILTIN_FOREWORD_PROVIDER_PACKAGE_ID.to_string(),
+            app.name.clone(),
+        ));
+    }
+    if app.path.len() < 2 {
+        return None;
+    }
+    let package_id = if app.path[0] == package.summary.package_name {
+        package.package_id.clone()
+    } else if let Some(dep_id) = package.direct_dep_ids.get(&app.path[0]) {
+        dep_id.clone()
+    } else if let Some((alias, _)) = package
+        .direct_dep_packages
+        .iter()
+        .find(|(_, dep_name)| **dep_name == app.path[0])
+    {
+        package.direct_dep_ids.get(alias)?.clone()
+    } else {
+        return None;
+    };
+    let export = registry
+        .exports
+        .get(&(package_id.clone(), app.path[1..].join(".")))?;
+    if package_id == package.package_id || export.public {
+        Some(export)
+    } else {
+        None
+    }
+}
+
+fn resolve_user_foreword_export<'a>(
+    package: &HirWorkspacePackage,
+    app: &arcana_hir::HirForewordApp,
+    registry: &'a ForewordRegistry,
+) -> Option<&'a ResolvedForewordExport> {
+    resolve_foreword_export(package, app, registry).filter(|export| !export.is_builtin())
+}
+
+const FOREWORD_ADAPTER_PROTOCOL_VERSION: &str = "arcana-foreword-stdio-v1";
+
+fn render_foreword_app_text(app: &arcana_hir::HirForewordApp) -> String {
+    if app.args.is_empty() {
+        format!("#{}", app.path.join("."))
+    } else {
+        format!(
+            "#{}[{}]",
+            app.path.join("."),
+            render_foreword_args(app).join(", ")
+        )
+    }
+}
+
+fn build_adapter_field_snapshot(field: &arcana_hir::HirField) -> AdapterFieldSnapshot {
+    AdapterFieldSnapshot {
+        name: field.name.clone(),
+        ty: field.ty.to_string(),
+        forewords: field
+            .forewords
+            .iter()
+            .map(render_foreword_app_text)
+            .collect(),
+    }
+}
+
+fn build_adapter_param_snapshot(param: &arcana_hir::HirParam) -> AdapterParamSnapshot {
+    AdapterParamSnapshot {
+        mode: param.mode.map(|mode| mode.as_str().to_string()),
+        name: param.name.clone(),
+        ty: param.ty.to_string(),
+        forewords: param
+            .forewords
+            .iter()
+            .map(render_foreword_app_text)
+            .collect(),
+    }
+}
+
+fn build_adapter_symbol_snapshot(symbol: &HirSymbol) -> AdapterSymbolSnapshot {
+    let (fields, methods, variants, assoc_types) = match &symbol.body {
+        HirSymbolBody::Record { fields } => (
+            fields.iter().map(build_adapter_field_snapshot).collect(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        ),
+        HirSymbolBody::Object { fields, methods } => (
+            fields.iter().map(build_adapter_field_snapshot).collect(),
+            methods.iter().map(build_adapter_symbol_snapshot).collect(),
+            Vec::new(),
+            Vec::new(),
+        ),
+        HirSymbolBody::Enum { variants } => (
+            Vec::new(),
+            Vec::new(),
+            variants
+                .iter()
+                .map(|variant| variant.name.clone())
+                .collect(),
+            Vec::new(),
+        ),
+        HirSymbolBody::Trait {
+            assoc_types,
+            methods,
+        } => (
+            Vec::new(),
+            methods.iter().map(build_adapter_symbol_snapshot).collect(),
+            Vec::new(),
+            assoc_types.iter().map(|assoc| assoc.name.clone()).collect(),
+        ),
+        HirSymbolBody::Owner { objects, exits } => (
+            Vec::new(),
+            Vec::new(),
+            objects
+                .iter()
+                .map(|object| {
+                    format!(
+                        "object:{}:{}",
+                        object.local_name,
+                        object.type_path.join(".")
+                    )
+                })
+                .chain(exits.iter().map(|exit| format!("exit:{}", exit.name)))
+                .collect(),
+            Vec::new(),
+        ),
+        HirSymbolBody::None => (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+    };
+    AdapterSymbolSnapshot {
+        kind: symbol.kind.as_str().to_string(),
+        name: symbol.name.clone(),
+        exported: symbol.exported,
+        is_async: symbol.is_async,
+        signature: render_symbol_signature(symbol),
+        type_params: symbol.type_params.clone(),
+        params: symbol
+            .params
+            .iter()
+            .map(build_adapter_param_snapshot)
+            .collect(),
+        return_type: symbol.return_type.as_ref().map(ToString::to_string),
+        forewords: symbol
+            .forewords
+            .iter()
+            .map(render_foreword_app_text)
+            .collect(),
+        fields,
+        methods,
+        variants,
+        assoc_types,
+        body_fingerprint: render_symbol_fingerprint(symbol),
+    }
+}
+
+fn build_adapter_directive_snapshot(
+    directive: &arcana_hir::HirDirective,
+) -> AdapterDirectiveSnapshot {
+    AdapterDirectiveSnapshot {
+        kind: directive.kind.as_str().to_string(),
+        path: directive.path.join("."),
+        alias: directive.alias.clone(),
+        forewords: directive
+            .forewords
+            .iter()
+            .map(render_foreword_app_text)
+            .collect(),
+    }
+}
+
+fn visible_adapter_catalog(
+    package: &HirWorkspacePackage,
+    registry: &ForewordRegistry,
+) -> Vec<AdapterCatalogEntry> {
+    let mut entries = registry
+        .exports
+        .values()
+        .filter(|export| {
+            export.is_builtin()
+                || export.exposed_package_id == package.package_id
+                || (export.public
+                    && package
+                        .direct_dep_ids
+                        .values()
+                        .any(|dep_id| dep_id == &export.exposed_package_id))
+        })
+        .map(|export| AdapterCatalogEntry {
+            exposed_name: export.exposed_name.join("."),
+            qualified_name: export.definition.qualified_name.join("."),
+            tier: export.catalog_tier().to_string(),
+            action: export.definition.action.as_str().to_string(),
+            retention: export.definition.retention.as_str().to_string(),
+            targets: builtin_foreword_targets(&export.definition.targets),
+            provider_package_id: export.provider_package_id.clone(),
+        })
+        .collect::<Vec<_>>();
+    for entry in registry
+        .catalog
+        .iter()
+        .filter(|entry| entry.tier == "builtin")
+    {
+        if entries.iter().any(|candidate| {
+            candidate.exposed_name == entry.exposed_name
+                && candidate.provider_package_id == entry.provider_package_id
+        }) {
+            continue;
+        }
+        entries.push(AdapterCatalogEntry {
+            exposed_name: entry.exposed_name.clone(),
+            qualified_name: entry.qualified_name.clone(),
+            tier: entry.tier.clone(),
+            action: entry.action.clone(),
+            retention: entry.retention.clone(),
+            targets: entry.targets.clone(),
+            provider_package_id: entry.provider_package_id.clone(),
+        });
+    }
+    entries.sort_by(|left, right| {
+        left.exposed_name
+            .cmp(&right.exposed_name)
+            .then_with(|| left.provider_package_id.cmp(&right.provider_package_id))
+    });
+    entries
+}
+
+fn target_path_for_symbol(
+    module_id: &str,
+    symbol_name: &str,
+    container_name: Option<&str>,
+) -> String {
+    match container_name {
+        Some(container_name) => format!("{module_id}.{container_name}.{symbol_name}"),
+        None => format!("{module_id}.{symbol_name}"),
+    }
+}
+
+fn target_path_for_param(
+    module_id: &str,
+    symbol_name: &str,
+    param_name: &str,
+    container_name: Option<&str>,
+) -> String {
+    format!(
+        "{}({param_name})",
+        target_path_for_symbol(module_id, symbol_name, container_name)
+    )
+}
+
+fn target_path_for_field(
+    module_id: &str,
+    symbol_name: &str,
+    field_name: &str,
+    container_name: Option<&str>,
+) -> String {
+    format!(
+        "{}.{field_name}",
+        target_path_for_symbol(module_id, symbol_name, container_name)
+    )
+}
+
+fn impl_container_name(impl_decl: &HirImplDecl) -> String {
+    let target = impl_decl.target_type.to_string();
+    match &impl_decl.trait_path {
+        Some(trait_path) => format!("{target}:{}", arcana_hir::render_hir_trait_ref(trait_path)),
+        None => target,
+    }
+}
+
+fn impl_target_path(module_id: &str, impl_decl: &HirImplDecl) -> String {
+    format!("{module_id}::impl({})", impl_container_name(impl_decl))
+}
+
+fn resolve_foreword_adapter_product<'a>(
+    workspace: &'a HirWorkspaceSummary,
+    export: &ResolvedForewordExport,
+    handler: &arcana_hir::HirForewordHandler,
+) -> Result<
+    (
+        &'a HirWorkspacePackage,
+        &'a arcana_hir::HirForewordAdapterProduct,
+    ),
+    String,
+> {
+    let provider_package = workspace
+        .package_by_id(&export.provider_package_id)
+        .ok_or_else(|| {
+            format!(
+                "executable foreword provider package `{}` is not loaded",
+                export.provider_package_id
+            )
+        })?;
+    let product = provider_package
+        .foreword_products
+        .get(&handler.product)
+        .ok_or_else(|| {
+            format!(
+                "foreword handler `{}` references unknown product `{}`",
+                handler.qualified_name.join("."),
+                handler.product
+            )
+        })?;
+    Ok((provider_package, product))
+}
+
+fn execute_foreword_adapter(
+    provider_package: &HirWorkspacePackage,
+    product: &arcana_hir::HirForewordAdapterProduct,
+    request: &ForewordAdapterRequest,
+) -> Result<ForewordAdapterResponse, String> {
+    let materialized = materialize_foreword_adapter_artifact(provider_package, product)?;
+    let (program, args) = if let Some(runner) = &materialized.runner_program {
+        let mut args = Vec::with_capacity(materialized.args.len() + 1);
+        args.extend(materialized.args.iter().cloned());
+        args.push(materialized.product_arg_path.clone());
+        (runner.clone(), args)
+    } else {
+        (
+            materialized.product_program.clone(),
+            materialized.args.clone(),
+        )
+    };
+    let request_json = serde_json::to_vec(request)
+        .map_err(|err| format!("failed to encode foreword adapter request: {err}"))?;
+    let mut child = Command::new(&program)
+        .args(&args)
+        .current_dir(external_process_path(&provider_package.root_dir))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| {
+            format!(
+                "failed to launch foreword adapter `{}` from `{}`: {err}",
+                product.name,
+                provider_package.root_dir.display()
+            )
+        })?;
+    if let Some(stdin) = child.stdin.as_mut() {
+        use std::io::Write;
+        stdin.write_all(&request_json).map_err(|err| {
+            format!(
+                "failed to write foreword adapter request to `{}`: {err}",
+                product.name
+            )
+        })?;
+    }
+    let output = child.wait_with_output().map_err(|err| {
+        format!(
+            "failed to wait for foreword adapter `{}`: {err}",
+            product.name
+        )
+    })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if !stderr.is_empty() {
+            stderr
+        } else if !stdout.is_empty() {
+            stdout
+        } else {
+            format!("status {}", output.status)
+        };
+        return Err(format!(
+            "foreword adapter `{}` failed: {}",
+            product.name, detail
+        ));
+    }
+    let response: ForewordAdapterResponse =
+        serde_json::from_slice(&output.stdout).map_err(|err| {
+            format!(
+                "foreword adapter `{}` returned invalid JSON: {err}",
+                product.name
+            )
+        })?;
+    if response.version != FOREWORD_ADAPTER_PROTOCOL_VERSION {
+        return Err(format!(
+            "foreword adapter `{}` returned protocol `{}` instead of `{}`",
+            product.name, response.version, FOREWORD_ADAPTER_PROTOCOL_VERSION
+        ));
+    }
+    Ok(response)
+}
+
+fn parse_adapter_symbol_snippet(module_id: &str, snippet: &str) -> Result<HirSymbol, String> {
+    let lowered = lower_module_text(module_id.to_string(), snippet)?;
+    if !lowered.directives.is_empty()
+        || !lowered.lang_items.is_empty()
+        || !lowered.memory_specs.is_empty()
+        || !lowered.foreword_definitions.is_empty()
+        || !lowered.foreword_handlers.is_empty()
+        || !lowered.foreword_aliases.is_empty()
+        || !lowered.impls.is_empty()
+        || lowered.symbols.len() != 1
+    {
+        return Err(
+            "adapter symbol snippet must produce exactly one symbol declaration".to_string(),
+        );
+    }
+    Ok(lowered.symbols.into_iter().next().expect("single symbol"))
+}
+
+fn parse_adapter_directive_snippet(
+    module_id: &str,
+    snippet: &str,
+) -> Result<arcana_hir::HirDirective, String> {
+    let lowered = lower_module_text(module_id.to_string(), snippet)?;
+    if !lowered.lang_items.is_empty()
+        || !lowered.memory_specs.is_empty()
+        || !lowered.foreword_definitions.is_empty()
+        || !lowered.foreword_handlers.is_empty()
+        || !lowered.foreword_aliases.is_empty()
+        || !lowered.symbols.is_empty()
+        || !lowered.impls.is_empty()
+        || lowered.directives.len() != 1
+    {
+        return Err(
+            "adapter directive snippet must produce exactly one import/use/reexport declaration"
+                .to_string(),
+        );
+    }
+    Ok(lowered
+        .directives
+        .into_iter()
+        .next()
+        .expect("single directive"))
+}
+
+fn apply_adapter_diagnostics(
+    response: &ForewordAdapterResponse,
+    module_path: &Path,
+    span: Span,
+    qualified_name: &str,
+    diagnostic_namespace: Option<&str>,
+    policy: &LintPolicy,
+    warnings: &mut Vec<CheckWarning>,
+    errors: &mut Vec<Diagnostic>,
+) {
+    for diagnostic in &response.diagnostics {
+        let rendered = format!(
+            "foreword adapter `{qualified_name}`: {}",
+            diagnostic.message
+        );
+        if diagnostic.severity == "warning" {
+            let lint_name = diagnostic
+                .lint
+                .as_deref()
+                .map(|lint| {
+                    if lint.contains('.') {
+                        lint.to_string()
+                    } else if let Some(namespace) = diagnostic_namespace {
+                        format!("{namespace}.{lint}")
+                    } else {
+                        format!("{qualified_name}.{lint}")
+                    }
+                })
+                .unwrap_or_else(|| {
+                    diagnostic_namespace
+                        .map(|namespace| format!("{namespace}.adapter"))
+                        .unwrap_or_else(|| format!("{qualified_name}.adapter"))
+                });
+            if lint_is_allowed(policy, &lint_name) {
+                continue;
+            }
+            if lint_is_denied(policy, &lint_name) {
+                errors.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: span.line,
+                    column: span.column,
+                    message: rendered,
+                });
+            } else {
+                warnings.push(CheckWarning {
+                    path: module_path.to_path_buf(),
+                    line: span.line,
+                    column: span.column,
+                    message: rendered,
+                });
+            }
+        } else {
+            errors.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: span.line,
+                column: span.column,
+                message: rendered,
+            });
+        }
+    }
+}
+
+fn validate_user_foreword_payload(
+    app: &arcana_hir::HirForewordApp,
+    definition: &arcana_hir::HirForewordDefinition,
+) -> Result<(), String> {
+    if definition.payload.is_empty() && app.args.is_empty() {
+        return Ok(());
+    }
+    if definition.payload.is_empty() {
+        return Err(format!(
+            "`#{}` does not accept a payload",
+            app.path.join(".")
+        ));
+    }
+    let mut assigned = BTreeMap::<String, &arcana_hir::HirForewordArg>::new();
+    let mut positional_index = 0usize;
+    for arg in &app.args {
+        if let Some(name) = &arg.name {
+            let Some(field) = definition.payload.iter().find(|field| field.name == *name) else {
+                return Err(format!(
+                    "`#{}` has no payload field `{name}`",
+                    app.path.join(".")
+                ));
+            };
+            if assigned.insert(field.name.clone(), arg).is_some() {
+                return Err(format!(
+                    "`#{}` payload field `{name}` is assigned more than once",
+                    app.path.join(".")
+                ));
+            }
+        } else {
+            let Some(field) = definition.payload.get(positional_index) else {
+                return Err(format!(
+                    "`#{}` received too many positional payload values",
+                    app.path.join(".")
+                ));
+            };
+            if assigned.insert(field.name.clone(), arg).is_some() {
+                return Err(format!(
+                    "`#{}` payload field `{}` is assigned more than once",
+                    app.path.join("."),
+                    field.name
+                ));
+            }
+            positional_index += 1;
+        }
+    }
+    for field in &definition.payload {
+        let Some(arg) = assigned.get(&field.name).copied() else {
+            if field.optional {
+                continue;
+            }
+            return Err(format!(
+                "`#{}` is missing required payload field `{}`",
+                app.path.join("."),
+                field.name
+            ));
+        };
+        let valid = match field.ty {
+            arcana_hir::HirForewordPayloadType::Bool => {
+                matches!(arg.typed_value, arcana_hir::HirForewordArgValue::Bool(_))
+            }
+            arcana_hir::HirForewordPayloadType::Int => {
+                matches!(arg.typed_value, arcana_hir::HirForewordArgValue::Int(_))
+            }
+            arcana_hir::HirForewordPayloadType::Str => {
+                matches!(arg.typed_value, arcana_hir::HirForewordArgValue::Str(_))
+            }
+            arcana_hir::HirForewordPayloadType::Symbol => {
+                matches!(arg.typed_value, arcana_hir::HirForewordArgValue::Symbol(_))
+            }
+            arcana_hir::HirForewordPayloadType::Path => matches!(
+                arg.typed_value,
+                arcana_hir::HirForewordArgValue::Path(_)
+                    | arcana_hir::HirForewordArgValue::Symbol(_)
+            ),
+        };
+        if !valid {
+            return Err(format!(
+                "`#{}` payload field `{}` must be {}",
+                app.path.join("."),
+                field.name,
+                field.ty.as_str()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn target_allowed_for_definition(
+    definition: &arcana_hir::HirForewordDefinition,
+    target_kind: &str,
+) -> bool {
+    definition
+        .targets
+        .iter()
+        .any(|target| target.as_str() == target_kind)
+}
+
+fn dependency_allows_executable_forewords(
+    package: &HirWorkspacePackage,
+    exposed_package_id: &str,
+) -> bool {
+    if exposed_package_id == package.package_id {
+        return true;
+    }
+    package
+        .direct_dep_ids
+        .iter()
+        .filter_map(|(alias, dep_id)| (dep_id == exposed_package_id).then_some(alias))
+        .any(|alias| package.executable_foreword_deps.contains(alias))
+}
+
+fn execute_executable_foreword_app(
+    workspace: &HirWorkspaceSummary,
+    package: &HirWorkspacePackage,
+    module_path: &Path,
+    module_id: &str,
+    registry: &ForewordRegistry,
+    adapter_cache: &mut BTreeMap<String, ForewordAdapterResponse>,
+    app: &arcana_hir::HirForewordApp,
+    export: &ResolvedForewordExport,
+    target_kind: &str,
+    target_path: &str,
+    target: AdapterTargetSnapshot,
+    policy: &LintPolicy,
+    warnings: &mut Vec<CheckWarning>,
+    errors: &mut Vec<Diagnostic>,
+) -> Option<ExecutedTransform> {
+    if !dependency_allows_executable_forewords(package, &export.exposed_package_id) {
+        errors.push(Diagnostic {
+            path: module_path.to_path_buf(),
+            line: app.span.line,
+            column: app.span.column,
+            message: format!(
+                "executable foreword `#{}` requires `executable_forewords = true` on the dependency that exports it",
+                app.path.join(".")
+            ),
+        });
+        return None;
+    }
+    let Some(handler) = &export.handler else {
+        errors.push(Diagnostic {
+            path: module_path.to_path_buf(),
+            line: app.span.line,
+            column: app.span.column,
+            message: format!(
+                "executable foreword `#{}` is missing a handler binding",
+                app.path.join(".")
+            ),
+        });
+        return None;
+    };
+    if handler.protocol != "stdio-v1" {
+        errors.push(Diagnostic {
+            path: module_path.to_path_buf(),
+            line: app.span.line,
+            column: app.span.column,
+            message: format!(
+                "foreword handler `{}` uses unsupported protocol `{}`",
+                handler.qualified_name.join("."),
+                handler.protocol
+            ),
+        });
+        return None;
+    }
+    let rendered_args = render_foreword_args(app);
+    let dependency_opt_in_enabled =
+        dependency_allows_executable_forewords(package, &export.exposed_package_id);
+    let (provider_package, product) =
+        match resolve_foreword_adapter_product(workspace, export, handler) {
+            Ok(value) => value,
+            Err(message) => {
+                errors.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: app.span.line,
+                    column: app.span.column,
+                    message,
+                });
+                return None;
+            }
+        };
+    let visible_forewords = visible_adapter_catalog(package, registry);
+    let artifact = build_adapter_artifact_identity(provider_package, product);
+    let cache_key = build_foreword_adapter_cache_key(
+        package,
+        export,
+        handler,
+        product,
+        &target,
+        &rendered_args,
+        &visible_forewords,
+        dependency_opt_in_enabled,
+        &artifact,
+    );
+    let request = ForewordAdapterRequest {
+        version: FOREWORD_ADAPTER_PROTOCOL_VERSION.to_string(),
+        protocol: handler.protocol.clone(),
+        cache_key: cache_key.clone(),
+        toolchain_version: env!("CARGO_PKG_VERSION").to_string(),
+        dependency_opt_in_enabled,
+        package: AdapterPackageSnapshot {
+            package_id: package.package_id.clone(),
+            package_name: package.summary.package_name.clone(),
+            root_dir: external_process_path_string(&package.root_dir),
+            module_id: module_id.to_string(),
+        },
+        foreword: AdapterForewordSnapshot {
+            applied_name: app.path.join("."),
+            resolved_name: export.exposed_name.join("."),
+            tier: export.definition.tier.as_str().to_string(),
+            visibility: export.definition.visibility.as_str().to_string(),
+            phase: export.definition.phase.as_str().to_string(),
+            action: export.definition.action.as_str().to_string(),
+            retention: export.definition.retention.as_str().to_string(),
+            targets: export
+                .definition
+                .targets
+                .iter()
+                .map(|target| target.as_str().to_string())
+                .collect(),
+            diagnostic_namespace: export.definition.diagnostic_namespace.clone(),
+            payload_schema: build_adapter_payload_schema(&export.definition),
+            repeatable: export.definition.repeatable,
+            conflicts: export
+                .definition
+                .conflicts
+                .iter()
+                .map(|conflict| conflict.join("."))
+                .collect(),
+            args: lower_adapter_payload_args(&app.args),
+            provider_package_id: export.provider_package_id.clone(),
+            exposed_package_id: export.exposed_package_id.clone(),
+            handler: Some(handler.qualified_name.join(".")),
+            entry: Some(handler.entry.clone()),
+        },
+        target,
+        visible_forewords,
+        artifact,
+    };
+    let response = if let Some(cached) = adapter_cache.get(&cache_key).cloned() {
+        cached
+    } else {
+        let response = match execute_foreword_adapter(provider_package, product, &request) {
+            Ok(response) => response,
+            Err(message) => {
+                errors.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: app.span.line,
+                    column: app.span.column,
+                    message,
+                });
+                return None;
+            }
+        };
+        adapter_cache.insert(cache_key, response.clone());
+        response
+    };
+    apply_adapter_diagnostics(
+        &response,
+        module_path,
+        app.span,
+        &export.exposed_name.join("."),
+        export.definition.diagnostic_namespace.as_deref(),
+        policy,
+        warnings,
+        errors,
+    );
+    Some(ExecutedTransform {
+        response,
+        generated_by: arcana_hir::HirGeneratedByForeword {
+            applied_name: app.path.join("."),
+            resolved_name: export.exposed_name.join("."),
+            provider_package_id: export.provider_package_id.clone(),
+            owner_kind: target_kind.to_string(),
+            owner_path: target_path.to_string(),
+            retention: export.definition.retention,
+            args: app.args.clone(),
+        },
+    })
+}
+
+fn maybe_execute_transform_app(
+    workspace: &HirWorkspaceSummary,
+    package: &HirWorkspacePackage,
+    module_path: &Path,
+    module_id: &str,
+    registry: &ForewordRegistry,
+    executed: &mut BTreeSet<ExecutedTransformKey>,
+    adapter_cache: &mut BTreeMap<String, ForewordAdapterResponse>,
+    app: &arcana_hir::HirForewordApp,
+    target_kind: &str,
+    target_path: &str,
+    target: AdapterTargetSnapshot,
+    policy: &LintPolicy,
+    warnings: &mut Vec<CheckWarning>,
+    errors: &mut Vec<Diagnostic>,
+) -> Option<ExecutedTransform> {
+    let export = resolve_user_foreword_export(package, app, registry)?;
+    if export.definition.tier != arcana_hir::HirForewordTier::Executable
+        || export.definition.action != arcana_hir::HirForewordAction::Transform
+    {
+        return None;
+    }
+    let key = ExecutedTransformKey {
+        package_id: package.package_id.clone(),
+        module_id: module_id.to_string(),
+        target_kind: target_kind.to_string(),
+        target_path: target_path.to_string(),
+        line: app.span.line,
+        column: app.span.column,
+        qualified_name: export.exposed_name.join("."),
+        args: render_foreword_args(app),
+    };
+    if !executed.insert(key) {
+        return None;
+    }
+    execute_executable_foreword_app(
+        workspace,
+        package,
+        module_path,
+        module_id,
+        registry,
+        adapter_cache,
+        app,
+        export,
+        target_kind,
+        target_path,
+        target,
+        policy,
+        warnings,
+        errors,
+    )
+}
+
+fn maybe_execute_metadata_app(
+    workspace: &HirWorkspaceSummary,
+    package: &HirWorkspacePackage,
+    module_path: &Path,
+    module_id: &str,
+    registry: &ForewordRegistry,
+    adapter_cache: &mut BTreeMap<String, ForewordAdapterResponse>,
+    app: &arcana_hir::HirForewordApp,
+    target_kind: &str,
+    target_path: &str,
+    target: AdapterTargetSnapshot,
+    policy: &LintPolicy,
+    warnings: &mut Vec<CheckWarning>,
+    errors: &mut Vec<Diagnostic>,
+) -> Option<ExecutedTransform> {
+    let export = resolve_user_foreword_export(package, app, registry)?;
+    if export.definition.tier != arcana_hir::HirForewordTier::Executable
+        || export.definition.action != arcana_hir::HirForewordAction::Metadata
+    {
+        return None;
+    }
+    execute_executable_foreword_app(
+        workspace,
+        package,
+        module_path,
+        module_id,
+        registry,
+        adapter_cache,
+        app,
+        export,
+        target_kind,
+        target_path,
+        target,
+        policy,
+        warnings,
+        errors,
+    )
+}
+
+fn build_generated_symbol_name_key(
+    generated_by: &arcana_hir::HirGeneratedByForeword,
+    symbol: &HirSymbol,
+) -> String {
+    hash_json_hex(&(
+        &generated_by.applied_name,
+        &generated_by.resolved_name,
+        &generated_by.provider_package_id,
+        &generated_by.owner_kind,
+        &generated_by.owner_path,
+        render_hir_foreword_args(&generated_by.args),
+        symbol.kind.as_str(),
+        &symbol.name,
+        render_symbol_signature(symbol),
+    ))
+}
+
+fn parse_appended_symbols(
+    module_id: &str,
+    snippets: &[String],
+    generated_by: &arcana_hir::HirGeneratedByForeword,
+) -> Result<Vec<HirSymbol>, String> {
+    let mut items = snippets
+        .iter()
+        .map(|snippet| {
+            let mut symbol = parse_adapter_symbol_snippet(module_id, snippet)?;
+            symbol.generated_by = Some(generated_by.clone());
+            symbol.generated_name_key =
+                Some(build_generated_symbol_name_key(generated_by, &symbol));
+            Ok(symbol)
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    items.sort_by(|left, right| {
+        left.generated_name_key
+            .cmp(&right.generated_name_key)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    Ok(items)
+}
+
+fn apply_symbol_transform_response(
+    module_id: &str,
+    module_path: &Path,
+    app: &arcana_hir::HirForewordApp,
+    owner_label: &str,
+    target_kind: &str,
+    target_path: &str,
+    owner_public: bool,
+    symbol: &mut HirSymbol,
+    executed: ExecutedTransform,
+    appended_symbols: &mut Vec<HirSymbol>,
+    _appended_impls: &mut Vec<HirImplDecl>,
+    emitted_metadata: &mut Vec<arcana_hir::HirEmittedForewordMetadata>,
+    registration_rows: &mut Vec<arcana_hir::HirForewordRegistrationRow>,
+    changed: &mut bool,
+    errors: &mut Vec<Diagnostic>,
+) {
+    let ExecutedTransform {
+        response,
+        generated_by,
+    } = executed;
+    let allow_adjacent_symbol_siblings = matches!(
+        target_kind,
+        "fn" | "record"
+            | "obj"
+            | "owner"
+            | "enum"
+            | "opaque_type"
+            | "trait"
+            | "behavior"
+            | "system"
+            | "const"
+    );
+    if let Some(replacement) = response.replace_owner {
+        match parse_adapter_symbol_snippet(module_id, &replacement) {
+            Ok(mut parsed) if parsed.name == symbol.name && parsed.kind == symbol.kind => {
+                parsed.generated_by = symbol.generated_by.clone();
+                parsed.generated_name_key = symbol.generated_name_key.clone();
+                *symbol = parsed;
+                *changed = true;
+            }
+            Ok(parsed) => errors.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: app.span.line,
+                column: app.span.column,
+                message: format!(
+                    "{owner_label} foreword adapter replacement for `{}` must keep owner `{}` with kind `{}` (got `{}` `{}`)",
+                    target_path,
+                    symbol.name,
+                    symbol.kind.as_str(),
+                    parsed.kind.as_str(),
+                    parsed.name
+                ),
+            }),
+            Err(message) => errors.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: app.span.line,
+                column: app.span.column,
+                message,
+            }),
+        }
+    }
+    if response.replace_directive.is_some() {
+        errors.push(Diagnostic {
+            path: module_path.to_path_buf(),
+            line: app.span.line,
+            column: app.span.column,
+            message: "symbol foreword adapters cannot replace directives".to_string(),
+        });
+    }
+    if !response.append_symbols.is_empty() && !allow_adjacent_symbol_siblings {
+        errors.push(Diagnostic {
+            path: module_path.to_path_buf(),
+            line: app.span.line,
+            column: app.span.column,
+            message: format!(
+                "{owner_label} foreword adapters may only append sibling declarations for top-level declaration targets"
+            ),
+        });
+    } else {
+        match parse_appended_symbols(module_id, &response.append_symbols, &generated_by) {
+            Ok(mut items) => {
+                if !items.is_empty() {
+                    *changed = true;
+                }
+                appended_symbols.append(&mut items);
+            }
+            Err(message) => errors.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: app.span.line,
+                column: app.span.column,
+                message,
+            }),
+        }
+    }
+    if !response.append_impls.is_empty() {
+        errors.push(Diagnostic {
+            path: module_path.to_path_buf(),
+            line: app.span.line,
+            column: app.span.column,
+            message:
+                "symbol foreword adapters cannot append impl blocks because sibling emission is limited to adjacent top-level declarations"
+                    .to_string(),
+        });
+    }
+    emitted_metadata.extend(collect_emitted_metadata(
+        module_path,
+        app,
+        owner_public,
+        &generated_by,
+        &response.emitted_metadata,
+        errors,
+    ));
+    registration_rows.extend(collect_registration_rows(
+        module_path,
+        app,
+        owner_public,
+        &generated_by,
+        &response.registration_rows,
+        errors,
+    ));
+}
+
+fn apply_directive_transform_response(
+    module_id: &str,
+    module_path: &Path,
+    app: &arcana_hir::HirForewordApp,
+    target_path: &str,
+    owner_public: bool,
+    directive: &mut arcana_hir::HirDirective,
+    executed: ExecutedTransform,
+    _appended_symbols: &mut Vec<HirSymbol>,
+    _appended_impls: &mut Vec<HirImplDecl>,
+    emitted_metadata: &mut Vec<arcana_hir::HirEmittedForewordMetadata>,
+    registration_rows: &mut Vec<arcana_hir::HirForewordRegistrationRow>,
+    changed: &mut bool,
+    errors: &mut Vec<Diagnostic>,
+) {
+    let ExecutedTransform {
+        response,
+        generated_by,
+    } = executed;
+    if let Some(replacement) = response.replace_directive {
+        match parse_adapter_directive_snippet(module_id, &replacement) {
+            Ok(parsed) if parsed.kind == directive.kind => {
+                *directive = parsed;
+                *changed = true;
+            }
+            Ok(parsed) => errors.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: app.span.line,
+                column: app.span.column,
+                message: format!(
+                    "directive foreword adapter replacement for `{}` must keep directive kind `{}` (got `{}`)",
+                    target_path,
+                    directive.kind.as_str(),
+                    parsed.kind.as_str()
+                ),
+            }),
+            Err(message) => errors.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: app.span.line,
+                column: app.span.column,
+                message,
+            }),
+        }
+    }
+    if response.replace_owner.is_some() {
+        errors.push(Diagnostic {
+            path: module_path.to_path_buf(),
+            line: app.span.line,
+            column: app.span.column,
+            message: "directive foreword adapters cannot replace symbols".to_string(),
+        });
+    }
+    if !response.append_symbols.is_empty() {
+        errors.push(Diagnostic {
+            path: module_path.to_path_buf(),
+            line: app.span.line,
+            column: app.span.column,
+            message:
+                "directive foreword adapters cannot append sibling declarations because import/use/reexport ordering is preserved separately from declaration lists"
+                    .to_string(),
+        });
+    }
+    if !response.append_impls.is_empty() {
+        errors.push(Diagnostic {
+            path: module_path.to_path_buf(),
+            line: app.span.line,
+            column: app.span.column,
+            message:
+                "directive foreword adapters cannot append impl blocks because sibling emission is limited to adjacent declaration slots"
+                    .to_string(),
+        });
+    }
+    emitted_metadata.extend(collect_emitted_metadata(
+        module_path,
+        app,
+        owner_public,
+        &generated_by,
+        &response.emitted_metadata,
+        errors,
+    ));
+    registration_rows.extend(collect_registration_rows(
+        module_path,
+        app,
+        owner_public,
+        &generated_by,
+        &response.registration_rows,
+        errors,
+    ));
+}
+
+fn apply_metadata_response(
+    module_path: &Path,
+    app: &arcana_hir::HirForewordApp,
+    owner_public: bool,
+    executed: ExecutedTransform,
+    emitted_metadata: &mut Vec<arcana_hir::HirEmittedForewordMetadata>,
+    registration_rows: &mut Vec<arcana_hir::HirForewordRegistrationRow>,
+    errors: &mut Vec<Diagnostic>,
+) {
+    let ExecutedTransform {
+        response,
+        generated_by,
+    } = executed;
+    if response.replace_owner.is_some() {
+        errors.push(Diagnostic {
+            path: module_path.to_path_buf(),
+            line: app.span.line,
+            column: app.span.column,
+            message: "metadata foreword adapters cannot replace symbols".to_string(),
+        });
+    }
+    if response.replace_directive.is_some() {
+        errors.push(Diagnostic {
+            path: module_path.to_path_buf(),
+            line: app.span.line,
+            column: app.span.column,
+            message: "metadata foreword adapters cannot replace directives".to_string(),
+        });
+    }
+    if !response.append_symbols.is_empty() {
+        errors.push(Diagnostic {
+            path: module_path.to_path_buf(),
+            line: app.span.line,
+            column: app.span.column,
+            message: "metadata foreword adapters cannot append symbols".to_string(),
+        });
+    }
+    if !response.append_impls.is_empty() {
+        errors.push(Diagnostic {
+            path: module_path.to_path_buf(),
+            line: app.span.line,
+            column: app.span.column,
+            message: "metadata foreword adapters cannot append impl blocks".to_string(),
+        });
+    }
+    emitted_metadata.extend(collect_emitted_metadata(
+        module_path,
+        app,
+        owner_public,
+        &generated_by,
+        &response.emitted_metadata,
+        errors,
+    ));
+    registration_rows.extend(collect_registration_rows(
+        module_path,
+        app,
+        owner_public,
+        &generated_by,
+        &response.registration_rows,
+        errors,
+    ));
+}
+
+fn transform_symbol(
+    workspace: &HirWorkspaceSummary,
+    package: &HirWorkspacePackage,
+    module_path: &Path,
+    module_id: &str,
+    registry: &ForewordRegistry,
+    executed: &mut BTreeSet<ExecutedTransformKey>,
+    adapter_cache: &mut BTreeMap<String, ForewordAdapterResponse>,
+    mut symbol: HirSymbol,
+    target_kind: &str,
+    container_kind: Option<&str>,
+    container_name: Option<&str>,
+    public: bool,
+    inherited_lint_layers: &[LintPolicyLayer],
+    emitted_metadata: &mut Vec<arcana_hir::HirEmittedForewordMetadata>,
+    registration_rows: &mut Vec<arcana_hir::HirForewordRegistrationRow>,
+    warnings: &mut Vec<CheckWarning>,
+    errors: &mut Vec<Diagnostic>,
+) -> (HirSymbol, Vec<HirSymbol>, Vec<HirImplDecl>, bool) {
+    let mut changed = false;
+    let mut appended_symbols = Vec::new();
+    let mut appended_impls = Vec::new();
+    let target_path = target_path_for_symbol(module_id, &symbol.name, container_name);
+    let symbol_lint_layer = lint_policy_layer_from_forewords(&symbol.forewords);
+
+    for app in symbol.forewords.clone() {
+        let target = AdapterTargetSnapshot {
+            kind: target_kind.to_string(),
+            path: target_path.clone(),
+            public,
+            owner_kind: "symbol".to_string(),
+            owner_symbol: Some(build_adapter_symbol_snapshot(&symbol)),
+            owner_directive: None,
+            selected_field: None,
+            selected_param: None,
+            selected_method_name: None,
+            container_kind: container_kind.map(ToString::to_string),
+            container_name: container_name.map(ToString::to_string),
+        };
+        if let Some(response) = maybe_execute_transform_app(
+            workspace,
+            package,
+            module_path,
+            module_id,
+            registry,
+            executed,
+            adapter_cache,
+            &app,
+            target_kind,
+            &target_path,
+            target,
+            &lint_policy_with_inherited([symbol_lint_layer.clone()], inherited_lint_layers),
+            warnings,
+            errors,
+        ) {
+            apply_symbol_transform_response(
+                module_id,
+                module_path,
+                &app,
+                "symbol",
+                target_kind,
+                &target_path,
+                public,
+                &mut symbol,
+                response,
+                &mut appended_symbols,
+                &mut appended_impls,
+                emitted_metadata,
+                registration_rows,
+                &mut changed,
+                errors,
+            );
+        }
+    }
+
+    let param_names = symbol
+        .params
+        .iter()
+        .map(|param| param.name.clone())
+        .collect::<Vec<_>>();
+    for param_name in param_names {
+        let Some(current_param) = symbol
+            .params
+            .iter()
+            .find(|param| param.name == param_name)
+            .cloned()
+        else {
+            continue;
+        };
+        let param_target_path =
+            target_path_for_param(module_id, &symbol.name, &param_name, container_name);
+        for app in current_param.forewords {
+            let target = AdapterTargetSnapshot {
+                kind: "param".to_string(),
+                path: param_target_path.clone(),
+                public,
+                owner_kind: "symbol".to_string(),
+                owner_symbol: Some(build_adapter_symbol_snapshot(&symbol)),
+                owner_directive: None,
+                selected_field: None,
+                selected_param: symbol
+                    .params
+                    .iter()
+                    .find(|param| param.name == param_name)
+                    .map(build_adapter_param_snapshot),
+                selected_method_name: None,
+                container_kind: container_kind.map(ToString::to_string),
+                container_name: container_name.map(ToString::to_string),
+            };
+            if let Some(response) = maybe_execute_transform_app(
+                workspace,
+                package,
+                module_path,
+                module_id,
+                registry,
+                executed,
+                adapter_cache,
+                &app,
+                "param",
+                &param_target_path,
+                target,
+                &lint_policy_with_inherited(
+                    [
+                        lint_policy_layer_from_forewords(
+                            &symbol
+                                .params
+                                .iter()
+                                .find(|param| param.name == param_name)
+                                .map(|param| param.forewords.clone())
+                                .unwrap_or_default(),
+                        ),
+                        symbol_lint_layer.clone(),
+                    ],
+                    inherited_lint_layers,
+                ),
+                warnings,
+                errors,
+            ) {
+                apply_symbol_transform_response(
+                    module_id,
+                    module_path,
+                    &app,
+                    "param",
+                    "param",
+                    &param_target_path,
+                    public,
+                    &mut symbol,
+                    response,
+                    &mut appended_symbols,
+                    &mut appended_impls,
+                    emitted_metadata,
+                    registration_rows,
+                    &mut changed,
+                    errors,
+                );
+            }
+        }
+    }
+
+    let field_names = match &symbol.body {
+        HirSymbolBody::Record { fields } | HirSymbolBody::Object { fields, .. } => fields
+            .iter()
+            .map(|field| field.name.clone())
+            .collect::<Vec<_>>(),
+        _ => Vec::new(),
+    };
+    for field_name in field_names {
+        let Some(current_field) = (match &symbol.body {
+            HirSymbolBody::Record { fields } | HirSymbolBody::Object { fields, .. } => fields
+                .iter()
+                .find(|field| field.name == field_name)
+                .cloned(),
+            _ => None,
+        }) else {
+            continue;
+        };
+        let field_target_path =
+            target_path_for_field(module_id, &symbol.name, &field_name, container_name);
+        for app in current_field.forewords {
+            let target = AdapterTargetSnapshot {
+                kind: "field".to_string(),
+                path: field_target_path.clone(),
+                public,
+                owner_kind: "symbol".to_string(),
+                owner_symbol: Some(build_adapter_symbol_snapshot(&symbol)),
+                owner_directive: None,
+                selected_field: match &symbol.body {
+                    HirSymbolBody::Record { fields } | HirSymbolBody::Object { fields, .. } => {
+                        fields
+                            .iter()
+                            .find(|field| field.name == field_name)
+                            .map(build_adapter_field_snapshot)
+                    }
+                    _ => None,
+                },
+                selected_param: None,
+                selected_method_name: None,
+                container_kind: container_kind.map(ToString::to_string),
+                container_name: container_name.map(ToString::to_string),
+            };
+            if let Some(response) = maybe_execute_transform_app(
+                workspace,
+                package,
+                module_path,
+                module_id,
+                registry,
+                executed,
+                adapter_cache,
+                &app,
+                "field",
+                &field_target_path,
+                target,
+                &lint_policy_with_inherited(
+                    [
+                        lint_policy_layer_from_forewords(
+                            &(match &symbol.body {
+                                HirSymbolBody::Record { fields }
+                                | HirSymbolBody::Object { fields, .. } => fields
+                                    .iter()
+                                    .find(|field| field.name == field_name)
+                                    .map(|field| field.forewords.clone())
+                                    .unwrap_or_default(),
+                                _ => Vec::new(),
+                            }),
+                        ),
+                        symbol_lint_layer.clone(),
+                    ],
+                    inherited_lint_layers,
+                ),
+                warnings,
+                errors,
+            ) {
+                apply_symbol_transform_response(
+                    module_id,
+                    module_path,
+                    &app,
+                    "field",
+                    "field",
+                    &field_target_path,
+                    public,
+                    &mut symbol,
+                    response,
+                    &mut appended_symbols,
+                    &mut appended_impls,
+                    emitted_metadata,
+                    registration_rows,
+                    &mut changed,
+                    errors,
+                );
+            }
+        }
+    }
+
+    match &mut symbol.body {
+        HirSymbolBody::Object { methods, .. } => {
+            let old_methods = std::mem::take(methods);
+            let mut next_methods = Vec::with_capacity(old_methods.len());
+            let child_inherited_layers = std::iter::once(symbol_lint_layer.clone())
+                .chain(inherited_lint_layers.iter().cloned())
+                .collect::<Vec<_>>();
+            for method in old_methods {
+                let (method, mut extra_symbols, mut extra_impls, method_changed) = transform_symbol(
+                    workspace,
+                    package,
+                    module_path,
+                    module_id,
+                    registry,
+                    executed,
+                    adapter_cache,
+                    method,
+                    "impl_method",
+                    Some("object"),
+                    Some(&symbol.name),
+                    public,
+                    &child_inherited_layers,
+                    emitted_metadata,
+                    registration_rows,
+                    warnings,
+                    errors,
+                );
+                changed |= method_changed;
+                next_methods.push(method);
+                appended_symbols.append(&mut extra_symbols);
+                appended_impls.append(&mut extra_impls);
+            }
+            *methods = next_methods;
+        }
+        HirSymbolBody::Trait { methods, .. } => {
+            let old_methods = std::mem::take(methods);
+            let mut next_methods = Vec::with_capacity(old_methods.len());
+            let child_inherited_layers = std::iter::once(symbol_lint_layer.clone())
+                .chain(inherited_lint_layers.iter().cloned())
+                .collect::<Vec<_>>();
+            for method in old_methods {
+                let (method, mut extra_symbols, mut extra_impls, method_changed) = transform_symbol(
+                    workspace,
+                    package,
+                    module_path,
+                    module_id,
+                    registry,
+                    executed,
+                    adapter_cache,
+                    method,
+                    "trait_method",
+                    Some("trait"),
+                    Some(&symbol.name),
+                    public,
+                    &child_inherited_layers,
+                    emitted_metadata,
+                    registration_rows,
+                    warnings,
+                    errors,
+                );
+                changed |= method_changed;
+                next_methods.push(method);
+                appended_symbols.append(&mut extra_symbols);
+                appended_impls.append(&mut extra_impls);
+            }
+            *methods = next_methods;
+        }
+        _ => {}
+    }
+
+    (symbol, appended_symbols, appended_impls, changed)
+}
+
+fn transform_impl(
+    workspace: &HirWorkspaceSummary,
+    package: &HirWorkspacePackage,
+    module_path: &Path,
+    module_id: &str,
+    registry: &ForewordRegistry,
+    executed: &mut BTreeSet<ExecutedTransformKey>,
+    adapter_cache: &mut BTreeMap<String, ForewordAdapterResponse>,
+    mut impl_decl: HirImplDecl,
+    emitted_metadata: &mut Vec<arcana_hir::HirEmittedForewordMetadata>,
+    registration_rows: &mut Vec<arcana_hir::HirForewordRegistrationRow>,
+    warnings: &mut Vec<CheckWarning>,
+    errors: &mut Vec<Diagnostic>,
+) -> (HirImplDecl, Vec<HirSymbol>, Vec<HirImplDecl>, bool) {
+    let mut changed = false;
+    let mut appended_symbols = Vec::new();
+    let mut appended_impls = Vec::new();
+    let container_name = impl_container_name(&impl_decl);
+    let old_methods = std::mem::take(&mut impl_decl.methods);
+    let mut next_methods = Vec::with_capacity(old_methods.len());
+    for method in old_methods {
+        let (method, mut extra_symbols, mut extra_impls, method_changed) = transform_symbol(
+            workspace,
+            package,
+            module_path,
+            module_id,
+            registry,
+            executed,
+            adapter_cache,
+            method,
+            "impl_method",
+            Some("impl"),
+            Some(&container_name),
+            false,
+            &[],
+            emitted_metadata,
+            registration_rows,
+            warnings,
+            errors,
+        );
+        changed |= method_changed;
+        next_methods.push(method);
+        appended_symbols.append(&mut extra_symbols);
+        appended_impls.append(&mut extra_impls);
+    }
+    impl_decl.methods = next_methods;
+    (impl_decl, appended_symbols, appended_impls, changed)
+}
+
+fn transform_module(
+    workspace: &HirWorkspaceSummary,
+    package: &HirWorkspacePackage,
+    registry: &ForewordRegistry,
+    executed: &mut BTreeSet<ExecutedTransformKey>,
+    adapter_cache: &mut BTreeMap<String, ForewordAdapterResponse>,
+    mut module: HirModuleSummary,
+    warnings: &mut Vec<CheckWarning>,
+    errors: &mut Vec<Diagnostic>,
+) -> (HirModuleSummary, bool) {
+    let module_path = package
+        .module_path(&module.module_id)
+        .cloned()
+        .unwrap_or_else(|| package.root_dir.join("src").join("unknown.arc"));
+    let mut changed = false;
+    let mut pending_symbols = Vec::new();
+    let mut pending_impls = Vec::new();
+    let mut pending_emitted_metadata = std::mem::take(&mut module.emitted_foreword_metadata);
+    let mut pending_registration_rows = std::mem::take(&mut module.foreword_registrations);
+
+    let old_directives = std::mem::take(&mut module.directives);
+    let mut next_directives = Vec::with_capacity(old_directives.len());
+    for mut directive in old_directives {
+        let target_kind = directive.kind.as_str().to_string();
+        let target_public = directive.kind == arcana_hir::HirDirectiveKind::Reexport;
+        let target_path = format!("{}:{}", module.module_id, directive.path.join("."));
+        for app in directive.forewords.clone() {
+            let target = AdapterTargetSnapshot {
+                kind: target_kind.clone(),
+                path: target_path.clone(),
+                public: target_public,
+                owner_kind: "directive".to_string(),
+                owner_symbol: None,
+                owner_directive: Some(build_adapter_directive_snapshot(&directive)),
+                selected_field: None,
+                selected_param: None,
+                selected_method_name: None,
+                container_kind: None,
+                container_name: None,
+            };
+            if let Some(response) = maybe_execute_transform_app(
+                workspace,
+                package,
+                &module_path,
+                &module.module_id,
+                registry,
+                executed,
+                adapter_cache,
+                &app,
+                &target_kind,
+                &target_path,
+                target,
+                &lint_policy_with_inherited(
+                    [lint_policy_layer_from_forewords(&directive.forewords)],
+                    &[],
+                ),
+                warnings,
+                errors,
+            ) {
+                apply_directive_transform_response(
+                    &module.module_id,
+                    &module_path,
+                    &app,
+                    &target_path,
+                    target_public,
+                    &mut directive,
+                    response,
+                    &mut pending_symbols,
+                    &mut pending_impls,
+                    &mut pending_emitted_metadata,
+                    &mut pending_registration_rows,
+                    &mut changed,
+                    errors,
+                );
+            }
+        }
+        next_directives.push(directive);
+    }
+    module.directives = next_directives;
+
+    let old_symbols = std::mem::take(&mut module.symbols);
+    for symbol in old_symbols {
+        let public = symbol.exported;
+        let target_kind = symbol.kind.as_str().to_string();
+        let (symbol, mut extra_symbols, mut extra_impls, symbol_changed) = transform_symbol(
+            workspace,
+            package,
+            &module_path,
+            &module.module_id,
+            registry,
+            executed,
+            adapter_cache,
+            symbol,
+            &target_kind,
+            None,
+            None,
+            public,
+            &[],
+            &mut pending_emitted_metadata,
+            &mut pending_registration_rows,
+            warnings,
+            errors,
+        );
+        changed |= symbol_changed;
+        pending_symbols.push(symbol);
+        pending_symbols.append(&mut extra_symbols);
+        pending_impls.append(&mut extra_impls);
+    }
+    module.symbols = pending_symbols;
+
+    let old_impls = std::mem::take(&mut module.impls);
+    let mut rebuilt_impls = Vec::new();
+    for impl_decl in old_impls {
+        let (impl_decl, mut extra_symbols, mut extra_impls, impl_changed) = transform_impl(
+            workspace,
+            package,
+            &module_path,
+            &module.module_id,
+            registry,
+            executed,
+            adapter_cache,
+            impl_decl,
+            &mut pending_emitted_metadata,
+            &mut pending_registration_rows,
+            warnings,
+            errors,
+        );
+        changed |= impl_changed;
+        rebuilt_impls.push(impl_decl);
+        module.symbols.append(&mut extra_symbols);
+        rebuilt_impls.append(&mut extra_impls);
+    }
+    rebuilt_impls.append(&mut pending_impls);
+    module.impls = rebuilt_impls;
+    module.emitted_foreword_metadata = pending_emitted_metadata;
+    module.foreword_registrations = pending_registration_rows;
+
+    (module, changed)
+}
+
+fn apply_executable_foreword_transforms(
+    mut workspace: HirWorkspaceSummary,
+) -> Result<(HirWorkspaceSummary, Vec<CheckWarning>), String> {
+    let mut executed = BTreeSet::<ExecutedTransformKey>::new();
+    let mut adapter_cache = BTreeMap::<String, ForewordAdapterResponse>::new();
+    let mut warnings = Vec::new();
+    loop {
+        let lookup_workspace = workspace.clone();
+        let registry = build_foreword_registry(&lookup_workspace);
+        if !registry.errors.is_empty() {
+            return Err(render_diagnostics(registry.errors));
+        }
+        let mut errors = Vec::new();
+        let mut pass_changed = false;
+        for (package_id, package) in &mut workspace.packages {
+            let Some(lookup_package) = lookup_workspace.package_by_id(package_id) else {
+                continue;
+            };
+            let old_modules = std::mem::take(&mut package.summary.modules);
+            let mut new_modules = Vec::with_capacity(old_modules.len());
+            for module in old_modules {
+                let (module, changed) = transform_module(
+                    &lookup_workspace,
+                    lookup_package,
+                    &registry,
+                    &mut executed,
+                    &mut adapter_cache,
+                    module,
+                    &mut warnings,
+                    &mut errors,
+                );
+                pass_changed |= changed;
+                new_modules.push(module);
+            }
+            package.summary.modules = new_modules;
+        }
+        if !errors.is_empty() {
+            return Err(render_diagnostics(errors));
+        }
+        if !pass_changed {
+            break;
+        }
+    }
+    Ok((workspace, warnings))
+}
+
+fn collect_symbol_executable_metadata(
+    workspace: &HirWorkspaceSummary,
+    package: &HirWorkspacePackage,
+    module_path: &Path,
+    module_id: &str,
+    registry: &ForewordRegistry,
+    adapter_cache: &mut BTreeMap<String, ForewordAdapterResponse>,
+    symbol: &HirSymbol,
+    target_kind: &str,
+    container_kind: Option<&str>,
+    container_name: Option<&str>,
+    public: bool,
+    inherited_lint_layers: &[LintPolicyLayer],
+    emitted_metadata: &mut Vec<arcana_hir::HirEmittedForewordMetadata>,
+    registration_rows: &mut Vec<arcana_hir::HirForewordRegistrationRow>,
+    warnings: &mut Vec<CheckWarning>,
+    errors: &mut Vec<Diagnostic>,
+) {
+    let target_path = target_path_for_symbol(module_id, &symbol.name, container_name);
+    let symbol_lint_layer = lint_policy_layer_from_forewords(&symbol.forewords);
+
+    for app in &symbol.forewords {
+        let target = AdapterTargetSnapshot {
+            kind: target_kind.to_string(),
+            path: target_path.clone(),
+            public,
+            owner_kind: "symbol".to_string(),
+            owner_symbol: Some(build_adapter_symbol_snapshot(symbol)),
+            owner_directive: None,
+            selected_field: None,
+            selected_param: None,
+            selected_method_name: None,
+            container_kind: container_kind.map(ToString::to_string),
+            container_name: container_name.map(ToString::to_string),
+        };
+        if let Some(response) = maybe_execute_metadata_app(
+            workspace,
+            package,
+            module_path,
+            module_id,
+            registry,
+            adapter_cache,
+            app,
+            target_kind,
+            &target_path,
+            target,
+            &lint_policy_with_inherited([symbol_lint_layer.clone()], inherited_lint_layers),
+            warnings,
+            errors,
+        ) {
+            apply_metadata_response(
+                module_path,
+                app,
+                public,
+                response,
+                emitted_metadata,
+                registration_rows,
+                errors,
+            );
+        }
+    }
+
+    for param in &symbol.params {
+        let param_target_path =
+            target_path_for_param(module_id, &symbol.name, &param.name, container_name);
+        for app in &param.forewords {
+            let target = AdapterTargetSnapshot {
+                kind: "param".to_string(),
+                path: param_target_path.clone(),
+                public,
+                owner_kind: "symbol".to_string(),
+                owner_symbol: Some(build_adapter_symbol_snapshot(symbol)),
+                owner_directive: None,
+                selected_field: None,
+                selected_param: Some(build_adapter_param_snapshot(param)),
+                selected_method_name: None,
+                container_kind: container_kind.map(ToString::to_string),
+                container_name: container_name.map(ToString::to_string),
+            };
+            if let Some(response) = maybe_execute_metadata_app(
+                workspace,
+                package,
+                module_path,
+                module_id,
+                registry,
+                adapter_cache,
+                app,
+                "param",
+                &param_target_path,
+                target,
+                &lint_policy_with_inherited(
+                    [
+                        lint_policy_layer_from_forewords(&param.forewords),
+                        symbol_lint_layer.clone(),
+                    ],
+                    inherited_lint_layers,
+                ),
+                warnings,
+                errors,
+            ) {
+                apply_metadata_response(
+                    module_path,
+                    app,
+                    public,
+                    response,
+                    emitted_metadata,
+                    registration_rows,
+                    errors,
+                );
+            }
+        }
+    }
+
+    match &symbol.body {
+        HirSymbolBody::Record { fields } | HirSymbolBody::Object { fields, .. } => {
+            for field in fields {
+                let field_target_path =
+                    target_path_for_field(module_id, &symbol.name, &field.name, container_name);
+                for app in &field.forewords {
+                    let target = AdapterTargetSnapshot {
+                        kind: "field".to_string(),
+                        path: field_target_path.clone(),
+                        public,
+                        owner_kind: "symbol".to_string(),
+                        owner_symbol: Some(build_adapter_symbol_snapshot(symbol)),
+                        owner_directive: None,
+                        selected_field: Some(build_adapter_field_snapshot(field)),
+                        selected_param: None,
+                        selected_method_name: None,
+                        container_kind: container_kind.map(ToString::to_string),
+                        container_name: container_name.map(ToString::to_string),
+                    };
+                    if let Some(response) = maybe_execute_metadata_app(
+                        workspace,
+                        package,
+                        module_path,
+                        module_id,
+                        registry,
+                        adapter_cache,
+                        app,
+                        "field",
+                        &field_target_path,
+                        target,
+                        &lint_policy_with_inherited(
+                            [
+                                lint_policy_layer_from_forewords(&field.forewords),
+                                symbol_lint_layer.clone(),
+                            ],
+                            inherited_lint_layers,
+                        ),
+                        warnings,
+                        errors,
+                    ) {
+                        apply_metadata_response(
+                            module_path,
+                            app,
+                            public,
+                            response,
+                            emitted_metadata,
+                            registration_rows,
+                            errors,
+                        );
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+
+    let child_inherited_layers = std::iter::once(symbol_lint_layer)
+        .chain(inherited_lint_layers.iter().cloned())
+        .collect::<Vec<_>>();
+    match &symbol.body {
+        HirSymbolBody::Object { methods, .. } => {
+            for method in methods {
+                collect_symbol_executable_metadata(
+                    workspace,
+                    package,
+                    module_path,
+                    module_id,
+                    registry,
+                    adapter_cache,
+                    method,
+                    "impl_method",
+                    Some("object"),
+                    Some(&symbol.name),
+                    public,
+                    &child_inherited_layers,
+                    emitted_metadata,
+                    registration_rows,
+                    warnings,
+                    errors,
+                );
+            }
+        }
+        HirSymbolBody::Trait { methods, .. } => {
+            for method in methods {
+                collect_symbol_executable_metadata(
+                    workspace,
+                    package,
+                    module_path,
+                    module_id,
+                    registry,
+                    adapter_cache,
+                    method,
+                    "trait_method",
+                    Some("trait"),
+                    Some(&symbol.name),
+                    public,
+                    &child_inherited_layers,
+                    emitted_metadata,
+                    registration_rows,
+                    warnings,
+                    errors,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_impl_executable_metadata(
+    workspace: &HirWorkspaceSummary,
+    package: &HirWorkspacePackage,
+    module_path: &Path,
+    module_id: &str,
+    registry: &ForewordRegistry,
+    adapter_cache: &mut BTreeMap<String, ForewordAdapterResponse>,
+    impl_decl: &HirImplDecl,
+    emitted_metadata: &mut Vec<arcana_hir::HirEmittedForewordMetadata>,
+    registration_rows: &mut Vec<arcana_hir::HirForewordRegistrationRow>,
+    warnings: &mut Vec<CheckWarning>,
+    errors: &mut Vec<Diagnostic>,
+) {
+    let container_name = impl_container_name(impl_decl);
+    for method in &impl_decl.methods {
+        collect_symbol_executable_metadata(
+            workspace,
+            package,
+            module_path,
+            module_id,
+            registry,
+            adapter_cache,
+            method,
+            "impl_method",
+            Some("impl"),
+            Some(&container_name),
+            false,
+            &[],
+            emitted_metadata,
+            registration_rows,
+            warnings,
+            errors,
+        );
+    }
+}
+
+fn collect_module_executable_metadata(
+    workspace: &HirWorkspaceSummary,
+    package: &HirWorkspacePackage,
+    registry: &ForewordRegistry,
+    adapter_cache: &mut BTreeMap<String, ForewordAdapterResponse>,
+    mut module: HirModuleSummary,
+    warnings: &mut Vec<CheckWarning>,
+    errors: &mut Vec<Diagnostic>,
+) -> HirModuleSummary {
+    let module_path = package
+        .module_path(&module.module_id)
+        .cloned()
+        .unwrap_or_else(|| package.root_dir.join("src").join("unknown.arc"));
+    let mut pending_emitted_metadata = std::mem::take(&mut module.emitted_foreword_metadata);
+    let mut pending_registration_rows = std::mem::take(&mut module.foreword_registrations);
+
+    for directive in &module.directives {
+        let target_kind = directive.kind.as_str().to_string();
+        let target_public = directive.kind == arcana_hir::HirDirectiveKind::Reexport;
+        let target_path = format!("{}:{}", module.module_id, directive.path.join("."));
+        for app in &directive.forewords {
+            let target = AdapterTargetSnapshot {
+                kind: target_kind.clone(),
+                path: target_path.clone(),
+                public: target_public,
+                owner_kind: "directive".to_string(),
+                owner_symbol: None,
+                owner_directive: Some(build_adapter_directive_snapshot(directive)),
+                selected_field: None,
+                selected_param: None,
+                selected_method_name: None,
+                container_kind: None,
+                container_name: None,
+            };
+            if let Some(response) = maybe_execute_metadata_app(
+                workspace,
+                package,
+                &module_path,
+                &module.module_id,
+                registry,
+                adapter_cache,
+                app,
+                &target_kind,
+                &target_path,
+                target,
+                &lint_policy_with_inherited(
+                    [lint_policy_layer_from_forewords(&directive.forewords)],
+                    &[],
+                ),
+                warnings,
+                errors,
+            ) {
+                apply_metadata_response(
+                    &module_path,
+                    app,
+                    target_public,
+                    response,
+                    &mut pending_emitted_metadata,
+                    &mut pending_registration_rows,
+                    errors,
+                );
+            }
+        }
+    }
+
+    for symbol in &module.symbols {
+        collect_symbol_executable_metadata(
+            workspace,
+            package,
+            &module_path,
+            &module.module_id,
+            registry,
+            adapter_cache,
+            symbol,
+            symbol.kind.as_str(),
+            None,
+            None,
+            symbol.exported,
+            &[],
+            &mut pending_emitted_metadata,
+            &mut pending_registration_rows,
+            warnings,
+            errors,
+        );
+    }
+
+    for impl_decl in &module.impls {
+        collect_impl_executable_metadata(
+            workspace,
+            package,
+            &module_path,
+            &module.module_id,
+            registry,
+            adapter_cache,
+            impl_decl,
+            &mut pending_emitted_metadata,
+            &mut pending_registration_rows,
+            warnings,
+            errors,
+        );
+    }
+
+    module.emitted_foreword_metadata = pending_emitted_metadata;
+    module.foreword_registrations = pending_registration_rows;
+    module
+}
+
+fn apply_executable_foreword_metadata(
+    mut workspace: HirWorkspaceSummary,
+) -> Result<(HirWorkspaceSummary, Vec<CheckWarning>), String> {
+    let lookup_workspace = workspace.clone();
+    let registry = build_foreword_registry(&lookup_workspace);
+    if !registry.errors.is_empty() {
+        return Err(render_diagnostics(registry.errors));
+    }
+    let mut adapter_cache = BTreeMap::<String, ForewordAdapterResponse>::new();
+    let mut warnings = Vec::new();
+    let mut errors = Vec::new();
+    for (package_id, package) in &mut workspace.packages {
+        let Some(lookup_package) = lookup_workspace.package_by_id(package_id) else {
+            continue;
+        };
+        let old_modules = std::mem::take(&mut package.summary.modules);
+        let mut new_modules = Vec::with_capacity(old_modules.len());
+        for module in old_modules {
+            let module = collect_module_executable_metadata(
+                &lookup_workspace,
+                lookup_package,
+                &registry,
+                &mut adapter_cache,
+                module,
+                &mut warnings,
+                &mut errors,
+            );
+            new_modules.push(module);
+        }
+        package.summary.modules = new_modules;
+    }
+    if !errors.is_empty() {
+        return Err(render_diagnostics(errors));
+    }
+    Ok((workspace, warnings))
+}
+
+fn deprecated_message(symbol: &HirSymbol) -> Option<String> {
+    let foreword = symbol
+        .forewords
+        .iter()
+        .find(|foreword| foreword.path.len() == 1 && foreword.name == "deprecated")?;
+    foreword.args.first().map(|arg| match &arg.typed_value {
+        arcana_hir::HirForewordArgValue::Str(value) => value.clone(),
+        _ => arg.value.trim().trim_matches('"').to_string(),
+    })
+}
+
+#[derive(Clone, Debug, Default)]
+struct LintPolicyLayer {
+    allow: Vec<String>,
+    deny: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct LintPolicy {
+    layers: Vec<LintPolicyLayer>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum LintMatchSpecificity {
+    Namespace = 0,
+    Exact = 1,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum LintDecision {
+    Allow,
+    Deny,
+}
+
+fn lint_policy_layer_from_forewords(forewords: &[arcana_hir::HirForewordApp]) -> LintPolicyLayer {
+    let mut policy = LintPolicyLayer::default();
+    for foreword in forewords {
+        if foreword.path.len() != 1 || (foreword.name != "allow" && foreword.name != "deny") {
+            continue;
+        }
+        let target = if foreword.name == "allow" {
+            &mut policy.allow
+        } else {
+            &mut policy.deny
+        };
+        target.extend(foreword.args.iter().map(|arg| arg.typed_value.render()));
+    }
+    policy
+}
+
+fn lint_policy_from_layers(layers: Vec<LintPolicyLayer>) -> LintPolicy {
+    LintPolicy { layers }
+}
+
+fn lint_policy_with_inherited<I>(layers: I, inherited: &[LintPolicyLayer]) -> LintPolicy
+where
+    I: IntoIterator<Item = LintPolicyLayer>,
+{
+    let mut merged = layers.into_iter().collect::<Vec<_>>();
+    merged.extend(inherited.iter().cloned());
+    lint_policy_from_layers(merged)
+}
+
+fn lint_match_specificity(pattern: &str, lint_name: &str) -> Option<LintMatchSpecificity> {
+    if pattern == lint_name {
+        Some(LintMatchSpecificity::Exact)
+    } else if lint_name
+        .strip_prefix(pattern)
+        .is_some_and(|tail| tail.starts_with('.'))
+    {
+        Some(LintMatchSpecificity::Namespace)
+    } else {
+        None
+    }
+}
+
+fn lint_decision(policy: &LintPolicy, lint_name: &str) -> Option<LintDecision> {
+    let mut best: Option<(LintMatchSpecificity, std::cmp::Reverse<usize>, LintDecision)> = None;
+    for (layer_index, layer) in policy.layers.iter().enumerate() {
+        for pattern in &layer.allow {
+            if let Some(specificity) = lint_match_specificity(pattern, lint_name) {
+                let candidate = (
+                    specificity,
+                    std::cmp::Reverse(layer_index),
+                    LintDecision::Allow,
+                );
+                if best.is_none_or(|current| candidate > current) {
+                    best = Some(candidate);
+                }
+            }
+        }
+        for pattern in &layer.deny {
+            if let Some(specificity) = lint_match_specificity(pattern, lint_name) {
+                let candidate = (
+                    specificity,
+                    std::cmp::Reverse(layer_index),
+                    LintDecision::Deny,
+                );
+                if best.is_none_or(|current| candidate > current) {
+                    best = Some(candidate);
+                }
+            }
+        }
+    }
+    best.map(|(_, _, decision)| decision)
+}
+
+fn lint_is_allowed(policy: &LintPolicy, lint_name: &str) -> bool {
+    lint_decision(policy, lint_name) == Some(LintDecision::Allow)
+}
+
+fn lint_is_denied(policy: &LintPolicy, lint_name: &str) -> bool {
+    lint_decision(policy, lint_name) == Some(LintDecision::Deny)
+}
+
+fn maybe_emit_basic_foreword_warning(
+    export: &ResolvedForewordExport,
+    module_path: &Path,
+    app: &arcana_hir::HirForewordApp,
+    policy: &LintPolicy,
+    warnings: &mut Vec<CheckWarning>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if export.is_builtin() || export.definition.tier != arcana_hir::HirForewordTier::Basic {
+        return;
+    }
+    let Some(lint_name) = export.definition.diagnostic_namespace.as_deref() else {
+        return;
+    };
+    let message = format!(
+        "basic foreword `#{}` is active on this target",
+        app.path.join(".")
+    );
+    if lint_is_allowed(policy, lint_name) {
+        return;
+    }
+    if lint_is_denied(policy, lint_name) {
+        diagnostics.push(Diagnostic {
+            path: module_path.to_path_buf(),
+            line: app.span.line,
+            column: app.span.column,
+            message,
+        });
+    } else {
+        warnings.push(CheckWarning {
+            path: module_path.to_path_buf(),
+            line: app.span.line,
+            column: app.span.column,
+            message,
+        });
+    }
+}
+
+fn normalize_foreword_conflict_name(
+    package: &HirWorkspacePackage,
+    registry: &ForewordRegistry,
+    path: &[String],
+) -> String {
+    if path.len() < 2 {
+        return path.join(".");
+    }
+    let probe = arcana_hir::HirForewordApp {
+        name: path.last().cloned().unwrap_or_default(),
+        path: path.to_vec(),
+        args: Vec::new(),
+        span: Span { line: 0, column: 0 },
+    };
+    resolve_user_foreword_export(package, &probe, registry)
+        .map(|export| export.exposed_name.join("."))
+        .unwrap_or_else(|| path.join("."))
+}
+
+fn validate_foreword_target_contracts(
+    package: &HirWorkspacePackage,
+    module_path: &Path,
+    apps: &[arcana_hir::HirForewordApp],
+    registry: &ForewordRegistry,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let resolved_apps = apps
+        .iter()
+        .filter_map(|app| {
+            let export = resolve_user_foreword_export(package, app, registry)?;
+            Some((app, export))
+        })
+        .collect::<Vec<_>>();
+
+    let mut seen = BTreeMap::<
+        String,
+        (
+            &arcana_hir::HirForewordDefinition,
+            &arcana_hir::HirForewordApp,
+        ),
+    >::new();
+    for (app, export) in &resolved_apps {
+        let key = export.exposed_name.join(".");
+        if let Some((_first_def, _first_app)) = seen.get(&key) {
+            if !export.definition.repeatable {
+                diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: app.span.line,
+                    column: app.span.column,
+                    message: format!("`#{}` is not repeatable on the same target", key),
+                });
+            }
+        } else {
+            seen.insert(key, (&export.definition, app));
+        }
+    }
+
+    let attached = resolved_apps
+        .iter()
+        .map(|(app, export)| (export.exposed_name.join("."), *app, *export))
+        .collect::<Vec<_>>();
+    let mut emitted = BTreeSet::<(String, String)>::new();
+    for (attached_name, app, export) in &attached {
+        for conflict_path in &export.definition.conflicts {
+            let conflict_name = normalize_foreword_conflict_name(package, registry, conflict_path);
+            if attached
+                .iter()
+                .any(|(other_name, _, _)| other_name == &conflict_name)
+                && emitted.insert((attached_name.clone(), conflict_name.clone()))
+            {
+                diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: app.span.line,
+                    column: app.span.column,
+                    message: format!(
+                        "`#{}` conflicts with `#{}` on the same target",
+                        attached_name, conflict_name
+                    ),
+                });
+            }
+        }
+    }
+}
+
+fn validate_foreword_apps_for_target(
+    package: &HirWorkspacePackage,
+    module_path: &Path,
+    module_id: &str,
+    apps: &[arcana_hir::HirForewordApp],
+    target_kind: &str,
+    target_path: &str,
+    target_public: bool,
+    target_generated_by: Option<&arcana_hir::HirGeneratedByForeword>,
+    registry: &ForewordRegistry,
+    inherited_lint_layers: &[LintPolicyLayer],
+    warnings: &mut Vec<CheckWarning>,
+    diagnostics: &mut Vec<Diagnostic>,
+    index: &mut Vec<ForewordIndexEntry>,
+) {
+    validate_foreword_target_contracts(package, module_path, apps, registry, diagnostics);
+    let policy = lint_policy_with_inherited(
+        [lint_policy_layer_from_forewords(apps)],
+        inherited_lint_layers,
+    );
+    for app in apps {
+        let Some(export) = resolve_foreword_export(package, app, registry) else {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: app.span.line,
+                column: app.span.column,
+                message: format!("unresolved foreword `#{}`", app.path.join(".")),
+            });
+            continue;
+        };
+        if !target_allowed_for_definition(&export.definition, target_kind) {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: app.span.line,
+                column: app.span.column,
+                message: format!(
+                    "`#{}` is not valid for {} targets",
+                    app.path.join("."),
+                    target_kind
+                ),
+            });
+            continue;
+        }
+        if !export.is_builtin()
+            && let Err(message) = validate_user_foreword_payload(app, &export.definition)
+        {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: app.span.line,
+                column: app.span.column,
+                message,
+            });
+            continue;
+        }
+        maybe_emit_basic_foreword_warning(export, module_path, app, &policy, warnings, diagnostics);
+        if export.definition.tier == arcana_hir::HirForewordTier::Executable {
+            if !dependency_allows_executable_forewords(package, &export.exposed_package_id) {
+                diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: app.span.line,
+                    column: app.span.column,
+                    message: format!(
+                        "executable foreword `#{}` requires `executable_forewords = true` on the dependency that exports it",
+                        app.path.join(".")
+                    ),
+                });
+                continue;
+            }
+            let Some(handler) = &export.handler else {
+                diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: app.span.line,
+                    column: app.span.column,
+                    message: format!(
+                        "executable foreword `#{}` is missing a handler binding",
+                        app.path.join(".")
+                    ),
+                });
+                continue;
+            };
+            if handler.protocol != "stdio-v1" {
+                diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: app.span.line,
+                    column: app.span.column,
+                    message: format!(
+                        "foreword handler `{}` uses unsupported protocol `{}`",
+                        handler.qualified_name.join("."),
+                        handler.protocol
+                    ),
+                });
+                continue;
+            }
+        }
+        index.push(ForewordIndexEntry {
+            entry_kind: "attached".to_string(),
+            qualified_name: export.exposed_name.join("."),
+            package_id: package.package_id.clone(),
+            module_id: module_id.to_string(),
+            target_kind: target_kind.to_string(),
+            target_path: target_path.to_string(),
+            retention: export.definition.retention.as_str().to_string(),
+            args: render_foreword_args(app),
+            public: target_public,
+            generated_by: target_generated_by.map(lower_generated_by),
+        });
+    }
+}
+
+fn generated_by_for_attached_foreword(
+    app: &arcana_hir::HirForewordApp,
+    export: &ResolvedForewordExport,
+    target_kind: &str,
+    target_path: &str,
+) -> arcana_hir::HirGeneratedByForeword {
+    arcana_hir::HirGeneratedByForeword {
+        applied_name: app.path.join("."),
+        resolved_name: export.exposed_name.join("."),
+        provider_package_id: export.provider_package_id.clone(),
+        owner_kind: target_kind.to_string(),
+        owner_path: target_path.to_string(),
+        retention: export.definition.retention,
+        args: app.args.clone(),
+    }
+}
+
+fn basic_registration_rows_for_app(
+    app: &arcana_hir::HirForewordApp,
+    export: &ResolvedForewordExport,
+    target_kind: &str,
+    target_path: &str,
+    target_public: bool,
+) -> Vec<arcana_hir::HirForewordRegistrationRow> {
+    let generated_by = generated_by_for_attached_foreword(app, export, target_kind, target_path);
+    let namespace = export.exposed_name.join(".");
+    if app.args.is_empty() {
+        return vec![arcana_hir::HirForewordRegistrationRow {
+            namespace,
+            key: "present".to_string(),
+            value: "true".to_string(),
+            target_kind: target_kind.to_string(),
+            target_path: target_path.to_string(),
+            public: target_public,
+            generated_by,
+        }];
+    }
+    app.args
+        .iter()
+        .enumerate()
+        .map(|(index, arg)| arcana_hir::HirForewordRegistrationRow {
+            namespace: namespace.clone(),
+            key: arg.name.clone().unwrap_or_else(|| format!("arg{index}")),
+            value: arg.typed_value.render(),
+            target_kind: target_kind.to_string(),
+            target_path: target_path.to_string(),
+            public: target_public,
+            generated_by: generated_by.clone(),
+        })
+        .collect()
+}
+
+fn append_basic_registration_rows_for_target(
+    package: &HirWorkspacePackage,
+    apps: &[arcana_hir::HirForewordApp],
+    target_kind: &str,
+    target_path: &str,
+    target_public: bool,
+    registry: &ForewordRegistry,
+    rows: &mut Vec<arcana_hir::HirForewordRegistrationRow>,
+) {
+    for app in apps {
+        if app.path.len() < 2 {
+            continue;
+        }
+        let Some(export) = resolve_user_foreword_export(package, app, registry) else {
+            continue;
+        };
+        if export.definition.tier != arcana_hir::HirForewordTier::Basic
+            || !target_allowed_for_definition(&export.definition, target_kind)
+            || validate_user_foreword_payload(app, &export.definition).is_err()
+        {
+            continue;
+        }
+        rows.extend(basic_registration_rows_for_app(
+            app,
+            export,
+            target_kind,
+            target_path,
+            target_public,
+        ));
+    }
+}
+
+fn append_basic_registration_rows_for_symbol(
+    package: &HirWorkspacePackage,
+    module_id: &str,
+    symbol: &HirSymbol,
+    target_kind: &str,
+    public: bool,
+    registry: &ForewordRegistry,
+    rows: &mut Vec<arcana_hir::HirForewordRegistrationRow>,
+) {
+    let symbol_target_path = format!("{}.{}", module_id, symbol.name);
+    append_basic_registration_rows_for_target(
+        package,
+        &symbol.forewords,
+        target_kind,
+        &symbol_target_path,
+        public,
+        registry,
+        rows,
+    );
+    for param in &symbol.params {
+        append_basic_registration_rows_for_target(
+            package,
+            &param.forewords,
+            "param",
+            &format!("{}.{}({})", module_id, symbol.name, param.name),
+            public,
+            registry,
+            rows,
+        );
+    }
+    match &symbol.body {
+        HirSymbolBody::Record { fields } => {
+            for field in fields {
+                append_basic_registration_rows_for_target(
+                    package,
+                    &field.forewords,
+                    "field",
+                    &format!("{}.{}.{}", module_id, symbol.name, field.name),
+                    public,
+                    registry,
+                    rows,
+                );
+            }
+        }
+        HirSymbolBody::Object { fields, methods } => {
+            for field in fields {
+                append_basic_registration_rows_for_target(
+                    package,
+                    &field.forewords,
+                    "field",
+                    &format!("{}.{}.{}", module_id, symbol.name, field.name),
+                    public,
+                    registry,
+                    rows,
+                );
+            }
+            for method in methods {
+                append_basic_registration_rows_for_symbol(
+                    package,
+                    module_id,
+                    method,
+                    "impl_method",
+                    public,
+                    registry,
+                    rows,
+                );
+            }
+        }
+        HirSymbolBody::Trait { methods, .. } => {
+            for method in methods {
+                append_basic_registration_rows_for_symbol(
+                    package,
+                    module_id,
+                    method,
+                    "trait_method",
+                    public,
+                    registry,
+                    rows,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+fn populate_basic_foreword_registrations(
+    mut workspace: HirWorkspaceSummary,
+) -> HirWorkspaceSummary {
+    let registry = build_foreword_registry(&workspace);
+    if !registry.errors.is_empty() {
+        return workspace;
+    }
+    let lookup_workspace = workspace.clone();
+    for (package_id, package) in &mut workspace.packages {
+        let Some(lookup_package) = lookup_workspace.package_by_id(package_id) else {
+            continue;
+        };
+        for module in &mut package.summary.modules {
+            let mut generated_rows = Vec::new();
+            for directive in &module.directives {
+                append_basic_registration_rows_for_target(
+                    lookup_package,
+                    &directive.forewords,
+                    directive.kind.as_str(),
+                    &format!("{}:{}", module.module_id, directive.path.join(".")),
+                    directive.kind == arcana_hir::HirDirectiveKind::Reexport,
+                    &registry,
+                    &mut generated_rows,
+                );
+            }
+            for symbol in &module.symbols {
+                append_basic_registration_rows_for_symbol(
+                    lookup_package,
+                    &module.module_id,
+                    symbol,
+                    symbol.kind.as_str(),
+                    symbol.exported,
+                    &registry,
+                    &mut generated_rows,
+                );
+            }
+            for impl_decl in &module.impls {
+                for method in &impl_decl.methods {
+                    append_basic_registration_rows_for_symbol(
+                        lookup_package,
+                        &module.module_id,
+                        method,
+                        "impl_method",
+                        false,
+                        &registry,
+                        &mut generated_rows,
+                    );
+                }
+            }
+            module.foreword_registrations.extend(generated_rows);
+        }
+    }
+    workspace
+}
+
+fn collect_deprecated_call_warnings_in_expr(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    module_path: &Path,
+    type_scope: &TypeScope,
+    scope: &ValueScope,
+    expr: &HirExpr,
+    span: Span,
+    policy: &LintPolicy,
+    warnings: &mut Vec<CheckWarning>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    match expr {
+        HirExpr::QualifiedPhrase {
+            subject,
+            args,
+            qualifier,
+            ..
+        } => {
+            if let Some(symbol) = resolve_qualified_phrase_target_symbol(
+                workspace,
+                resolved_module,
+                type_scope,
+                scope,
+                subject,
+                qualifier,
+            ) && let Some(message) = deprecated_message(symbol)
+            {
+                let lint_name = "deprecated_use";
+                if !lint_is_allowed(policy, lint_name) {
+                    let rendered = format!("use of deprecated `{}`: {}", symbol.name, message);
+                    if lint_is_denied(policy, lint_name) {
+                        diagnostics.push(Diagnostic {
+                            path: module_path.to_path_buf(),
+                            line: span.line,
+                            column: span.column,
+                            message: rendered,
+                        });
+                    } else {
+                        warnings.push(CheckWarning {
+                            path: module_path.to_path_buf(),
+                            line: span.line,
+                            column: span.column,
+                            message: rendered,
+                        });
+                    }
+                }
+            }
+            collect_deprecated_call_warnings_in_expr(
+                workspace,
+                resolved_module,
+                module_path,
+                type_scope,
+                scope,
+                subject,
+                span,
+                policy,
+                warnings,
+                diagnostics,
+            );
+            for arg in args {
+                match arg {
+                    arcana_hir::HirPhraseArg::Positional(expr)
+                    | arcana_hir::HirPhraseArg::Named { value: expr, .. } => {
+                        collect_deprecated_call_warnings_in_expr(
+                            workspace,
+                            resolved_module,
+                            module_path,
+                            type_scope,
+                            scope,
+                            expr,
+                            span,
+                            policy,
+                            warnings,
+                            diagnostics,
+                        );
+                    }
+                }
+            }
+        }
+        HirExpr::GenericApply { expr, .. }
+        | HirExpr::Await { expr }
+        | HirExpr::MemberAccess { expr, .. }
+        | HirExpr::Unary { expr, .. } => collect_deprecated_call_warnings_in_expr(
+            workspace,
+            resolved_module,
+            module_path,
+            type_scope,
+            scope,
+            expr,
+            span,
+            policy,
+            warnings,
+            diagnostics,
+        ),
+        HirExpr::Pair { left, right } | HirExpr::Binary { left, right, .. } => {
+            collect_deprecated_call_warnings_in_expr(
+                workspace,
+                resolved_module,
+                module_path,
+                type_scope,
+                scope,
+                left,
+                span,
+                policy,
+                warnings,
+                diagnostics,
+            );
+            collect_deprecated_call_warnings_in_expr(
+                workspace,
+                resolved_module,
+                module_path,
+                type_scope,
+                scope,
+                right,
+                span,
+                policy,
+                warnings,
+                diagnostics,
+            );
+        }
+        HirExpr::CollectionLiteral { items } => {
+            for item in items {
+                collect_deprecated_call_warnings_in_expr(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    scope,
+                    item,
+                    span,
+                    policy,
+                    warnings,
+                    diagnostics,
+                );
+            }
+        }
+        HirExpr::ConstructRegion(region) => {
+            collect_deprecated_call_warnings_in_expr(
+                workspace,
+                resolved_module,
+                module_path,
+                type_scope,
+                scope,
+                &region.target,
+                span,
+                policy,
+                warnings,
+                diagnostics,
+            );
+            for line in &region.lines {
+                collect_deprecated_call_warnings_in_expr(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    scope,
+                    &line.value,
+                    span,
+                    policy,
+                    warnings,
+                    diagnostics,
+                );
+            }
+            if let Some(arcana_hir::HirConstructDestination::Place { target }) = &region.destination
+            {
+                let expr = assign_target_to_expr(target);
+                collect_deprecated_call_warnings_in_expr(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    scope,
+                    &expr,
+                    span,
+                    policy,
+                    warnings,
+                    diagnostics,
+                );
+            }
+        }
+        HirExpr::Chain { steps, .. } => {
+            for step in steps {
+                collect_deprecated_call_warnings_in_expr(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    scope,
+                    &step.stage,
+                    span,
+                    policy,
+                    warnings,
+                    diagnostics,
+                );
+                for arg in &step.bind_args {
+                    collect_deprecated_call_warnings_in_expr(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        type_scope,
+                        scope,
+                        arg,
+                        span,
+                        policy,
+                        warnings,
+                        diagnostics,
+                    );
+                }
+            }
+        }
+        HirExpr::Match { subject, arms } => {
+            collect_deprecated_call_warnings_in_expr(
+                workspace,
+                resolved_module,
+                module_path,
+                type_scope,
+                scope,
+                subject,
+                span,
+                policy,
+                warnings,
+                diagnostics,
+            );
+            for arm in arms {
+                collect_deprecated_call_warnings_in_expr(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    scope,
+                    &arm.value,
+                    span,
+                    policy,
+                    warnings,
+                    diagnostics,
+                );
+            }
+        }
+        HirExpr::MemoryPhrase {
+            arena,
+            init_args,
+            constructor,
+            attached,
+            ..
+        } => {
+            collect_deprecated_call_warnings_in_expr(
+                workspace,
+                resolved_module,
+                module_path,
+                type_scope,
+                scope,
+                arena,
+                span,
+                policy,
+                warnings,
+                diagnostics,
+            );
+            for arg in init_args {
+                match arg {
+                    arcana_hir::HirPhraseArg::Positional(expr)
+                    | arcana_hir::HirPhraseArg::Named { value: expr, .. } => {
+                        collect_deprecated_call_warnings_in_expr(
+                            workspace,
+                            resolved_module,
+                            module_path,
+                            type_scope,
+                            scope,
+                            expr,
+                            span,
+                            policy,
+                            warnings,
+                            diagnostics,
+                        );
+                    }
+                }
+            }
+            collect_deprecated_call_warnings_in_expr(
+                workspace,
+                resolved_module,
+                module_path,
+                type_scope,
+                scope,
+                constructor,
+                span,
+                policy,
+                warnings,
+                diagnostics,
+            );
+            for attachment in attached {
+                match attachment {
+                    HirHeaderAttachment::Named { value, .. }
+                    | HirHeaderAttachment::Chain { expr: value, .. } => {
+                        collect_deprecated_call_warnings_in_expr(
+                            workspace,
+                            resolved_module,
+                            module_path,
+                            type_scope,
+                            scope,
+                            value,
+                            span,
+                            policy,
+                            warnings,
+                            diagnostics,
+                        );
+                    }
+                }
+            }
+        }
+        HirExpr::Index { expr, index } => {
+            collect_deprecated_call_warnings_in_expr(
+                workspace,
+                resolved_module,
+                module_path,
+                type_scope,
+                scope,
+                expr,
+                span,
+                policy,
+                warnings,
+                diagnostics,
+            );
+            collect_deprecated_call_warnings_in_expr(
+                workspace,
+                resolved_module,
+                module_path,
+                type_scope,
+                scope,
+                index,
+                span,
+                policy,
+                warnings,
+                diagnostics,
+            );
+        }
+        HirExpr::Slice {
+            expr, start, end, ..
+        } => {
+            collect_deprecated_call_warnings_in_expr(
+                workspace,
+                resolved_module,
+                module_path,
+                type_scope,
+                scope,
+                expr,
+                span,
+                policy,
+                warnings,
+                diagnostics,
+            );
+            if let Some(start) = start {
+                collect_deprecated_call_warnings_in_expr(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    scope,
+                    start,
+                    span,
+                    policy,
+                    warnings,
+                    diagnostics,
+                );
+            }
+            if let Some(end) = end {
+                collect_deprecated_call_warnings_in_expr(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    scope,
+                    end,
+                    span,
+                    policy,
+                    warnings,
+                    diagnostics,
+                );
+            }
+        }
+        HirExpr::Range { start, end, .. } => {
+            if let Some(start) = start {
+                collect_deprecated_call_warnings_in_expr(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    scope,
+                    start,
+                    span,
+                    policy,
+                    warnings,
+                    diagnostics,
+                );
+            }
+            if let Some(end) = end {
+                collect_deprecated_call_warnings_in_expr(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    scope,
+                    end,
+                    span,
+                    policy,
+                    warnings,
+                    diagnostics,
+                );
+            }
+        }
+        HirExpr::Path { .. }
+        | HirExpr::BoolLiteral { .. }
+        | HirExpr::IntLiteral { .. }
+        | HirExpr::StrLiteral { .. } => {}
+    }
+}
+
+fn collect_deprecated_call_warnings_in_statements(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    module_path: &Path,
+    type_scope: &TypeScope,
+    scope: &mut ValueScope,
+    statements: &[HirStatement],
+    policy: &LintPolicy,
+    warnings: &mut Vec<CheckWarning>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    for statement in statements {
+        match &statement.kind {
+            HirStatementKind::Let {
+                mutable,
+                name,
+                value,
+            } => {
+                collect_deprecated_call_warnings_in_expr(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    scope,
+                    value,
+                    statement.span,
+                    policy,
+                    warnings,
+                    diagnostics,
+                );
+                let ty =
+                    infer_expr_value_type(workspace, resolved_module, type_scope, scope, value);
+                let ownership = ty
+                    .as_ref()
+                    .map(|ty| infer_type_ownership(workspace, resolved_module, type_scope, ty))
+                    .unwrap_or_default();
+                scope.insert_typed(name, *mutable, ownership, ty);
+            }
+            HirStatementKind::Return { value } => {
+                if let Some(value) = value {
+                    collect_deprecated_call_warnings_in_expr(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        type_scope,
+                        scope,
+                        value,
+                        statement.span,
+                        policy,
+                        warnings,
+                        diagnostics,
+                    );
+                }
+            }
+            HirStatementKind::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                collect_deprecated_call_warnings_in_expr(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    scope,
+                    condition,
+                    statement.span,
+                    policy,
+                    warnings,
+                    diagnostics,
+                );
+                let mut then_scope = scope.clone();
+                collect_deprecated_call_warnings_in_statements(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    &mut then_scope,
+                    then_branch,
+                    policy,
+                    warnings,
+                    diagnostics,
+                );
+                if let Some(else_branch) = else_branch {
+                    let mut else_scope = scope.clone();
+                    collect_deprecated_call_warnings_in_statements(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        type_scope,
+                        &mut else_scope,
+                        else_branch,
+                        policy,
+                        warnings,
+                        diagnostics,
+                    );
+                }
+            }
+            HirStatementKind::While { condition, body } => {
+                collect_deprecated_call_warnings_in_expr(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    scope,
+                    condition,
+                    statement.span,
+                    policy,
+                    warnings,
+                    diagnostics,
+                );
+                let mut body_scope = scope.clone();
+                collect_deprecated_call_warnings_in_statements(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    &mut body_scope,
+                    body,
+                    policy,
+                    warnings,
+                    diagnostics,
+                );
+            }
+            HirStatementKind::For {
+                binding,
+                iterable,
+                body,
+            } => {
+                collect_deprecated_call_warnings_in_expr(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    scope,
+                    iterable,
+                    statement.span,
+                    policy,
+                    warnings,
+                    diagnostics,
+                );
+                let mut body_scope = scope.clone();
+                body_scope.insert(binding, false);
+                collect_deprecated_call_warnings_in_statements(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    &mut body_scope,
+                    body,
+                    policy,
+                    warnings,
+                    diagnostics,
+                );
+            }
+            HirStatementKind::Defer { expr } | HirStatementKind::Expr { expr } => {
+                collect_deprecated_call_warnings_in_expr(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    scope,
+                    expr,
+                    statement.span,
+                    policy,
+                    warnings,
+                    diagnostics,
+                )
+            }
+            HirStatementKind::Assign { value, .. } => collect_deprecated_call_warnings_in_expr(
+                workspace,
+                resolved_module,
+                module_path,
+                type_scope,
+                scope,
+                value,
+                statement.span,
+                policy,
+                warnings,
+                diagnostics,
+            ),
+            HirStatementKind::Recycle { .. }
+            | HirStatementKind::Bind { .. }
+            | HirStatementKind::Construct(_)
+            | HirStatementKind::MemorySpec(_)
+            | HirStatementKind::Break
+            | HirStatementKind::Continue => {}
+        }
+    }
+}
+
+fn push_generated_foreword_index_entry(
+    package: &HirWorkspacePackage,
+    module_id: &str,
+    target_kind: &str,
+    target_path: String,
+    public: bool,
+    generated_by: &arcana_hir::HirGeneratedByForeword,
+    index: &mut Vec<ForewordIndexEntry>,
+) {
+    index.push(ForewordIndexEntry {
+        entry_kind: "generated".to_string(),
+        qualified_name: generated_by.resolved_name.clone(),
+        package_id: package.package_id.clone(),
+        module_id: module_id.to_string(),
+        target_kind: target_kind.to_string(),
+        target_path,
+        retention: generated_by.retention.as_str().to_string(),
+        args: render_hir_foreword_args(&generated_by.args),
+        public,
+        generated_by: Some(lower_generated_by(generated_by)),
+    });
+}
+
+fn push_emitted_foreword_index_entry(
+    package: &HirWorkspacePackage,
+    module_id: &str,
+    entry: &arcana_hir::HirEmittedForewordMetadata,
+    index: &mut Vec<ForewordIndexEntry>,
+) {
+    index.push(ForewordIndexEntry {
+        entry_kind: "emitted".to_string(),
+        qualified_name: entry.qualified_name.clone(),
+        package_id: package.package_id.clone(),
+        module_id: module_id.to_string(),
+        target_kind: entry.target_kind.clone(),
+        target_path: entry.target_path.clone(),
+        retention: entry.retention.as_str().to_string(),
+        args: render_hir_foreword_args(&entry.args),
+        public: entry.public,
+        generated_by: Some(lower_generated_by(&entry.generated_by)),
+    });
+}
+
+fn lower_registration_row(row: &arcana_hir::HirForewordRegistrationRow) -> ForewordRegistrationRow {
+    ForewordRegistrationRow {
+        namespace: row.namespace.clone(),
+        key: row.key.clone(),
+        value: row.value.clone(),
+        target_kind: row.target_kind.clone(),
+        target_path: row.target_path.clone(),
+        public: row.public,
+        generated_by: lower_generated_by(&row.generated_by),
+    }
+}
+
+fn validate_symbol_declared_forewords(
+    workspace: &HirWorkspaceSummary,
+    package: &HirWorkspacePackage,
+    module: &HirModuleSummary,
+    symbol: &HirSymbol,
+    target_kind: &str,
+    public: bool,
+    inherited_generated_by: Option<&arcana_hir::HirGeneratedByForeword>,
+    registry: &ForewordRegistry,
+    inherited_lint_layers: &[LintPolicyLayer],
+    warnings: &mut Vec<CheckWarning>,
+    diagnostics: &mut Vec<Diagnostic>,
+    index: &mut Vec<ForewordIndexEntry>,
+) {
+    let module_path = package
+        .module_path(&module.module_id)
+        .cloned()
+        .unwrap_or_else(|| package.root_dir.join("src").join("unknown.arc"));
+    let target_generated_by = symbol.generated_by.as_ref().or(inherited_generated_by);
+    let symbol_target_path = format!("{}.{}", module.module_id, symbol.name);
+    let symbol_lint_layer = lint_policy_layer_from_forewords(&symbol.forewords);
+    if let Some(generated_by) = symbol.generated_by.as_ref() {
+        push_generated_foreword_index_entry(
+            package,
+            &module.module_id,
+            target_kind,
+            symbol_target_path.clone(),
+            public,
+            generated_by,
+            index,
+        );
+    }
+    validate_foreword_apps_for_target(
+        package,
+        &module_path,
+        &module.module_id,
+        &symbol.forewords,
+        target_kind,
+        &symbol_target_path,
+        public,
+        target_generated_by,
+        registry,
+        inherited_lint_layers,
+        warnings,
+        diagnostics,
+        index,
+    );
+    for param in &symbol.params {
+        validate_foreword_apps_for_target(
+            package,
+            &module_path,
+            &module.module_id,
+            &param.forewords,
+            "param",
+            &format!("{}.{}({})", module.module_id, symbol.name, param.name),
+            public,
+            target_generated_by,
+            registry,
+            &[symbol_lint_layer.clone()],
+            warnings,
+            diagnostics,
+            index,
+        );
+    }
+    match &symbol.body {
+        HirSymbolBody::Record { fields } => {
+            for field in fields {
+                validate_foreword_apps_for_target(
+                    package,
+                    &module_path,
+                    &module.module_id,
+                    &field.forewords,
+                    "field",
+                    &format!("{}.{}.{}", module.module_id, symbol.name, field.name),
+                    public,
+                    target_generated_by,
+                    registry,
+                    &[symbol_lint_layer.clone()],
+                    warnings,
+                    diagnostics,
+                    index,
+                );
+            }
+        }
+        HirSymbolBody::Object { fields, methods } => {
+            for field in fields {
+                validate_foreword_apps_for_target(
+                    package,
+                    &module_path,
+                    &module.module_id,
+                    &field.forewords,
+                    "field",
+                    &format!("{}.{}.{}", module.module_id, symbol.name, field.name),
+                    public,
+                    target_generated_by,
+                    registry,
+                    &[symbol_lint_layer.clone()],
+                    warnings,
+                    diagnostics,
+                    index,
+                );
+            }
+            for method in methods {
+                let child_inherited_layers = std::iter::once(symbol_lint_layer.clone())
+                    .chain(inherited_lint_layers.iter().cloned())
+                    .collect::<Vec<_>>();
+                validate_symbol_declared_forewords(
+                    workspace,
+                    package,
+                    module,
+                    method,
+                    "impl_method",
+                    public,
+                    target_generated_by,
+                    registry,
+                    &child_inherited_layers,
+                    warnings,
+                    diagnostics,
+                    index,
+                );
+            }
+        }
+        HirSymbolBody::Trait { methods, .. } => {
+            for method in methods {
+                let child_inherited_layers = std::iter::once(symbol_lint_layer.clone())
+                    .chain(inherited_lint_layers.iter().cloned())
+                    .collect::<Vec<_>>();
+                validate_symbol_declared_forewords(
+                    workspace,
+                    package,
+                    module,
+                    method,
+                    "trait_method",
+                    public,
+                    target_generated_by,
+                    registry,
+                    &child_inherited_layers,
+                    warnings,
+                    diagnostics,
+                    index,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
 fn validate_hir_semantics(
     workspace: &HirWorkspaceSummary,
     resolved: &HirResolvedWorkspace,
-) -> Vec<Diagnostic> {
-    let mut diagnostics = Vec::new();
+) -> SemanticValidation {
+    let mut validation = SemanticValidation::default();
+    let registry = build_foreword_registry(workspace);
+    validation.errors.extend(registry.errors.clone());
+    validation.foreword_catalog = registry.catalog.clone();
     for (package_id, package) in &workspace.packages {
         let Some(resolved_package) = resolved.package_by_id(package_id) else {
             continue;
         };
-        validate_package_lang_item_semantics(package, &mut diagnostics);
+        validate_package_lang_item_semantics(package, &mut validation.errors);
         for module in &package.summary.modules {
             let Some(resolved_module) = resolved_package.module(&module.module_id) else {
                 continue;
             };
+            validate_module_foreword_semantics(
+                workspace,
+                package,
+                module,
+                resolved_module,
+                &registry,
+                &mut validation,
+            );
             validate_module_semantics(
                 workspace,
                 resolved,
                 package,
                 module,
                 resolved_module,
-                &mut diagnostics,
+                &mut validation.errors,
             );
         }
     }
-    diagnostics
+    validation.discovered_tests.sort_by(|left, right| {
+        left.package_id
+            .cmp(&right.package_id)
+            .then_with(|| left.module_id.cmp(&right.module_id))
+            .then_with(|| left.symbol_name.cmp(&right.symbol_name))
+    });
+    validation.foreword_index.sort_by(|left, right| {
+        left.qualified_name
+            .cmp(&right.qualified_name)
+            .then_with(|| left.target_path.cmp(&right.target_path))
+            .then_with(|| left.entry_kind.cmp(&right.entry_kind))
+    });
+    validation.foreword_registrations.sort_by(|left, right| {
+        left.namespace
+            .cmp(&right.namespace)
+            .then_with(|| left.key.cmp(&right.key))
+            .then_with(|| left.target_path.cmp(&right.target_path))
+    });
+    validation
 }
 
 fn validate_memory_spec_decl_semantics(
@@ -3756,6 +8905,167 @@ fn validate_construct_region_semantics(
                     });
                 }
             }
+        }
+    }
+}
+
+fn validate_module_foreword_semantics(
+    workspace: &HirWorkspaceSummary,
+    package: &HirWorkspacePackage,
+    module: &HirModuleSummary,
+    resolved_module: &HirResolvedModule,
+    registry: &ForewordRegistry,
+    validation: &mut SemanticValidation,
+) {
+    let module_path = package
+        .module_path(&module.module_id)
+        .cloned()
+        .unwrap_or_else(|| package.root_dir.join("src").join("unknown.arc"));
+
+    for directive in &module.directives {
+        let target_kind = match directive.kind {
+            arcana_hir::HirDirectiveKind::Import => "import",
+            arcana_hir::HirDirectiveKind::Use => "use",
+            arcana_hir::HirDirectiveKind::Reexport => "reexport",
+        };
+        validate_foreword_apps_for_target(
+            package,
+            &module_path,
+            &module.module_id,
+            &directive.forewords,
+            target_kind,
+            &format!("{}:{}", module.module_id, directive.path.join(".")),
+            directive.kind == arcana_hir::HirDirectiveKind::Reexport,
+            None,
+            registry,
+            &[],
+            &mut validation.warnings,
+            &mut validation.errors,
+            &mut validation.foreword_index,
+        );
+    }
+    for entry in &module.emitted_foreword_metadata {
+        push_emitted_foreword_index_entry(
+            package,
+            &module.module_id,
+            entry,
+            &mut validation.foreword_index,
+        );
+    }
+    validation.foreword_registrations.extend(
+        module
+            .foreword_registrations
+            .iter()
+            .map(lower_registration_row),
+    );
+
+    for symbol in &module.symbols {
+        validate_symbol_declared_forewords(
+            workspace,
+            package,
+            module,
+            symbol,
+            symbol.kind.as_str(),
+            symbol.exported,
+            None,
+            registry,
+            &[],
+            &mut validation.warnings,
+            &mut validation.errors,
+            &mut validation.foreword_index,
+        );
+        if symbol.kind == HirSymbolKind::Fn
+            && symbol
+                .forewords
+                .iter()
+                .any(|foreword| foreword.path.len() == 1 && foreword.name == "test")
+        {
+            validation.discovered_tests.push(DiscoveredTest {
+                package_id: package.package_id.clone(),
+                module_id: module.module_id.clone(),
+                symbol_name: symbol.name.clone(),
+            });
+        }
+        let mut scope = ValueScope::default().with_symbol_params(&symbol.params);
+        let policy =
+            lint_policy_from_layers(vec![lint_policy_layer_from_forewords(&symbol.forewords)]);
+        collect_deprecated_call_warnings_in_statements(
+            workspace,
+            resolved_module,
+            &module_path,
+            &TypeScope::default().with_params(&symbol.type_params),
+            &mut scope,
+            &symbol.statements,
+            &policy,
+            &mut validation.warnings,
+            &mut validation.errors,
+        );
+        match &symbol.body {
+            HirSymbolBody::Object { methods, .. } | HirSymbolBody::Trait { methods, .. } => {
+                for method in methods {
+                    let mut method_scope = ValueScope::default().with_symbol_params(&method.params);
+                    let method_policy = lint_policy_from_layers(vec![
+                        lint_policy_layer_from_forewords(&method.forewords),
+                        lint_policy_layer_from_forewords(&symbol.forewords),
+                    ]);
+                    collect_deprecated_call_warnings_in_statements(
+                        workspace,
+                        resolved_module,
+                        &module_path,
+                        &TypeScope::default().with_params(&method.type_params),
+                        &mut method_scope,
+                        &method.statements,
+                        &method_policy,
+                        &mut validation.warnings,
+                        &mut validation.errors,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for impl_decl in &module.impls {
+        if let Some(generated_by) = impl_decl.generated_by.as_ref() {
+            push_generated_foreword_index_entry(
+                package,
+                &module.module_id,
+                "impl",
+                impl_target_path(&module.module_id, impl_decl),
+                false,
+                generated_by,
+                &mut validation.foreword_index,
+            );
+        }
+        for method in &impl_decl.methods {
+            validate_symbol_declared_forewords(
+                workspace,
+                package,
+                module,
+                method,
+                "impl_method",
+                false,
+                impl_decl.generated_by.as_ref(),
+                registry,
+                &[],
+                &mut validation.warnings,
+                &mut validation.errors,
+                &mut validation.foreword_index,
+            );
+            let mut scope = ValueScope::default().with_symbol_params(&method.params);
+            let policy =
+                lint_policy_from_layers(vec![lint_policy_layer_from_forewords(&method.forewords)]);
+            collect_deprecated_call_warnings_in_statements(
+                workspace,
+                resolved_module,
+                &module_path,
+                &TypeScope::default().with_params(&method.type_params),
+                &mut scope,
+                &method.statements,
+                &policy,
+                &mut validation.warnings,
+                &mut validation.errors,
+            );
         }
     }
 }
@@ -5604,7 +10914,7 @@ fn validate_rollup_handlers(
 #[derive(Clone, Debug, Default)]
 struct CleanupFooterPolicy {
     cover_all_cleanup_capable: bool,
-    explicit_target_ids: BTreeSet<u64>,
+    explicit_target_names: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -5979,7 +11289,7 @@ fn validate_cleanup_footer_targets(
 ) -> CleanupFooterPolicy {
     let mut policy = CleanupFooterPolicy {
         cover_all_cleanup_capable: has_bare_cleanup_rollup(cleanup_footers),
-        explicit_target_ids: BTreeSet::new(),
+        explicit_target_names: BTreeSet::new(),
     };
     let mut candidates_by_name = BTreeMap::<&str, Vec<&CleanupFooterCandidate>>::new();
     for candidate in candidates {
@@ -6039,7 +11349,7 @@ fn validate_cleanup_footer_targets(
             continue;
         }
         distinct_binding_ids.clear();
-        policy.explicit_target_ids.insert(candidate.binding_id);
+        policy.explicit_target_names.insert(candidate.name.clone());
     }
     policy
 }
@@ -6130,9 +11440,7 @@ fn should_activate_cleanup_binding(
     policy: &CleanupFooterPolicy,
     name: &str,
 ) -> bool {
-    scope
-        .binding_id_of(name)
-        .is_some_and(|binding_id| policy.explicit_target_ids.contains(&binding_id))
+    policy.explicit_target_names.contains(name)
         || (policy.cover_all_cleanup_capable
             && binding_supports_default_cleanup_contract(workspace, resolved_module, scope, name))
 }
@@ -8914,13 +14222,21 @@ fn is_identifier_text(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        check_path, check_sources, check_workspace_graph, compute_member_fingerprints,
-        compute_member_fingerprints_for_checked_workspace, load_workspace_hir, lower_to_hir,
+        AdapterArtifactIdentity, AdapterCatalogEntry, AdapterForewordSnapshot,
+        AdapterPackageSnapshot, AdapterTargetSnapshot, BUILTIN_FOREWORD_PROVIDER_PACKAGE_ID,
+        FOREWORD_ADAPTER_PROTOCOL_VERSION, ForewordAdapterRequest, ResolvedForewordExport,
+        ResolvedForewordExportKind, build_adapter_artifact_identity,
+        build_foreword_adapter_cache_key, check_path, check_sources, check_workspace_graph,
+        compute_member_fingerprints, compute_member_fingerprints_for_checked_workspace,
+        execute_executable_foreword_app, execute_foreword_adapter, load_workspace_hir,
+        lower_adapter_payload_args, lower_to_hir, materialize_foreword_adapter_artifact,
     };
     use arcana_package::{
         BuildDisposition, execute_build, load_workspace_graph, plan_workspace, prepare_build,
         read_lockfile, write_lockfile,
     };
+    use arcana_syntax::Span;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -9498,7 +14814,7 @@ mod tests {
                 ("core/book.toml", "name = \"core\"\nkind = \"lib\"\n"),
                 (
                     "core/src/book.arc",
-                    "import types\nuse types.Counter\nexport fn make_counter() -> Counter:\n    return pool: entities :> value = 0 <: Counter\n",
+                    "import types\nuse types.Counter\nexport fn make_counter() -> Counter:\n    return Counter :: value = 0 :: call\n",
                 ),
                 (
                     "core/src/types.arc",
@@ -9527,7 +14843,7 @@ mod tests {
 
         fs::write(
             root.join("core/src/book.arc"),
-            "import types\nexport fn make_counter() -> types.Counter:\n    return pool: entities :> value = 0 <: types.Counter\n",
+            "import types\nexport fn make_counter() -> types.Counter:\n    return types.Counter :: value = 0 :: call\n",
         )
         .expect("rewrite should succeed");
 
@@ -9887,7 +15203,7 @@ mod tests {
                 ("core/book.toml", "name = \"core\"\nkind = \"lib\"\n"),
                 (
                     "core/src/book.arc",
-                    "import types\nuse types.Counter\nexport fn make_counter() -> Counter:\n    return pool: entities :> value = 0 <: Counter\n\nimpl Counter:\n    fn add(self: Counter, value: Int) -> Int:\n        return self.value + value\n",
+                    "import types\nuse types.Counter\nexport fn make_counter() -> Counter:\n    return Counter :: value = 0 :: call\n\nimpl Counter:\n    fn add(self: Counter, value: Int) -> Int:\n        return self.value + value\n",
                 ),
                 (
                     "core/src/types.arc",
@@ -9916,7 +15232,7 @@ mod tests {
 
         fs::write(
             root.join("core/src/book.arc"),
-            "import types\nuse types.Counter\nexport fn make_counter() -> Counter:\n    return pool: entities :> value = 0 <: Counter\n\nimpl Counter:\n    fn add(self: Counter, value: Int, scale: Int) -> Int:\n        return self.value + value + scale\n",
+            "import types\nuse types.Counter\nexport fn make_counter() -> Counter:\n    return Counter :: value = 0 :: call\n\nimpl Counter:\n    fn add(self: Counter, value: Int, scale: Int) -> Int:\n        return self.value + value + scale\n",
         )
         .expect("rewrite should succeed");
 
@@ -9978,9 +15294,1725 @@ mod tests {
             ],
         );
 
-        let summary = check_path(&root).expect("builtin foreword package should check");
-        assert_eq!(summary.package_count, 1);
-        assert_eq!(summary.module_count, 2);
+        let checked =
+            crate::check_workspace_path(&root).expect("builtin foreword package should check");
+        assert_eq!(checked.summary().package_count, 1);
+        assert_eq!(checked.summary().module_count, 2);
+        assert!(
+            checked
+                .foreword_catalog()
+                .iter()
+                .any(|entry| entry.exposed_name == "deprecated"
+                    && entry.tier == "builtin"
+                    && entry.provider_package_id == BUILTIN_FOREWORD_PROVIDER_PACKAGE_ID),
+            "catalog should expose builtin forewords through the shared registry path"
+        );
+        assert!(
+            checked
+                .foreword_catalog()
+                .iter()
+                .any(|entry| entry.exposed_name == "test" && entry.targets == vec!["fn"]),
+            "catalog should expose builtin target law"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_workspace_requires_opt_in_for_executable_dependency_forewords() {
+        let script_seed_dir = test_temp_dir("arcana-frontend-workspaces", "opt_in_metadata_seed");
+        let adapter_rel_path = write_foreword_adapter_script(
+            &script_seed_dir,
+            "opt_in_metadata_adapter",
+            "{\"version\":\"arcana-foreword-stdio-v1\",\"diagnostics\":[]}\n",
+        );
+        let root = make_temp_workspace(
+            "executable_foreword_opt_in",
+            &["app", "tool"],
+            &[
+                (
+                    "tool/book.toml",
+                    &format!(
+                        "name = \"tool\"\nkind = \"lib\"\n[toolchain.foreword_products.tool-forewords]\npath = \"{}\"\n",
+                        adapter_rel_path
+                    ),
+                ),
+                (
+                    "tool/src/book.arc",
+                    concat!(
+                        "foreword tool.exec.trace:\n",
+                        "    tier = executable\n",
+                        "    visibility = public\n",
+                        "    targets = [fn]\n",
+                        "    retention = compile\n",
+                        "    payload = [label: Str]\n",
+                        "    handler = tool.exec.trace_handler\n",
+                        "foreword handler tool.exec.trace_handler:\n",
+                        "    protocol = \"stdio-v1\"\n",
+                        "    product = \"tool-forewords\"\n",
+                        "    entry = \"trace\"\n",
+                    ),
+                ),
+                ("tool/src/types.arc", ""),
+                (
+                    "app/book.toml",
+                    "name = \"app\"\nkind = \"app\"\n[deps]\ntool = { path = \"../tool\" }\n",
+                ),
+                (
+                    "app/src/shelf.arc",
+                    "#tool.exec.trace[label = \"entry\"]\nfn main() -> Int:\n    return 0\n",
+                ),
+                ("app/src/types.arc", ""),
+            ],
+        );
+        let tool_script_target = root.join("tool").join(&adapter_rel_path);
+        if let Some(parent) = tool_script_target.parent() {
+            fs::create_dir_all(parent).expect("adapter dir should be creatable");
+        }
+        copy_test_adapter_script(
+            &script_seed_dir.join(&adapter_rel_path),
+            &tool_script_target,
+        );
+
+        let err = match crate::check_workspace_path(&root) {
+            Ok(_) => panic!("executable foreword dependency should require opt-in"),
+            Err(err) => err,
+        };
+        assert!(
+            err.contains("requires `executable_forewords = true`")
+                || err.contains("requires `executable_forewords = true` on the dependency"),
+            "{err}"
+        );
+
+        fs::write(
+            root.join("app").join("book.toml"),
+            "name = \"app\"\nkind = \"app\"\n[deps]\ntool = { path = \"../tool\", executable_forewords = true }\n",
+        )
+        .expect("manifest should update");
+        let checked = crate::check_workspace_path(&root)
+            .expect("workspace should accept opted-in executable foreword");
+        assert!(
+            checked
+                .foreword_catalog()
+                .iter()
+                .any(|entry| entry.exposed_name == "tool.exec.trace"),
+            "catalog should include executable foreword"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+        fs::remove_dir_all(script_seed_dir).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_workspace_accepts_reexported_basic_forewords() {
+        let root = make_temp_workspace(
+            "basic_foreword_reexport",
+            &["app", "bridge", "tool"],
+            &[
+                ("tool/book.toml", "name = \"tool\"\nkind = \"lib\"\n"),
+                (
+                    "tool/src/book.arc",
+                    concat!(
+                        "foreword tool.meta.trace:\n",
+                        "    tier = basic\n",
+                        "    visibility = public\n",
+                        "    targets = [fn]\n",
+                        "    retention = runtime\n",
+                        "    payload = [label: Str]\n",
+                    ),
+                ),
+                ("tool/src/types.arc", ""),
+                (
+                    "bridge/book.toml",
+                    "name = \"bridge\"\nkind = \"lib\"\n[deps]\ntool = { path = \"../tool\" }\n",
+                ),
+                (
+                    "bridge/src/book.arc",
+                    "foreword reexport bridge.meta.trace = tool.meta.trace\n",
+                ),
+                ("bridge/src/types.arc", ""),
+                (
+                    "app/book.toml",
+                    "name = \"app\"\nkind = \"app\"\n[deps]\nbridge = { path = \"../bridge\" }\n",
+                ),
+                (
+                    "app/src/shelf.arc",
+                    "#bridge.meta.trace[label = \"entry\"]\nfn main() -> Int:\n    return 0\n",
+                ),
+                ("app/src/types.arc", ""),
+            ],
+        );
+
+        let checked = crate::check_workspace_path(&root)
+            .expect("workspace should accept reexported basic foreword");
+        assert!(
+            checked
+                .foreword_catalog()
+                .iter()
+                .any(|entry| entry.exposed_name == "bridge.meta.trace"),
+            "catalog should expose reexported foreword name"
+        );
+        let index_entry = checked
+            .foreword_index()
+            .iter()
+            .find(|entry| {
+                entry.entry_kind == "attached"
+                    && entry.qualified_name == "bridge.meta.trace"
+                    && entry.target_path == "app.main"
+            })
+            .expect("reexported foreword should index against the app target");
+        assert_eq!(index_entry.retention, "runtime");
+        assert_eq!(index_entry.args, vec!["label=\"entry\"".to_string()]);
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_workspace_accepts_package_local_foreword_aliases() {
+        let root = make_temp_package(
+            "aliasapp",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    concat!(
+                        "foreword aliasapp.meta.trace:\n",
+                        "    tier = basic\n",
+                        "    visibility = package\n",
+                        "    targets = [fn]\n",
+                        "    retention = runtime\n",
+                        "    payload = [label: Str]\n",
+                        "foreword alias aliasapp.meta.local = aliasapp.meta.trace\n",
+                        "#aliasapp.meta.local[label = \"entry\"]\n",
+                        "fn main() -> Int:\n",
+                        "    return 0\n",
+                    ),
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let checked = crate::check_workspace_path(&root)
+            .expect("workspace should accept package-local foreword aliases");
+        assert!(
+            checked
+                .foreword_catalog()
+                .iter()
+                .any(|entry| entry.exposed_name == "aliasapp.meta.local"),
+            "catalog should expose the package-local alias name"
+        );
+        let index_entry = checked
+            .foreword_index()
+            .iter()
+            .find(|entry| {
+                entry.entry_kind == "attached"
+                    && entry.qualified_name == "aliasapp.meta.local"
+                    && entry.target_path == "aliasapp.main"
+            })
+            .expect("alias application should appear in the foreword index");
+        assert_eq!(index_entry.retention, "runtime");
+        assert_eq!(index_entry.args, vec!["label=\"entry\"".to_string()]);
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_workspace_indexes_field_and_param_forewords() {
+        let root = make_temp_package(
+            "field_param_foreword_targets",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    concat!(
+                        "foreword field_param_foreword_targets.meta.trace:\n",
+                        "    tier = basic\n",
+                        "    visibility = public\n",
+                        "    targets = [fn, field, param]\n",
+                        "    retention = runtime\n",
+                        "    payload = [label: Str]\n",
+                        "record Box:\n",
+                        "    #field_param_foreword_targets.meta.trace[label = \"field\"]\n",
+                        "    value: Int\n",
+                        "fn helper(#field_param_foreword_targets.meta.trace[label = \"param\"] value: Int) -> Int:\n",
+                        "    return value\n",
+                        "#field_param_foreword_targets.meta.trace[label = \"fn\"]\n",
+                        "fn main() -> Int:\n",
+                        "    return helper :: 7 :: call\n",
+                    ),
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let checked = crate::check_workspace_path(&root)
+            .expect("workspace should index fn, field, and param foreword targets");
+        let index = checked.foreword_index();
+
+        let field_entry = index
+            .iter()
+            .find(|entry| {
+                entry.target_kind == "field"
+                    && entry.target_path == "field_param_foreword_targets.Box.value"
+                    && entry.qualified_name == "field_param_foreword_targets.meta.trace"
+            })
+            .expect("field foreword should index");
+        assert_eq!(field_entry.retention, "runtime");
+        assert_eq!(field_entry.args, vec!["label=\"field\"".to_string()]);
+
+        let param_entry = index
+            .iter()
+            .find(|entry| {
+                entry.target_kind == "param"
+                    && entry.target_path == "field_param_foreword_targets.helper(value)"
+                    && entry.qualified_name == "field_param_foreword_targets.meta.trace"
+            })
+            .expect("param foreword should index");
+        assert_eq!(param_entry.retention, "runtime");
+        assert_eq!(param_entry.args, vec!["label=\"param\"".to_string()]);
+
+        let fn_entry = index
+            .iter()
+            .find(|entry| {
+                entry.target_kind == "fn"
+                    && entry.target_path == "field_param_foreword_targets.main"
+                    && entry.qualified_name == "field_param_foreword_targets.meta.trace"
+            })
+            .expect("function foreword should index");
+        assert_eq!(fn_entry.retention, "runtime");
+        assert_eq!(fn_entry.args, vec!["label=\"fn\"".to_string()]);
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_workspace_emits_basic_foreword_registration_rows() {
+        let root = make_temp_package(
+            "basic_foreword_registration_rows",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    concat!(
+                        "foreword basic_foreword_registration_rows.meta.trace:\n",
+                        "    tier = basic\n",
+                        "    visibility = public\n",
+                        "    targets = [fn]\n",
+                        "    retention = runtime\n",
+                        "    payload = [label: Str]\n",
+                        "#basic_foreword_registration_rows.meta.trace[label = \"entry\"]\n",
+                        "export fn main() -> Int:\n",
+                        "    return 0\n",
+                    ),
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let checked = crate::check_workspace_path(&root)
+            .expect("workspace should emit deterministic basic foreword registration rows");
+        let registrations = checked.foreword_registrations().to_vec();
+        assert_eq!(registrations.len(), 1);
+        assert_eq!(
+            registrations[0].namespace,
+            "basic_foreword_registration_rows.meta.trace"
+        );
+        assert_eq!(registrations[0].key, "label");
+        assert_eq!(registrations[0].value, "\"entry\"");
+        assert_eq!(registrations[0].target_kind, "fn");
+        assert_eq!(
+            registrations[0].target_path,
+            "basic_foreword_registration_rows.main"
+        );
+        assert!(registrations[0].public);
+        assert_eq!(
+            registrations[0].generated_by.resolved_name,
+            "basic_foreword_registration_rows.meta.trace"
+        );
+
+        let (workspace, _) = checked.into_workspace_parts();
+        let app = workspace
+            .package("basic_foreword_registration_rows")
+            .expect("package should load");
+        let module = app
+            .summary
+            .modules
+            .iter()
+            .find(|module| module.module_id == "basic_foreword_registration_rows")
+            .expect("app module should exist");
+        assert_eq!(module.foreword_registrations.len(), 1);
+        assert_eq!(
+            module.foreword_registrations[0].namespace,
+            "basic_foreword_registration_rows.meta.trace"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_workspace_routes_executable_foreword_warnings_through_namespaced_lint_policy() {
+        let script_seed_dir = test_temp_dir("arcana-frontend-workspaces", "lint_policy_seed");
+        let adapter_rel_path = write_foreword_adapter_script(
+            &script_seed_dir,
+            "warning_adapter",
+            "{\"version\":\"arcana-foreword-stdio-v1\",\"diagnostics\":[{\"severity\":\"warning\",\"lint\":\"detail\",\"message\":\"adapter note\"}],\"replace_owner\":\"fn main() -> Int:\\n    return 0\\n\",\"append_symbols\":[],\"append_impls\":[]}\n",
+        );
+        let root = make_temp_workspace(
+            "executable_foreword_lint_policy",
+            &["app", "tool"],
+            &[
+                (
+                    "tool/book.toml",
+                    &format!(
+                        "name = \"tool\"\nkind = \"lib\"\n[toolchain.foreword_products.tool-forewords]\npath = \"{}\"\n",
+                        adapter_rel_path
+                    ),
+                ),
+                (
+                    "tool/src/book.arc",
+                    concat!(
+                        "foreword tool.exec.trace:\n",
+                        "    tier = executable\n",
+                        "    visibility = public\n",
+                        "    action = transform\n",
+                        "    targets = [fn]\n",
+                        "    retention = compile\n",
+                        "    diagnostic_namespace = tool.exec.trace\n",
+                        "    handler = tool.exec.trace_handler\n",
+                        "foreword handler tool.exec.trace_handler:\n",
+                        "    protocol = \"stdio-v1\"\n",
+                        "    product = \"tool-forewords\"\n",
+                        "    entry = \"trace\"\n",
+                    ),
+                ),
+                ("tool/src/types.arc", ""),
+                (
+                    "app/book.toml",
+                    "name = \"app\"\nkind = \"app\"\n[deps]\ntool = { path = \"../tool\", executable_forewords = true }\n",
+                ),
+                (
+                    "app/src/shelf.arc",
+                    "#tool.exec.trace\nfn main() -> Int:\n    return 0\n",
+                ),
+                ("app/src/types.arc", ""),
+            ],
+        );
+        let tool_script_target = root.join("tool").join(&adapter_rel_path);
+        if let Some(parent) = tool_script_target.parent() {
+            fs::create_dir_all(parent).expect("adapter dir should be creatable");
+        }
+        copy_test_adapter_script(
+            &script_seed_dir.join(&adapter_rel_path),
+            &tool_script_target,
+        );
+
+        let checked = crate::check_workspace_path(&root)
+            .expect("workspace should surface adapter warning by default");
+        assert!(
+            checked
+                .warnings()
+                .iter()
+                .any(|warning| warning.message.contains("adapter note")),
+            "default policy should surface the adapter warning"
+        );
+
+        fs::write(
+            root.join("app").join("src").join("shelf.arc"),
+            "#allow[tool.exec.trace]\n#tool.exec.trace\nfn main() -> Int:\n    return 0\n",
+        )
+        .expect("app module should update");
+        let checked = crate::check_workspace_path(&root)
+            .expect("allow policy should suppress namespaced adapter warnings");
+        assert!(
+            !checked
+                .warnings()
+                .iter()
+                .any(|warning| warning.message.contains("adapter note")),
+            "allow policy should suppress the adapter warning"
+        );
+
+        fs::write(
+            root.join("app").join("src").join("shelf.arc"),
+            "#deny[tool.exec.trace.detail]\n#tool.exec.trace\nfn main() -> Int:\n    return 0\n",
+        )
+        .expect("app module should update");
+        let err = match crate::check_workspace_path(&root) {
+            Ok(_) => panic!("deny policy should escalate namespaced adapter warnings to errors"),
+            Err(err) => err,
+        };
+        assert!(err.contains("adapter note"), "{err}");
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+        fs::remove_dir_all(script_seed_dir).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_workspace_routes_basic_foreword_warnings_through_namespaced_lint_policy() {
+        let root = make_temp_package(
+            "basic_foreword_warning_lint",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    concat!(
+                        "foreword basic_foreword_warning_lint.meta.experimental:\n",
+                        "    tier = basic\n",
+                        "    visibility = public\n",
+                        "    targets = [fn]\n",
+                        "    retention = compile\n",
+                        "    diagnostic_namespace = basic_foreword_warning_lint.meta\n",
+                        "#basic_foreword_warning_lint.meta.experimental\n",
+                        "fn main() -> Int:\n",
+                        "    return 0\n",
+                    ),
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let checked = crate::check_workspace_path(&root)
+            .expect("basic foreword warning lane should warn by default");
+        assert!(
+            checked
+                .warnings()
+                .iter()
+                .any(|warning| warning.message.contains("basic foreword")),
+            "default policy should surface the basic foreword warning"
+        );
+
+        fs::write(
+            root.join("src").join("shelf.arc"),
+            concat!(
+                "foreword basic_foreword_warning_lint.meta.experimental:\n",
+                "    tier = basic\n",
+                "    visibility = public\n",
+                "    targets = [fn]\n",
+                "    retention = compile\n",
+                "    diagnostic_namespace = basic_foreword_warning_lint.meta\n",
+                "#allow[basic_foreword_warning_lint.meta]\n",
+                "#basic_foreword_warning_lint.meta.experimental\n",
+                "fn main() -> Int:\n",
+                "    return 0\n",
+            ),
+        )
+        .expect("package source should update");
+        let checked = crate::check_workspace_path(&root)
+            .expect("allow policy should suppress basic foreword warnings");
+        assert!(
+            !checked
+                .warnings()
+                .iter()
+                .any(|warning| warning.message.contains("basic foreword")),
+            "allow policy should suppress the basic foreword warning"
+        );
+
+        fs::write(
+            root.join("src").join("shelf.arc"),
+            concat!(
+                "foreword basic_foreword_warning_lint.meta.experimental:\n",
+                "    tier = basic\n",
+                "    visibility = public\n",
+                "    targets = [fn]\n",
+                "    retention = compile\n",
+                "    diagnostic_namespace = basic_foreword_warning_lint.meta\n",
+                "#deny[basic_foreword_warning_lint.meta]\n",
+                "#basic_foreword_warning_lint.meta.experimental\n",
+                "fn main() -> Int:\n",
+                "    return 0\n",
+            ),
+        )
+        .expect("package source should update");
+        let err = match crate::check_workspace_path(&root) {
+            Ok(_) => panic!("deny policy should escalate the basic foreword warning"),
+            Err(err) => err,
+        };
+        assert!(err.contains("basic foreword"), "{err}");
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_workspace_discovers_tests_and_warns_on_deprecated_use() {
+        let root = make_temp_package(
+            "deprecated_test_discovery",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    concat!(
+                        "#deprecated[\"use fresh\"]\n",
+                        "fn old() -> Int:\n",
+                        "    return 7\n",
+                        "#test\n",
+                        "fn smoke() -> Int:\n",
+                        "    return old :: :: call\n",
+                        "#allow[deprecated_use]\n",
+                        "fn quiet() -> Int:\n",
+                        "    return old :: :: call\n",
+                        "fn main() -> Int:\n",
+                        "    return 0\n",
+                    ),
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let checked = crate::check_workspace_path(&root)
+            .expect("workspace should discover tests and surface deprecated warnings");
+        assert_eq!(checked.discovered_tests().len(), 1);
+        assert_eq!(
+            checked.discovered_tests()[0].module_id,
+            "deprecated_test_discovery"
+        );
+        assert_eq!(checked.discovered_tests()[0].symbol_name, "smoke");
+        assert_eq!(checked.warnings().len(), 1);
+        assert!(
+            checked.warnings()[0]
+                .message
+                .contains("use of deprecated `old`: use fresh"),
+            "deprecated warning should include the foreword message"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_workspace_denies_deprecated_use_via_builtin_lint_policy() {
+        let root = make_temp_package(
+            "deprecated_use_deny",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    concat!(
+                        "#deprecated[\"use fresh\"]\n",
+                        "fn old() -> Int:\n",
+                        "    return 7\n",
+                        "#deny[deprecated_use]\n",
+                        "fn main() -> Int:\n",
+                        "    return old :: :: call\n",
+                    ),
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = match crate::check_workspace_path(&root) {
+            Ok(_) => panic!("deny policy should escalate deprecated-use warnings"),
+            Err(err) => err,
+        };
+        assert!(err.contains("use of deprecated `old`: use fresh"), "{err}");
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn foreword_adapter_cache_keys_change_when_registry_opt_in_or_artifact_identity_changes() {
+        let root = test_temp_dir("arcana-frontend-tests", "adapter_cache_key");
+        let product_path = root.join("forewords").join("rewrite.sh");
+        let runner_path = root.join("forewords").join("runner.sh");
+        fs::create_dir_all(product_path.parent().expect("product parent"))
+            .expect("product dir should be creatable");
+        fs::write(&product_path, "#!/bin/sh\nprintf '{}'\n").expect("product should write");
+        fs::write(&runner_path, "#!/bin/sh\nexec \"$@\"\n").expect("runner should write");
+
+        let package = arcana_hir::HirWorkspacePackage {
+            package_id: "app.pkg".to_string(),
+            root_dir: root.clone(),
+            direct_deps: BTreeSet::new(),
+            direct_dep_packages: BTreeMap::new(),
+            direct_dep_ids: BTreeMap::new(),
+            executable_foreword_deps: BTreeSet::new(),
+            foreword_products: BTreeMap::new(),
+            summary: arcana_hir::HirPackageSummary {
+                package_name: "app".to_string(),
+                modules: Vec::new(),
+                dependency_edges: Vec::new(),
+            },
+            layout: arcana_hir::HirPackageLayout {
+                module_paths: BTreeMap::new(),
+                relative_modules: BTreeMap::new(),
+                absolute_modules: BTreeMap::new(),
+            },
+        };
+        let definition = arcana_hir::HirForewordDefinition {
+            qualified_name: vec![
+                "tool".to_string(),
+                "exec".to_string(),
+                "rewrite".to_string(),
+            ],
+            tier: arcana_hir::HirForewordTier::Executable,
+            visibility: arcana_hir::HirForewordVisibility::Public,
+            phase: arcana_hir::HirForewordPhase::Frontend,
+            action: arcana_hir::HirForewordAction::Transform,
+            targets: vec![arcana_hir::HirForewordDefinitionTarget::Function],
+            retention: arcana_hir::HirForewordRetention::Compile,
+            payload: vec![arcana_hir::HirForewordPayloadField {
+                name: "label".to_string(),
+                optional: false,
+                ty: arcana_hir::HirForewordPayloadType::Str,
+            }],
+            repeatable: false,
+            conflicts: Vec::new(),
+            diagnostic_namespace: Some("tool.exec.trace".to_string()),
+            handler: Some(vec![
+                "tool".to_string(),
+                "exec".to_string(),
+                "rewrite_handler".to_string(),
+            ]),
+            span: Span { line: 1, column: 1 },
+        };
+        let handler = arcana_hir::HirForewordHandler {
+            qualified_name: vec![
+                "tool".to_string(),
+                "exec".to_string(),
+                "rewrite_handler".to_string(),
+            ],
+            phase: arcana_hir::HirForewordPhase::Frontend,
+            protocol: "stdio-v1".to_string(),
+            product: "tool-forewords".to_string(),
+            entry: "rewrite".to_string(),
+            span: Span { line: 1, column: 1 },
+        };
+        let export = ResolvedForewordExport {
+            kind: ResolvedForewordExportKind::User,
+            provider_package_id: "tool.pkg".to_string(),
+            exposed_package_id: "tool.pkg".to_string(),
+            exposed_name: vec![
+                "tool".to_string(),
+                "exec".to_string(),
+                "rewrite".to_string(),
+            ],
+            definition,
+            handler: Some(handler.clone()),
+            public: true,
+        };
+        let target = AdapterTargetSnapshot {
+            kind: "fn".to_string(),
+            path: "app.main".to_string(),
+            public: true,
+            owner_kind: "symbol".to_string(),
+            owner_symbol: None,
+            owner_directive: None,
+            selected_field: None,
+            selected_param: None,
+            selected_method_name: None,
+            container_kind: None,
+            container_name: None,
+        };
+        let visible_catalog = vec![
+            AdapterCatalogEntry {
+                exposed_name: "deprecated".to_string(),
+                qualified_name: "deprecated".to_string(),
+                tier: "builtin".to_string(),
+                action: "metadata".to_string(),
+                retention: "compile".to_string(),
+                targets: vec!["fn".to_string()],
+                provider_package_id: BUILTIN_FOREWORD_PROVIDER_PACKAGE_ID.to_string(),
+            },
+            AdapterCatalogEntry {
+                exposed_name: "tool.exec.rewrite".to_string(),
+                qualified_name: "tool.exec.rewrite".to_string(),
+                tier: "executable".to_string(),
+                action: "transform".to_string(),
+                retention: "compile".to_string(),
+                targets: vec!["fn".to_string()],
+                provider_package_id: "tool.pkg".to_string(),
+            },
+        ];
+
+        let base_product = arcana_hir::HirForewordAdapterProduct {
+            name: "tool-forewords".to_string(),
+            path: "forewords/rewrite.sh".to_string(),
+            runner: Some("forewords/runner.sh".to_string()),
+            args: vec!["--mode".to_string(), "rewrite".to_string()],
+        };
+        let base_artifact = build_adapter_artifact_identity(&package, &base_product);
+        let base_key = build_foreword_adapter_cache_key(
+            &package,
+            &export,
+            &handler,
+            &base_product,
+            &target,
+            &["label=\"entry\"".to_string()],
+            &visible_catalog,
+            true,
+            &base_artifact,
+        );
+
+        let mut changed_catalog = visible_catalog.clone();
+        changed_catalog.push(AdapterCatalogEntry {
+            exposed_name: "tool.meta.trace".to_string(),
+            qualified_name: "tool.meta.trace".to_string(),
+            tier: "basic".to_string(),
+            action: "metadata".to_string(),
+            retention: "runtime".to_string(),
+            targets: vec!["fn".to_string()],
+            provider_package_id: "tool.pkg".to_string(),
+        });
+        let changed_catalog_key = build_foreword_adapter_cache_key(
+            &package,
+            &export,
+            &handler,
+            &base_product,
+            &target,
+            &["label=\"entry\"".to_string()],
+            &changed_catalog,
+            true,
+            &base_artifact,
+        );
+        assert_ne!(base_key, changed_catalog_key);
+
+        let changed_opt_in_key = build_foreword_adapter_cache_key(
+            &package,
+            &export,
+            &handler,
+            &base_product,
+            &target,
+            &["label=\"entry\"".to_string()],
+            &visible_catalog,
+            false,
+            &base_artifact,
+        );
+        assert_ne!(base_key, changed_opt_in_key);
+
+        let changed_product = arcana_hir::HirForewordAdapterProduct {
+            args: vec!["--mode".to_string(), "rewrite2".to_string()],
+            ..base_product.clone()
+        };
+        let changed_artifact = build_adapter_artifact_identity(&package, &changed_product);
+        let changed_artifact_key = build_foreword_adapter_cache_key(
+            &package,
+            &export,
+            &handler,
+            &changed_product,
+            &target,
+            &["label=\"entry\"".to_string()],
+            &visible_catalog,
+            true,
+            &changed_artifact,
+        );
+        assert_ne!(base_key, changed_artifact_key);
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn lower_adapter_payload_args_preserves_typed_values() {
+        let args = vec![
+            arcana_hir::HirForewordArg {
+                name: Some("enabled".to_string()),
+                value: "true".to_string(),
+                typed_value: arcana_hir::HirForewordArgValue::Bool(true),
+            },
+            arcana_hir::HirForewordArg {
+                name: Some("count".to_string()),
+                value: "7".to_string(),
+                typed_value: arcana_hir::HirForewordArgValue::Int(7),
+            },
+            arcana_hir::HirForewordArg {
+                name: Some("label".to_string()),
+                value: "\"hello\"".to_string(),
+                typed_value: arcana_hir::HirForewordArgValue::Str("hello".to_string()),
+            },
+            arcana_hir::HirForewordArg {
+                name: Some("path".to_string()),
+                value: "tool.meta.trace".to_string(),
+                typed_value: arcana_hir::HirForewordArgValue::Path(vec![
+                    "tool".to_string(),
+                    "meta".to_string(),
+                    "trace".to_string(),
+                ]),
+            },
+        ];
+        let lowered = lower_adapter_payload_args(&args);
+        let json = serde_json::to_value(&lowered).expect("payload args should serialize");
+        assert_eq!(json[0]["name"], "enabled");
+        assert_eq!(json[0]["rendered"], "true");
+        assert_eq!(json[0]["value"]["kind"], "Bool");
+        assert_eq!(json[0]["value"]["value"], true);
+        assert_eq!(json[1]["value"]["kind"], "Int");
+        assert_eq!(json[1]["value"]["value"], 7);
+        assert_eq!(json[2]["value"]["kind"], "Str");
+        assert_eq!(json[2]["value"]["value"], "hello");
+        assert_eq!(json[3]["value"]["kind"], "Path");
+        assert_eq!(
+            json[3]["value"]["value"],
+            serde_json::json!(["tool", "meta", "trace"])
+        );
+    }
+
+    #[test]
+    fn build_adapter_artifact_identity_materializes_product_under_package_cache() {
+        let root = test_temp_dir("arcana-frontend-tests", "materialized_adapter_identity");
+        let adapter_rel_path = write_foreword_adapter_script(
+            &root,
+            "materialized_identity",
+            "{\"version\":\"arcana-foreword-stdio-v1\",\"diagnostics\":[]}\n",
+        );
+        let (package, product, _) = make_adapter_request_fixture(&root, &adapter_rel_path);
+        let identity = build_adapter_artifact_identity(&package, &product);
+        assert!(
+            identity.product_path.contains(".arcana"),
+            "materialized product path should live under package cache: {}",
+            identity.product_path
+        );
+        assert!(
+            Path::new(&identity.product_path).is_file(),
+            "materialized product should exist at {}",
+            identity.product_path
+        );
+        let materialized = materialize_foreword_adapter_artifact(&package, &product)
+            .expect("adapter artifact should materialize");
+        assert_eq!(identity.product_path, materialized.product_arg_path);
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn execute_foreword_adapter_rejects_invalid_json_response() {
+        let root = test_temp_dir("arcana-frontend-tests", "adapter_invalid_json");
+        let adapter_rel_path = write_foreword_adapter_script(&root, "invalid_json", "not-json");
+        let (package, product, request) = make_adapter_request_fixture(&root, &adapter_rel_path);
+        let err = execute_foreword_adapter(&package, &product, &request)
+            .expect_err("invalid JSON adapter output should fail");
+        assert!(err.contains("returned invalid JSON"), "{err}");
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn execute_foreword_adapter_rejects_protocol_mismatch_response() {
+        let root = test_temp_dir("arcana-frontend-tests", "adapter_protocol_mismatch");
+        let adapter_rel_path = write_foreword_adapter_script(
+            &root,
+            "protocol_mismatch",
+            "{\"version\":\"wrong-protocol\",\"diagnostics\":[]}",
+        );
+        let (package, product, request) = make_adapter_request_fixture(&root, &adapter_rel_path);
+        let err = execute_foreword_adapter(&package, &product, &request)
+            .expect_err("protocol mismatch should fail");
+        assert!(err.contains("returned protocol `wrong-protocol`"), "{err}");
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn execute_foreword_adapter_surfaces_nonzero_exit_detail() {
+        let root = test_temp_dir("arcana-frontend-tests", "adapter_nonzero_exit");
+        let script = if cfg!(windows) {
+            "@echo off\r\necho failure detail 1>&2\r\nexit /b 9\r\n".to_string()
+        } else {
+            "#!/bin/sh\necho failure detail >&2\nexit 9\n".to_string()
+        };
+        let adapter_rel_path = write_foreword_script_contents(&root, "nonzero_exit", &script);
+        let (package, product, request) = make_adapter_request_fixture(&root, &adapter_rel_path);
+        let err = execute_foreword_adapter(&package, &product, &request)
+            .expect_err("nonzero adapter exit should fail");
+        assert!(err.contains("failure detail"), "{err}");
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn execute_executable_foreword_app_reuses_cached_response_for_identical_requests() {
+        let root = test_temp_dir("arcana-frontend-tests", "adapter_cached_replay");
+        let counter_path = root.join("counter.txt");
+        let output = "{\"version\":\"arcana-foreword-stdio-v1\",\"diagnostics\":[],\"emitted_metadata\":[],\"registration_rows\":[]}\n";
+        let script = if cfg!(windows) {
+            format!(
+                "@echo off\r\necho run>>\"{}\"\r\necho {}\r\n",
+                counter_path.display(),
+                output.trim()
+            )
+        } else {
+            format!(
+                "#!/bin/sh\necho run >> \"{}\"\nprintf '%s' '{}'\n",
+                counter_path.display(),
+                output
+            )
+        };
+        let adapter_rel_path = write_foreword_script_contents(&root, "cached_replay", &script);
+        let provider_package = arcana_hir::HirWorkspacePackage {
+            package_id: "tool.pkg".to_string(),
+            root_dir: root.clone(),
+            direct_deps: BTreeSet::new(),
+            direct_dep_packages: BTreeMap::new(),
+            direct_dep_ids: BTreeMap::new(),
+            executable_foreword_deps: BTreeSet::new(),
+            foreword_products: BTreeMap::from([(
+                "tool-forewords".to_string(),
+                arcana_hir::HirForewordAdapterProduct {
+                    name: "tool-forewords".to_string(),
+                    path: adapter_rel_path.clone(),
+                    runner: None,
+                    args: Vec::new(),
+                },
+            )]),
+            summary: arcana_hir::HirPackageSummary {
+                package_name: "tool".to_string(),
+                modules: Vec::new(),
+                dependency_edges: Vec::new(),
+            },
+            layout: arcana_hir::HirPackageLayout {
+                module_paths: BTreeMap::new(),
+                relative_modules: BTreeMap::new(),
+                absolute_modules: BTreeMap::new(),
+            },
+        };
+        let consumer_package = arcana_hir::HirWorkspacePackage {
+            package_id: "app.pkg".to_string(),
+            root_dir: root.clone(),
+            direct_deps: BTreeSet::from(["tool.pkg".to_string()]),
+            direct_dep_packages: BTreeMap::from([("tool".to_string(), "tool".to_string())]),
+            direct_dep_ids: BTreeMap::from([("tool".to_string(), "tool.pkg".to_string())]),
+            executable_foreword_deps: BTreeSet::from(["tool".to_string()]),
+            foreword_products: BTreeMap::new(),
+            summary: arcana_hir::HirPackageSummary {
+                package_name: "app".to_string(),
+                modules: Vec::new(),
+                dependency_edges: Vec::new(),
+            },
+            layout: arcana_hir::HirPackageLayout {
+                module_paths: BTreeMap::new(),
+                relative_modules: BTreeMap::new(),
+                absolute_modules: BTreeMap::new(),
+            },
+        };
+        let mut workspace = arcana_hir::HirWorkspaceSummary::default();
+        workspace
+            .packages
+            .insert("app.pkg".to_string(), consumer_package.clone());
+        workspace
+            .packages
+            .insert("tool.pkg".to_string(), provider_package.clone());
+        let app = arcana_hir::HirForewordApp {
+            name: "note".to_string(),
+            path: vec!["tool".to_string(), "exec".to_string(), "note".to_string()],
+            args: vec![arcana_hir::HirForewordArg {
+                name: Some("label".to_string()),
+                value: "\"main\"".to_string(),
+                typed_value: arcana_hir::HirForewordArgValue::Str("main".to_string()),
+            }],
+            span: Span { line: 1, column: 1 },
+        };
+        let definition = arcana_hir::HirForewordDefinition {
+            qualified_name: vec!["tool".to_string(), "exec".to_string(), "note".to_string()],
+            tier: arcana_hir::HirForewordTier::Executable,
+            visibility: arcana_hir::HirForewordVisibility::Public,
+            phase: arcana_hir::HirForewordPhase::Frontend,
+            action: arcana_hir::HirForewordAction::Metadata,
+            targets: vec![arcana_hir::HirForewordDefinitionTarget::Function],
+            retention: arcana_hir::HirForewordRetention::Runtime,
+            payload: vec![arcana_hir::HirForewordPayloadField {
+                name: "label".to_string(),
+                optional: false,
+                ty: arcana_hir::HirForewordPayloadType::Str,
+            }],
+            repeatable: false,
+            conflicts: Vec::new(),
+            diagnostic_namespace: None,
+            handler: Some(vec![
+                "tool".to_string(),
+                "exec".to_string(),
+                "note_handler".to_string(),
+            ]),
+            span: Span { line: 1, column: 1 },
+        };
+        let handler = arcana_hir::HirForewordHandler {
+            qualified_name: vec![
+                "tool".to_string(),
+                "exec".to_string(),
+                "note_handler".to_string(),
+            ],
+            phase: arcana_hir::HirForewordPhase::Frontend,
+            protocol: "stdio-v1".to_string(),
+            product: "tool-forewords".to_string(),
+            entry: "note".to_string(),
+            span: Span { line: 1, column: 1 },
+        };
+        let export = ResolvedForewordExport {
+            kind: ResolvedForewordExportKind::User,
+            provider_package_id: "tool.pkg".to_string(),
+            exposed_package_id: "tool.pkg".to_string(),
+            exposed_name: vec!["tool".to_string(), "exec".to_string(), "note".to_string()],
+            definition,
+            handler: Some(handler),
+            public: true,
+        };
+        let mut registry = super::ForewordRegistry::default();
+        registry.exports.insert(
+            ("tool.pkg".to_string(), "exec.note".to_string()),
+            export.clone(),
+        );
+        registry.catalog.push(super::ForewordCatalogEntry {
+            exposed_name: "tool.exec.note".to_string(),
+            qualified_name: "tool.exec.note".to_string(),
+            tier: "executable".to_string(),
+            visibility: "public".to_string(),
+            action: "metadata".to_string(),
+            retention: "runtime".to_string(),
+            targets: vec!["fn".to_string()],
+            diagnostic_namespace: None,
+            handler: Some("tool.exec.note_handler".to_string()),
+            provider_package_id: "tool.pkg".to_string(),
+        });
+
+        let target = AdapterTargetSnapshot {
+            kind: "fn".to_string(),
+            path: "app.main".to_string(),
+            public: true,
+            owner_kind: "symbol".to_string(),
+            owner_symbol: None,
+            owner_directive: None,
+            selected_field: None,
+            selected_param: None,
+            selected_method_name: None,
+            container_kind: None,
+            container_name: None,
+        };
+        let mut cache = BTreeMap::new();
+        let mut warnings = Vec::new();
+        let mut errors = Vec::new();
+        let policy = super::LintPolicy::default();
+        let first = execute_executable_foreword_app(
+            &workspace,
+            &consumer_package,
+            &root.join("app.arc"),
+            "app",
+            &registry,
+            &mut cache,
+            &app,
+            &export,
+            "fn",
+            "app.main",
+            target.clone(),
+            &policy,
+            &mut warnings,
+            &mut errors,
+        )
+        .expect("first execution should succeed");
+        let second = execute_executable_foreword_app(
+            &workspace,
+            &consumer_package,
+            &root.join("app.arc"),
+            "app",
+            &registry,
+            &mut cache,
+            &app,
+            &export,
+            "fn",
+            "app.main",
+            target,
+            &policy,
+            &mut warnings,
+            &mut errors,
+        )
+        .expect("cached execution should succeed");
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(first.response.version, second.response.version);
+        let counter = fs::read_to_string(&counter_path).expect("counter file should exist");
+        assert_eq!(
+            counter.lines().count(),
+            1,
+            "identical executable foreword input should replay from cache"
+        );
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_workspace_executes_executable_foreword_transform_products() {
+        let script_seed_dir = test_temp_dir("arcana-frontend-workspaces", "transform_script_seed");
+        let adapter_rel_path = write_foreword_adapter_script(
+            &script_seed_dir,
+            "transform_adapter",
+            "{\"version\":\"arcana-foreword-stdio-v1\",\"diagnostics\":[]}\n",
+        );
+        let runner_rel_path = write_foreword_runner_script(
+            &script_seed_dir,
+            "transform_adapter_runner",
+            "transform_flag",
+            "{\"version\":\"arcana-foreword-stdio-v1\",\"diagnostics\":[],\"replace_owner\":\"fn main() -> Int:\\n    return 7\\n\",\"append_symbols\":[\"fn helper() -> Int:\\n    return 11\\n\"],\"append_impls\":[],\"emitted_metadata\":[{\"qualified_name\":\"tool.exec.runtime_helper\",\"target_kind\":\"fn\",\"target_path\":\"app.helper\",\"retention\":\"runtime\",\"args\":[{\"name\":\"slot\",\"value\":\"\\\"helper\\\"\"}]}],\"registration_rows\":[{\"namespace\":\"tool.exec.registry\",\"key\":\"helper\",\"value\":\"runtime\",\"target_kind\":\"fn\",\"target_path\":\"app.helper\"}]}\n",
+        );
+        let root = make_temp_workspace(
+            "executable_foreword_transform",
+            &["app", "tool"],
+            &[
+                (
+                    "tool/book.toml",
+                    &format!(
+                        concat!(
+                            "name = \"tool\"\n",
+                            "kind = \"lib\"\n",
+                            "[toolchain.foreword_products.tool-forewords]\n",
+                            "path = \"{}\"\n",
+                            "runner = \"{}\"\n",
+                            "args = [{}]\n"
+                        ),
+                        adapter_rel_path,
+                        if cfg!(windows) { "powershell" } else { "sh" },
+                        if cfg!(windows) {
+                            let runner_arg_path = script_seed_dir
+                                .join(&runner_rel_path)
+                                .display()
+                                .to_string()
+                                .replace('\\', "\\\\");
+                            format!(
+                                "\"-ExecutionPolicy\", \"Bypass\", \"-File\", \"{runner_arg_path}\", \"transform_flag\""
+                            )
+                        } else {
+                            format!(
+                                "\"{}\", \"transform_flag\"",
+                                script_seed_dir.join(&runner_rel_path).display()
+                            )
+                        }
+                    ),
+                ),
+                (
+                    "tool/src/book.arc",
+                    concat!(
+                        "foreword tool.exec.rewrite:\n",
+                        "    tier = executable\n",
+                        "    visibility = public\n",
+                        "    action = transform\n",
+                        "    targets = [fn]\n",
+                        "    retention = compile\n",
+                        "    handler = tool.exec.rewrite_handler\n",
+                        "foreword handler tool.exec.rewrite_handler:\n",
+                        "    protocol = \"stdio-v1\"\n",
+                        "    product = \"tool-forewords\"\n",
+                        "    entry = \"rewrite\"\n",
+                    ),
+                ),
+                ("tool/src/types.arc", ""),
+                (
+                    "app/book.toml",
+                    "name = \"app\"\nkind = \"app\"\n[deps]\ntool = { path = \"../tool\", executable_forewords = true }\n",
+                ),
+                (
+                    "app/src/shelf.arc",
+                    "#tool.exec.rewrite\nfn main() -> Int:\n    return 0\n",
+                ),
+                ("app/src/types.arc", ""),
+            ],
+        );
+        for rel_path in [&adapter_rel_path, &runner_rel_path] {
+            let target = root.join("tool").join(rel_path);
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).expect("adapter dir should be creatable");
+            }
+            copy_test_adapter_script(&script_seed_dir.join(rel_path), &target);
+        }
+
+        let checked = crate::check_workspace_path(&root)
+            .expect("workspace should run executable foreword transform");
+        let index = checked.foreword_index().to_vec();
+        let registrations = checked.foreword_registrations().to_vec();
+        let (workspace, _) = checked.into_workspace_parts();
+        let app = workspace.package("app").expect("app package should load");
+        let main_module = app
+            .summary
+            .modules
+            .iter()
+            .find(|module| module.symbols.iter().any(|symbol| symbol.name == "main"))
+            .expect("main module should exist");
+        assert!(
+            main_module
+                .symbols
+                .iter()
+                .any(|symbol| symbol.name == "helper"),
+            "transform should append helper symbol"
+        );
+        let helper = main_module
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "helper")
+            .expect("helper symbol should exist");
+        assert!(
+            helper.generated_name_key.is_some(),
+            "generated siblings should carry a stable generation key"
+        );
+        let main = main_module
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "main")
+            .expect("main symbol should exist");
+        let generated_entry = index
+            .iter()
+            .find(|entry| {
+                entry.entry_kind == "generated"
+                    && entry.qualified_name == "tool.exec.rewrite"
+                    && entry.target_path == format!("{}.helper", main_module.module_id)
+            })
+            .expect("generated helper provenance entry should exist");
+        assert_eq!(generated_entry.retention, "compile");
+        let generated_by = generated_entry
+            .generated_by
+            .as_ref()
+            .expect("generated provenance should include origin");
+        assert_eq!(
+            generated_by.owner_path,
+            format!("{}.main", main_module.module_id)
+        );
+        let emitted_entry = index
+            .iter()
+            .find(|entry| {
+                entry.entry_kind == "emitted"
+                    && entry.qualified_name == "tool.exec.runtime_helper"
+                    && entry.target_path == format!("{}.helper", main_module.module_id)
+            })
+            .expect("adapter-emitted metadata entry should exist");
+        assert_eq!(emitted_entry.retention, "runtime");
+        assert_eq!(emitted_entry.args, vec!["slot=\"helper\"".to_string()]);
+        assert_eq!(registrations.len(), 1);
+        assert_eq!(registrations[0].namespace, "tool.exec.registry");
+        assert_eq!(
+            registrations[0].target_path,
+            format!("{}.helper", main_module.module_id)
+        );
+
+        let Some(arcana_hir::HirStatement {
+            kind:
+                arcana_hir::HirStatementKind::Return {
+                    value: Some(arcana_hir::HirExpr::IntLiteral { text, .. }),
+                },
+            ..
+        }) = main.statements.first()
+        else {
+            panic!("transformed main should return an integer literal");
+        };
+        assert_eq!(text, "7");
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+        fs::remove_dir_all(script_seed_dir).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_workspace_executes_executable_foreword_metadata_products() {
+        let script_seed_dir = test_temp_dir("arcana-frontend-workspaces", "metadata_script_seed");
+        let adapter_rel_path = write_foreword_adapter_script(
+            &script_seed_dir,
+            "metadata_adapter",
+            "{\"version\":\"arcana-foreword-stdio-v1\",\"diagnostics\":[]}\n",
+        );
+        let runner_rel_path = write_foreword_runner_script(
+            &script_seed_dir,
+            "metadata_adapter_runner",
+            "metadata_flag",
+            "{\"version\":\"arcana-foreword-stdio-v1\",\"diagnostics\":[],\"emitted_metadata\":[{\"qualified_name\":\"tool.exec.runtime_note\",\"target_kind\":\"fn\",\"target_path\":\"app.main\",\"retention\":\"runtime\",\"args\":[{\"name\":\"slot\",\"value\":\"\\\"main\\\"\"}]}],\"registration_rows\":[{\"namespace\":\"tool.exec.registry\",\"key\":\"main\",\"value\":\"metadata\",\"target_kind\":\"fn\",\"target_path\":\"app.main\"}]}\n",
+        );
+        let root = make_temp_workspace(
+            "executable_foreword_metadata",
+            &["app", "tool"],
+            &[
+                (
+                    "tool/book.toml",
+                    &format!(
+                        concat!(
+                            "name = \"tool\"\n",
+                            "kind = \"lib\"\n",
+                            "[toolchain.foreword_products.tool-forewords]\n",
+                            "path = \"{}\"\n",
+                            "runner = \"{}\"\n",
+                            "args = [{}]\n"
+                        ),
+                        adapter_rel_path,
+                        if cfg!(windows) { "powershell" } else { "sh" },
+                        if cfg!(windows) {
+                            let runner_arg_path = script_seed_dir
+                                .join(&runner_rel_path)
+                                .display()
+                                .to_string()
+                                .replace('\\', "\\\\");
+                            format!(
+                                "\"-ExecutionPolicy\", \"Bypass\", \"-File\", \"{runner_arg_path}\", \"metadata_flag\""
+                            )
+                        } else {
+                            format!(
+                                "\"{}\", \"metadata_flag\"",
+                                script_seed_dir.join(&runner_rel_path).display()
+                            )
+                        }
+                    ),
+                ),
+                (
+                    "tool/src/book.arc",
+                    concat!(
+                        "foreword tool.exec.note:\n",
+                        "    tier = executable\n",
+                        "    visibility = public\n",
+                        "    action = metadata\n",
+                        "    targets = [fn]\n",
+                        "    retention = runtime\n",
+                        "    handler = tool.exec.note_handler\n",
+                        "foreword handler tool.exec.note_handler:\n",
+                        "    protocol = \"stdio-v1\"\n",
+                        "    product = \"tool-forewords\"\n",
+                        "    entry = \"note\"\n",
+                    ),
+                ),
+                ("tool/src/types.arc", ""),
+                (
+                    "app/book.toml",
+                    "name = \"app\"\nkind = \"app\"\n[deps]\ntool = { path = \"../tool\", executable_forewords = true }\n",
+                ),
+                (
+                    "app/src/shelf.arc",
+                    "#tool.exec.note\nfn main() -> Int:\n    return 0\n",
+                ),
+                ("app/src/types.arc", ""),
+            ],
+        );
+        for rel_path in [&adapter_rel_path, &runner_rel_path] {
+            let target = root.join("tool").join(rel_path);
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).expect("adapter dir should be creatable");
+            }
+            copy_test_adapter_script(&script_seed_dir.join(rel_path), &target);
+        }
+
+        let checked = crate::check_workspace_path(&root)
+            .expect("workspace should run executable foreword metadata adapter");
+        let index = checked.foreword_index().to_vec();
+        let registrations = checked.foreword_registrations().to_vec();
+        let (workspace, _) = checked.into_workspace_parts();
+        let app = workspace.package("app").expect("app package should load");
+        let module = app
+            .summary
+            .modules
+            .iter()
+            .find(|module| module.module_id == "app")
+            .expect("app module should exist");
+        let main = module
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "main")
+            .expect("main symbol should exist");
+        let Some(arcana_hir::HirStatement {
+            kind:
+                arcana_hir::HirStatementKind::Return {
+                    value: Some(arcana_hir::HirExpr::IntLiteral { text, .. }),
+                },
+            ..
+        }) = main.statements.first()
+        else {
+            panic!("metadata adapter should not rewrite the owner symbol");
+        };
+        assert_eq!(text, "0");
+        assert!(
+            index.iter().any(|entry| {
+                entry.entry_kind == "emitted"
+                    && entry.qualified_name == "tool.exec.runtime_note"
+                    && entry.target_path == "app.main"
+            }),
+            "metadata adapter should emit retained metadata"
+        );
+        assert_eq!(registrations.len(), 1);
+        assert_eq!(registrations[0].namespace, "tool.exec.registry");
+        assert_eq!(registrations[0].value, "metadata");
+        assert_eq!(module.emitted_foreword_metadata.len(), 1);
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+        fs::remove_dir_all(script_seed_dir).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_workspace_rejects_nonadjacent_directive_sibling_emission() {
+        let script_seed_dir = test_temp_dir(
+            "arcana-frontend-workspaces",
+            "directive_append_rejection_seed",
+        );
+        let adapter_rel_path = write_foreword_adapter_script(
+            &script_seed_dir,
+            "directive_append_rejection",
+            "{\"version\":\"arcana-foreword-stdio-v1\",\"diagnostics\":[]}\n",
+        );
+        let runner_rel_path = write_foreword_runner_script(
+            &script_seed_dir,
+            "directive_append_rejection_runner",
+            "reject_flag",
+            "{\"version\":\"arcana-foreword-stdio-v1\",\"diagnostics\":[],\"replace_directive\":\"import std.io\",\"append_symbols\":[\"fn helper() -> Int:\\n    return 1\\n\"],\"append_impls\":[]}\n",
+        );
+        let root = make_temp_workspace(
+            "executable_foreword_directive_append_rejection",
+            &["app", "tool"],
+            &[
+                (
+                    "tool/book.toml",
+                    &format!(
+                        concat!(
+                            "name = \"tool\"\n",
+                            "kind = \"lib\"\n",
+                            "[toolchain.foreword_products.tool-forewords]\n",
+                            "path = \"{}\"\n",
+                            "runner = \"{}\"\n",
+                            "args = [{}]\n"
+                        ),
+                        adapter_rel_path,
+                        if cfg!(windows) { "powershell" } else { "sh" },
+                        if cfg!(windows) {
+                            let runner_arg_path = script_seed_dir
+                                .join(&runner_rel_path)
+                                .display()
+                                .to_string()
+                                .replace('\\', "\\\\");
+                            format!(
+                                "\"-ExecutionPolicy\", \"Bypass\", \"-File\", \"{runner_arg_path}\", \"reject_flag\""
+                            )
+                        } else {
+                            format!(
+                                "\"{}\", \"reject_flag\"",
+                                script_seed_dir.join(&runner_rel_path).display()
+                            )
+                        }
+                    ),
+                ),
+                (
+                    "tool/src/book.arc",
+                    concat!(
+                        "foreword tool.exec.expand:\n",
+                        "    tier = executable\n",
+                        "    visibility = public\n",
+                        "    action = transform\n",
+                        "    targets = [import]\n",
+                        "    retention = compile\n",
+                        "    handler = tool.exec.expand_handler\n",
+                        "foreword handler tool.exec.expand_handler:\n",
+                        "    protocol = \"stdio-v1\"\n",
+                        "    product = \"tool-forewords\"\n",
+                        "    entry = \"expand\"\n",
+                    ),
+                ),
+                ("tool/src/types.arc", ""),
+                (
+                    "app/book.toml",
+                    "name = \"app\"\nkind = \"app\"\n[deps]\ntool = { path = \"../tool\", executable_forewords = true }\n",
+                ),
+                (
+                    "app/src/shelf.arc",
+                    "#tool.exec.expand\nimport std.io\nfn main() -> Int:\n    return 0\n",
+                ),
+                ("app/src/types.arc", ""),
+            ],
+        );
+        for rel_path in [&adapter_rel_path, &runner_rel_path] {
+            let target = root.join("tool").join(rel_path);
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).expect("adapter dir should be creatable");
+            }
+            copy_test_adapter_script(&script_seed_dir.join(rel_path), &target);
+        }
+
+        let err = match crate::check_workspace_path(&root) {
+            Ok(_) => panic!("directive sibling emission should be rejected"),
+            Err(err) => err,
+        };
+        assert!(err.contains("cannot append sibling declarations"), "{err}");
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+        fs::remove_dir_all(script_seed_dir).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_workspace_executes_executable_foreword_transform_products_via_runner_indirection() {
+        let script_seed_dir = test_temp_dir("arcana-frontend-workspaces", "transform_runner_seed");
+        let adapter_rel_path = write_foreword_adapter_script(
+            &script_seed_dir,
+            "transform_with_runner",
+            "{\"version\":\"arcana-foreword-stdio-v1\",\"diagnostics\":[],\"replace_owner\":\"fn main() -> Int:\\n    return 13\\n\",\"append_symbols\":[],\"append_impls\":[]}\n",
+        );
+        let runner_rel_path = write_foreword_runner_script(
+            &script_seed_dir,
+            "transform_runner",
+            "runner_flag",
+            "{\"version\":\"arcana-foreword-stdio-v1\",\"diagnostics\":[],\"replace_owner\":\"fn main() -> Int:\\n    return 13\\n\",\"append_symbols\":[],\"append_impls\":[]}\n",
+        );
+        let root = make_temp_workspace(
+            "executable_foreword_transform_runner",
+            &["app", "tool"],
+            &[
+                (
+                    "tool/book.toml",
+                    &format!(
+                        concat!(
+                            "name = \"tool\"\n",
+                            "kind = \"lib\"\n",
+                            "[toolchain.foreword_products.tool-forewords]\n",
+                            "path = \"{}\"\n",
+                            "runner = \"{}\"\n",
+                            "args = []\n"
+                        ),
+                        adapter_rel_path,
+                        if cfg!(windows) { "cmd" } else { "sh" }
+                    ),
+                ),
+                (
+                    "tool/src/book.arc",
+                    concat!(
+                        "foreword tool.exec.rewrite:\n",
+                        "    tier = executable\n",
+                        "    visibility = public\n",
+                        "    action = transform\n",
+                        "    targets = [fn]\n",
+                        "    retention = compile\n",
+                        "    handler = tool.exec.rewrite_handler\n",
+                        "foreword handler tool.exec.rewrite_handler:\n",
+                        "    protocol = \"stdio-v1\"\n",
+                        "    product = \"tool-forewords\"\n",
+                        "    entry = \"rewrite\"\n",
+                    ),
+                ),
+                ("tool/src/types.arc", ""),
+                (
+                    "app/book.toml",
+                    "name = \"app\"\nkind = \"app\"\n[deps]\ntool = { path = \"../tool\", executable_forewords = true }\n",
+                ),
+                (
+                    "app/src/shelf.arc",
+                    "#tool.exec.rewrite\nfn main() -> Int:\n    return 0\n",
+                ),
+                ("app/src/types.arc", ""),
+            ],
+        );
+        for rel_path in [&adapter_rel_path, &runner_rel_path] {
+            let target = root.join("tool").join(rel_path);
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).expect("script dir should be creatable");
+            }
+            copy_test_adapter_script(&script_seed_dir.join(rel_path), &target);
+        }
+        let runner_arg_path = root
+            .join("tool")
+            .join(&runner_rel_path)
+            .display()
+            .to_string()
+            .replace('\\', "\\\\");
+        fs::write(
+            root.join("tool").join("book.toml"),
+            format!(
+                concat!(
+                    "name = \"tool\"\n",
+                    "kind = \"lib\"\n",
+                    "[toolchain.foreword_products.tool-forewords]\n",
+                    "path = \"{}\"\n",
+                    "runner = \"{}\"\n",
+                    "args = [{}]\n"
+                ),
+                adapter_rel_path,
+                if cfg!(windows) {
+                    "powershell"
+                } else {
+                    "sh"
+                },
+                if cfg!(windows) {
+                    format!(
+                        "\"-ExecutionPolicy\", \"Bypass\", \"-File\", \"{runner_arg_path}\", \"runner_flag\""
+                    )
+                } else {
+                    format!("\"{runner_arg_path}\", \"runner_flag\"")
+                }
+            ),
+        )
+        .expect("runner manifest should update");
+
+        let checked = crate::check_workspace_path(&root)
+            .expect("workspace should run executable foreword via runner indirection");
+        let (workspace, _) = checked.into_workspace_parts();
+        let app = workspace.package("app").expect("app package should load");
+        let main_module = app
+            .summary
+            .modules
+            .iter()
+            .find(|module| module.symbols.iter().any(|symbol| symbol.name == "main"))
+            .expect("main module should exist");
+        let main = main_module
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "main")
+            .expect("main symbol should exist");
+
+        let Some(arcana_hir::HirStatement {
+            kind:
+                arcana_hir::HirStatementKind::Return {
+                    value: Some(arcana_hir::HirExpr::IntLiteral { text, .. }),
+                },
+            ..
+        }) = main.statements.first()
+        else {
+            panic!("transformed main should return an integer literal");
+        };
+        assert_eq!(text, "13");
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+        fs::remove_dir_all(script_seed_dir).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_non_repeatable_user_forewords_on_same_target() {
+        let root = make_temp_package(
+            "app",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    concat!(
+                        "foreword app.meta.once:\n",
+                        "    tier = basic\n",
+                        "    visibility = public\n",
+                        "    targets = [fn]\n",
+                        "    retention = compile\n",
+                        "#app.meta.once\n",
+                        "#app.meta.once\n",
+                        "fn main() -> Int:\n",
+                        "    return 0\n",
+                    ),
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("duplicate non-repeatable foreword should fail");
+        assert!(err.contains("is not repeatable"), "{err}");
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_conflicting_user_forewords_on_same_target() {
+        let root = make_temp_package(
+            "app",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    concat!(
+                        "foreword app.meta.a:\n",
+                        "    tier = basic\n",
+                        "    visibility = public\n",
+                        "    targets = [fn]\n",
+                        "    retention = compile\n",
+                        "    conflicts = [app.meta.b]\n",
+                        "foreword app.meta.b:\n",
+                        "    tier = basic\n",
+                        "    visibility = public\n",
+                        "    targets = [fn]\n",
+                        "    retention = compile\n",
+                        "#app.meta.a\n",
+                        "#app.meta.b\n",
+                        "fn main() -> Int:\n",
+                        "    return 0\n",
+                    ),
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("conflicting forewords should fail");
+        assert!(err.contains("conflicts with"), "{err}");
 
         fs::remove_dir_all(root).expect("cleanup should succeed");
     }
@@ -10023,7 +17055,32 @@ mod tests {
             &[
                 (
                     "src/shelf.arc",
-                    "enum Result[T, E]:\n    Ok(T)\n    Err(E)\nfn cleanup(take value: Int) -> Result[Unit, Str]:\n    return Result.Ok[Unit, Str] :: :: call\nfn run(seed: Int) -> Int:\n    let local = seed\n    while local > 0:\n        let scratch = local\n        local -= 1\n    -cleanup[target = scratch, handler = cleanup]\n    return local\n-cleanup[target = seed, handler = cleanup]\nfn main() -> Int:\n    return run :: 1 :: call\n",
+                    concat!(
+                        "enum Result[T, E]:\n",
+                        "    Ok(T)\n",
+                        "    Err(E)\n",
+                        "record Box:\n",
+                        "    value: Int\n",
+                        "trait Cleanup[T]:\n",
+                        "    fn cleanup(take self: T) -> Result[Unit, Str]\n",
+                        "lang cleanup_contract = Cleanup\n",
+                        "impl Cleanup[Box] for Box:\n",
+                        "    fn cleanup(take self: Box) -> Result[Unit, Str]:\n",
+                        "        return Result.Ok[Unit, Str] :: :: call\n",
+                        "fn cleanup(take value: Box) -> Result[Unit, Str]:\n",
+                        "    return Result.Ok[Unit, Str] :: :: call\n",
+                        "fn run(take seed: Box) -> Int:\n",
+                        "    let mut local = seed.value\n",
+                        "    while local > 0:\n",
+                        "        let scratch = Box :: value = local :: call\n",
+                        "        local -= 1\n",
+                        "    -cleanup[target = scratch, handler = cleanup]\n",
+                        "    return local\n",
+                        "-cleanup[target = seed, handler = cleanup]\n",
+                        "fn main() -> Int:\n",
+                        "    let seed = Box :: value = 1 :: call\n",
+                        "    return run :: seed :: call\n",
+                    ),
                 ),
                 ("src/types.arc", ""),
             ],
@@ -10139,7 +17196,26 @@ mod tests {
             &[
                 (
                     "src/shelf.arc",
-                    "enum Result[T, E]:\n    Ok(T)\n    Err(E)\nfn cleanup(take value: Int) -> Result[Unit, Str]:\n    return Result.Ok[Unit, Str] :: :: call\nfn main(seed: Int) -> Int:\n    let local = seed\n    local += 1\n    return local\n-cleanup[target = local, handler = cleanup]\n",
+                    concat!(
+                        "enum Result[T, E]:\n",
+                        "    Ok(T)\n",
+                        "    Err(E)\n",
+                        "record Box:\n",
+                        "    value: Int\n",
+                        "trait Cleanup[T]:\n",
+                        "    fn cleanup(take self: T) -> Result[Unit, Str]\n",
+                        "lang cleanup_contract = Cleanup\n",
+                        "impl Cleanup[Box] for Box:\n",
+                        "    fn cleanup(take self: Box) -> Result[Unit, Str]:\n",
+                        "        return Result.Ok[Unit, Str] :: :: call\n",
+                        "fn cleanup(take value: Box) -> Result[Unit, Str]:\n",
+                        "    return Result.Ok[Unit, Str] :: :: call\n",
+                        "fn main() -> Int:\n",
+                        "    let mut local = Box :: value = 1 :: call\n",
+                        "    local = Box :: value = 2 :: call\n",
+                        "    return local.value\n",
+                        "-cleanup[target = local, handler = cleanup]\n",
+                    ),
                 ),
                 ("src/types.arc", ""),
             ],
@@ -10260,7 +17336,28 @@ mod tests {
             &[
                 (
                     "src/shelf.arc",
-                    "enum Result[T, E]:\n    Ok(T)\n    Err(E)\nfn cleanup(take value: Str) -> Result[Unit, Str]:\n    return Result.Ok[Unit, Str] :: :: call\nfn consume(take value: Str):\n    return\nfn main() -> Int:\n    let text = \"hi\"\n    consume :: text :: call\n    return 0\n-cleanup[target = text, handler = cleanup]\n",
+                    concat!(
+                        "enum Result[T, E]:\n",
+                        "    Ok(T)\n",
+                        "    Err(E)\n",
+                        "record Box:\n",
+                        "    value: Int\n",
+                        "trait Cleanup[T]:\n",
+                        "    fn cleanup(take self: T) -> Result[Unit, Str]\n",
+                        "lang cleanup_contract = Cleanup\n",
+                        "impl Cleanup[Box] for Box:\n",
+                        "    fn cleanup(take self: Box) -> Result[Unit, Str]:\n",
+                        "        return Result.Ok[Unit, Str] :: :: call\n",
+                        "fn cleanup(take value: Box) -> Result[Unit, Str]:\n",
+                        "    return Result.Ok[Unit, Str] :: :: call\n",
+                        "fn consume(take value: Box):\n",
+                        "    return\n",
+                        "fn main() -> Int:\n",
+                        "    let text = Box :: value = 1 :: call\n",
+                        "    consume :: text :: call\n",
+                        "    return 0\n",
+                        "-cleanup[target = text, handler = cleanup]\n",
+                    ),
                 ),
                 ("src/types.arc", ""),
             ],
@@ -10268,7 +17365,7 @@ mod tests {
 
         let err = check_path(&root).expect_err("moved cleanup subject should fail");
         assert!(
-            err.contains("cleanup footer target `text` cannot be moved after activation"),
+            err.contains("cleanup subject `text` cannot be moved after activation"),
             "{err}"
         );
 
@@ -12292,6 +19389,202 @@ mod tests {
             fs::write(path, contents).expect("file should be writable");
         }
         root
+    }
+
+    fn write_foreword_script_contents(root: &Path, name: &str, contents: &str) -> String {
+        let relative = if cfg!(windows) {
+            format!("forewords/{name}.cmd")
+        } else {
+            format!("forewords/{name}.sh")
+        };
+        let target = root.join(&relative);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).expect("adapter parent should be creatable");
+        }
+        fs::write(&target, contents).expect("adapter script should be writable");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&target)
+                .expect("adapter metadata should load")
+                .permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&target, perms).expect("adapter perms should update");
+        }
+        relative
+    }
+
+    fn write_foreword_adapter_script(root: &Path, name: &str, output: &str) -> String {
+        if cfg!(windows) {
+            let relative = format!("forewords/{name}.cmd");
+            let target = root.join(&relative);
+            let payload_target = root.join("forewords").join(format!("{name}.json"));
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).expect("adapter parent should be creatable");
+            }
+            fs::write(&payload_target, output).expect("adapter payload should be writable");
+            fs::write(
+                &target,
+                format!("@echo off\r\ntype \"%~dp0{name}.json\"\r\n"),
+            )
+            .expect("adapter script should be writable");
+            relative
+        } else {
+            let script = format!("#!/bin/sh\nprintf '%s' '{output}'\n");
+            write_foreword_script_contents(root, name, &script)
+        }
+    }
+
+    fn make_adapter_request_fixture(
+        root: &Path,
+        relative_product_path: &str,
+    ) -> (
+        arcana_hir::HirWorkspacePackage,
+        arcana_hir::HirForewordAdapterProduct,
+        ForewordAdapterRequest,
+    ) {
+        let package = arcana_hir::HirWorkspacePackage {
+            package_id: "tool.pkg".to_string(),
+            root_dir: root.to_path_buf(),
+            direct_deps: BTreeSet::new(),
+            direct_dep_packages: BTreeMap::new(),
+            direct_dep_ids: BTreeMap::new(),
+            executable_foreword_deps: BTreeSet::new(),
+            foreword_products: BTreeMap::new(),
+            summary: arcana_hir::HirPackageSummary {
+                package_name: "tool".to_string(),
+                modules: Vec::new(),
+                dependency_edges: Vec::new(),
+            },
+            layout: arcana_hir::HirPackageLayout {
+                module_paths: BTreeMap::new(),
+                relative_modules: BTreeMap::new(),
+                absolute_modules: BTreeMap::new(),
+            },
+        };
+        let product = arcana_hir::HirForewordAdapterProduct {
+            name: "tool-forewords".to_string(),
+            path: relative_product_path.to_string(),
+            runner: None,
+            args: Vec::new(),
+        };
+        let request = ForewordAdapterRequest {
+            version: FOREWORD_ADAPTER_PROTOCOL_VERSION.to_string(),
+            protocol: "stdio-v1".to_string(),
+            cache_key: "fixture".to_string(),
+            toolchain_version: "fixture".to_string(),
+            dependency_opt_in_enabled: true,
+            package: AdapterPackageSnapshot {
+                package_id: "app.pkg".to_string(),
+                package_name: "app".to_string(),
+                root_dir: root.display().to_string(),
+                module_id: "app".to_string(),
+            },
+            foreword: AdapterForewordSnapshot {
+                applied_name: "tool.exec.fixture".to_string(),
+                resolved_name: "tool.exec.fixture".to_string(),
+                tier: "executable".to_string(),
+                visibility: "public".to_string(),
+                phase: "frontend".to_string(),
+                action: "metadata".to_string(),
+                retention: "compile".to_string(),
+                targets: vec!["fn".to_string()],
+                diagnostic_namespace: Some("tool.exec.fixture".to_string()),
+                payload_schema: Vec::new(),
+                repeatable: false,
+                conflicts: Vec::new(),
+                args: Vec::new(),
+                provider_package_id: "tool.pkg".to_string(),
+                exposed_package_id: "tool.pkg".to_string(),
+                handler: Some("tool.exec.fixture_handler".to_string()),
+                entry: Some("run".to_string()),
+            },
+            target: AdapterTargetSnapshot {
+                kind: "fn".to_string(),
+                path: "app.main".to_string(),
+                public: true,
+                owner_kind: "symbol".to_string(),
+                owner_symbol: None,
+                owner_directive: None,
+                selected_field: None,
+                selected_param: None,
+                selected_method_name: None,
+                container_kind: None,
+                container_name: None,
+            },
+            visible_forewords: Vec::new(),
+            artifact: AdapterArtifactIdentity {
+                product_name: "tool-forewords".to_string(),
+                product_path: relative_product_path.to_string(),
+                runner: None,
+                args: Vec::new(),
+                product_digest: None,
+                runner_digest: None,
+            },
+        };
+        (package, product, request)
+    }
+
+    fn write_foreword_runner_script(
+        root: &Path,
+        name: &str,
+        expected_flag: &str,
+        output: &str,
+    ) -> String {
+        let relative = if cfg!(windows) {
+            format!("forewords/{name}.ps1")
+        } else {
+            format!("forewords/{name}.sh")
+        };
+        let target = root.join(&relative);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).expect("runner parent should be creatable");
+        }
+        let script = if cfg!(windows) {
+            format!(
+                "param([string]$flag, [string]$productPath)\r\nif ($flag -ne '{expected_flag}') {{ exit 9 }}\r\nWrite-Output '{output}'\r\n"
+            )
+        } else {
+            format!(
+                "#!/bin/sh\nif [ \"$1\" != \"{expected_flag}\" ]; then\n  exit 9\nfi\nprintf '%s' '{output}'\n"
+            )
+        };
+        fs::write(&target, script).expect("runner script should be writable");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&target)
+                .expect("runner metadata should load")
+                .permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&target, perms).expect("runner perms should update");
+        }
+        relative
+    }
+
+    fn copy_test_adapter_script(source: &Path, target: &Path) {
+        let bytes = fs::read(source).expect("adapter source should be readable");
+        fs::write(target, bytes).expect("adapter target should be writable");
+        if let Some(stem) = source.file_stem().and_then(|stem| stem.to_str()) {
+            let payload_source = source.with_file_name(format!("{stem}.json"));
+            if payload_source.is_file() {
+                let payload_target = target.with_file_name(format!("{stem}.json"));
+                fs::write(
+                    &payload_target,
+                    fs::read(&payload_source).expect("adapter payload should be readable"),
+                )
+                .expect("adapter payload should be writable");
+            }
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(target)
+                .expect("adapter target metadata should load")
+                .permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(target, perms).expect("adapter target perms should update");
+        }
     }
 
     fn test_temp_dir(prefix: &str, name: &str) -> PathBuf {

@@ -63,7 +63,6 @@ fn compile_routine(routine: &IrRoutine) -> AotRoutineArtifact {
         impl_target_type: routine.impl_target_type.clone(),
         impl_trait_path: routine.impl_trait_path.clone(),
         availability: routine.availability.clone(),
-        foreword_rows: routine.foreword_rows.clone(),
         cleanup_footers: routine.cleanup_footers.clone(),
         statements: routine.statements.clone(),
     }
@@ -114,6 +113,8 @@ pub fn compile_package(package: &IrPackage) -> AotPackageArtifact {
         dependency_rows: package.dependency_rows.clone(),
         exported_surface_rows: package.exported_surface_rows.clone(),
         runtime_requirements: package.runtime_requirements.clone(),
+        foreword_index: package.foreword_index.clone(),
+        foreword_registrations: package.foreword_registrations.clone(),
         entrypoints: package.entrypoints.iter().map(compile_entrypoint).collect(),
         routines: package.routines.iter().map(compile_routine).collect(),
         owners: package.owners.iter().map(compile_owner).collect(),

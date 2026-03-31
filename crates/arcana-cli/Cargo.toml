@@ -9,6 +9,7 @@ arcana-frontend.workspace = true
 arcana-ir.workspace = true
 arcana-package.workspace = true
 arcana-runtime.workspace = true
+serde_json.workspace = true
 toml.workspace = true
 
 [dev-dependencies]

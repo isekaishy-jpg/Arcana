@@ -27,7 +27,6 @@ pub struct RuntimeRoutinePlan {
     pub impl_target_type: Option<IrRoutineType>,
     pub impl_trait_path: Option<Vec<String>>,
     pub availability: Vec<ParsedAvailabilityAttachment>,
-    pub foreword_rows: Vec<String>,
     pub cleanup_footers: Vec<ParsedCleanupFooter>,
     pub statements: Vec<ParsedStmt>,
 }
@@ -60,7 +59,6 @@ pub(crate) fn lower_routine(routine: &AotRoutineArtifact) -> RuntimeRoutinePlan 
         impl_target_type: routine.impl_target_type.clone(),
         impl_trait_path: routine.impl_trait_path.clone(),
         availability: routine.availability.clone(),
-        foreword_rows: routine.foreword_rows.clone(),
         cleanup_footers: routine.cleanup_footers.clone(),
         statements: routine.statements.clone(),
     }

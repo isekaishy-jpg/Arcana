@@ -1025,8 +1025,16 @@ fn render_direct_routine_helper(routine: &NativeDirectRoutine) -> String {
             ));
         }
     }
+    let mut attrs = String::new();
+    if routine.inline_hint {
+        attrs.push_str("#[inline(always)]\n");
+    }
+    if routine.cold_hint {
+        attrs.push_str("#[cold]\n");
+    }
     format!(
         concat!(
+            "{}",
             "fn {}({}) -> Result<RuntimeAbiValue, String> {{\n",
             "{}",
             "    let result = (|| -> Result<RuntimeAbiValue, String> {{\n",
@@ -1036,6 +1044,7 @@ fn render_direct_routine_helper(routine: &NativeDirectRoutine) -> String {
             "    result\n",
             "}}\n\n"
         ),
+        attrs,
         direct_routine_fn_name(&routine.routine_key),
         params,
         prelude,
@@ -1509,4 +1518,36 @@ fn native_output_stem(output_name: &str) -> String {
 
 fn escape_toml(text: &str) -> String {
     text.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_direct_routine_helper;
+    use crate::native_abi::{NativeAbiParam, NativeAbiType};
+    use crate::native_lowering::{NativeDirectBlock, NativeDirectExpr, NativeDirectRoutine};
+    use arcana_cabi::{ArcanaCabiParamSourceMode, ArcanaCabiPassMode};
+
+    #[test]
+    fn render_direct_routine_helper_emits_native_hint_attributes() {
+        let rendered = render_direct_routine_helper(&NativeDirectRoutine {
+            routine_key: "core#fn-0".to_string(),
+            params: vec![NativeAbiParam {
+                name: "value".to_string(),
+                source_mode: ArcanaCabiParamSourceMode::Read,
+                input_type: NativeAbiType::Int,
+                pass_mode: ArcanaCabiPassMode::In,
+                write_back_type: None,
+            }],
+            return_type: NativeAbiType::Int,
+            inline_hint: true,
+            cold_hint: true,
+            body: NativeDirectBlock {
+                statements: Vec::new(),
+                return_expr: NativeDirectExpr::Int(1),
+            },
+        });
+
+        assert!(rendered.contains("#[inline(always)]"));
+        assert!(rendered.contains("#[cold]"));
+    }
 }

@@ -11,7 +11,7 @@ use crate::emit::AotEmitTarget;
 use crate::native_abi::{
     NativeAbiParam, NativeAbiType, NativeExport, NativeRoutineSignature, native_routine_signature,
 };
-use crate::native_plan::{NativeLaunchPlan, NativePackagePlan};
+use crate::native_plan::{NativeLaunchPlan, NativePackagePlan, NativeRoutineHints};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NativeDirectExpr {
@@ -125,6 +125,8 @@ pub struct NativeDirectRoutine {
     pub routine_key: String,
     pub params: Vec<NativeAbiParam>,
     pub return_type: NativeAbiType,
+    pub inline_hint: bool,
+    pub cold_hint: bool,
     pub body: NativeDirectBlock,
 }
 
@@ -196,18 +198,23 @@ struct NativeBlockLoweringCtx<'a> {
 
 struct NativeLoweringBuilder<'a> {
     routines_by_key: BTreeMap<&'a str, &'a AotRoutineArtifact>,
+    routine_hints: &'a BTreeMap<String, NativeRoutineHints>,
     direct_routines: BTreeMap<String, NativeDirectRoutine>,
     states: BTreeMap<String, LoweringState>,
     temp_counter: usize,
 }
 
 impl<'a> NativeLoweringBuilder<'a> {
-    fn new(routines: &'a [AotRoutineArtifact]) -> Self {
+    fn new(
+        routines: &'a [AotRoutineArtifact],
+        routine_hints: &'a BTreeMap<String, NativeRoutineHints>,
+    ) -> Self {
         Self {
             routines_by_key: routines
                 .iter()
                 .map(|routine| (routine.routine_key.as_str(), routine))
                 .collect(),
+            routine_hints,
             direct_routines: BTreeMap::new(),
             states: BTreeMap::new(),
             temp_counter: 0,
@@ -294,7 +301,6 @@ impl<'a> NativeLoweringBuilder<'a> {
             || routine.is_async
             || routine.intrinsic_impl.is_some()
             || !routine.type_params.is_empty()
-            || !routine.foreword_rows.is_empty()
         {
             return None;
         }
@@ -326,10 +332,17 @@ impl<'a> NativeLoweringBuilder<'a> {
             &routine.cleanup_footers,
             &initial_binding_names,
         )?;
+        let hints = self
+            .routine_hints
+            .get(&routine.routine_key)
+            .copied()
+            .unwrap_or_default();
         Some(NativeDirectRoutine {
             routine_key: routine.routine_key.clone(),
             params: signature.params.clone(),
             return_type: signature.return_type.clone(),
+            inline_hint: hints.inline_hint,
+            cold_hint: hints.cold_hint,
             body,
         })
     }
@@ -1572,7 +1585,7 @@ impl<'a> NativeLoweringBuilder<'a> {
 }
 
 pub fn build_native_lowering_plan(plan: &NativePackagePlan) -> Result<NativeLoweringPlan, String> {
-    let mut builder = NativeLoweringBuilder::new(&plan.artifact.routines);
+    let mut builder = NativeLoweringBuilder::new(&plan.artifact.routines, &plan.routine_hints);
     let launch = match &plan.launch {
         NativeLaunchPlan::Executable { main_routine_key } => NativeLaunchLowering::Executable {
             main_routine_key: main_routine_key.clone(),
@@ -1719,6 +1732,8 @@ mod tests {
             dependency_rows: Vec::new(),
             exported_surface_rows: Vec::new(),
             runtime_requirements: Vec::new(),
+            foreword_index: Vec::new(),
+            foreword_registrations: Vec::new(),
             entrypoints: Vec::new(),
             routines: Vec::new(),
             owners: Vec::new(),
@@ -1788,7 +1803,8 @@ mod tests {
             impl_target_type: None,
             impl_trait_path: None,
             availability: Vec::new(),
-            foreword_rows: Vec::new(),
+            inline_hint: false,
+            cold_hint: false,
             cleanup_footers: Vec::new(),
             statements: vec![ExecStmt::ReturnValue {
                 value: ExecExpr::Int(9),
@@ -1822,6 +1838,63 @@ mod tests {
     }
 
     #[test]
+    fn lowering_keeps_foreworded_routines_in_direct_lane_and_records_hints() {
+        let mut package = base_package();
+        package.entrypoints.push(IrEntrypoint {
+            package_id: test_package_id_for_module("core"),
+            module_id: "core".to_string(),
+            symbol_name: "main".to_string(),
+            symbol_kind: "fn".to_string(),
+            is_async: false,
+            exported: true,
+        });
+        package.routines.push(IrRoutine {
+            package_id: test_package_id_for_module("core"),
+            module_id: "core".to_string(),
+            routine_key: "core#fn-0".to_string(),
+            symbol_name: "main".to_string(),
+            symbol_kind: "fn".to_string(),
+            exported: true,
+            is_async: false,
+            type_params: Vec::new(),
+            behavior_attrs: BTreeMap::new(),
+            params: Vec::new(),
+            return_type: test_return_type("fn main() -> Int:"),
+            intrinsic_impl: None,
+            impl_target_type: None,
+            impl_trait_path: None,
+            availability: Vec::new(),
+            inline_hint: true,
+            cold_hint: false,
+            cleanup_footers: Vec::new(),
+            statements: vec![ExecStmt::ReturnValue {
+                value: ExecExpr::Int(1),
+            }],
+        });
+
+        sync_exported_function_surface_rows(&mut package);
+        let package_plan = build_native_package_plan(
+            AotEmitTarget::WindowsExeBundle,
+            &package,
+            &test_emit_context("app.exe"),
+        )
+        .expect("native package plan should build");
+        let lowering_plan =
+            build_native_lowering_plan(&package_plan).expect("native lowering should build");
+
+        assert!(matches!(
+            lowering_plan.launch,
+            NativeLaunchLowering::Executable {
+                lowering: NativeRoutineLowering::Direct { .. },
+                ..
+            }
+        ));
+        assert_eq!(lowering_plan.direct_routines.len(), 1);
+        assert!(lowering_plan.direct_routines[0].inline_hint);
+        assert!(!lowering_plan.direct_routines[0].cold_hint);
+    }
+
+    #[test]
     fn lowering_keeps_bool_recycle_regions_direct() {
         let mut package = base_package();
         package.entrypoints.push(IrEntrypoint {
@@ -1848,7 +1921,8 @@ mod tests {
             impl_target_type: None,
             impl_trait_path: None,
             availability: Vec::new(),
-            foreword_rows: Vec::new(),
+            inline_hint: false,
+            cold_hint: false,
             cleanup_footers: Vec::new(),
             statements: vec![
                 ExecStmt::Recycle {
@@ -1935,7 +2009,8 @@ mod tests {
             impl_target_type: None,
             impl_trait_path: None,
             availability: Vec::new(),
-            foreword_rows: Vec::new(),
+            inline_hint: false,
+            cold_hint: false,
             cleanup_footers: Vec::new(),
             statements: vec![
                 ExecStmt::Bind {
@@ -2015,7 +2090,8 @@ mod tests {
             impl_target_type: None,
             impl_trait_path: None,
             availability: Vec::new(),
-            foreword_rows: Vec::new(),
+            inline_hint: false,
+            cold_hint: false,
             cleanup_footers: Vec::new(),
             statements: vec![
                 ExecStmt::Let {
@@ -2153,7 +2229,8 @@ mod tests {
             impl_target_type: None,
             impl_trait_path: None,
             availability: Vec::new(),
-            foreword_rows: Vec::new(),
+            inline_hint: false,
+            cold_hint: false,
             cleanup_footers: Vec::new(),
             statements: vec![
                 ExecStmt::MemorySpec(ExecMemorySpecDecl {
@@ -2224,7 +2301,8 @@ mod tests {
             impl_target_type: None,
             impl_trait_path: None,
             availability: Vec::new(),
-            foreword_rows: Vec::new(),
+            inline_hint: false,
+            cold_hint: false,
             cleanup_footers: Vec::new(),
             statements: vec![
                 ExecStmt::Let {
@@ -2303,7 +2381,8 @@ mod tests {
             impl_target_type: None,
             impl_trait_path: None,
             availability: Vec::new(),
-            foreword_rows: Vec::new(),
+            inline_hint: false,
+            cold_hint: false,
             cleanup_footers: Vec::new(),
             statements: vec![
                 ExecStmt::Construct(ExecConstructRegion {
@@ -2379,7 +2458,8 @@ mod tests {
             impl_target_type: None,
             impl_trait_path: None,
             availability: Vec::new(),
-            foreword_rows: Vec::new(),
+            inline_hint: false,
+            cold_hint: false,
             cleanup_footers: Vec::new(),
             statements: vec![
                 ExecStmt::Let {
@@ -2461,7 +2541,8 @@ mod tests {
             impl_target_type: None,
             impl_trait_path: None,
             availability: Vec::new(),
-            foreword_rows: Vec::new(),
+            inline_hint: false,
+            cold_hint: false,
             cleanup_footers: Vec::new(),
             statements: vec![
                 ExecStmt::Recycle {
@@ -2529,7 +2610,8 @@ mod tests {
             impl_target_type: None,
             impl_trait_path: None,
             availability: Vec::new(),
-            foreword_rows: Vec::new(),
+            inline_hint: false,
+            cold_hint: false,
             cleanup_footers: Vec::new(),
             statements: vec![
                 ExecStmt::Bind {
@@ -2599,7 +2681,8 @@ mod tests {
             impl_target_type: None,
             impl_trait_path: None,
             availability: Vec::new(),
-            foreword_rows: Vec::new(),
+            inline_hint: false,
+            cold_hint: false,
             cleanup_footers: Vec::new(),
             statements: vec![
                 ExecStmt::Recycle {
@@ -2670,7 +2753,8 @@ mod tests {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
+                inline_hint: false,
+                cold_hint: false,
                 cleanup_footers: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Phrase {
@@ -2704,7 +2788,8 @@ mod tests {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
+                inline_hint: false,
+                cold_hint: false,
                 cleanup_footers: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Path(vec!["value".to_string()]),
@@ -2765,7 +2850,8 @@ mod tests {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
+                inline_hint: false,
+                cold_hint: false,
                 cleanup_footers: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Int(11),
@@ -2787,7 +2873,8 @@ mod tests {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
+                inline_hint: false,
+                cold_hint: false,
                 cleanup_footers: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Binary {
@@ -2813,7 +2900,8 @@ mod tests {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
+                inline_hint: false,
+                cold_hint: false,
                 cleanup_footers: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Phrase {
@@ -2846,7 +2934,8 @@ mod tests {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
+                inline_hint: false,
+                cold_hint: false,
                 cleanup_footers: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Path(vec!["pair".to_string()]),
@@ -2868,7 +2957,8 @@ mod tests {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
+                inline_hint: false,
+                cold_hint: false,
                 cleanup_footers: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Phrase {
@@ -2899,7 +2989,8 @@ mod tests {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
+                inline_hint: false,
+                cold_hint: false,
                 cleanup_footers: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Int(21),
@@ -2968,7 +3059,8 @@ mod tests {
             impl_target_type: None,
             impl_trait_path: None,
             availability: Vec::new(),
-            foreword_rows: Vec::new(),
+            inline_hint: false,
+            cold_hint: false,
             cleanup_footers: Vec::new(),
             statements: vec![
                 ExecStmt::Assign {
@@ -3038,7 +3130,8 @@ mod tests {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
+                inline_hint: false,
+                cold_hint: false,
                 cleanup_footers: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Phrase {
@@ -3072,7 +3165,8 @@ mod tests {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
+                inline_hint: false,
+                cold_hint: false,
                 cleanup_footers: Vec::new(),
                 statements: vec![
                     ExecStmt::Assign {
@@ -3149,7 +3243,8 @@ mod tests {
             impl_target_type: None,
             impl_trait_path: None,
             availability: Vec::new(),
-            foreword_rows: Vec::new(),
+            inline_hint: false,
+            cold_hint: false,
             cleanup_footers: Vec::new(),
             statements: vec![
                 ExecStmt::Assign {
@@ -3214,7 +3309,8 @@ mod tests {
             impl_target_type: None,
             impl_trait_path: None,
             availability: Vec::new(),
-            foreword_rows: Vec::new(),
+            inline_hint: false,
+            cold_hint: false,
             cleanup_footers: Vec::new(),
             statements: vec![
                 ExecStmt::Let {
@@ -3282,7 +3378,8 @@ mod tests {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
+                inline_hint: false,
+                cold_hint: false,
                 cleanup_footers: Vec::new(),
                 statements: vec![
                     ExecStmt::Let {
@@ -3339,7 +3436,8 @@ mod tests {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
+                inline_hint: false,
+                cold_hint: false,
                 cleanup_footers: Vec::new(),
                 statements: vec![
                     ExecStmt::Let {
@@ -3445,7 +3543,8 @@ mod tests {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
+                inline_hint: false,
+                cold_hint: false,
                 cleanup_footers: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Phrase {
@@ -3479,7 +3578,8 @@ mod tests {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
+                inline_hint: false,
+                cold_hint: false,
                 cleanup_footers: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Path(vec!["value".to_string()]),
@@ -3527,7 +3627,8 @@ mod tests {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
+                inline_hint: false,
+                cold_hint: false,
                 cleanup_footers: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Phrase {
@@ -3564,7 +3665,8 @@ mod tests {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
+                inline_hint: false,
+                cold_hint: false,
                 cleanup_footers: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Path(vec!["value".to_string()]),
@@ -3616,7 +3718,8 @@ mod tests {
             impl_target_type: None,
             impl_trait_path: None,
             availability: Vec::new(),
-            foreword_rows: Vec::new(),
+            inline_hint: false,
+            cold_hint: false,
             cleanup_footers: Vec::new(),
             statements: vec![
                 ExecStmt::Let {
@@ -3783,7 +3886,8 @@ mod tests {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
+                inline_hint: false,
+                cold_hint: false,
                 cleanup_footers: Vec::new(),
                 statements: vec![
                     ExecStmt::Expr {
@@ -3829,7 +3933,8 @@ mod tests {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
+                inline_hint: false,
+                cold_hint: false,
                 cleanup_footers: Vec::new(),
                 statements: vec![ExecStmt::ReturnVoid],
             },
@@ -3900,7 +4005,8 @@ mod tests {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
+                inline_hint: false,
+                cold_hint: false,
                 cleanup_footers: Vec::new(),
                 statements: vec![
                     ExecStmt::Let {
@@ -3948,7 +4054,8 @@ mod tests {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
+                inline_hint: false,
+                cold_hint: false,
                 cleanup_footers: Vec::new(),
                 statements: vec![ExecStmt::ReturnVoid],
             },
@@ -4046,7 +4153,8 @@ mod tests {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
+                inline_hint: false,
+                cold_hint: false,
                 cleanup_footers: vec![ExecCleanupFooter {
                     binding_id: 0,
                     kind: "cleanup".to_string(),
@@ -4082,7 +4190,8 @@ mod tests {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
+                inline_hint: false,
+                cold_hint: false,
                 cleanup_footers: Vec::new(),
                 statements: vec![ExecStmt::ReturnVoid],
             },
@@ -4149,7 +4258,8 @@ mod tests {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
+                inline_hint: false,
+                cold_hint: false,
                 cleanup_footers: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Phrase {
@@ -4192,7 +4302,8 @@ mod tests {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
+                inline_hint: false,
+                cold_hint: false,
                 cleanup_footers: vec![
                     ExecCleanupFooter {
                         binding_id: 0,
@@ -4229,7 +4340,8 @@ mod tests {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
+                inline_hint: false,
+                cold_hint: false,
                 cleanup_footers: Vec::new(),
                 statements: vec![ExecStmt::ReturnVoid],
             },
@@ -4293,7 +4405,8 @@ mod tests {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
+                inline_hint: false,
+                cold_hint: false,
                 cleanup_footers: Vec::new(),
                 statements: vec![
                     ExecStmt::If {
@@ -4350,7 +4463,8 @@ mod tests {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
+                inline_hint: false,
+                cold_hint: false,
                 cleanup_footers: Vec::new(),
                 statements: vec![ExecStmt::ReturnVoid],
             },
@@ -4453,7 +4567,8 @@ mod tests {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
+                inline_hint: false,
+                cold_hint: false,
                 cleanup_footers: Vec::new(),
                 statements: vec![
                     ExecStmt::Let {
@@ -4544,7 +4659,8 @@ mod tests {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
+                inline_hint: false,
+                cold_hint: false,
                 cleanup_footers: Vec::new(),
                 statements: vec![ExecStmt::ReturnVoid],
             },
@@ -4659,3 +4775,8 @@ mod tests {
         );
     }
 }
+
+
+
+
+

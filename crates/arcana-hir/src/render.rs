@@ -58,13 +58,158 @@ pub(crate) fn render_lang_item_fingerprint(lang_item: &HirLangItem) -> String {
     )
 }
 
+pub(crate) fn render_foreword_definition_fingerprint(
+    definition: &super::HirForewordDefinition,
+) -> String {
+    format!(
+        concat!(
+            "foreword_def(name=[{}]|tier={}|visibility={}|phase={}|action={}|",
+            "targets=[{}]|retention={}|payload=[{}]|repeatable={}|conflicts=[{}]|",
+            "diagnostic_namespace={}|handler={})"
+        ),
+        definition
+            .qualified_name
+            .iter()
+            .map(quote_fingerprint_text)
+            .collect::<Vec<_>>()
+            .join(","),
+        definition.tier.as_str(),
+        definition.visibility.as_str(),
+        definition.phase.as_str(),
+        definition.action.as_str(),
+        definition
+            .targets
+            .iter()
+            .map(|target| target.as_str().to_string())
+            .collect::<Vec<_>>()
+            .join(","),
+        definition.retention.as_str(),
+        definition
+            .payload
+            .iter()
+            .map(|field| {
+                format!(
+                    "field(name={}|optional={}|ty={})",
+                    quote_fingerprint_text(&field.name),
+                    field.optional,
+                    field.ty.as_str()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(","),
+        definition.repeatable,
+        definition
+            .conflicts
+            .iter()
+            .map(|path| {
+                format!(
+                    "[{}]",
+                    path.iter()
+                        .map(quote_fingerprint_text)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(","),
+        definition
+            .diagnostic_namespace
+            .as_ref()
+            .map(quote_fingerprint_text)
+            .unwrap_or_else(|| "none".to_string()),
+        definition
+            .handler
+            .as_ref()
+            .map(|path| {
+                format!(
+                    "[{}]",
+                    path.iter()
+                        .map(quote_fingerprint_text)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            })
+            .unwrap_or_else(|| "none".to_string())
+    )
+}
+
+pub(crate) fn render_foreword_handler_fingerprint(handler: &super::HirForewordHandler) -> String {
+    format!(
+        "foreword_handler(name=[{}]|phase={}|protocol={}|product={}|entry={})",
+        handler
+            .qualified_name
+            .iter()
+            .map(quote_fingerprint_text)
+            .collect::<Vec<_>>()
+            .join(","),
+        handler.phase.as_str(),
+        quote_fingerprint_text(&handler.protocol),
+        quote_fingerprint_text(&handler.product),
+        quote_fingerprint_text(&handler.entry)
+    )
+}
+
+pub(crate) fn render_foreword_alias_fingerprint(alias: &super::HirForewordAlias) -> String {
+    format!(
+        "foreword_alias(kind={}|source=[{}]|alias=[{}])",
+        alias.kind.as_str(),
+        alias
+            .source_name
+            .iter()
+            .map(quote_fingerprint_text)
+            .collect::<Vec<_>>()
+            .join(","),
+        alias
+            .alias_name
+            .iter()
+            .map(quote_fingerprint_text)
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
+pub(crate) fn render_emitted_foreword_metadata_fingerprint(
+    metadata: &super::HirEmittedForewordMetadata,
+) -> String {
+    format!(
+        "emitted_foreword(name={}|target_kind={}|target_path={}|retention={}|public={}|args=[{}]|generated_by={})",
+        quote_fingerprint_text(&metadata.qualified_name),
+        quote_fingerprint_text(&metadata.target_kind),
+        quote_fingerprint_text(&metadata.target_path),
+        metadata.retention.as_str(),
+        metadata.public,
+        metadata
+            .args
+            .iter()
+            .map(render_foreword_arg_fingerprint)
+            .collect::<Vec<_>>()
+            .join(","),
+        render_generated_by_fingerprint(&metadata.generated_by)
+    )
+}
+
+pub(crate) fn render_foreword_registration_fingerprint(
+    row: &super::HirForewordRegistrationRow,
+) -> String {
+    format!(
+        "foreword_registration(namespace={}|key={}|value={}|target_kind={}|target_path={}|public={}|generated_by={})",
+        quote_fingerprint_text(&row.namespace),
+        quote_fingerprint_text(&row.key),
+        quote_fingerprint_text(&row.value),
+        quote_fingerprint_text(&row.target_kind),
+        quote_fingerprint_text(&row.target_path),
+        row.public,
+        render_generated_by_fingerprint(&row.generated_by)
+    )
+}
+
 pub fn render_symbol_fingerprint(symbol: &HirSymbol) -> String {
     format!(
         concat!(
             "symbol(",
-            "kind={}|name={}|exported={}|async={}|signature={}|type_params=[{}]|",
+            "kind={}|name={}|exported={}|async={}|signature={}|type_params=[{}]|params=[{}]|",
             "where_clause={}|behavior_attrs=[{}]|availability=[{}]|forewords=[{}]|intrinsic={}|body={}|",
-            "statements=[{}]|cleanup_footers=[{}])"
+            "statements=[{}]|cleanup_footers=[{}]|generated_by={}|generated_name_key={})"
         ),
         symbol.kind.as_str(),
         quote_fingerprint_text(&symbol.name),
@@ -75,6 +220,12 @@ pub fn render_symbol_fingerprint(symbol: &HirSymbol) -> String {
             .type_params
             .iter()
             .map(quote_fingerprint_text)
+            .collect::<Vec<_>>()
+            .join(","),
+        symbol
+            .params
+            .iter()
+            .map(render_param_fingerprint)
             .collect::<Vec<_>>()
             .join(","),
         symbol
@@ -117,6 +268,31 @@ pub fn render_symbol_fingerprint(symbol: &HirSymbol) -> String {
             .iter()
             .map(render_rollup_fingerprint)
             .collect::<Vec<_>>()
+            .join(","),
+        symbol
+            .generated_by
+            .as_ref()
+            .map(render_generated_by_fingerprint)
+            .unwrap_or_else(|| "none".to_string()),
+        symbol
+            .generated_name_key
+            .as_ref()
+            .map(quote_fingerprint_text)
+            .unwrap_or_else(|| "none".to_string())
+    )
+}
+
+fn render_param_fingerprint(param: &super::HirParam) -> String {
+    format!(
+        "param(mode={}|name={}|ty={}|forewords=[{}])",
+        param.mode.map(|mode| mode.as_str()).unwrap_or("none"),
+        quote_fingerprint_text(&param.name),
+        quote_fingerprint_text(&param.ty),
+        param
+            .forewords
+            .iter()
+            .map(render_foreword_fingerprint)
+            .collect::<Vec<_>>()
             .join(",")
     )
 }
@@ -132,7 +308,7 @@ fn render_behavior_attr_fingerprint(attr: &HirBehaviorAttr) -> String {
 fn render_foreword_fingerprint(foreword: &HirForewordApp) -> String {
     format!(
         "foreword(name={}|args=[{}])",
-        quote_fingerprint_text(&foreword.name),
+        quote_fingerprint_text(&foreword.path.join(".")),
         foreword
             .args
             .iter()
@@ -144,12 +320,13 @@ fn render_foreword_fingerprint(foreword: &HirForewordApp) -> String {
 
 fn render_foreword_arg_fingerprint(arg: &HirForewordArg) -> String {
     format!(
-        "arg(name={}|value={})",
+        "arg(name={}|value={}|typed={})",
         arg.name
             .as_ref()
             .map(quote_fingerprint_text)
             .unwrap_or_else(|| "none".to_string()),
-        quote_fingerprint_text(&arg.value)
+        quote_fingerprint_text(&arg.value),
+        quote_fingerprint_text(arg.typed_value.render())
     )
 }
 
@@ -219,9 +396,15 @@ fn render_symbol_body_fingerprint(body: &HirSymbolBody) -> String {
 
 fn render_field_fingerprint(field: &super::HirField) -> String {
     format!(
-        "field(name={}|ty={})",
+        "field(name={}|ty={}|forewords=[{}])",
         quote_fingerprint_text(&field.name),
-        quote_fingerprint_text(&field.ty)
+        quote_fingerprint_text(&field.ty),
+        field
+            .forewords
+            .iter()
+            .map(render_foreword_fingerprint)
+            .collect::<Vec<_>>()
+            .join(",")
     )
 }
 
@@ -280,7 +463,7 @@ pub(crate) fn render_impl_fingerprint(impl_decl: &HirImplDecl) -> String {
     format!(
         concat!(
             "impl(type_params=[{}]|trait={}|target={}|assoc_types=[{}]|methods=[{}]|",
-            "body_entries=[{}])"
+            "body_entries=[{}]|generated_by={}|generated_name_key={})"
         ),
         impl_decl
             .type_params
@@ -310,6 +493,34 @@ pub(crate) fn render_impl_fingerprint(impl_decl: &HirImplDecl) -> String {
             .body_entries
             .iter()
             .map(quote_fingerprint_text)
+            .collect::<Vec<_>>()
+            .join(","),
+        impl_decl
+            .generated_by
+            .as_ref()
+            .map(render_generated_by_fingerprint)
+            .unwrap_or_else(|| "none".to_string()),
+        impl_decl
+            .generated_name_key
+            .as_ref()
+            .map(quote_fingerprint_text)
+            .unwrap_or_else(|| "none".to_string())
+    )
+}
+
+fn render_generated_by_fingerprint(provenance: &super::HirGeneratedByForeword) -> String {
+    format!(
+        "generated(applied={}|resolved={}|provider={}|owner_kind={}|owner_path={}|retention={}|args=[{}])",
+        quote_fingerprint_text(&provenance.applied_name),
+        quote_fingerprint_text(&provenance.resolved_name),
+        quote_fingerprint_text(&provenance.provider_package_id),
+        quote_fingerprint_text(&provenance.owner_kind),
+        quote_fingerprint_text(&provenance.owner_path),
+        provenance.retention.as_str(),
+        provenance
+            .args
+            .iter()
+            .map(render_foreword_arg_fingerprint)
             .collect::<Vec<_>>()
             .join(",")
     )

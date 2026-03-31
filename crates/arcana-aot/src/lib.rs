@@ -198,6 +198,8 @@ mod tests {
             dependency_rows: Vec::new(),
             exported_surface_rows: vec!["module=tool:export:fn:fn main() -> Int:".to_string()],
             runtime_requirements: Vec::new(),
+            foreword_index: Vec::new(),
+            foreword_registrations: Vec::new(),
             entrypoints: Vec::new(),
             routines: vec![AotRoutineArtifact {
                 package_id: test_package_id_for_module("tool"),
@@ -215,7 +217,6 @@ mod tests {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
                 cleanup_footers: Vec::new(),
                 statements: Vec::new(),
             }],
@@ -293,6 +294,8 @@ mod tests {
             ],
             exported_surface_rows: vec!["module=winspell:export:fn:fn open() -> Int:".to_string()],
             runtime_requirements: vec!["std.canvas".to_string()],
+            foreword_index: Vec::new(),
+            foreword_registrations: Vec::new(),
             entrypoints: vec![IrEntrypoint {
                 package_id: test_package_id_for_module("winspell"),
                 module_id: "winspell".to_string(),
@@ -317,7 +320,8 @@ mod tests {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
+                inline_hint: false,
+                cold_hint: false,
                 cleanup_footers: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Int(0),
@@ -364,6 +368,8 @@ mod tests {
             dependency_rows: Vec::new(),
             exported_surface_rows: Vec::new(),
             runtime_requirements: Vec::new(),
+            foreword_index: Vec::new(),
+            foreword_registrations: Vec::new(),
             entrypoints: Vec::new(),
             routines: vec![IrRoutine {
                 package_id: test_package_id_for_module("tool"),
@@ -381,7 +387,8 @@ mod tests {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
+                inline_hint: false,
+                cold_hint: false,
                 cleanup_footers: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Int(0),
@@ -438,6 +445,8 @@ mod tests {
             dependency_rows: Vec::new(),
             exported_surface_rows: vec!["module=tool:export:fn:fn main() -> Int:".to_string()],
             runtime_requirements: Vec::new(),
+            foreword_index: Vec::new(),
+            foreword_registrations: Vec::new(),
             entrypoints: vec![IrEntrypoint {
                 package_id: test_package_id_for_module("tool"),
                 module_id: "tool".to_string(),
@@ -462,7 +471,8 @@ mod tests {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
+                inline_hint: false,
+                cold_hint: false,
                 cleanup_footers: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Int(0),
@@ -584,6 +594,8 @@ mod tests {
             dependency_rows: Vec::new(),
             exported_surface_rows: Vec::new(),
             runtime_requirements: Vec::new(),
+            foreword_index: Vec::new(),
+            foreword_registrations: Vec::new(),
             entrypoints: vec![IrEntrypoint {
                 package_id: test_package_id_for_module("tool"),
                 module_id: "tool".to_string(),
@@ -608,7 +620,8 @@ mod tests {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
+                inline_hint: false,
+                cold_hint: false,
                 cleanup_footers: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Int(0),
@@ -667,6 +680,8 @@ mod tests {
             dependency_rows: Vec::new(),
             exported_surface_rows: Vec::new(),
             runtime_requirements: Vec::new(),
+            foreword_index: Vec::new(),
+            foreword_registrations: Vec::new(),
             entrypoints: Vec::new(),
             routines: Vec::new(),
             owners: Vec::new(),
@@ -718,6 +733,8 @@ mod tests {
             dependency_rows: Vec::new(),
             exported_surface_rows: Vec::new(),
             runtime_requirements: Vec::new(),
+            foreword_index: Vec::new(),
+            foreword_registrations: Vec::new(),
             entrypoints: Vec::new(),
             routines: vec![IrRoutine {
                 package_id: test_package_id_for_module("core"),
@@ -735,7 +752,8 @@ mod tests {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
+                inline_hint: false,
+                cold_hint: false,
                 cleanup_footers: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Bool(true),
@@ -831,6 +849,8 @@ mod tests {
             dependency_rows: Vec::new(),
             exported_surface_rows: Vec::new(),
             runtime_requirements: Vec::new(),
+            foreword_index: Vec::new(),
+            foreword_registrations: Vec::new(),
             entrypoints: Vec::new(),
             routines: vec![
                 IrRoutine {
@@ -849,7 +869,8 @@ mod tests {
                     impl_target_type: None,
                     impl_trait_path: None,
                     availability: Vec::new(),
-                    foreword_rows: Vec::new(),
+                    inline_hint: false,
+                    cold_hint: false,
                     cleanup_footers: Vec::new(),
                     statements: vec![ExecStmt::ReturnValue {
                         value: ExecExpr::Str("hi".to_string()),
@@ -873,7 +894,8 @@ mod tests {
                     impl_target_type: None,
                     impl_trait_path: None,
                     availability: Vec::new(),
-                    foreword_rows: Vec::new(),
+                    inline_hint: false,
+                    cold_hint: false,
                     cleanup_footers: Vec::new(),
                     statements: vec![ExecStmt::ReturnValue {
                         value: ExecExpr::Path(vec!["bytes".to_string()]),
@@ -936,6 +958,8 @@ mod tests {
             dependency_rows: vec!["source=core:import:std.array:".to_string()],
             exported_surface_rows: vec!["module=core:export:fn:fn answer() -> Int:".to_string()],
             runtime_requirements: Vec::new(),
+            foreword_index: Vec::new(),
+            foreword_registrations: Vec::new(),
             entrypoints: Vec::new(),
             routines: vec![
                 AotRoutineArtifact {
@@ -954,7 +978,6 @@ mod tests {
                     impl_target_type: None,
                     impl_trait_path: None,
                     availability: Vec::new(),
-                    foreword_rows: Vec::new(),
                     cleanup_footers: Vec::new(),
                     statements: vec![ExecStmt::ReturnValue {
                         value: ExecExpr::Int(42),
@@ -976,7 +999,6 @@ mod tests {
                     impl_target_type: None,
                     impl_trait_path: None,
                     availability: Vec::new(),
-                    foreword_rows: Vec::new(),
                     cleanup_footers: Vec::new(),
                     statements: vec![ExecStmt::ReturnValue {
                         value: ExecExpr::Int(0),
@@ -1053,6 +1075,8 @@ mod tests {
             dependency_rows: Vec::new(),
             exported_surface_rows: Vec::new(),
             runtime_requirements: Vec::new(),
+            foreword_index: Vec::new(),
+            foreword_registrations: Vec::new(),
             entrypoints: Vec::new(),
             routines: vec![IrRoutine {
                 package_id: test_package_id_for_module("core"),
@@ -1072,7 +1096,8 @@ mod tests {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
+                inline_hint: false,
+                cold_hint: false,
                 cleanup_footers: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Path(vec!["pair".to_string()]),
@@ -1131,6 +1156,8 @@ mod tests {
                 "module=tool:export:fn:fn main(x: Int) -> Int:".to_string(),
             ],
             runtime_requirements: vec!["std.io".to_string()],
+            foreword_index: Vec::new(),
+            foreword_registrations: Vec::new(),
             entrypoints: vec![AotEntrypointArtifact {
                 package_id: test_package_id_for_module("tool"),
                 module_id: "tool".to_string(),
@@ -1155,7 +1182,6 @@ mod tests {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: vec!["test()".to_string()],
                 cleanup_footers: vec![ExecCleanupFooter {
                     binding_id: 0,
                     kind: "cleanup".to_string(),
@@ -1233,6 +1259,8 @@ mod tests {
             dependency_rows: Vec::new(),
             exported_surface_rows: Vec::new(),
             runtime_requirements: Vec::new(),
+            foreword_index: Vec::new(),
+            foreword_registrations: Vec::new(),
             entrypoints: Vec::new(),
             routines: vec![IrRoutine {
                 package_id: test_package_id_for_module("tool"),
@@ -1250,7 +1278,8 @@ mod tests {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
+                inline_hint: false,
+                cold_hint: false,
                 cleanup_footers: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Int(0),
@@ -1296,6 +1325,8 @@ mod tests {
                 "module=tool:export:fn:fn main(x: Int) -> Int:".to_string(),
             ],
             runtime_requirements: Vec::new(),
+            foreword_index: Vec::new(),
+            foreword_registrations: Vec::new(),
             entrypoints: vec![AotEntrypointArtifact {
                 package_id: test_package_id_for_module("tool"),
                 module_id: "tool".to_string(),
@@ -1321,7 +1352,6 @@ mod tests {
                     impl_target_type: None,
                     impl_trait_path: None,
                     availability: Vec::new(),
-                    foreword_rows: Vec::new(),
                     cleanup_footers: Vec::new(),
                     statements: Vec::new(),
                 },
@@ -1341,7 +1371,6 @@ mod tests {
                     impl_target_type: None,
                     impl_trait_path: None,
                     availability: Vec::new(),
-                    foreword_rows: Vec::new(),
                     cleanup_footers: Vec::new(),
                     statements: Vec::new(),
                 },
@@ -1405,6 +1434,8 @@ mod tests {
             dependency_rows: Vec::new(),
             exported_surface_rows: Vec::new(),
             runtime_requirements: Vec::new(),
+            foreword_index: Vec::new(),
+            foreword_registrations: Vec::new(),
             entrypoints: Vec::new(),
             routines: vec![IrRoutine {
                 package_id: test_package_id_for_module("tool"),
@@ -1422,7 +1453,8 @@ mod tests {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
+                inline_hint: false,
+                cold_hint: false,
                 cleanup_footers: Vec::new(),
                 statements: vec![ExecStmt::ReturnValue {
                     value: ExecExpr::Int(0),
@@ -1467,6 +1499,8 @@ mod tests {
             dependency_rows: Vec::new(),
             exported_surface_rows: Vec::new(),
             runtime_requirements: Vec::new(),
+            foreword_index: Vec::new(),
+            foreword_registrations: Vec::new(),
             entrypoints: Vec::new(),
             routines: vec![AotRoutineArtifact {
                 package_id: test_package_id_for_module("tool"),
@@ -1484,7 +1518,6 @@ mod tests {
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
-                foreword_rows: Vec::new(),
                 cleanup_footers: Vec::new(),
                 statements: Vec::new(),
             }],
@@ -1505,6 +1538,32 @@ mod tests {
         let err = validate_package_artifact(&artifact)
             .expect_err("artifact should reject malformed module directive rows");
         assert!(err.contains("invalid path"), "{err}");
+    }
+
+    #[test]
+    fn validate_package_artifact_rejects_invalid_foreword_registration_rows() {
+        let mut artifact = base_surface_validation_artifact();
+        artifact.foreword_registrations = vec![arcana_ir::IrForewordRegistrationRow {
+            namespace: "bad namespace".to_string(),
+            key: "helper".to_string(),
+            value: "runtime".to_string(),
+            target_kind: "fn".to_string(),
+            target_path: "tool.main".to_string(),
+            public: true,
+            generated_by: arcana_ir::IrForewordGeneratedBy {
+                applied_name: "tool.exec.rewrite".to_string(),
+                resolved_name: "tool.exec.rewrite".to_string(),
+                provider_package_id: "tool".to_string(),
+                owner_kind: "fn".to_string(),
+                owner_path: "tool.main".to_string(),
+                retention: arcana_ir::IrForewordRetention::Tooling,
+                args: Vec::new(),
+            },
+        }];
+
+        let err = validate_package_artifact(&artifact)
+            .expect_err("artifact should reject invalid foreword registration rows");
+        assert!(err.contains("valid namespace"), "{err}");
     }
 
     #[test]
@@ -1594,7 +1653,6 @@ mod tests {
             impl_target_type: None,
             impl_trait_path: None,
             availability: Vec::new(),
-            foreword_rows: Vec::new(),
             cleanup_footers: Vec::new(),
             statements: Vec::new(),
         }];
@@ -1626,3 +1684,5 @@ mod tests {
         assert_eq!(exports[0].routine_key, "tool#fn-0");
     }
 }
+
+

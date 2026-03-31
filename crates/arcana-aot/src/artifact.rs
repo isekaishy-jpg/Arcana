@@ -1,10 +1,10 @@
 use arcana_ir::{
-    ExecAvailabilityAttachment, ExecCleanupFooter, ExecExpr, ExecStmt, IrRoutineParam,
-    IrRoutineType,
+    ExecAvailabilityAttachment, ExecCleanupFooter, ExecExpr, ExecStmt, IrForewordMetadata,
+    IrForewordRegistrationRow, IrRoutineParam, IrRoutineType,
 };
 use serde::{Deserialize, Serialize};
 
-pub const AOT_INTERNAL_FORMAT: &str = "arcana-aot-v8";
+pub const AOT_INTERNAL_FORMAT: &str = "arcana-aot-v9";
 
 pub type AotRoutineParamArtifact = IrRoutineParam;
 
@@ -59,7 +59,6 @@ pub struct AotRoutineArtifact {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub impl_trait_path: Option<Vec<String>>,
     pub availability: Vec<ExecAvailabilityAttachment>,
-    pub foreword_rows: Vec<String>,
     pub cleanup_footers: Vec<ExecCleanupFooter>,
     pub statements: Vec<ExecStmt>,
 }
@@ -112,6 +111,10 @@ pub struct AotPackageArtifact {
     pub dependency_rows: Vec<String>,
     pub exported_surface_rows: Vec<String>,
     pub runtime_requirements: Vec<String>,
+    #[serde(default)]
+    pub foreword_index: Vec<IrForewordMetadata>,
+    #[serde(default)]
+    pub foreword_registrations: Vec<IrForewordRegistrationRow>,
     pub entrypoints: Vec<AotEntrypointArtifact>,
     pub routines: Vec<AotRoutineArtifact>,
     pub owners: Vec<AotOwnerArtifact>,

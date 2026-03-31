@@ -528,6 +528,8 @@ mod tests {
             dependency_rows: Vec::new(),
             exported_surface_rows: Vec::new(),
             runtime_requirements: Vec::new(),
+            foreword_index: Vec::new(),
+            foreword_registrations: Vec::new(),
             entrypoints: Vec::new(),
             routines: Vec::new(),
             owners: Vec::new(),
