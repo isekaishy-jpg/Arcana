@@ -1,5 +1,9 @@
 use std::collections::BTreeSet;
 
+use arcana_language_law::{
+    ConstructCompletionKind, HeadedModifierKeyword, MemoryDetailKey, MemoryFamily,
+};
+
 pub mod freeze;
 pub mod surface_text;
 pub mod type_surface;
@@ -288,6 +292,106 @@ pub enum PhraseArg {
     Named { name: String, value: Expr },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HeadedModifierKind {
+    Keyword(HeadedModifierKeyword),
+    Name(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HeadedModifier {
+    pub kind: HeadedModifierKind,
+    pub payload: Option<Expr>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RecycleLineKind {
+    Expr {
+        gate: Expr,
+    },
+    Let {
+        mutable: bool,
+        name: String,
+        gate: Expr,
+    },
+    Assign {
+        name: String,
+        gate: Expr,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecycleLine {
+    pub kind: RecycleLineKind,
+    pub modifier: Option<HeadedModifier>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BindLineKind {
+    Let {
+        mutable: bool,
+        name: String,
+        gate: Expr,
+    },
+    Assign {
+        name: String,
+        gate: Expr,
+    },
+    Require {
+        expr: Expr,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BindLine {
+    pub kind: BindLineKind,
+    pub modifier: Option<HeadedModifier>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConstructLine {
+    pub name: String,
+    pub value: Expr,
+    pub modifier: Option<HeadedModifier>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConstructDestination {
+    Deliver { name: String },
+    Place { target: AssignTarget },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConstructRegion {
+    pub completion: ConstructCompletionKind,
+    pub target: Box<Expr>,
+    pub destination: Option<ConstructDestination>,
+    pub default_modifier: Option<HeadedModifier>,
+    pub lines: Vec<ConstructLine>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryDetailLine {
+    pub key: MemoryDetailKey,
+    pub value: Expr,
+    pub modifier: Option<HeadedModifier>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemorySpecDecl {
+    pub family: MemoryFamily,
+    pub name: String,
+    pub default_modifier: Option<HeadedModifier>,
+    pub details: Vec<MemoryDetailLine>,
+    pub span: Span,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChainConnector {
     Forward,
@@ -367,6 +471,7 @@ pub enum Expr {
         subject: Box<Expr>,
         arms: Vec<MatchArm>,
     },
+    ConstructRegion(Box<ConstructRegion>),
     Chain {
         style: String,
         introducer: ChainIntroducer,
@@ -504,6 +609,16 @@ pub enum StatementKind {
         op: AssignOp,
         value: Expr,
     },
+    Recycle {
+        default_modifier: Option<HeadedModifier>,
+        lines: Vec<RecycleLine>,
+    },
+    Bind {
+        default_modifier: Option<HeadedModifier>,
+        lines: Vec<BindLine>,
+    },
+    Construct(ConstructRegion),
+    MemorySpec(MemorySpecDecl),
     Expr {
         expr: Expr,
     },
@@ -588,6 +703,7 @@ pub struct ParsedModule {
     pub non_empty_line_count: usize,
     pub directives: Vec<ModuleDirective>,
     pub lang_items: Vec<LangItemDecl>,
+    pub memory_specs: Vec<MemorySpecDecl>,
     pub symbols: Vec<SymbolDecl>,
     pub impls: Vec<ImplDecl>,
 }
@@ -616,6 +732,7 @@ pub fn parse_module(source: &str) -> Result<ParsedModule, String> {
     let (entries, _) = collect_block_entries(&source_lines, 0, 0)?;
     let mut directives = Vec::new();
     let mut lang_items = Vec::new();
+    let mut memory_specs = Vec::new();
     let mut symbols = Vec::new();
     let mut impls = Vec::new();
     let mut pending_forewords = Vec::new();
@@ -658,6 +775,26 @@ pub fn parse_module(source: &str) -> Result<ParsedModule, String> {
                 ));
             }
             lang_items.push(lang_item);
+            index += 1;
+            continue;
+        }
+
+        if let Some(memory_spec) = parse_module_memory_spec(entry)? {
+            if !pending_availability.is_empty() {
+                let span = pending_availability[0].span;
+                return Err(format!(
+                    "{}:{}: availability attachments cannot target `Memory` module specs",
+                    span.line, span.column
+                ));
+            }
+            if !pending_forewords.is_empty() {
+                let foreword = &pending_forewords[0];
+                return Err(format!(
+                    "{}:{}: forewords cannot target `Memory` module specs in v1",
+                    foreword.span.line, foreword.span.column
+                ));
+            }
+            memory_specs.push(memory_spec);
             index += 1;
             continue;
         }
@@ -741,6 +878,7 @@ pub fn parse_module(source: &str) -> Result<ParsedModule, String> {
         non_empty_line_count: non_empty,
         directives,
         lang_items,
+        memory_specs,
         symbols,
         impls,
     };
@@ -2045,6 +2183,10 @@ fn parse_statement_block(
 }
 
 fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement, String> {
+    if let Some(statement) = parse_headed_region_statement(entry, loop_depth)? {
+        return Ok(statement);
+    }
+
     if let Some(rest) = entry.text.strip_prefix("if ") {
         let condition = parse_expression(
             &parse_block_header(rest, "if", entry.span)?,
@@ -2234,6 +2376,10 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
         });
     }
 
+    if let Some(message) = unknown_headed_region_error(entry)? {
+        return Err(message);
+    }
+
     Ok(Statement {
         kind: StatementKind::Expr {
             expr: parse_expression(&entry.text, &entry.children, entry.span)?,
@@ -2245,6 +2391,605 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
     })
 }
 
+#[derive(Clone, Copy)]
+enum HeadedModifierMode {
+    Recycle,
+    Bind,
+    Construct,
+    Memory,
+}
+
+fn unknown_headed_region_error(entry: &RawBlockEntry) -> Result<Option<String>, String> {
+    if entry.children.is_empty() {
+        return Ok(None);
+    }
+    let trimmed = entry.text.trim();
+    let Some((head, _)) = split_first_token(trimmed) else {
+        return Ok(None);
+    };
+    if !is_identifier(head)
+        || matches!(
+            head,
+            "if" | "while"
+                | "for"
+                | "let"
+                | "return"
+                | "defer"
+                | "break"
+                | "continue"
+                | "recycle"
+                | "bind"
+                | "construct"
+                | "Memory"
+        )
+    {
+        return Ok(None);
+    }
+    let (_, modifier) =
+        parse_headed_modifier_suffix(trimmed, HeadedModifierMode::Recycle, entry.span)?;
+    if modifier.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(format!(
+        "{}:{}: unknown headed region head `{head}`",
+        entry.span.line, entry.span.column
+    )))
+}
+
+fn parse_module_memory_spec(entry: &RawBlockEntry) -> Result<Option<MemorySpecDecl>, String> {
+    if !entry.text.starts_with("Memory ") {
+        return Ok(None);
+    }
+    Ok(Some(parse_memory_spec_decl(entry, true)?))
+}
+
+fn parse_headed_region_statement(
+    entry: &RawBlockEntry,
+    loop_depth: usize,
+) -> Result<Option<Statement>, String> {
+    if entry.text == "recycle" || entry.text.starts_with("recycle ") {
+        let (header, default_modifier) =
+            parse_headed_modifier_suffix(&entry.text, HeadedModifierMode::Recycle, entry.span)?;
+        if header != "recycle" {
+            return Err(format!(
+                "{}:{}: malformed `recycle` header",
+                entry.span.line, entry.span.column
+            ));
+        }
+        if entry.children.is_empty() {
+            return Err(format!(
+                "{}:{}: `recycle` requires an indented region body",
+                entry.span.line, entry.span.column
+            ));
+        }
+        return Ok(Some(Statement {
+            kind: StatementKind::Recycle {
+                default_modifier,
+                lines: entry
+                    .children
+                    .iter()
+                    .map(|line| parse_recycle_line(line, loop_depth))
+                    .collect::<Result<Vec<_>, _>>()?,
+            },
+            availability: Vec::new(),
+            forewords: Vec::new(),
+            cleanup_footers: Vec::new(),
+            span: entry.span,
+        }));
+    }
+
+    if entry.text == "bind" || entry.text.starts_with("bind ") {
+        let (header, default_modifier) =
+            parse_headed_modifier_suffix(&entry.text, HeadedModifierMode::Bind, entry.span)?;
+        if header != "bind" {
+            return Err(format!(
+                "{}:{}: malformed `bind` header",
+                entry.span.line, entry.span.column
+            ));
+        }
+        if entry.children.is_empty() {
+            return Err(format!(
+                "{}:{}: `bind` requires an indented region body",
+                entry.span.line, entry.span.column
+            ));
+        }
+        return Ok(Some(Statement {
+            kind: StatementKind::Bind {
+                default_modifier,
+                lines: entry
+                    .children
+                    .iter()
+                    .map(parse_bind_line)
+                    .collect::<Result<Vec<_>, _>>()?,
+            },
+            availability: Vec::new(),
+            forewords: Vec::new(),
+            cleanup_footers: Vec::new(),
+            span: entry.span,
+        }));
+    }
+
+    if entry.text.starts_with("construct ") {
+        let region = parse_construct_region(&entry.text, &entry.children, entry.span)?;
+        if matches!(region.completion, ConstructCompletionKind::Yield) {
+            return Err(format!(
+                "{}:{}: `construct yield` is expression-form only",
+                entry.span.line, entry.span.column
+            ));
+        }
+        return Ok(Some(Statement {
+            kind: StatementKind::Construct(region),
+            availability: Vec::new(),
+            forewords: Vec::new(),
+            cleanup_footers: Vec::new(),
+            span: entry.span,
+        }));
+    }
+
+    if entry.text.starts_with("Memory ") {
+        return Ok(Some(Statement {
+            kind: StatementKind::MemorySpec(parse_memory_spec_decl(entry, false)?),
+            availability: Vec::new(),
+            forewords: Vec::new(),
+            cleanup_footers: Vec::new(),
+            span: entry.span,
+        }));
+    }
+
+    Ok(None)
+}
+
+fn parse_construct_yield_expression(
+    text: &str,
+    attached: &[RawBlockEntry],
+    span: Span,
+) -> Result<Option<Expr>, String> {
+    if !text.starts_with("construct ") {
+        return Ok(None);
+    }
+    if attached.is_empty() {
+        return Ok(None);
+    }
+    let region = parse_construct_region(text, attached, span)?;
+    if !matches!(region.completion, ConstructCompletionKind::Yield) {
+        return Err(format!(
+            "{}:{}: only `construct yield` is valid in expression position",
+            span.line, span.column
+        ));
+    }
+    Ok(Some(Expr::ConstructRegion(Box::new(region))))
+}
+
+fn parse_recycle_line(entry: &RawBlockEntry, loop_depth: usize) -> Result<RecycleLine, String> {
+    let (text, modifier) =
+        parse_headed_modifier_suffix(&entry.text, HeadedModifierMode::Recycle, entry.span)?;
+    if let Some(rest) = text.strip_prefix("let ") {
+        let (mutable, rest) = if let Some(rest) = rest.strip_prefix("mut ") {
+            (true, rest)
+        } else {
+            (false, rest)
+        };
+        let (name, value) = rest.split_once('=').ok_or_else(|| {
+            format!(
+                "{}:{}: malformed `recycle` binding line",
+                entry.span.line, entry.span.column
+            )
+        })?;
+        let name = name.trim();
+        let value = value.trim();
+        if looks_like_tuple_binding(name) || !is_identifier(name) || value.is_empty() {
+            return Err(format!(
+                "{}:{}: malformed `recycle` binding line",
+                entry.span.line, entry.span.column
+            ));
+        }
+        return Ok(RecycleLine {
+            kind: RecycleLineKind::Let {
+                mutable,
+                name: name.to_string(),
+                gate: parse_expression(value, &entry.children, entry.span)?,
+            },
+            modifier,
+            span: entry.span,
+        });
+    }
+    if let Some((target, op, value)) = parse_assignment_statement(&text)? {
+        let AssignTarget::Name { text: name } = target else {
+            return Err(format!(
+                "{}:{}: `recycle` assignment lines only allow plain local names",
+                entry.span.line, entry.span.column
+            ));
+        };
+        if !matches!(op, AssignOp::Assign) {
+            return Err(format!(
+                "{}:{}: `recycle` assignment lines only allow `=`",
+                entry.span.line, entry.span.column
+            ));
+        }
+        return Ok(RecycleLine {
+            kind: RecycleLineKind::Assign {
+                name,
+                gate: parse_expression(&value, &entry.children, entry.span)?,
+            },
+            modifier,
+            span: entry.span,
+        });
+    }
+    if modifier.as_ref().is_some_and(|modifier| {
+        matches!(
+            modifier.kind,
+            HeadedModifierKind::Keyword(HeadedModifierKeyword::Break)
+                | HeadedModifierKind::Keyword(HeadedModifierKeyword::Continue)
+        ) && loop_depth == 0
+    }) {
+        return Err(format!(
+            "{}:{}: `break` and `continue` recycle exits are only valid inside loops",
+            entry.span.line, entry.span.column
+        ));
+    }
+    Ok(RecycleLine {
+        kind: RecycleLineKind::Expr {
+            gate: parse_expression(&text, &entry.children, entry.span)?,
+        },
+        modifier,
+        span: entry.span,
+    })
+}
+
+fn parse_bind_line(entry: &RawBlockEntry) -> Result<BindLine, String> {
+    let (text, modifier) =
+        parse_headed_modifier_suffix(&entry.text, HeadedModifierMode::Bind, entry.span)?;
+    if let Some(rest) = text.strip_prefix("require ") {
+        let expr = rest.trim();
+        if expr.is_empty() {
+            return Err(format!(
+                "{}:{}: malformed `bind require` line",
+                entry.span.line, entry.span.column
+            ));
+        }
+        return Ok(BindLine {
+            kind: BindLineKind::Require {
+                expr: parse_expression(expr, &entry.children, entry.span)?,
+            },
+            modifier,
+            span: entry.span,
+        });
+    }
+    if let Some(rest) = text.strip_prefix("let ") {
+        let (mutable, rest) = if let Some(rest) = rest.strip_prefix("mut ") {
+            (true, rest)
+        } else {
+            (false, rest)
+        };
+        let (name, value) = rest.split_once('=').ok_or_else(|| {
+            format!(
+                "{}:{}: malformed `bind` binding line",
+                entry.span.line, entry.span.column
+            )
+        })?;
+        let name = name.trim();
+        let value = value.trim();
+        if looks_like_tuple_binding(name) || !is_identifier(name) || value.is_empty() {
+            return Err(format!(
+                "{}:{}: malformed `bind` binding line",
+                entry.span.line, entry.span.column
+            ));
+        }
+        return Ok(BindLine {
+            kind: BindLineKind::Let {
+                mutable,
+                name: name.to_string(),
+                gate: parse_expression(value, &entry.children, entry.span)?,
+            },
+            modifier,
+            span: entry.span,
+        });
+    }
+    if let Some((target, op, value)) = parse_assignment_statement(&text)? {
+        let AssignTarget::Name { text: name } = target else {
+            return Err(format!(
+                "{}:{}: `bind` refinement lines only allow plain local names",
+                entry.span.line, entry.span.column
+            ));
+        };
+        if !matches!(op, AssignOp::Assign) {
+            return Err(format!(
+                "{}:{}: `bind` refinement lines only allow `=`",
+                entry.span.line, entry.span.column
+            ));
+        }
+        return Ok(BindLine {
+            kind: BindLineKind::Assign {
+                name,
+                gate: parse_expression(&value, &entry.children, entry.span)?,
+            },
+            modifier,
+            span: entry.span,
+        });
+    }
+    Err(format!(
+        "{}:{}: invalid `bind` line",
+        entry.span.line, entry.span.column
+    ))
+}
+
+fn parse_construct_region(
+    text: &str,
+    children: &[RawBlockEntry],
+    span: Span,
+) -> Result<ConstructRegion, String> {
+    if children.is_empty() {
+        return Err(format!(
+            "{}:{}: `construct` requires an indented region body",
+            span.line, span.column
+        ));
+    }
+    let Some(rest) = text.strip_prefix("construct ") else {
+        return Err(format!(
+            "{}:{}: malformed `construct` header",
+            span.line, span.column
+        ));
+    };
+    let (header, default_modifier) =
+        parse_headed_modifier_suffix(rest, HeadedModifierMode::Construct, span)?;
+    let Some((completion_text, remainder)) = split_first_token(&header) else {
+        return Err(format!(
+            "{}:{}: malformed `construct` header",
+            span.line, span.column
+        ));
+    };
+    let completion = match completion_text {
+        "yield" => ConstructCompletionKind::Yield,
+        "deliver" => ConstructCompletionKind::Deliver,
+        "place" => ConstructCompletionKind::Place,
+        _ => {
+            return Err(format!(
+                "{}:{}: malformed `construct` completion clause",
+                span.line, span.column
+            ));
+        }
+    };
+    let remainder = remainder.trim();
+    let (target_text, destination) = match completion {
+        ConstructCompletionKind::Yield => {
+            if remainder.is_empty() {
+                return Err(format!(
+                    "{}:{}: `construct yield` requires a constructor target",
+                    span.line, span.column
+                ));
+            }
+            (remainder, None)
+        }
+        ConstructCompletionKind::Deliver => {
+            let arrow = find_top_level_token(remainder, "->").ok_or_else(|| {
+                format!(
+                    "{}:{}: `construct deliver` requires `-> <name>`",
+                    span.line, span.column
+                )
+            })?;
+            let target = remainder[..arrow].trim();
+            let destination = remainder[arrow + 2..].trim();
+            if target.is_empty() || !is_identifier(destination) {
+                return Err(format!(
+                    "{}:{}: malformed `construct deliver` clause",
+                    span.line, span.column
+                ));
+            }
+            (
+                target,
+                Some(ConstructDestination::Deliver {
+                    name: destination.to_string(),
+                }),
+            )
+        }
+        ConstructCompletionKind::Place => {
+            let arrow = find_top_level_token(remainder, "->").ok_or_else(|| {
+                format!(
+                    "{}:{}: `construct place` requires `-> <target>`",
+                    span.line, span.column
+                )
+            })?;
+            let target = remainder[..arrow].trim();
+            let destination = remainder[arrow + 2..].trim();
+            if target.is_empty() || destination.is_empty() {
+                return Err(format!(
+                    "{}:{}: malformed `construct place` clause",
+                    span.line, span.column
+                ));
+            }
+            (
+                target,
+                Some(ConstructDestination::Place {
+                    target: parse_assign_target(destination)?,
+                }),
+            )
+        }
+    };
+    Ok(ConstructRegion {
+        completion,
+        target: Box::new(parse_expression(target_text, &[], span)?),
+        destination,
+        default_modifier,
+        lines: children
+            .iter()
+            .map(parse_construct_line)
+            .collect::<Result<Vec<_>, _>>()?,
+        span,
+    })
+}
+
+fn parse_construct_line(entry: &RawBlockEntry) -> Result<ConstructLine, String> {
+    let (text, modifier) =
+        parse_headed_modifier_suffix(&entry.text, HeadedModifierMode::Construct, entry.span)?;
+    let index = find_top_level_named_eq(&text).ok_or_else(|| {
+        format!(
+            "{}:{}: malformed `construct` contribution line",
+            entry.span.line, entry.span.column
+        )
+    })?;
+    let name = text[..index].trim();
+    let value = text[index + 1..].trim();
+    if !is_identifier(name) || value.is_empty() {
+        return Err(format!(
+            "{}:{}: malformed `construct` contribution line",
+            entry.span.line, entry.span.column
+        ));
+    }
+    Ok(ConstructLine {
+        name: name.to_string(),
+        value: parse_expression(value, &entry.children, entry.span)?,
+        modifier,
+        span: entry.span,
+    })
+}
+
+fn parse_memory_spec_decl(
+    entry: &RawBlockEntry,
+    module_scope: bool,
+) -> Result<MemorySpecDecl, String> {
+    let Some(rest) = entry.text.strip_prefix("Memory ") else {
+        return Err(format!(
+            "{}:{}: malformed `Memory` header",
+            entry.span.line, entry.span.column
+        ));
+    };
+    if entry.children.is_empty() {
+        return Err(format!(
+            "{}:{}: `Memory` requires an indented region body",
+            entry.span.line, entry.span.column
+        ));
+    }
+    let (header, default_modifier) =
+        parse_headed_modifier_suffix(rest, HeadedModifierMode::Memory, entry.span)?;
+    let Some((family_text, name_text)) = split_top_level_single_colon(&header) else {
+        return Err(format!(
+            "{}:{}: malformed `Memory` target slot; expected `<family>:<name>`",
+            entry.span.line, entry.span.column
+        ));
+    };
+    let family = MemoryFamily::parse(family_text.trim()).ok_or_else(|| {
+        format!(
+            "{}:{}: invalid `Memory` family `{}`",
+            entry.span.line,
+            entry.span.column,
+            family_text.trim()
+        )
+    })?;
+    let name = name_text.trim();
+    if !is_identifier(name) {
+        return Err(format!(
+            "{}:{}: malformed `Memory` target slot; expected `<family>:<name>`",
+            entry.span.line, entry.span.column
+        ));
+    }
+    let _ = module_scope;
+    Ok(MemorySpecDecl {
+        family,
+        name: name.to_string(),
+        default_modifier,
+        details: entry
+            .children
+            .iter()
+            .map(parse_memory_detail_line)
+            .collect::<Result<Vec<_>, _>>()?,
+        span: entry.span,
+    })
+}
+
+fn parse_memory_detail_line(entry: &RawBlockEntry) -> Result<MemoryDetailLine, String> {
+    let (text, modifier) =
+        parse_headed_modifier_suffix(&entry.text, HeadedModifierMode::Memory, entry.span)?;
+    let index = find_top_level_named_eq(&text).ok_or_else(|| {
+        format!(
+            "{}:{}: malformed `Memory` detail line",
+            entry.span.line, entry.span.column
+        )
+    })?;
+    let key = text[..index].trim();
+    let value = text[index + 1..].trim();
+    let key = MemoryDetailKey::parse(key).ok_or_else(|| {
+        format!(
+            "{}:{}: invalid `Memory` detail key `{}`",
+            entry.span.line, entry.span.column, key
+        )
+    })?;
+    if value.is_empty() {
+        return Err(format!(
+            "{}:{}: malformed `Memory` detail line",
+            entry.span.line, entry.span.column
+        ));
+    }
+    Ok(MemoryDetailLine {
+        key,
+        value: parse_expression(value, &entry.children, entry.span)?,
+        modifier,
+        span: entry.span,
+    })
+}
+
+fn parse_headed_modifier_suffix(
+    text: &str,
+    mode: HeadedModifierMode,
+    span: Span,
+) -> Result<(String, Option<HeadedModifier>), String> {
+    for index in find_top_level_token_positions(text, " -").into_iter().rev() {
+        let head = text[..index].trim_end();
+        let tail = text[index + 2..].trim();
+        let Some((name, payload_text)) = split_first_token(tail) else {
+            continue;
+        };
+        if !is_identifier(name) {
+            continue;
+        }
+        let keyword = HeadedModifierKeyword::parse(name);
+        let known = !matches!(keyword, HeadedModifierKeyword::NamedExit);
+        if !known && !modifier_allows_named(mode) {
+            continue;
+        }
+        let kind = if known {
+            HeadedModifierKind::Keyword(keyword)
+        } else {
+            HeadedModifierKind::Name(name.to_string())
+        };
+        let payload = if payload_text.trim().is_empty() {
+            None
+        } else {
+            Some(parse_expression(payload_text.trim(), &[], span)?)
+        };
+        return Ok((
+            head.trim().to_string(),
+            Some(HeadedModifier {
+                kind,
+                payload,
+                span,
+            }),
+        ));
+    }
+    Ok((text.trim().to_string(), None))
+}
+
+fn modifier_allows_named(mode: HeadedModifierMode) -> bool {
+    matches!(
+        mode,
+        HeadedModifierMode::Recycle | HeadedModifierMode::Memory
+    )
+}
+
+fn split_first_token(text: &str) -> Option<(&str, &str)> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    for (index, ch) in trimmed.char_indices() {
+        if ch.is_whitespace() {
+            let name = &trimmed[..index];
+            let rest = trimmed[index..].trim_start();
+            return Some((name, rest));
+        }
+    }
+    Some((trimmed, ""))
+}
+
 fn parse_expression(text: &str, attached: &[RawBlockEntry], span: Span) -> Result<Expr, String> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -2252,6 +2997,9 @@ fn parse_expression(text: &str, attached: &[RawBlockEntry], span: Span) -> Resul
             "{}:{}: malformed expression",
             span.line, span.column
         ));
+    }
+    if let Some(expr) = parse_construct_yield_expression(trimmed, attached, span)? {
+        return Ok(expr);
     }
     if let Some(rest) = trimmed.strip_prefix("match ") {
         return parse_match_expression(rest, attached, span);
@@ -5048,6 +5796,72 @@ fn validate_statement_phrase_contract(statements: &[Statement]) -> Result<(), St
             StatementKind::Assign { value, .. } => {
                 validate_expr_phrase_contract(value, statement.span, false)?;
             }
+            StatementKind::Recycle {
+                default_modifier,
+                lines,
+            } => {
+                validate_headed_modifier_phrase_contract(
+                    default_modifier.as_ref(),
+                    statement.span,
+                )?;
+                for line in lines {
+                    match &line.kind {
+                        RecycleLineKind::Expr { gate }
+                        | RecycleLineKind::Let { gate, .. }
+                        | RecycleLineKind::Assign { gate, .. } => {
+                            validate_expr_phrase_contract(gate, line.span, false)?;
+                        }
+                    }
+                    validate_headed_modifier_phrase_contract(line.modifier.as_ref(), line.span)?;
+                }
+            }
+            StatementKind::Bind {
+                default_modifier,
+                lines,
+            } => {
+                validate_headed_modifier_phrase_contract(
+                    default_modifier.as_ref(),
+                    statement.span,
+                )?;
+                for line in lines {
+                    match &line.kind {
+                        BindLineKind::Let { gate, .. } | BindLineKind::Assign { gate, .. } => {
+                            validate_expr_phrase_contract(gate, line.span, false)?;
+                        }
+                        BindLineKind::Require { expr } => {
+                            validate_expr_phrase_contract(expr, line.span, false)?;
+                        }
+                    }
+                    validate_headed_modifier_phrase_contract(line.modifier.as_ref(), line.span)?;
+                }
+            }
+            StatementKind::Construct(region) => {
+                validate_expr_phrase_contract(&region.target, region.span, false)?;
+                validate_headed_modifier_phrase_contract(
+                    region.default_modifier.as_ref(),
+                    region.span,
+                )?;
+                if let Some(ConstructDestination::Place { target }) = &region.destination {
+                    validate_assign_target_tuple_contract(target, region.span)?;
+                }
+                for line in &region.lines {
+                    validate_expr_phrase_contract(&line.value, line.span, false)?;
+                    validate_headed_modifier_phrase_contract(line.modifier.as_ref(), line.span)?;
+                }
+            }
+            StatementKind::MemorySpec(spec) => {
+                validate_headed_modifier_phrase_contract(
+                    spec.default_modifier.as_ref(),
+                    spec.span,
+                )?;
+                for detail in &spec.details {
+                    validate_expr_phrase_contract(&detail.value, detail.span, false)?;
+                    validate_headed_modifier_phrase_contract(
+                        detail.modifier.as_ref(),
+                        detail.span,
+                    )?;
+                }
+            }
             StatementKind::Expr { expr } => {
                 validate_expr_phrase_contract(expr, statement.span, true)?;
             }
@@ -5080,6 +5894,17 @@ fn validate_expr_phrase_contract(
             validate_expr_phrase_contract(subject, span, false)?;
             for arm in arms {
                 validate_expr_phrase_contract(&arm.value, arm.span, false)?;
+            }
+        }
+        Expr::ConstructRegion(region) => {
+            validate_expr_phrase_contract(&region.target, region.span, false)?;
+            validate_headed_modifier_phrase_contract(
+                region.default_modifier.as_ref(),
+                region.span,
+            )?;
+            for line in &region.lines {
+                validate_expr_phrase_contract(&line.value, line.span, false)?;
+                validate_headed_modifier_phrase_contract(line.modifier.as_ref(), line.span)?;
             }
         }
         Expr::Chain { steps, .. } => {
@@ -5189,6 +6014,18 @@ fn validate_phrase_arg_contract(arg: &PhraseArg, span: Span) -> Result<(), Strin
             validate_expr_phrase_contract(expr, span, false)
         }
     }
+}
+
+fn validate_headed_modifier_phrase_contract(
+    modifier: Option<&HeadedModifier>,
+    span: Span,
+) -> Result<(), String> {
+    if let Some(modifier) = modifier
+        && let Some(payload) = &modifier.payload
+    {
+        validate_expr_phrase_contract(payload, span, false)?;
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -5448,6 +6285,60 @@ fn validate_statement_block_tuple_contract(statements: &[Statement]) -> Result<(
                 validate_assign_target_tuple_contract(target, statement.span)?;
                 validate_expr_tuple_contract(value, statement.span)?;
             }
+            StatementKind::Recycle {
+                default_modifier,
+                lines,
+            } => {
+                validate_headed_modifier_tuple_contract(default_modifier.as_ref(), statement.span)?;
+                for line in lines {
+                    match &line.kind {
+                        RecycleLineKind::Expr { gate }
+                        | RecycleLineKind::Let { gate, .. }
+                        | RecycleLineKind::Assign { gate, .. } => {
+                            validate_expr_tuple_contract(gate, line.span)?;
+                        }
+                    }
+                    validate_headed_modifier_tuple_contract(line.modifier.as_ref(), line.span)?;
+                }
+            }
+            StatementKind::Bind {
+                default_modifier,
+                lines,
+            } => {
+                validate_headed_modifier_tuple_contract(default_modifier.as_ref(), statement.span)?;
+                for line in lines {
+                    match &line.kind {
+                        BindLineKind::Let { gate, .. } | BindLineKind::Assign { gate, .. } => {
+                            validate_expr_tuple_contract(gate, line.span)?;
+                        }
+                        BindLineKind::Require { expr } => {
+                            validate_expr_tuple_contract(expr, line.span)?;
+                        }
+                    }
+                    validate_headed_modifier_tuple_contract(line.modifier.as_ref(), line.span)?;
+                }
+            }
+            StatementKind::Construct(region) => {
+                validate_expr_tuple_contract(&region.target, region.span)?;
+                validate_headed_modifier_tuple_contract(
+                    region.default_modifier.as_ref(),
+                    region.span,
+                )?;
+                if let Some(ConstructDestination::Place { target }) = &region.destination {
+                    validate_assign_target_tuple_contract(target, region.span)?;
+                }
+                for line in &region.lines {
+                    validate_expr_tuple_contract(&line.value, line.span)?;
+                    validate_headed_modifier_tuple_contract(line.modifier.as_ref(), line.span)?;
+                }
+            }
+            StatementKind::MemorySpec(spec) => {
+                validate_headed_modifier_tuple_contract(spec.default_modifier.as_ref(), spec.span)?;
+                for detail in &spec.details {
+                    validate_expr_tuple_contract(&detail.value, detail.span)?;
+                    validate_headed_modifier_tuple_contract(detail.modifier.as_ref(), detail.span)?;
+                }
+            }
             StatementKind::Break | StatementKind::Continue => {}
         }
     }
@@ -5474,6 +6365,15 @@ fn validate_expr_tuple_contract(expr: &Expr, span: Span) -> Result<(), String> {
             validate_expr_tuple_contract(subject, span)?;
             for arm in arms {
                 validate_expr_tuple_contract(&arm.value, arm.span)?;
+            }
+            Ok(())
+        }
+        Expr::ConstructRegion(region) => {
+            validate_expr_tuple_contract(&region.target, region.span)?;
+            validate_headed_modifier_tuple_contract(region.default_modifier.as_ref(), region.span)?;
+            for line in &region.lines {
+                validate_expr_tuple_contract(&line.value, line.span)?;
+                validate_headed_modifier_tuple_contract(line.modifier.as_ref(), line.span)?;
             }
             Ok(())
         }
@@ -5575,6 +6475,18 @@ fn validate_header_attachment_tuple_contract(
             validate_expr_tuple_contract(value, span)
         }
     }
+}
+
+fn validate_headed_modifier_tuple_contract(
+    modifier: Option<&HeadedModifier>,
+    span: Span,
+) -> Result<(), String> {
+    if let Some(modifier) = modifier
+        && let Some(payload) = &modifier.payload
+    {
+        validate_expr_tuple_contract(payload, span)?;
+    }
+    Ok(())
 }
 
 fn validate_assign_target_tuple_contract(target: &AssignTarget, span: Span) -> Result<(), String> {
@@ -7650,5 +8562,72 @@ mod tests {
                 "{name} should be source-declared opaque type, not builtin"
             );
         }
+    }
+
+    #[test]
+    fn parse_module_collects_headed_regions_v1_shapes() {
+        let parsed = parse_module(concat!(
+            "record Widget:\n",
+            "    value: Int\n",
+            "enum Result[T, E]:\n",
+            "    Ok(T)\n",
+            "    Err(E)\n",
+            "Memory arena:cache -alloc\n",
+            "    capacity = 8\n",
+            "    pressure = bounded\n",
+            "fn main() -> Int:\n",
+            "    Memory frame:scratch -alloc\n",
+            "        capacity = 2\n",
+            "    bind -return 0\n",
+            "        let value = Result.Ok[Int, Str] :: 1 :: call\n",
+            "    recycle -return 0\n",
+            "        true\n",
+            "    let built = construct yield Widget -return 0\n",
+            "        value = value\n",
+            "    construct deliver Widget -> delivered -return 0\n",
+            "        value = value\n",
+            "    let mut placed = Widget :: value = 0 :: call\n",
+            "    construct place Widget -> placed -return 0\n",
+            "        value = value\n",
+            "    return built.value\n",
+        ))
+        .expect("headed regions should parse");
+
+        assert_eq!(parsed.memory_specs.len(), 1);
+        assert_eq!(parsed.memory_specs[0].family.as_str(), "arena");
+        assert_eq!(parsed.memory_specs[0].name, "cache");
+
+        let main = parsed
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "main")
+            .expect("main should parse");
+        assert!(matches!(
+            main.statements[0].kind,
+            StatementKind::MemorySpec(_)
+        ));
+        assert!(matches!(
+            main.statements[1].kind,
+            StatementKind::Bind { .. }
+        ));
+        assert!(matches!(
+            main.statements[2].kind,
+            StatementKind::Recycle { .. }
+        ));
+        assert!(matches!(
+            main.statements[3].kind,
+            StatementKind::Let {
+                value: Expr::ConstructRegion(_),
+                ..
+            }
+        ));
+        assert!(matches!(
+            main.statements[4].kind,
+            StatementKind::Construct(_)
+        ));
+        assert!(matches!(
+            main.statements[6].kind,
+            StatementKind::Construct(_)
+        ));
     }
 }

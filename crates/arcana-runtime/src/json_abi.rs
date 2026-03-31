@@ -9,7 +9,7 @@ use super::{
     RuntimeExecutionState, RuntimeHost, RuntimeOpaqueFamily, RuntimePackagePlan,
     RuntimeRoutinePlan, RuntimeValue, execute_routine_call_with_state,
     native_abi::project_export_write_backs, routine_plan::render_runtime_signature_text,
-    validate_runtime_requirements_supported,
+    runtime_eval_message, validate_runtime_requirements_supported,
 };
 
 pub const RUNTIME_JSON_ABI_FORMAT: &str = "arcana-runtime-json-abi-v3";
@@ -116,7 +116,22 @@ pub fn execute_exported_json_abi_routine(
         &mut state,
         host,
         false,
-    )?;
+    )
+    .map_err(runtime_eval_message)?;
+    if let Some(control) = outcome.control {
+        return Err(runtime_eval_message(match control {
+            super::FlowSignal::OwnerExit {
+                owner_key,
+                exit_name,
+            } => super::RuntimeEvalSignal::OwnerExit {
+                owner_key,
+                exit_name,
+            },
+            other => super::RuntimeEvalSignal::Message(format!(
+                "unsupported json abi control flow `{other:?}`"
+            )),
+        }));
+    }
     let write_backs = project_export_write_backs(routine, outcome.final_args)?;
     let rendered = serde_json::json!({
         "result": runtime_value_to_json_value(outcome.value)?,

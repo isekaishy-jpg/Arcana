@@ -15,6 +15,7 @@ This file is the active authority for the former page-rollup domain.
 - Cleanup footers are attached post-owner declarations.
 - `-cleanup` is valid only immediately after the owning body dedents back to owner indentation.
 - This scope does not define a generic `-name` footer family.
+- Headed regions are separate inner structural blocks, not footer attachments.
 - Future headed-region or other dash-form work may reuse `-cleanup` or other `-name` spellings in other contexts, but that is outside this v1 contract.
 
 ## Valid Owners

@@ -31,6 +31,7 @@
 Attached-header-entry note:
 - These are header-local metadata carriers, not general statement/expression targets.
 - Built-in compiler-owned validation remains target-specific; attached-entry forewords do not automatically inherit declaration or chain-contract semantics.
+- Headed-region participating lines are not new foreword targets in this patch unless a later approved headed-region or foreword scope opts in explicitly.
 
 Boundary contract notes:
 - `#boundary[...]` is compile-time only in v1

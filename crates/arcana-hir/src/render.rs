@@ -1,10 +1,11 @@
 use super::{
-    HirAssignTarget, HirAvailabilityAttachment, HirBehaviorAttr, HirBinaryOp, HirChainConnector,
-    HirChainIntroducer, HirChainStep, HirCleanupFooter, HirDirective, HirEnumVariant, HirExpr,
-    HirForewordApp, HirForewordArg, HirHeaderAttachment, HirImplAssocTypeBinding, HirImplDecl,
-    HirLangItem, HirMatchArm, HirMatchPattern, HirModuleDependency, HirOwnerExit, HirOwnerObject,
-    HirPhraseArg, HirStatement, HirStatementKind, HirSymbol, HirSymbolBody, HirUnaryOp,
-    signature::render_symbol_signature,
+    HirAssignTarget, HirAvailabilityAttachment, HirBehaviorAttr, HirBinaryOp, HirBindLineKind,
+    HirChainConnector, HirChainIntroducer, HirChainStep, HirCleanupFooter, HirConstructDestination,
+    HirConstructRegion, HirDirective, HirEnumVariant, HirExpr, HirForewordApp, HirForewordArg,
+    HirHeadedModifier, HirHeadedModifierKind, HirHeaderAttachment, HirImplAssocTypeBinding,
+    HirImplDecl, HirLangItem, HirMatchArm, HirMatchPattern, HirMemorySpecDecl, HirModuleDependency,
+    HirOwnerExit, HirOwnerObject, HirPhraseArg, HirRecycleLineKind, HirStatement, HirStatementKind,
+    HirSymbol, HirSymbolBody, HirUnaryOp, signature::render_symbol_signature,
 };
 
 pub(crate) fn encode_surface_text(text: &str) -> String {
@@ -450,6 +451,100 @@ fn render_statement_kind_fingerprint(kind: &HirStatementKind) -> String {
             op.as_str(),
             render_expr_fingerprint(value)
         ),
+        HirStatementKind::Recycle {
+            default_modifier,
+            lines,
+        } => format!(
+            "recycle(default_modifier={}|lines=[{}])",
+            default_modifier
+                .as_ref()
+                .map(render_headed_modifier_fingerprint)
+                .unwrap_or_else(|| "none".to_string()),
+            lines
+                .iter()
+                .map(|line| {
+                    let kind = match &line.kind {
+                        HirRecycleLineKind::Expr { gate } => {
+                            format!("expr({})", render_expr_fingerprint(gate))
+                        }
+                        HirRecycleLineKind::Let {
+                            mutable,
+                            name,
+                            gate,
+                        } => format!(
+                            "let(mutable={}|name={}|gate={})",
+                            mutable,
+                            quote_fingerprint_text(name),
+                            render_expr_fingerprint(gate)
+                        ),
+                        HirRecycleLineKind::Assign { name, gate } => format!(
+                            "assign(name={}|gate={})",
+                            quote_fingerprint_text(name),
+                            render_expr_fingerprint(gate)
+                        ),
+                    };
+                    format!(
+                        "line(kind={}|modifier={})",
+                        kind,
+                        line.modifier
+                            .as_ref()
+                            .map(render_headed_modifier_fingerprint)
+                            .unwrap_or_else(|| "none".to_string())
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        HirStatementKind::Bind {
+            default_modifier,
+            lines,
+        } => format!(
+            "bind(default_modifier={}|lines=[{}])",
+            default_modifier
+                .as_ref()
+                .map(render_headed_modifier_fingerprint)
+                .unwrap_or_else(|| "none".to_string()),
+            lines
+                .iter()
+                .map(|line| {
+                    let kind = match &line.kind {
+                        HirBindLineKind::Let {
+                            mutable,
+                            name,
+                            gate,
+                        } => format!(
+                            "let(mutable={}|name={}|gate={})",
+                            mutable,
+                            quote_fingerprint_text(name),
+                            render_expr_fingerprint(gate)
+                        ),
+                        HirBindLineKind::Assign { name, gate } => format!(
+                            "assign(name={}|gate={})",
+                            quote_fingerprint_text(name),
+                            render_expr_fingerprint(gate)
+                        ),
+                        HirBindLineKind::Require { expr } => {
+                            format!("require({})", render_expr_fingerprint(expr))
+                        }
+                    };
+                    format!(
+                        "line(kind={}|modifier={})",
+                        kind,
+                        line.modifier
+                            .as_ref()
+                            .map(render_headed_modifier_fingerprint)
+                            .unwrap_or_else(|| "none".to_string())
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        HirStatementKind::Construct(region) => {
+            format!("construct({})", render_construct_region_fingerprint(region))
+        }
+        HirStatementKind::MemorySpec(spec) => {
+            format!("memory_spec({})", render_memory_spec_fingerprint(spec))
+        }
         HirStatementKind::Expr { expr } => format!("expr({})", render_expr_fingerprint(expr)),
     }
 }
@@ -511,6 +606,9 @@ pub fn render_expr_fingerprint(expr: &HirExpr) -> String {
                 .collect::<Vec<_>>()
                 .join(",")
         ),
+        HirExpr::ConstructRegion(region) => {
+            format!("construct({})", render_construct_region_fingerprint(region))
+        }
         HirExpr::MemoryPhrase {
             family,
             arena,
@@ -623,6 +721,91 @@ pub fn render_expr_fingerprint(expr: &HirExpr) -> String {
                 .join(",")
         ),
     }
+}
+
+fn render_headed_modifier_fingerprint(modifier: &HirHeadedModifier) -> String {
+    let kind = match &modifier.kind {
+        HirHeadedModifierKind::Keyword(keyword) => keyword.as_str().to_string(),
+        HirHeadedModifierKind::Name(name) => quote_fingerprint_text(name),
+    };
+    format!(
+        "modifier(kind={}|payload={})",
+        kind,
+        modifier
+            .payload
+            .as_ref()
+            .map(render_expr_fingerprint)
+            .unwrap_or_else(|| "none".to_string())
+    )
+}
+
+fn render_construct_region_fingerprint(region: &HirConstructRegion) -> String {
+    format!(
+        "completion={}|target={}|destination={}|default_modifier={}|lines=[{}]",
+        region.completion.as_str(),
+        render_expr_fingerprint(&region.target),
+        region
+            .destination
+            .as_ref()
+            .map(|destination| match destination {
+                HirConstructDestination::Deliver { name } => {
+                    format!("deliver({})", quote_fingerprint_text(name))
+                }
+                HirConstructDestination::Place { target } => {
+                    format!("place({})", render_assign_target_fingerprint(target))
+                }
+            })
+            .unwrap_or_else(|| "none".to_string()),
+        region
+            .default_modifier
+            .as_ref()
+            .map(render_headed_modifier_fingerprint)
+            .unwrap_or_else(|| "none".to_string()),
+        region
+            .lines
+            .iter()
+            .map(|line| {
+                format!(
+                    "contrib(name={}|value={}|modifier={})",
+                    quote_fingerprint_text(&line.name),
+                    render_expr_fingerprint(&line.value),
+                    line.modifier
+                        .as_ref()
+                        .map(render_headed_modifier_fingerprint)
+                        .unwrap_or_else(|| "none".to_string())
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
+pub(crate) fn render_memory_spec_fingerprint(spec: &HirMemorySpecDecl) -> String {
+    format!(
+        "family={}|name={}|default_modifier={}|details=[{}]",
+        spec.family.as_str(),
+        quote_fingerprint_text(&spec.name),
+        spec.default_modifier
+            .as_ref()
+            .map(render_headed_modifier_fingerprint)
+            .unwrap_or_else(|| "none".to_string()),
+        spec.details
+            .iter()
+            .map(|detail| {
+                format!(
+                    "detail(key={}|value={}|modifier={})",
+                    detail.key.as_str(),
+                    render_expr_fingerprint(&detail.value),
+                    detail
+                        .modifier
+                        .as_ref()
+                        .map(render_headed_modifier_fingerprint)
+                        .unwrap_or_else(|| "none".to_string())
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    )
 }
 
 fn render_phrase_arg_fingerprint(arg: &HirPhraseArg) -> String {

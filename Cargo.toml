@@ -6,6 +6,7 @@ members = [
     "crates/arcana-frontend",
     "crates/arcana-hir",
     "crates/arcana-ir",
+    "crates/arcana-language-law",
     "crates/arcana-package",
     "crates/arcana-runtime",
     "crates/arcana-syntax",
@@ -24,6 +25,7 @@ arcana-cabi = { path = "crates/arcana-cabi" }
 arcana-frontend = { path = "crates/arcana-frontend" }
 arcana-hir = { path = "crates/arcana-hir" }
 arcana-ir = { path = "crates/arcana-ir" }
+arcana-language-law = { path = "crates/arcana-language-law" }
 arcana-package = { path = "crates/arcana-package" }
 arcana-runtime = { path = "crates/arcana-runtime" }
 arcana-syntax = { path = "crates/arcana-syntax" }

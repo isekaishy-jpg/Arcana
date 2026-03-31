@@ -167,9 +167,8 @@ fn dispatch_targeted_window_event[A, where arcana_desktop.app.Application[A]](ed
 
 fn dispatch_targeted_window_event_ready[A, where arcana_desktop.app.Application[A]](edit app: A, edit cx: arcana_desktop.types.AppContext, read target: arcana_desktop.types.TargetedEvent) -> arcana_desktop.types.ControlFlow:
     arcana_desktop.app.set_current_target :: cx, target.window_id, target.is_main_window :: call
-    let flow = arcana_desktop.app.run_window_event :: app, cx, target :: call
-    arcana_desktop.app.clear_current_target :: cx :: call
-    return flow
+    defer arcana_desktop.app.clear_current_target :: cx :: call
+    return arcana_desktop.app.run_window_event :: app, cx, target :: call
 
 fn dispatch_event[A, where arcana_desktop.app.Application[A]](edit app: A, edit cx: arcana_desktop.types.AppContext, read event: arcana_desktop.types.AppEvent) -> arcana_desktop.types.ControlFlow:
     return match event:

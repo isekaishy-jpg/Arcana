@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 use arcana_cabi::ArcanaCabiPassMode;
 use arcana_ir::{
-    ExecAssignOp, ExecAssignTarget, ExecBinaryOp, ExecCleanupFooter, ExecExpr,
-    ExecPhraseQualifierKind, ExecStmt,
+    ExecAssignOp, ExecAssignTarget, ExecBinaryOp, ExecBindLineKind, ExecCleanupFooter, ExecExpr,
+    ExecHeadedModifier, ExecPhraseQualifierKind, ExecRecycleLineKind, ExecStmt,
 };
 
 use crate::artifact::AotRoutineArtifact;
@@ -561,6 +561,36 @@ impl<'a> NativeLoweringBuilder<'a> {
                         )?,
                     });
                 }
+                ExecStmt::Recycle {
+                    default_modifier,
+                    lines,
+                } => {
+                    lowered_statements.extend(self.lower_recycle_stmt(
+                        default_modifier.as_ref(),
+                        lines,
+                        &bindings,
+                        ctx,
+                        &current_defers,
+                        &current_cleanup_actions,
+                    )?);
+                }
+                ExecStmt::Bind {
+                    default_modifier,
+                    lines,
+                } => {
+                    lowered_statements.extend(self.lower_bind_stmt(
+                        default_modifier.as_ref(),
+                        lines,
+                        &bindings,
+                        ctx,
+                        &current_defers,
+                        &current_cleanup_actions,
+                    )?);
+                }
+                // General construct regions still rely on runtime dispatch because the
+                // direct lowering model does not yet carry record/variant/match values.
+                ExecStmt::Construct(_) => return None,
+                ExecStmt::MemorySpec(_) => {}
                 _ => return None,
             }
         }
@@ -722,6 +752,36 @@ impl<'a> NativeLoweringBuilder<'a> {
                     )?;
                     return Some(lowered_statements);
                 }
+                ExecStmt::Recycle {
+                    default_modifier,
+                    lines,
+                } => {
+                    lowered_statements.extend(self.lower_recycle_stmt(
+                        default_modifier.as_ref(),
+                        lines,
+                        &bindings,
+                        ctx,
+                        &current_defers,
+                        &current_cleanup_actions,
+                    )?);
+                }
+                ExecStmt::Bind {
+                    default_modifier,
+                    lines,
+                } => {
+                    lowered_statements.extend(self.lower_bind_stmt(
+                        default_modifier.as_ref(),
+                        lines,
+                        &bindings,
+                        ctx,
+                        &current_defers,
+                        &current_cleanup_actions,
+                    )?);
+                }
+                // General construct regions still rely on runtime dispatch because the
+                // direct lowering model does not yet carry record/variant/match values.
+                ExecStmt::Construct(_) => return None,
+                ExecStmt::MemorySpec(_) => {}
                 _ => return None,
             }
         }
@@ -777,6 +837,117 @@ impl<'a> NativeLoweringBuilder<'a> {
             }
             _ => None,
         }
+    }
+
+    fn lower_headed_exit_body(
+        &mut self,
+        modifier: &ExecHeadedModifier,
+        bindings: &BTreeMap<String, NativeBinding>,
+        ctx: NativeBlockLoweringCtx<'_>,
+        current_defers: &[NativeDirectExpr],
+        current_cleanup_actions: &[NativeCleanupAction],
+    ) -> Option<Vec<NativeDirectStmt>> {
+        let mut body = Vec::new();
+        match modifier.kind.as_str() {
+            "return" => {
+                let payload = modifier.payload.as_ref()?;
+                let value = self.lower_expr(payload, bindings, ctx.expected_return_type)?;
+                self.push_return_with_cleanup(
+                    &mut body,
+                    value,
+                    bindings,
+                    ctx.outer_cleanup_scopes,
+                    current_defers,
+                    current_cleanup_actions,
+                );
+            }
+            "break" => {
+                self.push_loop_exit_with_cleanup(
+                    &mut body,
+                    NativeDirectStmt::Break,
+                    ctx.outer_cleanup_scopes,
+                    current_defers,
+                    current_cleanup_actions,
+                    ctx.current_scope_is_loop_boundary,
+                )?;
+            }
+            "continue" => {
+                self.push_loop_exit_with_cleanup(
+                    &mut body,
+                    NativeDirectStmt::Continue,
+                    ctx.outer_cleanup_scopes,
+                    current_defers,
+                    current_cleanup_actions,
+                    ctx.current_scope_is_loop_boundary,
+                )?;
+            }
+            _ => return None,
+        }
+        Some(body)
+    }
+
+    fn lower_recycle_stmt(
+        &mut self,
+        default_modifier: Option<&ExecHeadedModifier>,
+        lines: &[arcana_ir::ExecRecycleLine],
+        bindings: &BTreeMap<String, NativeBinding>,
+        ctx: NativeBlockLoweringCtx<'_>,
+        current_defers: &[NativeDirectExpr],
+        current_cleanup_actions: &[NativeCleanupAction],
+    ) -> Option<Vec<NativeDirectStmt>> {
+        let mut statements = Vec::new();
+        for line in lines {
+            let ExecRecycleLineKind::Expr { gate } = &line.kind else {
+                return None;
+            };
+            let condition = self.lower_expr(gate, bindings, &NativeAbiType::Bool)?;
+            let modifier = line.modifier.as_ref().or(default_modifier)?;
+            let exit_body = self.lower_headed_exit_body(
+                modifier,
+                bindings,
+                ctx,
+                current_defers,
+                current_cleanup_actions,
+            )?;
+            statements.push(NativeDirectStmt::If {
+                condition,
+                then_body: Vec::new(),
+                else_body: exit_body,
+            });
+        }
+        Some(statements)
+    }
+
+    fn lower_bind_stmt(
+        &mut self,
+        default_modifier: Option<&ExecHeadedModifier>,
+        lines: &[arcana_ir::ExecBindLine],
+        bindings: &BTreeMap<String, NativeBinding>,
+        ctx: NativeBlockLoweringCtx<'_>,
+        current_defers: &[NativeDirectExpr],
+        current_cleanup_actions: &[NativeCleanupAction],
+    ) -> Option<Vec<NativeDirectStmt>> {
+        let mut statements = Vec::new();
+        for line in lines {
+            let ExecBindLineKind::Require { expr } = &line.kind else {
+                return None;
+            };
+            let condition = self.lower_expr(expr, bindings, &NativeAbiType::Bool)?;
+            let modifier = line.modifier.as_ref().or(default_modifier)?;
+            let exit_body = self.lower_headed_exit_body(
+                modifier,
+                bindings,
+                ctx,
+                current_defers,
+                current_cleanup_actions,
+            )?;
+            statements.push(NativeDirectStmt::If {
+                condition,
+                then_body: Vec::new(),
+                else_body: exit_body,
+            });
+        }
+        Some(statements)
     }
 
     fn wrap_tail_expr_with_cleanup(
@@ -1180,6 +1351,8 @@ impl<'a> NativeLoweringBuilder<'a> {
                     ty: callee_signature.return_type,
                 })
             }
+            // Construct expressions currently require runtime dispatch for non-ABI runtime values.
+            ExecExpr::ConstructRegion(_) => None,
             _ => None,
         }
     }
@@ -1434,9 +1607,12 @@ mod tests {
     use crate::emit::{AotEmitContext, AotEmitTarget, AotRuntimeBinding};
     use crate::native_plan::build_native_package_plan;
     use arcana_ir::{
-        ExecAssignOp, ExecAssignTarget, ExecBinaryOp, ExecCleanupFooter, ExecExpr, ExecPhraseArg,
-        ExecPhraseQualifierKind, ExecStmt, IrEntrypoint, IrPackage, IrPackageModule, IrRoutine,
-        IrRoutineParam, IrRoutineType, parse_routine_type_text, render_routine_signature_text,
+        ExecAssignOp, ExecAssignTarget, ExecBinaryOp, ExecBindLine, ExecBindLineKind,
+        ExecCleanupFooter, ExecConstructContributionMode, ExecConstructDestination,
+        ExecConstructLine, ExecConstructRegion, ExecExpr, ExecHeadedModifier, ExecMemorySpecDecl,
+        ExecPhraseArg, ExecPhraseQualifierKind, ExecRecycleLine, ExecRecycleLineKind, ExecStmt,
+        IrEntrypoint, IrPackage, IrPackageModule, IrRoutine, IrRoutineParam, IrRoutineType,
+        parse_routine_type_text, render_routine_signature_text,
     };
 
     fn test_return_type(signature: &str) -> Option<IrRoutineType> {
@@ -1643,6 +1819,827 @@ mod tests {
             lowering_plan.direct_routines[0].body.return_expr,
             NativeDirectExpr::Int(9)
         );
+    }
+
+    #[test]
+    fn lowering_keeps_bool_recycle_regions_direct() {
+        let mut package = base_package();
+        package.entrypoints.push(IrEntrypoint {
+            package_id: test_package_id_for_module("core"),
+            module_id: "core".to_string(),
+            symbol_name: "main".to_string(),
+            symbol_kind: "fn".to_string(),
+            is_async: false,
+            exported: true,
+        });
+        package.routines.push(IrRoutine {
+            package_id: test_package_id_for_module("core"),
+            module_id: "core".to_string(),
+            routine_key: "core#fn-recycle".to_string(),
+            symbol_name: "main".to_string(),
+            symbol_kind: "fn".to_string(),
+            exported: true,
+            is_async: false,
+            type_params: Vec::new(),
+            behavior_attrs: BTreeMap::new(),
+            params: Vec::new(),
+            return_type: test_return_type("fn main() -> Int:"),
+            intrinsic_impl: None,
+            impl_target_type: None,
+            impl_trait_path: None,
+            availability: Vec::new(),
+            foreword_rows: Vec::new(),
+            cleanup_footers: Vec::new(),
+            statements: vec![
+                ExecStmt::Recycle {
+                    default_modifier: Some(ExecHeadedModifier {
+                        kind: "return".to_string(),
+                        payload: Some(ExecExpr::Int(0)),
+                    }),
+                    lines: vec![ExecRecycleLine {
+                        kind: ExecRecycleLineKind::Expr {
+                            gate: ExecExpr::Bool(false),
+                        },
+                        modifier: None,
+                    }],
+                },
+                ExecStmt::ReturnValue {
+                    value: ExecExpr::Int(9),
+                },
+            ],
+        });
+
+        sync_exported_function_surface_rows(&mut package);
+        let package_plan = build_native_package_plan(
+            AotEmitTarget::WindowsExeBundle,
+            &package,
+            &test_emit_context("app.exe"),
+        )
+        .expect("native package plan should build");
+        let lowering_plan =
+            build_native_lowering_plan(&package_plan).expect("native lowering should build");
+
+        assert_eq!(
+            lowering_plan.launch,
+            NativeLaunchLowering::Executable {
+                main_routine_key: "core#fn-recycle".to_string(),
+                lowering: NativeRoutineLowering::Direct {
+                    routine_key: "core#fn-recycle".to_string(),
+                },
+            }
+        );
+        let main = &lowering_plan.direct_routines[0];
+        let NativeDirectStmt::If {
+            condition,
+            then_body,
+            else_body,
+        } = &main.body.statements[0]
+        else {
+            panic!("expected lowered recycle guard");
+        };
+        assert_eq!(condition, &NativeDirectExpr::Bool(false));
+        assert!(then_body.is_empty());
+        assert_eq!(
+            else_body,
+            &vec![NativeDirectStmt::Return {
+                value: NativeDirectExpr::Int(0),
+            }]
+        );
+        assert_eq!(main.body.return_expr, NativeDirectExpr::Int(9));
+    }
+
+    #[test]
+    fn lowering_keeps_bind_require_regions_direct() {
+        let mut package = base_package();
+        package.entrypoints.push(IrEntrypoint {
+            package_id: test_package_id_for_module("core"),
+            module_id: "core".to_string(),
+            symbol_name: "main".to_string(),
+            symbol_kind: "fn".to_string(),
+            is_async: false,
+            exported: true,
+        });
+        package.routines.push(IrRoutine {
+            package_id: test_package_id_for_module("core"),
+            module_id: "core".to_string(),
+            routine_key: "core#fn-bind".to_string(),
+            symbol_name: "main".to_string(),
+            symbol_kind: "fn".to_string(),
+            exported: true,
+            is_async: false,
+            type_params: Vec::new(),
+            behavior_attrs: BTreeMap::new(),
+            params: Vec::new(),
+            return_type: test_return_type("fn main() -> Int:"),
+            intrinsic_impl: None,
+            impl_target_type: None,
+            impl_trait_path: None,
+            availability: Vec::new(),
+            foreword_rows: Vec::new(),
+            cleanup_footers: Vec::new(),
+            statements: vec![
+                ExecStmt::Bind {
+                    default_modifier: Some(ExecHeadedModifier {
+                        kind: "return".to_string(),
+                        payload: Some(ExecExpr::Int(0)),
+                    }),
+                    lines: vec![ExecBindLine {
+                        kind: ExecBindLineKind::Require {
+                            expr: ExecExpr::Bool(false),
+                        },
+                        modifier: None,
+                    }],
+                },
+                ExecStmt::ReturnValue {
+                    value: ExecExpr::Int(9),
+                },
+            ],
+        });
+
+        sync_exported_function_surface_rows(&mut package);
+        let package_plan = build_native_package_plan(
+            AotEmitTarget::WindowsExeBundle,
+            &package,
+            &test_emit_context("app.exe"),
+        )
+        .expect("native package plan should build");
+        let lowering_plan =
+            build_native_lowering_plan(&package_plan).expect("native lowering should build");
+
+        assert_eq!(
+            lowering_plan.launch,
+            NativeLaunchLowering::Executable {
+                main_routine_key: "core#fn-bind".to_string(),
+                lowering: NativeRoutineLowering::Direct {
+                    routine_key: "core#fn-bind".to_string(),
+                },
+            }
+        );
+        let main = &lowering_plan.direct_routines[0];
+        let NativeDirectStmt::If { else_body, .. } = &main.body.statements[0] else {
+            panic!("expected lowered bind guard");
+        };
+        assert_eq!(
+            else_body,
+            &vec![NativeDirectStmt::Return {
+                value: NativeDirectExpr::Int(0),
+            }]
+        );
+        assert_eq!(main.body.return_expr, NativeDirectExpr::Int(9));
+    }
+
+    #[test]
+    fn lowering_keeps_bind_require_loop_exit_regions_direct() {
+        let mut package = base_package();
+        package.entrypoints.push(IrEntrypoint {
+            package_id: test_package_id_for_module("core"),
+            module_id: "core".to_string(),
+            symbol_name: "main".to_string(),
+            symbol_kind: "fn".to_string(),
+            is_async: false,
+            exported: true,
+        });
+        package.routines.push(IrRoutine {
+            package_id: test_package_id_for_module("core"),
+            module_id: "core".to_string(),
+            routine_key: "core#fn-bind-loop".to_string(),
+            symbol_name: "main".to_string(),
+            symbol_kind: "fn".to_string(),
+            exported: true,
+            is_async: false,
+            type_params: Vec::new(),
+            behavior_attrs: BTreeMap::new(),
+            params: Vec::new(),
+            return_type: test_return_type("fn main() -> Int:"),
+            intrinsic_impl: None,
+            impl_target_type: None,
+            impl_trait_path: None,
+            availability: Vec::new(),
+            foreword_rows: Vec::new(),
+            cleanup_footers: Vec::new(),
+            statements: vec![
+                ExecStmt::Let {
+                    binding_id: 0,
+                    mutable: true,
+                    name: "i".to_string(),
+                    value: ExecExpr::Int(0),
+                },
+                ExecStmt::Let {
+                    binding_id: 1,
+                    mutable: true,
+                    name: "sum".to_string(),
+                    value: ExecExpr::Int(0),
+                },
+                ExecStmt::While {
+                    condition: ExecExpr::Binary {
+                        left: Box::new(ExecExpr::Path(vec!["i".to_string()])),
+                        op: arcana_ir::ExecBinaryOp::Lt,
+                        right: Box::new(ExecExpr::Int(5)),
+                    },
+                    body: vec![
+                        ExecStmt::Assign {
+                            target: ExecAssignTarget::Name("i".to_string()),
+                            op: ExecAssignOp::AddAssign,
+                            value: ExecExpr::Int(1),
+                        },
+                        ExecStmt::Bind {
+                            default_modifier: Some(ExecHeadedModifier {
+                                kind: "continue".to_string(),
+                                payload: None,
+                            }),
+                            lines: vec![ExecBindLine {
+                                kind: ExecBindLineKind::Require {
+                                    expr: ExecExpr::Binary {
+                                        left: Box::new(ExecExpr::Path(vec!["i".to_string()])),
+                                        op: arcana_ir::ExecBinaryOp::NotEq,
+                                        right: Box::new(ExecExpr::Int(3)),
+                                    },
+                                },
+                                modifier: None,
+                            }],
+                        },
+                        ExecStmt::Assign {
+                            target: ExecAssignTarget::Name("sum".to_string()),
+                            op: ExecAssignOp::AddAssign,
+                            value: ExecExpr::Path(vec!["i".to_string()]),
+                        },
+                        ExecStmt::Bind {
+                            default_modifier: Some(ExecHeadedModifier {
+                                kind: "break".to_string(),
+                                payload: None,
+                            }),
+                            lines: vec![ExecBindLine {
+                                kind: ExecBindLineKind::Require {
+                                    expr: ExecExpr::Binary {
+                                        left: Box::new(ExecExpr::Path(vec!["sum".to_string()])),
+                                        op: arcana_ir::ExecBinaryOp::LtEq,
+                                        right: Box::new(ExecExpr::Int(6)),
+                                    },
+                                },
+                                modifier: None,
+                            }],
+                        },
+                    ],
+                    cleanup_footers: Vec::new(),
+                    availability: Vec::new(),
+                },
+                ExecStmt::ReturnValue {
+                    value: ExecExpr::Path(vec!["sum".to_string()]),
+                },
+            ],
+        });
+
+        sync_exported_function_surface_rows(&mut package);
+        let package_plan = build_native_package_plan(
+            AotEmitTarget::WindowsExeBundle,
+            &package,
+            &test_emit_context("app.exe"),
+        )
+        .expect("native package plan should build");
+        let lowering_plan =
+            build_native_lowering_plan(&package_plan).expect("native lowering should build");
+
+        assert_eq!(
+            lowering_plan.launch,
+            NativeLaunchLowering::Executable {
+                main_routine_key: "core#fn-bind-loop".to_string(),
+                lowering: NativeRoutineLowering::Direct {
+                    routine_key: "core#fn-bind-loop".to_string(),
+                },
+            }
+        );
+        let main = &lowering_plan.direct_routines[0];
+        let NativeDirectStmt::While { body, .. } = &main.body.statements[2] else {
+            panic!("expected lowered while body");
+        };
+        let NativeDirectStmt::If { else_body, .. } = &body[1] else {
+            panic!("expected lowered bind-continue guard");
+        };
+        assert_eq!(else_body, &vec![NativeDirectStmt::Continue]);
+        let NativeDirectStmt::If { else_body, .. } = &body[3] else {
+            panic!("expected lowered bind-break guard");
+        };
+        assert_eq!(else_body, &vec![NativeDirectStmt::Break]);
+        assert_eq!(
+            main.body.return_expr,
+            NativeDirectExpr::Binding("sum".to_string())
+        );
+    }
+
+    #[test]
+    fn lowering_ignores_memory_specs_in_direct_subset() {
+        let mut package = base_package();
+        package.entrypoints.push(IrEntrypoint {
+            package_id: test_package_id_for_module("core"),
+            module_id: "core".to_string(),
+            symbol_name: "main".to_string(),
+            symbol_kind: "fn".to_string(),
+            is_async: false,
+            exported: true,
+        });
+        package.routines.push(IrRoutine {
+            package_id: test_package_id_for_module("core"),
+            module_id: "core".to_string(),
+            routine_key: "core#fn-memory".to_string(),
+            symbol_name: "main".to_string(),
+            symbol_kind: "fn".to_string(),
+            exported: true,
+            is_async: false,
+            type_params: Vec::new(),
+            behavior_attrs: BTreeMap::new(),
+            params: Vec::new(),
+            return_type: test_return_type("fn main() -> Int:"),
+            intrinsic_impl: None,
+            impl_target_type: None,
+            impl_trait_path: None,
+            availability: Vec::new(),
+            foreword_rows: Vec::new(),
+            cleanup_footers: Vec::new(),
+            statements: vec![
+                ExecStmt::MemorySpec(ExecMemorySpecDecl {
+                    family: "arena".to_string(),
+                    name: "cache".to_string(),
+                    default_modifier: Some(ExecHeadedModifier {
+                        kind: "alloc".to_string(),
+                        payload: None,
+                    }),
+                    details: Vec::new(),
+                }),
+                ExecStmt::ReturnValue {
+                    value: ExecExpr::Int(9),
+                },
+            ],
+        });
+
+        sync_exported_function_surface_rows(&mut package);
+        let package_plan = build_native_package_plan(
+            AotEmitTarget::WindowsExeBundle,
+            &package,
+            &test_emit_context("app.exe"),
+        )
+        .expect("native package plan should build");
+        let lowering_plan =
+            build_native_lowering_plan(&package_plan).expect("native lowering should build");
+
+        assert_eq!(
+            lowering_plan.launch,
+            NativeLaunchLowering::Executable {
+                main_routine_key: "core#fn-memory".to_string(),
+                lowering: NativeRoutineLowering::Direct {
+                    routine_key: "core#fn-memory".to_string(),
+                },
+            }
+        );
+        assert!(lowering_plan.direct_routines[0].body.statements.is_empty());
+        assert_eq!(
+            lowering_plan.direct_routines[0].body.return_expr,
+            NativeDirectExpr::Int(9)
+        );
+    }
+
+    #[test]
+    fn lowering_marks_construct_regions_as_runtime_dispatch() {
+        let mut package = base_package();
+        package.entrypoints.push(IrEntrypoint {
+            package_id: test_package_id_for_module("core"),
+            module_id: "core".to_string(),
+            symbol_name: "main".to_string(),
+            symbol_kind: "fn".to_string(),
+            is_async: false,
+            exported: true,
+        });
+        package.routines.push(IrRoutine {
+            package_id: test_package_id_for_module("core"),
+            module_id: "core".to_string(),
+            routine_key: "core#fn-construct".to_string(),
+            symbol_name: "main".to_string(),
+            symbol_kind: "fn".to_string(),
+            exported: true,
+            is_async: false,
+            type_params: Vec::new(),
+            behavior_attrs: BTreeMap::new(),
+            params: Vec::new(),
+            return_type: test_return_type("fn main() -> Int:"),
+            intrinsic_impl: None,
+            impl_target_type: None,
+            impl_trait_path: None,
+            availability: Vec::new(),
+            foreword_rows: Vec::new(),
+            cleanup_footers: Vec::new(),
+            statements: vec![
+                ExecStmt::Let {
+                    binding_id: 0,
+                    mutable: false,
+                    name: "built".to_string(),
+                    value: ExecExpr::ConstructRegion(Box::new(ExecConstructRegion {
+                        completion: "yield".to_string(),
+                        target: Box::new(ExecExpr::Path(vec![
+                            "core".to_string(),
+                            "Widget".to_string(),
+                        ])),
+                        destination: None,
+                        default_modifier: Some(ExecHeadedModifier {
+                            kind: "return".to_string(),
+                            payload: Some(ExecExpr::Int(0)),
+                        }),
+                        lines: vec![ExecConstructLine {
+                            name: "value".to_string(),
+                            value: ExecExpr::Int(1),
+                            mode: ExecConstructContributionMode::Direct,
+                            modifier: None,
+                        }],
+                    })),
+                },
+                ExecStmt::ReturnValue {
+                    value: ExecExpr::Int(9),
+                },
+            ],
+        });
+
+        sync_exported_function_surface_rows(&mut package);
+        let package_plan = build_native_package_plan(
+            AotEmitTarget::WindowsExeBundle,
+            &package,
+            &test_emit_context("app.exe"),
+        )
+        .expect("native package plan should build");
+        let lowering_plan =
+            build_native_lowering_plan(&package_plan).expect("native lowering should build");
+
+        assert_eq!(
+            lowering_plan.launch,
+            NativeLaunchLowering::Executable {
+                main_routine_key: "core#fn-construct".to_string(),
+                lowering: NativeRoutineLowering::RuntimeDispatch,
+            }
+        );
+        assert!(lowering_plan.direct_routines.is_empty());
+    }
+
+    #[test]
+    fn lowering_marks_construct_deliver_regions_as_runtime_dispatch() {
+        let mut package = base_package();
+        package.entrypoints.push(IrEntrypoint {
+            package_id: test_package_id_for_module("core"),
+            module_id: "core".to_string(),
+            symbol_name: "main".to_string(),
+            symbol_kind: "fn".to_string(),
+            is_async: false,
+            exported: true,
+        });
+        package.routines.push(IrRoutine {
+            package_id: test_package_id_for_module("core"),
+            module_id: "core".to_string(),
+            routine_key: "core#fn-construct-deliver".to_string(),
+            symbol_name: "main".to_string(),
+            symbol_kind: "fn".to_string(),
+            exported: true,
+            is_async: false,
+            type_params: Vec::new(),
+            behavior_attrs: BTreeMap::new(),
+            params: Vec::new(),
+            return_type: test_return_type("fn main() -> Int:"),
+            intrinsic_impl: None,
+            impl_target_type: None,
+            impl_trait_path: None,
+            availability: Vec::new(),
+            foreword_rows: Vec::new(),
+            cleanup_footers: Vec::new(),
+            statements: vec![
+                ExecStmt::Construct(ExecConstructRegion {
+                    completion: "deliver".to_string(),
+                    target: Box::new(ExecExpr::Path(vec![
+                        "core".to_string(),
+                        "Widget".to_string(),
+                    ])),
+                    destination: Some(ExecConstructDestination::Deliver {
+                        name: "built".to_string(),
+                    }),
+                    default_modifier: Some(ExecHeadedModifier {
+                        kind: "return".to_string(),
+                        payload: Some(ExecExpr::Int(0)),
+                    }),
+                    lines: vec![ExecConstructLine {
+                        name: "value".to_string(),
+                        value: ExecExpr::Int(1),
+                        mode: ExecConstructContributionMode::Direct,
+                        modifier: None,
+                    }],
+                }),
+                ExecStmt::ReturnValue {
+                    value: ExecExpr::Int(9),
+                },
+            ],
+        });
+
+        sync_exported_function_surface_rows(&mut package);
+        let package_plan = build_native_package_plan(
+            AotEmitTarget::WindowsExeBundle,
+            &package,
+            &test_emit_context("app.exe"),
+        )
+        .expect("native package plan should build");
+        let lowering_plan =
+            build_native_lowering_plan(&package_plan).expect("native lowering should build");
+
+        assert_eq!(
+            lowering_plan.launch,
+            NativeLaunchLowering::Executable {
+                main_routine_key: "core#fn-construct-deliver".to_string(),
+                lowering: NativeRoutineLowering::RuntimeDispatch,
+            }
+        );
+        assert!(lowering_plan.direct_routines.is_empty());
+    }
+
+    #[test]
+    fn lowering_marks_construct_place_regions_as_runtime_dispatch() {
+        let mut package = base_package();
+        package.entrypoints.push(IrEntrypoint {
+            package_id: test_package_id_for_module("core"),
+            module_id: "core".to_string(),
+            symbol_name: "main".to_string(),
+            symbol_kind: "fn".to_string(),
+            is_async: false,
+            exported: true,
+        });
+        package.routines.push(IrRoutine {
+            package_id: test_package_id_for_module("core"),
+            module_id: "core".to_string(),
+            routine_key: "core#fn-construct-place".to_string(),
+            symbol_name: "main".to_string(),
+            symbol_kind: "fn".to_string(),
+            exported: true,
+            is_async: false,
+            type_params: Vec::new(),
+            behavior_attrs: BTreeMap::new(),
+            params: Vec::new(),
+            return_type: test_return_type("fn main() -> Int:"),
+            intrinsic_impl: None,
+            impl_target_type: None,
+            impl_trait_path: None,
+            availability: Vec::new(),
+            foreword_rows: Vec::new(),
+            cleanup_footers: Vec::new(),
+            statements: vec![
+                ExecStmt::Let {
+                    binding_id: 0,
+                    mutable: true,
+                    name: "built".to_string(),
+                    value: ExecExpr::Int(1),
+                },
+                ExecStmt::Construct(ExecConstructRegion {
+                    completion: "place".to_string(),
+                    target: Box::new(ExecExpr::Path(vec![
+                        "core".to_string(),
+                        "Widget".to_string(),
+                    ])),
+                    destination: Some(ExecConstructDestination::Place {
+                        target: ExecAssignTarget::Name("built".to_string()),
+                    }),
+                    default_modifier: Some(ExecHeadedModifier {
+                        kind: "return".to_string(),
+                        payload: Some(ExecExpr::Int(0)),
+                    }),
+                    lines: vec![ExecConstructLine {
+                        name: "value".to_string(),
+                        value: ExecExpr::Int(1),
+                        mode: ExecConstructContributionMode::Direct,
+                        modifier: None,
+                    }],
+                }),
+                ExecStmt::ReturnValue {
+                    value: ExecExpr::Int(9),
+                },
+            ],
+        });
+
+        sync_exported_function_surface_rows(&mut package);
+        let package_plan = build_native_package_plan(
+            AotEmitTarget::WindowsExeBundle,
+            &package,
+            &test_emit_context("app.exe"),
+        )
+        .expect("native package plan should build");
+        let lowering_plan =
+            build_native_lowering_plan(&package_plan).expect("native lowering should build");
+
+        assert_eq!(
+            lowering_plan.launch,
+            NativeLaunchLowering::Executable {
+                main_routine_key: "core#fn-construct-place".to_string(),
+                lowering: NativeRoutineLowering::RuntimeDispatch,
+            }
+        );
+        assert!(lowering_plan.direct_routines.is_empty());
+    }
+
+    #[test]
+    fn lowering_marks_named_owner_exit_recycle_regions_as_runtime_dispatch() {
+        let mut package = base_package();
+        package.entrypoints.push(IrEntrypoint {
+            package_id: test_package_id_for_module("core"),
+            module_id: "core".to_string(),
+            symbol_name: "main".to_string(),
+            symbol_kind: "fn".to_string(),
+            is_async: false,
+            exported: true,
+        });
+        package.routines.push(IrRoutine {
+            package_id: test_package_id_for_module("core"),
+            module_id: "core".to_string(),
+            routine_key: "core#fn-recycle-owner-exit".to_string(),
+            symbol_name: "main".to_string(),
+            symbol_kind: "fn".to_string(),
+            exported: true,
+            is_async: false,
+            type_params: Vec::new(),
+            behavior_attrs: BTreeMap::new(),
+            params: Vec::new(),
+            return_type: test_return_type("fn main() -> Int:"),
+            intrinsic_impl: None,
+            impl_target_type: None,
+            impl_trait_path: None,
+            availability: Vec::new(),
+            foreword_rows: Vec::new(),
+            cleanup_footers: Vec::new(),
+            statements: vec![
+                ExecStmt::Recycle {
+                    default_modifier: Some(ExecHeadedModifier {
+                        kind: "done".to_string(),
+                        payload: None,
+                    }),
+                    lines: vec![ExecRecycleLine {
+                        kind: ExecRecycleLineKind::Expr {
+                            gate: ExecExpr::Bool(false),
+                        },
+                        modifier: None,
+                    }],
+                },
+                ExecStmt::ReturnValue {
+                    value: ExecExpr::Int(9),
+                },
+            ],
+        });
+
+        sync_exported_function_surface_rows(&mut package);
+        let package_plan = build_native_package_plan(
+            AotEmitTarget::WindowsExeBundle,
+            &package,
+            &test_emit_context("app.exe"),
+        )
+        .expect("native package plan should build");
+        let lowering_plan =
+            build_native_lowering_plan(&package_plan).expect("native lowering should build");
+
+        assert_eq!(
+            lowering_plan.launch,
+            NativeLaunchLowering::Executable {
+                main_routine_key: "core#fn-recycle-owner-exit".to_string(),
+                lowering: NativeRoutineLowering::RuntimeDispatch,
+            }
+        );
+        assert!(lowering_plan.direct_routines.is_empty());
+    }
+
+    #[test]
+    fn lowering_marks_payload_bind_regions_as_runtime_dispatch() {
+        let mut package = base_package();
+        package.entrypoints.push(IrEntrypoint {
+            package_id: test_package_id_for_module("core"),
+            module_id: "core".to_string(),
+            symbol_name: "main".to_string(),
+            symbol_kind: "fn".to_string(),
+            is_async: false,
+            exported: true,
+        });
+        package.routines.push(IrRoutine {
+            package_id: test_package_id_for_module("core"),
+            module_id: "core".to_string(),
+            routine_key: "core#fn-bind-payload".to_string(),
+            symbol_name: "main".to_string(),
+            symbol_kind: "fn".to_string(),
+            exported: true,
+            is_async: false,
+            type_params: Vec::new(),
+            behavior_attrs: BTreeMap::new(),
+            params: Vec::new(),
+            return_type: test_return_type("fn main() -> Int:"),
+            intrinsic_impl: None,
+            impl_target_type: None,
+            impl_trait_path: None,
+            availability: Vec::new(),
+            foreword_rows: Vec::new(),
+            cleanup_footers: Vec::new(),
+            statements: vec![
+                ExecStmt::Bind {
+                    default_modifier: Some(ExecHeadedModifier {
+                        kind: "return".to_string(),
+                        payload: Some(ExecExpr::Int(0)),
+                    }),
+                    lines: vec![ExecBindLine {
+                        kind: ExecBindLineKind::Let {
+                            mutable: false,
+                            name: "value".to_string(),
+                            gate: ExecExpr::Bool(true),
+                        },
+                        modifier: None,
+                    }],
+                },
+                ExecStmt::ReturnValue {
+                    value: ExecExpr::Int(9),
+                },
+            ],
+        });
+
+        sync_exported_function_surface_rows(&mut package);
+        let package_plan = build_native_package_plan(
+            AotEmitTarget::WindowsExeBundle,
+            &package,
+            &test_emit_context("app.exe"),
+        )
+        .expect("native package plan should build");
+        let lowering_plan =
+            build_native_lowering_plan(&package_plan).expect("native lowering should build");
+
+        assert_eq!(
+            lowering_plan.launch,
+            NativeLaunchLowering::Executable {
+                main_routine_key: "core#fn-bind-payload".to_string(),
+                lowering: NativeRoutineLowering::RuntimeDispatch,
+            }
+        );
+        assert!(lowering_plan.direct_routines.is_empty());
+    }
+
+    #[test]
+    fn lowering_marks_payload_recycle_regions_as_runtime_dispatch() {
+        let mut package = base_package();
+        package.entrypoints.push(IrEntrypoint {
+            package_id: test_package_id_for_module("core"),
+            module_id: "core".to_string(),
+            symbol_name: "main".to_string(),
+            symbol_kind: "fn".to_string(),
+            is_async: false,
+            exported: true,
+        });
+        package.routines.push(IrRoutine {
+            package_id: test_package_id_for_module("core"),
+            module_id: "core".to_string(),
+            routine_key: "core#fn-recycle-payload".to_string(),
+            symbol_name: "main".to_string(),
+            symbol_kind: "fn".to_string(),
+            exported: true,
+            is_async: false,
+            type_params: Vec::new(),
+            behavior_attrs: BTreeMap::new(),
+            params: Vec::new(),
+            return_type: test_return_type("fn main() -> Int:"),
+            intrinsic_impl: None,
+            impl_target_type: None,
+            impl_trait_path: None,
+            availability: Vec::new(),
+            foreword_rows: Vec::new(),
+            cleanup_footers: Vec::new(),
+            statements: vec![
+                ExecStmt::Recycle {
+                    default_modifier: Some(ExecHeadedModifier {
+                        kind: "return".to_string(),
+                        payload: Some(ExecExpr::Int(0)),
+                    }),
+                    lines: vec![ExecRecycleLine {
+                        kind: ExecRecycleLineKind::Let {
+                            mutable: false,
+                            name: "value".to_string(),
+                            gate: ExecExpr::Bool(true),
+                        },
+                        modifier: None,
+                    }],
+                },
+                ExecStmt::ReturnValue {
+                    value: ExecExpr::Int(9),
+                },
+            ],
+        });
+
+        sync_exported_function_surface_rows(&mut package);
+        let package_plan = build_native_package_plan(
+            AotEmitTarget::WindowsExeBundle,
+            &package,
+            &test_emit_context("app.exe"),
+        )
+        .expect("native package plan should build");
+        let lowering_plan =
+            build_native_lowering_plan(&package_plan).expect("native lowering should build");
+
+        assert_eq!(
+            lowering_plan.launch,
+            NativeLaunchLowering::Executable {
+                main_routine_key: "core#fn-recycle-payload".to_string(),
+                lowering: NativeRoutineLowering::RuntimeDispatch,
+            }
+        );
+        assert!(lowering_plan.direct_routines.is_empty());
     }
 
     #[test]

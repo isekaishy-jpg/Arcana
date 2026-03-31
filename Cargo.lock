@@ -48,6 +48,7 @@ version = "0.1.0"
 dependencies = [
  "arcana-hir",
  "arcana-ir",
+ "arcana-language-law",
  "arcana-package",
  "arcana-syntax",
  "toml",
@@ -57,6 +58,7 @@ dependencies = [
 name = "arcana-hir"
 version = "0.1.0"
 dependencies = [
+ "arcana-language-law",
  "arcana-syntax",
 ]
 
@@ -65,8 +67,14 @@ name = "arcana-ir"
 version = "0.1.0"
 dependencies = [
  "arcana-hir",
+ "arcana-language-law",
  "serde",
+ "serde_json",
 ]
+
+[[package]]
+name = "arcana-language-law"
+version = "0.1.0"
 
 [[package]]
 name = "arcana-package"
@@ -92,6 +100,7 @@ dependencies = [
  "arcana-cabi",
  "arcana-frontend",
  "arcana-ir",
+ "arcana-language-law",
  "arcana-package",
  "font8x8",
  "pathdiff",
@@ -106,6 +115,9 @@ dependencies = [
 [[package]]
 name = "arcana-syntax"
 version = "0.1.0"
+dependencies = [
+ "arcana-language-law",
+]
 
 [[package]]
 name = "block-buffer"

@@ -214,6 +214,90 @@ fn collect_stmt_callees(
             collect_assign_target_callees(package, current_module_id, target, out);
             collect_expr_callees(package, current_module_id, value, out);
         }
+        ExecStmt::Recycle {
+            default_modifier,
+            lines,
+        } => {
+            if let Some(modifier) = default_modifier
+                && let Some(payload) = &modifier.payload
+            {
+                collect_expr_callees(package, current_module_id, payload, out);
+            }
+            for line in lines {
+                match &line.kind {
+                    crate::ExecRecycleLineKind::Expr { gate }
+                    | crate::ExecRecycleLineKind::Let { gate, .. }
+                    | crate::ExecRecycleLineKind::Assign { gate, .. } => {
+                        collect_expr_callees(package, current_module_id, gate, out);
+                    }
+                }
+                if let Some(modifier) = &line.modifier
+                    && let Some(payload) = &modifier.payload
+                {
+                    collect_expr_callees(package, current_module_id, payload, out);
+                }
+            }
+        }
+        ExecStmt::Bind {
+            default_modifier,
+            lines,
+        } => {
+            if let Some(modifier) = default_modifier
+                && let Some(payload) = &modifier.payload
+            {
+                collect_expr_callees(package, current_module_id, payload, out);
+            }
+            for line in lines {
+                match &line.kind {
+                    crate::ExecBindLineKind::Let { gate, .. }
+                    | crate::ExecBindLineKind::Assign { gate, .. } => {
+                        collect_expr_callees(package, current_module_id, gate, out);
+                    }
+                    crate::ExecBindLineKind::Require { expr } => {
+                        collect_expr_callees(package, current_module_id, expr, out);
+                    }
+                }
+                if let Some(modifier) = &line.modifier
+                    && let Some(payload) = &modifier.payload
+                {
+                    collect_expr_callees(package, current_module_id, payload, out);
+                }
+            }
+        }
+        ExecStmt::Construct(region) => {
+            collect_expr_callees(package, current_module_id, &region.target, out);
+            if let Some(modifier) = &region.default_modifier
+                && let Some(payload) = &modifier.payload
+            {
+                collect_expr_callees(package, current_module_id, payload, out);
+            }
+            if let Some(crate::ExecConstructDestination::Place { target }) = &region.destination {
+                collect_assign_target_callees(package, current_module_id, target, out);
+            }
+            for line in &region.lines {
+                collect_expr_callees(package, current_module_id, &line.value, out);
+                if let Some(modifier) = &line.modifier
+                    && let Some(payload) = &modifier.payload
+                {
+                    collect_expr_callees(package, current_module_id, payload, out);
+                }
+            }
+        }
+        ExecStmt::MemorySpec(spec) => {
+            if let Some(modifier) = &spec.default_modifier
+                && let Some(payload) = &modifier.payload
+            {
+                collect_expr_callees(package, current_module_id, payload, out);
+            }
+            for detail in &spec.details {
+                collect_expr_callees(package, current_module_id, &detail.value, out);
+                if let Some(modifier) = &detail.modifier
+                    && let Some(payload) = &modifier.payload
+                {
+                    collect_expr_callees(package, current_module_id, payload, out);
+                }
+            }
+        }
     }
 }
 
@@ -256,6 +340,25 @@ fn collect_expr_callees(
             collect_expr_callees(package, current_module_id, subject, out);
             for arm in arms {
                 collect_expr_callees(package, current_module_id, &arm.value, out);
+            }
+        }
+        ExecExpr::ConstructRegion(region) => {
+            collect_expr_callees(package, current_module_id, &region.target, out);
+            if let Some(modifier) = &region.default_modifier
+                && let Some(payload) = &modifier.payload
+            {
+                collect_expr_callees(package, current_module_id, payload, out);
+            }
+            if let Some(crate::ExecConstructDestination::Place { target }) = &region.destination {
+                collect_assign_target_callees(package, current_module_id, target, out);
+            }
+            for line in &region.lines {
+                collect_expr_callees(package, current_module_id, &line.value, out);
+                if let Some(modifier) = &line.modifier
+                    && let Some(payload) = &modifier.payload
+                {
+                    collect_expr_callees(package, current_module_id, payload, out);
+                }
             }
         }
         ExecExpr::Chain { steps, .. } => {

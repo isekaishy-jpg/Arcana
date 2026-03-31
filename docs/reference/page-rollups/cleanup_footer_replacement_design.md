@@ -30,6 +30,7 @@ Key landed decisions:
 - bare `-cleanup` means whole owning scope cleanup, not single-target cleanup
 - `-cleanup` is valid only in attached post-owner footer position
 - this patch does not define a generic `-name` footer family
+- headed regions are separate inner structural blocks, not attached footer forms
 - future headed-region or other dash-form work may introduce other `-name` uses in other contexts without rewriting cleanup footer semantics
 
 ## Compatibility Constraint For Future Headed Regions

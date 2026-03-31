@@ -10,6 +10,7 @@ Completed foundation work:
 - language freeze policy and CI freeze guard
 - AnyBox policy guard over code-bearing paths
 - explicit spec-status taxonomy plus pre-selfhost contract docs for cleanup footers, tuples, callable/context direction, and AnyBox ban
+- headed regions (`recycle`, `construct`, `bind`, `Memory`) are now approved contract at the docs layer, with implementation and selfhost-matrix follow-through intentionally deferred until code lands
 - clarified frozen-doc interpretation so domain scopes beat descriptive implementation limits, tuple docs stay forward-looking, and chain-style semantics are explicit rather than inherited from Meadow-era behavior
 - seed import of frozen contract docs, conformance matrix, `std`, and historical MeadowLang corpus, with the broad reference tree now archived outside the repo
 - explicit recognition that rewrite-owned `std` is first-party surface and archived historical grimoires are not rewrite architecture authority

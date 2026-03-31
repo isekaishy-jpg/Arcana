@@ -22,6 +22,7 @@ Arcana v0 currently includes:
 - Core operators: unary `-` / `not` / `~`, `%`, `!=`, `<=`, `>=`, `and`, `or`, bitwise `& | ^ << shr`, `Str + Str`, compound assignments
 - Collections v0.9: `List[T]`, list literals, slicing with ranges, indexed assignment, `RangeInt`, pair tuples `(A, B)`
 - Memory phrases v0.35: `arena|frame|pool: instance :> ... <: qualifier` with typed allocator storage (`Arena[T]`, `FrameArena[T]`, `PoolArena[T]` + corresponding ID handles)
+- Headed regions v0.42: `recycle`, `construct`, `bind`, and `Memory` as structural inner blocks with head-defined rides, default modifiers, and head-specific completion/target slots
 - Ownership/lifetimes v0.32 surface: explicit refs (`&'a T`, `&'a mut T`), borrow/deref expressions (`&x`, `&mut x`, `*x`), a carried lexical borrow contract, and `#boundary[target="lua|sql"]` signature contracts
 - Trait v2: associated types, default trait methods, supertrait bounds, projection equality in `where`
 
@@ -175,6 +176,7 @@ Warnings are non-fatal and printed to stderr.
 - Bare `-cleanup` covers cleanup-capable owning bindings activated in that owner scope.
 - Local `defer` still runs before the owner's cleanup footer work.
 - Old `[subject, handler]#cleanup` syntax is no longer part of the accepted language.
+- Headed regions are separate inner structural blocks, not attached footer forms.
 
 ## Generic Phrase Family (v0.24)
 
@@ -199,6 +201,27 @@ Evaluation order for attached header blocks:
 2. Execute header phrase.
 3. Execute first attached chain from header result.
 4. Pipe through remaining attached chains in source order.
+
+## Headed Regions (v0.42)
+
+Arcana now includes headed regions as a separate structural family from phrases and cleanup footers.
+
+- A headed region is a structural inner block whose head defines the ride over top-level participating lines.
+- Headed regions are not attached forms.
+- The approved heads are:
+  - `recycle`
+  - `construct`
+  - `bind`
+  - `Memory`
+- Each headed region declares one default modifier.
+- Some heads also declare a required completion/target slot.
+- Participating lines must fit the selected head’s ride; headed regions are not freeform imperative blocks.
+
+Implementation note:
+
+- Headed regions are approved source-language contract now.
+- Parser/frontend/runtime support is still pending.
+- `conformance/selfhost_language_matrix.toml` intentionally remains unchanged until implementation lands.
 
 ## Qualified Phrases (v0.22)
 
@@ -409,6 +432,17 @@ Collections are now de-builtinized through an internal intrinsic bridge.
 
 Arcana supports explicit memory-context allocation phrases with three allocator families.
 
+Memory source surface now has two distinct roles:
+
+- `Memory` headed regions define reusable memory specs
+- memory phrases are the consumer surface for those specs
+
+The current approved `Memory` headed-region family set remains:
+
+- `arena`
+- `frame`
+- `pool`
+
 Memory phrase syntax:
 
 - `memory_type: instance :> args? <: qualifier`
@@ -475,6 +509,22 @@ Runtime semantics:
   - `arena id is invalid or stale`
   - `frame id is invalid or stale`
   - `pool id is invalid or stale`
+
+`Memory` headed-region shape:
+
+```arcana
+Memory <memory_type>:<name> -<memory_modifier>
+    <memory_detail_line>
+    <memory_detail_line> -<override_modifier>
+```
+
+Core `Memory` meaning:
+
+- `<memory_type>:<name>` establishes a reusable memory spec in the memory-spec namespace
+- `Memory` defines budgeting, lifetime shape, and pressure behavior
+- `Memory` does not perform allocation itself
+- memory phrases and other approved memory-aware forms are the consumers of those specs
+- `Memory` specs may be defined in modules, including `std`
 
 Notes:
 

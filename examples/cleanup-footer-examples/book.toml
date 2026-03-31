@@ -1,0 +1,5 @@
+name = "cleanup_footer_examples_workspace"
+kind = "lib"
+
+[workspace]
+members = ["app"]

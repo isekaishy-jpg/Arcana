@@ -19,12 +19,17 @@ use arcana_hir::{
     HirLocalTypeLookup, HirMatchPattern, HirModule, HirModuleSummary, HirPhraseArg,
     HirResolvedModule, HirResolvedTarget, HirResolvedWorkspace, HirStatement, HirStatementKind,
     HirSymbol, HirSymbolBody, HirSymbolKind, HirType, HirTypeKind, HirUnaryOp, HirWorkspacePackage,
-    HirWorkspaceSummary, collect_hir_type_refs, current_workspace_package_for_module,
-    infer_receiver_expr_type, lookup_method_candidates_for_hir_type, lower_module_text,
+    HirWorkspaceSummary, canonicalize_hir_type_in_module, collect_hir_type_refs,
+    current_workspace_package_for_module, infer_receiver_expr_type,
+    lookup_method_candidates_for_hir_type, lower_module_text,
     match_name_resolves_to_zero_payload_variant, render_symbol_signature, resolve_workspace,
     visible_package_root_for_module,
 };
 use arcana_ir::{is_runtime_main_entry_symbol, validate_runtime_main_entry_symbol};
+use arcana_language_law::{
+    HeadedModifierKeyword, MemoryDetailValueKind, MemoryFamily, memory_detail_descriptor,
+    memory_family_descriptor, memory_modifier_allowed,
+};
 use arcana_package::{
     WorkspaceFingerprints, WorkspaceGraph, load_workspace_hir as load_package_workspace_hir,
     load_workspace_hir_from_graph as load_package_workspace_hir_from_graph,
@@ -217,9 +222,13 @@ struct ValueScope {
     types: BTreeMap<String, HirType>,
     binding_ids: BTreeMap<String, u64>,
     next_binding_id: Rc<Cell<u64>>,
+    memory_specs: BTreeMap<String, VisibleMemorySpecBinding>,
     available_owners: BTreeMap<String, AvailableOwnerBinding>,
+    active_owners: BTreeMap<String, AvailableOwnerBinding>,
     attached_object_names: BTreeSet<String>,
     owner_member_types: BTreeMap<String, BTreeMap<String, HirType>>,
+    loop_depth: usize,
+    headed_region_depth: usize,
 }
 
 impl Default for ValueScope {
@@ -232,9 +241,13 @@ impl Default for ValueScope {
             types: BTreeMap::new(),
             binding_ids: BTreeMap::new(),
             next_binding_id: Rc::new(Cell::new(1)),
+            memory_specs: BTreeMap::new(),
             available_owners: BTreeMap::new(),
+            active_owners: BTreeMap::new(),
             attached_object_names: BTreeSet::new(),
             owner_member_types: BTreeMap::new(),
+            loop_depth: 0,
+            headed_region_depth: 0,
         }
     }
 }
@@ -250,7 +263,14 @@ struct AvailableOwnerBinding {
     local_name: String,
     owner_path: Vec<String>,
     objects: Vec<AvailableOwnerObjectBinding>,
+    exit_names: BTreeSet<String>,
     activation_context_type: Option<HirType>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct VisibleMemorySpecBinding {
+    family: MemoryFamily,
+    span: Span,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -340,6 +360,33 @@ impl ValueScope {
             .insert(owner.local_name.clone(), owner);
     }
 
+    fn insert_memory_spec(&mut self, name: &str, family: MemoryFamily, span: Span) {
+        self.memory_specs
+            .insert(name.to_string(), VisibleMemorySpecBinding { family, span });
+    }
+
+    fn memory_spec(&self, name: &str) -> Option<&VisibleMemorySpecBinding> {
+        self.memory_specs.get(name)
+    }
+
+    fn active_owner_for_exit(
+        &self,
+        exit_name: &str,
+    ) -> Result<Option<&AvailableOwnerBinding>, String> {
+        let matches = self
+            .active_owners
+            .values()
+            .filter(|owner| owner.exit_names.contains(exit_name))
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [] => Ok(None),
+            [owner] => Ok(Some(*owner)),
+            _ => Err(format!(
+                "named recycle exit `{exit_name}` is ambiguous across active owners"
+            )),
+        }
+    }
+
     fn attach_object_name(&mut self, name: impl Into<String>) {
         self.attached_object_names.insert(name.into());
     }
@@ -371,6 +418,8 @@ impl ValueScope {
             }
         }
         self.insert_typed(&owner.local_name, false, OwnershipClass::Copy, None);
+        self.active_owners
+            .insert(owner.owner_path.join("."), owner.clone());
         self.owner_member_types
             .insert(owner.local_name.clone(), owner_members.clone());
         inserted.push(owner.local_name.clone());
@@ -880,6 +929,33 @@ fn infer_expr_value_type(
         return Some(ty.clone());
     }
     infer_receiver_expr_type(workspace, resolved_module, scope, expr)
+}
+
+fn assign_target_to_expr(target: &HirAssignTarget) -> HirExpr {
+    match target {
+        HirAssignTarget::Name { text } => HirExpr::Path {
+            segments: vec![text.clone()],
+        },
+        HirAssignTarget::MemberAccess { target, member } => HirExpr::MemberAccess {
+            expr: Box::new(assign_target_to_expr(target)),
+            member: member.clone(),
+        },
+        HirAssignTarget::Index { target, index } => HirExpr::Index {
+            expr: Box::new(assign_target_to_expr(target)),
+            index: Box::new(index.clone()),
+        },
+    }
+}
+
+fn infer_assign_target_value_type(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    type_scope: &TypeScope,
+    scope: &ValueScope,
+    target: &HirAssignTarget,
+) -> Option<HirType> {
+    let expr = assign_target_to_expr(target);
+    infer_expr_value_type(workspace, resolved_module, type_scope, scope, &expr)
 }
 
 fn infer_expr_ownership(
@@ -1671,6 +1747,66 @@ fn validate_expr_borrow_flow_inner(
                 );
             }
         }
+        HirExpr::ConstructRegion(region) => {
+            validate_expr_borrow_flow_inner(
+                workspace,
+                resolved_module,
+                type_scope,
+                module_path,
+                scope,
+                &region.target,
+                span,
+                state,
+                false,
+                diagnostics,
+            );
+            if let Some(modifier) = &region.default_modifier
+                && let Some(payload) = &modifier.payload
+            {
+                validate_expr_borrow_flow_inner(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    module_path,
+                    scope,
+                    payload,
+                    span,
+                    state,
+                    false,
+                    diagnostics,
+                );
+            }
+            for line in &region.lines {
+                validate_expr_borrow_flow_inner(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    module_path,
+                    scope,
+                    &line.value,
+                    line.span,
+                    state,
+                    false,
+                    diagnostics,
+                );
+                if let Some(modifier) = &line.modifier
+                    && let Some(payload) = &modifier.payload
+                {
+                    validate_expr_borrow_flow_inner(
+                        workspace,
+                        resolved_module,
+                        type_scope,
+                        module_path,
+                        scope,
+                        payload,
+                        line.span,
+                        state,
+                        false,
+                        diagnostics,
+                    );
+                }
+            }
+        }
         HirExpr::Chain { steps, .. } => {
             for step in steps {
                 validate_expr_borrow_flow_inner(
@@ -2118,6 +2254,22 @@ fn collect_expr_local_borrows(
                 collect_expr_local_borrows(&arm.value, scope, borrows);
             }
         }
+        HirExpr::ConstructRegion(region) => {
+            collect_expr_local_borrows(&region.target, scope, borrows);
+            if let Some(modifier) = &region.default_modifier
+                && let Some(payload) = &modifier.payload
+            {
+                collect_expr_local_borrows(payload, scope, borrows);
+            }
+            for line in &region.lines {
+                collect_expr_local_borrows(&line.value, scope, borrows);
+                if let Some(modifier) = &line.modifier
+                    && let Some(payload) = &modifier.payload
+                {
+                    collect_expr_local_borrows(payload, scope, borrows);
+                }
+            }
+        }
         HirExpr::Chain { steps, .. } => {
             for step in steps {
                 collect_expr_local_borrows(&step.stage, scope, borrows);
@@ -2300,6 +2452,50 @@ fn note_expr_moves(
                 );
             }
         }
+        HirExpr::ConstructRegion(region) => {
+            note_expr_moves(
+                workspace,
+                resolved_module,
+                type_scope,
+                scope,
+                &region.target,
+                state,
+            );
+            if let Some(modifier) = &region.default_modifier
+                && let Some(payload) = &modifier.payload
+            {
+                note_expr_moves(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    scope,
+                    payload,
+                    state,
+                );
+            }
+            for line in &region.lines {
+                note_expr_moves(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    scope,
+                    &line.value,
+                    state,
+                );
+                if let Some(modifier) = &line.modifier
+                    && let Some(payload) = &modifier.payload
+                {
+                    note_expr_moves(
+                        workspace,
+                        resolved_module,
+                        type_scope,
+                        scope,
+                        payload,
+                        state,
+                    );
+                }
+            }
+        }
         HirExpr::Chain { steps, .. } => {
             for step in steps {
                 note_expr_moves(
@@ -2412,6 +2608,22 @@ fn collect_returned_local_borrows(
             collect_returned_local_borrows(subject, scope, roots);
             for arm in arms {
                 collect_returned_local_borrows(&arm.value, scope, roots);
+            }
+        }
+        HirExpr::ConstructRegion(region) => {
+            collect_returned_local_borrows(&region.target, scope, roots);
+            if let Some(modifier) = &region.default_modifier
+                && let Some(payload) = &modifier.payload
+            {
+                collect_returned_local_borrows(payload, scope, roots);
+            }
+            for line in &region.lines {
+                collect_returned_local_borrows(&line.value, scope, roots);
+                if let Some(modifier) = &line.modifier
+                    && let Some(payload) = &modifier.payload
+                {
+                    collect_returned_local_borrows(payload, scope, roots);
+                }
             }
         }
         HirExpr::Chain { steps, .. } => {
@@ -2777,6 +2989,749 @@ fn validate_hir_semantics(
     diagnostics
 }
 
+fn validate_memory_spec_decl_semantics(
+    module_path: &Path,
+    spec: &arcana_hir::HirMemorySpecDecl,
+    module_scope: bool,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let family = memory_family_descriptor(spec.family);
+    if spec.default_modifier.is_none() {
+        diagnostics.push(Diagnostic {
+            path: module_path.to_path_buf(),
+            line: spec.span.line,
+            column: spec.span.column,
+            message: format!(
+                "Memory spec `{}` requires a default modifier in v1",
+                spec.name
+            ),
+        });
+    }
+    if module_scope && !family.module_specs {
+        diagnostics.push(Diagnostic {
+            path: module_path.to_path_buf(),
+            line: spec.span.line,
+            column: spec.span.column,
+            message: format!(
+                "memory family `{}` is not allowed at module scope",
+                spec.family.as_str()
+            ),
+        });
+    }
+    if !module_scope && !family.block_specs {
+        diagnostics.push(Diagnostic {
+            path: module_path.to_path_buf(),
+            line: spec.span.line,
+            column: spec.span.column,
+            message: format!(
+                "memory family `{}` is not allowed in block scope",
+                spec.family.as_str()
+            ),
+        });
+    }
+    if let Some(modifier) = &spec.default_modifier {
+        match &modifier.kind {
+            arcana_hir::HirHeadedModifierKind::Name(name)
+                if memory_modifier_allowed(spec.family, name) => {}
+            arcana_hir::HirHeadedModifierKind::Name(name) => diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: modifier.span.line,
+                column: modifier.span.column,
+                message: format!(
+                    "memory modifier `-{name}` is not supported for family `{}`; allowed: {}",
+                    spec.family.as_str(),
+                    family.supported_modifiers.join(", ")
+                ),
+            }),
+            arcana_hir::HirHeadedModifierKind::Keyword(keyword) => diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: modifier.span.line,
+                column: modifier.span.column,
+                message: format!(
+                    "memory modifiers use family names, not `-{}` keyword modifiers",
+                    keyword.as_str()
+                ),
+            }),
+        }
+        if modifier.payload.is_some() {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: modifier.span.line,
+                column: modifier.span.column,
+                message: "memory modifiers do not take payload expressions in v1".to_string(),
+            });
+        }
+    }
+    let mut seen = BTreeSet::new();
+    for detail in &spec.details {
+        if let Some(modifier) = &detail.modifier {
+            match &modifier.kind {
+                arcana_hir::HirHeadedModifierKind::Name(name)
+                    if memory_modifier_allowed(spec.family, name) => {}
+                arcana_hir::HirHeadedModifierKind::Name(name) => diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: modifier.span.line,
+                    column: modifier.span.column,
+                    message: format!(
+                        "memory modifier `-{name}` is not supported for family `{}`; allowed: {}",
+                        spec.family.as_str(),
+                        family.supported_modifiers.join(", ")
+                    ),
+                }),
+                arcana_hir::HirHeadedModifierKind::Keyword(keyword) => {
+                    diagnostics.push(Diagnostic {
+                        path: module_path.to_path_buf(),
+                        line: modifier.span.line,
+                        column: modifier.span.column,
+                        message: format!(
+                            "memory modifiers use family names, not `-{}` keyword modifiers",
+                            keyword.as_str()
+                        ),
+                    })
+                }
+            }
+            if modifier.payload.is_some() {
+                diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: modifier.span.line,
+                    column: modifier.span.column,
+                    message: "memory modifiers do not take payload expressions in v1".to_string(),
+                });
+            }
+        }
+        if !seen.insert(detail.key) {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: detail.span.line,
+                column: detail.span.column,
+                message: format!(
+                    "memory detail `{}` appears more than once in spec `{}`",
+                    detail.key.as_str(),
+                    spec.name
+                ),
+            });
+            continue;
+        }
+        let Some(descriptor) = memory_detail_descriptor(spec.family, detail.key) else {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: detail.span.line,
+                column: detail.span.column,
+                message: format!(
+                    "memory detail `{}` is not supported for family `{}`",
+                    detail.key.as_str(),
+                    spec.family.as_str()
+                ),
+            });
+            continue;
+        };
+        if descriptor.value_kind == MemoryDetailValueKind::Atom {
+            let HirExpr::Path { segments } = &detail.value else {
+                diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: detail.span.line,
+                    column: detail.span.column,
+                    message: format!(
+                        "memory detail `{}` requires an identifier atom",
+                        detail.key.as_str()
+                    ),
+                });
+                continue;
+            };
+            let Some(atom) = segments.last() else {
+                continue;
+            };
+            if !descriptor.atoms.iter().any(|allowed| *allowed == atom) {
+                diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: detail.span.line,
+                    column: detail.span.column,
+                    message: format!(
+                        "memory detail `{}` for family `{}` rejects atom `{}`; allowed: {}",
+                        detail.key.as_str(),
+                        spec.family.as_str(),
+                        atom,
+                        descriptor.atoms.join(", ")
+                    ),
+                });
+            }
+        }
+    }
+}
+
+fn validate_recycle_modifier_semantics(
+    module_path: &Path,
+    scope: &ValueScope,
+    modifier: &arcana_hir::HirHeadedModifier,
+    gate_shape: Option<&GateShape>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    match &modifier.kind {
+        arcana_hir::HirHeadedModifierKind::Keyword(HeadedModifierKeyword::Break)
+            if scope.loop_depth == 0 =>
+        {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: modifier.span.line,
+                column: modifier.span.column,
+                message: "`recycle -break` is only valid inside a loop".to_string(),
+            });
+        }
+        arcana_hir::HirHeadedModifierKind::Keyword(HeadedModifierKeyword::Continue)
+            if scope.loop_depth == 0 =>
+        {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: modifier.span.line,
+                column: modifier.span.column,
+                message: "`recycle -continue` is only valid inside a loop".to_string(),
+            });
+        }
+        arcana_hir::HirHeadedModifierKind::Keyword(HeadedModifierKeyword::Return) => {
+            if modifier.payload.is_none() && !matches!(gate_shape, Some(GateShape::Result { .. })) {
+                diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: modifier.span.line,
+                    column: modifier.span.column,
+                    message: "bare `-return` in recycle requires Result failure".to_string(),
+                });
+            }
+        }
+        arcana_hir::HirHeadedModifierKind::Name(name) => match scope.active_owner_for_exit(name) {
+            Ok(Some(_)) => {}
+            Ok(None) => diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: modifier.span.line,
+                column: modifier.span.column,
+                message: format!("named recycle exit `{name}` is not active on this path"),
+            }),
+            Err(message) => diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: modifier.span.line,
+                column: modifier.span.column,
+                message,
+            }),
+        },
+        _ => {}
+    }
+}
+
+fn validate_bind_modifier_semantics(
+    module_path: &Path,
+    scope: &ValueScope,
+    modifier: &arcana_hir::HirHeadedModifier,
+    gate_shape: Option<&GateShape>,
+    line_kind: &arcana_hir::HirBindLineKind,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    match &modifier.kind {
+        arcana_hir::HirHeadedModifierKind::Keyword(HeadedModifierKeyword::Return) => {
+            if modifier.payload.is_none() && !matches!(gate_shape, Some(GateShape::Result { .. })) {
+                diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: modifier.span.line,
+                    column: modifier.span.column,
+                    message: "bare `-return` in bind requires Result failure".to_string(),
+                });
+            }
+        }
+        arcana_hir::HirHeadedModifierKind::Keyword(HeadedModifierKeyword::Default) => {
+            if !matches!(line_kind, arcana_hir::HirBindLineKind::Let { .. }) {
+                diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: modifier.span.line,
+                    column: modifier.span.column,
+                    message: "`bind -default` is only valid on `let name = gate` lines".to_string(),
+                });
+            }
+            if modifier.payload.is_none() {
+                diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: modifier.span.line,
+                    column: modifier.span.column,
+                    message: "`bind -default` requires a fallback payload".to_string(),
+                });
+            }
+        }
+        arcana_hir::HirHeadedModifierKind::Keyword(HeadedModifierKeyword::Preserve) => {
+            if !matches!(line_kind, arcana_hir::HirBindLineKind::Assign { .. }) {
+                diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: modifier.span.line,
+                    column: modifier.span.column,
+                    message: "`bind -preserve` is only valid on `name = gate` lines".to_string(),
+                });
+            }
+        }
+        arcana_hir::HirHeadedModifierKind::Keyword(HeadedModifierKeyword::Replace) => {
+            if !matches!(line_kind, arcana_hir::HirBindLineKind::Assign { .. }) {
+                diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: modifier.span.line,
+                    column: modifier.span.column,
+                    message: "`bind -replace` is only valid on `name = gate` lines".to_string(),
+                });
+            }
+            if modifier.payload.is_none() {
+                diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: modifier.span.line,
+                    column: modifier.span.column,
+                    message: "`bind -replace` requires a fallback payload".to_string(),
+                });
+            }
+        }
+        arcana_hir::HirHeadedModifierKind::Keyword(HeadedModifierKeyword::Break)
+            if !matches!(line_kind, arcana_hir::HirBindLineKind::Require { .. }) =>
+        {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: modifier.span.line,
+                column: modifier.span.column,
+                message: "`bind -break` is only valid on `require <expr>` lines".to_string(),
+            });
+        }
+        arcana_hir::HirHeadedModifierKind::Keyword(HeadedModifierKeyword::Continue)
+            if !matches!(line_kind, arcana_hir::HirBindLineKind::Require { .. }) =>
+        {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: modifier.span.line,
+                column: modifier.span.column,
+                message: "`bind -continue` is only valid on `require <expr>` lines".to_string(),
+            });
+        }
+        arcana_hir::HirHeadedModifierKind::Keyword(HeadedModifierKeyword::Break)
+            if scope.loop_depth == 0 =>
+        {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: modifier.span.line,
+                column: modifier.span.column,
+                message: "`bind -break` is only valid inside a loop".to_string(),
+            });
+        }
+        arcana_hir::HirHeadedModifierKind::Keyword(HeadedModifierKeyword::Continue)
+            if scope.loop_depth == 0 =>
+        {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: modifier.span.line,
+                column: modifier.span.column,
+                message: "`bind -continue` is only valid inside a loop".to_string(),
+            });
+        }
+        _ => {}
+    }
+    if matches!(line_kind, arcana_hir::HirBindLineKind::Require { .. })
+        && !matches!(
+            modifier.kind,
+            arcana_hir::HirHeadedModifierKind::Keyword(
+                HeadedModifierKeyword::Return
+                    | HeadedModifierKeyword::Break
+                    | HeadedModifierKeyword::Continue
+            )
+        )
+    {
+        diagnostics.push(Diagnostic {
+            path: module_path.to_path_buf(),
+            line: modifier.span.line,
+            column: modifier.span.column,
+            message:
+                "`bind require` only supports `return`, `break`, or `continue` failure handling"
+                    .to_string(),
+        });
+    }
+}
+
+fn validate_construct_modifier_semantics(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    module_path: &Path,
+    type_scope: &TypeScope,
+    scope: &ValueScope,
+    modifier: &arcana_hir::HirHeadedModifier,
+    value: &HirExpr,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    match &modifier.kind {
+        arcana_hir::HirHeadedModifierKind::Keyword(HeadedModifierKeyword::Return) => {
+            if modifier.payload.is_none()
+                && !matches!(
+                    infer_gate_shape(workspace, resolved_module, type_scope, scope, value),
+                    Some(GateShape::Result { .. })
+                )
+            {
+                diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: modifier.span.line,
+                    column: modifier.span.column,
+                    message: "bare `-return` on construct requires Result failure".to_string(),
+                });
+            }
+        }
+        arcana_hir::HirHeadedModifierKind::Keyword(HeadedModifierKeyword::Default) => {
+            if modifier.payload.is_none() {
+                diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: modifier.span.line,
+                    column: modifier.span.column,
+                    message: "`construct -default` requires a fallback payload".to_string(),
+                });
+            }
+        }
+        arcana_hir::HirHeadedModifierKind::Keyword(HeadedModifierKeyword::Skip) => {
+            if modifier.payload.is_some() {
+                diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: modifier.span.line,
+                    column: modifier.span.column,
+                    message: "`construct -skip` does not take a payload".to_string(),
+                });
+            }
+        }
+        arcana_hir::HirHeadedModifierKind::Keyword(other) => {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: modifier.span.line,
+                column: modifier.span.column,
+                message: format!(
+                    "`construct` does not support `-{}` modifiers in v1",
+                    other.as_str()
+                ),
+            });
+        }
+        arcana_hir::HirHeadedModifierKind::Name(name) => {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: modifier.span.line,
+                column: modifier.span.column,
+                message: format!("`construct` does not support named modifier `-{name}` in v1"),
+            });
+        }
+    }
+}
+
+fn validate_construct_contribution_semantics(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    module_path: &Path,
+    type_scope: &TypeScope,
+    scope: &ValueScope,
+    line: &arcana_hir::HirConstructLine,
+    target_name: &str,
+    target_ty: &HirType,
+    modifier: Option<&arcana_hir::HirHeadedModifier>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let Some(mode) = infer_construct_contribution_mode(
+        workspace,
+        resolved_module,
+        type_scope,
+        scope,
+        &line.value,
+        target_ty,
+    ) else {
+        let expected = canonicalize_local_hir_type(workspace, resolved_module, target_ty)
+            .unwrap_or_else(|| target_ty.clone());
+        let actual =
+            infer_expr_value_type(workspace, resolved_module, type_scope, scope, &line.value)
+                .and_then(|ty| canonicalize_local_hir_type(workspace, resolved_module, &ty))
+                .map(|ty| ty.render())
+                .unwrap_or_else(|| "unknown".to_string());
+        diagnostics.push(Diagnostic {
+            path: module_path.to_path_buf(),
+            line: line.span.line,
+            column: line.span.column,
+            message: format!(
+                "construct contribution `{}` has type `{actual}` but target `{target_name}` expects `{}` or sanctioned Option/Result acquisition into that type",
+                line.name,
+                expected.render()
+            ),
+        });
+        return;
+    };
+    if let Some(modifier) = modifier {
+        validate_construct_modifier_semantics(
+            workspace,
+            resolved_module,
+            module_path,
+            type_scope,
+            scope,
+            modifier,
+            &line.value,
+            diagnostics,
+        );
+        if matches!(
+            modifier.kind,
+            arcana_hir::HirHeadedModifierKind::Keyword(HeadedModifierKeyword::Default)
+        ) && let Some(payload) = &modifier.payload
+        {
+            let expected = canonicalize_local_hir_type(workspace, resolved_module, target_ty)
+                .unwrap_or_else(|| target_ty.clone());
+            let expected_key = expected.render();
+            let actual =
+                infer_expr_value_type(workspace, resolved_module, type_scope, scope, payload)
+                    .and_then(|ty| canonicalize_local_hir_type(workspace, resolved_module, &ty));
+            if actual.as_ref().map(|ty| ty.render()).as_deref() != Some(expected_key.as_str()) {
+                diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: modifier.span.line,
+                    column: modifier.span.column,
+                    message: format!(
+                        "`construct -default` fallback for `{}` must have type `{}`",
+                        line.name,
+                        expected.render()
+                    ),
+                });
+            }
+        }
+        if matches!(
+            modifier.kind,
+            arcana_hir::HirHeadedModifierKind::Keyword(HeadedModifierKeyword::Return)
+        ) && modifier.payload.is_none()
+            && !matches!(mode, ConstructContributionMode::ResultPayload)
+            && matches!(
+                infer_gate_shape(workspace, resolved_module, type_scope, scope, &line.value),
+                Some(GateShape::Result { .. })
+            )
+            && infer_construct_contribution_mode(
+                workspace,
+                resolved_module,
+                type_scope,
+                scope,
+                &line.value,
+                target_ty,
+            ) == Some(ConstructContributionMode::Direct)
+        {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: modifier.span.line,
+                column: modifier.span.column,
+                message: "bare `-return` on construct only applies to Result payload acquisition, not direct Result values".to_string(),
+            });
+        }
+    }
+}
+
+fn validate_construct_region_semantics(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    module_path: &Path,
+    type_scope: &TypeScope,
+    scope: &ValueScope,
+    region: &arcana_hir::HirConstructRegion,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if region.default_modifier.is_none() {
+        diagnostics.push(Diagnostic {
+            path: module_path.to_path_buf(),
+            line: region.span.line,
+            column: region.span.column,
+            message: "construct requires a default modifier in v1".to_string(),
+        });
+    }
+    let Some(target_path) = flatten_callable_expr_path(&region.target) else {
+        diagnostics.push(Diagnostic {
+            path: module_path.to_path_buf(),
+            line: region.span.line,
+            column: region.span.column,
+            message: "construct target must be a path-like constructor reference".to_string(),
+        });
+        return;
+    };
+    let Some(target_shape) =
+        resolve_construct_target_shape(workspace, resolved_module, &target_path)
+    else {
+        diagnostics.push(Diagnostic {
+            path: module_path.to_path_buf(),
+            line: region.span.line,
+            column: region.span.column,
+            message: format!(
+                "construct target `{}` must resolve to a record or single-payload enum variant",
+                target_path.join(".")
+            ),
+        });
+        return;
+    };
+    if let Some(arcana_hir::HirConstructDestination::Place { target }) = &region.destination {
+        let expected_ty = resolve_construct_result_type(workspace, resolved_module, &target_path);
+        let actual_ty =
+            infer_assign_target_value_type(workspace, resolved_module, type_scope, scope, target)
+                .and_then(|ty| canonicalize_local_hir_type(workspace, resolved_module, &ty));
+        match (expected_ty, actual_ty) {
+            (Some(expected_ty), Some(actual_ty)) if expected_ty != actual_ty => {
+                diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: region.span.line,
+                    column: region.span.column,
+                    message: format!(
+                        "construct place target type `{}` does not match constructor result type `{}`",
+                        actual_ty.render(),
+                        expected_ty.render()
+                    ),
+                });
+            }
+            (Some(_), None) => {
+                diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: region.span.line,
+                    column: region.span.column,
+                    message: "construct place target must have a known type in v1".to_string(),
+                });
+            }
+            _ => {}
+        }
+    }
+    if let Some(arcana_hir::HirConstructDestination::Deliver { name }) = &region.destination
+        && scope.contains(name)
+    {
+        diagnostics.push(Diagnostic {
+            path: module_path.to_path_buf(),
+            line: region.span.line,
+            column: region.span.column,
+            message: format!("construct deliver binding `{name}` already exists in this scope"),
+        });
+    }
+
+    let mut seen = BTreeSet::new();
+    match &target_shape {
+        ConstructTargetShape::Record { fields } => {
+            for line in &region.lines {
+                if !seen.insert(line.name.clone()) {
+                    diagnostics.push(Diagnostic {
+                        path: module_path.to_path_buf(),
+                        line: line.span.line,
+                        column: line.span.column,
+                        message: format!(
+                            "construct field `{}` is provided more than once",
+                            line.name
+                        ),
+                    });
+                }
+                let Some(field_ty) = fields.get(&line.name) else {
+                    diagnostics.push(Diagnostic {
+                        path: module_path.to_path_buf(),
+                        line: line.span.line,
+                        column: line.span.column,
+                        message: format!(
+                            "construct field `{}` does not exist on `{}`",
+                            line.name,
+                            target_path.join(".")
+                        ),
+                    });
+                    continue;
+                };
+                let modifier = line.modifier.as_ref().or(region.default_modifier.as_ref());
+                validate_construct_contribution_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    scope,
+                    line,
+                    &format!("{}.{}", target_path.join("."), line.name),
+                    field_ty,
+                    modifier,
+                    diagnostics,
+                );
+                if let Some(modifier) = modifier
+                    && matches!(
+                        modifier.kind,
+                        arcana_hir::HirHeadedModifierKind::Keyword(HeadedModifierKeyword::Skip)
+                    )
+                    && type_option_payload(field_ty).is_none()
+                {
+                    diagnostics.push(Diagnostic {
+                        path: module_path.to_path_buf(),
+                        line: modifier.span.line,
+                        column: modifier.span.column,
+                        message: format!(
+                            "construct `-skip` is only valid for Option fields; `{}` is `{}`",
+                            line.name,
+                            field_ty.render()
+                        ),
+                    });
+                }
+            }
+            for (field_name, field_ty) in fields {
+                if !seen.contains(field_name) && type_option_payload(field_ty).is_none() {
+                    diagnostics.push(Diagnostic {
+                        path: module_path.to_path_buf(),
+                        line: region.span.line,
+                        column: region.span.column,
+                        message: format!(
+                            "construct target `{}` is missing required field `{field_name}`",
+                            target_path.join(".")
+                        ),
+                    });
+                }
+            }
+        }
+        ConstructTargetShape::Variant { payload } => {
+            let payload_lines = region
+                .lines
+                .iter()
+                .filter(|line| line.name == "payload")
+                .count();
+            if payload_lines != 1 {
+                diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: region.span.line,
+                    column: region.span.column,
+                    message: format!(
+                        "construct target `{}` requires exactly one `payload = ...` line",
+                        target_path.join(".")
+                    ),
+                });
+            }
+            for line in &region.lines {
+                if line.name != "payload" {
+                    diagnostics.push(Diagnostic {
+                        path: module_path.to_path_buf(),
+                        line: line.span.line,
+                        column: line.span.column,
+                        message: format!(
+                            "construct target `{}` only accepts `payload = ...` contributions",
+                            target_path.join(".")
+                        ),
+                    });
+                }
+                let modifier = line.modifier.as_ref().or(region.default_modifier.as_ref());
+                validate_construct_contribution_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    scope,
+                    line,
+                    &format!("{}.payload", target_path.join(".")),
+                    payload,
+                    modifier,
+                    diagnostics,
+                );
+                if let Some(modifier) = modifier
+                    && matches!(
+                        modifier.kind,
+                        arcana_hir::HirHeadedModifierKind::Keyword(HeadedModifierKeyword::Skip)
+                    )
+                    && type_option_payload(payload).is_none()
+                {
+                    diagnostics.push(Diagnostic {
+                        path: module_path.to_path_buf(),
+                        line: modifier.span.line,
+                        column: modifier.span.column,
+                        message: format!(
+                            "construct `-skip` is only valid for Option payloads; payload is `{}`",
+                            payload.render()
+                        ),
+                    });
+                }
+            }
+        }
+    }
+}
+
 fn validate_module_semantics(
     workspace: &HirWorkspaceSummary,
     resolved_workspace: &HirResolvedWorkspace,
@@ -2861,6 +3816,69 @@ fn validate_module_semantics(
                     symbol_ref.symbol.kind.as_str()
                 ),
             });
+        }
+    }
+
+    let mut seen_memory_specs = BTreeSet::new();
+    for spec in &module.memory_specs {
+        if !seen_memory_specs.insert(spec.name.clone()) {
+            diagnostics.push(Diagnostic {
+                path: module_path.clone(),
+                line: spec.span.line,
+                column: spec.span.column,
+                message: format!(
+                    "module memory spec `{}` is declared more than once",
+                    spec.name
+                ),
+            });
+        }
+        validate_memory_spec_decl_semantics(&module_path, spec, true, diagnostics);
+        let mut region_scope = ValueScope::default();
+        region_scope.headed_region_depth = 1;
+        if let Some(modifier) = &spec.default_modifier
+            && let Some(payload) = &modifier.payload
+        {
+            validate_expr_semantics(
+                workspace,
+                resolved_module,
+                &module_path,
+                &TypeScope::default(),
+                &region_scope,
+                payload,
+                spec.span,
+                diagnostics,
+            );
+        }
+        for detail in &spec.details {
+            if memory_detail_descriptor(spec.family, detail.key)
+                .map(|descriptor| descriptor.value_kind == MemoryDetailValueKind::IntExpr)
+                .unwrap_or(true)
+            {
+                validate_expr_semantics(
+                    workspace,
+                    resolved_module,
+                    &module_path,
+                    &TypeScope::default(),
+                    &region_scope,
+                    &detail.value,
+                    detail.span,
+                    diagnostics,
+                );
+            }
+            if let Some(modifier) = &detail.modifier
+                && let Some(payload) = &modifier.payload
+            {
+                validate_expr_semantics(
+                    workspace,
+                    resolved_module,
+                    &module_path,
+                    &TypeScope::default(),
+                    &region_scope,
+                    payload,
+                    detail.span,
+                    diagnostics,
+                );
+            }
         }
     }
 
@@ -3610,7 +4628,7 @@ fn resolve_available_owner_binding(
     path: &[String],
 ) -> Option<AvailableOwnerBinding> {
     let resolved = lookup_symbol_path(workspace, resolved_module, path)?;
-    let HirSymbolBody::Owner { objects, .. } = &resolved.symbol.body else {
+    let HirSymbolBody::Owner { objects, exits } = &resolved.symbol.body else {
         return None;
     };
     Some(AvailableOwnerBinding {
@@ -3628,6 +4646,10 @@ fn resolve_available_owner_binding(
                 ),
             })
             .collect(),
+        exit_names: exits
+            .iter()
+            .map(|owner_exit| owner_exit.name.clone())
+            .collect(),
         activation_context_type: resolve_owner_activation_context_type(
             workspace,
             resolved_workspace,
@@ -3635,6 +4657,243 @@ fn resolve_available_owner_binding(
             objects,
         ),
     })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum GateShape {
+    Bool,
+    Option { payload: HirType },
+    Result { ok: HirType, err: HirType },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ConstructTargetShape {
+    Record { fields: BTreeMap<String, HirType> },
+    Variant { payload: HirType },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConstructContributionMode {
+    Direct,
+    OptionPayload,
+    ResultPayload,
+}
+
+fn type_bool_shape(ty: &HirType) -> bool {
+    matches!(&ty.kind, HirTypeKind::Path(path) if path.segments.last().map(String::as_str) == Some("Bool"))
+}
+
+fn type_option_payload(ty: &HirType) -> Option<HirType> {
+    let HirTypeKind::Apply { base, args } = &ty.kind else {
+        return None;
+    };
+    (base.segments.last().map(String::as_str) == Some("Option") && args.len() == 1)
+        .then(|| args[0].clone())
+}
+
+fn type_result_payloads(ty: &HirType) -> Option<(HirType, HirType)> {
+    let HirTypeKind::Apply { base, args } = &ty.kind else {
+        return None;
+    };
+    (base.segments.last().map(String::as_str) == Some("Result") && args.len() == 2)
+        .then(|| (args[0].clone(), args[1].clone()))
+}
+
+fn infer_gate_shape(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    type_scope: &TypeScope,
+    scope: &ValueScope,
+    expr: &HirExpr,
+) -> Option<GateShape> {
+    let ty = infer_expr_value_type(workspace, resolved_module, type_scope, scope, expr)?;
+    if type_bool_shape(&ty) {
+        Some(GateShape::Bool)
+    } else if let Some(payload) = type_option_payload(&ty) {
+        Some(GateShape::Option { payload })
+    } else {
+        type_result_payloads(&ty).map(|(ok, err)| GateShape::Result { ok, err })
+    }
+}
+
+fn infer_payload_binding(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    type_scope: &TypeScope,
+    scope: &ValueScope,
+    expr: &HirExpr,
+) -> Option<(OwnershipClass, HirType)> {
+    let payload = match infer_gate_shape(workspace, resolved_module, type_scope, scope, expr)? {
+        GateShape::Option { payload } => payload,
+        GateShape::Result { ok, .. } => ok,
+        GateShape::Bool => return None,
+    };
+    Some((
+        infer_type_ownership(workspace, resolved_module, type_scope, &payload),
+        payload,
+    ))
+}
+
+fn infer_construct_contribution_mode(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    type_scope: &TypeScope,
+    scope: &ValueScope,
+    expr: &HirExpr,
+    target_ty: &HirType,
+) -> Option<ConstructContributionMode> {
+    let expected = canonicalize_local_hir_type(workspace, resolved_module, target_ty)?;
+    let expected_key = expected.render();
+    let actual = infer_expr_value_type(workspace, resolved_module, type_scope, scope, expr)
+        .and_then(|ty| canonicalize_local_hir_type(workspace, resolved_module, &ty))?;
+    if actual.render() == expected_key {
+        return Some(ConstructContributionMode::Direct);
+    }
+    if type_option_payload(&actual).is_some_and(|payload| payload.render() == expected_key) {
+        return Some(ConstructContributionMode::OptionPayload);
+    }
+    if type_result_payloads(&actual).is_some_and(|(ok, _)| ok.render() == expected_key) {
+        return Some(ConstructContributionMode::ResultPayload);
+    }
+    None
+}
+
+fn module_memory_spec_binding(
+    module: &HirModuleSummary,
+    name: &str,
+) -> Option<VisibleMemorySpecBinding> {
+    module
+        .memory_specs
+        .iter()
+        .find(|spec| spec.name == name)
+        .map(|spec| VisibleMemorySpecBinding {
+            family: spec.family,
+            span: spec.span,
+        })
+}
+
+fn lookup_memory_spec_in_package_module(
+    package: &HirWorkspacePackage,
+    module: &HirModuleSummary,
+    path: &[String],
+) -> Option<VisibleMemorySpecBinding> {
+    if path.is_empty() {
+        return None;
+    }
+    if path.len() == 1 {
+        return module_memory_spec_binding(module, &path[0]);
+    }
+    let (spec_name, module_tail) = path.split_last()?;
+    let base_relative = module
+        .module_id
+        .split('.')
+        .skip(1)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let mut target_relative = base_relative;
+    target_relative.extend(module_tail.iter().cloned());
+    let target_module = package.resolve_relative_module(&target_relative)?;
+    module_memory_spec_binding(target_module, spec_name)
+}
+
+fn lookup_memory_spec_from_resolved_target(
+    workspace: &HirWorkspaceSummary,
+    target: &HirResolvedTarget,
+    tail: &[String],
+) -> Option<VisibleMemorySpecBinding> {
+    let HirResolvedTarget::Module {
+        package_id,
+        module_id,
+        ..
+    } = target
+    else {
+        return None;
+    };
+    let package = workspace.package_by_id(package_id)?;
+    let module = package.module(module_id)?;
+    lookup_memory_spec_in_package_module(package, module, tail)
+}
+
+fn lookup_visible_memory_spec_binding(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    path: &[String],
+) -> Option<VisibleMemorySpecBinding> {
+    let current_package = current_workspace_package_for_module(workspace, resolved_module)?;
+    let current_module = current_package.module(&resolved_module.module_id)?;
+    if path.len() == 1 {
+        return module_memory_spec_binding(current_module, &path[0]);
+    }
+    if let Some(binding) = resolved_module.bindings.get(&path[0])
+        && let Some(spec) =
+            lookup_memory_spec_from_resolved_target(workspace, &binding.target, &path[1..])
+    {
+        return Some(spec);
+    }
+    if let Some(package) = visible_package_root_for_module(workspace, resolved_module, &path[0]) {
+        let root_module = package.module(&package.summary.package_name)?;
+        return lookup_memory_spec_in_package_module(package, root_module, &path[1..]);
+    }
+    lookup_memory_spec_in_package_module(current_package, current_module, path)
+}
+
+fn resolve_construct_target_shape(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    path: &[String],
+) -> Option<ConstructTargetShape> {
+    if let Some(resolved) = lookup_symbol_path(workspace, resolved_module, path)
+        && let HirSymbolBody::Record { fields } = &resolved.symbol.body
+    {
+        return Some(ConstructTargetShape::Record {
+            fields: fields
+                .iter()
+                .map(|field| (field.name.clone(), field.ty.clone()))
+                .collect(),
+        });
+    }
+    let (variant_name, enum_path) = path.split_last()?;
+    let resolved = lookup_symbol_path(workspace, resolved_module, enum_path)?;
+    let HirSymbolBody::Enum { variants } = &resolved.symbol.body else {
+        return None;
+    };
+    let variant = variants
+        .iter()
+        .find(|variant| variant.name == *variant_name)?;
+    Some(ConstructTargetShape::Variant {
+        payload: variant.payload.clone()?,
+    })
+}
+
+fn resolve_construct_result_type(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    path: &[String],
+) -> Option<HirType> {
+    resolve_construct_target_shape(workspace, resolved_module, path)?;
+    let canonical_path = if lookup_symbol_path(workspace, resolved_module, path).is_some() {
+        path.to_vec()
+    } else {
+        path[..path.len().checked_sub(1)?].to_vec()
+    };
+    Some(canonical_type_from_path(
+        workspace,
+        resolved_module,
+        &canonical_path,
+        Span::default(),
+    ))
+}
+
+fn canonicalize_local_hir_type(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    ty: &HirType,
+) -> Option<HirType> {
+    let package = current_workspace_package_for_module(workspace, resolved_module)?;
+    let module = package.module(&resolved_module.module_id)?;
+    Some(canonicalize_hir_type_in_module(
+        workspace, package, module, ty,
+    ))
 }
 
 fn apply_availability_attachments_to_scope(
@@ -3797,6 +5056,10 @@ fn validate_symbol_value_semantics(
                         symbol.span,
                     ),
                 })
+                .collect(),
+            exit_names: exits
+                .iter()
+                .map(|owner_exit| owner_exit.name.clone())
                 .collect(),
             activation_context_type: resolve_owner_activation_context_type(
                 workspace,
@@ -4905,6 +6168,7 @@ fn validate_statement_block_semantics(
                     "while condition",
                 );
                 let mut body_scope = scope.clone();
+                body_scope.loop_depth += 1;
                 apply_availability_attachments_to_scope(
                     workspace,
                     resolved_workspace,
@@ -4991,6 +6255,7 @@ fn validate_statement_block_semantics(
                     borrow_state,
                 );
                 let mut body_scope = scope.clone();
+                body_scope.loop_depth += 1;
                 let iterable_binding_ty = infer_iterable_binding_type(
                     workspace,
                     resolved_module,
@@ -5254,6 +6519,466 @@ fn validate_statement_block_semantics(
                     note_escaping_expr_borrows(borrow_state, value, scope);
                 }
             }
+            HirStatementKind::Recycle {
+                default_modifier,
+                lines,
+            } => {
+                if default_modifier.is_none() {
+                    diagnostics.push(Diagnostic {
+                        path: module_path.to_path_buf(),
+                        line: statement.span.line,
+                        column: statement.span.column,
+                        message: "recycle requires a default modifier in v1".to_string(),
+                    });
+                }
+                let mut region_scope = scope.clone();
+                region_scope.headed_region_depth += 1;
+                if let Some(modifier) = default_modifier
+                    && let Some(payload) = &modifier.payload
+                {
+                    validate_expr_semantics(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        type_scope,
+                        &region_scope,
+                        payload,
+                        statement.span,
+                        diagnostics,
+                    );
+                }
+                for line in lines {
+                    let gate_shape = match &line.kind {
+                        arcana_hir::HirRecycleLineKind::Expr { gate }
+                        | arcana_hir::HirRecycleLineKind::Let { gate, .. }
+                        | arcana_hir::HirRecycleLineKind::Assign { gate, .. } => {
+                            validate_expr_semantics(
+                                workspace,
+                                resolved_module,
+                                module_path,
+                                type_scope,
+                                &region_scope,
+                                gate,
+                                line.span,
+                                diagnostics,
+                            );
+                            validate_expr_borrow_flow(
+                                workspace,
+                                resolved_module,
+                                type_scope,
+                                module_path,
+                                &region_scope,
+                                gate,
+                                line.span,
+                                borrow_state,
+                                diagnostics,
+                            );
+                            note_expr_moves(
+                                workspace,
+                                resolved_module,
+                                type_scope,
+                                &region_scope,
+                                gate,
+                                borrow_state,
+                            );
+                            infer_gate_shape(
+                                workspace,
+                                resolved_module,
+                                type_scope,
+                                &region_scope,
+                                gate,
+                            )
+                        }
+                    };
+                    if let Some(modifier) = &line.modifier
+                        && let Some(payload) = &modifier.payload
+                    {
+                        validate_expr_semantics(
+                            workspace,
+                            resolved_module,
+                            module_path,
+                            type_scope,
+                            &region_scope,
+                            payload,
+                            line.span,
+                            diagnostics,
+                        );
+                    }
+                    if let Some(modifier) = line.modifier.as_ref().or(default_modifier.as_ref()) {
+                        validate_recycle_modifier_semantics(
+                            module_path,
+                            &region_scope,
+                            modifier,
+                            gate_shape.as_ref(),
+                            diagnostics,
+                        );
+                    }
+                    match &line.kind {
+                        arcana_hir::HirRecycleLineKind::Let {
+                            mutable,
+                            name,
+                            gate,
+                        } => {
+                            if let Some((ownership, ty)) = infer_payload_binding(
+                                workspace,
+                                resolved_module,
+                                type_scope,
+                                &region_scope,
+                                gate,
+                            ) {
+                                scope.insert_typed(name, *mutable, ownership, Some(ty));
+                            } else {
+                                diagnostics.push(Diagnostic {
+                                    path: module_path.to_path_buf(),
+                                    line: line.span.line,
+                                    column: line.span.column,
+                                    message: "payload-bearing recycle lines require Option or Result gates".to_string(),
+                                });
+                            }
+                        }
+                        arcana_hir::HirRecycleLineKind::Assign { name, gate } => {
+                            if scope.contains(name) {
+                                if let Some((ownership, ty)) = infer_payload_binding(
+                                    workspace,
+                                    resolved_module,
+                                    type_scope,
+                                    &region_scope,
+                                    gate,
+                                ) {
+                                    scope.ownership.insert(name.clone(), ownership);
+                                    scope.types.insert(name.clone(), ty);
+                                } else {
+                                    diagnostics.push(Diagnostic {
+                                        path: module_path.to_path_buf(),
+                                        line: line.span.line,
+                                        column: line.span.column,
+                                        message: "payload-bearing recycle lines require Option or Result gates".to_string(),
+                                    });
+                                }
+                            }
+                        }
+                        arcana_hir::HirRecycleLineKind::Expr { .. } => {
+                            if gate_shape.is_none() {
+                                diagnostics.push(Diagnostic {
+                                    path: module_path.to_path_buf(),
+                                    line: line.span.line,
+                                    column: line.span.column,
+                                    message:
+                                        "recycle gates must evaluate to Bool, Option, or Result"
+                                            .to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            HirStatementKind::Bind {
+                default_modifier,
+                lines,
+            } => {
+                if default_modifier.is_none() {
+                    diagnostics.push(Diagnostic {
+                        path: module_path.to_path_buf(),
+                        line: statement.span.line,
+                        column: statement.span.column,
+                        message: "bind requires a default modifier in v1".to_string(),
+                    });
+                }
+                let mut region_scope = scope.clone();
+                region_scope.headed_region_depth += 1;
+                if let Some(modifier) = default_modifier
+                    && let Some(payload) = &modifier.payload
+                {
+                    validate_expr_semantics(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        type_scope,
+                        &region_scope,
+                        payload,
+                        statement.span,
+                        diagnostics,
+                    );
+                }
+                for line in lines {
+                    let gate_shape = match &line.kind {
+                        arcana_hir::HirBindLineKind::Let { gate, .. }
+                        | arcana_hir::HirBindLineKind::Assign { gate, .. } => {
+                            validate_expr_semantics(
+                                workspace,
+                                resolved_module,
+                                module_path,
+                                type_scope,
+                                &region_scope,
+                                gate,
+                                line.span,
+                                diagnostics,
+                            );
+                            validate_expr_borrow_flow(
+                                workspace,
+                                resolved_module,
+                                type_scope,
+                                module_path,
+                                &region_scope,
+                                gate,
+                                line.span,
+                                borrow_state,
+                                diagnostics,
+                            );
+                            note_expr_moves(
+                                workspace,
+                                resolved_module,
+                                type_scope,
+                                &region_scope,
+                                gate,
+                                borrow_state,
+                            );
+                            infer_gate_shape(
+                                workspace,
+                                resolved_module,
+                                type_scope,
+                                &region_scope,
+                                gate,
+                            )
+                        }
+                        arcana_hir::HirBindLineKind::Require { expr } => {
+                            validate_expr_semantics(
+                                workspace,
+                                resolved_module,
+                                module_path,
+                                type_scope,
+                                &region_scope,
+                                expr,
+                                line.span,
+                                diagnostics,
+                            );
+                            validate_expected_expr_type(
+                                module_path,
+                                expr,
+                                line.span,
+                                diagnostics,
+                                ExprTypeClass::Bool,
+                                "bind require condition",
+                            );
+                            None
+                        }
+                    };
+                    if let Some(modifier) = &line.modifier
+                        && let Some(payload) = &modifier.payload
+                    {
+                        validate_expr_semantics(
+                            workspace,
+                            resolved_module,
+                            module_path,
+                            type_scope,
+                            &region_scope,
+                            payload,
+                            line.span,
+                            diagnostics,
+                        );
+                    }
+                    if let Some(modifier) = line.modifier.as_ref().or(default_modifier.as_ref()) {
+                        validate_bind_modifier_semantics(
+                            module_path,
+                            &region_scope,
+                            modifier,
+                            gate_shape.as_ref(),
+                            &line.kind,
+                            diagnostics,
+                        );
+                    }
+                    match &line.kind {
+                        arcana_hir::HirBindLineKind::Let {
+                            mutable,
+                            name,
+                            gate,
+                        } => {
+                            if let Some((ownership, ty)) = infer_payload_binding(
+                                workspace,
+                                resolved_module,
+                                type_scope,
+                                &region_scope,
+                                gate,
+                            ) {
+                                scope.insert_typed(name, *mutable, ownership, Some(ty));
+                            } else {
+                                diagnostics.push(Diagnostic {
+                                    path: module_path.to_path_buf(),
+                                    line: line.span.line,
+                                    column: line.span.column,
+                                    message: "bind payload lines require Option or Result gates"
+                                        .to_string(),
+                                });
+                            }
+                        }
+                        arcana_hir::HirBindLineKind::Assign { name, gate } => {
+                            if scope.contains(name) {
+                                if let Some((ownership, ty)) = infer_payload_binding(
+                                    workspace,
+                                    resolved_module,
+                                    type_scope,
+                                    &region_scope,
+                                    gate,
+                                ) {
+                                    scope.ownership.insert(name.clone(), ownership);
+                                    scope.types.insert(name.clone(), ty);
+                                } else {
+                                    diagnostics.push(Diagnostic {
+                                        path: module_path.to_path_buf(),
+                                        line: line.span.line,
+                                        column: line.span.column,
+                                        message:
+                                            "bind payload lines require Option or Result gates"
+                                                .to_string(),
+                                    });
+                                }
+                            }
+                        }
+                        arcana_hir::HirBindLineKind::Require { .. } => {}
+                    }
+                }
+            }
+            HirStatementKind::Construct(region) => {
+                let mut region_scope = scope.clone();
+                region_scope.headed_region_depth += 1;
+                validate_expr_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    &region_scope,
+                    &region.target,
+                    region.span,
+                    diagnostics,
+                );
+                if let Some(arcana_hir::HirConstructDestination::Place { target }) =
+                    &region.destination
+                {
+                    validate_assign_target_semantics(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        type_scope,
+                        scope,
+                        target,
+                        region.span,
+                        diagnostics,
+                    );
+                }
+                if let Some(modifier) = &region.default_modifier
+                    && let Some(payload) = &modifier.payload
+                {
+                    validate_expr_semantics(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        type_scope,
+                        &region_scope,
+                        payload,
+                        region.span,
+                        diagnostics,
+                    );
+                }
+                for line in &region.lines {
+                    validate_expr_semantics(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        type_scope,
+                        &region_scope,
+                        &line.value,
+                        line.span,
+                        diagnostics,
+                    );
+                    if let Some(modifier) = &line.modifier
+                        && let Some(payload) = &modifier.payload
+                    {
+                        validate_expr_semantics(
+                            workspace,
+                            resolved_module,
+                            module_path,
+                            type_scope,
+                            &region_scope,
+                            payload,
+                            line.span,
+                            diagnostics,
+                        );
+                    }
+                }
+                validate_construct_region_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    &region_scope,
+                    region,
+                    diagnostics,
+                );
+                if let Some(arcana_hir::HirConstructDestination::Deliver { name }) =
+                    &region.destination
+                {
+                    let delivered_ty =
+                        flatten_callable_expr_path(&region.target).and_then(|path| {
+                            resolve_construct_result_type(workspace, resolved_module, &path)
+                        });
+                    let ownership = delivered_ty
+                        .as_ref()
+                        .map(|ty| infer_type_ownership(workspace, resolved_module, type_scope, ty))
+                        .unwrap_or_default();
+                    scope.insert_typed(name, false, ownership, delivered_ty);
+                }
+            }
+            HirStatementKind::MemorySpec(spec) => {
+                let mut region_scope = scope.clone();
+                region_scope.headed_region_depth += 1;
+                if let Some(modifier) = &spec.default_modifier
+                    && let Some(payload) = &modifier.payload
+                {
+                    validate_expr_semantics(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        type_scope,
+                        &region_scope,
+                        payload,
+                        spec.span,
+                        diagnostics,
+                    );
+                }
+                for detail in &spec.details {
+                    if memory_detail_descriptor(spec.family, detail.key)
+                        .map(|descriptor| descriptor.value_kind == MemoryDetailValueKind::IntExpr)
+                        .unwrap_or(true)
+                    {
+                        validate_expr_semantics(
+                            workspace,
+                            resolved_module,
+                            module_path,
+                            type_scope,
+                            &region_scope,
+                            &detail.value,
+                            detail.span,
+                            diagnostics,
+                        );
+                    }
+                    if let Some(modifier) = &detail.modifier
+                        && let Some(payload) = &modifier.payload
+                    {
+                        validate_expr_semantics(
+                            workspace,
+                            resolved_module,
+                            module_path,
+                            type_scope,
+                            &region_scope,
+                            payload,
+                            detail.span,
+                            diagnostics,
+                        );
+                    }
+                }
+                validate_memory_spec_decl_semantics(module_path, spec, false, diagnostics);
+                scope.insert_memory_spec(&spec.name, spec.family, spec.span);
+            }
             HirStatementKind::Break | HirStatementKind::Continue => {}
         }
     }
@@ -5509,6 +7234,91 @@ fn validate_expr_semantics(
                 );
             }
         }
+        HirExpr::ConstructRegion(region) => {
+            if scope.headed_region_depth > 0 {
+                diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: span.line,
+                    column: span.column,
+                    message: "headed regions cannot nest inside another headed region in v1"
+                        .to_string(),
+                });
+            }
+            let mut region_scope = scope.clone();
+            region_scope.headed_region_depth += 1;
+            validate_expr_semantics(
+                workspace,
+                resolved_module,
+                module_path,
+                type_scope,
+                &region_scope,
+                &region.target,
+                span,
+                diagnostics,
+            );
+            if let Some(arcana_hir::HirConstructDestination::Place { target }) = &region.destination
+            {
+                validate_assign_target_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    scope,
+                    target,
+                    span,
+                    diagnostics,
+                );
+            }
+            if let Some(modifier) = &region.default_modifier
+                && let Some(payload) = &modifier.payload
+            {
+                validate_expr_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    &region_scope,
+                    payload,
+                    span,
+                    diagnostics,
+                );
+            }
+            for line in &region.lines {
+                validate_expr_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    &region_scope,
+                    &line.value,
+                    line.span,
+                    diagnostics,
+                );
+                if let Some(modifier) = &line.modifier
+                    && let Some(payload) = &modifier.payload
+                {
+                    validate_expr_semantics(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        type_scope,
+                        &region_scope,
+                        payload,
+                        line.span,
+                        diagnostics,
+                    );
+                }
+            }
+            validate_construct_region_semantics(
+                workspace,
+                resolved_module,
+                module_path,
+                type_scope,
+                &region_scope,
+                region,
+                diagnostics,
+            );
+        }
         HirExpr::Chain { steps, .. } => {
             for step in steps {
                 validate_chain_step_semantics(
@@ -5524,22 +7334,84 @@ fn validate_expr_semantics(
             }
         }
         HirExpr::MemoryPhrase {
+            family,
             arena,
             init_args,
             constructor,
             attached,
-            ..
         } => {
-            validate_expr_semantics(
-                workspace,
-                resolved_module,
-                module_path,
-                type_scope,
-                scope,
-                arena,
-                span,
-                diagnostics,
-            );
+            if let Some(path) = flatten_member_expr_path(arena) {
+                let resolved_as_value = (path.len() == 1 && scope.contains(&path[0]))
+                    || value_path_exists(workspace, resolved_module, &path);
+                if !resolved_as_value {
+                    let memory_spec = if path.len() == 1 {
+                        scope.memory_spec(&path[0]).cloned()
+                    } else {
+                        lookup_visible_memory_spec_binding(workspace, resolved_module, &path)
+                    };
+                    if let Some(memory_spec) = memory_spec {
+                        if memory_spec.family.as_str() != family {
+                            diagnostics.push(Diagnostic {
+                                path: module_path.to_path_buf(),
+                                line: span.line,
+                                column: span.column,
+                                message: format!(
+                                    "memory phrase requires `{family}` but spec `{}` is `{}`",
+                                    path.join("."),
+                                    memory_spec.family.as_str()
+                                ),
+                            });
+                        } else if !memory_family_descriptor(memory_spec.family)
+                            .phrase_consumers
+                            .iter()
+                            .any(|consumer| *consumer == "memory_phrase")
+                        {
+                            diagnostics.push(Diagnostic {
+                                path: module_path.to_path_buf(),
+                                line: span.line,
+                                column: span.column,
+                                message: format!(
+                                    "memory family `{}` is not consumable from memory phrases in v1",
+                                    memory_spec.family.as_str()
+                                ),
+                            });
+                        }
+                    } else {
+                        validate_expr_semantics(
+                            workspace,
+                            resolved_module,
+                            module_path,
+                            type_scope,
+                            scope,
+                            arena,
+                            span,
+                            diagnostics,
+                        );
+                    }
+                } else {
+                    validate_expr_semantics(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        type_scope,
+                        scope,
+                        arena,
+                        span,
+                        diagnostics,
+                    );
+                }
+            } else {
+                validate_expr_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    scope,
+                    arena,
+                    span,
+                    diagnostics,
+                );
+            }
             for arg in init_args {
                 validate_phrase_arg_semantics(
                     workspace,
@@ -6707,9 +8579,137 @@ mod tests {
                     .join(fixture),
             )
             .expect("fixture should be readable");
-            let err = check_sources([source.as_str()]).expect_err("fixture should fail");
+            let err = match check_sources([source.as_str()]) {
+                Ok(summary) => panic!("{fixture} unexpectedly passed: {summary:?}"),
+                Err(err) => err,
+            };
             assert!(err.contains(expected), "{fixture}: {err}");
         }
+    }
+
+    #[test]
+    fn check_sources_rejects_headed_region_contract_fixtures() {
+        let repo_root = repo_root();
+        for (fixture, expected) in [
+            (
+                "headed_regions_unknown_head.arc",
+                "unknown headed region head `recyclez`",
+            ),
+            (
+                "headed_regions_invalid_construct.arc",
+                "`construct yield` is expression-form only",
+            ),
+            (
+                "headed_regions_invalid_memory_key.arc",
+                "invalid `Memory` detail key `unknown`",
+            ),
+            (
+                "headed_regions_invalid_memory_family.arc",
+                "invalid `Memory` family `view`",
+            ),
+            (
+                "headed_regions_unsupported_memory_family_key.arc",
+                "memory detail `recycle` is not supported for family `arena`",
+            ),
+            (
+                "headed_regions_missing_modifier.arc",
+                "recycle requires a default modifier in v1",
+            ),
+            (
+                "headed_regions_invalid_owner_exit.arc",
+                "named recycle exit `done` is not active on this path",
+            ),
+            (
+                "headed_regions_invalid_recycle_return.arc",
+                "bare `-return` in recycle requires Result failure",
+            ),
+            (
+                "headed_regions_invalid_bind_modifier.arc",
+                "`bind require` only supports `return`, `break`, or `continue` failure handling",
+            ),
+            (
+                "headed_regions_bind_preserve_on_let.arc",
+                "`bind -preserve` is only valid on `name = gate` lines",
+            ),
+            (
+                "headed_regions_invalid_recycle_continue.arc",
+                "`break` and `continue` recycle exits are only valid inside loops",
+            ),
+            (
+                "headed_regions_invalid_construct_skip.arc",
+                "construct `-skip` is only valid for Option fields",
+            ),
+            (
+                "headed_regions_invalid_construct_place_type.arc",
+                "construct place target type",
+            ),
+            (
+                "headed_regions_construct_duplicate_field.arc",
+                "construct field `value` is provided more than once",
+            ),
+            (
+                "headed_regions_construct_duplicate_payload.arc",
+                "requires exactly one `payload = ...` line",
+            ),
+            (
+                "headed_regions_invalid_nested.arc",
+                "headed regions cannot nest inside another headed region in v1",
+            ),
+        ] {
+            let source = fs::read_to_string(
+                repo_root
+                    .join("conformance")
+                    .join("check_parity_fixtures")
+                    .join(fixture),
+            )
+            .expect("fixture should be readable");
+            let root = make_temp_package(
+                fixture.trim_end_matches(".arc"),
+                "app",
+                &[],
+                &[("src/shelf.arc", source.as_str()), ("src/types.arc", "")],
+            );
+            let err = check_path(&root).expect_err("fixture should fail");
+            assert!(err.contains(expected), "{fixture}: {err}");
+            fs::remove_dir_all(root).expect("cleanup should succeed");
+        }
+    }
+
+    #[test]
+    fn check_headed_region_positive_workspace_fixture_passes() {
+        let fixture_root = repo_root()
+            .join("conformance")
+            .join("fixtures")
+            .join("headed_regions_v1_workspace");
+        let workspace_book = fs::read_to_string(fixture_root.join("book.toml"))
+            .expect("positive headed region workspace manifest should be readable");
+        let app_book = fs::read_to_string(fixture_root.join("app").join("book.toml"))
+            .expect("positive headed region app manifest should be readable");
+        let shelf = fs::read_to_string(fixture_root.join("app").join("src").join("shelf.arc"))
+            .expect("positive headed region shelf should be readable");
+        let core_book = fs::read_to_string(fixture_root.join("core").join("book.toml"))
+            .expect("positive headed region core manifest should be readable");
+        let core_module =
+            fs::read_to_string(fixture_root.join("core").join("src").join("book.arc"))
+                .expect("positive headed region core book should be readable");
+        let core_types =
+            fs::read_to_string(fixture_root.join("core").join("src").join("types.arc"))
+                .expect("positive headed region core types should be readable");
+        let root = make_temp_workspace(
+            "headed_region_positive_fixture",
+            &["core", "app"],
+            &[
+                ("book.toml", &workspace_book),
+                ("app/book.toml", &app_book),
+                ("app/src/shelf.arc", &shelf),
+                ("app/src/types.arc", ""),
+                ("core/book.toml", &core_book),
+                ("core/src/book.arc", &core_module),
+                ("core/src/types.arc", &core_types),
+            ],
+        );
+        check_path(&root).expect("headed region positive fixture should pass");
+        fs::remove_dir_all(root).expect("cleanup should succeed");
     }
 
     #[test]
@@ -7684,6 +9684,32 @@ mod tests {
         )
         .expect("std-handle cleanup footer fixture should check");
         assert!(summary.package_count >= 2);
+        assert!(summary.module_count >= 2);
+    }
+
+    #[test]
+    fn check_path_accepts_cleanup_footer_examples_package() {
+        let summary = check_path(
+            &repo_root()
+                .join("examples")
+                .join("cleanup-footer-examples")
+                .join("app"),
+        )
+        .expect("cleanup footer examples package should check");
+        assert!(summary.package_count >= 1);
+        assert!(summary.module_count >= 2);
+    }
+
+    #[test]
+    fn check_path_accepts_desktop_proof_app_with_defer_dispatcher() {
+        let summary = check_path(
+            &repo_root()
+                .join("examples")
+                .join("arcana-desktop-proof")
+                .join("app"),
+        )
+        .expect("desktop proof app should check with defer-based dispatcher cleanup");
+        assert!(summary.package_count >= 3);
         assert!(summary.module_count >= 2);
     }
 
@@ -9209,6 +11235,201 @@ mod tests {
         );
 
         fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_sources_rejects_headed_region_semantic_violations() {
+        for (source, expected) in [
+            (
+                concat!(
+                    "record Widget:\n",
+                    "    value: Int\n",
+                    "    maybe: Option[Int]\n",
+                    "fn main() -> Int:\n",
+                    "    let built = construct yield Widget -return 0\n",
+                    "        maybe = Option.None[Int] :: :: call\n",
+                    "    return 0\n",
+                ),
+                "missing required field `value`",
+            ),
+            (
+                concat!(
+                    "enum Result[T, E]:\n",
+                    "    Ok(T)\n",
+                    "    Err(E)\n",
+                    "fn main() -> Int:\n",
+                    "    bind -return 0\n",
+                    "        let value = Result.Err[Int, Str] :: \"no\" :: call -preserve\n",
+                    "    return 0\n",
+                ),
+                "`bind -preserve` is only valid on `name = gate` lines",
+            ),
+            (
+                concat!(
+                    "fn main() -> Int:\n",
+                    "    bind -continue\n",
+                    "        require false\n",
+                    "    return 0\n",
+                ),
+                "`bind -continue` is only valid inside a loop",
+            ),
+            (
+                concat!(
+                    "enum Result[T, E]:\n",
+                    "    Ok(T)\n",
+                    "    Err(E)\n",
+                    "fn main() -> Int:\n",
+                    "    while true:\n",
+                    "        bind -continue\n",
+                    "            let value = Result.Ok[Int, Str] :: 1 :: call\n",
+                    "    return 0\n",
+                ),
+                "`bind -continue` is only valid on `require <expr>` lines",
+            ),
+            (
+                concat!(
+                    "fn main() -> Int:\n",
+                    "    recycle\n",
+                    "        true\n",
+                    "    return 0\n",
+                ),
+                "recycle requires a default modifier in v1",
+            ),
+            (
+                concat!(
+                    "fn main() -> Int:\n",
+                    "    recycle -return 0\n",
+                    "        false -return\n",
+                    "    return 0\n",
+                ),
+                "bare `-return` in recycle requires Result failure",
+            ),
+            (
+                concat!(
+                    "fn main() -> Int:\n",
+                    "    recycle -return 0\n",
+                    "        false -done\n",
+                    "    return 0\n",
+                ),
+                "named recycle exit `done` is not active on this path",
+            ),
+            (
+                concat!(
+                    "obj Counter:\n",
+                    "    value: Int\n",
+                    "create Session [Counter] scope-exit:\n",
+                    "    done: when false hold [Counter]\n",
+                    "fn helper() -> Int:\n",
+                    "    recycle -done\n",
+                    "        false\n",
+                    "    return 1\n",
+                    "fn main() -> Int:\n",
+                    "    return 0\n",
+                ),
+                "named recycle exit `done` is not active on this path",
+            ),
+            (
+                concat!(
+                    "fn main() -> Int:\n",
+                    "    recycle -return 0\n",
+                    "        false -continue\n",
+                    "    return 0\n",
+                ),
+                "`break` and `continue` recycle exits are only valid inside loops",
+            ),
+            (
+                concat!(
+                    "Memory arena:cache -alloc\n",
+                    "    recycle = free_list\n",
+                    "fn main() -> Int:\n",
+                    "    return 0\n",
+                ),
+                "memory detail `recycle` is not supported for family `arena`",
+            ),
+            (
+                concat!(
+                    "Memory arena:cache -recycle\n",
+                    "    capacity = 4\n",
+                    "fn main() -> Int:\n",
+                    "    return 0\n",
+                ),
+                "memory modifier `-recycle` is not supported for family `arena`",
+            ),
+            (
+                concat!(
+                    "record Inner:\n",
+                    "    value: Int\n",
+                    "record Outer:\n",
+                    "    inner: Inner\n",
+                    "fn main() -> Int:\n",
+                    "    let outer = construct yield Outer -return 0\n",
+                    "        inner = construct yield Inner -return 0\n",
+                    "            value = 1\n",
+                    "    return 0\n",
+                ),
+                "headed regions cannot nest inside another headed region in v1",
+            ),
+            (
+                concat!(
+                    "record Widget:\n",
+                    "    value: Int\n",
+                    "record Other:\n",
+                    "    value: Int\n",
+                    "fn main() -> Int:\n",
+                    "    let target = Other :: value = 0 :: call\n",
+                    "    construct place Widget -> target -return 0\n",
+                    "        value = 1\n",
+                    "    return 0\n",
+                ),
+                "construct place target type `headed_region_semantic_violation.Other` does not match constructor result type `headed_region_semantic_violation.Widget`",
+            ),
+            (
+                concat!(
+                    "record Widget:\n",
+                    "    value: Int\n",
+                    "fn main() -> Int:\n",
+                    "    let built = construct yield Widget -break\n",
+                    "        value = 1\n",
+                    "    return 0\n",
+                ),
+                "`construct` does not support `-break` modifiers in v1",
+            ),
+            (
+                concat!(
+                    "record Widget:\n",
+                    "    value: Int\n",
+                    "fn main() -> Int:\n",
+                    "    let built = construct yield Widget -return 0\n",
+                    "        value = true\n",
+                    "    return 0\n",
+                ),
+                "construct contribution `value` has type `Bool` but target `Widget.value` expects `Int`",
+            ),
+            (
+                concat!(
+                    "record Widget:\n",
+                    "    value: Int\n",
+                    "enum Option[T]:\n",
+                    "    Some(T)\n",
+                    "    None\n",
+                    "fn main() -> Int:\n",
+                    "    let built = construct yield Widget -return 0\n",
+                    "        value = Option.None[Int] :: :: call -default false\n",
+                    "    return 0\n",
+                ),
+                "`construct -default` fallback for `value` must have type `Int`",
+            ),
+        ] {
+            let root = make_temp_package(
+                "headed_region_semantic_violation",
+                "app",
+                &[],
+                &[("src/shelf.arc", source), ("src/types.arc", "")],
+            );
+            let err = check_path(&root).expect_err("fixture should fail");
+            assert!(err.contains(expected), "{expected}: {err}");
+            fs::remove_dir_all(root).expect("cleanup should succeed");
+        }
     }
 
     fn make_temp_package(

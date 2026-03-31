@@ -1,7 +1,8 @@
 // Runtime-facing projection of the cabi export contract for generated export shims.
 use super::{
     RuntimeExecutionState, RuntimeHost, RuntimePackagePlan, RuntimeRoutinePlan, RuntimeValue,
-    execute_routine_call_with_state, validate_runtime_requirements_supported, variant_name_matches,
+    execute_routine_call_with_state, runtime_eval_message, validate_runtime_requirements_supported,
+    variant_name_matches,
 };
 use arcana_ir::{IrRoutineType, IrRoutineTypeKind};
 
@@ -55,7 +56,22 @@ pub fn execute_exported_abi_routine(
         &mut state,
         host,
         false,
-    )?;
+    )
+    .map_err(runtime_eval_message)?;
+    if let Some(control) = outcome.control {
+        return Err(runtime_eval_message(match control {
+            super::FlowSignal::OwnerExit {
+                owner_key,
+                exit_name,
+            } => super::RuntimeEvalSignal::OwnerExit {
+                owner_key,
+                exit_name,
+            },
+            other => super::RuntimeEvalSignal::Message(format!(
+                "unsupported native abi control flow `{other:?}`"
+            )),
+        }));
+    }
     Ok(RuntimeAbiExportOutcome {
         result: abi_value_from_runtime(outcome.value)?,
         write_backs: project_export_write_backs(routine, outcome.final_args)?,
@@ -85,7 +101,22 @@ pub fn execute_cleanup_runtime_abi_routine(
         state,
         host,
         false,
-    )?;
+    )
+    .map_err(runtime_eval_message)?;
+    if let Some(control) = outcome.control {
+        return Err(runtime_eval_message(match control {
+            super::FlowSignal::OwnerExit {
+                owner_key,
+                exit_name,
+            } => super::RuntimeEvalSignal::OwnerExit {
+                owner_key,
+                exit_name,
+            },
+            other => super::RuntimeEvalSignal::Message(format!(
+                "unsupported cleanup abi control flow `{other:?}`"
+            )),
+        }));
+    }
     expect_cleanup_runtime_value(outcome.value)
 }
 

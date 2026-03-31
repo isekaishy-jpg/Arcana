@@ -1,0 +1,8 @@
+name = "headed_regions_v1_workspace"
+kind = "app"
+
+[workspace]
+members = [
+  "core",
+  "app",
+]

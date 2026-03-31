@@ -59,6 +59,7 @@ This document defines how Arcana spec files are interpreted during the rewrite.
 - `docs/specs/std/std/v1-status.md`
 - `docs/specs/grimoires/grimoires/v1-scope.md`
 - `docs/specs/grimoires/grimoires/v1-status.md`
+- `docs/specs/headed-regions/headed-regions/v1-scope.md`
 - `docs/specs/selfhost-host/selfhost-host/v1-scope.md`
 - `docs/specs/selfhost-host/selfhost-host/app-substrate-v1-scope.md`
 - `docs/specs/memory/memory/v1-scope.md`
@@ -90,6 +91,7 @@ This document defines how Arcana spec files are interpreted during the rewrite.
 - `docs/specs/std/std/deferred-roadmap.md`
 - `docs/specs/selfhost-host/selfhost-host/deferred-roadmap.md`
 - `docs/specs/memory/memory/deferred-roadmap.md`
+- `docs/specs/headed-regions/headed-regions/deferred-roadmap.md`
 - `docs/specs/forewords/forewords/deferred-roadmap.md`
 - `docs/specs/page-rollups/page-rollups/deferred-roadmap.md`
 - `docs/specs/tuples/tuples/deferred-roadmap.md`
@@ -97,6 +99,7 @@ This document defines how Arcana spec files are interpreted during the rewrite.
 ## Immediate Rewrite Guidance
 
 - Cleanup footers are a pre-selfhost contract, not a post-selfhost cleanup idea.
+- Headed regions (`recycle`, `construct`, `bind`, `Memory`) are an approved pre-selfhost contract, but this docs patch does not imply implementation or selfhost-matrix readiness yet.
 - Rewrite-era scopes for access modes, qualified phrases, collections/ranges, `where`, concurrency, resources, memory, and chain surface now supersede stale Meadow-era planning notes where they overlap.
 - Chain surface should stay explicit as style qualifier plus introducer family plus connector-directed edges.
 - Pair-tuple rules must be explicit before selfhost because the imported corpus already depends on them heavily.

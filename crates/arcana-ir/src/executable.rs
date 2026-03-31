@@ -17,6 +17,7 @@ pub enum ExecExpr {
         subject: Box<ExecExpr>,
         arms: Vec<ExecMatchArm>,
     },
+    ConstructRegion(Box<ExecConstructRegion>),
     Chain {
         style: String,
         introducer: ExecChainIntroducer,
@@ -139,6 +140,115 @@ pub enum ExecHeaderAttachment {
     Chain { expr: ExecExpr },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecHeadedModifier {
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<ExecExpr>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExecRecycleLineKind {
+    Expr {
+        gate: ExecExpr,
+    },
+    Let {
+        mutable: bool,
+        name: String,
+        gate: ExecExpr,
+    },
+    Assign {
+        name: String,
+        gate: ExecExpr,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecRecycleLine {
+    pub kind: ExecRecycleLineKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modifier: Option<ExecHeadedModifier>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExecBindLineKind {
+    Let {
+        mutable: bool,
+        name: String,
+        gate: ExecExpr,
+    },
+    Assign {
+        name: String,
+        gate: ExecExpr,
+    },
+    Require {
+        expr: ExecExpr,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecBindLine {
+    pub kind: ExecBindLineKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modifier: Option<ExecHeadedModifier>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecConstructLine {
+    pub name: String,
+    pub value: ExecExpr,
+    #[serde(default, skip_serializing_if = "is_construct_contribution_mode_direct")]
+    pub mode: ExecConstructContributionMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modifier: Option<ExecHeadedModifier>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExecConstructContributionMode {
+    #[default]
+    Direct,
+    OptionPayload,
+    ResultPayload,
+}
+
+fn is_construct_contribution_mode_direct(mode: &ExecConstructContributionMode) -> bool {
+    matches!(mode, ExecConstructContributionMode::Direct)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExecConstructDestination {
+    Deliver { name: String },
+    Place { target: ExecAssignTarget },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecConstructRegion {
+    pub completion: String,
+    pub target: Box<ExecExpr>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination: Option<ExecConstructDestination>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_modifier: Option<ExecHeadedModifier>,
+    pub lines: Vec<ExecConstructLine>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecMemoryDetailLine {
+    pub key: String,
+    pub value: ExecExpr,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modifier: Option<ExecHeadedModifier>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecMemorySpecDecl {
+    pub family: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_modifier: Option<ExecHeadedModifier>,
+    pub details: Vec<ExecMemoryDetailLine>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExecAvailabilityKind {
     Owner,
@@ -220,6 +330,18 @@ pub enum ExecStmt {
         op: ExecAssignOp,
         value: ExecExpr,
     },
+    Recycle {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default_modifier: Option<ExecHeadedModifier>,
+        lines: Vec<ExecRecycleLine>,
+    },
+    Bind {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default_modifier: Option<ExecHeadedModifier>,
+        lines: Vec<ExecBindLine>,
+    },
+    Construct(ExecConstructRegion),
+    MemorySpec(ExecMemorySpecDecl),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

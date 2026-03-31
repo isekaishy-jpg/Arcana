@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use crate::artifact::AotPackageArtifact;
-use arcana_ir::{IrRoutineType, IrRoutineTypeKind};
+use arcana_ir::{IrRoutineType, IrRoutineTypeKind, parse_memory_spec_surface_row};
 
 fn strip_prefix_suffix<'a>(text: &'a str, prefix: &str, suffix: &str) -> Result<&'a str, String> {
     text.strip_prefix(prefix)
@@ -213,6 +213,9 @@ fn validate_dependency_row(row: &str) -> Result<(), String> {
 }
 
 fn validate_surface_row_payload(row: &str) -> Result<(), String> {
+    if parse_memory_spec_surface_row(row)?.is_some() {
+        return Ok(());
+    }
     if let Some(path) = row.strip_prefix("reexport:") {
         if split_simple_path(path).is_none() {
             return Err(format!("malformed exported reexport row `{row}`"));

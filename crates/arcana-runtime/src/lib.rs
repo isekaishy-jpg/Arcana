@@ -15,14 +15,23 @@ use arcana_ir::{
     ExecAssignOp as ParsedAssignOp, ExecAssignTarget as ParsedAssignTarget,
     ExecAvailabilityAttachment as ParsedAvailabilityAttachment,
     ExecAvailabilityKind as ParsedAvailabilityKind, ExecBinaryOp as ParsedBinaryOp,
-    ExecChainConnector as ParsedChainConnector, ExecChainIntroducer as ParsedChainIntroducer,
-    ExecChainStep as ParsedChainStep, ExecCleanupFooter as ParsedCleanupFooter,
-    ExecDynamicDispatch as ParsedDynamicDispatch, ExecExpr as ParsedExpr,
+    ExecBindLineKind as ParsedBindLineKind, ExecChainConnector as ParsedChainConnector,
+    ExecChainIntroducer as ParsedChainIntroducer, ExecChainStep as ParsedChainStep,
+    ExecCleanupFooter as ParsedCleanupFooter,
+    ExecConstructContributionMode as ParsedConstructContributionMode,
+    ExecConstructDestination as ParsedConstructDestination,
+    ExecConstructLine as ParsedConstructLine, ExecDynamicDispatch as ParsedDynamicDispatch,
+    ExecExpr as ParsedExpr, ExecHeadedModifier as ParsedHeadedModifier,
     ExecHeaderAttachment as ParsedHeaderAttachment, ExecMatchArm as ParsedMatchArm,
-    ExecMatchPattern as ParsedMatchPattern, ExecNamedBindingId as ParsedNamedBindingId,
-    ExecPhraseArg as ParsedPhraseArg, ExecPhraseQualifierKind as ParsedPhraseQualifierKind,
-    ExecStmt as ParsedStmt, ExecUnaryOp as ParsedUnaryOp, IrRoutineType, IrRoutineTypeKind,
+    ExecMatchPattern as ParsedMatchPattern, ExecMemorySpecDecl as ParsedMemorySpecDecl,
+    ExecNamedBindingId as ParsedNamedBindingId, ExecPhraseArg as ParsedPhraseArg,
+    ExecPhraseQualifierKind as ParsedPhraseQualifierKind,
+    ExecRecycleLineKind as ParsedRecycleLineKind, ExecStmt as ParsedStmt,
+    ExecUnaryOp as ParsedUnaryOp, IrRoutineType, IrRoutineTypeKind, parse_memory_spec_surface_row,
     parse_routine_type_text, validate_runtime_main_entry_contract,
+};
+use arcana_language_law::{
+    MemoryDetailKey, MemoryDetailValueKind, MemoryFamily, memory_detail_descriptor,
 };
 use pathdiff::diff_paths;
 use serde::{Deserialize, Serialize};
@@ -54,6 +63,8 @@ pub use package_image::{
 };
 pub use routine_plan::{RuntimeEntrypointPlan, RuntimeParamPlan, RuntimeRoutinePlan};
 use routine_plan::{lower_entrypoint, lower_routine};
+
+const MODULE_MEMORY_SPEC_ALIAS_PREFIX: &str = "@memory_spec:";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeOwnerObjectPlan {
@@ -3798,6 +3809,7 @@ struct BoundRuntimeArg {
 struct RoutineExecutionOutcome {
     value: RuntimeValue,
     final_args: Vec<RuntimeValue>,
+    control: Option<FlowSignal>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3821,9 +3833,17 @@ struct RuntimeAttachedObject {
     local_name: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeMemorySpecState {
+    spec: ParsedMemorySpecDecl,
+    handle: Option<RuntimeValue>,
+    handle_policy: Option<RuntimeMemoryHandlePolicy>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct RuntimeScope {
     locals: BTreeMap<String, RuntimeLocal>,
+    memory_specs: BTreeMap<String, RuntimeMemorySpecState>,
     deferred: Vec<ParsedExpr>,
     attached_object_names: BTreeSet<String>,
     attached_objects: Vec<RuntimeAttachedObject>,
@@ -3838,12 +3858,87 @@ enum FlowSignal {
     Return(RuntimeValue),
     Break,
     Continue,
+    OwnerExit {
+        owner_key: String,
+        exit_name: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum RuntimeEvalSignal {
     Message(String),
     Return(RuntimeValue),
+    OwnerExit {
+        owner_key: String,
+        exit_name: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuntimeMemoryStrategy {
+    Alloc,
+    Grow,
+    Fixed,
+    Recycle,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuntimeMemoryPressurePolicy {
+    Bounded,
+    Elastic,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuntimeMemoryHandlePolicy {
+    Stable,
+    Unstable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuntimeFrameRecyclePolicy {
+    Manual,
+    Frame,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuntimePoolRecyclePolicy {
+    FreeList,
+    Strict,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeArenaPolicy {
+    base_capacity: usize,
+    current_limit: usize,
+    growth_step: usize,
+    pressure: RuntimeMemoryPressurePolicy,
+    handle: RuntimeMemoryHandlePolicy,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeFrameArenaPolicy {
+    base_capacity: usize,
+    current_limit: usize,
+    growth_step: usize,
+    pressure: RuntimeMemoryPressurePolicy,
+    recycle: RuntimeFrameRecyclePolicy,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimePoolArenaPolicy {
+    base_capacity: usize,
+    current_limit: usize,
+    growth_step: usize,
+    pressure: RuntimeMemoryPressurePolicy,
+    recycle: RuntimePoolRecyclePolicy,
+    handle: RuntimeMemoryHandlePolicy,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RuntimeMemorySpecMaterialization {
+    Arena(RuntimeArenaPolicy),
+    Frame(RuntimeFrameArenaPolicy),
+    Pool(RuntimePoolArenaPolicy),
 }
 
 type RuntimeEvalResult<T> = Result<T, RuntimeEvalSignal>;
@@ -3854,12 +3949,144 @@ impl From<String> for RuntimeEvalSignal {
     }
 }
 
+fn runtime_memory_strategy_from_name(name: &str) -> Result<RuntimeMemoryStrategy, String> {
+    match name {
+        "alloc" => Ok(RuntimeMemoryStrategy::Alloc),
+        "grow" => Ok(RuntimeMemoryStrategy::Grow),
+        "fixed" => Ok(RuntimeMemoryStrategy::Fixed),
+        "recycle" => Ok(RuntimeMemoryStrategy::Recycle),
+        other => Err(format!("unsupported runtime memory modifier `-{other}`")),
+    }
+}
+
+fn runtime_memory_strategy_from_modifier(
+    modifier: &ParsedHeadedModifier,
+) -> Result<RuntimeMemoryStrategy, String> {
+    if modifier.payload.is_some() {
+        return Err("runtime memory modifiers do not take payload expressions in v1".to_string());
+    }
+    runtime_memory_strategy_from_name(&modifier.kind)
+}
+
+fn runtime_memory_pressure_from_atom(atom: &str) -> Result<RuntimeMemoryPressurePolicy, String> {
+    match atom {
+        "bounded" => Ok(RuntimeMemoryPressurePolicy::Bounded),
+        "elastic" => Ok(RuntimeMemoryPressurePolicy::Elastic),
+        other => Err(format!("unsupported memory pressure atom `{other}`")),
+    }
+}
+
+fn runtime_memory_handle_policy_from_atom(atom: &str) -> Result<RuntimeMemoryHandlePolicy, String> {
+    match atom {
+        "stable" => Ok(RuntimeMemoryHandlePolicy::Stable),
+        "unstable" => Ok(RuntimeMemoryHandlePolicy::Unstable),
+        other => Err(format!("unsupported memory handle atom `{other}`")),
+    }
+}
+
+fn runtime_frame_recycle_policy_from_atom(atom: &str) -> Result<RuntimeFrameRecyclePolicy, String> {
+    match atom {
+        "manual" => Ok(RuntimeFrameRecyclePolicy::Manual),
+        "frame" => Ok(RuntimeFrameRecyclePolicy::Frame),
+        other => Err(format!("unsupported frame recycle atom `{other}`")),
+    }
+}
+
+fn runtime_pool_recycle_policy_from_atom(atom: &str) -> Result<RuntimePoolRecyclePolicy, String> {
+    match atom {
+        "free_list" => Ok(RuntimePoolRecyclePolicy::FreeList),
+        "strict" => Ok(RuntimePoolRecyclePolicy::Strict),
+        other => Err(format!("unsupported pool recycle atom `{other}`")),
+    }
+}
+
+fn runtime_default_memory_pressure(strategy: RuntimeMemoryStrategy) -> RuntimeMemoryPressurePolicy {
+    match strategy {
+        RuntimeMemoryStrategy::Grow => RuntimeMemoryPressurePolicy::Elastic,
+        RuntimeMemoryStrategy::Alloc
+        | RuntimeMemoryStrategy::Fixed
+        | RuntimeMemoryStrategy::Recycle => RuntimeMemoryPressurePolicy::Bounded,
+    }
+}
+
+fn runtime_default_memory_handle_policy(
+    strategy: RuntimeMemoryStrategy,
+) -> RuntimeMemoryHandlePolicy {
+    match strategy {
+        RuntimeMemoryStrategy::Grow => RuntimeMemoryHandlePolicy::Unstable,
+        RuntimeMemoryStrategy::Alloc
+        | RuntimeMemoryStrategy::Fixed
+        | RuntimeMemoryStrategy::Recycle => RuntimeMemoryHandlePolicy::Stable,
+    }
+}
+
+fn runtime_default_frame_recycle_policy(
+    strategy: RuntimeMemoryStrategy,
+) -> RuntimeFrameRecyclePolicy {
+    match strategy {
+        RuntimeMemoryStrategy::Recycle => RuntimeFrameRecyclePolicy::Frame,
+        RuntimeMemoryStrategy::Alloc
+        | RuntimeMemoryStrategy::Grow
+        | RuntimeMemoryStrategy::Fixed => RuntimeFrameRecyclePolicy::Manual,
+    }
+}
+
+fn runtime_default_pool_recycle_policy(
+    strategy: RuntimeMemoryStrategy,
+) -> RuntimePoolRecyclePolicy {
+    match strategy {
+        RuntimeMemoryStrategy::Recycle => RuntimePoolRecyclePolicy::FreeList,
+        RuntimeMemoryStrategy::Alloc
+        | RuntimeMemoryStrategy::Grow
+        | RuntimeMemoryStrategy::Fixed => RuntimePoolRecyclePolicy::Strict,
+    }
+}
+
+fn runtime_default_growth_step(strategy: RuntimeMemoryStrategy, base_capacity: usize) -> usize {
+    match strategy {
+        RuntimeMemoryStrategy::Grow => base_capacity.max(1),
+        RuntimeMemoryStrategy::Alloc
+        | RuntimeMemoryStrategy::Fixed
+        | RuntimeMemoryStrategy::Recycle => 0,
+    }
+}
+
+fn runtime_non_negative_usize(value: i64, context: &str) -> Result<usize, String> {
+    usize::try_from(value).map_err(|_| format!("{context} must be non-negative"))
+}
+
+fn runtime_try_grow_limit(limit: &mut usize, growth_step: usize) -> bool {
+    if growth_step == 0 {
+        return false;
+    }
+    let next = limit.saturating_add(growth_step);
+    if next == *limit {
+        return false;
+    }
+    *limit = next;
+    true
+}
+
+fn memory_spec_alias_name(name: &str) -> String {
+    format!("{MODULE_MEMORY_SPEC_ALIAS_PREFIX}{name}")
+}
+
+fn memory_spec_state_key(package_id: &str, module_id: &str, name: &str) -> String {
+    format!("{package_id}|{module_id}|{name}")
+}
+
 fn runtime_eval_message(signal: RuntimeEvalSignal) -> String {
     match signal {
         RuntimeEvalSignal::Message(message) => message,
         RuntimeEvalSignal::Return(value) => {
             format!("runtime try qualifier `?` returned from unsupported context with `{value:?}`")
         }
+        RuntimeEvalSignal::OwnerExit {
+            owner_key,
+            exit_name,
+        } => format!(
+            "runtime try qualifier `?` returned from unsupported owner exit `{exit_name}` for `{owner_key}`"
+        ),
     }
 }
 
@@ -3869,6 +4096,7 @@ pub struct RuntimeExecutionState {
     call_stack: Vec<String>,
     cleanup_footer_frames: Vec<RuntimeCleanupFooterFrame>,
     owners: BTreeMap<String, RuntimeOwnerState>,
+    module_memory_specs: BTreeMap<String, RuntimeMemorySpecState>,
     next_entity_id: i64,
     live_entities: BTreeSet<i64>,
     component_slots: BTreeMap<Vec<String>, BTreeMap<i64, RuntimeValue>>,
@@ -3927,6 +4155,7 @@ struct RuntimeArenaState {
     next_slot: u64,
     generation: u64,
     slots: BTreeMap<u64, RuntimeValue>,
+    policy: RuntimeArenaPolicy,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3935,6 +4164,7 @@ struct RuntimeFrameArenaState {
     next_slot: u64,
     generation: u64,
     slots: BTreeMap<u64, RuntimeValue>,
+    policy: RuntimeFrameArenaPolicy,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3944,6 +4174,7 @@ struct RuntimePoolArenaState {
     free_slots: Vec<u64>,
     generations: BTreeMap<u64, u64>,
     slots: BTreeMap<u64, RuntimeValue>,
+    policy: RuntimePoolArenaPolicy,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -4404,6 +4635,17 @@ fn build_module_aliases(
                 module_aliases.insert(local_name, path);
             }
         }
+        for row in &module.exported_surface_rows {
+            if let Some(spec) = parse_memory_spec_surface_row(row)? {
+                let encoded = serde_json::to_string(&spec).map_err(|err| {
+                    format!(
+                        "failed to encode runtime memory spec `{}`: {err}",
+                        spec.name
+                    )
+                })?;
+                module_aliases.insert(memory_spec_alias_name(&spec.name), vec![encoded]);
+            }
+        }
     }
     Ok(aliases)
 }
@@ -4580,7 +4822,11 @@ fn validate_runtime_cleanup_footer_handlers_in_statements(
             | ParsedStmt::Defer(_)
             | ParsedStmt::Break
             | ParsedStmt::Continue
-            | ParsedStmt::Assign { .. } => {}
+            | ParsedStmt::Assign { .. }
+            | ParsedStmt::Recycle { .. }
+            | ParsedStmt::Bind { .. }
+            | ParsedStmt::Construct(_)
+            | ParsedStmt::MemorySpec(_) => {}
         }
     }
     Ok(())
@@ -5862,6 +6108,26 @@ fn lookup_local<'a>(scopes: &'a [RuntimeScope], name: &str) -> Option<&'a Runtim
     scopes.iter().rev().find_map(|scope| scope.locals.get(name))
 }
 
+fn lookup_memory_spec_in_scopes<'a>(
+    scopes: &'a [RuntimeScope],
+    name: &str,
+) -> Option<&'a RuntimeMemorySpecState> {
+    scopes
+        .iter()
+        .rev()
+        .find_map(|scope| scope.memory_specs.get(name))
+}
+
+fn lookup_memory_spec_in_scopes_mut<'a>(
+    scopes: &'a mut [RuntimeScope],
+    name: &str,
+) -> Option<&'a mut RuntimeMemorySpecState> {
+    scopes
+        .iter_mut()
+        .rev()
+        .find_map(|scope| scope.memory_specs.get_mut(name))
+}
+
 fn read_runtime_local_value(scopes: &[RuntimeScope], name: &str) -> Result<RuntimeValue, String> {
     let local = lookup_local(scopes, name)
         .ok_or_else(|| format!("unsupported runtime value path `{name}`"))?;
@@ -6053,6 +6319,89 @@ fn resolve_visible_package_id_for_path<'a>(
 ) -> Option<&'a str> {
     let root = path.first().map(String::as_str)?;
     resolve_visible_package_id_for_root(plan, current_package_id, root)
+}
+
+fn runtime_module_exists(plan: &RuntimePackagePlan, package_id: &str, module_id: &str) -> bool {
+    plan.module_aliases
+        .contains_key(&module_alias_scope_key(package_id, module_id))
+}
+
+fn resolve_memory_spec_target(
+    plan: &RuntimePackagePlan,
+    current_package_id: &str,
+    current_module_id: &str,
+    aliases: &BTreeMap<String, Vec<String>>,
+    path: &[String],
+) -> Option<(String, String, String)> {
+    if path.is_empty() {
+        return None;
+    }
+    let canonical = if path.len() == 1 {
+        path.to_vec()
+    } else if let Some(prefix) = aliases.get(&path[0]) {
+        let mut resolved = prefix.clone();
+        resolved.extend(path[1..].iter().cloned());
+        resolved
+    } else {
+        path.to_vec()
+    };
+    let spec_name = canonical.last()?.clone();
+    if canonical.len() == 1 {
+        return Some((
+            current_package_id.to_string(),
+            current_module_id.to_string(),
+            spec_name,
+        ));
+    }
+    let package_id = if let Some(package_id) =
+        resolve_visible_package_id_for_root(plan, current_package_id, &canonical[0])
+    {
+        package_id.to_string()
+    } else {
+        let current_package_name = current_package_name(plan, current_package_id)?;
+        let relative = current_module_id
+            .split('.')
+            .skip(1)
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let mut module_segments = vec![current_package_name.to_string()];
+        module_segments.extend(relative);
+        module_segments.extend(canonical[..canonical.len() - 1].iter().cloned());
+        let module_id = module_segments.join(".");
+        return runtime_module_exists(plan, current_package_id, &module_id).then_some((
+            current_package_id.to_string(),
+            module_id,
+            spec_name,
+        ));
+    };
+    let module_id = canonical[..canonical.len() - 1].join(".");
+    runtime_module_exists(plan, &package_id, &module_id)
+        .then_some((package_id, module_id, spec_name))
+}
+
+fn lookup_module_memory_spec_decl(
+    plan: &RuntimePackagePlan,
+    package_id: &str,
+    module_id: &str,
+    name: &str,
+) -> Result<Option<ParsedMemorySpecDecl>, String> {
+    let Some(module_aliases) = plan
+        .module_aliases
+        .get(&module_alias_scope_key(package_id, module_id))
+    else {
+        return Ok(None);
+    };
+    let Some(encoded) = module_aliases.get(&memory_spec_alias_name(name)) else {
+        return Ok(None);
+    };
+    let [json] = encoded.as_slice() else {
+        return Err(format!(
+            "runtime memory spec alias `{name}` in `{module_id}` is malformed"
+        ));
+    };
+    serde_json::from_str(json)
+        .map(Some)
+        .map_err(|err| format!("failed to decode runtime memory spec `{name}`: {err}"))
 }
 
 fn attached_object_is_visible(scopes: &[RuntimeScope], object_path: &[String], name: &str) -> bool {
@@ -6517,7 +6866,22 @@ fn execute_owner_object_lifecycle_hook(
             state,
             host,
             false,
-        )?;
+        )
+        .map_err(runtime_eval_message)?;
+        if let Some(control) = outcome.control {
+            return Err(runtime_eval_message(match control {
+                FlowSignal::OwnerExit {
+                    owner_key,
+                    exit_name,
+                } => RuntimeEvalSignal::OwnerExit {
+                    owner_key,
+                    exit_name,
+                },
+                other => RuntimeEvalSignal::Message(format!(
+                    "unsupported lifecycle hook control flow `{other:?}`"
+                )),
+            }));
+        }
         if outcome.value != RuntimeValue::Unit {
             return Err(format!(
                 "owner lifecycle hook for `{}` must return Unit",
@@ -6661,6 +7025,75 @@ fn release_scope_owner_activations(state: &mut RuntimeExecutionState, owner_keys
                 owner_state.pending_resume.clear();
             }
         }
+    }
+}
+
+fn apply_explicit_owner_exit(
+    plan: &RuntimePackagePlan,
+    state: &mut RuntimeExecutionState,
+    owner_key: &str,
+    exit_name: &str,
+    scopes: Option<&mut Vec<RuntimeScope>>,
+) -> Result<(), String> {
+    let (owner_package_id, owner_path) = parse_owner_state_key(owner_key);
+    let owner =
+        lookup_runtime_owner_plan(plan, &owner_package_id, &owner_path).ok_or_else(|| {
+            format!(
+                "runtime owner `{}` is not declared in the package plan",
+                owner_key
+            )
+        })?;
+    let owner_exit = owner
+        .exits
+        .iter()
+        .find(|owner_exit| owner_exit.name == exit_name)
+        .ok_or_else(|| {
+            format!(
+                "owner `{}` does not declare exit `{exit_name}`",
+                owner_path.join(".")
+            )
+        })?;
+    let owner_state = state.owners.entry(owner_key.to_string()).or_default();
+    owner_state
+        .objects
+        .retain(|name, _| owner_exit.holds.iter().any(|hold| hold == name));
+    owner_state.pending_init.clear();
+    owner_state.pending_resume.clear();
+    owner_state.activation_context = None;
+    owner_state.active_bindings = 0;
+    if let Some(scopes) = scopes {
+        invalidate_owner_activations_in_scopes(scopes, owner_key);
+    }
+    Ok(())
+}
+
+fn resolve_named_owner_exit_target(
+    plan: &RuntimePackagePlan,
+    scopes: &[RuntimeScope],
+    exit_name: &str,
+) -> Result<String, String> {
+    let matches = collect_active_owner_keys_from_scopes(scopes)
+        .into_iter()
+        .filter(|owner_key| {
+            let (package_id, owner_path) = parse_owner_state_key(owner_key);
+            lookup_runtime_owner_plan(plan, &package_id, &owner_path)
+                .map(|owner| {
+                    owner
+                        .exits
+                        .iter()
+                        .any(|owner_exit| owner_exit.name == exit_name)
+                })
+                .unwrap_or(false)
+        })
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [] => Err(format!(
+            "named recycle exit `{exit_name}` is not active on this path"
+        )),
+        [owner_key] => Ok(owner_key.clone()),
+        _ => Err(format!(
+            "named recycle exit `{exit_name}` is ambiguous across active owners"
+        )),
     }
 }
 
@@ -9641,6 +10074,7 @@ fn insert_runtime_atomic_bool(
 fn insert_runtime_arena(
     state: &mut RuntimeExecutionState,
     type_args: &[String],
+    policy: RuntimeArenaPolicy,
 ) -> RuntimeArenaHandle {
     let handle = RuntimeArenaHandle(state.next_arena_handle);
     state.next_arena_handle += 1;
@@ -9651,6 +10085,7 @@ fn insert_runtime_arena(
             next_slot: 0,
             generation: 0,
             slots: BTreeMap::new(),
+            policy,
         },
     );
     handle
@@ -9659,6 +10094,7 @@ fn insert_runtime_arena(
 fn insert_runtime_frame_arena(
     state: &mut RuntimeExecutionState,
     type_args: &[String],
+    policy: RuntimeFrameArenaPolicy,
 ) -> RuntimeFrameArenaHandle {
     let handle = RuntimeFrameArenaHandle(state.next_frame_arena_handle);
     state.next_frame_arena_handle += 1;
@@ -9669,6 +10105,7 @@ fn insert_runtime_frame_arena(
             next_slot: 0,
             generation: 0,
             slots: BTreeMap::new(),
+            policy,
         },
     );
     handle
@@ -9677,6 +10114,7 @@ fn insert_runtime_frame_arena(
 fn insert_runtime_pool_arena(
     state: &mut RuntimeExecutionState,
     type_args: &[String],
+    policy: RuntimePoolArenaPolicy,
 ) -> RuntimePoolArenaHandle {
     let handle = RuntimePoolArenaHandle(state.next_pool_arena_handle);
     state.next_pool_arena_handle += 1;
@@ -9688,9 +10126,81 @@ fn insert_runtime_pool_arena(
             free_slots: Vec::new(),
             generations: BTreeMap::new(),
             slots: BTreeMap::new(),
+            policy,
         },
     );
     handle
+}
+
+fn default_runtime_arena_policy(capacity: usize) -> RuntimeArenaPolicy {
+    RuntimeArenaPolicy {
+        base_capacity: capacity,
+        current_limit: capacity,
+        growth_step: 0,
+        pressure: RuntimeMemoryPressurePolicy::Bounded,
+        handle: RuntimeMemoryHandlePolicy::Stable,
+    }
+}
+
+fn default_runtime_frame_policy(capacity: usize) -> RuntimeFrameArenaPolicy {
+    RuntimeFrameArenaPolicy {
+        base_capacity: capacity,
+        current_limit: capacity,
+        growth_step: 0,
+        pressure: RuntimeMemoryPressurePolicy::Bounded,
+        recycle: RuntimeFrameRecyclePolicy::Manual,
+    }
+}
+
+fn default_runtime_pool_policy(capacity: usize) -> RuntimePoolArenaPolicy {
+    RuntimePoolArenaPolicy {
+        base_capacity: capacity,
+        current_limit: capacity,
+        growth_step: 0,
+        pressure: RuntimeMemoryPressurePolicy::Bounded,
+        recycle: RuntimePoolRecyclePolicy::Strict,
+        handle: RuntimeMemoryHandlePolicy::Stable,
+    }
+}
+
+fn ensure_runtime_arena_capacity(arena: &mut RuntimeArenaState) -> Result<(), String> {
+    if arena.slots.len() < arena.policy.current_limit {
+        return Ok(());
+    }
+    if matches!(arena.policy.pressure, RuntimeMemoryPressurePolicy::Elastic)
+        && runtime_try_grow_limit(&mut arena.policy.current_limit, arena.policy.growth_step)
+    {
+        return Ok(());
+    }
+    Err(format!(
+        "arena capacity exhausted at {}; growth={} pressure={:?}",
+        arena.policy.current_limit, arena.policy.growth_step, arena.policy.pressure
+    ))
+}
+
+fn ensure_runtime_frame_capacity(arena: &mut RuntimeFrameArenaState) -> Result<(), String> {
+    if arena.slots.len() < arena.policy.current_limit {
+        return Ok(());
+    }
+    if matches!(arena.policy.pressure, RuntimeMemoryPressurePolicy::Elastic)
+        && runtime_try_grow_limit(&mut arena.policy.current_limit, arena.policy.growth_step)
+    {
+        return Ok(());
+    }
+    if matches!(arena.policy.recycle, RuntimeFrameRecyclePolicy::Frame) {
+        arena.generation += 1;
+        arena.next_slot = 0;
+        arena.slots.clear();
+        arena.policy.current_limit = arena.policy.base_capacity;
+        return Ok(());
+    }
+    Err(format!(
+        "frame arena capacity exhausted at {}; growth={} pressure={:?} recycle={:?}",
+        arena.policy.current_limit,
+        arena.policy.growth_step,
+        arena.policy.pressure,
+        arena.policy.recycle
+    ))
 }
 
 fn insert_runtime_task(
@@ -11736,7 +12246,7 @@ fn execute_call_by_path(
     state: &mut RuntimeExecutionState,
     host: &mut dyn RuntimeHost,
     allow_async: bool,
-) -> Result<RuntimeValue, String> {
+) -> RuntimeEvalResult<RuntimeValue> {
     if let Some(value) = try_execute_arcana_owned_api_call(callable, &call_args, host)? {
         return Ok(value);
     }
@@ -11784,6 +12294,16 @@ fn execute_call_by_path(
             &outcome.final_args,
             host,
         )?;
+        if let Some(FlowSignal::OwnerExit {
+            owner_key,
+            exit_name,
+        }) = outcome.control
+        {
+            return Err(RuntimeEvalSignal::OwnerExit {
+                owner_key,
+                exit_name,
+            });
+        }
         return Ok(outcome.value);
     }
     let intrinsic = resolve_runtime_intrinsic_path(callable)
@@ -11792,7 +12312,8 @@ fn execute_call_by_path(
         return Err(format!(
             "runtime intrinsic `{}` does not yet support named-only fallback binding",
             callable.join(".")
-        ));
+        )
+        .into());
     }
     consume_take_call_args(scopes, intrinsic_take_arg_indices(intrinsic), &call_args)?;
     let mut values = call_args
@@ -14376,10 +14897,9 @@ fn execute_runtime_core_intrinsic(
         }
         RuntimeIntrinsic::MemoryArenaNew => {
             let capacity = expect_int(expect_single_arg(args, "arena_new")?, "arena_new")?;
-            if capacity < 0 {
-                return Err("arena_new capacity must be non-negative".to_string());
-            }
-            let handle = insert_runtime_arena(state, type_args);
+            let capacity = runtime_non_negative_usize(capacity, "arena_new capacity")?;
+            let handle =
+                insert_runtime_arena(state, type_args, default_runtime_arena_policy(capacity));
             Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::Arena(handle)))
         }
         RuntimeIntrinsic::MemoryArenaAlloc => {
@@ -14391,6 +14911,7 @@ fn execute_runtime_core_intrinsic(
                 .arenas
                 .get_mut(&handle)
                 .ok_or_else(|| format!("invalid Arena handle `{}`", handle.0))?;
+            ensure_runtime_arena_capacity(arena)?;
             let slot = arena.next_slot;
             arena.next_slot += 1;
             arena.slots.insert(slot, args[1].clone());
@@ -14517,16 +15038,21 @@ fn execute_runtime_core_intrinsic(
                 .get_mut(&handle)
                 .ok_or_else(|| format!("invalid Arena handle `{}`", handle.0))?;
             arena.generation += 1;
-            arena.next_slot = 0;
+            if matches!(arena.policy.handle, RuntimeMemoryHandlePolicy::Unstable) {
+                arena.next_slot = 0;
+            }
             arena.slots.clear();
+            arena.policy.current_limit = arena.policy.base_capacity;
             Ok(RuntimeValue::Unit)
         }
         RuntimeIntrinsic::MemoryFrameNew => {
             let capacity = expect_int(expect_single_arg(args, "frame_new")?, "frame_new")?;
-            if capacity < 0 {
-                return Err("frame_new capacity must be non-negative".to_string());
-            }
-            let handle = insert_runtime_frame_arena(state, type_args);
+            let capacity = runtime_non_negative_usize(capacity, "frame_new capacity")?;
+            let handle = insert_runtime_frame_arena(
+                state,
+                type_args,
+                default_runtime_frame_policy(capacity),
+            );
             Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::FrameArena(handle)))
         }
         RuntimeIntrinsic::MemoryFrameAlloc => {
@@ -14538,6 +15064,7 @@ fn execute_runtime_core_intrinsic(
                 .frame_arenas
                 .get_mut(&handle)
                 .ok_or_else(|| format!("invalid FrameArena handle `{}`", handle.0))?;
+            ensure_runtime_frame_capacity(arena)?;
             let slot = arena.next_slot;
             arena.next_slot += 1;
             arena.slots.insert(slot, args[1].clone());
@@ -14647,14 +15174,14 @@ fn execute_runtime_core_intrinsic(
             arena.generation += 1;
             arena.next_slot = 0;
             arena.slots.clear();
+            arena.policy.current_limit = arena.policy.base_capacity;
             Ok(RuntimeValue::Unit)
         }
         RuntimeIntrinsic::MemoryPoolNew => {
             let capacity = expect_int(expect_single_arg(args, "pool_new")?, "pool_new")?;
-            if capacity < 0 {
-                return Err("pool_new capacity must be non-negative".to_string());
-            }
-            let handle = insert_runtime_pool_arena(state, type_args);
+            let capacity = runtime_non_negative_usize(capacity, "pool_new capacity")?;
+            let handle =
+                insert_runtime_pool_arena(state, type_args, default_runtime_pool_policy(capacity));
             Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::PoolArena(handle)))
         }
         RuntimeIntrinsic::MemoryPoolAlloc => {
@@ -14666,12 +15193,38 @@ fn execute_runtime_core_intrinsic(
                 .pool_arenas
                 .get_mut(&handle)
                 .ok_or_else(|| format!("invalid PoolArena handle `{}`", handle.0))?;
-            let slot = arena.free_slots.pop().unwrap_or_else(|| {
+            let slot = if matches!(arena.policy.recycle, RuntimePoolRecyclePolicy::FreeList) {
+                arena.free_slots.pop()
+            } else {
+                None
+            }
+            .unwrap_or_else(|| {
+                if arena.slots.len() >= arena.policy.current_limit
+                    && matches!(arena.policy.pressure, RuntimeMemoryPressurePolicy::Elastic)
+                {
+                    let _ = runtime_try_grow_limit(
+                        &mut arena.policy.current_limit,
+                        arena.policy.growth_step,
+                    );
+                }
+                let has_capacity = arena.slots.len() < arena.policy.current_limit;
+                if !has_capacity {
+                    return u64::MAX;
+                }
                 let slot = arena.next_slot;
                 arena.next_slot += 1;
                 arena.generations.entry(slot).or_insert(0);
                 slot
             });
+            if slot == u64::MAX {
+                return Err(format!(
+                    "pool capacity exhausted at {}; growth={} pressure={:?} recycle={:?}",
+                    arena.policy.current_limit,
+                    arena.policy.growth_step,
+                    arena.policy.pressure,
+                    arena.policy.recycle
+                ));
+            }
             let generation = pool_slot_generation(arena, slot);
             arena.slots.insert(slot, args[1].clone());
             Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::PoolId(
@@ -14789,7 +15342,9 @@ fn execute_runtime_core_intrinsic(
             }
             arena.slots.remove(&id.slot);
             *arena.generations.entry(id.slot).or_insert(0) += 1;
-            arena.free_slots.push(id.slot);
+            if matches!(arena.policy.recycle, RuntimePoolRecyclePolicy::FreeList) {
+                arena.free_slots.push(id.slot);
+            }
             Ok(RuntimeValue::Bool(true))
         }
         RuntimeIntrinsic::MemoryPoolReset => {
@@ -14803,6 +15358,7 @@ fn execute_runtime_core_intrinsic(
                 *generation += 1;
             }
             arena.free_slots = arena.generations.keys().copied().rev().collect();
+            arena.policy.current_limit = arena.policy.base_capacity;
             Ok(RuntimeValue::Unit)
         }
         RuntimeIntrinsic::AudioDefaultOutputTry => {
@@ -16152,7 +16708,7 @@ fn execute_deferred_work(
                 allow_async,
             );
             state.current_thread_id = previous_thread_id;
-            result
+            result.map_err(runtime_eval_message)
         }
         RuntimeDeferredWork::Expr(pending) => {
             let RuntimeDeferredExpr {
@@ -16588,6 +17144,608 @@ fn eval_spawn_expr(
     ))
 }
 
+fn runtime_expr_path_name(expr: &ParsedExpr) -> Option<String> {
+    match expr {
+        ParsedExpr::Path(segments) => Some(segments.join(".")),
+        ParsedExpr::Generic { expr, .. } => runtime_expr_path_name(expr),
+        ParsedExpr::Member { expr, member } => {
+            runtime_expr_path_name(expr).map(|base| format!("{base}.{member}"))
+        }
+        _ => None,
+    }
+}
+
+fn runtime_gate_outcome(
+    value: RuntimeValue,
+    context: &str,
+) -> Result<Result<Option<RuntimeValue>, RuntimeValue>, String> {
+    match value {
+        RuntimeValue::Bool(true) => Ok(Ok(None)),
+        RuntimeValue::Bool(false) => Ok(Err(RuntimeValue::Bool(false))),
+        RuntimeValue::Variant { name, mut payload } => {
+            if variant_name_matches(&name, "Option.Some") && payload.len() == 1 {
+                Ok(Ok(Some(payload.remove(0))))
+            } else if variant_name_matches(&name, "Option.None") && payload.is_empty() {
+                Ok(Err(none_variant()))
+            } else if variant_name_matches(&name, "Result.Ok") && payload.len() == 1 {
+                Ok(Ok(Some(payload.remove(0))))
+            } else if variant_name_matches(&name, "Result.Err") && payload.len() == 1 {
+                Ok(Err(RuntimeValue::Variant { name, payload }))
+            } else {
+                Err(format!("{context} expects Bool, Option, or Result"))
+            }
+        }
+        other => Err(format!(
+            "{context} expects Bool, Option, or Result, found {other:?}"
+        )),
+    }
+}
+
+fn eval_headed_modifier_payload(
+    payload: Option<&ParsedExpr>,
+    plan: &RuntimePackagePlan,
+    current_package_id: &str,
+    current_module_id: &str,
+    scopes: &mut Vec<RuntimeScope>,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
+) -> RuntimeEvalResult<Option<RuntimeValue>> {
+    payload
+        .map(|expr| {
+            eval_expr(
+                expr,
+                plan,
+                current_package_id,
+                current_module_id,
+                scopes,
+                aliases,
+                type_bindings,
+                state,
+                host,
+            )
+        })
+        .transpose()
+}
+
+fn memory_family_from_text(text: &str) -> Result<MemoryFamily, String> {
+    MemoryFamily::parse(text).ok_or_else(|| format!("unknown memory family `{text}`"))
+}
+
+fn memory_detail_key_from_text(text: &str) -> Result<MemoryDetailKey, String> {
+    MemoryDetailKey::parse(text).ok_or_else(|| format!("unknown memory detail key `{text}`"))
+}
+
+fn memory_detail_atom(value: RuntimeValue, context: &str) -> Result<String, String> {
+    match value {
+        RuntimeValue::Str(text) => Ok(text),
+        RuntimeValue::Variant { name, payload } if payload.is_empty() => {
+            Ok(name.rsplit('.').next().unwrap_or(&name).to_string())
+        }
+        RuntimeValue::Record { name, fields } if fields.is_empty() => {
+            Ok(name.rsplit('.').next().unwrap_or(&name).to_string())
+        }
+        RuntimeValue::OwnerHandle(name) => Ok(name),
+        other => Err(format!(
+            "{context} requires an identifier atom, found {other:?}"
+        )),
+    }
+}
+
+fn runtime_materialization_handle_policy(
+    materialization: &RuntimeMemorySpecMaterialization,
+) -> RuntimeMemoryHandlePolicy {
+    match materialization {
+        RuntimeMemorySpecMaterialization::Arena(policy) => policy.handle,
+        RuntimeMemorySpecMaterialization::Frame(_) => RuntimeMemoryHandlePolicy::Stable,
+        RuntimeMemorySpecMaterialization::Pool(policy) => policy.handle,
+    }
+}
+
+fn build_runtime_memory_spec_materialization(
+    spec: &ParsedMemorySpecDecl,
+    plan: &RuntimePackagePlan,
+    current_package_id: &str,
+    current_module_id: &str,
+    scopes: &mut Vec<RuntimeScope>,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
+) -> RuntimeEvalResult<RuntimeMemorySpecMaterialization> {
+    let family = memory_family_from_text(&spec.family).map_err(RuntimeEvalSignal::from)?;
+    let default_strategy = spec
+        .default_modifier
+        .as_ref()
+        .map(runtime_memory_strategy_from_modifier)
+        .transpose()
+        .map_err(RuntimeEvalSignal::from)?
+        .unwrap_or(RuntimeMemoryStrategy::Alloc);
+    let mut budget_strategy = default_strategy;
+    let mut recycle_strategy = default_strategy;
+    let mut handle_strategy = default_strategy;
+    let mut capacity = 0usize;
+    let mut growth = None;
+    let mut pressure = None;
+    let mut handle_policy = None;
+    let mut frame_recycle = None;
+    let mut pool_recycle = None;
+    for detail in &spec.details {
+        let key = memory_detail_key_from_text(&detail.key).map_err(RuntimeEvalSignal::from)?;
+        let descriptor = memory_detail_descriptor(family, key).ok_or_else(|| {
+            RuntimeEvalSignal::from(format!(
+                "memory detail `{}` is not supported for family `{}`",
+                detail.key, spec.family
+            ))
+        })?;
+        let detail_strategy = detail
+            .modifier
+            .as_ref()
+            .map(runtime_memory_strategy_from_modifier)
+            .transpose()
+            .map_err(RuntimeEvalSignal::from)?;
+        match descriptor.value_kind {
+            MemoryDetailValueKind::IntExpr => {
+                let value = eval_expr(
+                    &detail.value,
+                    plan,
+                    current_package_id,
+                    current_module_id,
+                    scopes,
+                    aliases,
+                    type_bindings,
+                    state,
+                    host,
+                )?;
+                let int_value = expect_int(value, &format!("Memory.{}", detail.key))
+                    .map_err(RuntimeEvalSignal::from)?;
+                let normalized =
+                    runtime_non_negative_usize(int_value, &format!("Memory.{}", detail.key))
+                        .map_err(RuntimeEvalSignal::from)?;
+                if matches!(
+                    key,
+                    MemoryDetailKey::Capacity | MemoryDetailKey::Growth | MemoryDetailKey::Pressure
+                ) && let Some(strategy) = detail_strategy
+                {
+                    budget_strategy = strategy;
+                }
+                match key {
+                    MemoryDetailKey::Capacity => capacity = normalized,
+                    MemoryDetailKey::Growth => growth = Some(normalized),
+                    _ => unreachable!("only int memory detail keys reach this branch"),
+                }
+            }
+            MemoryDetailValueKind::Atom => {
+                let atom = match &detail.value {
+                    ParsedExpr::Path(segments) if !segments.is_empty() => {
+                        segments.last().cloned().unwrap_or_default()
+                    }
+                    _ => {
+                        let value = eval_expr(
+                            &detail.value,
+                            plan,
+                            current_package_id,
+                            current_module_id,
+                            scopes,
+                            aliases,
+                            type_bindings,
+                            state,
+                            host,
+                        )?;
+                        memory_detail_atom(value, &format!("Memory.{}", detail.key))
+                            .map_err(RuntimeEvalSignal::from)?
+                    }
+                };
+                if !descriptor.atoms.iter().any(|allowed| *allowed == atom) {
+                    return Err(format!(
+                        "memory detail `{}` for family `{}` rejects atom `{}`; allowed: {}",
+                        detail.key,
+                        spec.family,
+                        atom,
+                        descriptor.atoms.join(", ")
+                    )
+                    .into());
+                }
+                match key {
+                    MemoryDetailKey::Pressure => {
+                        if let Some(strategy) = detail_strategy {
+                            budget_strategy = strategy;
+                        }
+                        pressure = Some(
+                            runtime_memory_pressure_from_atom(&atom)
+                                .map_err(RuntimeEvalSignal::from)?,
+                        );
+                    }
+                    MemoryDetailKey::Handle => {
+                        if let Some(strategy) = detail_strategy {
+                            handle_strategy = strategy;
+                        }
+                        handle_policy = Some(
+                            runtime_memory_handle_policy_from_atom(&atom)
+                                .map_err(RuntimeEvalSignal::from)?,
+                        );
+                    }
+                    MemoryDetailKey::Recycle => {
+                        if let Some(strategy) = detail_strategy {
+                            recycle_strategy = strategy;
+                        }
+                        match family {
+                            MemoryFamily::Arena => {
+                                return Err(RuntimeEvalSignal::from(
+                                    "arena does not support recycle atoms".to_string(),
+                                ));
+                            }
+                            MemoryFamily::Frame => {
+                                frame_recycle = Some(
+                                    runtime_frame_recycle_policy_from_atom(&atom)
+                                        .map_err(RuntimeEvalSignal::from)?,
+                                );
+                            }
+                            MemoryFamily::Pool => {
+                                pool_recycle = Some(
+                                    runtime_pool_recycle_policy_from_atom(&atom)
+                                        .map_err(RuntimeEvalSignal::from)?,
+                                );
+                            }
+                        }
+                    }
+                    _ => unreachable!("only atom memory detail keys reach this branch"),
+                }
+            }
+        }
+    }
+    Ok(match family {
+        MemoryFamily::Arena => RuntimeMemorySpecMaterialization::Arena(RuntimeArenaPolicy {
+            base_capacity: capacity,
+            current_limit: capacity,
+            growth_step: growth
+                .unwrap_or_else(|| runtime_default_growth_step(budget_strategy, capacity)),
+            pressure: pressure.unwrap_or_else(|| runtime_default_memory_pressure(budget_strategy)),
+            handle: handle_policy
+                .unwrap_or_else(|| runtime_default_memory_handle_policy(handle_strategy)),
+        }),
+        MemoryFamily::Frame => RuntimeMemorySpecMaterialization::Frame(RuntimeFrameArenaPolicy {
+            base_capacity: capacity,
+            current_limit: capacity,
+            growth_step: growth
+                .unwrap_or_else(|| runtime_default_growth_step(budget_strategy, capacity)),
+            pressure: pressure.unwrap_or_else(|| runtime_default_memory_pressure(budget_strategy)),
+            recycle: frame_recycle
+                .unwrap_or_else(|| runtime_default_frame_recycle_policy(recycle_strategy)),
+        }),
+        MemoryFamily::Pool => RuntimeMemorySpecMaterialization::Pool(RuntimePoolArenaPolicy {
+            base_capacity: capacity,
+            current_limit: capacity,
+            growth_step: growth
+                .unwrap_or_else(|| runtime_default_growth_step(budget_strategy, capacity)),
+            pressure: pressure.unwrap_or_else(|| runtime_default_memory_pressure(budget_strategy)),
+            recycle: pool_recycle
+                .unwrap_or_else(|| runtime_default_pool_recycle_policy(recycle_strategy)),
+            handle: handle_policy
+                .unwrap_or_else(|| runtime_default_memory_handle_policy(handle_strategy)),
+        }),
+    })
+}
+
+fn materialize_runtime_memory_spec(
+    spec: &ParsedMemorySpecDecl,
+    plan: &RuntimePackagePlan,
+    current_package_id: &str,
+    current_module_id: &str,
+    scopes: &mut Vec<RuntimeScope>,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
+) -> RuntimeEvalResult<(RuntimeValue, RuntimeMemoryHandlePolicy)> {
+    let materialization = build_runtime_memory_spec_materialization(
+        spec,
+        plan,
+        current_package_id,
+        current_module_id,
+        scopes,
+        aliases,
+        type_bindings,
+        state,
+        host,
+    )?;
+    let handle_policy = runtime_materialization_handle_policy(&materialization);
+    let value = match materialization {
+        RuntimeMemorySpecMaterialization::Arena(policy) => RuntimeValue::Opaque(
+            RuntimeOpaqueValue::Arena(insert_runtime_arena(state, &[], policy)),
+        ),
+        RuntimeMemorySpecMaterialization::Frame(policy) => RuntimeValue::Opaque(
+            RuntimeOpaqueValue::FrameArena(insert_runtime_frame_arena(state, &[], policy)),
+        ),
+        RuntimeMemorySpecMaterialization::Pool(policy) => RuntimeValue::Opaque(
+            RuntimeOpaqueValue::PoolArena(insert_runtime_pool_arena(state, &[], policy)),
+        ),
+    };
+    Ok((value, handle_policy))
+}
+
+fn resolve_runtime_memory_phrase_instance(
+    family: &str,
+    arena: &ParsedExpr,
+    plan: &RuntimePackagePlan,
+    current_package_id: &str,
+    current_module_id: &str,
+    scopes: &mut Vec<RuntimeScope>,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
+) -> RuntimeEvalResult<RuntimeValue> {
+    let Some(path) = runtime_expr_path_name(arena)
+        .map(|text| text.split('.').map(ToString::to_string).collect::<Vec<_>>())
+    else {
+        return eval_expr(
+            arena,
+            plan,
+            current_package_id,
+            current_module_id,
+            scopes,
+            aliases,
+            type_bindings,
+            state,
+            host,
+        );
+    };
+    if path.len() == 1 && lookup_local(scopes, &path[0]).is_some() {
+        return eval_expr(
+            arena,
+            plan,
+            current_package_id,
+            current_module_id,
+            scopes,
+            aliases,
+            type_bindings,
+            state,
+            host,
+        );
+    }
+    if path.len() == 1
+        && let Some(spec_state) = lookup_memory_spec_in_scopes(scopes, &path[0]).cloned()
+    {
+        if spec_state.spec.family != family {
+            return Err(format!(
+                "memory spec `{}` is family `{}` but phrase requires `{family}`",
+                path[0], spec_state.spec.family
+            )
+            .into());
+        }
+        if spec_state.handle_policy == Some(RuntimeMemoryHandlePolicy::Stable)
+            && let Some(handle) = spec_state.handle
+        {
+            return Ok(handle);
+        }
+        let (handle, handle_policy) = materialize_runtime_memory_spec(
+            &spec_state.spec,
+            plan,
+            current_package_id,
+            current_module_id,
+            scopes,
+            aliases,
+            type_bindings,
+            state,
+            host,
+        )?;
+        if let Some(spec_state) = lookup_memory_spec_in_scopes_mut(scopes, &path[0]) {
+            spec_state.handle_policy = Some(handle_policy);
+            spec_state.handle =
+                matches!(handle_policy, RuntimeMemoryHandlePolicy::Stable).then(|| handle.clone());
+        }
+        return Ok(handle);
+    }
+    if let Some((package_id, module_id, spec_name)) =
+        resolve_memory_spec_target(plan, current_package_id, current_module_id, aliases, &path)
+    {
+        let key = memory_spec_state_key(&package_id, &module_id, &spec_name);
+        let existing_state = state.module_memory_specs.get(&key).cloned();
+        let spec = if let Some(existing) = &existing_state {
+            existing.spec.clone()
+        } else if let Some(spec) =
+            lookup_module_memory_spec_decl(plan, &package_id, &module_id, &spec_name)
+                .map_err(RuntimeEvalSignal::from)?
+        {
+            if spec.family != family {
+                return Err(format!(
+                    "memory spec `{}` is family `{}` but phrase requires `{family}`",
+                    path.join("."),
+                    spec.family
+                )
+                .into());
+            }
+            state.module_memory_specs.insert(
+                key.clone(),
+                RuntimeMemorySpecState {
+                    spec: spec.clone(),
+                    handle: None,
+                    handle_policy: None,
+                },
+            );
+            spec
+        } else {
+            return eval_expr(
+                arena,
+                plan,
+                current_package_id,
+                current_module_id,
+                scopes,
+                aliases,
+                type_bindings,
+                state,
+                host,
+            );
+        };
+        if let Some(existing) = existing_state
+            && existing.handle_policy == Some(RuntimeMemoryHandlePolicy::Stable)
+            && let Some(handle) = existing.handle
+        {
+            return Ok(handle);
+        }
+        let (handle, handle_policy) = materialize_runtime_memory_spec(
+            &spec,
+            plan,
+            current_package_id,
+            current_module_id,
+            scopes,
+            aliases,
+            type_bindings,
+            state,
+            host,
+        )?;
+        state
+            .module_memory_specs
+            .entry(key.clone())
+            .and_modify(|spec_state| {
+                spec_state.handle_policy = Some(handle_policy);
+                spec_state.handle = matches!(handle_policy, RuntimeMemoryHandlePolicy::Stable)
+                    .then(|| handle.clone());
+            })
+            .or_insert(RuntimeMemorySpecState {
+                spec,
+                handle: matches!(handle_policy, RuntimeMemoryHandlePolicy::Stable)
+                    .then(|| handle.clone()),
+                handle_policy: Some(handle_policy),
+            });
+        return Ok(handle);
+    }
+    eval_expr(
+        arena,
+        plan,
+        current_package_id,
+        current_module_id,
+        scopes,
+        aliases,
+        type_bindings,
+        state,
+        host,
+    )
+}
+
+fn eval_construct_contribution_value(
+    line: &ParsedConstructLine,
+    default_modifier: Option<&ParsedHeadedModifier>,
+    plan: &RuntimePackagePlan,
+    current_package_id: &str,
+    current_module_id: &str,
+    scopes: &mut Vec<RuntimeScope>,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
+) -> RuntimeEvalResult<Option<RuntimeValue>> {
+    let value = eval_expr(
+        &line.value,
+        plan,
+        current_package_id,
+        current_module_id,
+        scopes,
+        aliases,
+        type_bindings,
+        state,
+        host,
+    )?;
+    if matches!(line.mode, ParsedConstructContributionMode::Direct) {
+        return Ok(Some(value));
+    }
+    let modifier = line.modifier.as_ref().or(default_modifier);
+    let Some(modifier) = modifier else {
+        return Err(
+            "construct acquisition failure requires an explicit modifier"
+                .to_string()
+                .into(),
+        );
+    };
+    match runtime_construct_contribution_outcome(value, line.mode)? {
+        Ok(payload) => Ok(Some(payload)),
+        Err(failure) => match modifier.kind.as_str() {
+            "return" => {
+                if let Some(payload) = &modifier.payload {
+                    let value = eval_expr(
+                        payload,
+                        plan,
+                        current_package_id,
+                        current_module_id,
+                        scopes,
+                        aliases,
+                        type_bindings,
+                        state,
+                        host,
+                    )?;
+                    Err(RuntimeEvalSignal::Return(value))
+                } else if let RuntimeValue::Variant { name, .. } = &failure {
+                    if variant_name_matches(name, "Result.Err") {
+                        Err(RuntimeEvalSignal::Return(failure))
+                    } else {
+                        Err("bare `-return` on construct requires Result failure"
+                            .to_string()
+                            .into())
+                    }
+                } else {
+                    Err("bare `-return` on construct requires Result failure"
+                        .to_string()
+                        .into())
+                }
+            }
+            "default" => Ok(eval_headed_modifier_payload(
+                modifier.payload.as_ref(),
+                plan,
+                current_package_id,
+                current_module_id,
+                scopes,
+                aliases,
+                type_bindings,
+                state,
+                host,
+            )?),
+            "skip" => Ok(Some(none_variant())),
+            other => Err(format!("unsupported construct modifier `{other}`").into()),
+        },
+    }
+}
+
+fn runtime_construct_contribution_outcome(
+    value: RuntimeValue,
+    mode: ParsedConstructContributionMode,
+) -> Result<Result<RuntimeValue, RuntimeValue>, String> {
+    match mode {
+        ParsedConstructContributionMode::Direct => Ok(Ok(value)),
+        ParsedConstructContributionMode::OptionPayload => match value {
+            RuntimeValue::Variant { name, mut payload }
+                if variant_name_matches(&name, "Option.Some") && payload.len() == 1 =>
+            {
+                Ok(Ok(payload.remove(0)))
+            }
+            RuntimeValue::Variant { name, payload }
+                if variant_name_matches(&name, "Option.None") && payload.is_empty() =>
+            {
+                Ok(Err(none_variant()))
+            }
+            other => Err(format!(
+                "construct acquisition expects Option payload, found {other:?}"
+            )),
+        },
+        ParsedConstructContributionMode::ResultPayload => match value {
+            RuntimeValue::Variant { name, mut payload }
+                if variant_name_matches(&name, "Result.Ok") && payload.len() == 1 =>
+            {
+                Ok(Ok(payload.remove(0)))
+            }
+            RuntimeValue::Variant { name, payload }
+                if variant_name_matches(&name, "Result.Err") && payload.len() == 1 =>
+            {
+                Ok(Err(RuntimeValue::Variant { name, payload }))
+            }
+            other => Err(format!(
+                "construct acquisition expects Result payload, found {other:?}"
+            )),
+        },
+    }
+}
+
 fn eval_expr(
     expr: &ParsedExpr,
     plan: &RuntimePackagePlan,
@@ -16657,6 +17815,44 @@ fn eval_expr(
             state,
             host,
         ),
+        ParsedExpr::ConstructRegion(region) => {
+            let target_name = runtime_expr_path_name(&region.target).ok_or_else(|| {
+                "construct target must be a path-like constructor reference".to_string()
+            })?;
+            let mut fields = BTreeMap::new();
+            let mut payload = Vec::new();
+            for line in &region.lines {
+                if let Some(value) = eval_construct_contribution_value(
+                    line,
+                    region.default_modifier.as_ref(),
+                    plan,
+                    current_package_id,
+                    current_module_id,
+                    scopes,
+                    aliases,
+                    type_bindings,
+                    state,
+                    host,
+                )? {
+                    if line.name == "payload" {
+                        payload.push(value);
+                    } else {
+                        fields.insert(line.name.clone(), value);
+                    }
+                }
+            }
+            if !payload.is_empty() && fields.is_empty() {
+                Ok(RuntimeValue::Variant {
+                    name: target_name,
+                    payload,
+                })
+            } else {
+                Ok(RuntimeValue::Record {
+                    name: target_name,
+                    fields,
+                })
+            }
+        }
         ParsedExpr::Chain {
             style,
             introducer,
@@ -17188,7 +18384,8 @@ fn eval_expr(
             constructor,
             attached,
         } => {
-            let arena_value = eval_expr(
+            let arena_value = resolve_runtime_memory_phrase_instance(
+                family,
                 arena,
                 plan,
                 current_package_id,
@@ -17454,28 +18651,65 @@ fn execute_scoped_block(
     let exited_scope = scopes
         .pop()
         .ok_or_else(|| "runtime scope stack is empty".to_string())?;
-    defer_result?;
+    let result = match defer_result {
+        Ok(()) => result,
+        Err(RuntimeEvalSignal::OwnerExit {
+            owner_key,
+            exit_name,
+        }) => Ok(FlowSignal::OwnerExit {
+            owner_key,
+            exit_name,
+        }),
+        Err(other) => return Err(other),
+    };
     let frame = if cleanup_footers.is_empty() {
         None
     } else {
         pop_runtime_cleanup_footer_frame(state)
     };
-    let result = finish_runtime_cleanup_footers(result, frame, plan, scopes, state, host);
-    if let Err(err) = evaluate_owner_exit_checkpoints(
-        &exited_scope.activated_owner_keys,
-        plan,
-        current_package_id,
-        current_module_id,
-        aliases,
-        type_bindings,
-        state,
-        host,
-        Some(scopes),
-    ) {
-        return Err(err.into());
-    }
+    let result = match finish_runtime_cleanup_footers(result, frame, plan, scopes, state, host) {
+        Ok(signal) => signal,
+        Err(RuntimeEvalSignal::OwnerExit {
+            owner_key,
+            exit_name,
+        }) => FlowSignal::OwnerExit {
+            owner_key,
+            exit_name,
+        },
+        Err(other) => return Err(other),
+    };
+    let result = match result {
+        FlowSignal::OwnerExit {
+            owner_key,
+            exit_name,
+        } if exited_scope
+            .activated_owner_keys
+            .iter()
+            .any(|active| active == &owner_key) =>
+        {
+            apply_explicit_owner_exit(plan, state, &owner_key, &exit_name, Some(scopes))
+                .map_err(RuntimeEvalSignal::from)?;
+            FlowSignal::Next
+        }
+        other => {
+            if let Err(err) = evaluate_owner_exit_checkpoints(
+                &exited_scope.activated_owner_keys,
+                plan,
+                current_package_id,
+                current_module_id,
+                aliases,
+                type_bindings,
+                state,
+                host,
+                Some(scopes),
+            ) {
+                return Err(err.into());
+            }
+            other
+        }
+    };
     release_scope_owner_activations(state, &exited_scope.activated_owner_keys);
-    result
+    Ok(result)
 }
 
 fn execute_statements(
@@ -17667,6 +18901,15 @@ fn execute_statements(
                     FlowSignal::Next | FlowSignal::Continue => {}
                     FlowSignal::Break => break FlowSignal::Next,
                     FlowSignal::Return(value) => break FlowSignal::Return(value),
+                    FlowSignal::OwnerExit {
+                        owner_key,
+                        exit_name,
+                    } => {
+                        break FlowSignal::OwnerExit {
+                            owner_key,
+                            exit_name,
+                        };
+                    }
                 }
             },
             ParsedStmt::For {
@@ -17721,6 +18964,16 @@ fn execute_statements(
                         }
                         FlowSignal::Return(value) => {
                             loop_signal = FlowSignal::Return(value);
+                            break;
+                        }
+                        FlowSignal::OwnerExit {
+                            owner_key,
+                            exit_name,
+                        } => {
+                            loop_signal = FlowSignal::OwnerExit {
+                                owner_key,
+                                exit_name,
+                            };
                             break;
                         }
                     }
@@ -17814,6 +19067,457 @@ fn execute_statements(
                 .map_err(RuntimeEvalSignal::from)?;
                 FlowSignal::Next
             }
+            ParsedStmt::Recycle {
+                default_modifier,
+                lines,
+            } => {
+                let mut signal = FlowSignal::Next;
+                for line in lines {
+                    let gate = match &line.kind {
+                        ParsedRecycleLineKind::Expr { gate }
+                        | ParsedRecycleLineKind::Let { gate, .. }
+                        | ParsedRecycleLineKind::Assign { gate, .. } => gate,
+                    };
+                    let value = eval_expr(
+                        gate,
+                        plan,
+                        current_package_id,
+                        current_module_id,
+                        scopes,
+                        aliases,
+                        type_bindings,
+                        state,
+                        host,
+                    )?;
+                    match runtime_gate_outcome(value, "recycle gate")? {
+                        Ok(success_payload) => match (&line.kind, success_payload) {
+                            (ParsedRecycleLineKind::Let { mutable, name, .. }, Some(payload)) => {
+                                let current_scope_depth = scopes.len().saturating_sub(1);
+                                let current_scope = scopes
+                                    .last_mut()
+                                    .ok_or_else(|| "runtime scope stack is empty".to_string())?;
+                                insert_runtime_local(
+                                    state,
+                                    current_scope_depth,
+                                    current_scope,
+                                    0,
+                                    name.clone(),
+                                    *mutable,
+                                    payload,
+                                );
+                            }
+                            (ParsedRecycleLineKind::Assign { name, .. }, Some(payload)) => {
+                                apply_assign(
+                                    &ParsedAssignTarget::Name(name.clone()),
+                                    ParsedAssignOp::Assign,
+                                    payload,
+                                    plan,
+                                    current_package_id,
+                                    current_module_id,
+                                    scopes,
+                                    aliases,
+                                    type_bindings,
+                                    state,
+                                    host,
+                                )?;
+                            }
+                            (ParsedRecycleLineKind::Expr { .. }, _) => {}
+                            _ => {
+                                return Err(
+                                    "payload-bearing recycle line requires Option/Result gate"
+                                        .to_string()
+                                        .into(),
+                                );
+                            }
+                        },
+                        Err(failure) => {
+                            let modifier = line
+                                .modifier
+                                .as_ref()
+                                .or(default_modifier.as_ref())
+                                .ok_or_else(|| {
+                                    "recycle failure requires an explicit exit modifier".to_string()
+                                })?;
+                            signal = match modifier.kind.as_str() {
+                                "return" => {
+                                    if let Some(payload) = &modifier.payload {
+                                        FlowSignal::Return(eval_expr(
+                                            payload,
+                                            plan,
+                                            current_package_id,
+                                            current_module_id,
+                                            scopes,
+                                            aliases,
+                                            type_bindings,
+                                            state,
+                                            host,
+                                        )?)
+                                    } else if let RuntimeValue::Variant { name, .. } = &failure {
+                                        if variant_name_matches(name, "Result.Err") {
+                                            FlowSignal::Return(failure)
+                                        } else {
+                                            return Err(
+                                                "bare `-return` in recycle requires Result failure"
+                                                    .to_string()
+                                                    .into(),
+                                            );
+                                        }
+                                    } else {
+                                        return Err(
+                                            "bare `-return` in recycle requires Result failure"
+                                                .to_string()
+                                                .into(),
+                                        );
+                                    }
+                                }
+                                "break" => FlowSignal::Break,
+                                "continue" => FlowSignal::Continue,
+                                other => {
+                                    let owner_key =
+                                        resolve_named_owner_exit_target(plan, scopes, other)
+                                            .map_err(RuntimeEvalSignal::from)?;
+                                    FlowSignal::OwnerExit {
+                                        owner_key,
+                                        exit_name: other.to_string(),
+                                    }
+                                }
+                            };
+                            break;
+                        }
+                    }
+                }
+                signal
+            }
+            ParsedStmt::Bind {
+                default_modifier,
+                lines,
+            } => {
+                let mut signal = FlowSignal::Next;
+                for line in lines {
+                    let modifier = line.modifier.as_ref().or(default_modifier.as_ref());
+                    match &line.kind {
+                        ParsedBindLineKind::Require { expr } => {
+                            let value = eval_expr(
+                                expr,
+                                plan,
+                                current_package_id,
+                                current_module_id,
+                                scopes,
+                                aliases,
+                                type_bindings,
+                                state,
+                                host,
+                            )?;
+                            if !expect_bool(value, "bind require")? {
+                                let modifier = modifier.ok_or_else(|| {
+                                    "bind require failure requires an explicit modifier".to_string()
+                                })?;
+                                signal = match modifier.kind.as_str() {
+                                    "return" => {
+                                        let value = eval_headed_modifier_payload(
+                                            modifier.payload.as_ref(),
+                                            plan,
+                                            current_package_id,
+                                            current_module_id,
+                                            scopes,
+                                            aliases,
+                                            type_bindings,
+                                            state,
+                                            host,
+                                        )?
+                                        .unwrap_or(RuntimeValue::Unit);
+                                        FlowSignal::Return(value)
+                                    }
+                                    "break" => FlowSignal::Break,
+                                    "continue" => FlowSignal::Continue,
+                                    other => {
+                                        return Err(format!(
+                                            "unsupported bind require modifier `{other}`"
+                                        )
+                                        .into());
+                                    }
+                                };
+                                break;
+                            }
+                        }
+                        ParsedBindLineKind::Let {
+                            mutable,
+                            name,
+                            gate,
+                        } => {
+                            let gate_value = eval_expr(
+                                gate,
+                                plan,
+                                current_package_id,
+                                current_module_id,
+                                scopes,
+                                aliases,
+                                type_bindings,
+                                state,
+                                host,
+                            )?;
+                            match runtime_gate_outcome(gate_value, "bind gate")? {
+                                Ok(Some(payload)) => {
+                                    let current_scope_depth = scopes.len().saturating_sub(1);
+                                    let current_scope = scopes.last_mut().ok_or_else(|| {
+                                        "runtime scope stack is empty".to_string()
+                                    })?;
+                                    insert_runtime_local(
+                                        state,
+                                        current_scope_depth,
+                                        current_scope,
+                                        0,
+                                        name.clone(),
+                                        *mutable,
+                                        payload,
+                                    );
+                                }
+                                Ok(None) => {
+                                    return Err("bind payload lines require Option/Result gates"
+                                        .to_string()
+                                        .into());
+                                }
+                                Err(failure) => {
+                                    let modifier = modifier.ok_or_else(|| {
+                                        "bind failure requires an explicit modifier".to_string()
+                                    })?;
+                                    match modifier.kind.as_str() {
+                                        "return" => {
+                                            signal = if let Some(payload) = &modifier.payload {
+                                                FlowSignal::Return(eval_expr(
+                                                    payload,
+                                                    plan,
+                                                    current_package_id,
+                                                    current_module_id,
+                                                    scopes,
+                                                    aliases,
+                                                    type_bindings,
+                                                    state,
+                                                    host,
+                                                )?)
+                                            } else if let RuntimeValue::Variant { name, .. } =
+                                                &failure
+                                            {
+                                                if variant_name_matches(name, "Result.Err") {
+                                                    FlowSignal::Return(failure)
+                                                } else {
+                                                    return Err("bare `-return` in bind requires Result failure".to_string().into());
+                                                }
+                                            } else {
+                                                return Err("bare `-return` in bind requires Result failure".to_string().into());
+                                            };
+                                            break;
+                                        }
+                                        "default" => {
+                                            let fallback = eval_headed_modifier_payload(
+                                                modifier.payload.as_ref(),
+                                                plan,
+                                                current_package_id,
+                                                current_module_id,
+                                                scopes,
+                                                aliases,
+                                                type_bindings,
+                                                state,
+                                                host,
+                                            )?
+                                            .ok_or_else(|| {
+                                                "bind `default` requires a payload".to_string()
+                                            })?;
+                                            let current_scope_depth =
+                                                scopes.len().saturating_sub(1);
+                                            let current_scope =
+                                                scopes.last_mut().ok_or_else(|| {
+                                                    "runtime scope stack is empty".to_string()
+                                                })?;
+                                            insert_runtime_local(
+                                                state,
+                                                current_scope_depth,
+                                                current_scope,
+                                                0,
+                                                name.clone(),
+                                                *mutable,
+                                                fallback,
+                                            );
+                                        }
+                                        other => {
+                                            return Err(format!(
+                                                "unsupported bind let modifier `{other}`"
+                                            )
+                                            .into());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        ParsedBindLineKind::Assign { name, gate } => {
+                            let gate_value = eval_expr(
+                                gate,
+                                plan,
+                                current_package_id,
+                                current_module_id,
+                                scopes,
+                                aliases,
+                                type_bindings,
+                                state,
+                                host,
+                            )?;
+                            match runtime_gate_outcome(gate_value, "bind gate")? {
+                                Ok(Some(payload)) => {
+                                    apply_assign(
+                                        &ParsedAssignTarget::Name(name.clone()),
+                                        ParsedAssignOp::Assign,
+                                        payload,
+                                        plan,
+                                        current_package_id,
+                                        current_module_id,
+                                        scopes,
+                                        aliases,
+                                        type_bindings,
+                                        state,
+                                        host,
+                                    )?;
+                                }
+                                Ok(None) => {
+                                    return Err("bind payload lines require Option/Result gates"
+                                        .to_string()
+                                        .into());
+                                }
+                                Err(failure) => {
+                                    let modifier = modifier.ok_or_else(|| {
+                                        "bind failure requires an explicit modifier".to_string()
+                                    })?;
+                                    match modifier.kind.as_str() {
+                                        "return" => {
+                                            signal = if let Some(payload) = &modifier.payload {
+                                                FlowSignal::Return(eval_expr(
+                                                    payload,
+                                                    plan,
+                                                    current_package_id,
+                                                    current_module_id,
+                                                    scopes,
+                                                    aliases,
+                                                    type_bindings,
+                                                    state,
+                                                    host,
+                                                )?)
+                                            } else if let RuntimeValue::Variant { name, .. } =
+                                                &failure
+                                            {
+                                                if variant_name_matches(name, "Result.Err") {
+                                                    FlowSignal::Return(failure)
+                                                } else {
+                                                    return Err("bare `-return` in bind requires Result failure".to_string().into());
+                                                }
+                                            } else {
+                                                return Err("bare `-return` in bind requires Result failure".to_string().into());
+                                            };
+                                            break;
+                                        }
+                                        "preserve" => {}
+                                        "replace" => {
+                                            let fallback = eval_headed_modifier_payload(
+                                                modifier.payload.as_ref(),
+                                                plan,
+                                                current_package_id,
+                                                current_module_id,
+                                                scopes,
+                                                aliases,
+                                                type_bindings,
+                                                state,
+                                                host,
+                                            )?
+                                            .ok_or_else(|| {
+                                                "bind `replace` requires a payload".to_string()
+                                            })?;
+                                            apply_assign(
+                                                &ParsedAssignTarget::Name(name.clone()),
+                                                ParsedAssignOp::Assign,
+                                                fallback,
+                                                plan,
+                                                current_package_id,
+                                                current_module_id,
+                                                scopes,
+                                                aliases,
+                                                type_bindings,
+                                                state,
+                                                host,
+                                            )?;
+                                        }
+                                        other => {
+                                            return Err(format!(
+                                                "unsupported bind assign modifier `{other}`"
+                                            )
+                                            .into());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                signal
+            }
+            ParsedStmt::Construct(region) => {
+                let value = eval_expr(
+                    &ParsedExpr::ConstructRegion(Box::new(region.clone())),
+                    plan,
+                    current_package_id,
+                    current_module_id,
+                    scopes,
+                    aliases,
+                    type_bindings,
+                    state,
+                    host,
+                )?;
+                match &region.destination {
+                    Some(ParsedConstructDestination::Deliver { name }) => {
+                        let current_scope_depth = scopes.len().saturating_sub(1);
+                        let current_scope = scopes
+                            .last_mut()
+                            .ok_or_else(|| "runtime scope stack is empty".to_string())?;
+                        insert_runtime_local(
+                            state,
+                            current_scope_depth,
+                            current_scope,
+                            0,
+                            name.clone(),
+                            false,
+                            value,
+                        );
+                    }
+                    Some(ParsedConstructDestination::Place { target }) => {
+                        apply_assign(
+                            target,
+                            ParsedAssignOp::Assign,
+                            value,
+                            plan,
+                            current_package_id,
+                            current_module_id,
+                            scopes,
+                            aliases,
+                            type_bindings,
+                            state,
+                            host,
+                        )?;
+                    }
+                    None => {}
+                }
+                FlowSignal::Next
+            }
+            ParsedStmt::MemorySpec(spec) => {
+                let current_scope = scopes
+                    .last_mut()
+                    .ok_or_else(|| "runtime scope stack is empty".to_string())?;
+                current_scope.memory_specs.insert(
+                    spec.name.clone(),
+                    RuntimeMemorySpecState {
+                        spec: spec.clone(),
+                        handle: None,
+                        handle_policy: None,
+                    },
+                );
+                FlowSignal::Next
+            }
             ParsedStmt::Break => FlowSignal::Break,
             ParsedStmt::Continue => FlowSignal::Continue,
             ParsedStmt::Assign { target, op, value } => {
@@ -17860,13 +19564,13 @@ fn execute_routine_call_with_state(
     state: &mut RuntimeExecutionState,
     host: &mut dyn RuntimeHost,
     allow_async: bool,
-) -> Result<RoutineExecutionOutcome, String> {
+) -> RuntimeEvalResult<RoutineExecutionOutcome> {
     let routine = plan
         .routines
         .get(routine_index)
         .ok_or_else(|| format!("invalid routine index `{routine_index}`"))?;
     push_runtime_call_frame(state, &routine.module_id, &routine.symbol_name)?;
-    let execution_result = (|| -> Result<RoutineExecutionOutcome, String> {
+    let execution_result = (|| -> RuntimeEvalResult<RoutineExecutionOutcome> {
         if let Some(intrinsic_impl) = &routine.intrinsic_impl {
             let intrinsic = resolve_runtime_intrinsic_impl(intrinsic_impl).ok_or_else(|| {
                 format!(
@@ -17879,13 +19583,15 @@ fn execute_routine_call_with_state(
             return Ok(RoutineExecutionOutcome {
                 value,
                 final_args: args,
+                control: None,
             });
         }
         if routine.is_async && !allow_async {
             return Err(format!(
                 "async routine `{}` is not executable in the current runtime lane",
                 routine.symbol_name
-            ));
+            )
+            .into());
         }
         if args.len() != routine.params.len() {
             return Err(format!(
@@ -17893,7 +19599,8 @@ fn execute_routine_call_with_state(
                 routine.symbol_name,
                 routine.params.len(),
                 args.len()
-            ));
+            )
+            .into());
         }
         if !routine.type_params.is_empty()
             && !type_args.is_empty()
@@ -17904,7 +19611,8 @@ fn execute_routine_call_with_state(
                 routine.symbol_name,
                 routine.type_params.len(),
                 type_args.len()
-            ));
+            )
+            .into());
         }
         let aliases = plan
             .module_aliases
@@ -17929,7 +19637,7 @@ fn execute_routine_call_with_state(
         if entered_async_context {
             state.async_context_depth += 1;
         }
-        let outcome = (|| -> Result<RoutineExecutionOutcome, String> {
+        let outcome = (|| -> RuntimeEvalResult<RoutineExecutionOutcome> {
             let mut initial_scope = RuntimeScope {
                 inherited_active_owner_keys: inherited_active_owner_keys.to_vec(),
                 ..Default::default()
@@ -17996,7 +19704,7 @@ fn execute_routine_call_with_state(
                 .ok_or_else(|| "runtime scope stack is empty".to_string())?;
             match defer_result {
                 Ok(()) => {}
-                Err(RuntimeEvalSignal::Message(message)) => return Err(message),
+                Err(RuntimeEvalSignal::Message(message)) => return Err(message.into()),
                 Err(RuntimeEvalSignal::Return(value)) => {
                     if let Some(frame) = routine_cleanup_footer_frame.clone() {
                         execute_cleanup_footers(frame, plan, &mut scopes, state, host)
@@ -18029,8 +19737,60 @@ fn execute_routine_call_with_state(
                                     )
                                 })
                         })
-                        .collect::<Result<Vec<_>, String>>()?;
-                    return Ok(RoutineExecutionOutcome { value, final_args });
+                        .collect::<Result<Vec<_>, String>>()
+                        .map_err(RuntimeEvalSignal::from)?;
+                    return Ok(RoutineExecutionOutcome {
+                        value,
+                        final_args,
+                        control: None,
+                    });
+                }
+                Err(RuntimeEvalSignal::OwnerExit {
+                    owner_key,
+                    exit_name,
+                }) => {
+                    if let Some(frame) = routine_cleanup_footer_frame.clone() {
+                        execute_cleanup_footers(frame, plan, &mut scopes, state, host)
+                            .map_err(runtime_eval_message)?;
+                    }
+                    evaluate_owner_exit_checkpoints(
+                        &final_scope.activated_owner_keys,
+                        plan,
+                        &routine.package_id,
+                        &routine.module_id,
+                        &aliases,
+                        &type_bindings,
+                        state,
+                        host,
+                        None,
+                    )
+                    .map_err(RuntimeEvalSignal::from)?;
+                    release_scope_owner_activations(state, &final_scope.activated_owner_keys);
+                    let final_args = routine
+                        .params
+                        .iter()
+                        .map(|param| {
+                            final_scope
+                                .locals
+                                .get(&param.name)
+                                .map(|local| local.value.clone())
+                                .ok_or_else(|| {
+                                    format!(
+                                        "runtime routine `{}` lost bound parameter `{}`",
+                                        routine.symbol_name, param.name
+                                    )
+                                })
+                        })
+                        .collect::<Result<Vec<_>, String>>()
+                        .map_err(RuntimeEvalSignal::from)?;
+                    return Ok(RoutineExecutionOutcome {
+                        value: RuntimeValue::Unit,
+                        final_args,
+                        control: Some(FlowSignal::OwnerExit {
+                            owner_key,
+                            exit_name,
+                        }),
+                    });
                 }
             }
             if let Some(frame) = routine_cleanup_footer_frame.clone()
@@ -18053,15 +19813,68 @@ fn execute_routine_call_with_state(
             release_scope_owner_activations(state, &final_scope.activated_owner_keys);
             let result = match result {
                 Ok(signal) => signal,
-                Err(RuntimeEvalSignal::Message(message)) => return Err(message),
+                Err(RuntimeEvalSignal::Message(message)) => return Err(message.into()),
                 Err(RuntimeEvalSignal::Return(value)) => FlowSignal::Return(value),
+                Err(RuntimeEvalSignal::OwnerExit {
+                    owner_key,
+                    exit_name,
+                }) => FlowSignal::OwnerExit {
+                    owner_key,
+                    exit_name,
+                },
+            };
+            let result = match result {
+                FlowSignal::OwnerExit {
+                    owner_key,
+                    exit_name,
+                } if final_scope
+                    .activated_owner_keys
+                    .iter()
+                    .any(|active| active == &owner_key) =>
+                {
+                    apply_explicit_owner_exit(plan, state, &owner_key, &exit_name, None)?;
+                    FlowSignal::Next
+                }
+                other => other,
             };
             let value = match result {
                 FlowSignal::Next => RuntimeValue::Unit,
                 FlowSignal::Return(value) => value,
-                FlowSignal::Break => return Err("break escaped the top-level routine".to_string()),
+                FlowSignal::Break => {
+                    return Err("break escaped the top-level routine".to_string().into());
+                }
                 FlowSignal::Continue => {
-                    return Err("continue escaped the top-level routine".to_string());
+                    return Err("continue escaped the top-level routine".to_string().into());
+                }
+                FlowSignal::OwnerExit {
+                    owner_key,
+                    exit_name,
+                } => {
+                    let final_args = routine
+                        .params
+                        .iter()
+                        .map(|param| {
+                            final_scope
+                                .locals
+                                .get(&param.name)
+                                .map(|local| local.value.clone())
+                                .ok_or_else(|| {
+                                    format!(
+                                        "runtime routine `{}` lost bound parameter `{}`",
+                                        routine.symbol_name, param.name
+                                    )
+                                })
+                        })
+                        .collect::<Result<Vec<_>, String>>()
+                        .map_err(RuntimeEvalSignal::from)?;
+                    return Ok(RoutineExecutionOutcome {
+                        value: RuntimeValue::Unit,
+                        final_args,
+                        control: Some(FlowSignal::OwnerExit {
+                            owner_key,
+                            exit_name,
+                        }),
+                    });
                 }
             };
             let final_args = routine
@@ -18079,8 +19892,13 @@ fn execute_routine_call_with_state(
                             )
                         })
                 })
-                .collect::<Result<Vec<_>, String>>()?;
-            Ok(RoutineExecutionOutcome { value, final_args })
+                .collect::<Result<Vec<_>, String>>()
+                .map_err(RuntimeEvalSignal::from)?;
+            Ok(RoutineExecutionOutcome {
+                value,
+                final_args,
+                control: None,
+            })
         })();
         if entered_async_context {
             state.async_context_depth = state.async_context_depth.saturating_sub(1);
@@ -18099,7 +19917,7 @@ fn execute_routine_with_state(
     state: &mut RuntimeExecutionState,
     host: &mut dyn RuntimeHost,
 ) -> Result<RuntimeValue, String> {
-    Ok(execute_routine_call_with_state(
+    let outcome = execute_routine_call_with_state(
         plan,
         routine_index,
         type_args,
@@ -18108,8 +19926,18 @@ fn execute_routine_with_state(
         state,
         host,
         false,
-    )?
-    .value)
+    )
+    .map_err(runtime_eval_message)?;
+    if let Some(FlowSignal::OwnerExit {
+        owner_key,
+        exit_name,
+    }) = outcome.control
+    {
+        return Err(format!(
+            "owner exit `{exit_name}` for `{owner_key}` escaped the top-level runtime"
+        ));
+    }
+    Ok(outcome.value)
 }
 
 pub fn validate_runtime_requirements_supported(
@@ -18190,8 +20018,18 @@ pub fn execute_entrypoint_routine(
         &mut state,
         host,
         true,
-    )?
-    .value;
+    )
+    .map_err(runtime_eval_message)?;
+    if let Some(FlowSignal::OwnerExit {
+        owner_key,
+        exit_name,
+    }) = value.control.clone()
+    {
+        return Err(format!(
+            "owner exit `{exit_name}` for `{owner_key}` escaped entrypoint `{routine_key}`"
+        ));
+    }
+    let value = value.value;
     match value {
         RuntimeValue::Int(value) => i32::try_from(value)
             .map_err(|_| format!("main return value `{value}` does not fit in i32")),

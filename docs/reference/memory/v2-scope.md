@@ -3,7 +3,10 @@
 Status: `reference-only`
 
 This file captures a legacy implementation slice and is retained only as memory-system history.
-Current memory authority lives in `docs/specs/memory/memory/generic-memory-spec.md` and `docs/specs/memory/memory/deferred-roadmap.md`.
+Current rewrite authority for memory surface now lives in:
+- `docs/specs/memory/memory/v1-scope.md`
+- `docs/specs/headed-regions/headed-regions/v1-scope.md`
+- `docs/specs/memory/memory/deferred-roadmap.md`
 
 ## Implemented Now
 

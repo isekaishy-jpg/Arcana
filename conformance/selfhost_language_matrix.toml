@@ -122,6 +122,29 @@ negative = [
 ]
 
 [[feature]]
+id = "headed_regions_v1"
+status = "required"
+positive = ["conformance/fixtures/headed_regions_v1_workspace"]
+negative = [
+    "conformance/check_parity_fixtures/headed_regions_unknown_head.arc",
+    "conformance/check_parity_fixtures/headed_regions_missing_modifier.arc",
+    "conformance/check_parity_fixtures/headed_regions_invalid_construct.arc",
+    "conformance/check_parity_fixtures/headed_regions_invalid_construct_place_type.arc",
+    "conformance/check_parity_fixtures/headed_regions_invalid_construct_skip.arc",
+    "conformance/check_parity_fixtures/headed_regions_invalid_memory_family.arc",
+    "conformance/check_parity_fixtures/headed_regions_unsupported_memory_family_key.arc",
+    "conformance/check_parity_fixtures/headed_regions_invalid_nested.arc",
+    "conformance/check_parity_fixtures/headed_regions_invalid_owner_exit.arc",
+    "conformance/check_parity_fixtures/headed_regions_invalid_recycle_continue.arc",
+    "conformance/check_parity_fixtures/headed_regions_invalid_recycle_return.arc",
+    "conformance/check_parity_fixtures/headed_regions_invalid_bind_modifier.arc",
+    "conformance/check_parity_fixtures/headed_regions_bind_preserve_on_let.arc",
+    "conformance/check_parity_fixtures/headed_regions_invalid_memory_key.arc",
+    "conformance/check_parity_fixtures/headed_regions_construct_duplicate_field.arc",
+    "conformance/check_parity_fixtures/headed_regions_construct_duplicate_payload.arc",
+]
+
+[[feature]]
 id = "intrinsic_kernel_abi"
 status = "required"
 positive = ["std/src", "std/src/kernel"]

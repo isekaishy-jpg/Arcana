@@ -3,15 +3,16 @@ use super::NativeProcessHost;
 use super::{
     BufferedEvent, BufferedFrameInput, BufferedHost, ParsedAssignOp, ParsedAssignTarget,
     ParsedCleanupFooter, ParsedExpr, ParsedPhraseArg, ParsedPhraseQualifierKind, ParsedStmt,
-    RuntimeCallArg, RuntimeEntrypointPlan, RuntimeExecutionState, RuntimeHost, RuntimeOpaqueValue,
-    RuntimePackagePlan, RuntimeParamPlan, RuntimeRoutinePlan, RuntimeValue,
+    RuntimeCallArg, RuntimeEntrypointPlan, RuntimeExecutionState, RuntimeHost, RuntimeIntrinsic,
+    RuntimeOpaqueValue, RuntimePackagePlan, RuntimeParamPlan, RuntimeRoutinePlan, RuntimeValue,
     arcana_desktop_session_record, arcana_desktop_wake_record, arcana_desktop_window_value,
     arcana_window_id_record, err_variant, execute_entrypoint_routine, execute_exported_abi_routine,
-    execute_exported_json_abi_routine, execute_main, execute_routine, insert_runtime_channel,
-    load_package_plan, lookup_runtime_owner_plan, none_variant, ok_variant, owner_state_key,
-    parse_cleanup_footer_row, parse_runtime_package_image, parse_stmt, plan_from_artifact,
-    render_exported_json_abi_manifest, render_runtime_package_image, resolve_routine_index,
-    resolve_routine_index_for_call, some_variant, try_execute_arcana_owned_api_call,
+    execute_exported_json_abi_routine, execute_main, execute_routine, execute_routine_with_state,
+    execute_runtime_intrinsic, insert_runtime_channel, load_package_plan,
+    lookup_runtime_owner_plan, none_variant, ok_variant, owner_state_key, parse_cleanup_footer_row,
+    parse_runtime_package_image, parse_stmt, plan_from_artifact, render_exported_json_abi_manifest,
+    render_runtime_package_image, resolve_routine_index, resolve_routine_index_for_call,
+    some_variant, try_execute_arcana_owned_api_call,
 };
 use arcana_aot::{
     AOT_INTERNAL_FORMAT, AotEntrypointArtifact, AotOwnerArtifact, AotPackageArtifact,
@@ -3768,6 +3769,544 @@ fn execute_main_runs_memory_phrase_attachment_routines() {
         host.stdout,
         vec!["4".to_string(), "1".to_string(), "1".to_string()]
     );
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn execute_main_resolves_module_and_block_memory_specs() {
+    let dir = temp_workspace_dir("headed_region_memory_specs");
+    write_file(
+        &dir.join("book.toml"),
+        "name = \"runtime_headed_region_memory_specs\"\nkind = \"app\"\n",
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "import types\n",
+            "fn main() -> Int:\n",
+            "    Memory pool:scratch -alloc\n",
+            "        capacity = 2\n",
+            "        pressure = bounded\n",
+            "    let _a = arena: types.cache :> value = 7 <: types.Item\n",
+            "    let _b = pool: scratch :> value = 9 <: types.Item\n",
+            "    let _c = arena: types.cache :> value = 11 <: types.Item\n",
+            "    return 3\n",
+        ),
+    );
+    write_file(
+        &dir.join("src").join("types.arc"),
+        concat!(
+            "export record Item:\n",
+            "    value: Int\n",
+            "Memory arena:cache -alloc\n",
+            "    capacity = 4\n",
+            "    pressure = bounded\n",
+        ),
+    );
+
+    let graph = load_workspace_graph(&dir).expect("workspace graph should load");
+    let checked = check_workspace_graph(&graph).expect("workspace should check");
+    let fingerprints = compute_member_fingerprints_for_checked_workspace(&graph, &checked)
+        .expect("fingerprints should compute");
+    let order = plan_workspace(&graph).expect("workspace order should plan");
+    let statuses =
+        plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
+    execute_workspace_build(&graph, &fingerprints, &statuses);
+
+    let artifact_path = graph.root_dir.join(
+        statuses
+            .iter()
+            .find(|status| status.member_name() == "runtime_headed_region_memory_specs")
+            .expect("app artifact status should exist")
+            .artifact_rel_path(),
+    );
+    let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
+    let mut host = BufferedHost::default();
+    let code = execute_main(&plan, &mut host).expect("runtime should execute");
+
+    assert_eq!(code, 3);
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn execute_main_memory_specs_apply_runtime_policies() {
+    let dir = temp_workspace_dir("headed_region_memory_policies");
+    write_file(
+        &dir.join("book.toml"),
+        "name = \"runtime_headed_region_memory_policies\"\nkind = \"app\"\n",
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "import types\n",
+            "fn main() -> Int:\n",
+            "    let _stable_a = arena: types.stable_cache :> value = 1 <: types.Item\n",
+            "    let _stable_b = arena: types.stable_cache :> value = 2 <: types.Item\n",
+            "    let _fresh_a = arena: types.fresh_cache :> value = 3 <: types.Item\n",
+            "    let _fresh_b = arena: types.fresh_cache :> value = 4 <: types.Item\n",
+            "    let _frame_a = frame: types.scratch :> value = 5 <: types.Item\n",
+            "    let _frame_b = frame: types.scratch :> value = 6 <: types.Item\n",
+            "    let _free_pool = pool: types.free_pool :> value = 7 <: types.Item\n",
+            "    let _strict_pool = pool: types.strict_pool :> value = 8 <: types.Item\n",
+            "    return 0\n",
+        ),
+    );
+    write_file(
+        &dir.join("src").join("types.arc"),
+        concat!(
+            "export record Item:\n",
+            "    value: Int\n",
+            "Memory arena:stable_cache -grow\n",
+            "    capacity = 1\n",
+            "    growth = 2\n",
+            "    pressure = elastic\n",
+            "    handle = stable\n",
+            "Memory arena:fresh_cache -grow\n",
+            "    capacity = 1\n",
+            "    growth = 1\n",
+            "    pressure = elastic\n",
+            "    handle = unstable\n",
+            "Memory frame:scratch -recycle\n",
+            "    capacity = 1\n",
+            "    recycle = frame\n",
+            "Memory pool:free_pool -recycle\n",
+            "    capacity = 3\n",
+            "    recycle = free_list\n",
+            "Memory pool:strict_pool -alloc\n",
+            "    capacity = 3\n",
+            "    recycle = strict\n",
+        ),
+    );
+
+    let plan = build_workspace_plan_for_member(&dir, "runtime_headed_region_memory_policies");
+    let mut host = BufferedHost::default();
+    let mut state = RuntimeExecutionState::default();
+    let entry = plan
+        .main_entrypoint()
+        .expect("main entrypoint should exist");
+    let value = execute_routine_with_state(
+        &plan,
+        entry.routine_index,
+        Vec::new(),
+        Vec::new(),
+        &mut state,
+        &mut host,
+    )
+    .expect("runtime should execute");
+    assert_eq!(value, RuntimeValue::Int(0));
+
+    let stable_spec = state
+        .module_memory_specs
+        .values()
+        .find(|spec| spec.spec.name == "stable_cache")
+        .expect("stable cache spec should materialize");
+    let RuntimeValue::Opaque(RuntimeOpaqueValue::Arena(stable_handle)) = stable_spec
+        .handle
+        .clone()
+        .expect("stable cache should retain a cached handle")
+    else {
+        panic!("stable cache should cache an arena handle");
+    };
+    let stable_arena = state
+        .arenas
+        .get(&stable_handle)
+        .expect("stable arena should exist");
+    assert_eq!(stable_arena.slots.len(), 2);
+    assert_eq!(stable_arena.policy.current_limit, 3);
+
+    let fresh_spec = state
+        .module_memory_specs
+        .values()
+        .find(|spec| spec.spec.name == "fresh_cache")
+        .expect("fresh cache spec should materialize");
+    assert_eq!(fresh_spec.handle, None);
+    assert_eq!(state.arenas.len(), 3);
+
+    let frame_spec = state
+        .module_memory_specs
+        .values()
+        .find(|spec| spec.spec.name == "scratch")
+        .expect("scratch frame spec should materialize");
+    let RuntimeValue::Opaque(RuntimeOpaqueValue::FrameArena(frame_handle)) = frame_spec
+        .handle
+        .clone()
+        .expect("frame spec should keep a cached handle")
+    else {
+        panic!("frame spec should cache a frame handle");
+    };
+    let frame_arena = state
+        .frame_arenas
+        .get(&frame_handle)
+        .expect("frame arena should exist");
+    assert_eq!(frame_arena.slots.len(), 1);
+    assert_eq!(frame_arena.generation, 1);
+
+    let free_spec = state
+        .module_memory_specs
+        .values()
+        .find(|spec| spec.spec.name == "free_pool")
+        .expect("free pool spec should materialize");
+    let RuntimeValue::Opaque(RuntimeOpaqueValue::PoolArena(free_handle)) = free_spec
+        .handle
+        .clone()
+        .expect("free pool should keep a cached handle")
+    else {
+        panic!("free pool should cache a pool handle");
+    };
+    let strict_spec = state
+        .module_memory_specs
+        .values()
+        .find(|spec| spec.spec.name == "strict_pool")
+        .expect("strict pool spec should materialize");
+    let RuntimeValue::Opaque(RuntimeOpaqueValue::PoolArena(strict_handle)) = strict_spec
+        .handle
+        .clone()
+        .expect("strict pool should keep a cached handle")
+    else {
+        panic!("strict pool should cache a pool handle");
+    };
+
+    let free_id = execute_runtime_intrinsic(
+        RuntimeIntrinsic::MemoryPoolAlloc,
+        &[],
+        &mut vec![
+            RuntimeValue::Opaque(RuntimeOpaqueValue::PoolArena(free_handle)),
+            RuntimeValue::Int(11),
+        ],
+        &plan,
+        &mut state,
+        &mut host,
+    )
+    .expect("free-list pool should allocate");
+    execute_runtime_intrinsic(
+        RuntimeIntrinsic::MemoryPoolRemove,
+        &[],
+        &mut vec![
+            RuntimeValue::Opaque(RuntimeOpaqueValue::PoolArena(free_handle)),
+            free_id.clone(),
+        ],
+        &plan,
+        &mut state,
+        &mut host,
+    )
+    .expect("free-list pool should remove");
+    let _ = execute_runtime_intrinsic(
+        RuntimeIntrinsic::MemoryPoolAlloc,
+        &[],
+        &mut vec![
+            RuntimeValue::Opaque(RuntimeOpaqueValue::PoolArena(free_handle)),
+            RuntimeValue::Int(12),
+        ],
+        &plan,
+        &mut state,
+        &mut host,
+    )
+    .expect("free-list pool should recycle a freed slot");
+
+    let strict_id = execute_runtime_intrinsic(
+        RuntimeIntrinsic::MemoryPoolAlloc,
+        &[],
+        &mut vec![
+            RuntimeValue::Opaque(RuntimeOpaqueValue::PoolArena(strict_handle)),
+            RuntimeValue::Int(21),
+        ],
+        &plan,
+        &mut state,
+        &mut host,
+    )
+    .expect("strict pool should allocate");
+    execute_runtime_intrinsic(
+        RuntimeIntrinsic::MemoryPoolRemove,
+        &[],
+        &mut vec![
+            RuntimeValue::Opaque(RuntimeOpaqueValue::PoolArena(strict_handle)),
+            strict_id.clone(),
+        ],
+        &plan,
+        &mut state,
+        &mut host,
+    )
+    .expect("strict pool should remove");
+    let _ = execute_runtime_intrinsic(
+        RuntimeIntrinsic::MemoryPoolAlloc,
+        &[],
+        &mut vec![
+            RuntimeValue::Opaque(RuntimeOpaqueValue::PoolArena(strict_handle)),
+            RuntimeValue::Int(22),
+        ],
+        &plan,
+        &mut state,
+        &mut host,
+    )
+    .expect("strict pool should allocate a fresh slot");
+
+    let free_pool = state
+        .pool_arenas
+        .get(&free_handle)
+        .expect("free-list pool should exist");
+    assert_eq!(free_pool.next_slot, 2);
+    assert!(free_pool.free_slots.is_empty());
+
+    let strict_pool = state
+        .pool_arenas
+        .get(&strict_handle)
+        .expect("strict pool should exist");
+    assert_eq!(strict_pool.next_slot, 3);
+    assert!(strict_pool.free_slots.is_empty());
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn execute_main_runs_headed_regions_positive_workspace_fixture() {
+    let fixture_root = repo_root()
+        .join("conformance")
+        .join("fixtures")
+        .join("headed_regions_v1_workspace");
+    let dir = temp_workspace_dir("headed_regions_positive_fixture");
+    for relative_path in [
+        "book.toml",
+        "app/book.toml",
+        "app/src/shelf.arc",
+        "app/src/types.arc",
+        "core/book.toml",
+        "core/src/book.arc",
+        "core/src/types.arc",
+    ] {
+        let source = fs::read_to_string(fixture_root.join(relative_path))
+            .expect("headed regions positive fixture file should be readable");
+        write_file(&dir.join(relative_path), &source);
+    }
+
+    let plan = build_workspace_plan_for_member(&dir, "app");
+    let mut host = BufferedHost::default();
+    let code = execute_main(&plan, &mut host).expect("runtime should execute");
+
+    assert_eq!(code, 17);
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn execute_main_consumes_named_recycle_owner_exits() {
+    let dir = temp_workspace_dir("headed_region_owner_exit");
+    write_file(
+        &dir.join("book.toml"),
+        "name = \"runtime_headed_region_owner_exit\"\nkind = \"app\"\n",
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "obj Counter:\n",
+            "    value: Int\n",
+            "create Session [Counter] scope-exit:\n",
+            "    done: when false hold [Counter]\n",
+            "fn main() -> Int:\n",
+            "    if true:\n",
+            "        let active = Session :: :: call\n",
+            "        recycle -done\n",
+            "            false\n",
+            "        return 1\n",
+            "    return 7\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let graph = load_workspace_graph(&dir).expect("workspace graph should load");
+    let checked = check_workspace_graph(&graph).expect("workspace should check");
+    let fingerprints = compute_member_fingerprints_for_checked_workspace(&graph, &checked)
+        .expect("fingerprints should compute");
+    let order = plan_workspace(&graph).expect("workspace order should plan");
+    let statuses =
+        plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
+    execute_workspace_build(&graph, &fingerprints, &statuses);
+
+    let artifact_path = graph.root_dir.join(
+        statuses
+            .iter()
+            .find(|status| status.member_name() == "runtime_headed_region_owner_exit")
+            .expect("app artifact status should exist")
+            .artifact_rel_path(),
+    );
+    let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
+    let mut host = BufferedHost::default();
+    let code = execute_main(&plan, &mut host).expect("runtime should execute");
+
+    assert_eq!(code, 7);
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn execute_main_runs_bind_recovery_regions() {
+    let dir = temp_workspace_dir("headed_region_bind_recovery");
+    write_file(
+        &dir.join("book.toml"),
+        "name = \"runtime_headed_region_bind_recovery\"\nkind = \"app\"\n",
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "import std.option\n",
+            "import std.result\n",
+            "use std.option.Option\n",
+            "use std.result.Result\n",
+            "fn main() -> Int:\n",
+            "    let mut current = 5\n",
+            "    bind -return 99\n",
+            "        let fallback = Option.None[Int] :: :: call -default 7\n",
+            "        current = Option.None[Int] :: :: call -preserve\n",
+            "        current = Option.None[Int] :: :: call -replace 11\n",
+            "        let ok = Result.Ok[Int, Str] :: 3 :: call\n",
+            "    return fallback + current + ok\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let graph = load_workspace_graph(&dir).expect("workspace graph should load");
+    let checked = check_workspace_graph(&graph).expect("workspace should check");
+    let fingerprints = compute_member_fingerprints_for_checked_workspace(&graph, &checked)
+        .expect("fingerprints should compute");
+    let order = plan_workspace(&graph).expect("workspace order should plan");
+    let statuses =
+        plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
+    execute_workspace_build(&graph, &fingerprints, &statuses);
+
+    let artifact_path = graph.root_dir.join(
+        statuses
+            .iter()
+            .find(|status| status.member_name() == "runtime_headed_region_bind_recovery")
+            .expect("app artifact status should exist")
+            .artifact_rel_path(),
+    );
+    let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
+    let mut host = BufferedHost::default();
+    let code = execute_main(&plan, &mut host).expect("runtime should execute");
+
+    assert_eq!(code, 21);
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn execute_main_runs_bind_require_loop_exits() {
+    let dir = temp_workspace_dir("headed_region_bind_require_loop_exits");
+    write_file(
+        &dir.join("book.toml"),
+        "name = \"runtime_headed_region_bind_require_loop_exits\"\nkind = \"app\"\n",
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "fn main() -> Int:\n",
+            "    let mut i = 0\n",
+            "    let mut sum = 0\n",
+            "    while i < 5:\n",
+            "        i = i + 1\n",
+            "        bind -continue\n",
+            "            require i != 3\n",
+            "        sum = sum + i\n",
+            "        bind -break\n",
+            "            require sum <= 6\n",
+            "    return sum\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let graph = load_workspace_graph(&dir).expect("workspace graph should load");
+    let checked = check_workspace_graph(&graph).expect("workspace should check");
+    let fingerprints = compute_member_fingerprints_for_checked_workspace(&graph, &checked)
+        .expect("fingerprints should compute");
+    let order = plan_workspace(&graph).expect("workspace order should plan");
+    let statuses =
+        plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
+    execute_workspace_build(&graph, &fingerprints, &statuses);
+
+    let artifact_path = graph.root_dir.join(
+        statuses
+            .iter()
+            .find(|status| status.member_name() == "runtime_headed_region_bind_require_loop_exits")
+            .expect("app artifact status should exist")
+            .artifact_rel_path(),
+    );
+    let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
+    let mut host = BufferedHost::default();
+    let code = execute_main(&plan, &mut host).expect("runtime should execute");
+
+    assert_eq!(code, 7);
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn execute_main_construct_regions_preserve_direct_values_and_payload_acquisition() {
+    let dir = temp_workspace_dir("headed_region_construct_values");
+    write_file(
+        &dir.join("book.toml"),
+        "name = \"runtime_headed_region_construct_values\"\nkind = \"app\"\n",
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "import std.option\n",
+            "import std.result\n",
+            "use std.option.Option\n",
+            "use std.result.Result\n",
+            "record Widget:\n",
+            "    ready: Bool\n",
+            "    maybe: Option[Int]\n",
+            "    outcome: Result[Int, Str]\n",
+            "enum Packet:\n",
+            "    Data(Int)\n",
+            "fn main() -> Int:\n",
+            "    let built = construct yield Widget -return 99\n",
+            "        ready = false\n",
+            "        maybe = Option.None[Int] :: :: call\n",
+            "        outcome = Result.Err[Int, Str] :: \"bad\" :: call\n",
+            "    let packet = construct yield Packet.Data -return 98\n",
+            "        payload = Result.Ok[Int, Str] :: 7 :: call\n",
+            "    if built.ready:\n",
+            "        return 1\n",
+            "    let maybe_ok = match built.maybe:\n",
+            "        Option.Some(_) => false\n",
+            "        Option.None => true\n",
+            "    let outcome_ok = match built.outcome:\n",
+            "        Result.Ok(_) => false\n",
+            "        Result.Err(message) => message == \"bad\"\n",
+            "    let packet_value = match packet:\n",
+            "        Packet.Data(value) => value\n",
+            "    if not maybe_ok:\n",
+            "        return 2\n",
+            "    if not outcome_ok:\n",
+            "        return 3\n",
+            "    return packet_value\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let graph = load_workspace_graph(&dir).expect("workspace graph should load");
+    let checked = check_workspace_graph(&graph).expect("workspace should check");
+    let fingerprints = compute_member_fingerprints_for_checked_workspace(&graph, &checked)
+        .expect("fingerprints should compute");
+    let order = plan_workspace(&graph).expect("workspace order should plan");
+    let statuses =
+        plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
+    execute_workspace_build(&graph, &fingerprints, &statuses);
+
+    let artifact_path = graph.root_dir.join(
+        statuses
+            .iter()
+            .find(|status| status.member_name() == "runtime_headed_region_construct_values")
+            .expect("app artifact status should exist")
+            .artifact_rel_path(),
+    );
+    let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
+    let mut host = BufferedHost::default();
+    let code = execute_main(&plan, &mut host).expect("runtime should execute");
+
+    assert_eq!(code, 7);
 
     let _ = fs::remove_dir_all(dir);
 }

@@ -26,6 +26,9 @@ pub use type_surface::{
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use arcana_language_law::{
+    ConstructCompletionKind, HeadedModifierKeyword, MemoryDetailKey, MemoryFamily,
+};
 use arcana_syntax::{
     AssignOp as ParsedAssignOp, DirectiveKind as ParsedDirectiveKind, Expr as ParsedExpr,
     OpaqueBoundaryPolicy as ParsedOpaqueBoundaryPolicy,
@@ -282,6 +285,106 @@ pub enum HirPhraseArg {
     Named { name: String, value: HirExpr },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HirHeadedModifierKind {
+    Keyword(HeadedModifierKeyword),
+    Name(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HirHeadedModifier {
+    pub kind: HirHeadedModifierKind,
+    pub payload: Option<HirExpr>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HirRecycleLineKind {
+    Expr {
+        gate: HirExpr,
+    },
+    Let {
+        mutable: bool,
+        name: String,
+        gate: HirExpr,
+    },
+    Assign {
+        name: String,
+        gate: HirExpr,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HirRecycleLine {
+    pub kind: HirRecycleLineKind,
+    pub modifier: Option<HirHeadedModifier>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HirBindLineKind {
+    Let {
+        mutable: bool,
+        name: String,
+        gate: HirExpr,
+    },
+    Assign {
+        name: String,
+        gate: HirExpr,
+    },
+    Require {
+        expr: HirExpr,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HirBindLine {
+    pub kind: HirBindLineKind,
+    pub modifier: Option<HirHeadedModifier>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HirConstructLine {
+    pub name: String,
+    pub value: HirExpr,
+    pub modifier: Option<HirHeadedModifier>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HirConstructDestination {
+    Deliver { name: String },
+    Place { target: HirAssignTarget },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HirConstructRegion {
+    pub completion: ConstructCompletionKind,
+    pub target: Box<HirExpr>,
+    pub destination: Option<HirConstructDestination>,
+    pub default_modifier: Option<HirHeadedModifier>,
+    pub lines: Vec<HirConstructLine>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HirMemoryDetailLine {
+    pub key: MemoryDetailKey,
+    pub value: HirExpr,
+    pub modifier: Option<HirHeadedModifier>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HirMemorySpecDecl {
+    pub family: MemoryFamily,
+    pub name: String,
+    pub default_modifier: Option<HirHeadedModifier>,
+    pub details: Vec<HirMemoryDetailLine>,
+    pub span: Span,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HirChainConnector {
     Forward,
@@ -376,6 +479,7 @@ pub enum HirExpr {
         subject: Box<HirExpr>,
         arms: Vec<HirMatchArm>,
     },
+    ConstructRegion(Box<HirConstructRegion>),
     Chain {
         style: String,
         introducer: HirChainIntroducer,
@@ -513,6 +617,16 @@ pub enum HirStatementKind {
         op: HirAssignOp,
         value: HirExpr,
     },
+    Recycle {
+        default_modifier: Option<HirHeadedModifier>,
+        lines: Vec<HirRecycleLine>,
+    },
+    Bind {
+        default_modifier: Option<HirHeadedModifier>,
+        lines: Vec<HirBindLine>,
+    },
+    Construct(HirConstructRegion),
+    MemorySpec(HirMemorySpecDecl),
     Expr {
         expr: HirExpr,
     },
@@ -589,6 +703,7 @@ pub struct HirModuleSummary {
     pub non_empty_line_count: usize,
     pub directives: Vec<HirDirective>,
     pub lang_items: Vec<HirLangItem>,
+    pub memory_specs: Vec<HirMemorySpecDecl>,
     pub symbols: Vec<HirSymbol>,
     pub impls: Vec<HirImplDecl>,
 }
@@ -643,6 +758,11 @@ impl HirModuleSummary {
             self.lang_items
                 .iter()
                 .map(render::render_lang_item_fingerprint),
+        );
+        rows.extend(
+            self.memory_specs
+                .iter()
+                .map(render::render_memory_spec_fingerprint),
         );
         rows.extend(self.symbols.iter().map(render::render_symbol_fingerprint));
         rows.extend(self.impls.iter().map(render::render_impl_fingerprint));
@@ -1732,6 +1852,11 @@ pub fn lower_parsed_module(
                 span: item.span,
             })
             .collect(),
+        memory_specs: parsed
+            .memory_specs
+            .iter()
+            .map(lower_memory_spec_decl)
+            .collect(),
         symbols: parsed
             .symbols
             .iter()
@@ -2589,6 +2714,72 @@ fn lower_cleanup_footers(
         .collect()
 }
 
+fn lower_headed_modifier(modifier: &arcana_syntax::HeadedModifier) -> HirHeadedModifier {
+    HirHeadedModifier {
+        kind: match &modifier.kind {
+            arcana_syntax::HeadedModifierKind::Keyword(keyword) => {
+                HirHeadedModifierKind::Keyword(*keyword)
+            }
+            arcana_syntax::HeadedModifierKind::Name(name) => {
+                HirHeadedModifierKind::Name(name.clone())
+            }
+        },
+        payload: modifier.payload.as_ref().map(lower_expr),
+        span: modifier.span,
+    }
+}
+
+fn lower_memory_spec_decl(spec: &arcana_syntax::MemorySpecDecl) -> HirMemorySpecDecl {
+    HirMemorySpecDecl {
+        family: spec.family,
+        name: spec.name.clone(),
+        default_modifier: spec.default_modifier.as_ref().map(lower_headed_modifier),
+        details: spec
+            .details
+            .iter()
+            .map(|detail| HirMemoryDetailLine {
+                key: detail.key,
+                value: lower_expr(&detail.value),
+                modifier: detail.modifier.as_ref().map(lower_headed_modifier),
+                span: detail.span,
+            })
+            .collect(),
+        span: spec.span,
+    }
+}
+
+fn lower_construct_region(region: &arcana_syntax::ConstructRegion) -> HirConstructRegion {
+    HirConstructRegion {
+        completion: region.completion,
+        target: Box::new(lower_expr(&region.target)),
+        destination: region
+            .destination
+            .as_ref()
+            .map(|destination| match destination {
+                arcana_syntax::ConstructDestination::Deliver { name } => {
+                    HirConstructDestination::Deliver { name: name.clone() }
+                }
+                arcana_syntax::ConstructDestination::Place { target } => {
+                    HirConstructDestination::Place {
+                        target: lower_assign_target(target),
+                    }
+                }
+            }),
+        default_modifier: region.default_modifier.as_ref().map(lower_headed_modifier),
+        lines: region
+            .lines
+            .iter()
+            .map(|line| HirConstructLine {
+                name: line.name.clone(),
+                value: lower_expr(&line.value),
+                modifier: line.modifier.as_ref().map(lower_headed_modifier),
+                span: line.span,
+            })
+            .collect(),
+        span: region.span,
+    }
+}
+
 fn lower_assign_op(op: &ParsedAssignOp) -> HirAssignOp {
     match op {
         ParsedAssignOp::Assign => HirAssignOp::Assign,
@@ -2677,6 +2868,9 @@ fn lower_expr(expr: &ParsedExpr) -> HirExpr {
                 })
                 .collect(),
         },
+        ParsedExpr::ConstructRegion(region) => {
+            HirExpr::ConstructRegion(Box::new(lower_construct_region(region)))
+        }
         ParsedExpr::Chain {
             style,
             introducer,
@@ -2894,6 +3088,82 @@ fn lower_statement(statement: &arcana_syntax::Statement) -> HirStatement {
                 op: lower_assign_op(op),
                 value: lower_expr(value),
             },
+            ParsedStatementKind::Recycle {
+                default_modifier,
+                lines,
+            } => HirStatementKind::Recycle {
+                default_modifier: default_modifier.as_ref().map(lower_headed_modifier),
+                lines: lines
+                    .iter()
+                    .map(|line| HirRecycleLine {
+                        kind: match &line.kind {
+                            arcana_syntax::RecycleLineKind::Expr { gate } => {
+                                HirRecycleLineKind::Expr {
+                                    gate: lower_expr(gate),
+                                }
+                            }
+                            arcana_syntax::RecycleLineKind::Let {
+                                mutable,
+                                name,
+                                gate,
+                            } => HirRecycleLineKind::Let {
+                                mutable: *mutable,
+                                name: name.clone(),
+                                gate: lower_expr(gate),
+                            },
+                            arcana_syntax::RecycleLineKind::Assign { name, gate } => {
+                                HirRecycleLineKind::Assign {
+                                    name: name.clone(),
+                                    gate: lower_expr(gate),
+                                }
+                            }
+                        },
+                        modifier: line.modifier.as_ref().map(lower_headed_modifier),
+                        span: line.span,
+                    })
+                    .collect(),
+            },
+            ParsedStatementKind::Bind {
+                default_modifier,
+                lines,
+            } => HirStatementKind::Bind {
+                default_modifier: default_modifier.as_ref().map(lower_headed_modifier),
+                lines: lines
+                    .iter()
+                    .map(|line| HirBindLine {
+                        kind: match &line.kind {
+                            arcana_syntax::BindLineKind::Let {
+                                mutable,
+                                name,
+                                gate,
+                            } => HirBindLineKind::Let {
+                                mutable: *mutable,
+                                name: name.clone(),
+                                gate: lower_expr(gate),
+                            },
+                            arcana_syntax::BindLineKind::Assign { name, gate } => {
+                                HirBindLineKind::Assign {
+                                    name: name.clone(),
+                                    gate: lower_expr(gate),
+                                }
+                            }
+                            arcana_syntax::BindLineKind::Require { expr } => {
+                                HirBindLineKind::Require {
+                                    expr: lower_expr(expr),
+                                }
+                            }
+                        },
+                        modifier: line.modifier.as_ref().map(lower_headed_modifier),
+                        span: line.span,
+                    })
+                    .collect(),
+            },
+            ParsedStatementKind::Construct(region) => {
+                HirStatementKind::Construct(lower_construct_region(region))
+            }
+            ParsedStatementKind::MemorySpec(spec) => {
+                HirStatementKind::MemorySpec(lower_memory_spec_decl(spec))
+            }
             ParsedStatementKind::Expr { expr } => HirStatementKind::Expr {
                 expr: lower_expr(expr),
             },
@@ -5041,5 +5311,59 @@ mod tests {
             vec!["render".to_string(), "window".to_string()]
         );
         assert_eq!(nested.module_id, "winspell.render.window");
+    }
+
+    #[test]
+    fn lower_module_text_captures_headed_regions_v1_shapes() {
+        let module = lower_module_text(
+            "app",
+            concat!(
+                "record Widget:\n",
+                "    value: Int\n",
+                "enum Result[T, E]:\n",
+                "    Ok(T)\n",
+                "    Err(E)\n",
+                "Memory arena:cache -alloc\n",
+                "    capacity = 8\n",
+                "fn main() -> Int:\n",
+                "    bind -return 0\n",
+                "        let value = Result.Ok[Int, Str] :: 1 :: call\n",
+                "    recycle -return 0\n",
+                "        true\n",
+                "    let built = construct yield Widget -return 0\n",
+                "        value = value\n",
+                "    construct deliver Widget -> delivered -return 0\n",
+                "        value = value\n",
+                "    return built.value\n",
+            ),
+        )
+        .expect("headed regions should lower");
+
+        assert_eq!(module.memory_specs.len(), 1);
+        assert_eq!(module.memory_specs[0].family.as_str(), "arena");
+        let main = module
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "main")
+            .expect("main should lower");
+        assert!(matches!(
+            main.statements[0].kind,
+            HirStatementKind::Bind { .. }
+        ));
+        assert!(matches!(
+            main.statements[1].kind,
+            HirStatementKind::Recycle { .. }
+        ));
+        assert!(matches!(
+            main.statements[2].kind,
+            HirStatementKind::Let {
+                value: HirExpr::ConstructRegion(_),
+                ..
+            }
+        ));
+        assert!(matches!(
+            main.statements[3].kind,
+            HirStatementKind::Construct(_)
+        ));
     }
 }

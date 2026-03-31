@@ -8,6 +8,7 @@
   - it was too vague about which legacy materials to carry forward.
 - The rewrite stays Rust-first, but the architecture is explicitly shaped for four non-language goals before selfhost: deterministic package management, real incremental builds, early first-party host plus app/runtime packages, and an eventual AOT backend.
 - One explicit freeze exception is now part of that contract: the object/owner model (`obj`, `create ... scope-exit`, availability attachments, owner activation, hold/re-entry) is approved pre-selfhost because later desktop/grimoire work depends on explicit lifetime-packaged state rather than the discarded historical selfhost grimoire designs.
+- A second explicit freeze exception is now part of that contract at the docs layer: headed regions (`recycle`, `construct`, `bind`, `Memory`) are approved pre-selfhost language law, while parser/frontend/runtime implementation and selfhost-matrix coverage remain follow-through work rather than completed status.
 
 ## Seed Import and Governance
 - Copy forward only the source-of-truth docs and corpus that define the frozen contract:
