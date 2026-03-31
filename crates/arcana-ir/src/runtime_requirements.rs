@@ -538,8 +538,12 @@ mod tests {
         derive_runtime_requirements_with_roots,
     };
     use crate::{
-        ExecCleanupFooter, ExecExpr, ExecPhraseQualifierKind, ExecStmt, IrEntrypoint, IrPackage,
-        IrPackageModule, IrRoutine, IrRoutineParam, parse_routine_type_text,
+        ExecAssignTarget, ExecBindLine, ExecBindLineKind, ExecCleanupFooter,
+        ExecConstructContributionMode, ExecConstructDestination, ExecConstructLine,
+        ExecConstructRegion, ExecExpr, ExecHeadedModifier, ExecMemoryDetailLine,
+        ExecMemorySpecDecl, ExecPhraseQualifierKind, ExecRecycleLine, ExecRecycleLineKind,
+        ExecStmt, IrEntrypoint, IrPackage, IrPackageModule, IrRoutine, IrRoutineParam,
+        parse_routine_type_text,
     };
 
     fn test_package_id_for_module(module_id: &str) -> String {
@@ -620,6 +624,415 @@ mod tests {
                 attached: Vec::new(),
             },
         }
+    }
+
+    fn call_expr(routine_key: &str, callable: &[&str]) -> ExecExpr {
+        ExecExpr::Phrase {
+            subject: Box::new(ExecExpr::Path(
+                callable.iter().map(|segment| segment.to_string()).collect(),
+            )),
+            args: Vec::new(),
+            qualifier_kind: ExecPhraseQualifierKind::Call,
+            qualifier: "call".to_string(),
+            resolved_callable: Some(callable.iter().map(|segment| segment.to_string()).collect()),
+            resolved_routine: Some(routine_key.to_string()),
+            dynamic_dispatch: None,
+            attached: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn derives_requirements_from_headed_region_statements() {
+        let package = IrPackage {
+            package_id: "app".to_string(),
+            package_name: "app".to_string(),
+            root_module_id: "app".to_string(),
+            direct_deps: vec!["std".to_string()],
+            direct_dep_ids: vec!["std".to_string()],
+            package_display_names: test_package_display_names_with_deps(
+                "app".to_string(),
+                "app".to_string(),
+                vec!["std".to_string()],
+                vec!["std".to_string()],
+            ),
+            package_direct_dep_ids: test_package_direct_dep_ids(
+                "app".to_string(),
+                vec!["std".to_string()],
+                vec!["std".to_string()],
+            ),
+            modules: vec![IrPackageModule {
+                package_id: test_package_id_for_module("app"),
+                module_id: "app".to_string(),
+                symbol_count: 1,
+                item_count: 1,
+                line_count: 1,
+                non_empty_line_count: 1,
+                directive_rows: Vec::new(),
+                lang_item_rows: Vec::new(),
+                exported_surface_rows: Vec::new(),
+            }],
+            dependency_edge_count: 0,
+            dependency_rows: Vec::new(),
+            exported_surface_rows: Vec::new(),
+            runtime_requirements: Vec::new(),
+            entrypoints: vec![IrEntrypoint {
+                package_id: test_package_id_for_module("app"),
+                module_id: "app".to_string(),
+                symbol_name: "main".to_string(),
+                symbol_kind: "fn".to_string(),
+                is_async: false,
+                exported: true,
+            }],
+            routines: vec![
+                routine(
+                    "app",
+                    "app#sym-0",
+                    "main",
+                    None,
+                    vec![
+                        ExecStmt::Recycle {
+                            default_modifier: Some(ExecHeadedModifier {
+                                kind: "return".to_string(),
+                                payload: Some(call_expr("std.io#sym-0", &["std", "io", "print"])),
+                            }),
+                            lines: vec![ExecRecycleLine {
+                                kind: ExecRecycleLineKind::Expr {
+                                    gate: call_expr(
+                                        "std.text#sym-0",
+                                        &["std", "text", "len_bytes"],
+                                    ),
+                                },
+                                modifier: Some(ExecHeadedModifier {
+                                    kind: "return".to_string(),
+                                    payload: Some(call_expr(
+                                        "std.args#sym-0",
+                                        &["std", "args", "count"],
+                                    )),
+                                }),
+                            }],
+                        },
+                        ExecStmt::Bind {
+                            default_modifier: Some(ExecHeadedModifier {
+                                kind: "default".to_string(),
+                                payload: Some(call_expr(
+                                    "std.time#sym-0",
+                                    &["std", "time", "now_ms"],
+                                )),
+                            }),
+                            lines: vec![
+                                ExecBindLine {
+                                    kind: ExecBindLineKind::Let {
+                                        mutable: false,
+                                        name: "value".to_string(),
+                                        gate: call_expr(
+                                            "std.fs#sym-0",
+                                            &["std", "fs", "read_text"],
+                                        ),
+                                    },
+                                    modifier: None,
+                                },
+                                ExecBindLine {
+                                    kind: ExecBindLineKind::Require {
+                                        expr: call_expr("std.env#sym-0", &["std", "env", "get"]),
+                                    },
+                                    modifier: Some(ExecHeadedModifier {
+                                        kind: "return".to_string(),
+                                        payload: Some(call_expr(
+                                            "std.path#sym-0",
+                                            &["std", "path", "cwd"],
+                                        )),
+                                    }),
+                                },
+                            ],
+                        },
+                        ExecStmt::Construct(ExecConstructRegion {
+                            completion: "place".to_string(),
+                            target: Box::new(ExecExpr::Path(vec![
+                                "app".to_string(),
+                                "Widget".to_string(),
+                            ])),
+                            destination: Some(ExecConstructDestination::Place {
+                                target: ExecAssignTarget::Index {
+                                    target: Box::new(ExecAssignTarget::Name("slots".to_string())),
+                                    index: call_expr(
+                                        "std.process#sym-0",
+                                        &["std", "process", "status"],
+                                    ),
+                                },
+                            }),
+                            default_modifier: Some(ExecHeadedModifier {
+                                kind: "return".to_string(),
+                                payload: Some(call_expr(
+                                    "std.audio#sym-0",
+                                    &["std", "audio", "default_output"],
+                                )),
+                            }),
+                            lines: vec![ExecConstructLine {
+                                name: "value".to_string(),
+                                value: call_expr(
+                                    "std.collections#sym-0",
+                                    &["std", "collections", "list_new"],
+                                ),
+                                mode: ExecConstructContributionMode::Direct,
+                                modifier: Some(ExecHeadedModifier {
+                                    kind: "default".to_string(),
+                                    payload: Some(call_expr(
+                                        "std.concurrent#sym-0",
+                                        &["std", "concurrent", "spawn"],
+                                    )),
+                                }),
+                            }],
+                        }),
+                        ExecStmt::MemorySpec(ExecMemorySpecDecl {
+                            family: "arena".to_string(),
+                            name: "cache".to_string(),
+                            default_modifier: Some(ExecHeadedModifier {
+                                kind: "alloc".to_string(),
+                                payload: None,
+                            }),
+                            details: vec![ExecMemoryDetailLine {
+                                key: "capacity".to_string(),
+                                value: call_expr(
+                                    "std.memory#sym-0",
+                                    &["std", "memory", "arena_alloc"],
+                                ),
+                                modifier: None,
+                            }],
+                        }),
+                        ExecStmt::ReturnValue {
+                            value: ExecExpr::Int(0),
+                        },
+                    ],
+                ),
+                routine(
+                    "std.io",
+                    "std.io#sym-0",
+                    "print",
+                    Some("IoPrint"),
+                    Vec::new(),
+                ),
+                routine(
+                    "std.text",
+                    "std.text#sym-0",
+                    "len_bytes",
+                    Some("HostTextLenBytes"),
+                    Vec::new(),
+                ),
+                routine(
+                    "std.args",
+                    "std.args#sym-0",
+                    "count",
+                    Some("HostArgCount"),
+                    Vec::new(),
+                ),
+                routine(
+                    "std.time",
+                    "std.time#sym-0",
+                    "now_ms",
+                    Some("HostTimeNowMs"),
+                    Vec::new(),
+                ),
+                routine(
+                    "std.fs",
+                    "std.fs#sym-0",
+                    "read_text",
+                    Some("HostFsReadTextTry"),
+                    Vec::new(),
+                ),
+                routine(
+                    "std.env",
+                    "std.env#sym-0",
+                    "get",
+                    Some("HostEnvGet"),
+                    Vec::new(),
+                ),
+                routine(
+                    "std.path",
+                    "std.path#sym-0",
+                    "cwd",
+                    Some("HostPathCwd"),
+                    Vec::new(),
+                ),
+                routine(
+                    "std.process",
+                    "std.process#sym-0",
+                    "status",
+                    Some("HostProcessExecStatus"),
+                    Vec::new(),
+                ),
+                routine(
+                    "std.audio",
+                    "std.audio#sym-0",
+                    "default_output",
+                    Some("AudioDefaultOutputTry"),
+                    Vec::new(),
+                ),
+                routine(
+                    "std.collections",
+                    "std.collections#sym-0",
+                    "list_new",
+                    Some("ListNew"),
+                    Vec::new(),
+                ),
+                routine(
+                    "std.concurrent",
+                    "std.concurrent#sym-0",
+                    "spawn",
+                    Some("ConcurrentTaskSpawn"),
+                    Vec::new(),
+                ),
+                routine(
+                    "std.memory",
+                    "std.memory#sym-0",
+                    "arena_alloc",
+                    Some("MemoryArenaAlloc"),
+                    Vec::new(),
+                ),
+            ],
+            owners: Vec::new(),
+        };
+
+        assert_eq!(
+            derive_runtime_requirements(&package),
+            vec![
+                "std.kernel.args".to_string(),
+                "std.kernel.audio".to_string(),
+                "std.kernel.collections".to_string(),
+                "std.kernel.concurrency".to_string(),
+                "std.kernel.env".to_string(),
+                "std.kernel.fs".to_string(),
+                "std.kernel.io".to_string(),
+                "std.kernel.memory".to_string(),
+                "std.kernel.path".to_string(),
+                "std.kernel.process".to_string(),
+                "std.kernel.text".to_string(),
+                "std.kernel.time".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn derives_requirements_from_construct_yield_expr_regions() {
+        let package = IrPackage {
+            package_id: "app".to_string(),
+            package_name: "app".to_string(),
+            root_module_id: "app".to_string(),
+            direct_deps: vec!["std".to_string()],
+            direct_dep_ids: vec!["std".to_string()],
+            package_display_names: test_package_display_names_with_deps(
+                "app".to_string(),
+                "app".to_string(),
+                vec!["std".to_string()],
+                vec!["std".to_string()],
+            ),
+            package_direct_dep_ids: test_package_direct_dep_ids(
+                "app".to_string(),
+                vec!["std".to_string()],
+                vec!["std".to_string()],
+            ),
+            modules: vec![IrPackageModule {
+                package_id: test_package_id_for_module("app"),
+                module_id: "app".to_string(),
+                symbol_count: 1,
+                item_count: 1,
+                line_count: 1,
+                non_empty_line_count: 1,
+                directive_rows: Vec::new(),
+                lang_item_rows: Vec::new(),
+                exported_surface_rows: Vec::new(),
+            }],
+            dependency_edge_count: 0,
+            dependency_rows: Vec::new(),
+            exported_surface_rows: Vec::new(),
+            runtime_requirements: Vec::new(),
+            entrypoints: vec![IrEntrypoint {
+                package_id: test_package_id_for_module("app"),
+                module_id: "app".to_string(),
+                symbol_name: "main".to_string(),
+                symbol_kind: "fn".to_string(),
+                is_async: false,
+                exported: true,
+            }],
+            routines: vec![
+                routine(
+                    "app",
+                    "app#sym-0",
+                    "main",
+                    None,
+                    vec![
+                        ExecStmt::Let {
+                            binding_id: 0,
+                            mutable: false,
+                            name: "built".to_string(),
+                            value: ExecExpr::ConstructRegion(Box::new(ExecConstructRegion {
+                                completion: "yield".to_string(),
+                                target: Box::new(ExecExpr::Path(vec![
+                                    "app".to_string(),
+                                    "Widget".to_string(),
+                                ])),
+                                destination: None,
+                                default_modifier: Some(ExecHeadedModifier {
+                                    kind: "return".to_string(),
+                                    payload: Some(call_expr(
+                                        "std.io#sym-0",
+                                        &["std", "io", "print"],
+                                    )),
+                                }),
+                                lines: vec![ExecConstructLine {
+                                    name: "value".to_string(),
+                                    value: call_expr(
+                                        "std.text#sym-0",
+                                        &["std", "text", "len_bytes"],
+                                    ),
+                                    mode: ExecConstructContributionMode::Direct,
+                                    modifier: Some(ExecHeadedModifier {
+                                        kind: "default".to_string(),
+                                        payload: Some(call_expr(
+                                            "std.args#sym-0",
+                                            &["std", "args", "count"],
+                                        )),
+                                    }),
+                                }],
+                            })),
+                        },
+                        ExecStmt::ReturnValue {
+                            value: ExecExpr::Int(0),
+                        },
+                    ],
+                ),
+                routine(
+                    "std.io",
+                    "std.io#sym-0",
+                    "print",
+                    Some("IoPrint"),
+                    Vec::new(),
+                ),
+                routine(
+                    "std.text",
+                    "std.text#sym-0",
+                    "len_bytes",
+                    Some("HostTextLenBytes"),
+                    Vec::new(),
+                ),
+                routine(
+                    "std.args",
+                    "std.args#sym-0",
+                    "count",
+                    Some("HostArgCount"),
+                    Vec::new(),
+                ),
+            ],
+            owners: Vec::new(),
+        };
+
+        assert_eq!(
+            derive_runtime_requirements(&package),
+            vec![
+                "std.kernel.args".to_string(),
+                "std.kernel.io".to_string(),
+                "std.kernel.text".to_string(),
+            ]
+        );
     }
 
     #[test]

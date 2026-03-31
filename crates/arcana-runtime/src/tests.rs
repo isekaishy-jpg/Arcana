@@ -4041,6 +4041,33 @@ fn execute_main_memory_specs_apply_runtime_policies() {
         &mut host,
     )
     .expect("strict pool should allocate a fresh slot");
+    execute_runtime_intrinsic(
+        RuntimeIntrinsic::MemoryPoolReset,
+        &[],
+        &mut vec![RuntimeValue::Opaque(RuntimeOpaqueValue::PoolArena(
+            strict_handle,
+        ))],
+        &plan,
+        &mut state,
+        &mut host,
+    )
+    .expect("strict pool should reset");
+    let strict_reused = execute_runtime_intrinsic(
+        RuntimeIntrinsic::MemoryPoolAlloc,
+        &[],
+        &mut vec![
+            RuntimeValue::Opaque(RuntimeOpaqueValue::PoolArena(strict_handle)),
+            RuntimeValue::Int(23),
+        ],
+        &plan,
+        &mut state,
+        &mut host,
+    )
+    .expect("strict pool should reuse slots after reset");
+    let RuntimeValue::Opaque(RuntimeOpaqueValue::PoolId(strict_reused_id)) = strict_reused else {
+        panic!("strict pool alloc should return a PoolId");
+    };
+    assert_eq!(strict_reused_id.slot, 0);
 
     let free_pool = state
         .pool_arenas
@@ -4053,10 +4080,87 @@ fn execute_main_memory_specs_apply_runtime_policies() {
         .pool_arenas
         .get(&strict_handle)
         .expect("strict pool should exist");
-    assert_eq!(strict_pool.next_slot, 3);
+    assert_eq!(strict_pool.next_slot, 1);
     assert!(strict_pool.free_slots.is_empty());
 
     let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn runtime_memory_spec_materialization_uses_descriptor_hook_registry() {
+    let mut state = RuntimeExecutionState::default();
+    let arena_descriptor =
+        arcana_language_law::memory_family_descriptor(arcana_language_law::MemoryFamily::Arena);
+    let frame_descriptor =
+        arcana_language_law::memory_family_descriptor(arcana_language_law::MemoryFamily::Frame);
+    let pool_descriptor =
+        arcana_language_law::memory_family_descriptor(arcana_language_law::MemoryFamily::Pool);
+
+    let arena_value = super::materialize_runtime_memory_spec_handle(
+        &super::RuntimeMemorySpecMaterialization {
+            hook_id: arena_descriptor.lazy_materialization_hook_id,
+            handle_policy: super::RuntimeMemoryHandlePolicy::Stable,
+            kind: super::RuntimeMemorySpecMaterializationKind::Arena(
+                super::default_runtime_arena_policy(2),
+            ),
+        },
+        &mut state,
+    )
+    .expect("arena descriptor hook should materialize");
+    let frame_value = super::materialize_runtime_memory_spec_handle(
+        &super::RuntimeMemorySpecMaterialization {
+            hook_id: frame_descriptor.lazy_materialization_hook_id,
+            handle_policy: super::RuntimeMemoryHandlePolicy::Stable,
+            kind: super::RuntimeMemorySpecMaterializationKind::Frame(
+                super::default_runtime_frame_policy(2),
+            ),
+        },
+        &mut state,
+    )
+    .expect("frame descriptor hook should materialize");
+    let pool_value = super::materialize_runtime_memory_spec_handle(
+        &super::RuntimeMemorySpecMaterialization {
+            hook_id: pool_descriptor.lazy_materialization_hook_id,
+            handle_policy: super::RuntimeMemoryHandlePolicy::Stable,
+            kind: super::RuntimeMemorySpecMaterializationKind::Pool(
+                super::default_runtime_pool_policy(2),
+            ),
+        },
+        &mut state,
+    )
+    .expect("pool descriptor hook should materialize");
+
+    assert!(matches!(
+        arena_value,
+        RuntimeValue::Opaque(RuntimeOpaqueValue::Arena(_))
+    ));
+    assert!(matches!(
+        frame_value,
+        RuntimeValue::Opaque(RuntimeOpaqueValue::FrameArena(_))
+    ));
+    assert!(matches!(
+        pool_value,
+        RuntimeValue::Opaque(RuntimeOpaqueValue::PoolArena(_))
+    ));
+    assert_eq!(state.arenas.len(), 1);
+    assert_eq!(state.frame_arenas.len(), 1);
+    assert_eq!(state.pool_arenas.len(), 1);
+
+    let err = super::materialize_runtime_memory_spec_handle(
+        &super::RuntimeMemorySpecMaterialization {
+            hook_id: "unknown_memory_new",
+            handle_policy: super::RuntimeMemoryHandlePolicy::Stable,
+            kind: super::RuntimeMemorySpecMaterializationKind::Arena(
+                super::default_runtime_arena_policy(1),
+            ),
+        },
+        &mut state,
+    )
+    .expect_err("unknown runtime memory hooks should fail");
+    assert!(
+        super::runtime_eval_message(err)
+            .contains("unsupported runtime memory materialization hook `unknown_memory_new`")
+    );
 }
 
 #[test]

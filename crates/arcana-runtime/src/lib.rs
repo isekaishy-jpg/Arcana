@@ -32,6 +32,7 @@ use arcana_ir::{
 };
 use arcana_language_law::{
     MemoryDetailKey, MemoryDetailValueKind, MemoryFamily, memory_detail_descriptor,
+    memory_family_descriptor,
 };
 use pathdiff::diff_paths;
 use serde::{Deserialize, Serialize};
@@ -3935,10 +3936,17 @@ struct RuntimePoolArenaPolicy {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum RuntimeMemorySpecMaterialization {
+enum RuntimeMemorySpecMaterializationKind {
     Arena(RuntimeArenaPolicy),
     Frame(RuntimeFrameArenaPolicy),
     Pool(RuntimePoolArenaPolicy),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeMemorySpecMaterialization {
+    hook_id: &'static str,
+    handle_policy: RuntimeMemoryHandlePolicy,
+    kind: RuntimeMemorySpecMaterializationKind,
 }
 
 type RuntimeEvalResult<T> = Result<T, RuntimeEvalSignal>;
@@ -15357,7 +15365,15 @@ fn execute_runtime_core_intrinsic(
             for generation in arena.generations.values_mut() {
                 *generation += 1;
             }
-            arena.free_slots = arena.generations.keys().copied().rev().collect();
+            match arena.policy.recycle {
+                RuntimePoolRecyclePolicy::FreeList => {
+                    arena.free_slots = arena.generations.keys().copied().rev().collect();
+                }
+                RuntimePoolRecyclePolicy::Strict => {
+                    arena.next_slot = 0;
+                    arena.free_slots.clear();
+                }
+            }
             arena.policy.current_limit = arena.policy.base_capacity;
             Ok(RuntimeValue::Unit)
         }
@@ -17233,16 +17249,6 @@ fn memory_detail_atom(value: RuntimeValue, context: &str) -> Result<String, Stri
     }
 }
 
-fn runtime_materialization_handle_policy(
-    materialization: &RuntimeMemorySpecMaterialization,
-) -> RuntimeMemoryHandlePolicy {
-    match materialization {
-        RuntimeMemorySpecMaterialization::Arena(policy) => policy.handle,
-        RuntimeMemorySpecMaterialization::Frame(_) => RuntimeMemoryHandlePolicy::Stable,
-        RuntimeMemorySpecMaterialization::Pool(policy) => policy.handle,
-    }
-}
-
 fn build_runtime_memory_spec_materialization(
     spec: &ParsedMemorySpecDecl,
     plan: &RuntimePackagePlan,
@@ -17255,6 +17261,7 @@ fn build_runtime_memory_spec_materialization(
     host: &mut dyn RuntimeHost,
 ) -> RuntimeEvalResult<RuntimeMemorySpecMaterialization> {
     let family = memory_family_from_text(&spec.family).map_err(RuntimeEvalSignal::from)?;
+    let descriptor = memory_family_descriptor(family);
     let default_strategy = spec
         .default_modifier
         .as_ref()
@@ -17395,37 +17402,143 @@ fn build_runtime_memory_spec_materialization(
             }
         }
     }
-    Ok(match family {
-        MemoryFamily::Arena => RuntimeMemorySpecMaterialization::Arena(RuntimeArenaPolicy {
-            base_capacity: capacity,
-            current_limit: capacity,
-            growth_step: growth
-                .unwrap_or_else(|| runtime_default_growth_step(budget_strategy, capacity)),
-            pressure: pressure.unwrap_or_else(|| runtime_default_memory_pressure(budget_strategy)),
-            handle: handle_policy
-                .unwrap_or_else(|| runtime_default_memory_handle_policy(handle_strategy)),
-        }),
-        MemoryFamily::Frame => RuntimeMemorySpecMaterialization::Frame(RuntimeFrameArenaPolicy {
-            base_capacity: capacity,
-            current_limit: capacity,
-            growth_step: growth
-                .unwrap_or_else(|| runtime_default_growth_step(budget_strategy, capacity)),
-            pressure: pressure.unwrap_or_else(|| runtime_default_memory_pressure(budget_strategy)),
-            recycle: frame_recycle
-                .unwrap_or_else(|| runtime_default_frame_recycle_policy(recycle_strategy)),
-        }),
-        MemoryFamily::Pool => RuntimeMemorySpecMaterialization::Pool(RuntimePoolArenaPolicy {
-            base_capacity: capacity,
-            current_limit: capacity,
-            growth_step: growth
-                .unwrap_or_else(|| runtime_default_growth_step(budget_strategy, capacity)),
-            pressure: pressure.unwrap_or_else(|| runtime_default_memory_pressure(budget_strategy)),
-            recycle: pool_recycle
-                .unwrap_or_else(|| runtime_default_pool_recycle_policy(recycle_strategy)),
-            handle: handle_policy
-                .unwrap_or_else(|| runtime_default_memory_handle_policy(handle_strategy)),
-        }),
+    let (resolved_handle_policy, kind) = match family {
+        MemoryFamily::Arena => {
+            let policy = RuntimeArenaPolicy {
+                base_capacity: capacity,
+                current_limit: capacity,
+                growth_step: growth
+                    .unwrap_or_else(|| runtime_default_growth_step(budget_strategy, capacity)),
+                pressure: pressure
+                    .unwrap_or_else(|| runtime_default_memory_pressure(budget_strategy)),
+                handle: handle_policy
+                    .unwrap_or_else(|| runtime_default_memory_handle_policy(handle_strategy)),
+            };
+            (
+                policy.handle,
+                RuntimeMemorySpecMaterializationKind::Arena(policy),
+            )
+        }
+        MemoryFamily::Frame => (
+            RuntimeMemoryHandlePolicy::Stable,
+            RuntimeMemorySpecMaterializationKind::Frame(RuntimeFrameArenaPolicy {
+                base_capacity: capacity,
+                current_limit: capacity,
+                growth_step: growth
+                    .unwrap_or_else(|| runtime_default_growth_step(budget_strategy, capacity)),
+                pressure: pressure
+                    .unwrap_or_else(|| runtime_default_memory_pressure(budget_strategy)),
+                recycle: frame_recycle
+                    .unwrap_or_else(|| runtime_default_frame_recycle_policy(recycle_strategy)),
+            }),
+        ),
+        MemoryFamily::Pool => {
+            let policy = RuntimePoolArenaPolicy {
+                base_capacity: capacity,
+                current_limit: capacity,
+                growth_step: growth
+                    .unwrap_or_else(|| runtime_default_growth_step(budget_strategy, capacity)),
+                pressure: pressure
+                    .unwrap_or_else(|| runtime_default_memory_pressure(budget_strategy)),
+                recycle: pool_recycle
+                    .unwrap_or_else(|| runtime_default_pool_recycle_policy(recycle_strategy)),
+                handle: handle_policy
+                    .unwrap_or_else(|| runtime_default_memory_handle_policy(handle_strategy)),
+            };
+            (
+                policy.handle,
+                RuntimeMemorySpecMaterializationKind::Pool(policy),
+            )
+        }
+    };
+    Ok(RuntimeMemorySpecMaterialization {
+        hook_id: descriptor.lazy_materialization_hook_id,
+        handle_policy: resolved_handle_policy,
+        kind,
     })
+}
+
+struct RuntimeMemoryMaterializationHook {
+    id: &'static str,
+    materialize: fn(
+        &RuntimeMemorySpecMaterializationKind,
+        &mut RuntimeExecutionState,
+    ) -> RuntimeEvalResult<RuntimeValue>,
+}
+
+fn materialize_runtime_arena_spec_hook(
+    kind: &RuntimeMemorySpecMaterializationKind,
+    state: &mut RuntimeExecutionState,
+) -> RuntimeEvalResult<RuntimeValue> {
+    let RuntimeMemorySpecMaterializationKind::Arena(policy) = kind else {
+        return Err(RuntimeEvalSignal::from(
+            "runtime memory materialization hook `arena_new` received a non-arena policy"
+                .to_string(),
+        ));
+    };
+    Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::Arena(
+        insert_runtime_arena(state, &[], policy.clone()),
+    )))
+}
+
+fn materialize_runtime_frame_spec_hook(
+    kind: &RuntimeMemorySpecMaterializationKind,
+    state: &mut RuntimeExecutionState,
+) -> RuntimeEvalResult<RuntimeValue> {
+    let RuntimeMemorySpecMaterializationKind::Frame(policy) = kind else {
+        return Err(RuntimeEvalSignal::from(
+            "runtime memory materialization hook `frame_new` received a non-frame policy"
+                .to_string(),
+        ));
+    };
+    Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::FrameArena(
+        insert_runtime_frame_arena(state, &[], policy.clone()),
+    )))
+}
+
+fn materialize_runtime_pool_spec_hook(
+    kind: &RuntimeMemorySpecMaterializationKind,
+    state: &mut RuntimeExecutionState,
+) -> RuntimeEvalResult<RuntimeValue> {
+    let RuntimeMemorySpecMaterializationKind::Pool(policy) = kind else {
+        return Err(RuntimeEvalSignal::from(
+            "runtime memory materialization hook `pool_new` received a non-pool policy".to_string(),
+        ));
+    };
+    Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::PoolArena(
+        insert_runtime_pool_arena(state, &[], policy.clone()),
+    )))
+}
+
+const RUNTIME_MEMORY_MATERIALIZATION_HOOKS: &[RuntimeMemoryMaterializationHook] = &[
+    RuntimeMemoryMaterializationHook {
+        id: "arena_new",
+        materialize: materialize_runtime_arena_spec_hook,
+    },
+    RuntimeMemoryMaterializationHook {
+        id: "frame_new",
+        materialize: materialize_runtime_frame_spec_hook,
+    },
+    RuntimeMemoryMaterializationHook {
+        id: "pool_new",
+        materialize: materialize_runtime_pool_spec_hook,
+    },
+];
+
+fn materialize_runtime_memory_spec_handle(
+    materialization: &RuntimeMemorySpecMaterialization,
+    state: &mut RuntimeExecutionState,
+) -> RuntimeEvalResult<RuntimeValue> {
+    let hook = RUNTIME_MEMORY_MATERIALIZATION_HOOKS
+        .iter()
+        .find(|hook| hook.id == materialization.hook_id)
+        .ok_or_else(|| {
+            RuntimeEvalSignal::from(format!(
+                "unsupported runtime memory materialization hook `{}`",
+                materialization.hook_id
+            ))
+        })?;
+    (hook.materialize)(&materialization.kind, state)
 }
 
 fn materialize_runtime_memory_spec(
@@ -17450,18 +17563,8 @@ fn materialize_runtime_memory_spec(
         state,
         host,
     )?;
-    let handle_policy = runtime_materialization_handle_policy(&materialization);
-    let value = match materialization {
-        RuntimeMemorySpecMaterialization::Arena(policy) => RuntimeValue::Opaque(
-            RuntimeOpaqueValue::Arena(insert_runtime_arena(state, &[], policy)),
-        ),
-        RuntimeMemorySpecMaterialization::Frame(policy) => RuntimeValue::Opaque(
-            RuntimeOpaqueValue::FrameArena(insert_runtime_frame_arena(state, &[], policy)),
-        ),
-        RuntimeMemorySpecMaterialization::Pool(policy) => RuntimeValue::Opaque(
-            RuntimeOpaqueValue::PoolArena(insert_runtime_pool_arena(state, &[], policy)),
-        ),
-    };
+    let handle_policy = materialization.handle_policy;
+    let value = materialize_runtime_memory_spec_handle(&materialization, state)?;
     Ok((value, handle_policy))
 }
 
