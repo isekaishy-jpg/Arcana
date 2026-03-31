@@ -1096,6 +1096,12 @@ impl LowerValueScope {
         binding_id
     }
 
+    fn update_type(&mut self, name: &str, ty: HirType) {
+        if let Some(binding) = self.locals.get_mut(name) {
+            binding.ty = ty;
+        }
+    }
+
     fn owner_member_type(&self, owner_name: &str, member: &str) -> Option<&HirType> {
         self.owner_member_types
             .get(owner_name)
@@ -1878,6 +1884,18 @@ fn infer_expr_hir_type(scope: &ResolvedRenderScope<'_>, expr: &HirExpr) -> Optio
     }
 }
 
+fn infer_headed_payload_binding_type(
+    scope: &ResolvedRenderScope<'_>,
+    expr: &HirExpr,
+) -> Option<HirType> {
+    let ty = infer_expr_hir_type(scope, expr)?;
+    if let Some(payload) = type_option_payload_for_construct(&ty) {
+        Some(payload)
+    } else {
+        type_result_payloads_for_construct(&ty).map(|(ok, _)| ok)
+    }
+}
+
 #[derive(Clone, Debug)]
 enum ResolvedConstructTargetShape {
     Record(BTreeMap<String, HirType>),
@@ -1938,6 +1956,33 @@ fn resolve_construct_target_shape_for_scope(
     Some(ResolvedConstructTargetShape::Variant(
         canonicalize_scope_hir_type(scope, variant.payload.as_ref()?)?,
     ))
+}
+
+fn canonical_scope_type_from_path(scope: &ResolvedRenderScope<'_>, path: &[String]) -> HirType {
+    let segments = lookup_symbol_path(scope.workspace, scope.resolved_module, path)
+        .map(resolved_symbol_path)
+        .unwrap_or_else(|| path.to_vec());
+    HirType {
+        kind: HirTypeKind::Path(HirPath {
+            segments,
+            span: Default::default(),
+        }),
+        span: Default::default(),
+    }
+}
+
+fn resolve_construct_result_type_for_scope(
+    scope: &ResolvedRenderScope<'_>,
+    path: &[String],
+) -> Option<HirType> {
+    resolve_construct_target_shape_for_scope(scope, path)?;
+    let canonical_path =
+        if lookup_symbol_path(scope.workspace, scope.resolved_module, path).is_some() {
+            path.to_vec()
+        } else {
+            path[..path.len().checked_sub(1)?].to_vec()
+        };
+    Some(canonical_scope_type_from_path(scope, &canonical_path))
 }
 
 fn infer_construct_contribution_mode(
@@ -2482,6 +2527,46 @@ fn collect_lowered_cleanup_bindings(
                     );
                 }
             }
+        }
+        ExecStmt::Recycle { lines, .. } => {
+            for line in lines {
+                let ExecRecycleLineKind::Let { name, .. } = &line.kind else {
+                    continue;
+                };
+                let Some(binding_id) = scope.value_scope.binding_id_of(name) else {
+                    continue;
+                };
+                let Some(ty) = scope.value_scope.type_of(name).cloned() else {
+                    continue;
+                };
+                push_cleanup_binding_candidate(bindings, name.clone(), binding_id, ty);
+            }
+        }
+        ExecStmt::Bind { lines, .. } => {
+            for line in lines {
+                let ExecBindLineKind::Let { name, .. } = &line.kind else {
+                    continue;
+                };
+                let Some(binding_id) = scope.value_scope.binding_id_of(name) else {
+                    continue;
+                };
+                let Some(ty) = scope.value_scope.type_of(name).cloned() else {
+                    continue;
+                };
+                push_cleanup_binding_candidate(bindings, name.clone(), binding_id, ty);
+            }
+        }
+        ExecStmt::Construct(region) => {
+            let Some(ExecConstructDestination::Deliver { name }) = &region.destination else {
+                return;
+            };
+            let Some(binding_id) = scope.value_scope.binding_id_of(name) else {
+                return;
+            };
+            let Some(ty) = scope.value_scope.type_of(name).cloned() else {
+                return;
+            };
+            push_cleanup_binding_candidate(bindings, name.clone(), binding_id, ty);
         }
         _ => {}
     }
@@ -3264,396 +3349,448 @@ fn lower_exec_stmt_resolved(
     scope: &mut ResolvedRenderScope<'_>,
     inherited_cleanup_cleanup_footers: &[HirCleanupFooter],
 ) -> Result<LoweredExecBlock, String> {
-    let (lowered_stmt, mut cleanup_bindings) =
-        match &statement.kind {
-            HirStatementKind::Let {
-                mutable,
-                name,
-                value,
-            } => {
-                if let Some(owner_activation) = resolve_owner_activation_expr(scope, value)? {
-                    let lowered_context = owner_activation
-                        .context
-                        .map(|expr| lower_exec_expr_resolved(expr, scope));
-                    scope.value_scope.activate_owner(
-                        &owner_activation.owner_local_name,
-                        &owner_activation.owner_path,
-                        &owner_activation.objects,
-                        Some(name),
-                    );
-                    let object_binding_ids = owner_activation
-                        .objects
-                        .iter()
-                        .filter_map(|(local_name, _)| {
-                            scope
-                                .value_scope
-                                .binding_id_of(local_name)
-                                .map(|binding_id| ExecNamedBindingId {
-                                    name: local_name.clone(),
-                                    binding_id,
-                                })
-                        })
-                        .collect();
-                    (
-                        ExecStmt::ActivateOwner {
-                            owner_path: owner_activation.owner_path,
-                            owner_local_name: owner_activation.owner_local_name,
-                            binding: Some(name.clone()),
-                            object_binding_ids,
-                            context: lowered_context,
-                        },
-                        Vec::new(),
-                    )
-                } else {
-                    let mut binding_id = 0;
-                    let lowered_value = lower_exec_expr_resolved(value, scope);
-                    let lowered = ExecStmt::Let {
-                        binding_id,
-                        mutable: *mutable,
-                        name: name.clone(),
-                        value: lowered_value,
-                    };
-                    if let Some(ty) = infer_expr_hir_type(scope, value) {
-                        binding_id = scope.value_scope.insert(name.clone(), ty);
-                    }
-                    let lowered = match lowered {
-                        ExecStmt::Let {
-                            mutable,
-                            name,
-                            value,
-                            ..
-                        } => ExecStmt::Let {
-                            binding_id,
-                            mutable,
-                            name,
-                            value,
-                        },
-                        _ => unreachable!(),
-                    };
-                    (lowered, Vec::new())
-                }
-            }
-            HirStatementKind::Expr { expr } => {
-                if let Some(owner_activation) = resolve_owner_activation_expr(scope, expr)? {
-                    let lowered_context = owner_activation
-                        .context
-                        .map(|value| lower_exec_expr_resolved(value, scope));
-                    scope.value_scope.activate_owner(
-                        &owner_activation.owner_local_name,
-                        &owner_activation.owner_path,
-                        &owner_activation.objects,
-                        None,
-                    );
-                    let object_binding_ids = owner_activation
-                        .objects
-                        .iter()
-                        .filter_map(|(local_name, _)| {
-                            scope
-                                .value_scope
-                                .binding_id_of(local_name)
-                                .map(|binding_id| ExecNamedBindingId {
-                                    name: local_name.clone(),
-                                    binding_id,
-                                })
-                        })
-                        .collect();
-                    (
-                        ExecStmt::ActivateOwner {
-                            owner_path: owner_activation.owner_path,
-                            owner_local_name: owner_activation.owner_local_name,
-                            binding: None,
-                            object_binding_ids,
-                            context: lowered_context,
-                        },
-                        Vec::new(),
-                    )
-                } else {
-                    let statement_cleanup_cleanup_footers = effective_cleanup_cleanup_footers(
-                        &statement.cleanup_footers,
-                        inherited_cleanup_cleanup_footers,
-                    );
-                    (
-                        ExecStmt::Expr {
-                            expr: lower_exec_expr_resolved(expr, scope),
-                            cleanup_footers: lower_resolved_statement_cleanup_footers(
-                                scope,
-                                statement_cleanup_cleanup_footers,
-                                Vec::new(),
-                            )?,
-                        },
-                        Vec::new(),
-                    )
-                }
-            }
-            HirStatementKind::Return { value } => (
-                match value.as_ref() {
-                    Some(value) => ExecStmt::ReturnValue {
-                        value: lower_exec_expr_resolved(value, scope),
-                    },
-                    None => ExecStmt::ReturnVoid,
-                },
-                Vec::new(),
-            ),
-            HirStatementKind::If {
-                condition,
-                then_branch,
-                else_branch,
-            } => {
-                let statement_cleanup_cleanup_footers = effective_cleanup_cleanup_footers(
-                    &statement.cleanup_footers,
-                    inherited_cleanup_cleanup_footers,
+    let (lowered_stmt, mut cleanup_bindings) = match &statement.kind {
+        HirStatementKind::Let {
+            mutable,
+            name,
+            value,
+        } => {
+            if let Some(owner_activation) = resolve_owner_activation_expr(scope, value)? {
+                let lowered_context = owner_activation
+                    .context
+                    .map(|expr| lower_exec_expr_resolved(expr, scope));
+                scope.value_scope.activate_owner(
+                    &owner_activation.owner_local_name,
+                    &owner_activation.owner_path,
+                    &owner_activation.objects,
+                    Some(name),
                 );
-                let mut then_scope = scope.clone();
-                let then_block = lower_exec_stmt_block_resolved_with_cleanup_candidates(
-                    then_branch,
-                    &mut then_scope,
-                    statement_cleanup_cleanup_footers,
-                )?;
-                let else_branch = else_branch
-                    .as_ref()
-                    .map(|branch| {
-                        let mut else_scope = scope.clone();
-                        lower_exec_stmt_block_resolved_with_cleanup_candidates(
-                            branch,
-                            &mut else_scope,
-                            statement_cleanup_cleanup_footers,
-                        )
+                let object_binding_ids = owner_activation
+                    .objects
+                    .iter()
+                    .filter_map(|(local_name, _)| {
+                        scope
+                            .value_scope
+                            .binding_id_of(local_name)
+                            .map(|binding_id| ExecNamedBindingId {
+                                name: local_name.clone(),
+                                binding_id,
+                            })
                     })
-                    .transpose()?
-                    .unwrap_or_default();
-                let mut rollup_bindings = then_block.cleanup_bindings;
-                rollup_bindings.extend(else_branch.cleanup_bindings.iter().cloned());
+                    .collect();
                 (
-                    ExecStmt::If {
-                        condition: lower_exec_expr_resolved(condition, scope),
-                        then_branch: then_block.statements,
-                        else_branch: else_branch.statements,
-                        availability: statement
-                            .availability
-                            .iter()
-                            .map(|attachment| {
-                                lower_availability_attachment_exec_resolved(attachment, scope)
-                            })
-                            .collect::<Result<Vec<_>, _>>()?,
-                        cleanup_footers: lower_resolved_statement_cleanup_footers(
-                            scope,
-                            statement_cleanup_cleanup_footers,
-                            rollup_bindings.clone(),
-                        )?,
+                    ExecStmt::ActivateOwner {
+                        owner_path: owner_activation.owner_path,
+                        owner_local_name: owner_activation.owner_local_name,
+                        binding: Some(name.clone()),
+                        object_binding_ids,
+                        context: lowered_context,
                     },
-                    rollup_bindings,
+                    Vec::new(),
                 )
-            }
-            HirStatementKind::While { condition, body } => {
-                let statement_cleanup_cleanup_footers = effective_cleanup_cleanup_footers(
-                    &statement.cleanup_footers,
-                    inherited_cleanup_cleanup_footers,
-                );
-                let mut body_scope = scope.clone();
-                let body_block = lower_exec_stmt_block_resolved_with_cleanup_candidates(
-                    body,
-                    &mut body_scope,
-                    statement_cleanup_cleanup_footers,
-                )?;
-                let cleanup_bindings = body_block.cleanup_bindings;
-                (
-                    ExecStmt::While {
-                        condition: lower_exec_expr_resolved(condition, scope),
-                        body: body_block.statements,
-                        availability: statement
-                            .availability
-                            .iter()
-                            .map(|attachment| {
-                                lower_availability_attachment_exec_resolved(attachment, scope)
-                            })
-                            .collect::<Result<Vec<_>, _>>()?,
-                        cleanup_footers: lower_resolved_statement_cleanup_footers(
-                            scope,
-                            statement_cleanup_cleanup_footers,
-                            cleanup_bindings.clone(),
-                        )?,
-                    },
-                    cleanup_bindings,
-                )
-            }
-            HirStatementKind::For {
-                binding,
-                iterable,
-                body,
-            } => {
-                let statement_cleanup_cleanup_footers = effective_cleanup_cleanup_footers(
-                    &statement.cleanup_footers,
-                    inherited_cleanup_cleanup_footers,
-                );
-                let mut body_scope = scope.clone();
+            } else {
                 let mut binding_id = 0;
-                let mut rollup_bindings = Vec::new();
-                if let Some(ty) = infer_iterable_binding_type(scope, iterable) {
-                    binding_id = body_scope.value_scope.insert(binding.clone(), ty.clone());
-                    push_cleanup_binding_candidate(
-                        &mut rollup_bindings,
-                        binding.clone(),
-                        binding_id,
-                        ty,
-                    );
-                }
-                let body_block = lower_exec_stmt_block_resolved_with_cleanup_candidates(
-                    body,
-                    &mut body_scope,
-                    statement_cleanup_cleanup_footers,
-                )?;
-                rollup_bindings.extend(body_block.cleanup_bindings.iter().cloned());
-                (
-                    ExecStmt::For {
-                        binding_id,
-                        binding: binding.clone(),
-                        iterable: lower_exec_expr_resolved(iterable, scope),
-                        body: body_block.statements,
-                        availability: statement
-                            .availability
-                            .iter()
-                            .map(|attachment| {
-                                lower_availability_attachment_exec_resolved(attachment, scope)
-                            })
-                            .collect::<Result<Vec<_>, _>>()?,
-                        cleanup_footers: lower_resolved_statement_cleanup_footers(
-                            scope,
-                            statement_cleanup_cleanup_footers,
-                            rollup_bindings.clone(),
-                        )?,
-                    },
-                    rollup_bindings,
-                )
-            }
-            HirStatementKind::Defer { expr } => (
-                ExecStmt::Defer(lower_exec_expr_resolved(expr, scope)),
-                Vec::new(),
-            ),
-            HirStatementKind::Break => (ExecStmt::Break, Vec::new()),
-            HirStatementKind::Continue => (ExecStmt::Continue, Vec::new()),
-            HirStatementKind::Assign { target, op, value } => {
-                let lowered = ExecStmt::Assign {
-                    target: lower_assign_target_exec_resolved(target, scope),
-                    op: lower_assign_op(*op),
-                    value: lower_exec_expr_resolved(value, scope),
+                let lowered_value = lower_exec_expr_resolved(value, scope);
+                let lowered = ExecStmt::Let {
+                    binding_id,
+                    mutable: *mutable,
+                    name: name.clone(),
+                    value: lowered_value,
                 };
-                if matches!(op, HirAssignOp::Assign)
-                    && let HirAssignTarget::Name { text } = target
-                    && let Some(ty) = infer_expr_hir_type(scope, value)
-                {
-                    scope.value_scope.insert(text.clone(), ty);
+                if let Some(ty) = infer_expr_hir_type(scope, value) {
+                    binding_id = scope.value_scope.insert(name.clone(), ty);
                 }
+                let lowered = match lowered {
+                    ExecStmt::Let {
+                        mutable,
+                        name,
+                        value,
+                        ..
+                    } => ExecStmt::Let {
+                        binding_id,
+                        mutable,
+                        name,
+                        value,
+                    },
+                    _ => unreachable!(),
+                };
                 (lowered, Vec::new())
             }
-            HirStatementKind::Recycle {
-                default_modifier,
-                lines,
-            } => (
+        }
+        HirStatementKind::Expr { expr } => {
+            if let Some(owner_activation) = resolve_owner_activation_expr(scope, expr)? {
+                let lowered_context = owner_activation
+                    .context
+                    .map(|value| lower_exec_expr_resolved(value, scope));
+                scope.value_scope.activate_owner(
+                    &owner_activation.owner_local_name,
+                    &owner_activation.owner_path,
+                    &owner_activation.objects,
+                    None,
+                );
+                let object_binding_ids = owner_activation
+                    .objects
+                    .iter()
+                    .filter_map(|(local_name, _)| {
+                        scope
+                            .value_scope
+                            .binding_id_of(local_name)
+                            .map(|binding_id| ExecNamedBindingId {
+                                name: local_name.clone(),
+                                binding_id,
+                            })
+                    })
+                    .collect();
+                (
+                    ExecStmt::ActivateOwner {
+                        owner_path: owner_activation.owner_path,
+                        owner_local_name: owner_activation.owner_local_name,
+                        binding: None,
+                        object_binding_ids,
+                        context: lowered_context,
+                    },
+                    Vec::new(),
+                )
+            } else {
+                let statement_cleanup_cleanup_footers = effective_cleanup_cleanup_footers(
+                    &statement.cleanup_footers,
+                    inherited_cleanup_cleanup_footers,
+                );
+                (
+                    ExecStmt::Expr {
+                        expr: lower_exec_expr_resolved(expr, scope),
+                        cleanup_footers: lower_resolved_statement_cleanup_footers(
+                            scope,
+                            statement_cleanup_cleanup_footers,
+                            Vec::new(),
+                        )?,
+                    },
+                    Vec::new(),
+                )
+            }
+        }
+        HirStatementKind::Return { value } => (
+            match value.as_ref() {
+                Some(value) => ExecStmt::ReturnValue {
+                    value: lower_exec_expr_resolved(value, scope),
+                },
+                None => ExecStmt::ReturnVoid,
+            },
+            Vec::new(),
+        ),
+        HirStatementKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            let statement_cleanup_cleanup_footers = effective_cleanup_cleanup_footers(
+                &statement.cleanup_footers,
+                inherited_cleanup_cleanup_footers,
+            );
+            let mut then_scope = scope.clone();
+            let then_block = lower_exec_stmt_block_resolved_with_cleanup_candidates(
+                then_branch,
+                &mut then_scope,
+                statement_cleanup_cleanup_footers,
+            )?;
+            let else_branch = else_branch
+                .as_ref()
+                .map(|branch| {
+                    let mut else_scope = scope.clone();
+                    lower_exec_stmt_block_resolved_with_cleanup_candidates(
+                        branch,
+                        &mut else_scope,
+                        statement_cleanup_cleanup_footers,
+                    )
+                })
+                .transpose()?
+                .unwrap_or_default();
+            let mut rollup_bindings = then_block.cleanup_bindings;
+            rollup_bindings.extend(else_branch.cleanup_bindings.iter().cloned());
+            (
+                ExecStmt::If {
+                    condition: lower_exec_expr_resolved(condition, scope),
+                    then_branch: then_block.statements,
+                    else_branch: else_branch.statements,
+                    availability: statement
+                        .availability
+                        .iter()
+                        .map(|attachment| {
+                            lower_availability_attachment_exec_resolved(attachment, scope)
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                    cleanup_footers: lower_resolved_statement_cleanup_footers(
+                        scope,
+                        statement_cleanup_cleanup_footers,
+                        rollup_bindings.clone(),
+                    )?,
+                },
+                rollup_bindings,
+            )
+        }
+        HirStatementKind::While { condition, body } => {
+            let statement_cleanup_cleanup_footers = effective_cleanup_cleanup_footers(
+                &statement.cleanup_footers,
+                inherited_cleanup_cleanup_footers,
+            );
+            let mut body_scope = scope.clone();
+            let body_block = lower_exec_stmt_block_resolved_with_cleanup_candidates(
+                body,
+                &mut body_scope,
+                statement_cleanup_cleanup_footers,
+            )?;
+            let cleanup_bindings = body_block.cleanup_bindings;
+            (
+                ExecStmt::While {
+                    condition: lower_exec_expr_resolved(condition, scope),
+                    body: body_block.statements,
+                    availability: statement
+                        .availability
+                        .iter()
+                        .map(|attachment| {
+                            lower_availability_attachment_exec_resolved(attachment, scope)
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                    cleanup_footers: lower_resolved_statement_cleanup_footers(
+                        scope,
+                        statement_cleanup_cleanup_footers,
+                        cleanup_bindings.clone(),
+                    )?,
+                },
+                cleanup_bindings,
+            )
+        }
+        HirStatementKind::For {
+            binding,
+            iterable,
+            body,
+        } => {
+            let statement_cleanup_cleanup_footers = effective_cleanup_cleanup_footers(
+                &statement.cleanup_footers,
+                inherited_cleanup_cleanup_footers,
+            );
+            let mut body_scope = scope.clone();
+            let mut binding_id = 0;
+            let mut rollup_bindings = Vec::new();
+            if let Some(ty) = infer_iterable_binding_type(scope, iterable) {
+                binding_id = body_scope.value_scope.insert(binding.clone(), ty.clone());
+                push_cleanup_binding_candidate(
+                    &mut rollup_bindings,
+                    binding.clone(),
+                    binding_id,
+                    ty,
+                );
+            }
+            let body_block = lower_exec_stmt_block_resolved_with_cleanup_candidates(
+                body,
+                &mut body_scope,
+                statement_cleanup_cleanup_footers,
+            )?;
+            rollup_bindings.extend(body_block.cleanup_bindings.iter().cloned());
+            (
+                ExecStmt::For {
+                    binding_id,
+                    binding: binding.clone(),
+                    iterable: lower_exec_expr_resolved(iterable, scope),
+                    body: body_block.statements,
+                    availability: statement
+                        .availability
+                        .iter()
+                        .map(|attachment| {
+                            lower_availability_attachment_exec_resolved(attachment, scope)
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                    cleanup_footers: lower_resolved_statement_cleanup_footers(
+                        scope,
+                        statement_cleanup_cleanup_footers,
+                        rollup_bindings.clone(),
+                    )?,
+                },
+                rollup_bindings,
+            )
+        }
+        HirStatementKind::Defer { expr } => (
+            ExecStmt::Defer(lower_exec_expr_resolved(expr, scope)),
+            Vec::new(),
+        ),
+        HirStatementKind::Break => (ExecStmt::Break, Vec::new()),
+        HirStatementKind::Continue => (ExecStmt::Continue, Vec::new()),
+        HirStatementKind::Assign { target, op, value } => {
+            let lowered = ExecStmt::Assign {
+                target: lower_assign_target_exec_resolved(target, scope),
+                op: lower_assign_op(*op),
+                value: lower_exec_expr_resolved(value, scope),
+            };
+            if matches!(op, HirAssignOp::Assign)
+                && let HirAssignTarget::Name { text } = target
+                && let Some(ty) = infer_expr_hir_type(scope, value)
+            {
+                scope.value_scope.insert(text.clone(), ty);
+            }
+            (lowered, Vec::new())
+        }
+        HirStatementKind::Recycle {
+            default_modifier,
+            lines,
+        } => {
+            let mut region_scope = scope.clone();
+            let default_modifier = default_modifier
+                .as_ref()
+                .map(|modifier| lower_headed_modifier_exec_resolved(modifier, &region_scope));
+            let mut lowered_lines = Vec::new();
+            for line in lines {
+                let lowered_line = ExecRecycleLine {
+                    kind: match &line.kind {
+                        arcana_hir::HirRecycleLineKind::Expr { gate } => {
+                            ExecRecycleLineKind::Expr {
+                                gate: lower_exec_expr_resolved(gate, &region_scope),
+                            }
+                        }
+                        arcana_hir::HirRecycleLineKind::Let {
+                            mutable,
+                            name,
+                            gate,
+                        } => ExecRecycleLineKind::Let {
+                            mutable: *mutable,
+                            name: name.clone(),
+                            gate: lower_exec_expr_resolved(gate, &region_scope),
+                        },
+                        arcana_hir::HirRecycleLineKind::Assign { name, gate } => {
+                            ExecRecycleLineKind::Assign {
+                                name: name.clone(),
+                                gate: lower_exec_expr_resolved(gate, &region_scope),
+                            }
+                        }
+                    },
+                    modifier: line.modifier.as_ref().map(|modifier| {
+                        lower_headed_modifier_exec_resolved(modifier, &region_scope)
+                    }),
+                };
+                match &line.kind {
+                    arcana_hir::HirRecycleLineKind::Let { name, gate, .. } => {
+                        if let Some(ty) = infer_headed_payload_binding_type(&region_scope, gate) {
+                            region_scope.value_scope.insert(name.clone(), ty.clone());
+                            scope.value_scope.insert(name.clone(), ty);
+                        }
+                    }
+                    arcana_hir::HirRecycleLineKind::Assign { name, gate } => {
+                        if region_scope.value_scope.contains(name)
+                            && let Some(ty) = infer_headed_payload_binding_type(&region_scope, gate)
+                        {
+                            region_scope.value_scope.update_type(name, ty.clone());
+                            scope.value_scope.update_type(name, ty);
+                        }
+                    }
+                    arcana_hir::HirRecycleLineKind::Expr { .. } => {}
+                }
+                lowered_lines.push(lowered_line);
+            }
+            (
                 ExecStmt::Recycle {
-                    default_modifier: default_modifier
-                        .as_ref()
-                        .map(|modifier| lower_headed_modifier_exec_resolved(modifier, scope)),
-                    lines: lines
-                        .iter()
-                        .map(|line| ExecRecycleLine {
-                            kind: match &line.kind {
-                                arcana_hir::HirRecycleLineKind::Expr { gate } => {
-                                    ExecRecycleLineKind::Expr {
-                                        gate: lower_exec_expr_resolved(gate, scope),
-                                    }
-                                }
-                                arcana_hir::HirRecycleLineKind::Let {
-                                    mutable,
-                                    name,
-                                    gate,
-                                } => ExecRecycleLineKind::Let {
-                                    mutable: *mutable,
-                                    name: name.clone(),
-                                    gate: lower_exec_expr_resolved(gate, scope),
-                                },
-                                arcana_hir::HirRecycleLineKind::Assign { name, gate } => {
-                                    ExecRecycleLineKind::Assign {
-                                        name: name.clone(),
-                                        gate: lower_exec_expr_resolved(gate, scope),
-                                    }
-                                }
-                            },
-                            modifier: line.modifier.as_ref().map(|modifier| {
-                                lower_headed_modifier_exec_resolved(modifier, scope)
-                            }),
-                        })
-                        .collect(),
+                    default_modifier,
+                    lines: lowered_lines,
                 },
                 Vec::new(),
-            ),
-            HirStatementKind::Bind {
-                default_modifier,
-                lines,
-            } => (
+            )
+        }
+        HirStatementKind::Bind {
+            default_modifier,
+            lines,
+        } => {
+            let mut region_scope = scope.clone();
+            let default_modifier = default_modifier
+                .as_ref()
+                .map(|modifier| lower_headed_modifier_exec_resolved(modifier, &region_scope));
+            let mut lowered_lines = Vec::new();
+            for line in lines {
+                let lowered_line = ExecBindLine {
+                    kind: match &line.kind {
+                        arcana_hir::HirBindLineKind::Let {
+                            mutable,
+                            name,
+                            gate,
+                        } => ExecBindLineKind::Let {
+                            mutable: *mutable,
+                            name: name.clone(),
+                            gate: lower_exec_expr_resolved(gate, &region_scope),
+                        },
+                        arcana_hir::HirBindLineKind::Assign { name, gate } => {
+                            ExecBindLineKind::Assign {
+                                name: name.clone(),
+                                gate: lower_exec_expr_resolved(gate, &region_scope),
+                            }
+                        }
+                        arcana_hir::HirBindLineKind::Require { expr } => {
+                            ExecBindLineKind::Require {
+                                expr: lower_exec_expr_resolved(expr, &region_scope),
+                            }
+                        }
+                    },
+                    modifier: line.modifier.as_ref().map(|modifier| {
+                        lower_headed_modifier_exec_resolved(modifier, &region_scope)
+                    }),
+                };
+                match &line.kind {
+                    arcana_hir::HirBindLineKind::Let { name, gate, .. } => {
+                        if let Some(ty) = infer_headed_payload_binding_type(&region_scope, gate) {
+                            region_scope.value_scope.insert(name.clone(), ty.clone());
+                            scope.value_scope.insert(name.clone(), ty);
+                        }
+                    }
+                    arcana_hir::HirBindLineKind::Assign { name, gate } => {
+                        if region_scope.value_scope.contains(name)
+                            && let Some(ty) = infer_headed_payload_binding_type(&region_scope, gate)
+                        {
+                            region_scope.value_scope.update_type(name, ty.clone());
+                            scope.value_scope.update_type(name, ty);
+                        }
+                    }
+                    arcana_hir::HirBindLineKind::Require { .. } => {}
+                }
+                lowered_lines.push(lowered_line);
+            }
+            (
                 ExecStmt::Bind {
-                    default_modifier: default_modifier
-                        .as_ref()
-                        .map(|modifier| lower_headed_modifier_exec_resolved(modifier, scope)),
-                    lines: lines
-                        .iter()
-                        .map(|line| ExecBindLine {
-                            kind: match &line.kind {
-                                arcana_hir::HirBindLineKind::Let {
-                                    mutable,
-                                    name,
-                                    gate,
-                                } => ExecBindLineKind::Let {
-                                    mutable: *mutable,
-                                    name: name.clone(),
-                                    gate: lower_exec_expr_resolved(gate, scope),
-                                },
-                                arcana_hir::HirBindLineKind::Assign { name, gate } => {
-                                    ExecBindLineKind::Assign {
-                                        name: name.clone(),
-                                        gate: lower_exec_expr_resolved(gate, scope),
-                                    }
-                                }
-                                arcana_hir::HirBindLineKind::Require { expr } => {
-                                    ExecBindLineKind::Require {
-                                        expr: lower_exec_expr_resolved(expr, scope),
-                                    }
-                                }
-                            },
-                            modifier: line.modifier.as_ref().map(|modifier| {
-                                lower_headed_modifier_exec_resolved(modifier, scope)
-                            }),
-                        })
-                        .collect(),
+                    default_modifier,
+                    lines: lowered_lines,
                 },
                 Vec::new(),
-            ),
-            HirStatementKind::Construct(region) => (
-                ExecStmt::Construct(lower_construct_region_exec_resolved(region, scope)),
-                Vec::new(),
-            ),
-            HirStatementKind::MemorySpec(spec) => (
-                ExecStmt::MemorySpec(ExecMemorySpecDecl {
-                    family: spec.family.as_str().to_string(),
-                    name: spec.name.clone(),
-                    default_modifier: spec
-                        .default_modifier
-                        .as_ref()
-                        .map(|modifier| lower_headed_modifier_exec_resolved(modifier, scope)),
-                    details: spec
-                        .details
-                        .iter()
-                        .map(|detail| ExecMemoryDetailLine {
-                            key: detail.key.as_str().to_string(),
-                            value: lower_exec_expr_resolved(&detail.value, scope),
-                            modifier: detail.modifier.as_ref().map(|modifier| {
-                                lower_headed_modifier_exec_resolved(modifier, scope)
-                            }),
-                        })
-                        .collect(),
-                }),
-                Vec::new(),
-            ),
-        };
+            )
+        }
+        HirStatementKind::Construct(region) => {
+            let lowered = ExecStmt::Construct(lower_construct_region_exec_resolved(region, scope));
+            if let Some(arcana_hir::HirConstructDestination::Deliver { name }) = &region.destination
+                && let Some(target_path) = flatten_callable_expr_path(&region.target)
+                && let Some(ty) = resolve_construct_result_type_for_scope(scope, &target_path)
+            {
+                scope.value_scope.insert(name.clone(), ty);
+            }
+            (lowered, Vec::new())
+        }
+        HirStatementKind::MemorySpec(spec) => (
+            ExecStmt::MemorySpec(ExecMemorySpecDecl {
+                family: spec.family.as_str().to_string(),
+                name: spec.name.clone(),
+                default_modifier: spec
+                    .default_modifier
+                    .as_ref()
+                    .map(|modifier| lower_headed_modifier_exec_resolved(modifier, scope)),
+                details: spec
+                    .details
+                    .iter()
+                    .map(|detail| ExecMemoryDetailLine {
+                        key: detail.key.as_str().to_string(),
+                        value: lower_exec_expr_resolved(&detail.value, scope),
+                        modifier: detail
+                            .modifier
+                            .as_ref()
+                            .map(|modifier| lower_headed_modifier_exec_resolved(modifier, scope)),
+                    })
+                    .collect(),
+            }),
+            Vec::new(),
+        ),
+    };
     collect_lowered_cleanup_bindings(scope, &lowered_stmt, &mut cleanup_bindings);
     Ok(LoweredExecBlock {
         statements: vec![lowered_stmt],
@@ -4375,8 +4512,8 @@ pub fn lower_workspace_package_with_resolution(
 #[cfg(test)]
 mod tests {
     use super::{
-        ExecExpr, ExecStmt, IrModule, lower_hir, lower_package, lower_workspace_package,
-        lower_workspace_package_with_resolution,
+        ExecBindLineKind, ExecExpr, ExecStmt, IrModule, lower_hir, lower_package,
+        lower_workspace_package, lower_workspace_package_with_resolution,
     };
     use arcana_hir::{
         HirModule, build_package_layout, build_package_summary, build_workspace_package,
@@ -4841,6 +4978,164 @@ mod tests {
         assert!(
             err.contains("bare-method qualifier `tap` on `app.Counter` is ambiguous"),
             "{err}"
+        );
+    }
+
+    #[test]
+    fn lower_workspace_package_with_resolution_resolves_bare_methods_on_bind_survivors() {
+        let app_summary = build_package_summary(
+            "app",
+            vec![
+                lower_module_text(
+                    "app",
+                    concat!(
+                        "record Counter:\n",
+                        "    value: Int\n",
+                        "impl Counter:\n",
+                        "    fn tap(read self: Counter) -> Int:\n",
+                        "        return self.value\n",
+                        "enum Result[T, E]:\n",
+                        "    Ok(T)\n",
+                        "    Err(E)\n",
+                        "fn main() -> Int:\n",
+                        "    bind -return 0\n",
+                        "        let counter = Result.Ok[Counter, Str] :: (Counter :: value = 1 :: call) :: call\n",
+                        "        require (counter :: :: tap) == 1\n",
+                        "    return counter :: :: tap\n",
+                    ),
+                )
+                .expect("module should lower"),
+            ],
+        );
+        let app_layout = build_package_layout(
+            &app_summary,
+            BTreeMap::from([(
+                "app".to_string(),
+                Path::new("C:/repo/app/src/shelf.arc").to_path_buf(),
+            )]),
+            BTreeMap::new(),
+        )
+        .expect("app layout should build");
+        let app_workspace = build_workspace_package(
+            "app".to_string(),
+            Path::new("C:/repo/app").to_path_buf(),
+            BTreeSet::new(),
+            app_summary,
+            app_layout,
+        )
+        .expect("app workspace should build");
+
+        let workspace =
+            build_workspace_summary(vec![app_workspace]).expect("workspace should build");
+        let resolved = resolve_workspace(&workspace).expect("workspace should resolve");
+        let package = workspace.package("app").expect("app package should exist");
+
+        let lowered = lower_workspace_package_with_resolution(&workspace, &resolved, package)
+            .expect("workspace package should lower");
+        let main = lowered
+            .routines
+            .iter()
+            .find(|routine| routine.symbol_name == "main")
+            .expect("main routine should exist");
+        let ExecStmt::Bind { lines, .. } = &main.statements[0] else {
+            panic!("expected bind region");
+        };
+        let ExecBindLineKind::Require { expr } = &lines[1].kind else {
+            panic!("expected require line");
+        };
+        let ExecExpr::Binary { left, .. } = expr else {
+            panic!("expected binary require expression");
+        };
+        let ExecExpr::Phrase {
+            resolved_routine, ..
+        } = left.as_ref()
+        else {
+            panic!("expected bare-method phrase inside bind require");
+        };
+        assert!(
+            resolved_routine.is_some(),
+            "bind survivor should resolve bare method"
+        );
+        let ExecStmt::ReturnValue { value } = &main.statements[1] else {
+            panic!("expected return statement");
+        };
+        let ExecExpr::Phrase {
+            resolved_routine, ..
+        } = value
+        else {
+            panic!("expected bare-method return phrase");
+        };
+        assert!(
+            resolved_routine.is_some(),
+            "post-bind survivor should resolve bare method"
+        );
+    }
+
+    #[test]
+    fn lower_workspace_package_with_resolution_resolves_bare_methods_on_construct_deliver_survivors()
+     {
+        let app_summary = build_package_summary(
+            "app",
+            vec![
+                lower_module_text(
+                    "app",
+                    concat!(
+                        "record Counter:\n",
+                        "    value: Int\n",
+                        "impl Counter:\n",
+                        "    fn tap(read self: Counter) -> Int:\n",
+                        "        return self.value\n",
+                        "fn main() -> Int:\n",
+                        "    construct deliver Counter -> counter -return 0\n",
+                        "        value = 1\n",
+                        "    return counter :: :: tap\n",
+                    ),
+                )
+                .expect("module should lower"),
+            ],
+        );
+        let app_layout = build_package_layout(
+            &app_summary,
+            BTreeMap::from([(
+                "app".to_string(),
+                Path::new("C:/repo/app/src/shelf.arc").to_path_buf(),
+            )]),
+            BTreeMap::new(),
+        )
+        .expect("app layout should build");
+        let app_workspace = build_workspace_package(
+            "app".to_string(),
+            Path::new("C:/repo/app").to_path_buf(),
+            BTreeSet::new(),
+            app_summary,
+            app_layout,
+        )
+        .expect("app workspace should build");
+
+        let workspace =
+            build_workspace_summary(vec![app_workspace]).expect("workspace should build");
+        let resolved = resolve_workspace(&workspace).expect("workspace should resolve");
+        let package = workspace.package("app").expect("app package should exist");
+
+        let lowered = lower_workspace_package_with_resolution(&workspace, &resolved, package)
+            .expect("workspace package should lower");
+        let main = lowered
+            .routines
+            .iter()
+            .find(|routine| routine.symbol_name == "main")
+            .expect("main routine should exist");
+        let ExecStmt::ReturnValue { value } = &main.statements[1] else {
+            panic!("expected return statement");
+        };
+        let ExecExpr::Phrase {
+            resolved_routine, ..
+        } = value
+        else {
+            panic!("expected bare-method return phrase");
+        };
+        assert!(
+            resolved_routine.is_some(),
+            "construct deliver survivor should resolve bare method"
         );
     }
 

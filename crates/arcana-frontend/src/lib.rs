@@ -16,7 +16,7 @@ mod where_clause;
 
 use arcana_hir::{
     HirAssignTarget, HirBinaryOp, HirChainStep, HirExpr, HirHeaderAttachment, HirImplDecl,
-    HirLocalTypeLookup, HirMatchPattern, HirModule, HirModuleSummary, HirPhraseArg,
+    HirLocalTypeLookup, HirMatchPattern, HirModule, HirModuleSummary, HirPath, HirPhraseArg,
     HirResolvedModule, HirResolvedTarget, HirResolvedWorkspace, HirStatement, HirStatementKind,
     HirSymbol, HirSymbolBody, HirSymbolKind, HirType, HirTypeKind, HirUnaryOp, HirWorkspacePackage,
     HirWorkspaceSummary, canonicalize_hir_type_in_module, collect_hir_type_refs,
@@ -229,6 +229,7 @@ struct ValueScope {
     owner_member_types: BTreeMap<String, BTreeMap<String, HirType>>,
     loop_depth: usize,
     headed_region_depth: usize,
+    enclosing_return_type: Option<HirType>,
 }
 
 impl Default for ValueScope {
@@ -248,6 +249,7 @@ impl Default for ValueScope {
             owner_member_types: BTreeMap::new(),
             loop_depth: 0,
             headed_region_depth: 0,
+            enclosing_return_type: None,
         }
     }
 }
@@ -3418,6 +3420,7 @@ fn validate_construct_contribution_semantics(
     module_path: &Path,
     type_scope: &TypeScope,
     scope: &ValueScope,
+    expected_return_type: Option<&HirType>,
     line: &arcana_hir::HirConstructLine,
     target_name: &str,
     target_ty: &HirType,
@@ -3511,6 +3514,25 @@ fn validate_construct_contribution_semantics(
                 message: "bare `-return` on construct only applies to Result payload acquisition, not direct Result values".to_string(),
             });
         }
+        if matches!(
+            modifier.kind,
+            arcana_hir::HirHeadedModifierKind::Keyword(HeadedModifierKeyword::Return)
+        ) && modifier.payload.is_none()
+            && matches!(mode, ConstructContributionMode::ResultPayload)
+        {
+            validate_bare_result_return_type(
+                workspace,
+                resolved_module,
+                module_path,
+                type_scope,
+                scope,
+                &line.value,
+                expected_return_type,
+                modifier.span,
+                "bare `construct -return` failure",
+                diagnostics,
+            );
+        }
     }
 }
 
@@ -3520,6 +3542,7 @@ fn validate_construct_region_semantics(
     module_path: &Path,
     type_scope: &TypeScope,
     scope: &ValueScope,
+    expected_return_type: Option<&HirType>,
     region: &arcana_hir::HirConstructRegion,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
@@ -3560,7 +3583,10 @@ fn validate_construct_region_semantics(
             infer_assign_target_value_type(workspace, resolved_module, type_scope, scope, target)
                 .and_then(|ty| canonicalize_local_hir_type(workspace, resolved_module, &ty));
         match (expected_ty, actual_ty) {
-            (Some(expected_ty), Some(actual_ty)) if expected_ty != actual_ty => {
+            (Some(expected_ty), Some(actual_ty))
+                if canonical_hir_type_key(workspace, resolved_module, &expected_ty)
+                    != canonical_hir_type_key(workspace, resolved_module, &actual_ty) =>
+            {
                 diagnostics.push(Diagnostic {
                     path: module_path.to_path_buf(),
                     line: region.span.line,
@@ -3629,6 +3655,7 @@ fn validate_construct_region_semantics(
                     module_path,
                     type_scope,
                     scope,
+                    expected_return_type,
                     line,
                     &format!("{}.{}", target_path.join("."), line.name),
                     field_ty,
@@ -3704,6 +3731,7 @@ fn validate_construct_region_semantics(
                     module_path,
                     type_scope,
                     scope,
+                    expected_return_type,
                     line,
                     &format!("{}.payload", target_path.join(".")),
                     payload,
@@ -4734,6 +4762,314 @@ fn infer_payload_binding(
     ))
 }
 
+fn sync_visible_typed_local(
+    scope: &mut ValueScope,
+    region_scope: &mut ValueScope,
+    name: &str,
+    mutable: bool,
+    ownership: OwnershipClass,
+    ty: HirType,
+) {
+    scope.insert_typed(name, mutable, ownership, Some(ty.clone()));
+    region_scope.insert_typed(name, mutable, ownership, Some(ty));
+}
+
+fn sync_visible_refined_local(
+    scope: &mut ValueScope,
+    region_scope: &mut ValueScope,
+    name: &str,
+    ownership: OwnershipClass,
+    ty: HirType,
+) {
+    scope.ownership.insert(name.to_string(), ownership);
+    scope.types.insert(name.to_string(), ty.clone());
+    region_scope.ownership.insert(name.to_string(), ownership);
+    region_scope.types.insert(name.to_string(), ty);
+}
+
+fn canonical_hir_type_key(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    ty: &HirType,
+) -> String {
+    canonicalize_local_hir_type(workspace, resolved_module, ty)
+        .unwrap_or_else(|| ty.clone())
+        .render()
+}
+
+fn canonical_hir_type_is_unit(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    ty: &HirType,
+) -> bool {
+    matches!(
+        canonicalize_local_hir_type(workspace, resolved_module, ty)
+            .unwrap_or_else(|| ty.clone())
+            .kind,
+        HirTypeKind::Path(HirPath { ref segments, .. })
+            if segments.last().map(String::as_str) == Some("Unit")
+    )
+}
+
+fn enclosing_return_type_is_unit(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    expected_return_type: Option<&HirType>,
+) -> bool {
+    expected_return_type
+        .is_some_and(|ty| canonical_hir_type_is_unit(workspace, resolved_module, ty))
+}
+
+fn enclosing_return_type_key(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    expected_return_type: Option<&HirType>,
+) -> String {
+    expected_return_type
+        .map(|ty| canonical_hir_type_key(workspace, resolved_module, ty))
+        .unwrap_or_else(|| "Unit".to_string())
+}
+
+fn validate_returned_expr_type(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    module_path: &Path,
+    type_scope: &TypeScope,
+    scope: &ValueScope,
+    expr: &HirExpr,
+    expected_return_type: Option<&HirType>,
+    span: Span,
+    context: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let Some(expected_ty) = expected_return_type else {
+        return;
+    };
+    if enclosing_return_type_is_unit(workspace, resolved_module, expected_return_type) {
+        push_type_contract_diagnostic(
+            module_path,
+            span,
+            diagnostics,
+            format!("{context} is not allowed because the enclosing routine returns Unit"),
+        );
+        return;
+    }
+    let Some(actual_ty) =
+        infer_expr_value_type(workspace, resolved_module, type_scope, scope, expr)
+    else {
+        return;
+    };
+    let expected_key = canonical_hir_type_key(workspace, resolved_module, expected_ty);
+    if canonical_hir_type_key(workspace, resolved_module, &actual_ty) != expected_key {
+        push_type_contract_diagnostic(
+            module_path,
+            span,
+            diagnostics,
+            format!("{context} must have type `{expected_key}`"),
+        );
+    }
+}
+
+fn validate_return_statement_type(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    module_path: &Path,
+    type_scope: &TypeScope,
+    scope: &ValueScope,
+    value: Option<&HirExpr>,
+    expected_return_type: Option<&HirType>,
+    span: Span,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if let Some(value) = value {
+        validate_returned_expr_type(
+            workspace,
+            resolved_module,
+            module_path,
+            type_scope,
+            scope,
+            value,
+            expected_return_type,
+            span,
+            "return value",
+            diagnostics,
+        );
+    } else if expected_return_type.is_some()
+        && !enclosing_return_type_is_unit(workspace, resolved_module, expected_return_type)
+    {
+        push_type_contract_diagnostic(
+            module_path,
+            span,
+            diagnostics,
+            format!(
+                "return statement requires a value of type `{}`",
+                enclosing_return_type_key(workspace, resolved_module, expected_return_type)
+            ),
+        );
+    }
+}
+
+fn validate_return_modifier_payload_type(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    module_path: &Path,
+    type_scope: &TypeScope,
+    scope: &ValueScope,
+    modifier: &arcana_hir::HirHeadedModifier,
+    expected_return_type: Option<&HirType>,
+    context: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if !matches!(
+        modifier.kind,
+        arcana_hir::HirHeadedModifierKind::Keyword(HeadedModifierKeyword::Return)
+    ) {
+        return;
+    }
+    let Some(payload) = &modifier.payload else {
+        return;
+    };
+    validate_returned_expr_type(
+        workspace,
+        resolved_module,
+        module_path,
+        type_scope,
+        scope,
+        payload,
+        expected_return_type,
+        modifier.span,
+        context,
+        diagnostics,
+    );
+}
+
+fn validate_bare_result_return_type(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    module_path: &Path,
+    type_scope: &TypeScope,
+    scope: &ValueScope,
+    failure_expr: &HirExpr,
+    expected_return_type: Option<&HirType>,
+    span: Span,
+    context: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    validate_returned_expr_type(
+        workspace,
+        resolved_module,
+        module_path,
+        type_scope,
+        scope,
+        failure_expr,
+        expected_return_type,
+        span,
+        context,
+        diagnostics,
+    );
+}
+
+fn validate_bind_fallback_type_semantics(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    module_path: &Path,
+    type_scope: &TypeScope,
+    scope: &ValueScope,
+    line_kind: &arcana_hir::HirBindLineKind,
+    modifier: &arcana_hir::HirHeadedModifier,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let expected = match (&line_kind, &modifier.kind) {
+        (
+            arcana_hir::HirBindLineKind::Let { name, gate, .. },
+            arcana_hir::HirHeadedModifierKind::Keyword(HeadedModifierKeyword::Default),
+        ) => infer_payload_binding(workspace, resolved_module, type_scope, scope, gate).map(
+            |(_, ty)| {
+                (
+                    name.as_str(),
+                    canonical_hir_type_key(workspace, resolved_module, &ty),
+                    "default",
+                )
+            },
+        ),
+        (
+            arcana_hir::HirBindLineKind::Assign { name, .. },
+            arcana_hir::HirHeadedModifierKind::Keyword(HeadedModifierKeyword::Replace),
+        ) => scope.type_of(name).map(|ty| {
+            (
+                name.as_str(),
+                canonical_hir_type_key(workspace, resolved_module, ty),
+                "replace",
+            )
+        }),
+        _ => None,
+    };
+    let Some((name, expected_key, modifier_name)) = expected else {
+        return;
+    };
+    let Some(payload) = &modifier.payload else {
+        return;
+    };
+    let Some(actual_ty) =
+        infer_expr_value_type(workspace, resolved_module, type_scope, scope, payload)
+    else {
+        return;
+    };
+    let actual_key = canonical_hir_type_key(workspace, resolved_module, &actual_ty);
+    if actual_key != expected_key {
+        diagnostics.push(Diagnostic {
+            path: module_path.to_path_buf(),
+            line: modifier.span.line,
+            column: modifier.span.column,
+            message: format!(
+                "`bind -{modifier_name}` fallback for `{name}` must have type `{expected_key}`"
+            ),
+        });
+    }
+}
+
+fn validate_bind_refinement_stability_semantics(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    module_path: &Path,
+    type_scope: &TypeScope,
+    scope: &ValueScope,
+    line_kind: &arcana_hir::HirBindLineKind,
+    modifier: &arcana_hir::HirHeadedModifier,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let (name, gate, modifier_name) = match (&line_kind, &modifier.kind) {
+        (
+            arcana_hir::HirBindLineKind::Assign { name, gate },
+            arcana_hir::HirHeadedModifierKind::Keyword(HeadedModifierKeyword::Preserve),
+        ) => (name.as_str(), gate, "preserve"),
+        (
+            arcana_hir::HirBindLineKind::Assign { name, gate },
+            arcana_hir::HirHeadedModifierKind::Keyword(HeadedModifierKeyword::Replace),
+        ) => (name.as_str(), gate, "replace"),
+        _ => return,
+    };
+    let Some(existing_ty) = scope.type_of(name) else {
+        return;
+    };
+    let Some((_, payload_ty)) =
+        infer_payload_binding(workspace, resolved_module, type_scope, scope, gate)
+    else {
+        return;
+    };
+    let expected_key = canonical_hir_type_key(workspace, resolved_module, existing_ty);
+    if canonical_hir_type_key(workspace, resolved_module, &payload_ty) != expected_key {
+        diagnostics.push(Diagnostic {
+            path: module_path.to_path_buf(),
+            line: modifier.span.line,
+            column: modifier.span.column,
+            message: format!(
+                "`bind -{modifier_name}` payload for `{name}` must have type `{expected_key}`"
+            ),
+        });
+    }
+}
+
 fn infer_construct_contribution_mode(
     workspace: &HirWorkspaceSummary,
     resolved_module: &HirResolvedModule,
@@ -4959,6 +5295,7 @@ fn validate_symbol_value_semantics(
 ) {
     let type_scope = inherited_type_scope.with_params(&symbol.type_params);
     let mut scope = inherited_scope.with_symbol_params(&symbol.params);
+    scope.enclosing_return_type = symbol.return_type.clone();
     apply_availability_attachments_to_scope(
         workspace,
         resolved_workspace,
@@ -5035,6 +5372,7 @@ fn validate_symbol_value_semantics(
         &mut scope,
         &mut borrow_state,
         &symbol_cleanup_policy,
+        symbol.return_type.as_ref(),
         diagnostics,
     );
 
@@ -5831,6 +6169,7 @@ fn validate_statement_block_semantics(
     scope: &mut ValueScope,
     borrow_state: &mut BorrowFlowState,
     current_block_cleanup_policy: &CleanupFooterPolicy,
+    expected_return_type: Option<&HirType>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     for statement in statements {
@@ -5994,6 +6333,17 @@ fn validate_statement_block_semantics(
                         diagnostics,
                     );
                 }
+                validate_return_statement_type(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    scope,
+                    value.as_ref(),
+                    expected_return_type,
+                    statement.span,
+                    diagnostics,
+                );
             }
             HirStatementKind::If {
                 condition,
@@ -6085,6 +6435,7 @@ fn validate_statement_block_semantics(
                     &mut then_scope,
                     &mut then_borrows,
                     &nested_cleanup_policy,
+                    expected_return_type,
                     diagnostics,
                 );
                 borrow_state.merge_moves_from(&then_borrows);
@@ -6124,6 +6475,7 @@ fn validate_statement_block_semantics(
                         &mut else_scope,
                         &mut else_borrows,
                         &nested_cleanup_policy,
+                        expected_return_type,
                         diagnostics,
                     );
                     borrow_state.merge_moves_from(&else_borrows);
@@ -6216,6 +6568,7 @@ fn validate_statement_block_semantics(
                     &mut body_scope,
                     &mut body_borrows,
                     &nested_cleanup_policy,
+                    expected_return_type,
                     diagnostics,
                 );
                 borrow_state.merge_moves_from(&body_borrows);
@@ -6341,6 +6694,7 @@ fn validate_statement_block_semantics(
                     &mut body_scope,
                     &mut body_borrows,
                     &nested_cleanup_policy,
+                    expected_return_type,
                     diagnostics,
                 );
                 body_borrows.clear_local(binding);
@@ -6546,6 +6900,17 @@ fn validate_statement_block_semantics(
                         statement.span,
                         diagnostics,
                     );
+                    validate_return_modifier_payload_type(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        type_scope,
+                        &region_scope,
+                        modifier,
+                        expected_return_type,
+                        "`recycle -return` payload",
+                        diagnostics,
+                    );
                 }
                 for line in lines {
                     let gate_shape = match &line.kind {
@@ -6603,6 +6968,17 @@ fn validate_statement_block_semantics(
                             line.span,
                             diagnostics,
                         );
+                        validate_return_modifier_payload_type(
+                            workspace,
+                            resolved_module,
+                            module_path,
+                            type_scope,
+                            &region_scope,
+                            modifier,
+                            expected_return_type,
+                            "`recycle -return` payload",
+                            diagnostics,
+                        );
                     }
                     if let Some(modifier) = line.modifier.as_ref().or(default_modifier.as_ref()) {
                         validate_recycle_modifier_semantics(
@@ -6612,6 +6988,27 @@ fn validate_statement_block_semantics(
                             gate_shape.as_ref(),
                             diagnostics,
                         );
+                        if modifier.payload.is_none()
+                            && matches!(gate_shape, Some(GateShape::Result { .. }))
+                        {
+                            let failure_expr = match &line.kind {
+                                arcana_hir::HirRecycleLineKind::Expr { gate }
+                                | arcana_hir::HirRecycleLineKind::Let { gate, .. }
+                                | arcana_hir::HirRecycleLineKind::Assign { gate, .. } => gate,
+                            };
+                            validate_bare_result_return_type(
+                                workspace,
+                                resolved_module,
+                                module_path,
+                                type_scope,
+                                &region_scope,
+                                failure_expr,
+                                expected_return_type,
+                                modifier.span,
+                                "bare `recycle -return` failure",
+                                diagnostics,
+                            );
+                        }
                     }
                     match &line.kind {
                         arcana_hir::HirRecycleLineKind::Let {
@@ -6626,7 +7023,24 @@ fn validate_statement_block_semantics(
                                 &region_scope,
                                 gate,
                             ) {
-                                scope.insert_typed(name, *mutable, ownership, Some(ty));
+                                note_escaping_expr_borrows(borrow_state, gate, &region_scope);
+                                borrow_state.clear_local(name);
+                                sync_visible_typed_local(
+                                    scope,
+                                    &mut region_scope,
+                                    name,
+                                    *mutable,
+                                    ownership,
+                                    ty,
+                                );
+                                activate_current_cleanup_binding(
+                                    workspace,
+                                    resolved_module,
+                                    borrow_state,
+                                    scope,
+                                    current_block_cleanup_policy,
+                                    name,
+                                );
                             } else {
                                 diagnostics.push(Diagnostic {
                                     path: module_path.to_path_buf(),
@@ -6637,7 +7051,29 @@ fn validate_statement_block_semantics(
                             }
                         }
                         arcana_hir::HirRecycleLineKind::Assign { name, gate } => {
-                            if scope.contains(name) {
+                            let target = HirAssignTarget::Name { text: name.clone() };
+                            validate_assign_target_semantics(
+                                workspace,
+                                resolved_module,
+                                module_path,
+                                type_scope,
+                                &region_scope,
+                                &target,
+                                line.span,
+                                diagnostics,
+                            );
+                            validate_assign_target_borrow_flow(
+                                workspace,
+                                resolved_module,
+                                type_scope,
+                                module_path,
+                                &region_scope,
+                                &target,
+                                line.span,
+                                borrow_state,
+                                diagnostics,
+                            );
+                            if region_scope.contains(name) {
                                 if let Some((ownership, ty)) = infer_payload_binding(
                                     workspace,
                                     resolved_module,
@@ -6645,8 +7081,15 @@ fn validate_statement_block_semantics(
                                     &region_scope,
                                     gate,
                                 ) {
-                                    scope.ownership.insert(name.clone(), ownership);
-                                    scope.types.insert(name.clone(), ty);
+                                    note_escaping_expr_borrows(borrow_state, gate, &region_scope);
+                                    borrow_state.clear_local(name);
+                                    sync_visible_refined_local(
+                                        scope,
+                                        &mut region_scope,
+                                        name,
+                                        ownership,
+                                        ty,
+                                    );
                                 } else {
                                     diagnostics.push(Diagnostic {
                                         path: module_path.to_path_buf(),
@@ -6697,6 +7140,17 @@ fn validate_statement_block_semantics(
                         &region_scope,
                         payload,
                         statement.span,
+                        diagnostics,
+                    );
+                    validate_return_modifier_payload_type(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        type_scope,
+                        &region_scope,
+                        modifier,
+                        expected_return_type,
+                        "`bind -return` payload",
                         diagnostics,
                     );
                 }
@@ -6776,6 +7230,17 @@ fn validate_statement_block_semantics(
                             line.span,
                             diagnostics,
                         );
+                        validate_return_modifier_payload_type(
+                            workspace,
+                            resolved_module,
+                            module_path,
+                            type_scope,
+                            &region_scope,
+                            modifier,
+                            expected_return_type,
+                            "`bind -return` payload",
+                            diagnostics,
+                        );
                     }
                     if let Some(modifier) = line.modifier.as_ref().or(default_modifier.as_ref()) {
                         validate_bind_modifier_semantics(
@@ -6786,6 +7251,48 @@ fn validate_statement_block_semantics(
                             &line.kind,
                             diagnostics,
                         );
+                        validate_bind_fallback_type_semantics(
+                            workspace,
+                            resolved_module,
+                            module_path,
+                            type_scope,
+                            &region_scope,
+                            &line.kind,
+                            modifier,
+                            diagnostics,
+                        );
+                        validate_bind_refinement_stability_semantics(
+                            workspace,
+                            resolved_module,
+                            module_path,
+                            type_scope,
+                            &region_scope,
+                            &line.kind,
+                            modifier,
+                            diagnostics,
+                        );
+                        if modifier.payload.is_none()
+                            && matches!(gate_shape, Some(GateShape::Result { .. }))
+                            && !matches!(line.kind, arcana_hir::HirBindLineKind::Require { .. })
+                        {
+                            let failure_expr = match &line.kind {
+                                arcana_hir::HirBindLineKind::Let { gate, .. }
+                                | arcana_hir::HirBindLineKind::Assign { gate, .. } => gate,
+                                arcana_hir::HirBindLineKind::Require { .. } => unreachable!(),
+                            };
+                            validate_bare_result_return_type(
+                                workspace,
+                                resolved_module,
+                                module_path,
+                                type_scope,
+                                &region_scope,
+                                failure_expr,
+                                expected_return_type,
+                                modifier.span,
+                                "bare `bind -return` failure",
+                                diagnostics,
+                            );
+                        }
                     }
                     match &line.kind {
                         arcana_hir::HirBindLineKind::Let {
@@ -6800,7 +7307,24 @@ fn validate_statement_block_semantics(
                                 &region_scope,
                                 gate,
                             ) {
-                                scope.insert_typed(name, *mutable, ownership, Some(ty));
+                                note_escaping_expr_borrows(borrow_state, gate, &region_scope);
+                                borrow_state.clear_local(name);
+                                sync_visible_typed_local(
+                                    scope,
+                                    &mut region_scope,
+                                    name,
+                                    *mutable,
+                                    ownership,
+                                    ty,
+                                );
+                                activate_current_cleanup_binding(
+                                    workspace,
+                                    resolved_module,
+                                    borrow_state,
+                                    scope,
+                                    current_block_cleanup_policy,
+                                    name,
+                                );
                             } else {
                                 diagnostics.push(Diagnostic {
                                     path: module_path.to_path_buf(),
@@ -6812,7 +7336,29 @@ fn validate_statement_block_semantics(
                             }
                         }
                         arcana_hir::HirBindLineKind::Assign { name, gate } => {
-                            if scope.contains(name) {
+                            let target = HirAssignTarget::Name { text: name.clone() };
+                            validate_assign_target_semantics(
+                                workspace,
+                                resolved_module,
+                                module_path,
+                                type_scope,
+                                &region_scope,
+                                &target,
+                                line.span,
+                                diagnostics,
+                            );
+                            validate_assign_target_borrow_flow(
+                                workspace,
+                                resolved_module,
+                                type_scope,
+                                module_path,
+                                &region_scope,
+                                &target,
+                                line.span,
+                                borrow_state,
+                                diagnostics,
+                            );
+                            if region_scope.contains(name) {
                                 if let Some((ownership, ty)) = infer_payload_binding(
                                     workspace,
                                     resolved_module,
@@ -6820,8 +7366,15 @@ fn validate_statement_block_semantics(
                                     &region_scope,
                                     gate,
                                 ) {
-                                    scope.ownership.insert(name.clone(), ownership);
-                                    scope.types.insert(name.clone(), ty);
+                                    note_escaping_expr_borrows(borrow_state, gate, &region_scope);
+                                    borrow_state.clear_local(name);
+                                    sync_visible_refined_local(
+                                        scope,
+                                        &mut region_scope,
+                                        name,
+                                        ownership,
+                                        ty,
+                                    );
                                 } else {
                                     diagnostics.push(Diagnostic {
                                         path: module_path.to_path_buf(),
@@ -6864,6 +7417,17 @@ fn validate_statement_block_semantics(
                         region.span,
                         diagnostics,
                     );
+                    validate_assign_target_borrow_flow(
+                        workspace,
+                        resolved_module,
+                        type_scope,
+                        module_path,
+                        scope,
+                        target,
+                        region.span,
+                        borrow_state,
+                        diagnostics,
+                    );
                 }
                 if let Some(modifier) = &region.default_modifier
                     && let Some(payload) = &modifier.payload
@@ -6876,6 +7440,17 @@ fn validate_statement_block_semantics(
                         &region_scope,
                         payload,
                         region.span,
+                        diagnostics,
+                    );
+                    validate_return_modifier_payload_type(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        type_scope,
+                        &region_scope,
+                        modifier,
+                        expected_return_type,
+                        "`construct -return` payload",
                         diagnostics,
                     );
                 }
@@ -6903,6 +7478,17 @@ fn validate_statement_block_semantics(
                             line.span,
                             diagnostics,
                         );
+                        validate_return_modifier_payload_type(
+                            workspace,
+                            resolved_module,
+                            module_path,
+                            type_scope,
+                            &region_scope,
+                            modifier,
+                            expected_return_type,
+                            "`construct -return` payload",
+                            diagnostics,
+                        );
                     }
                 }
                 validate_construct_region_semantics(
@@ -6911,6 +7497,7 @@ fn validate_statement_block_semantics(
                     module_path,
                     type_scope,
                     &region_scope,
+                    expected_return_type,
                     region,
                     diagnostics,
                 );
@@ -6925,7 +7512,22 @@ fn validate_statement_block_semantics(
                         .as_ref()
                         .map(|ty| infer_type_ownership(workspace, resolved_module, type_scope, ty))
                         .unwrap_or_default();
+                    borrow_state.clear_local(name);
                     scope.insert_typed(name, false, ownership, delivered_ty);
+                    activate_current_cleanup_binding(
+                        workspace,
+                        resolved_module,
+                        borrow_state,
+                        scope,
+                        current_block_cleanup_policy,
+                        name,
+                    );
+                }
+                if let Some(arcana_hir::HirConstructDestination::Place { target }) =
+                    &region.destination
+                    && let Some(name) = assign_target_root_local(target, scope)
+                {
+                    borrow_state.clear_local(name);
                 }
             }
             HirStatementKind::MemorySpec(spec) => {
@@ -7282,6 +7884,17 @@ fn validate_expr_semantics(
                     span,
                     diagnostics,
                 );
+                validate_return_modifier_payload_type(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    &region_scope,
+                    modifier,
+                    scope.enclosing_return_type.as_ref(),
+                    "`construct -return` payload",
+                    diagnostics,
+                );
             }
             for line in &region.lines {
                 validate_expr_semantics(
@@ -7307,6 +7920,17 @@ fn validate_expr_semantics(
                         line.span,
                         diagnostics,
                     );
+                    validate_return_modifier_payload_type(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        type_scope,
+                        &region_scope,
+                        modifier,
+                        scope.enclosing_return_type.as_ref(),
+                        "`construct -return` payload",
+                        diagnostics,
+                    );
                 }
             }
             validate_construct_region_semantics(
@@ -7315,6 +7939,7 @@ fn validate_expr_semantics(
                 module_path,
                 type_scope,
                 &region_scope,
+                scope.enclosing_return_type.as_ref(),
                 region,
                 diagnostics,
             );
@@ -8630,6 +9255,14 @@ mod tests {
             (
                 "headed_regions_bind_preserve_on_let.arc",
                 "`bind -preserve` is only valid on `name = gate` lines",
+            ),
+            (
+                "headed_regions_bind_preserve_payload_type.arc",
+                "`bind -preserve` payload for `value` must have type `Str`",
+            ),
+            (
+                "headed_regions_bind_replace_payload_type.arc",
+                "`bind -replace` payload for `value` must have type `Str`",
             ),
             (
                 "headed_regions_invalid_recycle_continue.arc",
@@ -11419,6 +12052,112 @@ mod tests {
                 ),
                 "`construct -default` fallback for `value` must have type `Int`",
             ),
+            (
+                concat!(
+                    "enum Option[T]:\n",
+                    "    Some(T)\n",
+                    "    None\n",
+                    "fn main() -> Int:\n",
+                    "    bind -return 0\n",
+                    "        missing = Option.Some[Int] :: 1 :: call\n",
+                    "    return 0\n",
+                ),
+                "unresolved value reference `missing` in assignment target",
+            ),
+            (
+                concat!(
+                    "enum Option[T]:\n",
+                    "    Some(T)\n",
+                    "    None\n",
+                    "fn main() -> Int:\n",
+                    "    recycle -return 0\n",
+                    "        missing = Option.Some[Int] :: 1 :: call\n",
+                    "    return 0\n",
+                ),
+                "unresolved value reference `missing` in assignment target",
+            ),
+            (
+                concat!(
+                    "enum Option[T]:\n",
+                    "    Some(T)\n",
+                    "    None\n",
+                    "fn main() -> Int:\n",
+                    "    let mut value = 1\n",
+                    "    bind -return 0\n",
+                    "        value = Option.None[Int] :: :: call -replace \"x\"\n",
+                    "    return value\n",
+                ),
+                "`bind -replace` fallback for `value` must have type `Int`",
+            ),
+            (
+                concat!(
+                    "enum Option[T]:\n",
+                    "    Some(T)\n",
+                    "    None\n",
+                    "fn main() -> Int:\n",
+                    "    bind -return 0\n",
+                    "        let value = Option.None[Int] :: :: call -default \"x\"\n",
+                    "    return value\n",
+                ),
+                "`bind -default` fallback for `value` must have type `Int`",
+            ),
+            (
+                concat!(
+                    "enum Option[T]:\n",
+                    "    Some(T)\n",
+                    "    None\n",
+                    "fn main() -> Int:\n",
+                    "    let mut value = \"x\"\n",
+                    "    bind -return 0\n",
+                    "        value = Option.Some[Int] :: 1 :: call -preserve\n",
+                    "    return 0\n",
+                ),
+                "`bind -preserve` payload for `value` must have type `Str`",
+            ),
+            (
+                concat!(
+                    "enum Option[T]:\n",
+                    "    Some(T)\n",
+                    "    None\n",
+                    "fn main() -> Int:\n",
+                    "    bind -return \"x\"\n",
+                    "        let value = Option.None[Int] :: :: call\n",
+                    "    return 0\n",
+                ),
+                "`bind -return` payload must have type `Int`",
+            ),
+            (
+                concat!(
+                    "fn main() -> Int:\n",
+                    "    recycle -return \"x\"\n",
+                    "        false\n",
+                    "    return 0\n",
+                ),
+                "`recycle -return` payload must have type `Int`",
+            ),
+            (
+                concat!(
+                    "record Widget:\n",
+                    "    value: Int\n",
+                    "fn main() -> Int:\n",
+                    "    let built = construct yield Widget -return \"x\"\n",
+                    "        value = 1\n",
+                    "    return 0\n",
+                ),
+                "`construct -return` payload must have type `Int`",
+            ),
+            (
+                concat!(
+                    "enum Result[T, E]:\n",
+                    "    Ok(T)\n",
+                    "    Err(E)\n",
+                    "fn main() -> Int:\n",
+                    "    bind -return\n",
+                    "        let value = Result.Err[Int, Str] :: \"x\" :: call\n",
+                    "    return 0\n",
+                ),
+                "bare `bind -return` failure must have type `Int`",
+            ),
         ] {
             let root = make_temp_package(
                 "headed_region_semantic_violation",
@@ -11427,6 +12166,69 @@ mod tests {
                 &[("src/shelf.arc", source), ("src/types.arc", "")],
             );
             let err = check_path(&root).expect_err("fixture should fail");
+            assert!(err.contains(expected), "{expected}: {err}");
+            fs::remove_dir_all(root).expect("cleanup should succeed");
+        }
+    }
+
+    #[test]
+    fn check_path_accepts_same_region_headed_bindings_and_matching_construct_place() {
+        let root = make_temp_package(
+            "headed_region_same_scope_positive",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    concat!(
+                        "record Widget:\n",
+                        "    value: Int\n",
+                        "enum Option[T]:\n",
+                        "    Some(T)\n",
+                        "    None\n",
+                        "fn main() -> Int:\n",
+                        "    bind -return 0\n",
+                        "        let value = Option.Some[Int] :: 1 :: call\n",
+                        "        require value == 1\n",
+                        "    recycle -return 0\n",
+                        "        let copy = Option.Some[Int] :: value :: call\n",
+                        "        copy == 1\n",
+                        "    let mut placed = Widget :: value = 0 :: call\n",
+                        "    construct place Widget -> placed -return 0\n",
+                        "        value = value\n",
+                        "    return placed.value\n",
+                    ),
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+        check_path(&root).expect("same-region headed bindings should check");
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_sources_rejects_return_type_mismatches() {
+        for (source, expected) in [
+            (
+                "fn main() -> Int:\n    return \"x\"\n",
+                "return value must have type `Int`",
+            ),
+            (
+                "fn main() -> Int:\n    return\n",
+                "return statement requires a value of type `Int`",
+            ),
+            (
+                "fn helper() -> Unit:\n    return 1\nfn main() -> Int:\n    helper :: :: call\n    return 0\n",
+                "return value is not allowed because the enclosing routine returns Unit",
+            ),
+        ] {
+            let root = make_temp_package(
+                "return_type_mismatch",
+                "app",
+                &[],
+                &[("src/shelf.arc", source), ("src/types.arc", "")],
+            );
+            let err = check_path(&root).expect_err("return mismatch should fail");
             assert!(err.contains(expected), "{expected}: {err}");
             fs::remove_dir_all(root).expect("cleanup should succeed");
         }
