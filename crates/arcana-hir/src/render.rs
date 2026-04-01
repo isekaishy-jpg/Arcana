@@ -308,7 +308,7 @@ fn render_behavior_attr_fingerprint(attr: &HirBehaviorAttr) -> String {
 fn render_foreword_fingerprint(foreword: &HirForewordApp) -> String {
     format!(
         "foreword(name={}|args=[{}])",
-        quote_fingerprint_text(&foreword.path.join(".")),
+        quote_fingerprint_text(foreword.path.join(".")),
         foreword
             .args
             .iter()

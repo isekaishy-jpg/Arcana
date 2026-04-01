@@ -5,8 +5,8 @@ use std::process::Command;
 
 use arcana_frontend::check_workspace_graph;
 use arcana_package::{
-    BuildTarget, GrimoireKind, WorkspaceGraph, default_distribution_dir,
-    execute_build_with_context_and_progress, load_workspace_graph,
+    BuildDisposition, BuildTarget, GrimoireKind, WorkspaceGraph, default_distribution_dir,
+    distribution_bundle_is_ready, execute_build_with_context_and_progress, load_workspace_graph,
     plan_build_for_target_with_context, plan_workspace, prepare_build_from_workspace,
     read_lockfile, stage_distribution_bundle, write_lockfile,
 };
@@ -100,14 +100,27 @@ pub(crate) fn prepare_run_workspace(
         BuildTarget::WindowsExe => {
             let bundle_dir =
                 default_distribution_dir(&graph, &runnable_member_name, &BuildTarget::WindowsExe);
-            let bundle = stage_distribution_bundle(
-                &graph,
-                &statuses,
-                &runnable_member_id,
-                &BuildTarget::WindowsExe,
-                &bundle_dir,
-            )?;
-            Some(bundle.bundle_dir)
+            let root_file_name = artifact_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| {
+                    format!("invalid built artifact path `{}`", artifact_path.display())
+                })?
+                .to_string();
+            if status.disposition() != BuildDisposition::CacheHit
+                || !distribution_bundle_is_ready(&bundle_dir, &root_file_name)
+            {
+                let bundle = stage_distribution_bundle(
+                    &graph,
+                    &statuses,
+                    &runnable_member_id,
+                    &BuildTarget::WindowsExe,
+                    &bundle_dir,
+                )?;
+                Some(bundle.bundle_dir)
+            } else {
+                Some(bundle_dir)
+            }
         }
         _ => None,
     };
@@ -286,6 +299,33 @@ mod tests {
         let code = run_workspace(dir.clone(), BuildTarget::windows_exe(), None, Vec::new())
             .expect("windows exe run should succeed");
         assert_eq!(code, 0);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn prepare_run_workspace_reuses_existing_windows_bundle_when_fresh() {
+        let dir = temp_dir("prepare_windows_bundle_reuse");
+        write_app_workspace(&dir, "fn main() -> Int:\n    return 7\n");
+
+        let first = prepare_run_workspace(&dir, BuildTarget::windows_exe(), None)
+            .expect("first windows exe run should build");
+        let bundle_dir = first
+            .working_dir
+            .clone()
+            .expect("windows exe run should stage a bundle");
+        let marker = bundle_dir.join("runner-reuse-marker.txt");
+        fs::write(&marker, "keep\n").expect("marker file should write");
+
+        let second = prepare_run_workspace(&dir, BuildTarget::windows_exe(), None)
+            .expect("second windows exe run should reuse staged bundle");
+
+        assert_eq!(second.working_dir.as_deref(), Some(bundle_dir.as_path()));
+        assert!(
+            marker.is_file(),
+            "fresh bundle reuse should not clear existing staged bundle contents"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

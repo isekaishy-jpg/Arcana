@@ -59,6 +59,8 @@ This document defines how Arcana spec files are interpreted during the rewrite.
 - `docs/specs/std/std/v1-status.md`
 - `docs/specs/grimoires/grimoires/v1-scope.md`
 - `docs/specs/grimoires/grimoires/v1-status.md`
+- `docs/specs/grimoires/arcana-text/v1-scope.md`
+- `docs/specs/grimoires/arcana-text/v1-status.md`
 - `docs/specs/headed-regions/headed-regions/v1-scope.md`
 - `docs/specs/selfhost-host/selfhost-host/v1-scope.md`
 - `docs/specs/selfhost-host/selfhost-host/app-substrate-v1-scope.md`

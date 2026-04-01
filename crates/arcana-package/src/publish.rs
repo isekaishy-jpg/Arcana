@@ -292,6 +292,12 @@ fn render_published_dependency(
     if let Some(native_child) = &spec.native_child {
         fields.push(format!("native_child = \"{}\"", escape_toml(native_child)));
     }
+    if let Some(native_provider) = &spec.native_provider {
+        fields.push(format!(
+            "native_provider = \"{}\"",
+            escape_toml(native_provider)
+        ));
+    }
     if !spec.native_plugins.is_empty() {
         fields.push(format!(
             "native_plugins = {}",
@@ -327,6 +333,12 @@ fn render_native_products(
             out.push_str(&format!(
                 ", rust_cdylib_crate = \"{}\"",
                 escape_toml(crate_name)
+            ));
+        }
+        if let Some(provider_dir) = &product.provider_dir {
+            out.push_str(&format!(
+                ", provider_dir = \"{}\"",
+                escape_toml(provider_dir)
             ));
         }
         if !product.sidecars.is_empty() {
@@ -374,8 +386,20 @@ fn render_foreword_products(
 fn collect_snapshot_paths(member: &WorkspaceMember) -> PackageResult<Vec<String>> {
     let mut paths = Vec::new();
     collect_relative_files(&member.abs_dir.join("src"), &member.abs_dir, &mut paths)?;
+    let assets_dir = member.abs_dir.join("assets");
+    if assets_dir.is_dir() {
+        collect_relative_files(&assets_dir, &member.abs_dir, &mut paths)?;
+    }
     for product in member.native_products.values() {
         paths.push(product.file.clone());
+        if let Some(provider_dir) = &product.provider_dir {
+            let provider_root = member.abs_dir.join(provider_dir);
+            if provider_root.is_dir() {
+                collect_relative_files(&provider_root, &member.abs_dir, &mut paths)?;
+            } else {
+                paths.push(provider_dir.clone());
+            }
+        }
         for sidecar in &product.sidecars {
             paths.push(sidecar.clone());
         }
@@ -750,6 +774,127 @@ mod tests {
         assert!(
             metadata.contains(&expected),
             "published metadata should record the sidecar checksum `{expected}`: {metadata}"
+        );
+    }
+
+    #[test]
+    fn publish_includes_package_assets_in_snapshot() {
+        let _guard = env_lock().lock().expect("env lock should acquire");
+        let home = temp_dir("home_assets_snapshot");
+        let core = temp_dir("core_assets_snapshot");
+        write_file(
+            &core.join("book.toml"),
+            concat!(
+                "name = \"core\"\n",
+                "kind = \"lib\"\n",
+                "version = \"1.0.0\"\n",
+            ),
+        );
+        write_file(
+            &core.join("src").join("book.arc"),
+            "export fn util() -> Int:\n    return 1\n",
+        );
+        write_file(&core.join("src").join("types.arc"), "// types\n");
+        write_file(&core.join("assets").join("runtime.txt"), "runtime asset\n");
+
+        unsafe {
+            std::env::set_var("ARCANA_HOME", &home);
+        }
+        publish_workspace_member(&core, "core").expect("publish should succeed");
+
+        let snapshot_dir = local_registry_package_dir(
+            DEFAULT_REGISTRY_NAME,
+            "core",
+            &SemverVersion::parse("1.0.0").expect("version should parse"),
+        )
+        .expect("package dir should resolve")
+        .join(LOCAL_REGISTRY_SNAPSHOT_DIR);
+        let asset_path = snapshot_dir.join("assets").join("runtime.txt");
+        assert!(
+            asset_path.is_file(),
+            "published snapshot should include package assets at {}",
+            asset_path.display()
+        );
+        assert_eq!(
+            fs::read_to_string(&asset_path).expect("published asset should read"),
+            "runtime asset\n"
+        );
+    }
+
+    #[test]
+    fn publish_preserves_native_provider_dependency_setting() {
+        let _guard = env_lock().lock().expect("env lock should acquire");
+        let home = temp_dir("home_native_provider_publish");
+        let workspace = temp_dir("workspace_native_provider_publish");
+        write_file(
+            &workspace.join("book.toml"),
+            "name = \"workspace\"\nkind = \"app\"\n[workspace]\nmembers = [\"core\", \"text\"]\n",
+        );
+
+        write_file(
+            &workspace.join("core").join("book.toml"),
+            concat!(
+                "name = \"core\"\n",
+                "kind = \"lib\"\n",
+                "version = \"1.0.0\"\n",
+                "[deps]\n",
+                "text = { path = \"../text\", native_provider = \"default\" }\n",
+            ),
+        );
+        write_file(
+            &workspace.join("core").join("src").join("book.arc"),
+            "export fn util() -> Int:\n    return 1\n",
+        );
+        write_file(
+            &workspace.join("core").join("src").join("types.arc"),
+            "// types\n",
+        );
+
+        write_file(
+            &workspace.join("text").join("book.toml"),
+            concat!(
+                "name = \"text\"\n",
+                "kind = \"lib\"\n",
+                "version = \"1.0.0\"\n",
+                "\n[native.products.default]\n",
+                "kind = \"dll\"\n",
+                "role = \"provider\"\n",
+                "producer = \"arcana-source\"\n",
+                "file = \"text_provider.dll\"\n",
+                "contract = \"arcana.cabi.provider.v1\"\n",
+                "sidecars = []\n",
+            ),
+        );
+        write_file(
+            &workspace.join("text").join("src").join("book.arc"),
+            "export fn ready() -> Int:\n    return 1\n",
+        );
+        write_file(
+            &workspace.join("text").join("src").join("types.arc"),
+            "// types\n",
+        );
+        write_file(
+            &workspace.join("text").join("text_provider.dll"),
+            "provider-dll\n",
+        );
+
+        // SAFETY: tests serialize access to process env through env_lock().
+        unsafe {
+            std::env::set_var("ARCANA_HOME", &home);
+        }
+        publish_workspace_member(&workspace, "core").expect("publish should succeed");
+
+        let metadata_path = local_registry_package_dir(
+            DEFAULT_REGISTRY_NAME,
+            "core",
+            &SemverVersion::parse("1.0.0").expect("version should parse"),
+        )
+        .expect("package dir should resolve")
+        .join(LOCAL_REGISTRY_METADATA_FILE);
+        let metadata = fs::read_to_string(&metadata_path).expect("metadata should read");
+        assert!(
+            metadata.contains("native_provider = \"default\""),
+            "published metadata should preserve native_provider dependency settings: {metadata}"
         );
     }
 

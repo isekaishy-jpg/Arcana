@@ -1684,5 +1684,3 @@ mod tests {
         assert_eq!(exports[0].routine_key, "tool#fn-0");
     }
 }
-
-

@@ -711,11 +711,9 @@ mod tests {
             )],
         );
 
-        let output = collect_test_command_output(&[
-            "--list".to_string(),
-            root.display().to_string(),
-        ])
-        .expect("test command should succeed");
+        let output =
+            collect_test_command_output(&["--list".to_string(), root.display().to_string()])
+                .expect("test command should succeed");
         assert!(
             output.trim().ends_with("::cliapp::smoke"),
             "unexpected test listing: {output}"
@@ -756,10 +754,9 @@ mod tests {
         .expect("foreword list should succeed");
         let list = serde_json::from_str::<serde_json::Value>(&list_output).expect("valid json");
         assert!(
-            list.as_array()
-                .is_some_and(|entries| entries.iter().any(|entry| {
-                    entry["exposed_name"] == "cliapp.meta.trace"
-                })),
+            list.as_array().is_some_and(|entries| entries
+                .iter()
+                .any(|entry| { entry["exposed_name"] == "cliapp.meta.trace" })),
             "catalog should include the package foreword"
         );
 
@@ -784,7 +781,8 @@ mod tests {
         .expect("foreword index should succeed");
         let index = serde_json::from_str::<serde_json::Value>(&index_output).expect("valid json");
         assert!(
-            index.as_array()
+            index
+                .as_array()
                 .is_some_and(|entries| entries.iter().any(|entry| {
                     entry["qualified_name"] == "cliapp.meta.trace"
                         && entry["target_path"] == "cliapp.main"

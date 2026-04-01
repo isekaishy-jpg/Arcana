@@ -8,11 +8,14 @@ pub const ARCANA_NATIVE_PRODUCT_TEMP_PROBES_ENV: &str = "ARCANA_NATIVE_PRODUCT_T
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AotInstanceProductSpec {
+    pub package_id: String,
     pub package_name: String,
     pub product_name: String,
     pub role: ArcanaCabiProductRole,
     pub contract_id: String,
     pub output_file_name: String,
+    pub package_image_text: Option<String>,
+    pub provider_dir: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,7 +59,9 @@ pub fn compile_instance_product(
 ) -> Result<AotCompiledInstanceProduct, String> {
     if !matches!(
         spec.role,
-        ArcanaCabiProductRole::Child | ArcanaCabiProductRole::Plugin
+        ArcanaCabiProductRole::Child
+            | ArcanaCabiProductRole::Plugin
+            | ArcanaCabiProductRole::Provider
     ) {
         native_product_probe(
             "compile_rejected_role",
@@ -68,7 +73,7 @@ pub fn compile_instance_product(
             ),
         );
         return Err(format!(
-            "generic native instance products support only `child` and `plugin` roles (found `{}` for `{}:{}`)",
+            "generic native instance products support only `child`, `plugin`, and `provider` roles (found `{}` for `{}:{}`)",
             spec.role.as_str(),
             spec.package_name,
             spec.product_name
@@ -204,6 +209,15 @@ fn write_instance_product_project(
             project_dir.join("src").join("lib.rs").display()
         )
     })?;
+    if matches!(spec.role, ArcanaCabiProductRole::Provider) && spec.provider_dir.is_some() {
+        return Err(format!(
+            "arcana-source provider products must not use `provider_dir` for `{}:{}`",
+            spec.package_name, spec.product_name
+        ));
+    }
+    if let Some(provider_dir) = &spec.provider_dir {
+        copy_provider_shim_dir(provider_dir, &project_dir.join("src").join("provider_shim"))?;
+    }
     Ok(())
 }
 
@@ -232,7 +246,10 @@ fn render_instance_product_cargo_toml(spec: &AotInstanceProductSpec) -> Result<S
         escape_toml(&output_stem),
         escape_toml(&cabi_dependency.display().to_string()),
     );
-    if spec.role == ArcanaCabiProductRole::Child {
+    if matches!(
+        spec.role,
+        ArcanaCabiProductRole::Child | ArcanaCabiProductRole::Provider
+    ) {
         out.push_str(&format!(
             "arcana_runtime = {{ package = \"arcana-runtime\", path = \"{}\" }}\n",
             escape_toml(&runtime_dependency.display().to_string())
@@ -246,6 +263,7 @@ fn render_instance_product_lib_rs(spec: &AotInstanceProductSpec) -> String {
     match spec.role {
         ArcanaCabiProductRole::Child => render_child_instance_product_lib_rs(spec),
         ArcanaCabiProductRole::Plugin => render_plugin_instance_product_lib_rs(spec),
+        ArcanaCabiProductRole::Provider => render_provider_instance_product_lib_rs(spec),
         ArcanaCabiProductRole::Export => unreachable!("instance products reject export role"),
     }
 }
@@ -298,17 +316,6 @@ fn render_common_instance_preamble(spec: &AotInstanceProductSpec) -> String {
             "    }}\n",
             "    unsafe {{ drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len))); }}\n",
             "}}\n\n",
-            "unsafe extern \"system\" fn create_unit_instance() -> *mut c_void {{\n",
-            "    Box::into_raw(Box::new(())) as *mut c_void\n",
-            "}}\n\n",
-            "unsafe extern \"system\" fn destroy_unit_instance(instance: *mut c_void) {{\n",
-            "    if instance.is_null() {{\n",
-            "        return;\n",
-            "    }}\n",
-            "    unsafe {{\n",
-            "        drop(Box::from_raw(instance as *mut ()));\n",
-            "    }}\n",
-            "}}\n\n",
         ),
         render_rust_string_literal(&package_name),
         render_rust_string_literal(&product_name),
@@ -317,8 +324,25 @@ fn render_common_instance_preamble(spec: &AotInstanceProductSpec) -> String {
     )
 }
 
+fn render_unit_instance_helpers() -> &'static str {
+    concat!(
+        "unsafe extern \"system\" fn create_unit_instance() -> *mut c_void {\n",
+        "    Box::into_raw(Box::new(())) as *mut c_void\n",
+        "}\n\n",
+        "unsafe extern \"system\" fn destroy_unit_instance(instance: *mut c_void) {\n",
+        "    if instance.is_null() {\n",
+        "        return;\n",
+        "    }\n",
+        "    unsafe {\n",
+        "        drop(Box::from_raw(instance as *mut ()));\n",
+        "    }\n",
+        "}\n\n",
+    )
+}
+
 fn render_child_instance_product_lib_rs(spec: &AotInstanceProductSpec) -> String {
     let mut out = render_common_instance_preamble(spec);
+    out.push_str(render_unit_instance_helpers());
     out.push_str(
         concat!(
             "use std::ffi::CStr;\n",
@@ -406,6 +430,7 @@ fn render_plugin_instance_product_lib_rs(spec: &AotInstanceProductSpec) -> Strin
         spec.package_name, spec.product_name, spec.contract_id
     );
     let mut out = render_common_instance_preamble(spec);
+    out.push_str(render_unit_instance_helpers());
     out.push_str(&format!(
         "static PLUGIN_DESCRIPTION: &str = {};\n\n",
         render_rust_string_literal(&description)
@@ -478,6 +503,303 @@ fn render_plugin_instance_product_lib_rs(spec: &AotInstanceProductSpec) -> Strin
         ),
     );
     out
+}
+
+fn render_provider_instance_product_lib_rs(spec: &AotInstanceProductSpec) -> String {
+    let package_image_text =
+        render_rust_string_literal(spec.package_image_text.as_deref().unwrap_or(""));
+    let mut out = render_common_instance_preamble(spec);
+    out.push_str(&format!(
+        "static PACKAGE_IMAGE_TEXT: &str = {};\n\n",
+        package_image_text
+    ));
+    out.push_str(
+        concat!(
+            "use std::ffi::CStr;\n",
+            "use arcana_cabi::{\n",
+            "    ArcanaCabiInstanceOpsV1,\n",
+            "    ArcanaCabiProviderHostOpsV1,\n",
+            "    ArcanaCabiProviderOpsV1,\n",
+            "    decode_provider_values,\n",
+            "    encode_provider_call_outcome,\n",
+            "    encode_provider_descriptor,\n",
+            "};\n",
+            "use arcana_runtime::{ArcanaSourceProvider, RuntimeSourceProviderCallbacks, current_process_runtime_host};\n\n",
+            "struct ProviderInstance {\n",
+            "    provider: ArcanaSourceProvider,\n",
+            "}\n\n",
+            "pub struct ProviderHost<'a> {\n",
+            "    ops: &'a ArcanaCabiProviderHostOpsV1,\n",
+            "    context: *mut c_void,\n",
+            "}\n\n",
+            "impl<'a> ProviderHost<'a> {\n",
+            "    fn new(ops: &'a ArcanaCabiProviderHostOpsV1, context: *mut c_void) -> Result<Self, String> {\n",
+            "        if ops.ops_size < std::mem::size_of::<ArcanaCabiProviderHostOpsV1>() {\n",
+            "            return Err(format!(\n",
+            "                \"provider host ops size {} smaller than expected {}\",\n",
+            "                ops.ops_size,\n",
+            "                std::mem::size_of::<ArcanaCabiProviderHostOpsV1>()\n",
+            "            ));\n",
+            "        }\n",
+            "        Ok(Self { ops, context })\n",
+            "    }\n\n",
+            "    fn resolve_package_asset_root(&mut self, package_id: &str) -> Result<String, String> {\n",
+            "        let package_id = std::ffi::CString::new(package_id)\n",
+            "            .map_err(|_| format!(\"provider host package id contains interior nul: {package_id:?}\"))?;\n",
+            "        let owned = unsafe { (self.ops.resolve_package_asset_root)(self.context, package_id.as_ptr()) };\n",
+            "        if owned.ptr.is_null() {\n",
+            "            return Ok(String::new());\n",
+            "        }\n",
+            "        let bytes = unsafe { std::slice::from_raw_parts(owned.ptr.cast::<u8>(), owned.len) }.to_vec();\n",
+            "        unsafe { (self.ops.host_owned_str_free)(owned.ptr.cast::<u8>(), owned.len) };\n",
+            "        String::from_utf8(bytes)\n",
+            "            .map_err(|e| format!(\"provider host returned non-utf8 asset root: {e}\"))\n",
+            "    }\n\n",
+            "    fn canvas_image_create_impl(&mut self, width: i64, height: i64) -> Result<u64, String> {\n",
+            "        let mut image_id = 0_u64;\n",
+            "        let ok = unsafe { (self.ops.canvas_image_create)(self.context, width, height, &mut image_id) };\n",
+            "        if ok == 0 {\n",
+            "            return Err(self.last_error().unwrap_or_else(|| \"provider host canvas_image_create failed\".to_string()));\n",
+            "        }\n",
+            "        Ok(image_id)\n",
+            "    }\n\n",
+            "    fn canvas_image_replace_rgba_impl(&mut self, image_id: u64, rgba: &[u8]) -> Result<(), String> {\n",
+            "        let ok = unsafe {\n",
+            "            (self.ops.canvas_image_replace_rgba)(self.context, image_id, rgba.as_ptr(), rgba.len())\n",
+            "        };\n",
+            "        if ok == 0 {\n",
+            "            return Err(self.last_error().unwrap_or_else(|| \"provider host canvas_image_replace_rgba failed\".to_string()));\n",
+            "        }\n",
+            "        Ok(())\n",
+            "    }\n\n",
+            "    fn canvas_blit_impl(&mut self, window_id: u64, image_id: u64, x: i64, y: i64) -> Result<(), String> {\n",
+            "        let ok = unsafe { (self.ops.canvas_blit)(self.context, window_id, image_id, x, y) };\n",
+            "        if ok == 0 {\n",
+            "            return Err(self.last_error().unwrap_or_else(|| \"provider host canvas_blit failed\".to_string()));\n",
+            "        }\n",
+            "        Ok(())\n",
+            "    }\n\n",
+            "    fn last_error(&mut self) -> Option<String> {\n",
+            "        let mut len = 0_usize;\n",
+            "        let ptr = unsafe { (self.ops.last_error_alloc)(self.context, &mut len) };\n",
+            "        if ptr.is_null() || len == 0 {\n",
+            "            return None;\n",
+            "        }\n",
+            "        let bytes = unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec();\n",
+            "        unsafe { (self.ops.host_owned_str_free)(ptr, len) };\n",
+            "        String::from_utf8(bytes).ok()\n",
+            "    }\n",
+            "}\n\n",
+            "impl RuntimeSourceProviderCallbacks for ProviderHost<'_> {\n",
+            "    fn package_asset_root(&mut self, package_id: &str) -> Result<String, String> {\n",
+            "        self.resolve_package_asset_root(package_id)\n",
+            "    }\n\n",
+            "    fn canvas_image_create(&mut self, width: i64, height: i64) -> Result<u64, String> {\n",
+            "        self.canvas_image_create_impl(width, height)\n",
+            "    }\n\n",
+            "    fn canvas_image_replace_rgba(&mut self, image_id: u64, rgba: &[u8]) -> Result<(), String> {\n",
+            "        self.canvas_image_replace_rgba_impl(image_id, rgba)\n",
+            "    }\n\n",
+            "    fn canvas_blit(&mut self, window_id: u64, image_id: u64, x: i64, y: i64) -> Result<(), String> {\n",
+            "        self.canvas_blit_impl(window_id, image_id, x, y)\n",
+            "    }\n",
+            "}\n\n",
+            "unsafe extern \"system\" fn create_provider_instance() -> *mut c_void {\n",
+            "    match ArcanaSourceProvider::new(PACKAGE_IMAGE_TEXT) {\n",
+            "        Ok(provider) => Box::into_raw(Box::new(ProviderInstance { provider })) as *mut c_void,\n",
+            "        Err(err) => {\n",
+            "            set_last_error(err);\n",
+            "            ptr::null_mut()\n",
+            "        }\n",
+            "    }\n",
+            "}\n\n",
+            "unsafe extern \"system\" fn destroy_provider_instance(instance: *mut c_void) {\n",
+            "    if instance.is_null() {\n",
+            "        return;\n",
+            "    }\n",
+            "    unsafe { drop(Box::from_raw(instance as *mut ProviderInstance)); }\n",
+            "}\n\n",
+            "unsafe extern \"system\" fn describe(instance: *mut c_void, out_len: *mut usize) -> *mut u8 {\n",
+            "    if instance.is_null() {\n",
+            "        set_last_error(\"provider instance must not be null\".to_string());\n",
+            "        if !out_len.is_null() { unsafe { *out_len = 0; } }\n",
+            "        return ptr::null_mut();\n",
+            "    }\n",
+            "    let instance = unsafe { &*(instance as *mut ProviderInstance) };\n",
+            "    let bytes = match encode_provider_descriptor(instance.provider.descriptor()) {\n",
+            "        Ok(bytes) => bytes,\n",
+            "        Err(err) => {\n",
+            "            set_last_error(format!(\"failed to encode provider descriptor: {err}\"));\n",
+            "            if !out_len.is_null() { unsafe { *out_len = 0; } }\n",
+            "            return ptr::null_mut();\n",
+            "        }\n",
+            "    };\n",
+            "    let (ptr, len) = allocated_bytes_parts(bytes);\n",
+            "    if !out_len.is_null() { unsafe { *out_len = len; } }\n",
+            "    ptr\n",
+            "}\n\n",
+            "unsafe extern \"system\" fn invoke_callable(\n",
+            "    instance: *mut c_void,\n",
+            "    host_ops: *const ArcanaCabiProviderHostOpsV1,\n",
+            "    host_context: *mut c_void,\n",
+            "    callable_key: *const c_char,\n",
+            "    args_ptr: *const u8,\n",
+            "    args_len: usize,\n",
+            "    out_len: *mut usize,\n",
+            ") -> *mut u8 {\n",
+            "    let result = (|| {\n",
+            "        let instance = unsafe { (instance as *mut ProviderInstance).as_mut() }\n",
+            "            .ok_or_else(|| \"provider instance must not be null\".to_string())?;\n",
+            "        let host_ops = unsafe { host_ops.as_ref() }\n",
+            "            .ok_or_else(|| \"provider host ops must not be null\".to_string())?;\n",
+            "        let callable_key = unsafe { CStr::from_ptr(callable_key) }\n",
+            "            .to_str()\n",
+            "            .map_err(|e| format!(\"provider callable key is not utf8: {e}\"))?;\n",
+            "        let args = decode_provider_values(unsafe { std::slice::from_raw_parts(args_ptr, args_len) })?;\n",
+            "        let mut host = ProviderHost::new(host_ops, host_context)?;\n",
+            "        let mut runtime_host = current_process_runtime_host()?;\n",
+            "        let outcome = instance.provider.invoke(callable_key, &args, runtime_host.as_mut(), &mut host)?;\n",
+            "        Ok(encode_provider_call_outcome(&outcome)?)\n",
+            "    })();\n",
+            "    match result {\n",
+            "        Ok(bytes) => {\n",
+            "            let (ptr, len) = allocated_bytes_parts(bytes);\n",
+            "            if !out_len.is_null() { unsafe { *out_len = len; } }\n",
+            "            ptr\n",
+            "        }\n",
+            "        Err(err) => {\n",
+            "            set_last_error(err);\n",
+            "            if !out_len.is_null() { unsafe { *out_len = 0; } }\n",
+            "            ptr::null_mut()\n",
+            "        }\n",
+            "    }\n",
+            "}\n\n",
+            "unsafe extern \"system\" fn retain_opaque(instance: *mut c_void, family_key: *const c_char, opaque_id: u64) -> i32 {\n",
+            "    let result = (|| {\n",
+            "        let instance = unsafe { (instance as *mut ProviderInstance).as_mut() }\n",
+            "            .ok_or_else(|| \"provider instance must not be null\".to_string())?;\n",
+            "        let family_key = unsafe { CStr::from_ptr(family_key) }\n",
+            "            .to_str()\n",
+            "            .map_err(|e| format!(\"provider family key is not utf8: {e}\"))?;\n",
+            "        instance.provider.retain_opaque(family_key, opaque_id)\n",
+            "    })();\n",
+            "    match result {\n",
+            "        Ok(()) => 1,\n",
+            "        Err(err) => {\n",
+            "            set_last_error(err);\n",
+            "            0\n",
+            "        }\n",
+            "    }\n",
+            "}\n\n",
+            "unsafe extern \"system\" fn release_opaque(instance: *mut c_void, family_key: *const c_char, opaque_id: u64) -> i32 {\n",
+            "    let result = (|| {\n",
+            "        let instance = unsafe { (instance as *mut ProviderInstance).as_mut() }\n",
+            "            .ok_or_else(|| \"provider instance must not be null\".to_string())?;\n",
+            "        let family_key = unsafe { CStr::from_ptr(family_key) }\n",
+            "            .to_str()\n",
+            "            .map_err(|e| format!(\"provider family key is not utf8: {e}\"))?;\n",
+            "        instance.provider.release_opaque(family_key, opaque_id)\n",
+            "    })();\n",
+            "    match result {\n",
+            "        Ok(()) => 1,\n",
+            "        Err(err) => {\n",
+            "            set_last_error(err);\n",
+            "            0\n",
+            "        }\n",
+            "    }\n",
+            "}\n\n",
+            "static PROVIDER_OPS: ArcanaCabiProviderOpsV1 = ArcanaCabiProviderOpsV1 {\n",
+            "    base: ArcanaCabiInstanceOpsV1 {\n",
+            "        ops_size: std::mem::size_of::<ArcanaCabiInstanceOpsV1>(),\n",
+            "        create_instance: create_provider_instance as ArcanaCabiCreateInstanceFn,\n",
+            "        destroy_instance: destroy_provider_instance as ArcanaCabiDestroyInstanceFn,\n",
+            "        reserved0: ptr::null(),\n",
+            "        reserved1: ptr::null(),\n",
+            "    },\n",
+            "    describe,\n",
+            "    invoke_callable,\n",
+            "    retain_opaque,\n",
+            "    release_opaque,\n",
+            "    last_error_alloc: last_error_alloc as ArcanaCabiLastErrorAllocFn,\n",
+            "    owned_bytes_free: owned_bytes_free as ArcanaCabiOwnedBytesFreeFn,\n",
+            "    reserved0: ptr::null(),\n",
+            "    reserved1: ptr::null(),\n",
+            "};\n\n",
+            "static PRODUCT_API: ArcanaCabiProductApiV1 = ArcanaCabiProductApiV1 {\n",
+            "    descriptor_size: std::mem::size_of::<ArcanaCabiProductApiV1>(),\n",
+            "    package_name: PACKAGE_NAME.as_ptr() as *const c_char,\n",
+            "    product_name: PRODUCT_NAME.as_ptr() as *const c_char,\n",
+            "    role: ROLE_NAME.as_ptr() as *const c_char,\n",
+            "    contract_id: CONTRACT_ID.as_ptr() as *const c_char,\n",
+            "    contract_version: ARCANA_CABI_CONTRACT_VERSION_V1,\n",
+            "    role_ops: &PROVIDER_OPS as *const ArcanaCabiProviderOpsV1 as *const c_void,\n",
+            "    reserved0: ptr::null(),\n",
+            "    reserved1: ptr::null(),\n",
+            "};\n\n",
+            "const _: &str = ARCANA_CABI_GET_PRODUCT_API_V1_SYMBOL;\n",
+            "const _: u32 = ARCANA_CABI_CONTRACT_VERSION_V1;\n\n",
+            "#[unsafe(no_mangle)]\n",
+            "pub extern \"system\" fn arcana_cabi_get_product_api_v1() -> *const ArcanaCabiProductApiV1 {\n",
+            "    &PRODUCT_API\n",
+            "}\n",
+        ),
+    );
+    out
+}
+
+fn copy_provider_shim_dir(source: &Path, dest: &Path) -> Result<(), String> {
+    if !source.is_dir() {
+        return Err(format!(
+            "provider shim directory `{}` does not exist or is not a directory",
+            source.display()
+        ));
+    }
+    if dest.exists() {
+        fs::remove_dir_all(dest).map_err(|e| {
+            format!(
+                "failed to clear generated provider shim directory `{}`: {e}",
+                dest.display()
+            )
+        })?;
+    }
+    fs::create_dir_all(dest).map_err(|e| {
+        format!(
+            "failed to create generated provider shim directory `{}`: {e}",
+            dest.display()
+        )
+    })?;
+    copy_provider_shim_dir_recursive(source, dest)
+}
+
+fn copy_provider_shim_dir_recursive(source: &Path, dest: &Path) -> Result<(), String> {
+    for entry in fs::read_dir(source).map_err(|e| {
+        format!(
+            "failed to read provider shim directory `{}`: {e}",
+            source.display()
+        )
+    })? {
+        let entry = entry.map_err(|e| format!("failed to read provider shim entry: {e}"))?;
+        let source_path = entry.path();
+        let dest_path = dest.join(entry.file_name());
+        if source_path.is_dir() {
+            fs::create_dir_all(&dest_path).map_err(|e| {
+                format!(
+                    "failed to create generated provider shim directory `{}`: {e}",
+                    dest_path.display()
+                )
+            })?;
+            copy_provider_shim_dir_recursive(&source_path, &dest_path)?;
+        } else {
+            fs::copy(&source_path, &dest_path).map_err(|e| {
+                format!(
+                    "failed to copy provider shim file `{}` to `{}`: {e}",
+                    source_path.display(),
+                    dest_path.display()
+                )
+            })?;
+        }
+    }
+    Ok(())
 }
 
 fn repo_root() -> PathBuf {
@@ -560,21 +882,27 @@ mod tests {
 
     fn child_spec() -> AotInstanceProductSpec {
         AotInstanceProductSpec {
+            package_id: "arcana_desktop".to_string(),
             package_name: "arcana_desktop".to_string(),
             product_name: "default".to_string(),
             role: ArcanaCabiProductRole::Child,
             contract_id: ARCANA_CABI_CHILD_CONTRACT_ID.to_string(),
             output_file_name: "arcwin.dll".to_string(),
+            package_image_text: None,
+            provider_dir: None,
         }
     }
 
     fn plugin_spec() -> AotInstanceProductSpec {
         AotInstanceProductSpec {
+            package_id: "tooling".to_string(),
             package_name: "tooling".to_string(),
             product_name: "tools".to_string(),
             role: ArcanaCabiProductRole::Plugin,
             contract_id: ARCANA_CABI_PLUGIN_CONTRACT_ID.to_string(),
             output_file_name: "tooling_tools.dll".to_string(),
+            package_image_text: None,
+            provider_dir: None,
         }
     }
 

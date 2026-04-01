@@ -111,6 +111,23 @@ pub fn render_cached_artifact(
         .map(|file| format!("\"{}\"", escape_toml(&file.relative_path)))
         .collect::<Vec<_>>()
         .join(", ");
+    let root_artifact_length = emission
+        .root_artifact_bytes
+        .as_ref()
+        .map(|bytes| format!("root_artifact_length = {}\n", bytes.len()))
+        .unwrap_or_default();
+    let support_file_meta = emission
+        .support_files
+        .iter()
+        .map(|file| {
+            format!(
+                "[[support_file_meta]]\npath = \"{}\"\nlength = {}\n",
+                escape_toml(&file.relative_path),
+                file.bytes.len()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("");
     let mut rendered = format!(
         concat!(
             "member = \"{}\"\n",
@@ -146,6 +163,92 @@ pub fn render_cached_artifact(
             1,
         );
     }
+    rendered.push_str(&root_artifact_length);
+    rendered.push_str(&support_file_meta);
+    rendered
+}
+
+pub fn render_cached_artifact_index(
+    member: &str,
+    kind: &GrimoireKind,
+    fingerprint: &str,
+    api_fingerprint: &str,
+    target: &BuildTarget,
+    target_format: &str,
+    toolchain: &str,
+    emission: &AotPackageEmission,
+    artifact_hash: &str,
+    native_product_closure: Option<&str>,
+) -> String {
+    let required_support_files = emission
+        .support_files
+        .iter()
+        .filter(|file| !file.relative_path.starts_with("package-assets/"))
+        .map(|file| format!("\"{}\"", escape_toml(&file.relative_path)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let required_support_lengths = emission
+        .support_files
+        .iter()
+        .filter(|file| !file.relative_path.starts_with("package-assets/"))
+        .map(|file| {
+            format!(
+                "{} = {}\n",
+                quote_toml_key(&file.relative_path),
+                file.bytes.len()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    let package_asset_roots = emission
+        .support_files
+        .iter()
+        .filter_map(|file| package_asset_root_prefix(&file.relative_path))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .map(|root| format!("\"{}\"", escape_toml(root)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut rendered = format!(
+        concat!(
+            "member = \"{}\"\n",
+            "kind = \"{}\"\n",
+            "fingerprint = \"{}\"\n",
+            "api_fingerprint = \"{}\"\n",
+            "target = \"{}\"\n",
+            "target_format = \"{}\"\n",
+            "toolchain = \"{}\"\n",
+            "artifact_hash = \"{}\"\n",
+            "required_support_files = [{}]\n",
+            "package_asset_roots = [{}]\n",
+        ),
+        escape_toml(member),
+        kind.as_str(),
+        escape_toml(fingerprint),
+        escape_toml(api_fingerprint),
+        target,
+        escape_toml(target_format),
+        escape_toml(toolchain),
+        escape_toml(artifact_hash),
+        required_support_files,
+        package_asset_roots,
+    );
+    if let Some(root_artifact_bytes) = &emission.root_artifact_bytes {
+        rendered.push_str(&format!(
+            "root_artifact_length = {}\n",
+            root_artifact_bytes.len()
+        ));
+    }
+    if let Some(closure) = native_product_closure {
+        rendered.push_str(&format!(
+            "native_product_closure = \"{}\"\n",
+            escape_toml(closure)
+        ));
+    }
+    if !required_support_lengths.is_empty() {
+        rendered.push_str("[required_support_lengths]\n");
+        rendered.push_str(&required_support_lengths);
+    }
     rendered
 }
 
@@ -162,6 +265,14 @@ pub fn cache_metadata_path_for_output(output_path: &Path, target: &BuildTarget) 
     }
 }
 
+pub fn cache_index_path_for_output(output_path: &Path) -> PathBuf {
+    let file_name = output_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("artifact");
+    output_path.with_file_name(format!("{file_name}.arcana-index.toml"))
+}
+
 pub fn cached_artifact_matches_status(
     output_path: &Path,
     expected_member: &str,
@@ -176,6 +287,20 @@ pub fn cached_artifact_matches_status(
 ) -> bool {
     if expected_artifact_hash.is_empty() {
         return false;
+    }
+    if cached_index_matches_status(
+        output_path,
+        expected_member,
+        expected_kind,
+        expected_fingerprint,
+        expected_api_fingerprint,
+        expected_target,
+        expected_format,
+        expected_toolchain,
+        expected_artifact_hash,
+        expected_native_product_closure,
+    ) {
+        return true;
     }
     let metadata_path = cache_metadata_path_for_output(output_path, expected_target);
     let Ok(text) = fs::read_to_string(&metadata_path) else {
@@ -203,6 +328,9 @@ pub fn cached_artifact_matches_status(
     if !matches_header {
         return false;
     }
+    if cached_output_files_match(output_path, expected_target, table) {
+        return true;
+    }
     let Ok(artifact) = parse_package_artifact(&text) else {
         return false;
     };
@@ -213,6 +341,47 @@ pub fn cached_artifact_matches_status(
         .ok()
         .as_deref()
         == Some(expected_artifact_hash)
+}
+
+fn cached_index_matches_status(
+    output_path: &Path,
+    expected_member: &str,
+    expected_kind: &GrimoireKind,
+    expected_fingerprint: &str,
+    expected_api_fingerprint: &str,
+    expected_target: &BuildTarget,
+    expected_format: &str,
+    expected_toolchain: &str,
+    expected_artifact_hash: &str,
+    expected_native_product_closure: Option<&str>,
+) -> bool {
+    let index_path = cache_index_path_for_output(output_path);
+    let Ok(text) = fs::read_to_string(&index_path) else {
+        return false;
+    };
+    let Ok(value) = text.parse::<toml::Value>() else {
+        return false;
+    };
+    let Some(table) = value.as_table() else {
+        return false;
+    };
+    let matches_header = table.get("member").and_then(toml::Value::as_str) == Some(expected_member)
+        && table.get("kind").and_then(toml::Value::as_str) == Some(expected_kind.as_str())
+        && table.get("fingerprint").and_then(toml::Value::as_str) == Some(expected_fingerprint)
+        && table.get("api_fingerprint").and_then(toml::Value::as_str)
+            == Some(expected_api_fingerprint)
+        && table.get("target").and_then(toml::Value::as_str) == Some(expected_target.key())
+        && table.get("target_format").and_then(toml::Value::as_str) == Some(expected_format)
+        && table.get("toolchain").and_then(toml::Value::as_str) == Some(expected_toolchain)
+        && table.get("artifact_hash").and_then(toml::Value::as_str) == Some(expected_artifact_hash)
+        && table
+            .get("native_product_closure")
+            .and_then(toml::Value::as_str)
+            == expected_native_product_closure;
+    if !matches_header {
+        return false;
+    }
+    cached_output_index_matches(output_path, expected_target, table)
 }
 
 pub fn read_cached_output_metadata(
@@ -399,6 +568,123 @@ fn cached_emission_hash_for_output_path(
     ))
 }
 
+fn cached_output_files_match(
+    output_path: &Path,
+    target: &BuildTarget,
+    table: &toml::Table,
+) -> bool {
+    let Ok(support_files) = support_files_from_table(table) else {
+        return false;
+    };
+    if !matches!(target, BuildTarget::InternalAot) {
+        let Some(expected_root_length) = table
+            .get("root_artifact_length")
+            .and_then(toml::Value::as_integer)
+        else {
+            return false;
+        };
+        let Ok(metadata) = fs::metadata(output_path) else {
+            return false;
+        };
+        if metadata.len() != expected_root_length as u64 {
+            return false;
+        }
+    }
+    if support_files.is_empty() {
+        return true;
+    }
+    let artifact_dir = output_path.parent().unwrap_or_else(|| Path::new("."));
+    if support_files.len() > 64 {
+        return cached_large_support_set_matches(artifact_dir, &support_files);
+    }
+    let Some(support_file_lengths) = support_file_lengths_from_table(table) else {
+        return false;
+    };
+    if support_files
+        .iter()
+        .any(|path| !support_file_lengths.contains_key(path))
+    {
+        return false;
+    }
+    support_files.into_iter().all(|relative_path| {
+        let Some(expected_length) = support_file_lengths.get(&relative_path) else {
+            return false;
+        };
+        fs::metadata(artifact_dir.join(relative_path))
+            .map(|metadata| metadata.len() == *expected_length)
+            .unwrap_or(false)
+    })
+}
+
+fn cached_large_support_set_matches(artifact_dir: &Path, support_files: &[String]) -> bool {
+    let mut package_asset_roots = std::collections::BTreeSet::new();
+    for relative_path in support_files {
+        if let Some(root) = package_asset_root_prefix(relative_path) {
+            package_asset_roots.insert(root);
+            continue;
+        }
+        if !artifact_dir.join(relative_path).exists() {
+            return false;
+        }
+    }
+    package_asset_roots
+        .into_iter()
+        .all(|root| artifact_dir.join(root).is_dir())
+}
+
+fn package_asset_root_prefix(relative_path: &str) -> Option<&str> {
+    let prefix = "package-assets/";
+    if !relative_path.starts_with(prefix) {
+        return None;
+    }
+    let tail = &relative_path[prefix.len()..];
+    let slash = tail.find('/')?;
+    Some(&relative_path[..prefix.len() + slash])
+}
+
+fn cached_output_index_matches(
+    output_path: &Path,
+    target: &BuildTarget,
+    table: &toml::Table,
+) -> bool {
+    if !matches!(target, BuildTarget::InternalAot) {
+        let Some(expected_root_length) = table
+            .get("root_artifact_length")
+            .and_then(toml::Value::as_integer)
+        else {
+            return false;
+        };
+        let Ok(metadata) = fs::metadata(output_path) else {
+            return false;
+        };
+        if metadata.len() != expected_root_length as u64 {
+            return false;
+        }
+    }
+    let artifact_dir = output_path.parent().unwrap_or_else(|| Path::new("."));
+    let Ok(required_support_files) = required_support_files_from_table(table) else {
+        return false;
+    };
+    let Some(required_support_lengths) = required_support_lengths_from_table(table) else {
+        return false;
+    };
+    for relative_path in &required_support_files {
+        let Some(expected_length) = required_support_lengths.get(relative_path) else {
+            return false;
+        };
+        let Ok(metadata) = fs::metadata(artifact_dir.join(relative_path)) else {
+            return false;
+        };
+        if metadata.len() != *expected_length {
+            return false;
+        }
+    }
+    let package_asset_roots = package_asset_roots_from_table(table).unwrap_or_default();
+    package_asset_roots
+        .into_iter()
+        .all(|root| artifact_dir.join(root).is_dir())
+}
+
 fn support_files_from_table(table: &toml::Table) -> Result<Vec<String>, String> {
     let Some(value) = table.get("support_files") else {
         return Ok(Vec::new());
@@ -416,6 +702,70 @@ fn support_files_from_table(table: &toml::Table) -> Result<Vec<String>, String> 
         .collect::<Result<Vec<_>, _>>()?;
     collect_validated_support_file_paths(paths.iter().map(String::as_str))
         .map_err(|e| e.to_string())
+}
+
+fn support_file_lengths_from_table(
+    table: &toml::Table,
+) -> Option<std::collections::HashMap<String, u64>> {
+    let items = table.get("support_file_meta")?.as_array()?;
+    let mut lengths = std::collections::HashMap::new();
+    for item in items {
+        let item = item.as_table()?;
+        let path = item.get("path")?.as_str()?.to_string();
+        collect_validated_support_file_paths([path.as_str()]).ok()?;
+        let length = u64::try_from(item.get("length")?.as_integer()?).ok()?;
+        lengths.insert(path, length);
+    }
+    Some(lengths)
+}
+
+fn required_support_files_from_table(table: &toml::Table) -> Result<Vec<String>, String> {
+    let Some(value) = table.get("required_support_files") else {
+        return Ok(Vec::new());
+    };
+    let items = value
+        .as_array()
+        .ok_or_else(|| "`required_support_files` must be an array".to_string())?;
+    let paths = items
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .map(ToString::to_string)
+                .ok_or_else(|| "required support file entries must be strings".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    collect_validated_support_file_paths(paths.iter().map(String::as_str))
+        .map_err(|e| e.to_string())
+}
+
+fn required_support_lengths_from_table(
+    table: &toml::Table,
+) -> Option<std::collections::HashMap<String, u64>> {
+    let Some(value) = table.get("required_support_lengths") else {
+        return Some(std::collections::HashMap::new());
+    };
+    let table = value.as_table()?;
+    let mut lengths = std::collections::HashMap::new();
+    for (path, value) in table {
+        collect_validated_support_file_paths([path.as_str()]).ok()?;
+        let length = u64::try_from(value.as_integer()?).ok()?;
+        lengths.insert(path.clone(), length);
+    }
+    Some(lengths)
+}
+
+fn package_asset_roots_from_table(table: &toml::Table) -> Option<Vec<String>> {
+    let Some(value) = table.get("package_asset_roots") else {
+        return Some(Vec::new());
+    };
+    let items = value.as_array()?;
+    let mut roots = Vec::new();
+    for item in items {
+        let root = item.as_str()?.to_string();
+        collect_validated_support_file_paths([root.as_str()]).ok()?;
+        roots.push(root);
+    }
+    Some(roots)
 }
 
 fn required_header_field(
@@ -443,6 +793,10 @@ fn sorted_support_files(files: &[AotEmissionFile]) -> Vec<&AotEmissionFile> {
 
 fn escape_toml(text: &str) -> String {
     text.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn quote_toml_key(text: &str) -> String {
+    format!("\"{}\"", escape_toml(text))
 }
 
 #[cfg(test)]

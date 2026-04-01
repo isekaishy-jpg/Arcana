@@ -3,7 +3,9 @@
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::type_complexity)]
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::ffi::{CStr, c_char, c_void};
 use std::fs;
 use std::io::{Read, Seek, Write};
 use std::path::{Component, Path, PathBuf};
@@ -11,6 +13,7 @@ use std::path::{Component, Path, PathBuf};
 use arcana_aot::{
     AotOwnerArtifact, AotPackageArtifact, parse_package_artifact, validate_package_artifact,
 };
+use arcana_cabi::{ArcanaCabiProviderHostOpsV1, ArcanaCabiProviderValue, ArcanaOwnedStr};
 use arcana_ir::{
     ExecAssignOp as ParsedAssignOp, ExecAssignTarget as ParsedAssignTarget,
     ExecAvailabilityAttachment as ParsedAvailabilityAttachment,
@@ -45,6 +48,8 @@ mod native_host;
 mod native_product_loader;
 mod package_image;
 mod routine_plan;
+mod source_provider;
+mod text_engine;
 pub use arcana_ir::{
     IrForewordArg, IrForewordEntryKind, IrForewordGeneratedBy, IrForewordMetadata,
     IrForewordRegistrationRow, IrForewordRetention,
@@ -60,7 +65,8 @@ pub use native_abi::{
 pub use native_host::NativeProcessHost;
 pub use native_product_loader::{
     RuntimeChildBindingInfo, RuntimeNativePluginHandle, RuntimeNativeProductCatalog,
-    RuntimeNativeProductInfo, activate_current_bundle_native_products, load_bundle_native_products,
+    RuntimeNativeProductInfo, RuntimeProviderBindingInfo, activate_current_bundle_native_products,
+    load_bundle_native_products, load_bundle_native_products_from_manifest_path,
     load_current_bundle_native_products,
 };
 pub use package_image::{
@@ -68,8 +74,15 @@ pub use package_image::{
 };
 pub use routine_plan::{RuntimeEntrypointPlan, RuntimeParamPlan, RuntimeRoutinePlan};
 use routine_plan::{lower_entrypoint, lower_routine};
+pub use source_provider::{ArcanaSourceProvider, RuntimeSourceProviderCallbacks};
 
 const MODULE_MEMORY_SPEC_ALIAS_PREFIX: &str = "@memory_spec:";
+pub const ARCANA_NATIVE_BUNDLE_DIR_ENV: &str = "ARCANA_NATIVE_BUNDLE_DIR";
+pub const ARCANA_NATIVE_BUNDLE_MANIFEST_ENV: &str = "ARCANA_NATIVE_BUNDLE_MANIFEST";
+
+thread_local! {
+    static ACTIVE_RUNTIME_NATIVE_PRODUCTS: RefCell<Option<RuntimeNativeProductCatalog>> = const { RefCell::new(None) };
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeOwnerObjectPlan {
@@ -322,6 +335,9 @@ pub struct RuntimeTaskHandle(u64);
 pub struct RuntimeThreadHandle(u64);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RuntimeProviderOpaqueHandle(u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct RuntimeLocalHandle(u64);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -405,6 +421,7 @@ enum RuntimeOpaqueValue {
     PoolId(RuntimePoolIdValue),
     Task(RuntimeTaskHandle),
     Thread(RuntimeThreadHandle),
+    Provider(RuntimeProviderOpaqueHandle),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -559,6 +576,7 @@ impl RuntimeOpaqueFamily {
             RuntimeOpaqueValue::PoolId(_) => Self::PoolId,
             RuntimeOpaqueValue::Task(_) => Self::Task,
             RuntimeOpaqueValue::Thread(_) => Self::Thread,
+            RuntimeOpaqueValue::Provider(_) => panic!("provider opaques are dynamic"),
         }
     }
 }
@@ -1124,6 +1142,22 @@ pub trait RuntimeHost {
     fn image_load(&mut self, path: &str) -> Result<RuntimeImageHandle, String> {
         let _ = path;
         Err("runtime host image_load is not implemented".to_string())
+    }
+    fn canvas_image_create(
+        &mut self,
+        width: i64,
+        height: i64,
+    ) -> Result<RuntimeImageHandle, String> {
+        let _ = (width, height);
+        Err("runtime host canvas_image_create is not implemented".to_string())
+    }
+    fn canvas_image_replace_rgba(
+        &mut self,
+        image: RuntimeImageHandle,
+        rgba: &[u8],
+    ) -> Result<(), String> {
+        let _ = (image, rgba);
+        Err("runtime host canvas_image_replace_rgba is not implemented".to_string())
     }
     fn canvas_image_size(&mut self, image: RuntimeImageHandle) -> Result<(i64, i64), String> {
         let _ = image;
@@ -1771,6 +1805,7 @@ struct BufferedImage {
     path: String,
     width: i64,
     height: i64,
+    pixels: Vec<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2017,9 +2052,20 @@ impl BufferedHost {
                 path: path.to_string(),
                 width,
                 height,
+                pixels: vec![
+                    0;
+                    usize::try_from(width.max(0).saturating_mul(height.max(0)))
+                        .unwrap_or(0)
+                ],
             },
         );
         handle
+    }
+
+    fn image_mut(&mut self, handle: RuntimeImageHandle) -> Result<&mut BufferedImage, String> {
+        self.images
+            .get_mut(&handle)
+            .ok_or_else(|| format!("invalid Image handle `{}`", handle.0))
     }
 
     fn image_ref(&self, handle: RuntimeImageHandle) -> Result<&BufferedImage, String> {
@@ -3158,9 +3204,9 @@ impl RuntimeHost for BufferedHost {
     }
 
     fn canvas_label_size(&mut self, text: &str) -> Result<(i64, i64), String> {
-        Ok((
-            i64::try_from(text.len()).map_err(|_| "label width overflow".to_string())? * 8,
-            16,
+        Ok(text_engine::measure_plain_text(
+            text,
+            text_engine::DEFAULT_FONT_SIZE,
         ))
     }
 
@@ -3185,6 +3231,44 @@ impl RuntimeHost for BufferedHost {
             ));
         }
         Ok(self.insert_image(&runtime_path_string(&resolved), 16, 16))
+    }
+
+    fn canvas_image_create(
+        &mut self,
+        width: i64,
+        height: i64,
+    ) -> Result<RuntimeImageHandle, String> {
+        if width < 0 || height < 0 {
+            return Err("canvas_image_create expects non-negative dimensions".to_string());
+        }
+        Ok(self.insert_image(&format!("<generated:{}x{}>", width, height), width, height))
+    }
+
+    fn canvas_image_replace_rgba(
+        &mut self,
+        image: RuntimeImageHandle,
+        rgba: &[u8],
+    ) -> Result<(), String> {
+        let image = self.image_mut(image)?;
+        let expected = usize::try_from(image.width.max(0).saturating_mul(image.height.max(0)))
+            .unwrap_or(0)
+            .saturating_mul(4);
+        if rgba.len() != expected {
+            return Err(format!(
+                "canvas_image_replace_rgba expected {expected} bytes for {}x{} image, got {}",
+                image.width,
+                image.height,
+                rgba.len()
+            ));
+        }
+        image.pixels.clear();
+        image.pixels.reserve(expected / 4);
+        for chunk in rgba.chunks_exact(4) {
+            image.pixels.push(
+                (u32::from(chunk[0]) << 16) | (u32::from(chunk[1]) << 8) | u32::from(chunk[2]),
+            );
+        }
+        Ok(())
     }
 
     fn canvas_image_size(&mut self, image: RuntimeImageHandle) -> Result<(i64, i64), String> {
@@ -4247,6 +4331,8 @@ pub struct RuntimeExecutionState {
     atomic_ints: BTreeMap<RuntimeAtomicIntHandle, i64>,
     next_atomic_bool_handle: u64,
     atomic_bools: BTreeMap<RuntimeAtomicBoolHandle, bool>,
+    next_provider_opaque_handle: u64,
+    provider_opaques: BTreeMap<RuntimeProviderOpaqueHandle, RuntimeProviderOpaqueState>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -4301,6 +4387,15 @@ struct RuntimePoolArenaState {
     generations: BTreeMap<u64, u64>,
     slots: BTreeMap<u64, RuntimeValue>,
     policy: RuntimePoolArenaPolicy,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeProviderOpaqueState {
+    consumer_package_id: String,
+    dependency_alias: String,
+    family_key: String,
+    type_path: String,
+    opaque_id: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -4386,6 +4481,7 @@ enum RuntimeIntrinsic {
     ArgGet,
     EnvHas,
     EnvGet,
+    PackageAssetRootTry,
     PathCwd,
     PathJoin,
     PathNormalize,
@@ -4432,6 +4528,8 @@ enum RuntimeIntrinsic {
     CanvasPresent,
     CanvasRgb,
     ImageLoadTry,
+    CanvasImageCreate,
+    CanvasImageReplaceRgba,
     CanvasImageSize,
     CanvasBlit,
     CanvasBlitScaled,
@@ -5767,6 +5865,7 @@ fn resolve_runtime_intrinsic_impl(intrinsic_impl: &str) -> Option<RuntimeIntrins
         "HostArgGet" => Some(RuntimeIntrinsic::ArgGet),
         "HostEnvHas" => Some(RuntimeIntrinsic::EnvHas),
         "HostEnvGet" => Some(RuntimeIntrinsic::EnvGet),
+        "PackageCurrentAssetRootTry" => Some(RuntimeIntrinsic::PackageAssetRootTry),
         "HostPathCwd" => Some(RuntimeIntrinsic::PathCwd),
         "HostPathJoin" => Some(RuntimeIntrinsic::PathJoin),
         "HostPathNormalize" => Some(RuntimeIntrinsic::PathNormalize),
@@ -5813,6 +5912,8 @@ fn resolve_runtime_intrinsic_impl(intrinsic_impl: &str) -> Option<RuntimeIntrins
         "CanvasPresent" => Some(RuntimeIntrinsic::CanvasPresent),
         "CanvasRgb" => Some(RuntimeIntrinsic::CanvasRgb),
         "ImageLoadTry" => Some(RuntimeIntrinsic::ImageLoadTry),
+        "CanvasImageCreate" => Some(RuntimeIntrinsic::CanvasImageCreate),
+        "CanvasImageReplaceRgba" => Some(RuntimeIntrinsic::CanvasImageReplaceRgba),
         "CanvasImageSize" => Some(RuntimeIntrinsic::CanvasImageSize),
         "CanvasBlit" => Some(RuntimeIntrinsic::CanvasBlit),
         "CanvasBlitScaled" => Some(RuntimeIntrinsic::CanvasBlitScaled),
@@ -6203,6 +6304,9 @@ fn runtime_value_to_string(value: &RuntimeValue) -> String {
         }
         RuntimeValue::Opaque(RuntimeOpaqueValue::Thread(handle)) => {
             format!("<Thread:{}>", handle.0)
+        }
+        RuntimeValue::Opaque(RuntimeOpaqueValue::Provider(handle)) => {
+            format!("<ProviderOpaque:{}>", handle.0)
         }
         RuntimeValue::Record { name, fields } => format!(
             "{}{{{}}}",
@@ -8174,56 +8278,6 @@ fn expect_arcana_window_config(
     })
 }
 
-fn expect_arcana_label_spec(
-    value: RuntimeValue,
-    context: &str,
-) -> Result<(i64, i64, String, i64), String> {
-    let mut fields = expect_named_record(value, "arcana_text.types.LabelSpec", context)?;
-    let (x, y) = expect_int_pair(remove_record_field(&mut fields, "pos", context)?, context)?;
-    let text = expect_str(remove_record_field(&mut fields, "text", context)?, context)?;
-    let color = expect_int(remove_record_field(&mut fields, "color", context)?, context)?;
-    Ok((x, y, text, color))
-}
-
-fn expect_arcana_rect_spec(
-    value: RuntimeValue,
-    context: &str,
-) -> Result<(i64, i64, i64, i64, i64), String> {
-    let mut fields = expect_named_record(value, "arcana_graphics.types.RectSpec", context)?;
-    let (x, y) = expect_int_pair(remove_record_field(&mut fields, "pos", context)?, context)?;
-    let (w, h) = expect_int_pair(remove_record_field(&mut fields, "size", context)?, context)?;
-    let color = expect_int(remove_record_field(&mut fields, "color", context)?, context)?;
-    Ok((x, y, w, h, color))
-}
-
-fn expect_arcana_line_spec(
-    value: RuntimeValue,
-    context: &str,
-) -> Result<(i64, i64, i64, i64, i64), String> {
-    let mut fields = expect_named_record(value, "arcana_graphics.types.LineSpec", context)?;
-    let (x1, y1) = expect_int_pair(remove_record_field(&mut fields, "start", context)?, context)?;
-    let (x2, y2) = expect_int_pair(remove_record_field(&mut fields, "end", context)?, context)?;
-    let color = expect_int(remove_record_field(&mut fields, "color", context)?, context)?;
-    Ok((x1, y1, x2, y2, color))
-}
-
-fn expect_arcana_circle_fill_spec(
-    value: RuntimeValue,
-    context: &str,
-) -> Result<(i64, i64, i64, i64), String> {
-    let mut fields = expect_named_record(value, "arcana_graphics.types.CircleFillSpec", context)?;
-    let (x, y) = expect_int_pair(
-        remove_record_field(&mut fields, "center", context)?,
-        context,
-    )?;
-    let radius = expect_int(
-        remove_record_field(&mut fields, "radius", context)?,
-        context,
-    )?;
-    let color = expect_int(remove_record_field(&mut fields, "color", context)?, context)?;
-    Ok((x, y, radius, color))
-}
-
 fn arcana_window_theme_override_variant(code: i64) -> RuntimeValue {
     let suffix = match code {
         1 => "Light",
@@ -8996,6 +9050,385 @@ fn expect_arcana_composition_area(
     Ok((active, position, size))
 }
 
+fn runtime_bundle_manifest_candidates(bundle_dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let primary = bundle_dir.join("arcana.bundle.toml");
+    if primary.is_file() {
+        return Ok(vec![primary]);
+    }
+    let mut manifests = fs::read_dir(bundle_dir)
+        .map_err(|e| {
+            format!(
+                "failed to read bundle directory `{}`: {e}",
+                bundle_dir.display()
+            )
+        })?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".arcana-bundle.toml"))
+        })
+        .collect::<Vec<_>>();
+    manifests.sort();
+    Ok(manifests)
+}
+
+fn runtime_resolve_manifest_override_path(
+    host: &mut dyn RuntimeHost,
+    value: &str,
+) -> Result<PathBuf, String> {
+    let path = PathBuf::from(value);
+    if path.is_absolute() {
+        return Ok(normalize_lexical_path(&path));
+    }
+    Ok(normalize_lexical_path(
+        &PathBuf::from(host.cwd()?).join(path),
+    ))
+}
+
+fn load_runtime_native_products_for_host(
+    host: &mut dyn RuntimeHost,
+) -> Result<RuntimeNativeProductCatalog, String> {
+    let manifest_override = host.env_get(ARCANA_NATIVE_BUNDLE_MANIFEST_ENV)?;
+    if !manifest_override.is_empty() {
+        let manifest_path = runtime_resolve_manifest_override_path(host, &manifest_override)?;
+        if !manifest_path.is_file() {
+            return Err(format!(
+                "native bundle manifest override `{}` does not exist",
+                manifest_path.display()
+            ));
+        }
+        return load_bundle_native_products_from_manifest_path(&manifest_path);
+    }
+    let bundle_override = host.env_get(ARCANA_NATIVE_BUNDLE_DIR_ENV)?;
+    if !bundle_override.is_empty() {
+        let bundle_dir = runtime_resolve_manifest_override_path(host, &bundle_override)?;
+        let manifests = runtime_bundle_manifest_candidates(&bundle_dir)?;
+        return match manifests.as_slice() {
+            [manifest] => load_bundle_native_products_from_manifest_path(manifest),
+            [] => load_bundle_native_products(&bundle_dir),
+            _ => Err(format!(
+                "bundle override `{}` has multiple candidate manifests; set `{ARCANA_NATIVE_BUNDLE_MANIFEST_ENV}` explicitly",
+                bundle_dir.display()
+            )),
+        };
+    }
+    let cwd = PathBuf::from(host.cwd()?);
+    let cwd_manifests = runtime_bundle_manifest_candidates(&cwd)?;
+    match cwd_manifests.as_slice() {
+        [manifest] => load_bundle_native_products_from_manifest_path(manifest),
+        [] => load_current_bundle_native_products(),
+        _ => Err(format!(
+            "working directory `{}` has multiple candidate native bundle manifests; set `{ARCANA_NATIVE_BUNDLE_MANIFEST_ENV}` explicitly",
+            cwd.display()
+        )),
+    }
+}
+
+fn reset_runtime_native_products_cache() {
+    ACTIVE_RUNTIME_NATIVE_PRODUCTS.with(|slot| {
+        *slot.borrow_mut() = None;
+    });
+}
+
+fn with_runtime_native_products<R>(
+    host: &mut dyn RuntimeHost,
+    action: impl FnOnce(&mut RuntimeNativeProductCatalog) -> Result<R, String>,
+) -> Result<R, String> {
+    ACTIVE_RUNTIME_NATIVE_PRODUCTS.with(|slot| {
+        if slot.borrow().is_none() {
+            let catalog = load_runtime_native_products_for_host(host)?;
+            *slot.borrow_mut() = Some(catalog);
+        }
+        let mut borrow = slot.borrow_mut();
+        let catalog = borrow
+            .as_mut()
+            .ok_or_else(|| "runtime native product catalog is not available".to_string())?;
+        action(catalog)
+    })
+}
+
+struct RuntimeProviderHostContext {
+    host: *mut (dyn RuntimeHost + 'static),
+    bundle_dir: PathBuf,
+    package_asset_roots: BTreeMap<String, String>,
+    last_error: Option<Vec<u8>>,
+}
+
+impl RuntimeProviderHostContext {
+    unsafe fn host_mut(&mut self) -> &mut dyn RuntimeHost {
+        unsafe { &mut *self.host }
+    }
+
+    fn set_last_error(&mut self, message: String) {
+        self.last_error = Some(message.into_bytes());
+    }
+
+    fn clear_last_error(&mut self) {
+        self.last_error = None;
+    }
+
+    fn clear_last_error_with_default<T>(&mut self, value: T) -> T {
+        self.clear_last_error();
+        value
+    }
+
+    fn resolve_package_asset_root(&mut self, package_id: &str) -> Result<PathBuf, String> {
+        if let Some(root) = self.package_asset_roots.get(package_id) {
+            let path = normalize_lexical_path(&self.bundle_dir.join(root));
+            if path.exists() {
+                return Ok(path);
+            }
+        }
+        let fallback_bundle = normalize_lexical_path(
+            &self
+                .bundle_dir
+                .join(runtime_default_package_asset_root(package_id)),
+        );
+        if fallback_bundle.exists() {
+            return Ok(fallback_bundle);
+        }
+        let cwd = PathBuf::from(unsafe { self.host_mut().cwd()? });
+        let fallback =
+            normalize_lexical_path(&cwd.join(runtime_default_package_asset_root(package_id)));
+        if fallback.exists() {
+            return Ok(fallback);
+        }
+        Err(format!(
+            "package assets for `{package_id}` are not staged under `{}`",
+            fallback.display()
+        ))
+    }
+}
+
+fn runtime_owned_str(text: String) -> ArcanaOwnedStr {
+    let mut bytes = text.into_bytes().into_boxed_slice();
+    let len = bytes.len();
+    let ptr = bytes.as_mut_ptr();
+    std::mem::forget(bytes);
+    ArcanaOwnedStr { ptr, len }
+}
+
+unsafe extern "system" fn runtime_provider_host_owned_str_free(ptr: *mut u8, len: usize) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        drop(Vec::from_raw_parts(ptr, len, len));
+    }
+}
+
+unsafe extern "system" fn runtime_provider_host_last_error_alloc(
+    host_context: *mut c_void,
+    out_len: *mut usize,
+) -> *mut u8 {
+    if host_context.is_null() {
+        if !out_len.is_null() {
+            unsafe {
+                *out_len = 0;
+            }
+        }
+        return std::ptr::null_mut();
+    }
+    let context = unsafe { &mut *(host_context as *mut RuntimeProviderHostContext) };
+    let Some(mut bytes) = context.last_error.take() else {
+        if !out_len.is_null() {
+            unsafe {
+                *out_len = 0;
+            }
+        }
+        return std::ptr::null_mut();
+    };
+    let len = bytes.len();
+    let ptr = bytes.as_mut_ptr();
+    std::mem::forget(bytes);
+    if !out_len.is_null() {
+        unsafe {
+            *out_len = len;
+        }
+    }
+    ptr
+}
+
+unsafe extern "system" fn runtime_provider_host_resolve_package_asset_root(
+    host_context: *mut c_void,
+    package_id: *const c_char,
+) -> ArcanaOwnedStr {
+    if host_context.is_null() || package_id.is_null() {
+        return ArcanaOwnedStr::default();
+    }
+    let context = unsafe { &mut *(host_context as *mut RuntimeProviderHostContext) };
+    let package_id = match unsafe { CStr::from_ptr(package_id) }.to_str() {
+        Ok(value) => value,
+        Err(err) => {
+            context.set_last_error(format!(
+                "provider host package id is not valid utf-8: {err}"
+            ));
+            return ArcanaOwnedStr::default();
+        }
+    };
+    match context.resolve_package_asset_root(package_id) {
+        Ok(path) => {
+            context.clear_last_error_with_default(runtime_owned_str(runtime_path_string(&path)))
+        }
+        Err(err) => {
+            context.set_last_error(err);
+            ArcanaOwnedStr::default()
+        }
+    }
+}
+
+unsafe extern "system" fn runtime_provider_host_canvas_image_create(
+    host_context: *mut c_void,
+    width: i64,
+    height: i64,
+    out_image_id: *mut u64,
+) -> i32 {
+    if host_context.is_null() || out_image_id.is_null() {
+        return 0;
+    }
+    let context = unsafe { &mut *(host_context as *mut RuntimeProviderHostContext) };
+    match unsafe { context.host_mut() }.canvas_image_create(width, height) {
+        Ok(image) => {
+            unsafe {
+                *out_image_id = image.0;
+            }
+            context.clear_last_error();
+            1
+        }
+        Err(err) => {
+            context.set_last_error(err);
+            0
+        }
+    }
+}
+
+unsafe extern "system" fn runtime_provider_host_canvas_image_replace_rgba(
+    host_context: *mut c_void,
+    image_id: u64,
+    rgba_ptr: *const u8,
+    rgba_len: usize,
+) -> i32 {
+    if host_context.is_null() || (rgba_ptr.is_null() && rgba_len != 0) {
+        return 0;
+    }
+    let context = unsafe { &mut *(host_context as *mut RuntimeProviderHostContext) };
+    let rgba = if rgba_len == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(rgba_ptr, rgba_len) }
+    };
+    match unsafe { context.host_mut() }
+        .canvas_image_replace_rgba(RuntimeImageHandle(image_id), rgba)
+    {
+        Ok(()) => {
+            context.clear_last_error();
+            1
+        }
+        Err(err) => {
+            context.set_last_error(err);
+            0
+        }
+    }
+}
+
+unsafe extern "system" fn runtime_provider_host_canvas_blit(
+    host_context: *mut c_void,
+    window_id: u64,
+    image_id: u64,
+    x: i64,
+    y: i64,
+) -> i32 {
+    if host_context.is_null() {
+        return 0;
+    }
+    let context = unsafe { &mut *(host_context as *mut RuntimeProviderHostContext) };
+    match unsafe { context.host_mut() }.canvas_blit(
+        RuntimeWindowHandle(window_id),
+        RuntimeImageHandle(image_id),
+        x,
+        y,
+    ) {
+        Ok(()) => {
+            context.clear_last_error();
+            1
+        }
+        Err(err) => {
+            context.set_last_error(err);
+            0
+        }
+    }
+}
+
+fn runtime_provider_host_ops_v1() -> ArcanaCabiProviderHostOpsV1 {
+    ArcanaCabiProviderHostOpsV1 {
+        ops_size: std::mem::size_of::<ArcanaCabiProviderHostOpsV1>(),
+        resolve_package_asset_root: runtime_provider_host_resolve_package_asset_root,
+        host_owned_str_free: runtime_provider_host_owned_str_free,
+        canvas_image_create: runtime_provider_host_canvas_image_create,
+        canvas_image_replace_rgba: runtime_provider_host_canvas_image_replace_rgba,
+        canvas_blit: runtime_provider_host_canvas_blit,
+        last_error_alloc: runtime_provider_host_last_error_alloc,
+        reserved0: std::ptr::null(),
+        reserved1: std::ptr::null(),
+    }
+}
+
+fn runtime_short_package_id_hash(package_id: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"arcana_package_id_v1\n");
+    hasher.update(package_id.as_bytes());
+    format!("{:x}", hasher.finalize())
+        .chars()
+        .take(12)
+        .collect()
+}
+
+fn runtime_default_package_asset_root(package_id: &str) -> String {
+    format!(
+        "package-assets/{}",
+        runtime_short_package_id_hash(package_id)
+    )
+}
+
+fn runtime_current_package_asset_root(
+    current_package_id: &str,
+    host: &mut dyn RuntimeHost,
+) -> Result<PathBuf, String> {
+    match with_runtime_native_products(host, |catalog| {
+        if let Some(root) = catalog.package_asset_root(current_package_id) {
+            let path = catalog.bundle_dir().join(root);
+            if path.exists() {
+                return Ok(normalize_lexical_path(&path));
+            }
+        }
+        let fallback_bundle = normalize_lexical_path(
+            &catalog
+                .bundle_dir()
+                .join(runtime_default_package_asset_root(current_package_id)),
+        );
+        if fallback_bundle.exists() {
+            return Ok(fallback_bundle);
+        }
+        Err(String::new())
+    }) {
+        Ok(path) => return Ok(path),
+        Err(err) if !err.is_empty() => return Err(err),
+        Err(_) => {}
+    }
+    let cwd = PathBuf::from(host.cwd()?);
+    let fallback =
+        normalize_lexical_path(&cwd.join(runtime_default_package_asset_root(current_package_id)));
+    if fallback.exists() {
+        return Ok(fallback);
+    }
+    Err(format!(
+        "package assets for `{current_package_id}` are not staged under `{}`",
+        fallback.display()
+    ))
+}
+
 fn try_execute_arcana_owned_api_call(
     callable: &[String],
     call_args: &[RuntimeCallArg],
@@ -9006,116 +9439,6 @@ fn try_execute_arcana_owned_api_call(
         .map(|arg| arg.value.clone())
         .collect::<Vec<_>>();
     match callable {
-        [a, b, c] if a == "arcana_graphics" && b == "canvas" && c == "rgb" => {
-            if values.len() != 3 {
-                return Err("arcana_graphics.canvas.rgb expects three arguments".to_string());
-            }
-            Ok(Some(RuntimeValue::Int(host.canvas_rgb(
-                expect_int(values[0].clone(), "arcana_graphics.canvas.rgb")?,
-                expect_int(values[1].clone(), "arcana_graphics.canvas.rgb")?,
-                expect_int(values[2].clone(), "arcana_graphics.canvas.rgb")?,
-            )?)))
-        }
-        [a, b, c] if a == "arcana_graphics" && b == "canvas" && c == "fill" => {
-            if values.len() != 2 {
-                return Err("arcana_graphics.canvas.fill expects two arguments".to_string());
-            }
-            host.canvas_fill(
-                expect_arcana_desktop_window(values[0].clone(), "arcana_graphics.canvas.fill")?,
-                expect_int(values[1].clone(), "arcana_graphics.canvas.fill")?,
-            )?;
-            Ok(Some(RuntimeValue::Unit))
-        }
-        [a, b, c] if a == "arcana_graphics" && b == "canvas" && c == "rect" => {
-            if values.len() != 2 {
-                return Err("arcana_graphics.canvas.rect expects two arguments".to_string());
-            }
-            let (x, y, w, h, color) =
-                expect_arcana_rect_spec(values[1].clone(), "arcana_graphics.canvas.rect")?;
-            host.canvas_rect(
-                expect_arcana_desktop_window(values[0].clone(), "arcana_graphics.canvas.rect")?,
-                x,
-                y,
-                w,
-                h,
-                color,
-            )?;
-            Ok(Some(RuntimeValue::Unit))
-        }
-        [a, b, c] if a == "arcana_graphics" && b == "canvas" && c == "line" => {
-            if values.len() != 2 {
-                return Err("arcana_graphics.canvas.line expects two arguments".to_string());
-            }
-            let (x1, y1, x2, y2, color) =
-                expect_arcana_line_spec(values[1].clone(), "arcana_graphics.canvas.line")?;
-            host.canvas_line(
-                expect_arcana_desktop_window(values[0].clone(), "arcana_graphics.canvas.line")?,
-                x1,
-                y1,
-                x2,
-                y2,
-                color,
-            )?;
-            Ok(Some(RuntimeValue::Unit))
-        }
-        [a, b, c] if a == "arcana_graphics" && b == "canvas" && c == "circle_fill" => {
-            if values.len() != 2 {
-                return Err("arcana_graphics.canvas.circle_fill expects two arguments".to_string());
-            }
-            let (x, y, radius, color) = expect_arcana_circle_fill_spec(
-                values[1].clone(),
-                "arcana_graphics.canvas.circle_fill",
-            )?;
-            host.canvas_circle_fill(
-                expect_arcana_desktop_window(
-                    values[0].clone(),
-                    "arcana_graphics.canvas.circle_fill",
-                )?,
-                x,
-                y,
-                radius,
-                color,
-            )?;
-            Ok(Some(RuntimeValue::Unit))
-        }
-        [a, b, c] if a == "arcana_graphics" && b == "canvas" && c == "present" => {
-            if values.len() != 1 {
-                return Err("arcana_graphics.canvas.present expects one argument".to_string());
-            }
-            host.canvas_present(expect_arcana_desktop_window(
-                values[0].clone(),
-                "arcana_graphics.canvas.present",
-            )?)?;
-            Ok(Some(RuntimeValue::Unit))
-        }
-        [a, b, c] if a == "arcana_text" && b == "labels" && c == "label" => {
-            if values.len() != 2 {
-                return Err("arcana_text.labels.label expects two arguments".to_string());
-            }
-            let (x, y, text, color) =
-                expect_arcana_label_spec(values[1].clone(), "arcana_text.labels.label")?;
-            host.canvas_label(
-                expect_arcana_desktop_window(values[0].clone(), "arcana_text.labels.label")?,
-                x,
-                y,
-                &text,
-                color,
-            )?;
-            Ok(Some(RuntimeValue::Unit))
-        }
-        [a, b, c] if a == "arcana_text" && b == "labels" && c == "measure" => {
-            if values.len() != 1 {
-                return Err("arcana_text.labels.measure expects one argument".to_string());
-            }
-            let (w, h) = host.canvas_label_size(&expect_str(
-                values[0].clone(),
-                "arcana_text.labels.measure",
-            )?)?;
-            Ok(Some(RuntimeValue::Pair(
-                Box::new(RuntimeValue::Int(w)),
-                Box::new(RuntimeValue::Int(h)),
-            )))
-        }
         [a, b, c] if a == "arcana_desktop" && b == "events" && c == "poll" => {
             if values.len() != 1 {
                 return Err("arcana_desktop.events.poll expects one argument".to_string());
@@ -10779,8 +11102,503 @@ fn variant_name_matches(name: &str, expected: &str) -> bool {
         || expected.ends_with(&format!(".{name}"))
 }
 
+fn provider_opaque_state(
+    state: &RuntimeExecutionState,
+    handle: RuntimeProviderOpaqueHandle,
+) -> Option<&RuntimeProviderOpaqueState> {
+    state.provider_opaques.get(&handle)
+}
+
+fn runtime_opaque_id(value: &RuntimeOpaqueValue) -> Option<u64> {
+    match value {
+        RuntimeOpaqueValue::FileStream(handle) => Some(handle.0),
+        RuntimeOpaqueValue::Window(handle) => Some(handle.0),
+        RuntimeOpaqueValue::Image(handle) => Some(handle.0),
+        RuntimeOpaqueValue::AppFrame(handle) => Some(handle.0),
+        RuntimeOpaqueValue::AppSession(handle) => Some(handle.0),
+        RuntimeOpaqueValue::Wake(handle) => Some(handle.0),
+        RuntimeOpaqueValue::AudioDevice(handle) => Some(handle.0),
+        RuntimeOpaqueValue::AudioBuffer(handle) => Some(handle.0),
+        RuntimeOpaqueValue::AudioPlayback(handle) => Some(handle.0),
+        RuntimeOpaqueValue::Channel(handle) => Some(handle.0),
+        RuntimeOpaqueValue::Mutex(handle) => Some(handle.0),
+        RuntimeOpaqueValue::AtomicInt(handle) => Some(handle.0),
+        RuntimeOpaqueValue::AtomicBool(handle) => Some(handle.0),
+        RuntimeOpaqueValue::Arena(handle) => Some(handle.0),
+        RuntimeOpaqueValue::FrameArena(handle) => Some(handle.0),
+        RuntimeOpaqueValue::PoolArena(handle) => Some(handle.0),
+        RuntimeOpaqueValue::Task(handle) => Some(handle.0),
+        RuntimeOpaqueValue::Thread(handle) => Some(handle.0),
+        RuntimeOpaqueValue::Provider(_)
+        | RuntimeOpaqueValue::ArenaId(_)
+        | RuntimeOpaqueValue::FrameId(_)
+        | RuntimeOpaqueValue::PoolId(_) => None,
+    }
+}
+
+fn runtime_substrate_opaque_from_family(
+    family: &str,
+    id: u64,
+) -> Result<RuntimeOpaqueValue, String> {
+    match family {
+        "std.fs.FileStream" => Ok(RuntimeOpaqueValue::FileStream(RuntimeFileStreamHandle(id))),
+        "std.window.Window" => Ok(RuntimeOpaqueValue::Window(RuntimeWindowHandle(id))),
+        "std.canvas.Image" => Ok(RuntimeOpaqueValue::Image(RuntimeImageHandle(id))),
+        "std.events.AppFrame" => Ok(RuntimeOpaqueValue::AppFrame(RuntimeAppFrameHandle(id))),
+        "std.events.AppSession" => Ok(RuntimeOpaqueValue::AppSession(RuntimeAppSessionHandle(id))),
+        "std.events.WakeHandle" => Ok(RuntimeOpaqueValue::Wake(RuntimeWakeHandle(id))),
+        "std.audio.AudioDevice" => Ok(RuntimeOpaqueValue::AudioDevice(RuntimeAudioDeviceHandle(
+            id,
+        ))),
+        "std.audio.AudioBuffer" => Ok(RuntimeOpaqueValue::AudioBuffer(RuntimeAudioBufferHandle(
+            id,
+        ))),
+        "std.audio.AudioPlayback" => Ok(RuntimeOpaqueValue::AudioPlayback(
+            RuntimeAudioPlaybackHandle(id),
+        )),
+        "std.concurrent.Channel" => Ok(RuntimeOpaqueValue::Channel(RuntimeChannelHandle(id))),
+        "std.concurrent.Mutex" => Ok(RuntimeOpaqueValue::Mutex(RuntimeMutexHandle(id))),
+        "std.concurrent.AtomicInt" => Ok(RuntimeOpaqueValue::AtomicInt(RuntimeAtomicIntHandle(id))),
+        "std.concurrent.AtomicBool" => {
+            Ok(RuntimeOpaqueValue::AtomicBool(RuntimeAtomicBoolHandle(id)))
+        }
+        "std.memory.Arena" => Ok(RuntimeOpaqueValue::Arena(RuntimeArenaHandle(id))),
+        "std.memory.FrameArena" => Ok(RuntimeOpaqueValue::FrameArena(RuntimeFrameArenaHandle(id))),
+        "std.memory.PoolArena" => Ok(RuntimeOpaqueValue::PoolArena(RuntimePoolArenaHandle(id))),
+        "std.concurrent.Task" => Ok(RuntimeOpaqueValue::Task(RuntimeTaskHandle(id))),
+        "std.concurrent.Thread" => Ok(RuntimeOpaqueValue::Thread(RuntimeThreadHandle(id))),
+        _ => Err(format!(
+            "unsupported substrate opaque family `{family}` in provider value transport"
+        )),
+    }
+}
+
+fn runtime_value_to_provider_value(
+    value: &RuntimeValue,
+    state: &RuntimeExecutionState,
+) -> Result<ArcanaCabiProviderValue, String> {
+    match value {
+        RuntimeValue::Int(value) => Ok(ArcanaCabiProviderValue::Int(*value)),
+        RuntimeValue::Bool(value) => Ok(ArcanaCabiProviderValue::Bool(*value)),
+        RuntimeValue::Str(value) => Ok(ArcanaCabiProviderValue::Str(value.clone())),
+        RuntimeValue::Pair(left, right) => Ok(ArcanaCabiProviderValue::Pair(
+            Box::new(runtime_value_to_provider_value(left, state)?),
+            Box::new(runtime_value_to_provider_value(right, state)?),
+        )),
+        RuntimeValue::Array(values) => {
+            let mut bytes = Vec::with_capacity(values.len());
+            for value in values {
+                let RuntimeValue::Int(byte) = value else {
+                    return Err(
+                        "provider value transport only supports Array[Int] as bytes".to_string()
+                    );
+                };
+                bytes.push(u8::try_from(*byte).map_err(|_| {
+                    format!("provider bytes array element `{byte}` does not fit in u8")
+                })?);
+            }
+            Ok(ArcanaCabiProviderValue::Bytes(bytes))
+        }
+        RuntimeValue::List(values) => Ok(ArcanaCabiProviderValue::List(
+            values
+                .iter()
+                .map(|value| runtime_value_to_provider_value(value, state))
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
+        RuntimeValue::Map(entries) => Ok(ArcanaCabiProviderValue::Map(
+            entries
+                .iter()
+                .map(|(key, value)| {
+                    Ok((
+                        runtime_value_to_provider_value(key, state)?,
+                        runtime_value_to_provider_value(value, state)?,
+                    ))
+                })
+                .collect::<Result<Vec<_>, String>>()?,
+        )),
+        RuntimeValue::Range {
+            start,
+            end,
+            inclusive_end,
+        } => Ok(ArcanaCabiProviderValue::Range {
+            start: *start,
+            end: *end,
+            inclusive_end: *inclusive_end,
+        }),
+        RuntimeValue::Opaque(RuntimeOpaqueValue::Provider(handle)) => {
+            let provider = provider_opaque_state(state, *handle)
+                .ok_or_else(|| format!("invalid provider opaque handle `{}`", handle.0))?;
+            Ok(ArcanaCabiProviderValue::ProviderOpaque {
+                family: provider.family_key.clone(),
+                id: provider.opaque_id,
+            })
+        }
+        RuntimeValue::Opaque(value) => Ok(ArcanaCabiProviderValue::SubstrateOpaque {
+            family: opaque_type_name(value).to_string(),
+            id: runtime_opaque_id(value).ok_or_else(|| {
+                format!(
+                    "runtime opaque `{}` is not transportable across the provider boundary",
+                    opaque_type_name(value)
+                )
+            })?,
+        }),
+        RuntimeValue::Record { name, fields } => Ok(ArcanaCabiProviderValue::Record {
+            name: name.clone(),
+            fields: fields
+                .iter()
+                .map(|(name, value)| {
+                    Ok((name.clone(), runtime_value_to_provider_value(value, state)?))
+                })
+                .collect::<Result<Vec<_>, String>>()?,
+        }),
+        RuntimeValue::Variant { name, payload } => Ok(ArcanaCabiProviderValue::Variant {
+            name: name.clone(),
+            payload: payload
+                .iter()
+                .map(|value| runtime_value_to_provider_value(value, state))
+                .collect::<Result<Vec<_>, _>>()?,
+        }),
+        RuntimeValue::Unit => Ok(ArcanaCabiProviderValue::Unit),
+        RuntimeValue::OwnerHandle(_) | RuntimeValue::Ref(_) => {
+            Err("provider value transport does not allow Owner or Ref values".to_string())
+        }
+    }
+}
+
+fn runtime_value_from_provider_value(
+    value: ArcanaCabiProviderValue,
+    state: &mut RuntimeExecutionState,
+    catalog: &mut RuntimeNativeProductCatalog,
+    consumer_package_id: &str,
+    dependency_alias: &str,
+) -> Result<RuntimeValue, String> {
+    match value {
+        ArcanaCabiProviderValue::Int(value) => Ok(RuntimeValue::Int(value)),
+        ArcanaCabiProviderValue::Bool(value) => Ok(RuntimeValue::Bool(value)),
+        ArcanaCabiProviderValue::Str(value) => Ok(RuntimeValue::Str(value)),
+        ArcanaCabiProviderValue::Bytes(bytes) => Ok(RuntimeValue::Array(
+            bytes
+                .into_iter()
+                .map(|byte| RuntimeValue::Int(i64::from(byte)))
+                .collect(),
+        )),
+        ArcanaCabiProviderValue::Pair(left, right) => Ok(make_pair(
+            runtime_value_from_provider_value(
+                *left,
+                state,
+                catalog,
+                consumer_package_id,
+                dependency_alias,
+            )?,
+            runtime_value_from_provider_value(
+                *right,
+                state,
+                catalog,
+                consumer_package_id,
+                dependency_alias,
+            )?,
+        )),
+        ArcanaCabiProviderValue::List(values) => Ok(RuntimeValue::List(
+            values
+                .into_iter()
+                .map(|value| {
+                    runtime_value_from_provider_value(
+                        value,
+                        state,
+                        catalog,
+                        consumer_package_id,
+                        dependency_alias,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
+        ArcanaCabiProviderValue::Map(entries) => Ok(RuntimeValue::Map(
+            entries
+                .into_iter()
+                .map(|(key, value)| {
+                    Ok((
+                        runtime_value_from_provider_value(
+                            key,
+                            state,
+                            catalog,
+                            consumer_package_id,
+                            dependency_alias,
+                        )?,
+                        runtime_value_from_provider_value(
+                            value,
+                            state,
+                            catalog,
+                            consumer_package_id,
+                            dependency_alias,
+                        )?,
+                    ))
+                })
+                .collect::<Result<Vec<_>, String>>()?,
+        )),
+        ArcanaCabiProviderValue::Range {
+            start,
+            end,
+            inclusive_end,
+        } => Ok(RuntimeValue::Range {
+            start,
+            end,
+            inclusive_end,
+        }),
+        ArcanaCabiProviderValue::Record { name, fields } => Ok(RuntimeValue::Record {
+            name,
+            fields: fields
+                .into_iter()
+                .map(|(field, value)| {
+                    Ok((
+                        field,
+                        runtime_value_from_provider_value(
+                            value,
+                            state,
+                            catalog,
+                            consumer_package_id,
+                            dependency_alias,
+                        )?,
+                    ))
+                })
+                .collect::<Result<BTreeMap<_, _>, String>>()?,
+        }),
+        ArcanaCabiProviderValue::Variant { name, payload } => Ok(RuntimeValue::Variant {
+            name,
+            payload: payload
+                .into_iter()
+                .map(|value| {
+                    runtime_value_from_provider_value(
+                        value,
+                        state,
+                        catalog,
+                        consumer_package_id,
+                        dependency_alias,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        }),
+        ArcanaCabiProviderValue::SubstrateOpaque { family, id } => Ok(RuntimeValue::Opaque(
+            runtime_substrate_opaque_from_family(&family, id)?,
+        )),
+        ArcanaCabiProviderValue::ProviderOpaque { family, id } => {
+            let type_path = catalog
+                .provider_binding_opaque_type_path(consumer_package_id, dependency_alias, &family)?
+                .ok_or_else(|| {
+                    format!(
+                        "provider binding `{consumer_package_id}` -> `{dependency_alias}` returned undeclared opaque family `{family}`"
+                    )
+                })?;
+            let handle = RuntimeProviderOpaqueHandle(state.next_provider_opaque_handle.max(1));
+            state.next_provider_opaque_handle = handle.0 + 1;
+            state.provider_opaques.insert(
+                handle,
+                RuntimeProviderOpaqueState {
+                    consumer_package_id: consumer_package_id.to_string(),
+                    dependency_alias: dependency_alias.to_string(),
+                    family_key: family,
+                    type_path,
+                    opaque_id: id,
+                },
+            );
+            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::Provider(handle)))
+        }
+        ArcanaCabiProviderValue::Unit => Ok(RuntimeValue::Unit),
+    }
+}
+
+fn try_execute_provider_call(
+    callable: &[String],
+    call_args: &[RuntimeCallArg],
+    current_package_id: &str,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
+) -> Result<Option<RuntimeProviderCallResult>, String> {
+    let Some(root) = callable.first() else {
+        return Ok(None);
+    };
+    let callable_key = callable.join(".");
+    let host_ptr = unsafe {
+        std::mem::transmute::<*mut dyn RuntimeHost, *mut (dyn RuntimeHost + 'static)>(
+            host as *mut dyn RuntimeHost,
+        )
+    };
+    with_runtime_native_products(host, move |catalog| {
+        let Some(binding) = catalog
+            .provider_binding_for(current_package_id, root)
+            .cloned()
+        else {
+            return Ok(None);
+        };
+        if !catalog.provider_binding_declares_callable(
+            current_package_id,
+            &binding.dependency_alias,
+            &callable_key,
+        )? {
+            return Ok(None);
+        }
+        let args = call_args
+            .iter()
+            .map(|arg| runtime_value_to_provider_value(&arg.value, state))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut host_context = RuntimeProviderHostContext {
+            host: host_ptr,
+            bundle_dir: catalog.bundle_dir().to_path_buf(),
+            package_asset_roots: catalog.package_asset_roots().clone(),
+            last_error: None,
+        };
+        let host_ops = runtime_provider_host_ops_v1();
+        let outcome = unsafe {
+            catalog.invoke_provider_binding(
+                current_package_id,
+                &binding.dependency_alias,
+                &callable_key,
+                &args,
+                &host_ops,
+                &mut host_context as *mut RuntimeProviderHostContext as *mut c_void,
+            )
+        }?;
+        let value = runtime_value_from_provider_value(
+            outcome.result,
+            state,
+            catalog,
+            current_package_id,
+            &binding.dependency_alias,
+        )?;
+        let mut final_args = call_args
+            .iter()
+            .map(|arg| arg.value.clone())
+            .collect::<Vec<_>>();
+        let mut edit_arg_indices = Vec::new();
+        for write_back in outcome.write_backs {
+            let Some(existing) = final_args.get(write_back.index).cloned() else {
+                return Err(format!(
+                    "provider callable `{callable_key}` returned write-back index {} outside arg count {}",
+                    write_back.index,
+                    final_args.len()
+                ));
+            };
+            let updated = runtime_value_from_provider_write_back(
+                write_back.value,
+                &existing,
+                state,
+                catalog,
+                current_package_id,
+                &binding.dependency_alias,
+            )?;
+            final_args[write_back.index] = updated;
+            if !edit_arg_indices.contains(&write_back.index) {
+                edit_arg_indices.push(write_back.index);
+            }
+        }
+        Ok(Some(RuntimeProviderCallResult {
+            value,
+            final_args,
+            edit_arg_indices,
+        }))
+    })
+}
+
+struct RuntimeProviderCallResult {
+    value: RuntimeValue,
+    final_args: Vec<RuntimeValue>,
+    edit_arg_indices: Vec<usize>,
+}
+
+fn runtime_provider_opaque_value(
+    state: &mut RuntimeExecutionState,
+    consumer_package_id: &str,
+    dependency_alias: &str,
+    family: String,
+    type_path: String,
+    opaque_id: u64,
+) -> RuntimeValue {
+    let handle = RuntimeProviderOpaqueHandle(state.next_provider_opaque_handle.max(1));
+    state.next_provider_opaque_handle = handle.0 + 1;
+    state.provider_opaques.insert(
+        handle,
+        RuntimeProviderOpaqueState {
+            consumer_package_id: consumer_package_id.to_string(),
+            dependency_alias: dependency_alias.to_string(),
+            family_key: family,
+            type_path,
+            opaque_id,
+        },
+    );
+    RuntimeValue::Opaque(RuntimeOpaqueValue::Provider(handle))
+}
+
+fn runtime_value_from_provider_write_back(
+    value: ArcanaCabiProviderValue,
+    existing: &RuntimeValue,
+    state: &mut RuntimeExecutionState,
+    catalog: &mut RuntimeNativeProductCatalog,
+    consumer_package_id: &str,
+    dependency_alias: &str,
+) -> Result<RuntimeValue, String> {
+    let ArcanaCabiProviderValue::ProviderOpaque { family, id } = &value else {
+        return runtime_value_from_provider_value(
+            value,
+            state,
+            catalog,
+            consumer_package_id,
+            dependency_alias,
+        );
+    };
+    if let RuntimeValue::Opaque(RuntimeOpaqueValue::Provider(handle)) = existing
+        && let Some(existing_state) = provider_opaque_state(state, *handle)
+        && existing_state.consumer_package_id == consumer_package_id
+        && existing_state.dependency_alias == dependency_alias
+        && existing_state.family_key == *family
+        && existing_state.opaque_id == *id
+    {
+        return Ok(existing.clone());
+    }
+    let type_path = catalog
+        .provider_binding_opaque_type_path(consumer_package_id, dependency_alias, family)?
+        .ok_or_else(|| {
+            format!(
+                "provider binding `{consumer_package_id}` -> `{dependency_alias}` returned undeclared opaque family `{family}`"
+            )
+        })?;
+    catalog.retain_provider_opaque(consumer_package_id, dependency_alias, family, *id)?;
+    Ok(runtime_provider_opaque_value(
+        state,
+        consumer_package_id,
+        dependency_alias,
+        family.clone(),
+        type_path,
+        *id,
+    ))
+}
+
+fn release_runtime_provider_opaques(
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
+) -> Result<(), String> {
+    let opaques = state.provider_opaques.values().cloned().collect::<Vec<_>>();
+    if opaques.is_empty() {
+        return Ok(());
+    }
+    with_runtime_native_products(host, |catalog| {
+        for opaque in &opaques {
+            catalog.release_provider_opaque(
+                &opaque.consumer_package_id,
+                &opaque.dependency_alias,
+                &opaque.family_key,
+                opaque.opaque_id,
+            )?;
+        }
+        Ok(())
+    })?;
+    state.provider_opaques.clear();
+    Ok(())
+}
+
 fn opaque_type_name(value: &RuntimeOpaqueValue) -> &'static str {
-    RuntimeOpaqueFamily::from_opaque_value(value).canonical_type_name()
+    match value {
+        RuntimeOpaqueValue::Provider(_) => "<provider-opaque>",
+        _ => RuntimeOpaqueFamily::from_opaque_value(value).canonical_type_name(),
+    }
 }
 
 fn runtime_receiver_type_args(
@@ -10866,6 +11684,7 @@ fn runtime_value_type_without_state(receiver: &RuntimeValue) -> Option<IrRoutine
         RuntimeValue::Record { name, .. } => parse_routine_type_text(name)
             .ok()
             .or_else(|| runtime_simple_type(runtime_type_root_name(name).as_str())),
+        RuntimeValue::Opaque(RuntimeOpaqueValue::Provider(_)) => None,
         RuntimeValue::Opaque(value) => runtime_simple_type(opaque_type_name(value)),
         RuntimeValue::Variant { name, .. } => {
             let enum_name = runtime_variant_enum_name(name);
@@ -10882,6 +11701,9 @@ fn runtime_value_type(
     state: &RuntimeExecutionState,
 ) -> Option<IrRoutineType> {
     match receiver {
+        RuntimeValue::Opaque(RuntimeOpaqueValue::Provider(handle)) => {
+            runtime_simple_type(&provider_opaque_state(state, *handle)?.type_path)
+        }
         RuntimeValue::Opaque(RuntimeOpaqueValue::Channel(_)) => runtime_type_with_args(
             opaque_type_name(match receiver {
                 RuntimeValue::Opaque(value) => value,
@@ -11003,6 +11825,7 @@ fn runtime_value_type_root(receiver: &RuntimeValue) -> Option<String> {
         RuntimeValue::Range { .. } => Some("RangeInt".to_string()),
         RuntimeValue::OwnerHandle(_) => Some("Owner".to_string()),
         RuntimeValue::Ref(_) => Some("Ref".to_string()),
+        RuntimeValue::Opaque(RuntimeOpaqueValue::Provider(_)) => Some("Opaque".to_string()),
         RuntimeValue::Opaque(value) => Some(runtime_type_root_name(opaque_type_name(value))),
         RuntimeValue::Record { name, .. } => Some(runtime_type_root_name(name)),
         RuntimeValue::Variant { name, .. } => {
@@ -11205,8 +12028,31 @@ fn write_assign_target_value(
 ) -> Result<(), String> {
     let place = resolve_assign_target_place(scopes, target)?;
     if !place.mutable {
+        let detail = match target {
+            ParsedAssignTarget::Name(name) => match lookup_local(scopes, name) {
+                Some(local) => match &local.value {
+                    RuntimeValue::Ref(reference) => format!(
+                        "local `{name}` mutable={}, moved={}, value=Ref(mutable={})",
+                        local.mutable, local.moved, reference.mutable
+                    ),
+                    other => format!(
+                        "local `{name}` mutable={}, moved={}, value={}",
+                        local.mutable,
+                        local.moved,
+                        runtime_value_to_string(other)
+                    ),
+                },
+                None => format!("local `{name}` is unresolved"),
+            },
+            _ => "non-name assignment target".to_string(),
+        };
+        let call_stack = if state.call_stack.is_empty() {
+            "<empty>".to_string()
+        } else {
+            state.call_stack.join(" -> ")
+        };
         return Err(format!(
-            "runtime assignment target `{target:?}` is not mutable"
+            "runtime assignment target `{target:?}` is not mutable ({detail}); call_stack={call_stack}"
         ));
     }
     write_runtime_reference(
@@ -12375,6 +13221,25 @@ fn execute_call_by_path(
     host: &mut dyn RuntimeHost,
     allow_async: bool,
 ) -> RuntimeEvalResult<RuntimeValue> {
+    if !source_provider::source_provider_dispatch_active()
+        && let Some(outcome) =
+            try_execute_provider_call(callable, &call_args, current_package_id, state, host)?
+    {
+        write_back_call_args(
+            scopes,
+            plan,
+            current_package_id,
+            current_module_id,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            state,
+            outcome.edit_arg_indices.as_slice(),
+            &call_args,
+            &outcome.final_args,
+            host,
+        )?;
+        return Ok(outcome.value);
+    }
     if let Some(value) = try_execute_arcana_owned_api_call(callable, &call_args, host)? {
         return Ok(value);
     }
@@ -12534,7 +13399,7 @@ fn execute_runtime_apply_phrase(
         state,
         host,
     )?;
-    Ok(execute_call_by_path(
+    execute_call_by_path(
         &callable,
         resolved_routine,
         None,
@@ -12548,7 +13413,7 @@ fn execute_runtime_apply_phrase(
         state,
         host,
         allow_async,
-    )?)
+    )
 }
 
 fn execute_runtime_method_call(
@@ -12610,7 +13475,7 @@ fn execute_runtime_method_call(
         state,
         host,
     )?);
-    Ok(execute_call_by_path(
+    execute_call_by_path(
         &callable,
         resolved_routine,
         dynamic_dispatch,
@@ -12624,7 +13489,7 @@ fn execute_runtime_method_call(
         state,
         host,
         runtime_async_calls_allowed(state),
-    )?)
+    )
 }
 
 fn execute_runtime_named_qualifier_call(
@@ -12684,7 +13549,7 @@ fn execute_runtime_named_qualifier_call(
         state,
         host,
     )?);
-    Ok(execute_call_by_path(
+    execute_call_by_path(
         &callable,
         None,
         None,
@@ -12698,7 +13563,7 @@ fn execute_runtime_named_qualifier_call(
         state,
         host,
         runtime_async_calls_allowed(state),
-    )?)
+    )
 }
 
 fn eval_qualifier(
@@ -13556,6 +14421,21 @@ fn execute_runtime_core_intrinsic(
             let name = expect_str(expect_single_arg(args, "env_get")?, "env_get")?;
             Ok(RuntimeValue::Str(host.env_get(&name)?))
         }
+        RuntimeIntrinsic::PackageAssetRootTry => {
+            if !args.is_empty() {
+                return Err("package_asset_root expects zero arguments".to_string());
+            }
+            Ok(
+                match source_provider::active_source_provider_package_asset_root(&plan.package_id)?
+                {
+                    Some(root) => ok_variant(RuntimeValue::Str(root)),
+                    None => match runtime_current_package_asset_root(&plan.package_id, host) {
+                        Ok(path) => ok_variant(RuntimeValue::Str(runtime_path_string(&path))),
+                        Err(err) => err_variant(err),
+                    },
+                },
+            )
+        }
         RuntimeIntrinsic::PathCwd => {
             if !args.is_empty() {
                 return Err("path_cwd expects zero arguments".to_string());
@@ -13978,6 +14858,37 @@ fn execute_runtime_core_intrinsic(
                 Err(err) => err_variant(err),
             })
         }
+        RuntimeIntrinsic::CanvasImageCreate => {
+            if args.len() != 2 {
+                return Err("canvas_image_create expects two arguments".to_string());
+            }
+            if let Some(image) = source_provider::active_source_provider_canvas_image_create(
+                expect_int(args[0].clone(), "canvas_image_create")?,
+                expect_int(args[1].clone(), "canvas_image_create")?,
+            )? {
+                return Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::Image(image)));
+            }
+            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::Image(
+                host.canvas_image_create(
+                    expect_int(args[0].clone(), "canvas_image_create")?,
+                    expect_int(args[1].clone(), "canvas_image_create")?,
+                )?,
+            )))
+        }
+        RuntimeIntrinsic::CanvasImageReplaceRgba => {
+            if args.len() != 2 {
+                return Err("canvas_image_replace_rgba expects two arguments".to_string());
+            }
+            let image = expect_image(args[0].clone(), "canvas_image_replace_rgba")?;
+            let rgba = expect_byte_array(args[1].clone(), "canvas_image_replace_rgba")?;
+            if source_provider::active_source_provider_canvas_image_replace_rgba(image, &rgba)?
+                .is_some()
+            {
+                return Ok(RuntimeValue::Unit);
+            }
+            host.canvas_image_replace_rgba(image, &rgba)?;
+            Ok(RuntimeValue::Unit)
+        }
         RuntimeIntrinsic::CanvasImageSize => {
             let image = expect_image(
                 expect_single_arg(args, "canvas_image_size")?,
@@ -13990,12 +14901,16 @@ fn execute_runtime_core_intrinsic(
             if args.len() != 4 {
                 return Err("canvas_blit expects four arguments".to_string());
             }
-            host.canvas_blit(
-                expect_window(args[0].clone(), "canvas_blit")?,
-                expect_image(args[1].clone(), "canvas_blit")?,
-                expect_int(args[2].clone(), "canvas_blit")?,
-                expect_int(args[3].clone(), "canvas_blit")?,
-            )?;
+            let window = expect_window(args[0].clone(), "canvas_blit")?;
+            let image = expect_image(args[1].clone(), "canvas_blit")?;
+            let x = expect_int(args[2].clone(), "canvas_blit")?;
+            let y = expect_int(args[3].clone(), "canvas_blit")?;
+            if source_provider::active_source_provider_canvas_blit(window.0, image.0, x, y)?
+                .is_some()
+            {
+                return Ok(RuntimeValue::Unit);
+            }
+            host.canvas_blit(window, image, x, y)?;
             Ok(RuntimeValue::Unit)
         }
         RuntimeIntrinsic::CanvasBlitScaled => {
@@ -16545,7 +17460,7 @@ fn execute_runtime_chain_stage(
         &call_args,
         plan,
     )?;
-    Ok(execute_call_by_path(
+    execute_call_by_path(
         &callable,
         None,
         None,
@@ -16559,7 +17474,7 @@ fn execute_runtime_chain_stage(
         state,
         host,
         allow_async,
-    )?)
+    )
 }
 
 fn spawn_runtime_chain_stage(
@@ -20185,8 +21100,14 @@ fn execute_routine(
     host: &mut dyn RuntimeHost,
 ) -> Result<RuntimeValue, String> {
     validate_runtime_requirements_supported(plan, host)?;
+    reset_runtime_native_products_cache();
     let mut state = RuntimeExecutionState::default();
-    execute_routine_with_state(plan, routine_index, Vec::new(), args, &mut state, host)
+    let result =
+        execute_routine_with_state(plan, routine_index, Vec::new(), args, &mut state, host);
+    let cleanup = release_runtime_provider_opaques(&mut state, host);
+    reset_runtime_native_products_cache();
+    cleanup?;
+    result
 }
 
 pub fn execute_main(plan: &RuntimePackagePlan, host: &mut dyn RuntimeHost) -> Result<i32, String> {
@@ -20208,6 +21129,7 @@ pub fn execute_entrypoint_routine(
     host: &mut dyn RuntimeHost,
 ) -> Result<i32, String> {
     validate_runtime_requirements_supported(plan, host)?;
+    reset_runtime_native_products_cache();
     let entry = plan
         .entrypoints
         .iter()
@@ -20241,8 +21163,18 @@ pub fn execute_entrypoint_routine(
         &mut state,
         host,
         true,
-    )
-    .map_err(runtime_eval_message)?;
+    );
+    let value = match value {
+        Ok(value) => value,
+        Err(err) => {
+            let cleanup = release_runtime_provider_opaques(&mut state, host);
+            reset_runtime_native_products_cache();
+            cleanup?;
+            return Err(runtime_eval_message(err));
+        }
+    };
+    release_runtime_provider_opaques(&mut state, host)?;
+    reset_runtime_native_products_cache();
     if let Some(FlowSignal::OwnerExit {
         owner_key,
         exit_name,

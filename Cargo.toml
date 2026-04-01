@@ -29,7 +29,6 @@ arcana-language-law = { path = "crates/arcana-language-law" }
 arcana-package = { path = "crates/arcana-package" }
 arcana-runtime = { path = "crates/arcana-runtime" }
 arcana-syntax = { path = "crates/arcana-syntax" }
-font8x8 = "0.3"
 libloading = "0.8"
 pathdiff = "0.2"
 serde = { version = "1", features = ["derive"] }

@@ -871,7 +871,8 @@ fn handle_button(edit self: demo_types.Demo, edit cx: arcana_desktop.types.AppCo
     set_status :: self, "button", (actions.button_label :: id :: call) :: call
     return cx.control.control_flow
 
-fn on_main_redraw(edit self: demo_types.Demo, edit cx: arcana_desktop.types.AppContext, read win: arcana_desktop.types.Window) -> arcana_desktop.types.ControlFlow:
+fn on_main_redraw(edit self: demo_types.Demo, edit cx: arcana_desktop.types.AppContext, take win: arcana_desktop.types.Window) -> arcana_desktop.types.ControlFlow:
+    let mut win = win
     self.redraw_count += 1
     self.last_event = "WindowRedrawRequested"
     self.last_window = "main"
@@ -888,7 +889,8 @@ fn on_main_redraw(edit self: demo_types.Demo, edit cx: arcana_desktop.types.AppC
     self.controls_dirty = false
     return arcana_desktop.types.ControlFlow.Wait :: :: call
 
-fn on_second_redraw(edit self: demo_types.Demo, read win: arcana_desktop.types.Window) -> arcana_desktop.types.ControlFlow:
+fn on_second_redraw(edit self: demo_types.Demo, take win: arcana_desktop.types.Window) -> arcana_desktop.types.ControlFlow:
+    let mut win = win
     self.second_window_seen = true
     self.second_window_alive = arcana_desktop.window.alive :: win :: call
     self.second_window_visible = arcana_desktop.window.visible :: win :: call

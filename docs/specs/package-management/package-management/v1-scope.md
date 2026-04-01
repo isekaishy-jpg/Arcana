@@ -42,6 +42,11 @@ Top-level package fields:
 - `kind = "app" | "lib"`
 - optional `version = "MAJOR.MINOR.PATCH"`
 
+Package-owned assets:
+- a top-level `assets/` directory is part of the package contract without needing a manifest key
+- package assets participate in source fingerprints, publish snapshots, emitted support-file staging, and packaged runtime lookup
+- staged package assets live under deterministic package-id-keyed bundle roots rather than source-relative workspace paths
+
 Enabled dependency forms:
 
 ```toml
@@ -50,6 +55,7 @@ core = { path = "../core" }
 foo = { version = "^1.2.3" }
 foo_v1 = { package = "foo", version = "~1.4.0", registry = "local" }
 tool = { path = "../tool", executable_forewords = true }
+text = { path = "../text", native_provider = "default" }
 ```
 
 Recognized-but-disabled future forms:
@@ -72,6 +78,7 @@ Reserved dependency keys:
 - `checksum`
 - `native_delivery`
 - `native_child`
+- `native_provider`
 - `native_plugins`
 - `executable_forewords`
 
@@ -130,6 +137,10 @@ Rules:
 - `executable_forewords = true` is a dependency-edge opt-in:
   - it grants the depender permission to execute executable foreword handlers exported by that dependency
   - omission leaves dependency-provided executable forewords rejected during frontend validation
+- `native_provider = "<product>"` is a dependency-edge opt-in:
+  - it activates a typed package-library native provider for that dependency alias
+  - omission means the dependency remains source-only from the consumer's point of view even if the dependency package declares provider products
+  - provider activation is explicit and alias-scoped; it must not be inferred from package names or default runtime exceptions
 
 ## Local Registry And Publish
 
@@ -182,6 +193,7 @@ Rules:
 - the public `arcana-cabi` descriptor remains display-name-facing in v1
 - bundle/runtime metadata must carry `package_id` wherever graph-level disambiguation is required
 - runtime child/plugin selection and dedupe must use `(package_id, product_name)` as the stable identity
+- runtime provider selection and dedupe must use `(consumer_package_id, dependency_alias, package_id, product_name)` as the stable identity
 - package-name-only helper lookup may remain only as an ambiguity-checking wrapper above package-id-aware APIs
 
 ## Future Compatibility Rules

@@ -31,7 +31,7 @@ pub use build::{
 };
 pub use distribution::{
     DISTRIBUTION_BUNDLE_FORMAT, DistributionBundle, default_distribution_dir,
-    default_distribution_dir_for_build, stage_distribution_bundle,
+    default_distribution_dir_for_build, distribution_bundle_is_ready, stage_distribution_bundle,
     stage_distribution_bundle_for_build,
 };
 pub use fingerprint::{
@@ -356,6 +356,7 @@ pub struct NativeProductSpec {
     pub file: String,
     pub contract: String,
     pub rust_cdylib_crate: Option<String>,
+    pub provider_dir: Option<String>,
     pub sidecars: Vec<String>,
 }
 
@@ -373,6 +374,7 @@ pub struct DependencySpec {
     pub source: DependencySourceSpec,
     pub native_delivery: NativeDependencyDelivery,
     pub native_child: Option<String>,
+    pub native_provider: Option<String>,
     pub native_plugins: Vec<String>,
     pub executable_forewords: bool,
 }
@@ -383,6 +385,10 @@ impl DependencySpec {
             NativeDependencyDelivery::Dll => Some("default"),
             NativeDependencyDelivery::Baked => None,
         })
+    }
+
+    pub fn selected_native_provider(&self) -> Option<&str> {
+        self.native_provider.as_deref()
     }
 }
 
@@ -492,6 +498,7 @@ pub struct LockNativeProductEntry {
     pub file: String,
     pub contract: String,
     pub rust_cdylib_crate: Option<String>,
+    pub provider_dir: Option<String>,
     pub sidecars: Vec<String>,
 }
 
@@ -2100,6 +2107,10 @@ fn read_lockfile_native_products(
                         .get("rust_cdylib_crate")
                         .and_then(toml::Value::as_str)
                         .map(ToString::to_string),
+                    provider_dir: entry
+                        .get("provider_dir")
+                        .and_then(toml::Value::as_str)
+                        .map(ToString::to_string),
                     sidecars: entry
                         .get("sidecars")
                         .map(parse_string_array)
@@ -2471,6 +2482,7 @@ fn parse_dependency_spec(
             },
             native_delivery: NativeDependencyDelivery::Baked,
             native_child: None,
+            native_provider: None,
             native_plugins: Vec::new(),
             executable_forewords: false,
         });
@@ -2493,6 +2505,7 @@ fn parse_dependency_spec(
         "checksum",
         "native_delivery",
         "native_child",
+        "native_provider",
         "native_plugins",
         "executable_forewords",
     ];
@@ -2531,6 +2544,17 @@ fn parse_dependency_spec(
             value.as_str().map(ToString::to_string).ok_or_else(|| {
                 format!(
                     "dependency `{name}` in `{}` must set `native_child` as a string",
+                    manifest_path.display()
+                )
+            })
+        })
+        .transpose()?;
+    let native_provider = table
+        .get("native_provider")
+        .map(|value| {
+            value.as_str().map(ToString::to_string).ok_or_else(|| {
+                format!(
+                    "dependency `{name}` in `{}` must set `native_provider` as a string",
                     manifest_path.display()
                 )
             })
@@ -2647,6 +2671,7 @@ fn parse_dependency_spec(
             },
             native_delivery,
             native_child,
+            native_provider,
             native_plugins,
             executable_forewords,
         });
@@ -2663,6 +2688,7 @@ fn parse_dependency_spec(
             },
             native_delivery,
             native_child,
+            native_provider,
             native_plugins,
             executable_forewords,
         });
@@ -2677,6 +2703,7 @@ fn parse_dependency_spec(
             },
             native_delivery,
             native_child,
+            native_provider,
             native_plugins,
             executable_forewords,
         });
@@ -2777,11 +2804,25 @@ fn parse_native_products(
                 })
             })
             .transpose()?;
+        let provider_dir = product
+            .get("provider_dir")
+            .map(|value| {
+                value.as_str().map(ToString::to_string).ok_or_else(|| {
+                    format!(
+                        "native product `{name}` in `{}` must set `provider_dir` as a string",
+                        manifest_path.display()
+                    )
+                })
+            })
+            .transpose()?;
         let sidecars = product
             .get("sidecars")
             .map(parse_string_array)
             .transpose()?
             .unwrap_or_default();
+        if let Some(provider_dir) = &provider_dir {
+            validate_support_file_relative_path(provider_dir)?;
+        }
         for sidecar in &sidecars {
             validate_support_file_relative_path(sidecar)?;
         }
@@ -2797,6 +2838,21 @@ fn parse_native_products(
                 manifest_path.display()
             ));
         }
+        if role == ArcanaCabiProductRole::Provider
+            && producer == NativeProductProducer::ArcanaSource
+            && provider_dir.is_some()
+        {
+            return Err(format!(
+                "native product `{name}` in `{}` must not set `provider_dir` for `role = \"provider\"` and `producer = \"arcana-source\"`",
+                manifest_path.display()
+            ));
+        }
+        if role != ArcanaCabiProductRole::Provider && provider_dir.is_some() {
+            return Err(format!(
+                "native product `{name}` in `{}` may set `provider_dir` only for `role = \"provider\"`",
+                manifest_path.display()
+            ));
+        }
         parsed.insert(
             name.clone(),
             NativeProductSpec {
@@ -2807,6 +2863,7 @@ fn parse_native_products(
                 file,
                 contract,
                 rust_cdylib_crate,
+                provider_dir,
                 sidecars,
             },
         );
@@ -3468,6 +3525,115 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn stage_distribution_bundle_stages_package_assets_under_package_roots() {
+        let dir = temp_dir("dist_windows_exe_package_assets");
+        write_file(
+            &dir.join("book.toml"),
+            "name = \"app\"\nkind = \"app\"\n[deps]\ncore = { path = \"core\" }\n",
+        );
+        write_file(
+            &dir.join("src").join("shelf.arc"),
+            "import core\nfn main() -> Int:\n    return core.answer :: :: call\n",
+        );
+        write_file(&dir.join("src").join("types.arc"), "// types\n");
+        write_file(&dir.join("assets").join("app.txt"), "app-asset\n");
+
+        write_file(
+            &dir.join("core").join("book.toml"),
+            "name = \"core\"\nkind = \"lib\"\n",
+        );
+        write_file(
+            &dir.join("core").join("src").join("book.arc"),
+            "export fn answer() -> Int:\n    return 0\n",
+        );
+        write_file(
+            &dir.join("core").join("src").join("types.arc"),
+            "// types\n",
+        );
+        write_file(
+            &dir.join("core").join("assets").join("core.txt"),
+            "core-asset\n",
+        );
+
+        let graph = load_workspace_graph(&dir).expect("load graph");
+        let order = plan_workspace(&graph).expect("plan");
+        let prepared = prepare_test_build(&graph);
+        let statuses = plan_build_for_target_with_context(
+            &graph,
+            &order,
+            &prepared,
+            None,
+            BuildTarget::windows_exe(),
+            &BuildExecutionContext::default(),
+        )
+        .expect("windows exe plan should build");
+        execute_build_with_context(
+            &graph,
+            &prepared,
+            &statuses,
+            &BuildExecutionContext::default(),
+        )
+        .expect("windows exe build should succeed");
+
+        let bundle_dir = default_distribution_dir(&graph, "app", &BuildTarget::windows_exe());
+        let bundle = stage_distribution_bundle(
+            &graph,
+            &statuses,
+            "app",
+            &BuildTarget::windows_exe(),
+            &bundle_dir,
+        )
+        .expect("distribution staging should succeed");
+        let app_member = graph.member("app").expect("app member should resolve");
+        let core_member = graph.member("core").expect("core member should resolve");
+        let app_root = crate::build::package_asset_bundle_dir(app_member);
+        let core_root = crate::build::package_asset_bundle_dir(core_member);
+
+        assert!(
+            bundle
+                .support_files
+                .contains(&format!("{app_root}/app.txt"))
+        );
+        assert!(
+            bundle
+                .support_files
+                .contains(&format!("{core_root}/core.txt"))
+        );
+        assert!(bundle.bundle_dir.join(&app_root).join("app.txt").is_file());
+        assert!(
+            bundle
+                .bundle_dir
+                .join(&core_root)
+                .join("core.txt")
+                .is_file()
+        );
+        assert!(bundle.manifest_text.contains("[[package_assets]]"));
+        assert!(
+            bundle
+                .manifest_text
+                .contains(&format!("package_id = \"{}\"", app_member.package_id))
+        );
+        assert!(
+            bundle
+                .manifest_text
+                .contains(&format!("package_id = \"{}\"", core_member.package_id))
+        );
+        assert!(
+            bundle
+                .manifest_text
+                .contains(&format!("asset_root = \"{app_root}\""))
+        );
+        assert!(
+            bundle
+                .manifest_text
+                .contains(&format!("asset_root = \"{core_root}\""))
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn stage_distribution_bundle_records_native_products_and_child_bindings() {
         let dir = temp_dir("dist_windows_exe_native_products");
         write_file(
@@ -3564,6 +3730,149 @@ mod tests {
         assert!(manifest_text.contains("package_name = \"desktop\""));
         assert!(manifest_text.contains("product_name = \"default\""));
         assert!(manifest_text.contains("[[child_bindings]]"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stage_distribution_bundle_records_provider_products_and_bindings() {
+        let dir = temp_dir("dist_windows_exe_provider_products");
+        write_file(
+            &dir.join("book.toml"),
+            "name = \"app\"\nkind = \"app\"\n[deps]\ndemo_counter = { path = \"demo-counter\", native_provider = \"default\" }\n",
+        );
+        write_file(
+            &dir.join("src").join("shelf.arc"),
+            "fn main() -> Int:\n    return 0\n",
+        );
+        write_file(&dir.join("src").join("types.arc"), "// types\n");
+
+        write_file(
+            &dir.join("demo-counter").join("book.toml"),
+            concat!(
+                "name = \"demo_counter\"\n",
+                "kind = \"lib\"\n",
+                "\n[native.products.default]\n",
+                "kind = \"dll\"\n",
+                "role = \"provider\"\n",
+                "producer = \"arcana-source\"\n",
+                "file = \"demo_counter_provider.dll\"\n",
+                "contract = \"arcana.cabi.provider.v1\"\n",
+                "sidecars = []\n",
+            ),
+        );
+        write_file(
+            &dir.join("demo-counter").join("src").join("book.arc"),
+            concat!(
+                "reexport demo_counter.types\n",
+                "reexport demo_counter.counter\n",
+            ),
+        );
+        write_file(
+            &dir.join("demo-counter").join("src").join("types.arc"),
+            concat!(
+                "export opaque type Counter as move, boundary_unsafe\n",
+                "\n",
+                "export record CounterSnapshot:\n",
+                "    value: Int\n",
+            ),
+        );
+        write_file(
+            &dir.join("demo-counter").join("src").join("counter.arc"),
+            concat!(
+                "import demo_counter.types\n",
+                "\n",
+                "export fn new(seed: Int) -> demo_counter.types.Counter:\n",
+                "    return demo_counter.counter.new :: seed :: call\n",
+                "\n",
+                "export fn add(edit counter: demo_counter.types.Counter, amount: Int):\n",
+                "    demo_counter.counter.add :: counter, amount :: call\n",
+                "\n",
+                "export fn snapshot(read counter: demo_counter.types.Counter) -> demo_counter.types.CounterSnapshot:\n",
+                "    return demo_counter.counter.snapshot :: counter :: call\n",
+            ),
+        );
+        write_file(
+            &dir.join("demo-counter")
+                .join("src")
+                .join("provider_impl")
+                .join("engine.arc"),
+            concat!("export record CounterState:\n", "    value: Int\n",),
+        );
+        write_file(
+            &dir.join("demo-counter")
+                .join("src")
+                .join("provider_impl")
+                .join("counter.arc"),
+            concat!(
+                "import demo_counter.provider_impl.engine\n",
+                "import demo_counter.types\n",
+                "\n",
+                "fn new(seed: Int) -> demo_counter.provider_impl.engine.CounterState:\n",
+                "    return demo_counter.provider_impl.engine.CounterState :: value = seed :: call\n",
+                "\n",
+                "fn add(edit counter: demo_counter.provider_impl.engine.CounterState, amount: Int):\n",
+                "    counter.value = counter.value + amount\n",
+                "\n",
+                "fn snapshot(read counter: demo_counter.provider_impl.engine.CounterState) -> demo_counter.types.CounterSnapshot:\n",
+                "    return demo_counter.types.CounterSnapshot :: value = counter.value :: call\n",
+            ),
+        );
+
+        let graph = load_workspace_graph(&dir).expect("load graph");
+        let order = plan_workspace(&graph).expect("plan");
+        let prepared = prepare_test_build(&graph);
+        let statuses = plan_build_for_target_with_context(
+            &graph,
+            &order,
+            &prepared,
+            None,
+            BuildTarget::windows_exe(),
+            &BuildExecutionContext::default(),
+        )
+        .expect("windows exe plan should build");
+        execute_build_with_context(
+            &graph,
+            &prepared,
+            &statuses,
+            &BuildExecutionContext::default(),
+        )
+        .expect("windows exe build should succeed");
+
+        let bundle_dir = default_distribution_dir(&graph, "app", &BuildTarget::windows_exe());
+        let bundle = stage_distribution_bundle(
+            &graph,
+            &statuses,
+            "app",
+            &BuildTarget::windows_exe(),
+            &bundle_dir,
+        )
+        .expect("distribution staging should succeed");
+        let manifest_text = &bundle.manifest_text;
+
+        assert!(
+            bundle
+                .bundle_dir
+                .join("demo_counter_provider.dll")
+                .is_file()
+        );
+        assert!(manifest_text.contains("[[native_products]]"));
+        assert!(manifest_text.contains("package_name = \"demo_counter\""));
+        assert!(manifest_text.contains("product_name = \"default\""));
+        assert!(manifest_text.contains("role = \"provider\""));
+        assert!(manifest_text.contains("contract_id = \"arcana.cabi.provider.v1\""));
+        assert!(manifest_text.contains("contract_version = 1"));
+        assert!(manifest_text.contains("producer = \"arcana-source\""));
+        assert!(manifest_text.contains("sidecars = []"));
+        assert!(manifest_text.contains("file_hash = \"sha256:"));
+        assert!(manifest_text.contains("file = \"demo_counter_provider.dll\""));
+        assert!(manifest_text.contains("native_product_closure = \"sha256:"));
+        assert!(manifest_text.contains("[[provider_bindings]]"));
+        assert!(manifest_text.contains("consumer_member = \"app\""));
+        assert!(manifest_text.contains("dependency_alias = \"demo_counter\""));
+        assert!(manifest_text.contains("package_name = \"demo_counter\""));
+        assert!(manifest_text.contains("product_name = \"default\""));
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -5578,6 +5887,12 @@ toolchain = \"future-toolchain\"\n"
                 "producer = \"arcana-source\"\n",
                 "file = \"arcana_tools.dll\"\n",
                 "contract = \"arcana.cabi.plugin.v1\"\n",
+                "\n[native.products.provider]\n",
+                "kind = \"dll\"\n",
+                "role = \"provider\"\n",
+                "producer = \"arcana-source\"\n",
+                "file = \"arcana_provider.dll\"\n",
+                "contract = \"arcana.cabi.provider.v1\"\n",
             ),
         );
         write_file(
@@ -5593,14 +5908,14 @@ toolchain = \"future-toolchain\"\n"
                 "name = \"app\"\n",
                 "kind = \"app\"\n",
                 "[deps]\n",
-                "desktop = { path = \"../desktop\", native_child = \"default\", native_plugins = [\"tools\"] }\n",
+                "desktop = { path = \"../desktop\", native_child = \"default\", native_provider = \"provider\", native_plugins = [\"tools\"] }\n",
             ),
         );
         let second = member_source_fingerprint(&dir, "app");
 
         assert_ne!(
             first, second,
-            "dependency native child/plugin selection changes should affect the source fingerprint"
+            "dependency native child/plugin/provider selection changes should affect the source fingerprint"
         );
 
         let _ = fs::remove_dir_all(&dir);
@@ -5663,6 +5978,44 @@ toolchain = \"future-toolchain\"\n"
         assert_ne!(
             first, second,
             "native product manifest changes should affect the source fingerprint"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn package_asset_content_changes_update_source_fingerprint() {
+        fn member_source_fingerprint(dir: &Path, member: &str) -> String {
+            let graph = load_workspace_graph(dir).expect("graph should load");
+            let workspace = load_workspace_hir_from_graph(dir, &graph).expect("workspace");
+            let resolved_workspace = arcana_hir::resolve_workspace(&workspace).expect("resolve");
+            let fingerprints =
+                compute_workspace_fingerprints(&graph, &workspace, &resolved_workspace)
+                    .expect("fingerprints");
+            fingerprint_member(&fingerprints, &graph, member)
+                .source()
+                .to_string()
+        }
+
+        let dir = temp_dir("package_asset_source_fingerprint");
+        write_file(
+            &dir.join("book.toml"),
+            "name = \"desktop\"\nkind = \"lib\"\n",
+        );
+        write_file(
+            &dir.join("src/book.arc"),
+            "export fn ready() -> Int:\n    return 1\n",
+        );
+        write_file(&dir.join("src/types.arc"), "// desktop types\n");
+        write_file(&dir.join("assets/runtime.txt"), "alpha\n");
+
+        let first = member_source_fingerprint(&dir, "desktop");
+        write_file(&dir.join("assets/runtime.txt"), "beta\n");
+        let second = member_source_fingerprint(&dir, "desktop");
+
+        assert_ne!(
+            first, second,
+            "package asset content changes should affect the source fingerprint"
         );
 
         let _ = fs::remove_dir_all(&dir);

@@ -1,4 +1,5 @@
 reexport types
 reexport arcana_graphics.color
+reexport arcana_graphics.paint
 reexport arcana_graphics.canvas
 reexport arcana_graphics.images

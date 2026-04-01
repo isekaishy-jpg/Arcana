@@ -1,0 +1,5 @@
+name = "text_proof_workspace"
+kind = "lib"
+
+[workspace]
+members = ["app"]

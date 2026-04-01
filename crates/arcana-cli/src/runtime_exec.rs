@@ -3,7 +3,10 @@ use std::env;
 use std::io::{self, Write};
 use std::path::Path;
 
-use arcana_runtime::{BufferedHost, RuntimePackagePlan, execute_main, load_package_plan};
+use arcana_runtime::{
+    ARCANA_NATIVE_BUNDLE_DIR_ENV, ARCANA_NATIVE_BUNDLE_MANIFEST_ENV, BufferedHost,
+    RuntimePackagePlan, execute_main, load_package_plan,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ProcessContext {
@@ -32,6 +35,26 @@ pub(crate) fn run_plan(plan: &RuntimePackagePlan, context: ProcessContext) -> Re
 
 pub(crate) fn run_plan_file(path: &Path, context: ProcessContext) -> Result<i32, String> {
     let plan = load_plan_file(path)?;
+    let mut context = context;
+    if let Some(parent) = path.parent() {
+        context
+            .env
+            .entry(ARCANA_NATIVE_BUNDLE_DIR_ENV.to_string())
+            .or_insert_with(|| parent.to_string_lossy().into_owned());
+    }
+    let manifest_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| format!("{name}.arcana-bundle.toml"))
+        .unwrap_or_else(|| "arcana.bundle.toml".to_string());
+    context
+        .env
+        .entry(ARCANA_NATIVE_BUNDLE_MANIFEST_ENV.to_string())
+        .or_insert_with(|| {
+            path.with_file_name(manifest_name)
+                .to_string_lossy()
+                .into_owned()
+        });
     run_plan(&plan, context)
 }
 

@@ -1,5 +1,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
+use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
 use arcana_hir::{
     HirDirectiveKind, HirImplDecl, HirPredicate, HirResolvedModule, HirResolvedPackage,
@@ -10,7 +12,7 @@ use arcana_hir::{
 use arcana_syntax::is_builtin_type_name;
 use sha2::{Digest, Sha256};
 
-use crate::{PackageResult, WorkspaceGraph, WorkspaceMember};
+use crate::{CACHE_DIR, PackageResult, WorkspaceGraph, WorkspaceMember};
 
 fn quote_fingerprint_text(text: impl ToString) -> String {
     let escaped = text.to_string().replace('\\', "\\\\").replace('|', "\\|");
@@ -88,10 +90,11 @@ pub fn compute_workspace_fingerprints(
     workspace: &HirWorkspaceSummary,
     resolved_workspace: &HirResolvedWorkspace,
 ) -> PackageResult<WorkspaceFingerprints> {
+    let asset_rows = collect_workspace_asset_rows(graph)?;
     let mut fingerprints = HashMap::new();
 
     for member in &graph.members {
-        let source = compute_member_source_fingerprint(member, workspace)?;
+        let source = compute_member_source_fingerprint(member, workspace, &asset_rows)?;
         let api = compute_resolved_api_fingerprint(member, workspace, resolved_workspace)?;
         fingerprints.insert(
             member.package_id.clone(),
@@ -100,7 +103,7 @@ pub fn compute_workspace_fingerprints(
     }
 
     Ok(WorkspaceFingerprints::from_parts(
-        compute_workspace_snapshot_id(graph, workspace)?,
+        compute_workspace_snapshot_id_with_asset_rows(graph, workspace, &asset_rows)?,
         fingerprints,
     ))
 }
@@ -108,6 +111,15 @@ pub fn compute_workspace_fingerprints(
 pub fn compute_workspace_snapshot_id(
     graph: &WorkspaceGraph,
     workspace: &HirWorkspaceSummary,
+) -> PackageResult<String> {
+    let asset_rows = collect_workspace_asset_rows(graph)?;
+    compute_workspace_snapshot_id_with_asset_rows(graph, workspace, &asset_rows)
+}
+
+fn compute_workspace_snapshot_id_with_asset_rows(
+    graph: &WorkspaceGraph,
+    workspace: &HirWorkspaceSummary,
+    asset_rows: &HashMap<String, Vec<String>>,
 ) -> PackageResult<String> {
     let mut hasher = Sha256::new();
     hasher.update(b"arcana_workspace_snapshot_v1\n");
@@ -134,6 +146,10 @@ pub fn compute_workspace_snapshot_id(
             hasher.update(b"\n");
         }
         for row in render_member_foreword_product_rows(member)? {
+            hasher.update(row.as_bytes());
+            hasher.update(b"\n");
+        }
+        for row in member_asset_rows(asset_rows, member) {
             hasher.update(row.as_bytes());
             hasher.update(b"\n");
         }
@@ -197,6 +213,7 @@ fn compute_resolved_api_fingerprint(
 fn compute_member_source_fingerprint(
     member: &WorkspaceMember,
     workspace: &HirWorkspaceSummary,
+    asset_rows: &HashMap<String, Vec<String>>,
 ) -> PackageResult<String> {
     let package = workspace.package_by_id(&member.package_id).ok_or_else(|| {
         format!(
@@ -221,6 +238,10 @@ fn compute_member_source_fingerprint(
         hasher.update(b"\n");
     }
     for row in render_member_foreword_product_rows(member)? {
+        hasher.update(row.as_bytes());
+        hasher.update(b"\n");
+    }
+    for row in member_asset_rows(asset_rows, member) {
         hasher.update(row.as_bytes());
         hasher.update(b"\n");
     }
@@ -259,11 +280,12 @@ fn render_member_dependency_setting_rows(member: &WorkspaceMember) -> Vec<String
             let mut native_plugins = spec.native_plugins.clone();
             native_plugins.sort();
             format!(
-                "dep_setting:alias={alias}|package={package_name}|package_id={package_id}|source={:?}|source_label={}|native_delivery={}|native_child={}|native_plugins={}|executable_forewords={}",
+                "dep_setting:alias={alias}|package={package_name}|package_id={package_id}|source={:?}|source_label={}|native_delivery={}|native_child={}|native_provider={}|native_plugins={}|executable_forewords={}",
                 spec.source.kind(),
                 spec.source.location_label(),
                 spec.native_delivery.as_str(),
                 spec.native_child.as_deref().unwrap_or(""),
+                spec.native_provider.as_deref().unwrap_or(""),
                 native_plugins.join(","),
                 spec.executable_forewords
             )
@@ -273,17 +295,222 @@ fn render_member_dependency_setting_rows(member: &WorkspaceMember) -> Vec<String
     rows
 }
 
+fn collect_workspace_asset_rows(
+    graph: &WorkspaceGraph,
+) -> PackageResult<HashMap<String, Vec<String>>> {
+    let mut cache = PackageAssetFingerprintCache::new(&graph.root_dir);
+    let mut asset_rows = HashMap::new();
+    for member in &graph.members {
+        asset_rows.insert(
+            member.package_id.clone(),
+            render_member_package_asset_rows(member, &mut cache)?,
+        );
+    }
+    Ok(asset_rows)
+}
+
+fn member_asset_rows<'a>(
+    asset_rows: &'a HashMap<String, Vec<String>>,
+    member: &WorkspaceMember,
+) -> &'a [String] {
+    asset_rows
+        .get(&member.package_id)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+}
+
+fn render_member_package_asset_rows(
+    member: &WorkspaceMember,
+    cache: &mut PackageAssetFingerprintCache,
+) -> PackageResult<Vec<String>> {
+    let assets_dir = member.abs_dir.join("assets");
+    if !assets_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut rows = Vec::new();
+    collect_member_package_asset_rows(&assets_dir, &assets_dir, member, cache, &mut rows)?;
+    rows.sort();
+    Ok(rows)
+}
+
+fn collect_member_package_asset_rows(
+    dir: &Path,
+    root: &Path,
+    member: &WorkspaceMember,
+    cache: &mut PackageAssetFingerprintCache,
+    out: &mut Vec<String>,
+) -> PackageResult<()> {
+    let mut entries = fs::read_dir(dir)
+        .map_err(|e| format!("failed to read asset directory `{}`: {e}", dir.display()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| {
+            format!(
+                "failed to read asset directory entry `{}`: {e}",
+                dir.display()
+            )
+        })?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_member_package_asset_rows(&path, root, member, cache, out)?;
+            continue;
+        }
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|e| format!("failed to relativize asset `{}`: {e}", path.display()))?
+            .to_string_lossy()
+            .replace('\\', "/");
+        out.push(cache.asset_row(member, &path, &relative)?);
+    }
+    Ok(())
+}
+
+struct PackageAssetFingerprintCache {
+    cache_root: PathBuf,
+}
+
+impl PackageAssetFingerprintCache {
+    fn new(workspace_root: &Path) -> Self {
+        Self {
+            cache_root: workspace_root.join(CACHE_DIR).join("asset-fingerprints-v1"),
+        }
+    }
+
+    fn asset_row(
+        &mut self,
+        member: &WorkspaceMember,
+        path: &Path,
+        relative: &str,
+    ) -> PackageResult<String> {
+        let metadata = fs::metadata(path)
+            .map_err(|e| format!("failed to read asset metadata `{}`: {e}", path.display()))?;
+        let length = metadata.len();
+        let modified_unix_nanos = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .and_then(|duration| i64::try_from(duration.as_nanos()).ok());
+        if let Some(modified_unix_nanos) = modified_unix_nanos
+            && let Some(row) = self.read_cached_row(member, relative, length, modified_unix_nanos)
+        {
+            return Ok(row);
+        }
+        let row = compute_asset_row(path, relative)?;
+        if let Some(modified_unix_nanos) = modified_unix_nanos {
+            self.write_cached_row(member, relative, length, modified_unix_nanos, &row);
+        }
+        Ok(row)
+    }
+
+    fn read_cached_row(
+        &self,
+        member: &WorkspaceMember,
+        relative: &str,
+        length: u64,
+        modified_unix_nanos: i64,
+    ) -> Option<String> {
+        let cache_path = self.cache_path(member, relative);
+        let text = fs::read_to_string(cache_path).ok()?;
+        let value = text.parse::<toml::Value>().ok()?;
+        let table = value.as_table()?;
+        if table.get("version").and_then(toml::Value::as_integer) != Some(1) {
+            return None;
+        }
+        if table.get("relative").and_then(toml::Value::as_str) != Some(relative) {
+            return None;
+        }
+        if table.get("length").and_then(toml::Value::as_integer) != Some(length as i64) {
+            return None;
+        }
+        if table
+            .get("modified_unix_nanos")
+            .and_then(toml::Value::as_integer)
+            != Some(modified_unix_nanos)
+        {
+            return None;
+        }
+        table
+            .get("row")
+            .and_then(toml::Value::as_str)
+            .map(str::to_string)
+    }
+
+    fn write_cached_row(
+        &self,
+        member: &WorkspaceMember,
+        relative: &str,
+        length: u64,
+        modified_unix_nanos: i64,
+        row: &str,
+    ) {
+        let cache_path = self.cache_path(member, relative);
+        let Some(parent) = cache_path.parent() else {
+            return;
+        };
+        if fs::create_dir_all(parent).is_err() {
+            return;
+        }
+        let rendered = format!(
+            concat!(
+                "version = 1\n",
+                "relative = \"{}\"\n",
+                "length = {}\n",
+                "modified_unix_nanos = {}\n",
+                "row = \"{}\"\n",
+            ),
+            escape_cache_text(relative),
+            length,
+            modified_unix_nanos,
+            escape_cache_text(row),
+        );
+        let _ = fs::write(cache_path, rendered);
+    }
+
+    fn cache_path(&self, member: &WorkspaceMember, relative: &str) -> PathBuf {
+        let mut hasher = Sha256::new();
+        hasher.update(b"arcana_package_asset_cache_key_v1\n");
+        hasher.update(member.package_id.as_bytes());
+        hasher.update(b"\n");
+        hasher.update(relative.as_bytes());
+        let digest = format!("{:x}", hasher.finalize());
+        self.cache_root
+            .join(&digest[0..2])
+            .join(format!("{digest}.toml"))
+    }
+}
+
+fn compute_asset_row(path: &Path, relative: &str) -> PackageResult<String> {
+    let bytes = fs::read(path)
+        .map_err(|e| format!("failed to read asset file `{}`: {e}", path.display()))?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"arcana_package_asset_v1\n");
+    hasher.update(relative.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(&bytes);
+    Ok(format!(
+        "asset:{}:{:x}",
+        quote_fingerprint_text(relative),
+        hasher.finalize()
+    ))
+}
+
+fn escape_cache_text(text: &str) -> String {
+    text.replace('\\', "\\\\").replace('\"', "\\\"")
+}
+
 fn render_member_native_product_rows(member: &WorkspaceMember) -> PackageResult<Vec<String>> {
     let mut rows = Vec::new();
     for (name, product) in &member.native_products {
         rows.push(format!(
-            "native_product:name={name}|kind={}|role={}|producer={}|file={}|contract={}|rust_cdylib_crate={}",
+            "native_product:name={name}|kind={}|role={}|producer={}|file={}|contract={}|rust_cdylib_crate={}|provider_dir={}",
             product.kind,
             product.role.as_str(),
             product.producer.as_str(),
             product.file,
             product.contract,
-            product.rust_cdylib_crate.as_deref().unwrap_or("")
+            product.rust_cdylib_crate.as_deref().unwrap_or(""),
+            product.provider_dir.as_deref().unwrap_or("")
         ));
         for sidecar in &product.sidecars {
             rows.push(format!(

@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use arcana_aot::{
     ARCANA_NATIVE_PRODUCT_TEMP_PROBES_ENV, AotEmissionFile, AotEmitContext, AotEmitTarget,
@@ -18,11 +19,12 @@ use arcana_ir::{
 };
 
 use crate::build_identity::{
-    cache_metadata_path_for_output, cached_artifact_matches_status, cached_emission_hash,
-    cached_emission_hash_for_path, current_build_toolchain_for_target_with_context,
-    render_cached_artifact,
+    cache_index_path_for_output, cache_metadata_path_for_output, cached_artifact_matches_status,
+    cached_emission_hash, cached_emission_hash_for_path,
+    current_build_toolchain_for_target_with_context, render_cached_artifact,
+    render_cached_artifact_index,
 };
-use crate::distribution::resolve_native_product_files;
+use crate::distribution::{append_internal_native_bundle_support, resolve_native_product_files};
 use crate::fingerprint::{
     WorkspaceFingerprints, compute_workspace_fingerprints, package_uses_implicit_std,
 };
@@ -110,7 +112,8 @@ pub struct PreparedBuild {
     pub(crate) fingerprint_set_id: String,
     pub(crate) fingerprints: WorkspaceFingerprints,
     pub(crate) workspace: HirWorkspaceSummary,
-    pub(crate) lowered_packages: BTreeMap<String, IrPackage>,
+    pub(crate) resolved_workspace: HirResolvedWorkspace,
+    pub(crate) lowered_packages: OnceLock<BTreeMap<String, IrPackage>>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -151,22 +154,13 @@ pub fn prepare_build_from_workspace(
     resolved_workspace: HirResolvedWorkspace,
 ) -> PackageResult<PreparedBuild> {
     let fingerprints = compute_workspace_fingerprints(graph, &workspace, &resolved_workspace)?;
-    let lowered_packages = workspace
-        .packages
-        .values()
-        .map(|package| {
-            Ok((
-                package.package_id.clone(),
-                lower_workspace_package_with_resolution(&workspace, &resolved_workspace, package)?,
-            ))
-        })
-        .collect::<PackageResult<BTreeMap<_, _>>>()?;
     Ok(PreparedBuild {
         snapshot_id: fingerprints.snapshot_id().to_string(),
         fingerprint_set_id: fingerprints.identity(),
         fingerprints,
         workspace,
-        lowered_packages,
+        resolved_workspace,
+        lowered_packages: OnceLock::new(),
     })
 }
 
@@ -447,10 +441,10 @@ where
         let member = graph
             .member(&status.member)
             .ok_or_else(|| format!("missing workspace member `{}`", status.member))?;
+        let lowered_packages = prepared_lowered_packages(prepared)?;
         let linked_package_names =
             collect_linked_package_names(graph, &prepared.workspace, &status.member)?;
-        let root_package = prepared
-            .lowered_packages
+        let root_package = lowered_packages
             .get(&member.package_id)
             .cloned()
             .ok_or_else(|| format!("missing lowered package `{}`", member.package_id))?;
@@ -458,8 +452,7 @@ where
             .into_iter()
             .filter(|package_id| package_id != &member.package_id)
             .map(|name| {
-                prepared
-                    .lowered_packages
+                lowered_packages
                     .get(&name)
                     .cloned()
                     .ok_or_else(|| format!("missing lowered linked package `{name}`"))
@@ -527,6 +520,28 @@ where
             format!(
                 "failed to write artifact `{}`: {e}",
                 metadata_path.display()
+            )
+        })?;
+        let index_path = cache_index_path_for_output(&artifact_path);
+        fs::write(
+            &index_path,
+            render_cached_artifact_index(
+                &status.member,
+                &status.kind,
+                &status.fingerprint,
+                &status.api_fingerprint,
+                &status.target,
+                &status.format,
+                &status.toolchain,
+                &emission,
+                &artifact_hash,
+                status.native_product_closure.as_deref(),
+            ),
+        )
+        .map_err(|e| {
+            format!(
+                "failed to write artifact index `{}`: {e}",
+                index_path.display()
             )
         })?;
     }
@@ -686,6 +701,9 @@ pub fn render_lockfile(
             if let Some(path) = &entry.rust_cdylib_crate {
                 out.push_str(&format!("rust_cdylib_crate = \"{}\"\n", escape_toml(path)));
             }
+            if let Some(path) = &entry.provider_dir {
+                out.push_str(&format!("provider_dir = \"{}\"\n", escape_toml(path)));
+            }
             out.push_str(&format!(
                 "sidecars = {}\n\n",
                 format_string_array(&entry.sidecars)
@@ -752,8 +770,21 @@ fn merge_lock_build_entries(
 ) -> PackageResult<BTreeMap<String, BTreeMap<BuildOutputKey, LockTargetEntry>>> {
     let mut updates = HashMap::<(String, BuildOutputKey), LockTargetEntry>::new();
     for status in statuses {
-        let artifact_path = graph.root_dir.join(&status.artifact_rel_path);
-        let artifact_hash = cached_emission_hash_for_path(&artifact_path, &status.target)?;
+        let artifact_hash = if status.disposition == BuildDisposition::CacheHit {
+            existing_lock
+                .and_then(|lock| lock.members.get(&status.member))
+                .and_then(|member| member.targets.get(&status.build_key))
+                .map(|entry| entry.artifact_hash.clone())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        let artifact_hash = if artifact_hash.is_empty() {
+            let artifact_path = graph.root_dir.join(&status.artifact_rel_path);
+            cached_emission_hash_for_path(&artifact_path, &status.target)?
+        } else {
+            artifact_hash
+        };
         updates.insert(
             (status.member.clone(), status.build_key.clone()),
             LockTargetEntry {
@@ -801,6 +832,7 @@ fn lock_native_product_entries(
                     file: product.file.clone(),
                     contract: product.contract.clone(),
                     rust_cdylib_crate: product.rust_cdylib_crate.clone(),
+                    provider_dir: product.provider_dir.clone(),
                     sidecars: product.sidecars.clone(),
                 },
             )
@@ -849,6 +881,66 @@ fn collect_linked_package_names(
         names.insert(std_package.package_id.clone());
     }
     Ok(names.into_iter().collect())
+}
+
+pub(crate) fn render_member_internal_package_image(
+    graph: &WorkspaceGraph,
+    member_package_id: &str,
+) -> PackageResult<String> {
+    let prepared = prepare_build(graph)?;
+    let member = graph
+        .member_by_id(member_package_id)
+        .ok_or_else(|| format!("missing workspace member `{member_package_id}`"))?;
+    let lowered_packages = prepared_lowered_packages(&prepared)?;
+    let root = lowered_packages
+        .get(member_package_id)
+        .cloned()
+        .ok_or_else(|| format!("missing lowered package `{member_package_id}`"))?;
+    let linked_package_names =
+        collect_linked_package_names(graph, &prepared.workspace, member_package_id)?;
+    let linked_packages = linked_package_names
+        .into_iter()
+        .filter(|package_id| package_id != member_package_id)
+        .map(|package_id| {
+            lowered_packages
+                .get(&package_id)
+                .cloned()
+                .ok_or_else(|| format!("missing lowered package `{package_id}`"))
+        })
+        .collect::<PackageResult<Vec<_>>>()?;
+    let linked_package = link_ir_packages(&member.kind, root, linked_packages);
+    let artifact = compile_package(&linked_package);
+    validate_package_artifact(&artifact)
+        .map_err(|e| format!("provider package artifact validation failed: {e}"))?;
+    Ok(render_package_artifact(&artifact))
+}
+
+fn prepared_lowered_packages(
+    prepared: &PreparedBuild,
+) -> PackageResult<&BTreeMap<String, IrPackage>> {
+    if let Some(lowered) = prepared.lowered_packages.get() {
+        return Ok(lowered);
+    }
+    let lowered = prepared
+        .workspace
+        .packages
+        .values()
+        .map(|package| {
+            Ok((
+                package.package_id.clone(),
+                lower_workspace_package_with_resolution(
+                    &prepared.workspace,
+                    &prepared.resolved_workspace,
+                    package,
+                )?,
+            ))
+        })
+        .collect::<PackageResult<BTreeMap<_, _>>>()?;
+    let _ = prepared.lowered_packages.set(lowered);
+    Ok(prepared
+        .lowered_packages
+        .get()
+        .expect("prepared lowered packages should be initialized"))
 }
 
 fn collect_transitive_member_names(
@@ -1011,7 +1103,7 @@ fn emit_artifact_for_target(
         );
     }
     let context = emit_context_for_target(graph, root_member, build_key, root_kind, build_context)?;
-    match build_key.target_ref() {
+    let mut emission = match build_key.target_ref() {
         BuildTarget::InternalAot => {
             emit_package_with_context(AotEmitTarget::InternalArtifact, &linked_package, &context)
         }
@@ -1025,7 +1117,12 @@ fn emit_artifact_for_target(
             "unsupported build target `{}`",
             build_key.target_ref()
         )),
+    }?;
+    if !matches!(build_key.target_ref(), BuildTarget::InternalAot) {
+        append_package_asset_support_files(graph, root_member, &mut emission)?;
     }
+    append_internal_native_bundle_support(graph, root_member, build_key, &mut emission)?;
+    Ok(emission)
 }
 
 fn emit_root_native_product_bundle(
@@ -1088,6 +1185,91 @@ fn emit_root_native_product_bundle(
         root_artifact_bytes: Some(root_artifact_bytes),
         support_files,
     })
+}
+
+fn append_package_asset_support_files(
+    graph: &WorkspaceGraph,
+    root_member: &crate::WorkspaceMember,
+    emission: &mut AotPackageEmission,
+) -> PackageResult<()> {
+    let mut seen = emission
+        .support_files
+        .iter()
+        .map(|file| file.relative_path.clone())
+        .collect::<BTreeSet<_>>();
+    for package_id in collect_transitive_member_names(graph, &root_member.package_id)? {
+        let member = graph
+            .member_by_id(&package_id)
+            .ok_or_else(|| format!("missing workspace member `{package_id}`"))?;
+        for file in collect_member_package_asset_files(member)? {
+            if !seen.insert(file.relative_path.clone()) {
+                return Err(format!(
+                    "duplicate support file path `{}`",
+                    file.relative_path
+                ));
+            }
+            emission.support_files.push(file);
+        }
+    }
+    emission
+        .support_files
+        .sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    Ok(())
+}
+
+fn collect_member_package_asset_files(
+    member: &crate::WorkspaceMember,
+) -> PackageResult<Vec<AotEmissionFile>> {
+    let assets_dir = member.abs_dir.join("assets");
+    if !assets_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut files = Vec::new();
+    collect_member_package_asset_files_from_dir(member, &assets_dir, &assets_dir, &mut files)?;
+    Ok(files)
+}
+
+fn collect_member_package_asset_files_from_dir(
+    member: &crate::WorkspaceMember,
+    dir: &Path,
+    assets_root: &Path,
+    out: &mut Vec<AotEmissionFile>,
+) -> PackageResult<()> {
+    let mut entries = fs::read_dir(dir)
+        .map_err(|e| format!("failed to read asset directory `{}`: {e}", dir.display()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| {
+            format!(
+                "failed to read asset directory entry `{}`: {e}",
+                dir.display()
+            )
+        })?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_member_package_asset_files_from_dir(member, &path, assets_root, out)?;
+            continue;
+        }
+        let relative = path
+            .strip_prefix(assets_root)
+            .map_err(|e| format!("failed to relativize asset `{}`: {e}", path.display()))?;
+        let relative = relative.to_string_lossy().replace('\\', "/");
+        let bytes = fs::read(&path)
+            .map_err(|e| format!("failed to read asset file `{}`: {e}", path.display()))?;
+        out.push(AotEmissionFile {
+            relative_path: format!("{}/{}", package_asset_bundle_dir(member), relative),
+            bytes,
+        });
+    }
+    Ok(())
+}
+
+pub(crate) fn package_asset_bundle_dir(member: &crate::WorkspaceMember) -> String {
+    format!(
+        "package-assets/{}",
+        short_package_id_hash(&member.package_id)
+    )
 }
 
 fn emit_context_for_target(
@@ -1300,6 +1482,7 @@ fn select_root_windows_dll_product_spec(
                 .to_string(),
             contract: ARCANA_CABI_EXPORT_CONTRACT_ID.to_string(),
             rust_cdylib_crate: None,
+            provider_dir: None,
             sidecars: Vec::new(),
         });
     }

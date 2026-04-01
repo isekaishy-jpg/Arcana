@@ -560,17 +560,17 @@ fn rewrite_stmt_routine_keys(
             default_modifier,
             lines,
         } => {
-            if let Some(modifier) = default_modifier {
-                if let Some(payload) = &mut modifier.payload {
-                    rewrite_expr_routine_keys(
-                        package_display_names,
-                        package_direct_dep_ids,
-                        duplicate_keys,
-                        routine_key_map,
-                        current_package_id,
-                        payload,
-                    )?;
-                }
+            if let Some(modifier) = default_modifier
+                && let Some(payload) = &mut modifier.payload
+            {
+                rewrite_expr_routine_keys(
+                    package_display_names,
+                    package_direct_dep_ids,
+                    duplicate_keys,
+                    routine_key_map,
+                    current_package_id,
+                    payload,
+                )?;
             }
             for line in lines {
                 match &mut line.kind {
@@ -585,27 +585,9 @@ fn rewrite_stmt_routine_keys(
                         gate,
                     )?,
                 }
-                if let Some(modifier) = &mut line.modifier {
-                    if let Some(payload) = &mut modifier.payload {
-                        rewrite_expr_routine_keys(
-                            package_display_names,
-                            package_direct_dep_ids,
-                            duplicate_keys,
-                            routine_key_map,
-                            current_package_id,
-                            payload,
-                        )?;
-                    }
-                }
-            }
-            Ok(())
-        }
-        ExecStmt::Bind {
-            default_modifier,
-            lines,
-        } => {
-            if let Some(modifier) = default_modifier {
-                if let Some(payload) = &mut modifier.payload {
+                if let Some(modifier) = &mut line.modifier
+                    && let Some(payload) = &mut modifier.payload
+                {
                     rewrite_expr_routine_keys(
                         package_display_names,
                         package_direct_dep_ids,
@@ -615,6 +597,24 @@ fn rewrite_stmt_routine_keys(
                         payload,
                     )?;
                 }
+            }
+            Ok(())
+        }
+        ExecStmt::Bind {
+            default_modifier,
+            lines,
+        } => {
+            if let Some(modifier) = default_modifier
+                && let Some(payload) = &mut modifier.payload
+            {
+                rewrite_expr_routine_keys(
+                    package_display_names,
+                    package_direct_dep_ids,
+                    duplicate_keys,
+                    routine_key_map,
+                    current_package_id,
+                    payload,
+                )?;
             }
             for line in lines {
                 match &mut line.kind {
@@ -637,17 +637,17 @@ fn rewrite_stmt_routine_keys(
                         expr,
                     )?,
                 }
-                if let Some(modifier) = &mut line.modifier {
-                    if let Some(payload) = &mut modifier.payload {
-                        rewrite_expr_routine_keys(
-                            package_display_names,
-                            package_direct_dep_ids,
-                            duplicate_keys,
-                            routine_key_map,
-                            current_package_id,
-                            payload,
-                        )?;
-                    }
+                if let Some(modifier) = &mut line.modifier
+                    && let Some(payload) = &mut modifier.payload
+                {
+                    rewrite_expr_routine_keys(
+                        package_display_names,
+                        package_direct_dep_ids,
+                        duplicate_keys,
+                        routine_key_map,
+                        current_package_id,
+                        payload,
+                    )?;
                 }
             }
             Ok(())
@@ -671,17 +671,17 @@ fn rewrite_stmt_routine_keys(
                     target,
                 )?;
             }
-            if let Some(modifier) = &mut region.default_modifier {
-                if let Some(payload) = &mut modifier.payload {
-                    rewrite_expr_routine_keys(
-                        package_display_names,
-                        package_direct_dep_ids,
-                        duplicate_keys,
-                        routine_key_map,
-                        current_package_id,
-                        payload,
-                    )?;
-                }
+            if let Some(modifier) = &mut region.default_modifier
+                && let Some(payload) = &mut modifier.payload
+            {
+                rewrite_expr_routine_keys(
+                    package_display_names,
+                    package_direct_dep_ids,
+                    duplicate_keys,
+                    routine_key_map,
+                    current_package_id,
+                    payload,
+                )?;
             }
             for line in &mut region.lines {
                 rewrite_expr_routine_keys(
@@ -692,24 +692,9 @@ fn rewrite_stmt_routine_keys(
                     current_package_id,
                     &mut line.value,
                 )?;
-                if let Some(modifier) = &mut line.modifier {
-                    if let Some(payload) = &mut modifier.payload {
-                        rewrite_expr_routine_keys(
-                            package_display_names,
-                            package_direct_dep_ids,
-                            duplicate_keys,
-                            routine_key_map,
-                            current_package_id,
-                            payload,
-                        )?;
-                    }
-                }
-            }
-            Ok(())
-        }
-        ExecStmt::MemorySpec(spec) => {
-            if let Some(modifier) = &mut spec.default_modifier {
-                if let Some(payload) = &mut modifier.payload {
+                if let Some(modifier) = &mut line.modifier
+                    && let Some(payload) = &mut modifier.payload
+                {
                     rewrite_expr_routine_keys(
                         package_display_names,
                         package_direct_dep_ids,
@@ -720,6 +705,21 @@ fn rewrite_stmt_routine_keys(
                     )?;
                 }
             }
+            Ok(())
+        }
+        ExecStmt::MemorySpec(spec) => {
+            if let Some(modifier) = &mut spec.default_modifier
+                && let Some(payload) = &mut modifier.payload
+            {
+                rewrite_expr_routine_keys(
+                    package_display_names,
+                    package_direct_dep_ids,
+                    duplicate_keys,
+                    routine_key_map,
+                    current_package_id,
+                    payload,
+                )?;
+            }
             for detail in &mut spec.details {
                 rewrite_expr_routine_keys(
                     package_display_names,
@@ -729,17 +729,17 @@ fn rewrite_stmt_routine_keys(
                     current_package_id,
                     &mut detail.value,
                 )?;
-                if let Some(modifier) = &mut detail.modifier {
-                    if let Some(payload) = &mut modifier.payload {
-                        rewrite_expr_routine_keys(
-                            package_display_names,
-                            package_direct_dep_ids,
-                            duplicate_keys,
-                            routine_key_map,
-                            current_package_id,
-                            payload,
-                        )?;
-                    }
+                if let Some(modifier) = &mut detail.modifier
+                    && let Some(payload) = &mut modifier.payload
+                {
+                    rewrite_expr_routine_keys(
+                        package_display_names,
+                        package_direct_dep_ids,
+                        duplicate_keys,
+                        routine_key_map,
+                        current_package_id,
+                        payload,
+                    )?;
                 }
             }
             Ok(())
@@ -867,17 +867,17 @@ fn rewrite_expr_routine_keys(
                     target,
                 )?;
             }
-            if let Some(modifier) = &mut region.default_modifier {
-                if let Some(payload) = &mut modifier.payload {
-                    rewrite_expr_routine_keys(
-                        package_display_names,
-                        package_direct_dep_ids,
-                        duplicate_keys,
-                        routine_key_map,
-                        current_package_id,
-                        payload,
-                    )?;
-                }
+            if let Some(modifier) = &mut region.default_modifier
+                && let Some(payload) = &mut modifier.payload
+            {
+                rewrite_expr_routine_keys(
+                    package_display_names,
+                    package_direct_dep_ids,
+                    duplicate_keys,
+                    routine_key_map,
+                    current_package_id,
+                    payload,
+                )?;
             }
             for line in &mut region.lines {
                 rewrite_expr_routine_keys(
@@ -888,17 +888,17 @@ fn rewrite_expr_routine_keys(
                     current_package_id,
                     &mut line.value,
                 )?;
-                if let Some(modifier) = &mut line.modifier {
-                    if let Some(payload) = &mut modifier.payload {
-                        rewrite_expr_routine_keys(
-                            package_display_names,
-                            package_direct_dep_ids,
-                            duplicate_keys,
-                            routine_key_map,
-                            current_package_id,
-                            payload,
-                        )?;
-                    }
+                if let Some(modifier) = &mut line.modifier
+                    && let Some(payload) = &mut modifier.payload
+                {
+                    rewrite_expr_routine_keys(
+                        package_display_names,
+                        package_direct_dep_ids,
+                        duplicate_keys,
+                        routine_key_map,
+                        current_package_id,
+                        payload,
+                    )?;
                 }
             }
             Ok(())

@@ -11,19 +11,24 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use arcana_aot::{
-    ARCANA_NATIVE_PRODUCT_TEMP_PROBES_ENV, AotInstanceProductSpec, compile_instance_product,
+    ARCANA_NATIVE_PRODUCT_TEMP_PROBES_ENV, AotEmissionFile, AotInstanceProductSpec,
+    AotPackageEmission, compile_instance_product,
 };
 use arcana_cabi::ArcanaCabiProductRole;
 #[cfg(windows)]
 use arcana_cabi::{
     ARCANA_CABI_CONTRACT_VERSION_V1, ARCANA_CABI_GET_PRODUCT_API_V1_SYMBOL, ArcanaCabiChildOpsV1,
     ArcanaCabiExportOpsV1, ArcanaCabiInstanceOpsV1, ArcanaCabiPluginOpsV1, ArcanaCabiProductApiV1,
+    ArcanaCabiProviderOpsV1,
 };
 #[cfg(windows)]
 use libloading::Library;
 use sha2::{Digest, Sha256};
 
-use crate::build::{BuildStatus, selected_native_product_for_build};
+use crate::build::{
+    BuildStatus, package_asset_bundle_dir, render_member_internal_package_image,
+    selected_native_product_for_build,
+};
 use crate::build_identity::read_cached_output_metadata;
 use crate::{
     BuildOutputKey, BuildTarget, NativeProductProducer, PackageResult, WorkspaceGraph,
@@ -48,6 +53,45 @@ pub struct DistributionBundle {
     pub toolchain: String,
     pub bundle_dir: PathBuf,
     pub manifest_text: String,
+}
+
+pub fn distribution_bundle_is_ready(bundle_dir: &Path, expected_root_artifact: &str) -> bool {
+    let root_artifact_path = bundle_dir.join(expected_root_artifact);
+    let manifest_path = bundle_dir.join(DISTRIBUTION_MANIFEST_FILE);
+    let manifest_text = if manifest_path.is_file() {
+        match fs::read_to_string(&manifest_path) {
+            Ok(text) => text,
+            Err(_) => return false,
+        }
+    } else {
+        match read_embedded_distribution_manifest(&root_artifact_path) {
+            Ok(Some(text)) => text,
+            _ => return false,
+        }
+    };
+    if validate_distribution_manifest_text(&manifest_text).is_err() {
+        return false;
+    }
+    let Ok(value) = manifest_text.parse::<toml::Value>() else {
+        return false;
+    };
+    let Some(table) = value.as_table() else {
+        return false;
+    };
+    if table.get("root_artifact").and_then(toml::Value::as_str) != Some(expected_root_artifact) {
+        return false;
+    }
+    if !root_artifact_path.is_file() {
+        return false;
+    }
+    let Some(support_files) = table.get("support_files").and_then(toml::Value::as_array) else {
+        return false;
+    };
+    support_files.iter().all(|value| {
+        value
+            .as_str()
+            .is_some_and(|path| bundle_dir.join(path).exists())
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -75,9 +119,27 @@ struct DistributionNativeProduct {
 struct DistributionChildBinding {
     consumer_member: String,
     dependency_alias: String,
+    consumer_package_id: String,
     package_id: String,
     package_name: String,
     product_name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DistributionProviderBinding {
+    consumer_member: String,
+    dependency_alias: String,
+    consumer_package_id: String,
+    package_id: String,
+    package_name: String,
+    product_name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DistributionPackageAsset {
+    package_id: String,
+    package_name: String,
+    asset_root: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -85,6 +147,7 @@ struct StagedNativeDependencyProducts {
     files: Vec<NativeBundleFile>,
     products: Vec<DistributionNativeProduct>,
     child_bindings: Vec<DistributionChildBinding>,
+    provider_bindings: Vec<DistributionProviderBinding>,
     runtime_child_binding: Option<DistributionChildBinding>,
     root_native_product: Option<DistributionNativeProduct>,
 }
@@ -93,6 +156,7 @@ struct StagedNativeDependencyProducts {
 struct NativeSelectionPlan {
     products: Vec<DistributionNativeProduct>,
     child_bindings: Vec<DistributionChildBinding>,
+    provider_bindings: Vec<DistributionProviderBinding>,
     runtime_child_binding: Option<DistributionChildBinding>,
 }
 
@@ -146,6 +210,109 @@ pub fn default_distribution_dir_for_build(
         dir = dir.join(product);
     }
     dir
+}
+
+pub(crate) fn append_internal_native_bundle_support(
+    graph: &WorkspaceGraph,
+    root_member: &WorkspaceMember,
+    build_key: &BuildOutputKey,
+    emission: &mut AotPackageEmission,
+) -> PackageResult<()> {
+    if build_key.target_ref() != &BuildTarget::InternalAot {
+        return Ok(());
+    }
+    let temp_root = unique_native_build_dir(
+        &graph
+            .root_dir
+            .join(".arcana")
+            .join("internal-native-support"),
+        &format!("{}_{}", root_member.name, build_key.storage_key()),
+    );
+    fs::create_dir_all(&temp_root).map_err(|e| {
+        format!(
+            "failed to create internal native staging directory `{}`: {e}",
+            temp_root.display()
+        )
+    })?;
+    let staged =
+        stage_native_dependency_products(graph, &root_member.package_id, build_key, &temp_root)?;
+    let cleanup = NativeBundleCleanupGuard::from_files(&staged.files);
+    if staged.products.is_empty()
+        && staged.child_bindings.is_empty()
+        && staged.provider_bindings.is_empty()
+    {
+        drop(cleanup);
+        return Ok(());
+    }
+    let package_assets = collect_bundle_package_assets(graph, &root_member.package_id)?;
+    let root_artifact = build_key
+        .target_ref()
+        .artifact_file_name(&root_member.kind)?;
+    let mut support_paths = emission
+        .support_files
+        .iter()
+        .map(|file| file.relative_path.clone())
+        .collect::<Vec<_>>();
+    for file in &staged.files {
+        if support_paths
+            .iter()
+            .any(|existing| existing == &file.relative_path)
+        {
+            return Err(format!(
+                "duplicate internal support file path `{}` while staging native provider support",
+                file.relative_path
+            ));
+        }
+        let bytes = fs::read(&file.source_path).map_err(|e| {
+            format!(
+                "failed to read staged internal native support file `{}`: {e}",
+                file.source_path.display()
+            )
+        })?;
+        support_paths.push(file.relative_path.clone());
+        emission.support_files.push(AotEmissionFile {
+            relative_path: file.relative_path.clone(),
+            bytes,
+        });
+    }
+    let manifest_name = format!("{root_artifact}.arcana-bundle.toml");
+    if support_paths
+        .iter()
+        .any(|existing| existing == &manifest_name)
+    {
+        return Err(format!(
+            "duplicate internal support file path `{manifest_name}` while staging native provider support"
+        ));
+    }
+    support_paths.push(manifest_name.clone());
+    let support_paths =
+        collect_validated_support_file_paths(support_paths.iter().map(String::as_str))?;
+    let closure = native_product_closure_digest(graph, &root_member.package_id, build_key)?;
+    let manifest_text = render_distribution_manifest(
+        &root_member.name,
+        build_key,
+        emission.target.format(),
+        root_artifact,
+        &support_paths,
+        "",
+        "",
+        closure.as_deref(),
+        None,
+        &staged.products,
+        staged.runtime_child_binding.as_ref(),
+        &staged.child_bindings,
+        &staged.provider_bindings,
+        &package_assets,
+    );
+    emission.support_files.push(AotEmissionFile {
+        relative_path: manifest_name,
+        bytes: manifest_text.into_bytes(),
+    });
+    emission
+        .support_files
+        .sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    drop(cleanup);
+    Ok(())
 }
 
 fn distribution_member_dir_name(member: &WorkspaceMember) -> String {
@@ -257,6 +424,7 @@ pub fn stage_distribution_bundle_for_build(
         build_key,
         &metadata.artifact_hash,
     )?;
+    let package_assets = collect_bundle_package_assets(graph, &resolved_member)?;
     let staged_native_products =
         stage_native_dependency_products(graph, &resolved_member, build_key, bundle_dir)?;
     let _native_cleanup = NativeBundleCleanupGuard::from_files(&staged_native_products.files);
@@ -314,6 +482,8 @@ pub fn stage_distribution_bundle_for_build(
         &staged_native_products.products,
         staged_native_products.runtime_child_binding.as_ref(),
         &staged_native_products.child_bindings,
+        &staged_native_products.provider_bindings,
+        &package_assets,
     );
     let root_artifact_path = bundle_dir.join(&root_file_name);
     embed_distribution_manifest(&root_artifact_path, &manifest_text)?;
@@ -340,7 +510,7 @@ fn stage_native_dependency_products(
 ) -> PackageResult<StagedNativeDependencyProducts> {
     if !matches!(
         build_key.target_ref(),
-        BuildTarget::WindowsExe | BuildTarget::WindowsDll
+        BuildTarget::InternalAot | BuildTarget::WindowsExe | BuildTarget::WindowsDll
     ) {
         return Ok(StagedNativeDependencyProducts::default());
     }
@@ -465,9 +635,70 @@ fn stage_native_dependency_products(
         files: staged,
         products: staged_products,
         child_bindings: selections.child_bindings,
+        provider_bindings: selections.provider_bindings,
         runtime_child_binding: selections.runtime_child_binding,
         root_native_product: None,
     })
+}
+
+fn collect_bundle_package_assets(
+    graph: &WorkspaceGraph,
+    root_member: &str,
+) -> PackageResult<Vec<DistributionPackageAsset>> {
+    let mut pending = VecDeque::from([root_member.to_string()]);
+    let mut visited = BTreeSet::new();
+    let mut assets = Vec::new();
+    while let Some(package_id) = pending.pop_front() {
+        if !visited.insert(package_id.clone()) {
+            continue;
+        }
+        let member = graph
+            .member_by_id(&package_id)
+            .ok_or_else(|| format!("missing workspace member `{package_id}`"))?;
+        for dep in &member.deps {
+            pending.push_back(dep.clone());
+        }
+        if member_has_package_assets(member)? {
+            assets.push(DistributionPackageAsset {
+                package_id: member.package_id.clone(),
+                package_name: member.name.clone(),
+                asset_root: package_asset_bundle_dir(member),
+            });
+        }
+    }
+    assets.sort_by(|left, right| {
+        left.package_id
+            .cmp(&right.package_id)
+            .then_with(|| left.asset_root.cmp(&right.asset_root))
+    });
+    Ok(assets)
+}
+
+fn member_has_package_assets(member: &WorkspaceMember) -> PackageResult<bool> {
+    let assets_dir = member.abs_dir.join("assets");
+    if !assets_dir.is_dir() {
+        return Ok(false);
+    }
+    let mut pending = VecDeque::from([assets_dir]);
+    while let Some(dir) = pending.pop_front() {
+        for entry in fs::read_dir(&dir)
+            .map_err(|e| format!("failed to read asset directory `{}`: {e}", dir.display()))?
+        {
+            let entry = entry.map_err(|e| {
+                format!(
+                    "failed to read asset directory entry `{}`: {e}",
+                    dir.display()
+                )
+            })?;
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push_back(path);
+            } else {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 pub(crate) fn native_product_closure_digest(
@@ -475,11 +706,17 @@ pub(crate) fn native_product_closure_digest(
     root_member: &str,
     build_key: &BuildOutputKey,
 ) -> PackageResult<Option<String>> {
-    if !matches!(build_key.target_ref(), BuildTarget::WindowsExe) {
+    if !matches!(
+        build_key.target_ref(),
+        BuildTarget::InternalAot | BuildTarget::WindowsExe
+    ) {
         return Ok(None);
     }
     let selections = collect_native_dependency_product_selections(graph, root_member)?;
-    if selections.products.is_empty() && selections.child_bindings.is_empty() {
+    if selections.products.is_empty()
+        && selections.child_bindings.is_empty()
+        && selections.provider_bindings.is_empty()
+    {
         return Ok(None);
     }
     let mut hasher = Sha256::new();
@@ -512,6 +749,22 @@ pub(crate) fn native_product_closure_digest(
     for binding in &selections.child_bindings {
         hasher.update(b"\nbinding\n");
         hasher.update(binding.consumer_member.as_bytes());
+        hasher.update(b"\n");
+        hasher.update(binding.consumer_package_id.as_bytes());
+        hasher.update(b"\n");
+        hasher.update(binding.dependency_alias.as_bytes());
+        hasher.update(b"\n");
+        hasher.update(binding.package_id.as_bytes());
+        hasher.update(b"\n");
+        hasher.update(binding.package_name.as_bytes());
+        hasher.update(b"\n");
+        hasher.update(binding.product_name.as_bytes());
+    }
+    for binding in &selections.provider_bindings {
+        hasher.update(b"\nprovider_binding\n");
+        hasher.update(binding.consumer_member.as_bytes());
+        hasher.update(b"\n");
+        hasher.update(binding.consumer_package_id.as_bytes());
         hasher.update(b"\n");
         hasher.update(binding.dependency_alias.as_bytes());
         hasher.update(b"\n");
@@ -549,6 +802,7 @@ fn collect_native_dependency_product_selections(
     let mut selected_product_keys = BTreeSet::new();
     let mut products = Vec::new();
     let mut child_bindings = Vec::new();
+    let mut provider_bindings = Vec::new();
 
     while let Some(member_name) = pending.pop_front() {
         if !visited.insert(member_name.clone()) {
@@ -607,9 +861,50 @@ fn collect_native_dependency_product_selections(
                 child_bindings.push(DistributionChildBinding {
                     consumer_member: member.name.clone(),
                     dependency_alias: alias.clone(),
+                    consumer_package_id: member.package_id.clone(),
                     package_id: dependency_member.package_id.clone(),
                     package_name: dependency_member.name.clone(),
                     product_name: child.to_string(),
+                });
+            }
+            if let Some(provider) = spec.selected_native_provider() {
+                require_selected_native_product(
+                    dependency_member,
+                    provider,
+                    ArcanaCabiProductRole::Provider,
+                    alias,
+                    &member.name,
+                )?;
+                let provider_product =
+                    dependency_member.native_products.get(provider).ok_or_else(|| {
+                        format!(
+                            "dependency `{alias}` in `{}` selects native product `{provider}`, but `{}` does not define it",
+                            member.name, dependency_member.name
+                        )
+                    })?;
+                if selected_product_keys
+                    .insert((dependency_member.package_id.clone(), provider.to_string()))
+                {
+                    products.push(DistributionNativeProduct {
+                        package_id: dependency_member.package_id.clone(),
+                        package_name: dependency_member.name.clone(),
+                        product_name: provider.to_string(),
+                        role: ArcanaCabiProductRole::Provider,
+                        contract_id: provider_product.contract.clone(),
+                        contract_version: 1,
+                        producer: provider_product.producer.as_str().to_string(),
+                        sidecars: provider_product.sidecars.clone(),
+                        file: provider_product.file.clone(),
+                        file_hash: String::new(),
+                    });
+                }
+                provider_bindings.push(DistributionProviderBinding {
+                    consumer_member: member.name.clone(),
+                    dependency_alias: alias.clone(),
+                    consumer_package_id: member.package_id.clone(),
+                    package_id: dependency_member.package_id.clone(),
+                    package_name: dependency_member.name.clone(),
+                    product_name: provider.to_string(),
                 });
             }
             for plugin in &spec.native_plugins {
@@ -656,6 +951,16 @@ fn collect_native_dependency_product_selections(
     child_bindings.sort_by(|left, right| {
         left.consumer_member
             .cmp(&right.consumer_member)
+            .then_with(|| left.consumer_package_id.cmp(&right.consumer_package_id))
+            .then_with(|| left.dependency_alias.cmp(&right.dependency_alias))
+            .then_with(|| left.package_id.cmp(&right.package_id))
+            .then_with(|| left.package_name.cmp(&right.package_name))
+            .then_with(|| left.product_name.cmp(&right.product_name))
+    });
+    provider_bindings.sort_by(|left, right| {
+        left.consumer_member
+            .cmp(&right.consumer_member)
+            .then_with(|| left.consumer_package_id.cmp(&right.consumer_package_id))
             .then_with(|| left.dependency_alias.cmp(&right.dependency_alias))
             .then_with(|| left.package_id.cmp(&right.package_id))
             .then_with(|| left.package_name.cmp(&right.package_name))
@@ -708,6 +1013,7 @@ fn collect_native_dependency_product_selections(
     Ok(NativeSelectionPlan {
         products,
         child_bindings,
+        provider_bindings,
         runtime_child_binding,
     })
 }
@@ -857,7 +1163,9 @@ fn build_generated_cabi_product(
 ) -> PackageResult<Vec<NativeBundleFile>> {
     if !matches!(
         product.role,
-        ArcanaCabiProductRole::Child | ArcanaCabiProductRole::Plugin
+        ArcanaCabiProductRole::Child
+            | ArcanaCabiProductRole::Plugin
+            | ArcanaCabiProductRole::Provider
     ) {
         native_product_probe(
             "generated_product_rejected_role",
@@ -870,12 +1178,18 @@ fn build_generated_cabi_product(
             ),
         );
         return Err(format!(
-            "native product `{}` on `{}` uses producer `{}`, but generated cabi products currently support only `child` and `plugin` roles",
+            "native product `{}` on `{}` uses producer `{}`, but generated cabi products currently support only `child`, `plugin`, and `provider` roles",
             product.name,
             member.name,
             product.producer.as_str()
         ));
     }
+
+    let package_image_text = if product.role == ArcanaCabiProductRole::Provider {
+        Some(load_member_provider_package_text(graph, member)?)
+    } else {
+        None
+    };
 
     let project_parent_dir = repo_root()
         .join("target")
@@ -898,11 +1212,17 @@ fn build_generated_cabi_product(
     })?;
     let compiled = compile_instance_product(
         &AotInstanceProductSpec {
+            package_id: member.package_id.clone(),
             package_name: member.name.clone(),
             product_name: product.name.clone(),
             role: product.role,
             contract_id: product.contract.clone(),
             output_file_name: product.file.clone(),
+            package_image_text,
+            provider_dir: product
+                .provider_dir
+                .as_ref()
+                .map(|dir| member.abs_dir.join(dir)),
         },
         &project_dir,
         &target_dir,
@@ -933,6 +1253,13 @@ fn build_generated_cabi_product(
     validate_native_product_dependency_closure(member, product, &files)?;
     validate_native_product_cabi_contract(member, product, &files)?;
     Ok(files)
+}
+
+fn load_member_provider_package_text(
+    graph: &WorkspaceGraph,
+    member: &WorkspaceMember,
+) -> PackageResult<String> {
+    render_member_internal_package_image(graph, &member.package_id)
 }
 
 fn distribution_root_native_product(
@@ -1201,6 +1528,7 @@ fn windows_system_dll_allowed(name: &str) -> bool {
             "advapi32.dll"
                 | "avrt.dll"
                 | "bcrypt.dll"
+                | "bcryptprimitives.dll"
                 | "cfgmgr32.dll"
                 | "combase.dll"
                 | "comctl32.dll"
@@ -1386,6 +1714,8 @@ fn render_distribution_manifest(
     native_products: &[DistributionNativeProduct],
     runtime_child_binding: Option<&DistributionChildBinding>,
     child_bindings: &[DistributionChildBinding],
+    provider_bindings: &[DistributionProviderBinding],
+    package_assets: &[DistributionPackageAsset],
 ) -> String {
     let support_files = support_files
         .iter()
@@ -1468,6 +1798,37 @@ fn render_distribution_manifest(
             escape_toml(&binding.consumer_member)
         ));
         rendered.push_str(&format!(
+            "consumer_package_id = \"{}\"\n",
+            escape_toml(&binding.consumer_package_id)
+        ));
+        rendered.push_str(&format!(
+            "dependency_alias = \"{}\"\n",
+            escape_toml(&binding.dependency_alias)
+        ));
+        rendered.push_str(&format!(
+            "package_id = \"{}\"\n",
+            escape_toml(&binding.package_id)
+        ));
+        rendered.push_str(&format!(
+            "package_name = \"{}\"\n",
+            escape_toml(&binding.package_name)
+        ));
+        rendered.push_str(&format!(
+            "product_name = \"{}\"\n",
+            escape_toml(&binding.product_name)
+        ));
+    }
+    for binding in provider_bindings {
+        rendered.push_str("\n[[provider_bindings]]\n");
+        rendered.push_str(&format!(
+            "consumer_member = \"{}\"\n",
+            escape_toml(&binding.consumer_member)
+        ));
+        rendered.push_str(&format!(
+            "consumer_package_id = \"{}\"\n",
+            escape_toml(&binding.consumer_package_id)
+        ));
+        rendered.push_str(&format!(
             "dependency_alias = \"{}\"\n",
             escape_toml(&binding.dependency_alias)
         ));
@@ -1545,6 +1906,21 @@ fn render_distribution_manifest(
         rendered.push_str(&format!(
             "product_name = \"{}\"\n",
             escape_toml(&binding.product_name)
+        ));
+    }
+    for asset in package_assets {
+        rendered.push_str("\n[[package_assets]]\n");
+        rendered.push_str(&format!(
+            "package_id = \"{}\"\n",
+            escape_toml(&asset.package_id)
+        ));
+        rendered.push_str(&format!(
+            "package_name = \"{}\"\n",
+            escape_toml(&asset.package_name)
+        ));
+        rendered.push_str(&format!(
+            "asset_root = \"{}\"\n",
+            escape_toml(&asset.asset_root)
         ));
     }
     rendered
@@ -1815,6 +2191,18 @@ fn validate_native_product_descriptor_from_staged_root(
                     product.name,
                     member.name,
                     plugin_ops.base.ops_size,
+                    std::mem::size_of::<ArcanaCabiInstanceOpsV1>()
+                ));
+            }
+        }
+        ArcanaCabiProductRole::Provider => {
+            let provider_ops = unsafe { &*(api.role_ops as *const ArcanaCabiProviderOpsV1) };
+            if provider_ops.base.ops_size < std::mem::size_of::<ArcanaCabiInstanceOpsV1>() {
+                return Err(format!(
+                    "native provider product `{}` on `{}` reported instance ops size {} smaller than expected {}",
+                    product.name,
+                    member.name,
+                    provider_ops.base.ops_size,
                     std::mem::size_of::<ArcanaCabiInstanceOpsV1>()
                 ));
             }

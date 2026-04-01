@@ -1,0 +1,5 @@
+name = "forewords_proof_workspace"
+kind = "lib"
+
+[workspace]
+members = ["app", "tool"]

@@ -10,9 +10,10 @@ This document freezes the rewrite-owned native product and foreign ABI direction
 
 It defines:
 - `crates/arcana-cabi` as the only owner of Arcana's foreign ABI contract
-- the native product roles `export`, `child`, and `plugin`
+- the native product roles `export`, `child`, `plugin`, and `provider`
 - the generic descriptor/ops-table shape
 - the exported `edit` write-back contract
+- the typed provider callable/value/opaque contract
 - the rule that generated headers, runtime JSON ABI, and native bundle manifests are projections of the cabi contract rather than independent ABI owners
 
 ## Contract Owner
@@ -23,7 +24,7 @@ It defines:
   - product role ids
   - owned/view value structs
   - export metadata shape
-  - instance ops shape for `child` and `plugin`
+  - instance ops shape for `child`, `plugin`, and `provider`
   - contract ids and versions
 - `arcana-runtime` and `arcana-aot` may project, consume, or serialize this contract, but they must not define a separate competing public ABI.
 
@@ -53,11 +54,19 @@ It defines:
 - Enumeration/open scope comes from bundle manifest product rows, not arbitrary bundle directory scans.
 - Every open yields a fresh instance.
 
+### `provider`
+
+- Dependency-scoped typed package-library provider loaded from bundle-declared provider bindings.
+- Activation is explicit on dependency edges through `native_provider`; it is not inferred from dependency presence or package name.
+- Instances are keyed by `(consumer_member, dependency_alias)`.
+- The provider contract exists so grimoires and external packages can ship typed APIs plus opaque handles without runtime package-name special-casing.
+- Runtime may host provider instances generically, but it must not encode package-specific behavior in the substrate fast path.
+
 ## Native Product Declaration
 
 - Named native products are declared under `[native.products.<name>]` in `book.toml`.
 - Current product kind is `dll`.
-- Current roles are `export`, `child`, and `plugin`.
+- Current roles are `export`, `child`, `plugin`, and `provider`.
 - Current producers are:
   - `arcana-source`
   - `rust-cdylib`
@@ -122,6 +131,42 @@ It defines:
   - `last_error_alloc`
   - `owned_bytes_free`
 
+### `provider`
+
+- `role_ops` points at `ArcanaCabiProviderOpsV1`.
+- Its first field is the shared `ArcanaCabiInstanceOpsV1` base.
+- It additionally provides:
+  - `describe`
+    - returns typed callable metadata plus provider-declared opaque-family metadata
+  - `invoke_callable`
+    - request: typed provider value rows encoded by the cabi-owned provider codec
+    - result: typed provider result plus explicit `edit` write-backs encoded by the same codec
+  - `retain_opaque`
+  - `release_opaque`
+  - `last_error_alloc`
+  - `owned_bytes_free`
+
+## Provider Value Contract
+
+- `arcana.cabi.provider.v1` owns a structured typed value codec for provider calls.
+- The codec is generic and versioned; it is not a free-form plugin blob and not a JSON transport.
+- It must carry:
+  - `Int`
+  - `Bool`
+  - `Str`
+  - `Unit`
+  - byte arrays
+  - `Pair`
+  - `List`
+  - `Map`
+  - integer ranges
+  - named records
+  - named variants
+  - runtime-owned substrate opaque handles
+  - provider-owned opaque handles
+- Provider `edit` params are represented as input values plus explicit write-backs in the provider outcome payload.
+- Owner handles, refs, and erased Arcana-value carriers must not cross the provider boundary.
+
 ## Export Contract
 
 - Exported routine symbols remain the primary interop surface.
@@ -155,7 +200,10 @@ It defines:
   - optional `[runtime_child_binding]`
   - `[[native_products]]`
   - `[[child_bindings]]`
+- Distribution manifests must additionally retain `[[provider_bindings]]` rows keyed by consumer member, dependency alias, provider package id, and provider product name.
+- Distribution manifests may additionally retain `[[package_assets]]` rows keyed by `package_id` plus staged `asset_root` so packaged runtimes can resolve package-owned bundled assets without source-path assumptions.
 - Packaging must stage only the declared product file plus declared sidecars.
+- Packaging must also stage package-owned `assets/` trees under deterministic package-id-keyed bundle roots when the built member or its dependency closure exports such assets.
 - Packaging must validate declared `rust-cdylib` products against their cabi package/product/role/contract/version descriptor before staging succeeds.
 - Packaging must fail when a produced DLL depends on undeclared non-system DLLs.
 - Rust `std-*.dll` scavenging is forbidden.
@@ -163,5 +211,5 @@ It defines:
 ## Legacy Compatibility
 
 - `native_delivery = "dll"` is a deprecated compatibility alias for `native_child = "default"`.
-- New manifests should write `native_child` and `native_plugins` explicitly.
+- New manifests should write `native_child`, `native_provider`, and `native_plugins` explicitly.
 - `windows-dll` remains the compatibility target name even though it now covers the full root DLL product lane, not only legacy export builds.

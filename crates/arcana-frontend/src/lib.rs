@@ -7938,7 +7938,6 @@ fn lower_registration_row(row: &arcana_hir::HirForewordRegistrationRow) -> Forew
 }
 
 fn validate_symbol_declared_forewords(
-    workspace: &HirWorkspaceSummary,
     package: &HirWorkspacePackage,
     module: &HirModuleSummary,
     symbol: &HirSymbol,
@@ -7995,7 +7994,7 @@ fn validate_symbol_declared_forewords(
             public,
             target_generated_by,
             registry,
-            &[symbol_lint_layer.clone()],
+            std::slice::from_ref(&symbol_lint_layer),
             warnings,
             diagnostics,
             index,
@@ -8014,7 +8013,7 @@ fn validate_symbol_declared_forewords(
                     public,
                     target_generated_by,
                     registry,
-                    &[symbol_lint_layer.clone()],
+                    std::slice::from_ref(&symbol_lint_layer),
                     warnings,
                     diagnostics,
                     index,
@@ -8033,7 +8032,7 @@ fn validate_symbol_declared_forewords(
                     public,
                     target_generated_by,
                     registry,
-                    &[symbol_lint_layer.clone()],
+                    std::slice::from_ref(&symbol_lint_layer),
                     warnings,
                     diagnostics,
                     index,
@@ -8044,7 +8043,6 @@ fn validate_symbol_declared_forewords(
                     .chain(inherited_lint_layers.iter().cloned())
                     .collect::<Vec<_>>();
                 validate_symbol_declared_forewords(
-                    workspace,
                     package,
                     module,
                     method,
@@ -8065,7 +8063,6 @@ fn validate_symbol_declared_forewords(
                     .chain(inherited_lint_layers.iter().cloned())
                     .collect::<Vec<_>>();
                 validate_symbol_declared_forewords(
-                    workspace,
                     package,
                     module,
                     method,
@@ -8961,7 +8958,6 @@ fn validate_module_foreword_semantics(
 
     for symbol in &module.symbols {
         validate_symbol_declared_forewords(
-            workspace,
             package,
             module,
             symbol,
@@ -9039,7 +9035,6 @@ fn validate_module_foreword_semantics(
         }
         for method in &impl_decl.methods {
             validate_symbol_declared_forewords(
-                workspace,
                 package,
                 module,
                 method,
@@ -9171,8 +9166,10 @@ fn validate_module_semantics(
             });
         }
         validate_memory_spec_decl_semantics(&module_path, spec, true, diagnostics);
-        let mut region_scope = ValueScope::default();
-        region_scope.headed_region_depth = 1;
+        let region_scope = ValueScope {
+            headed_region_depth: 1,
+            ..ValueScope::default()
+        };
         if let Some(modifier) = &spec.default_modifier
             && let Some(payload) = &modifier.payload
         {
@@ -13296,8 +13293,7 @@ fn validate_expr_semantics(
                             });
                         } else if !memory_family_descriptor(memory_spec.family)
                             .phrase_consumers
-                            .iter()
-                            .any(|consumer| *consumer == "memory_phrase")
+                            .contains(&"memory_phrase")
                         {
                             diagnostics.push(Diagnostic {
                                 path: module_path.to_path_buf(),

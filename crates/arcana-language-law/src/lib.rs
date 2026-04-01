@@ -313,6 +313,5 @@ pub fn memory_detail_descriptor(
 pub fn memory_modifier_allowed(family: MemoryFamily, modifier: &str) -> bool {
     memory_family_descriptor(family)
         .supported_modifiers
-        .iter()
-        .any(|allowed| *allowed == modifier)
+        .contains(&modifier)
 }

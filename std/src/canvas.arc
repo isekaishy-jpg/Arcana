@@ -109,6 +109,12 @@ export fn rgb(r: Int, g: Int, b: Int) -> Int:
 export fn image_load(path: Str) -> Result[Image, Str]:
     return std.kernel.gfx.image_load :: path :: call
 
+export fn image_create(width: Int, height: Int) -> Image:
+    return std.kernel.gfx.canvas_image_create :: width, height :: call
+
+export fn image_replace_rgba(edit img: Image, read rgba: Array[Int]):
+    std.kernel.gfx.canvas_image_replace_rgba :: img, rgba :: call
+
 export fn image_size(read img: Image) -> (Int, Int):
     return std.kernel.gfx.canvas_image_size :: img :: call
 

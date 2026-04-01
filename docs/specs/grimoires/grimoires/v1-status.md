@@ -39,9 +39,9 @@ current_package: `grimoires/owned/libs/arcana-text`
 historical_seed: archived MeadowLang desktop app corpus
 why: Arcana-owned text draw, shaping, layout, and text-asset boundary above `std.canvas`, `std.text`, and `std.fs`
 current_source: rewrite-owned-in-progress
-still_needs_rebuild: grow the current package beyond label wrappers into a cosmic-text-class text/layout layer while keeping file IO itself in `std.fs`
-update_note: file IO remains host-core std surface; text asset helpers may layer on top, but this grimoire should not redefine `std.fs`
-promotion_condition: a rewrite-owned text grimoire exists and proves text draw plus text-asset flows without pushing file APIs into grimoire policy
+still_needs_rebuild: grow the current rewrite-owned paragraph/builder/font-collection foundation into full SkParagraph-class shaping, fallback, and glyph rasterization while keeping file IO itself in `std.fs`
+update_note: the scaffold-era `arcana_text -> arcana_desktop` label wrapper path has been removed from the public design center. `arcana_text` now owns paragraph handles, builder/style records, font-collection APIs, paragraph metrics queries, mutable paragraph updates, package-id-keyed bundled asset resolution, a vendored Monaspace `v1.400` desktop asset set, and a package-owned default provider product, with first-party proof/template callers moved onto the paragraph path instead of `arcana_text.labels.*`. Runtime now hosts text only through the generic provider lane plus minimal canvas/image substrate; it no longer hardcodes `arcana_text.*` dispatch or fixed text opaque families. The current implementation is still bootstrap-level and uses a source-backed bitmap paragraph engine rather than final font parsing/shaping/raster code, but the contract now points in the right direction: no desktop helper layer, no third-party text crate dependence, no public label-wrapper facade, and no runtime-builtin text grimoire.
+promotion_condition: a rewrite-owned text grimoire exists and proves paragraph layout, text draw, and text-asset flows without pushing file APIs into grimoire policy or falling back to scaffold-era label wrappers
 
 id: GRIMOIRE-AUDIO
 classification: bootstrap-required

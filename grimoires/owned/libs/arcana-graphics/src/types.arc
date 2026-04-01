@@ -1,3 +1,6 @@
+export record Paint:
+    color: Int
+
 export record RectSpec:
     pos: (Int, Int)
     size: (Int, Int)

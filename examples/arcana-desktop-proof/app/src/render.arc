@@ -1,7 +1,10 @@
 import actions
 import arcana_desktop.monitor
 import arcana_desktop.window
-import arcana_text.labels
+import arcana_text.builder
+import arcana_text.fonts
+import arcana_text.paragraphs
+import arcana_text.types
 import demo_types
 import layout
 import pages
@@ -17,6 +20,11 @@ record TextBlock:
     pos: (Int, Int)
     layout: (Int, Int)
     text_and_color: (Str, Int)
+
+record TextLabel:
+    pos: (Int, Int)
+    text: Str
+    color: Int
 
 record WrappedLinesBlock:
     pos: (Int, Int)
@@ -45,19 +53,38 @@ record ControlDeckState:
     cursor_grabbed: Bool
     composition_area_active: Bool
 
-fn draw_label(read win: arcana_desktop.types.Window, read spec: arcana_text.types.LabelSpec):
-    arcana_text.labels.label :: win, spec :: call
+fn draw_label(edit win: arcana_desktop.types.Window, read spec: render.TextLabel):
+    let collection = arcana_text.fonts.default_collection :: :: call
+    let style = arcana_text.types.default_text_style :: spec.color :: call
+    let paragraph_style = arcana_text.types.default_paragraph_style :: :: call
+    let mut builder = arcana_text.builder.open :: collection, paragraph_style :: call
+    arcana_text.builder.push_style :: builder, style :: call
+    arcana_text.builder.add_text :: builder, spec.text :: call
+    let mut paragraph = arcana_text.builder.build :: builder :: call
+    arcana_text.paragraphs.layout :: paragraph, 0 :: call
+    arcana_text.paragraphs.paint :: win, paragraph, spec.pos :: call
+
+fn measure_text(text: Str) -> (Int, Int):
+    let collection = arcana_text.fonts.default_collection :: :: call
+    let style = arcana_text.types.default_text_style :: (rgb :: 255, 255, 255 :: call) :: call
+    let paragraph_style = arcana_text.types.default_paragraph_style :: :: call
+    let mut builder = arcana_text.builder.open :: collection, paragraph_style :: call
+    arcana_text.builder.push_style :: builder, style :: call
+    arcana_text.builder.add_text :: builder, text :: call
+    let mut paragraph = arcana_text.builder.build :: builder :: call
+    arcana_text.paragraphs.layout :: paragraph, 0 :: call
+    return ((arcana_text.paragraphs.longest_line :: paragraph :: call), (arcana_text.paragraphs.height :: paragraph :: call))
 
 fn rgb(r: Int, g: Int, b: Int) -> Int:
     return arcana_graphics.canvas.rgb :: r, g, b :: call
 
-fn fill_rect(read win: arcana_desktop.types.Window, read spec: arcana_graphics.types.RectSpec):
+fn fill_rect(edit win: arcana_desktop.types.Window, read spec: arcana_graphics.types.RectSpec):
     arcana_graphics.canvas.rect :: win, spec :: call
 
-fn stroke_line(read win: arcana_desktop.types.Window, read spec: arcana_graphics.types.LineSpec):
+fn stroke_line(edit win: arcana_desktop.types.Window, read spec: arcana_graphics.types.LineSpec):
     arcana_graphics.canvas.line :: win, spec :: call
 
-fn fill_circle(read win: arcana_desktop.types.Window, read spec: arcana_graphics.types.CircleFillSpec):
+fn fill_circle(edit win: arcana_desktop.types.Window, read spec: arcana_graphics.types.CircleFillSpec):
     arcana_graphics.canvas.circle_fill :: win, spec :: call
 
 fn bool_name(value: Bool) -> Str:
@@ -153,7 +180,7 @@ fn push_wrapped_line(edit out: List[Str], read source: Str, max_width: Int):
         let mut candidate = word
         if current != "":
             candidate = current + " " + word
-        let size = arcana_desktop.canvas.label_size :: candidate :: call
+        let size = measure_text :: candidate :: call
         if current == "" or size.0 <= max_width:
             current = candidate
         else:
@@ -169,25 +196,25 @@ export fn wrapped_lines(read text: Str, max_width: Int) -> List[Str]:
         push_wrapped_line :: out, value, max_width :: call
     return out
 
-fn draw_wrapped_lines(read win: arcana_desktop.types.Window, read lines: List[Str], read block: render.WrappedLinesBlock):
+fn draw_wrapped_lines(edit win: arcana_desktop.types.Window, read lines: List[Str], read block: render.WrappedLinesBlock):
     let mut y = block.pos.1
     let mut shown = 0
     for value in lines:
         if shown >= block.max_lines:
             return
-        draw_label :: win, (arcana_text.types.LabelSpec :: pos = (block.pos.0, y), text = value, color = block.color :: call) :: call
+        draw_label :: win, (render.TextLabel :: pos = (block.pos.0, y), text = value, color = block.color :: call) :: call
         y += 18
         shown += 1
 
-fn draw_metric_line(read win: arcana_desktop.types.Window, read spec: render.MetricLine):
-    draw_label :: win, (arcana_text.types.LabelSpec :: pos = spec.pos, text = spec.text.0, color = spec.colors.0 :: call) :: call
-    draw_label :: win, (arcana_text.types.LabelSpec :: pos = (spec.pos.0 + 112, spec.pos.1), text = spec.text.1, color = spec.colors.1 :: call) :: call
+fn draw_metric_line(edit win: arcana_desktop.types.Window, read spec: render.MetricLine):
+    draw_label :: win, (render.TextLabel :: pos = spec.pos, text = spec.text.0, color = spec.colors.0 :: call) :: call
+    draw_label :: win, (render.TextLabel :: pos = (spec.pos.0 + 112, spec.pos.1), text = spec.text.1, color = spec.colors.1 :: call) :: call
 
-fn draw_card(read win: arcana_desktop.types.Window, read payload: (render.CardBlock, render.Palette)):
+fn draw_card(edit win: arcana_desktop.types.Window, read payload: (render.CardBlock, render.Palette)):
     let pos = payload.0
     let palette = payload.1
     fill_rect :: win, (arcana_graphics.types.RectSpec :: pos = pos.pos, size = pos.size, color = (rgb :: 17, 27, 39 :: call) :: call) :: call
-    draw_label :: win, (arcana_text.types.LabelSpec :: pos = (pos.pos.0 + 12, pos.pos.1 + 14), text = pos.title, color = palette.accent :: call) :: call
+    draw_label :: win, (render.TextLabel :: pos = (pos.pos.0 + 12, pos.pos.1 + 14), text = pos.title, color = palette.accent :: call) :: call
 
 fn control_deck_state(read win: arcana_desktop.types.Window) -> render.ControlDeckState:
     let settings = arcana_desktop.window.settings :: win :: call
@@ -252,26 +279,26 @@ fn button_fill(read self: demo_types.Demo, id: Int, read deck: render.ControlDec
         color = rgb :: 43, 84, 100 :: call
     return color
 
-fn draw_header(read self: demo_types.Demo, read win: arcana_desktop.types.Window, read payload: (layout.ViewLayout, render.Palette)):
+fn draw_header(read self: demo_types.Demo, edit win: arcana_desktop.types.Window, read payload: (layout.ViewLayout, render.Palette)):
     let view = payload.0
     let palette = payload.1
     fill_rect :: win, (arcana_graphics.types.RectSpec :: pos = (0, 0), size = (view.window_size.0, view.header_height), color = palette.surfaces.1.0 :: call) :: call
     fill_rect :: win, (arcana_graphics.types.RectSpec :: pos = (0, view.header_height - 4), size = (view.window_size.0, 4), color = palette.tones.0 :: call) :: call
-    draw_label :: win, (arcana_text.types.LabelSpec :: pos = (24, 24), text = "Arcana Desktop", color = palette.accent :: call) :: call
-    draw_label :: win, (arcana_text.types.LabelSpec :: pos = (24, 48), text = "authoritative shell showcase", color = palette.tones.1.1 :: call) :: call
-    draw_label :: win, (arcana_text.types.LabelSpec :: pos = (view.center_panel.pos.0, 24), text = (pages.title :: self.page_index :: call), color = palette.tones.1.0 :: call) :: call
-    draw_label :: win, (arcana_text.types.LabelSpec :: pos = (view.center_panel.pos.0, 48), text = (self.status_head + " :: " + self.status_tail), color = palette.tones.1.1 :: call) :: call
-    draw_label :: win, (arcana_text.types.LabelSpec :: pos = (view.right_panel.pos.0, 24), text = "Desktop State", color = palette.tones.1.0 :: call) :: call
-    draw_label :: win, (arcana_text.types.LabelSpec :: pos = (view.right_panel.pos.0, 48), text = ("last monitor " + self.last_monitor), color = palette.tones.1.1 :: call) :: call
-    draw_label :: win, (arcana_text.types.LabelSpec :: pos = (view.left_panel.pos.0, 68), text = "Control Deck", color = palette.tones.1.1 :: call) :: call
-    draw_label :: win, (arcana_text.types.LabelSpec :: pos = (view.center_panel.pos.0, 68), text = "Guide Page", color = palette.tones.1.1 :: call) :: call
-    draw_label :: win, (arcana_text.types.LabelSpec :: pos = (view.right_panel.pos.0, 68), text = "Live Readback", color = palette.tones.1.1 :: call) :: call
+    draw_label :: win, (render.TextLabel :: pos = (24, 24), text = "Arcana Desktop", color = palette.accent :: call) :: call
+    draw_label :: win, (render.TextLabel :: pos = (24, 48), text = "authoritative shell showcase", color = palette.tones.1.1 :: call) :: call
+    draw_label :: win, (render.TextLabel :: pos = (view.center_panel.pos.0, 24), text = (pages.title :: self.page_index :: call), color = palette.tones.1.0 :: call) :: call
+    draw_label :: win, (render.TextLabel :: pos = (view.center_panel.pos.0, 48), text = (self.status_head + " :: " + self.status_tail), color = palette.tones.1.1 :: call) :: call
+    draw_label :: win, (render.TextLabel :: pos = (view.right_panel.pos.0, 24), text = "Desktop State", color = palette.tones.1.0 :: call) :: call
+    draw_label :: win, (render.TextLabel :: pos = (view.right_panel.pos.0, 48), text = ("last monitor " + self.last_monitor), color = palette.tones.1.1 :: call) :: call
+    draw_label :: win, (render.TextLabel :: pos = (view.left_panel.pos.0, 68), text = "Control Deck", color = palette.tones.1.1 :: call) :: call
+    draw_label :: win, (render.TextLabel :: pos = (view.center_panel.pos.0, 68), text = "Guide Page", color = palette.tones.1.1 :: call) :: call
+    draw_label :: win, (render.TextLabel :: pos = (view.right_panel.pos.0, 68), text = "Live Readback", color = palette.tones.1.1 :: call) :: call
     let mut badge = rgb :: 73, 92, 109 :: call
     if self.pending_wake:
         badge = rgb :: 222, 160, 76 :: call
     fill_circle :: win, (arcana_graphics.types.CircleFillSpec :: center = (view.left_panel.pos.0 + view.left_panel.size.0 - 26, 42), radius = 8, color = badge :: call) :: call
 
-fn draw_controls(read self: demo_types.Demo, read win: arcana_desktop.types.Window, read payload: (layout.ViewLayout, render.Palette)):
+fn draw_controls(read self: demo_types.Demo, edit win: arcana_desktop.types.Window, read payload: (layout.ViewLayout, render.Palette)):
     let view = payload.0
     let palette = payload.1
     let deck = control_deck_state :: win :: call
@@ -282,16 +309,16 @@ fn draw_controls(read self: demo_types.Demo, read win: arcana_desktop.types.Wind
         let rect = layout.button_rect :: view, id :: call
         let fill = button_fill :: self, id, deck :: call
         fill_rect :: win, (arcana_graphics.types.RectSpec :: pos = rect.pos, size = rect.size, color = fill :: call) :: call
-        draw_label :: win, (arcana_text.types.LabelSpec :: pos = (rect.pos.0 + 10, rect.pos.1 + 8), text = (actions.button_label :: id :: call), color = palette.tones.1.0 :: call) :: call
+        draw_label :: win, (render.TextLabel :: pos = (rect.pos.0 + 10, rect.pos.1 + 8), text = (actions.button_label :: id :: call), color = palette.tones.1.0 :: call) :: call
         id += 1
 
-export fn draw_controls_only(read self: demo_types.Demo, read win: arcana_desktop.types.Window):
+export fn draw_controls_only(read self: demo_types.Demo, edit win: arcana_desktop.types.Window):
     let view = layout.for_window :: (arcana_desktop.window.size :: win :: call) :: call
     let palette = render.Palette :: surfaces = ((rgb :: 8, 13, 21 :: call), ((rgb :: 12, 18, 28 :: call), (rgb :: 13, 20, 31 :: call))), tones = ((rgb :: 32, 54, 75 :: call), ((rgb :: 233, 237, 242 :: call), (rgb :: 161, 173, 186 :: call))), accent = (rgb :: 113, 214, 225 :: call) :: call
     draw_controls :: self, win, (view, palette) :: call
     arcana_graphics.canvas.present :: win :: call
 
-fn draw_center_panel(read self: demo_types.Demo, read win: arcana_desktop.types.Window, read payload: (layout.ViewLayout, render.Palette)):
+fn draw_center_panel(read self: demo_types.Demo, edit win: arcana_desktop.types.Window, read payload: (layout.ViewLayout, render.Palette)):
     let view = payload.0
     let palette = payload.1
     let inset = 18
@@ -303,14 +330,14 @@ fn draw_center_panel(read self: demo_types.Demo, read win: arcana_desktop.types.
     fill_rect :: win, (arcana_graphics.types.RectSpec :: pos = view.center_panel.pos, size = view.center_panel.size, color = palette.surfaces.1.1 :: call) :: call
     stroke_line :: win, (arcana_graphics.types.LineSpec :: start = (view.center_panel.pos.0, view.center_panel.pos.1), end = (view.center_panel.pos.0 + view.center_panel.size.0, view.center_panel.pos.1), color = palette.tones.0 :: call) :: call
     fill_rect :: win, (arcana_graphics.types.RectSpec :: pos = (inner_x, inner_y), size = (inner_w, 72), color = (rgb :: 17, 27, 39 :: call) :: call) :: call
-    draw_label :: win, (arcana_text.types.LabelSpec :: pos = (inner_x + 16, inner_y + 14), text = (pages.title :: self.page_index :: call), color = palette.accent :: call) :: call
-    draw_label :: win, (arcana_text.types.LabelSpec :: pos = (inner_x + 16, inner_y + 38), text = self.status_tail, color = palette.tones.1.0 :: call) :: call
+    draw_label :: win, (render.TextLabel :: pos = (inner_x + 16, inner_y + 14), text = (pages.title :: self.page_index :: call), color = palette.accent :: call) :: call
+    draw_label :: win, (render.TextLabel :: pos = (inner_x + 16, inner_y + 38), text = self.status_tail, color = palette.tones.1.0 :: call) :: call
     fill_rect :: win, (arcana_graphics.types.RectSpec :: pos = (inner_x, body_y), size = (inner_w, view.center_panel.size.1 - 180), color = (rgb :: 18, 23, 33 :: call) :: call) :: call
     draw_wrapped_lines :: win, self.body_lines, (render.WrappedLinesBlock :: pos = (inner_x + 16, body_y + 14), max_lines = 20, color = palette.tones.1.0 :: call) :: call
     fill_rect :: win, (arcana_graphics.types.RectSpec :: pos = (inner_x, footer_y), size = (inner_w, 40), color = (rgb :: 17, 27, 39 :: call) :: call) :: call
-    draw_label :: win, (arcana_text.types.LabelSpec :: pos = (inner_x + 12, footer_y + 12), text = "Q / E page  |  W wake  |  N second  |  Esc exit", color = palette.tones.1.1 :: call) :: call
+    draw_label :: win, (render.TextLabel :: pos = (inner_x + 12, footer_y + 12), text = "Q / E page  |  W wake  |  N second  |  Esc exit", color = palette.tones.1.1 :: call) :: call
 
-fn draw_session_panel(read self: demo_types.Demo, read win: arcana_desktop.types.Window, read payload: (layout.ViewLayout, render.Palette)):
+fn draw_session_panel(read self: demo_types.Demo, edit win: arcana_desktop.types.Window, read payload: (layout.ViewLayout, render.Palette)):
     let view = payload.0
     let palette = payload.1
     let x = view.right_panel.pos.0 + 18
@@ -322,6 +349,14 @@ fn draw_session_panel(read self: demo_types.Demo, read win: arcana_desktop.types
     let current_monitor = arcana_desktop.monitor.current :: win :: call
     let primary_monitor = arcana_desktop.monitor.primary :: :: call
     let monitor_count = arcana_desktop.monitor.count :: :: call
+    let scale_milli = arcana_desktop.window.scale_factor_milli :: win :: call
+    let focused = arcana_desktop.window.focused :: win :: call
+    let resized = arcana_desktop.window.resized :: win :: call
+    let maximized = arcana_desktop.window.maximized :: win :: call
+    let minimized = arcana_desktop.window.minimized :: win :: call
+    let theme = arcana_desktop.window.theme :: win :: call
+    let current_monitor_name = current_monitor.name
+    let primary_monitor_name = primary_monitor.name
     let mut first_monitor = "-"
     if monitor_count > 0:
         first_monitor = (arcana_desktop.monitor.get :: 0 :: call).name
@@ -336,17 +371,17 @@ fn draw_session_panel(read self: demo_types.Demo, read win: arcana_desktop.types
     draw_metric_line :: win, (render.MetricLine :: pos = (x + 12, card1_pos.1 + 76), text = ("pos", (point_text :: settings.bounds.position :: call)), colors = (palette.tones.1.1, palette.tones.1.0) :: call) :: call
     draw_metric_line :: win, (render.MetricLine :: pos = (x + 12, card1_pos.1 + 94), text = ("min", (bounds_text :: settings.bounds.min_size :: call)), colors = (palette.tones.1.1, palette.tones.1.0) :: call) :: call
     draw_metric_line :: win, (render.MetricLine :: pos = (x + 12, card1_pos.1 + 112), text = ("max", (bounds_text :: settings.bounds.max_size :: call)), colors = (palette.tones.1.1, palette.tones.1.0) :: call) :: call
-    draw_metric_line :: win, (render.MetricLine :: pos = (x + 12, card1_pos.1 + 130), text = ("scale", (scale_text :: (arcana_desktop.window.scale_factor_milli :: win :: call) :: call)), colors = (palette.tones.1.1, palette.tones.1.0) :: call) :: call
+    draw_metric_line :: win, (render.MetricLine :: pos = (x + 12, card1_pos.1 + 130), text = ("scale", (scale_text :: scale_milli :: call)), colors = (palette.tones.1.1, palette.tones.1.0) :: call) :: call
     draw_metric_line :: win, (render.MetricLine :: pos = (x + 12, card1_pos.1 + 148), text = ("monitors", ((std.text.from_int :: monitor_count :: call) + "  first " + first_monitor)), colors = (palette.tones.1.1, palette.tones.1.0) :: call) :: call
 
     let card2_pos = (x, card1_pos.1 + card1_size.1 + 18)
     let card2_size = (w, 130)
     draw_card :: win, ((render.CardBlock :: pos = card2_pos, size = card2_size, title = "Window State" :: call), palette) :: call
-    draw_metric_line :: win, (render.MetricLine :: pos = (x + 12, card2_pos.1 + 40), text = ("shown", ((bool_name :: settings.bounds.visible :: call) + " / focus " + (bool_name :: (arcana_desktop.window.focused :: win :: call) :: call) + " / resize " + (bool_name :: (arcana_desktop.window.resized :: win :: call) :: call))), colors = (palette.tones.1.1, palette.tones.1.0) :: call) :: call
+    draw_metric_line :: win, (render.MetricLine :: pos = (x + 12, card2_pos.1 + 40), text = ("shown", ((bool_name :: settings.bounds.visible :: call) + " / focus " + (bool_name :: focused :: call) + " / resize " + (bool_name :: resized :: call))), colors = (palette.tones.1.1, palette.tones.1.0) :: call) :: call
     draw_metric_line :: win, (render.MetricLine :: pos = (x + 12, card2_pos.1 + 58), text = ("chrome", ((bool_name :: settings.options.style.decorated :: call) + " / resize " + (bool_name :: settings.options.style.resizable :: call))), colors = (palette.tones.1.1, palette.tones.1.0) :: call) :: call
     draw_metric_line :: win, (render.MetricLine :: pos = (x + 12, card2_pos.1 + 76), text = ("layer", ((bool_name :: settings.options.style.transparent :: call) + " / top " + (bool_name :: settings.options.state.topmost :: call))), colors = (palette.tones.1.1, palette.tones.1.0) :: call) :: call
-    draw_metric_line :: win, (render.MetricLine :: pos = (x + 12, card2_pos.1 + 94), text = ("state", ((bool_name :: settings.options.state.fullscreen :: call) + " / " + (bool_name :: (arcana_desktop.window.maximized :: win :: call) :: call) + " / " + (bool_name :: (arcana_desktop.window.minimized :: win :: call) :: call))), colors = (palette.tones.1.1, palette.tones.1.0) :: call) :: call
-    draw_metric_line :: win, (render.MetricLine :: pos = (x + 12, card2_pos.1 + 112), text = ("theme", ((theme_name :: (arcana_desktop.window.theme :: win :: call) :: call) + " / " + (theme_override_name :: settings.options.state.theme_override :: call))), colors = (palette.tones.1.1, palette.tones.1.0) :: call) :: call
+    draw_metric_line :: win, (render.MetricLine :: pos = (x + 12, card2_pos.1 + 94), text = ("state", ((bool_name :: settings.options.state.fullscreen :: call) + " / " + (bool_name :: maximized :: call) + " / " + (bool_name :: minimized :: call))), colors = (palette.tones.1.1, palette.tones.1.0) :: call) :: call
+    draw_metric_line :: win, (render.MetricLine :: pos = (x + 12, card2_pos.1 + 112), text = ("theme", ((theme_name :: theme :: call) + " / " + (theme_override_name :: settings.options.state.theme_override :: call))), colors = (palette.tones.1.1, palette.tones.1.0) :: call) :: call
 
     let card3_pos = (x, card2_pos.1 + card2_size.1 + 18)
     let card3_size = (w, 148)
@@ -366,11 +401,11 @@ fn draw_session_panel(read self: demo_types.Demo, read win: arcana_desktop.types
     draw_metric_line :: win, (render.MetricLine :: pos = (x + 12, card4_pos.1 + 76), text = ("raw motion", (std.text.from_int :: self.raw_motion_total :: call)), colors = (palette.tones.1.1, palette.tones.1.0) :: call) :: call
     draw_metric_line :: win, (render.MetricLine :: pos = (x + 12, card4_pos.1 + 94), text = ("raw b / w / k", (((std.text.from_int :: self.raw_button_events :: call) + " / " + (std.text.from_int :: self.raw_wheel_events :: call)) + " / " + (std.text.from_int :: self.raw_key_events :: call))), colors = (palette.tones.1.1, palette.tones.1.0) :: call) :: call
     draw_metric_line :: win, (render.MetricLine :: pos = (x + 12, card4_pos.1 + 112), text = ("policy / dev", ((device_policy_name :: self.device_policy_code :: call) + " / " + self.last_device)), colors = (palette.tones.1.1, palette.tones.1.0) :: call) :: call
-    draw_metric_line :: win, (render.MetricLine :: pos = (x + 12, card4_pos.1 + 130), text = ("current / primary", (current_monitor.name + " / " + primary_monitor.name)), colors = (palette.tones.1.1, palette.tones.1.0) :: call) :: call
+    draw_metric_line :: win, (render.MetricLine :: pos = (x + 12, card4_pos.1 + 130), text = ("current / primary", (current_monitor_name + " / " + primary_monitor_name)), colors = (palette.tones.1.1, palette.tones.1.0) :: call) :: call
     draw_metric_line :: win, (render.MetricLine :: pos = (x + 12, card4_pos.1 + 148), text = ("second", (second_window_summary :: self :: call)), colors = (palette.tones.1.1, palette.tones.1.0) :: call) :: call
     draw_metric_line :: win, (render.MetricLine :: pos = (x + 12, card4_pos.1 + 166), text = ("event / clip", (self.last_event + " / " + self.last_clipboard)), colors = (palette.tones.1.1, palette.tones.1.0) :: call) :: call
 
-export fn draw_main(read self: demo_types.Demo, read win: arcana_desktop.types.Window):
+export fn draw_main(read self: demo_types.Demo, edit win: arcana_desktop.types.Window):
     let view = layout.for_window :: (arcana_desktop.window.size :: win :: call) :: call
     let palette = render.Palette :: surfaces = ((rgb :: 8, 13, 21 :: call), ((rgb :: 12, 18, 28 :: call), (rgb :: 13, 20, 31 :: call))), tones = ((rgb :: 32, 54, 75 :: call), ((rgb :: 233, 237, 242 :: call), (rgb :: 161, 173, 186 :: call))), accent = (rgb :: 113, 214, 225 :: call) :: call
     arcana_graphics.canvas.fill :: win, palette.surfaces.0 :: call
@@ -380,7 +415,7 @@ export fn draw_main(read self: demo_types.Demo, read win: arcana_desktop.types.W
     draw_session_panel :: self, win, (view, palette) :: call
     arcana_graphics.canvas.present :: win :: call
 
-export fn draw_secondary(read self: demo_types.Demo, read win: arcana_desktop.types.Window):
+export fn draw_secondary(read self: demo_types.Demo, edit win: arcana_desktop.types.Window):
     let _ = self
     let background = rgb :: 16, 24, 36 :: call
     let panel = rgb :: 22, 35, 52 :: call
@@ -390,10 +425,10 @@ export fn draw_secondary(read self: demo_types.Demo, read win: arcana_desktop.ty
     arcana_graphics.canvas.fill :: win, background :: call
     fill_rect :: win, (arcana_graphics.types.RectSpec :: pos = (20, 20), size = (360, 54), color = panel :: call) :: call
     fill_rect :: win, (arcana_graphics.types.RectSpec :: pos = (20, 92), size = (360, 162), color = panel :: call) :: call
-    draw_label :: win, (arcana_text.types.LabelSpec :: pos = (36, 36), text = "Second Window", color = accent :: call) :: call
-    draw_label :: win, (arcana_text.types.LabelSpec :: pos = (36, 56), text = "live multi-window desktop session", color = muted :: call) :: call
-    draw_label :: win, (arcana_text.types.LabelSpec :: pos = (36, 112), text = "This window stays alive independently.", color = text :: call) :: call
-    draw_label :: win, (arcana_text.types.LabelSpec :: pos = (36, 134), text = "Use 2nd Vis and 2nd End on the main deck.", color = text :: call) :: call
-    draw_label :: win, (arcana_text.types.LabelSpec :: pos = (36, 156), text = "Clicks should not couple input to shutdown.", color = text :: call) :: call
-    draw_label :: win, (arcana_text.types.LabelSpec :: pos = (36, 178), text = "Close the last live window to end the session.", color = muted :: call) :: call
+    draw_label :: win, (render.TextLabel :: pos = (36, 36), text = "Second Window", color = accent :: call) :: call
+    draw_label :: win, (render.TextLabel :: pos = (36, 56), text = "live multi-window desktop session", color = muted :: call) :: call
+    draw_label :: win, (render.TextLabel :: pos = (36, 112), text = "This window stays alive independently.", color = text :: call) :: call
+    draw_label :: win, (render.TextLabel :: pos = (36, 134), text = "Use 2nd Vis and 2nd End on the main deck.", color = text :: call) :: call
+    draw_label :: win, (render.TextLabel :: pos = (36, 156), text = "Clicks should not couple input to shutdown.", color = text :: call) :: call
+    draw_label :: win, (render.TextLabel :: pos = (36, 178), text = "Close the last live window to end the session.", color = muted :: call) :: call
     arcana_graphics.canvas.present :: win :: call

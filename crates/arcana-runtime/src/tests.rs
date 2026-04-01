@@ -314,6 +314,13 @@ fn write_file(path: &Path, text: &str) {
 }
 
 fn build_workspace_plan_for_member(dir: &Path, member: &str) -> RuntimePackagePlan {
+    build_workspace_plan_and_artifact_dir_for_member(dir, member).0
+}
+
+fn build_workspace_plan_and_artifact_dir_for_member(
+    dir: &Path,
+    member: &str,
+) -> (RuntimePackagePlan, PathBuf) {
     let graph = load_workspace_graph(dir).expect("workspace graph should load");
     let checked = check_workspace_graph(&graph).expect("workspace should check");
     let fingerprints = compute_member_fingerprints_for_checked_workspace(&graph, &checked)
@@ -330,7 +337,13 @@ fn build_workspace_plan_for_member(dir: &Path, member: &str) -> RuntimePackagePl
             .expect("artifact status should exist")
             .artifact_rel_path(),
     );
-    load_package_plan(&artifact_path).expect("runtime plan should load")
+    (
+        load_package_plan(&artifact_path).expect("runtime plan should load"),
+        artifact_path
+            .parent()
+            .expect("artifact parent should exist")
+            .to_path_buf(),
+    )
 }
 
 fn runtime_call_arg(value: RuntimeValue, name: &str) -> RuntimeCallArg {
@@ -896,13 +909,19 @@ fn load_package_plan_accepts_behavior_attr_values_with_colons() {
     write_file(&dir.join("src").join("types.arc"), "// test types\n");
 
     let graph = load_workspace_graph(&dir).expect("workspace graph should load");
+    eprintln!("[asset-test] graph loaded");
     let checked = check_workspace_graph(&graph).expect("workspace should check");
+    eprintln!("[asset-test] workspace checked");
     let fingerprints = compute_member_fingerprints_for_checked_workspace(&graph, &checked)
         .expect("fingerprints should compute");
+    eprintln!("[asset-test] fingerprints computed");
     let order = plan_workspace(&graph).expect("workspace order should plan");
+    eprintln!("[asset-test] workspace planned");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
+    eprintln!("[asset-test] build planned");
     execute_workspace_build(&graph, &fingerprints, &statuses);
+    eprintln!("[asset-test] workspace built");
 
     let artifact_path = graph.root_dir.join(
         statuses
@@ -2704,13 +2723,19 @@ fn runtime_plan_supports_package_id_stable_foreword_lookup() {
     ];
 
     let plan = plan_from_artifact(&artifact).expect("runtime plan should build");
-    assert_eq!(plan.runtime_retained_forewords_for_package("hello").len(), 1);
+    assert_eq!(
+        plan.runtime_retained_forewords_for_package("hello").len(),
+        1
+    );
     assert_eq!(
         plan.public_runtime_retained_forewords_for_package("hello")
             .len(),
         1
     );
-    assert_eq!(plan.runtime_retained_forewords_for_package("dep.pkg").len(), 1);
+    assert_eq!(
+        plan.runtime_retained_forewords_for_package("dep.pkg").len(),
+        1
+    );
     assert_eq!(
         plan.public_runtime_retained_forewords_for_package("dep.pkg")
             .len(),
@@ -5361,7 +5386,9 @@ fn execute_main_runs_linked_std_fs_bytes_routines() {
         sandbox_root: cwd,
         ..BufferedHost::default()
     };
+    eprintln!("[asset-test] executing main");
     let code = execute_main(&plan, &mut host).expect("runtime should execute");
+    eprintln!("[asset-test] main executed");
 
     assert_eq!(code, 0);
     assert_eq!(
@@ -10135,3 +10162,385 @@ fn execute_main_runs_arcana_desktop_ecs_adapter_workspace() {
     let _ = fs::remove_dir_all(dir);
 }
 
+#[test]
+fn execute_main_runs_arcana_text_paragraph_metrics_and_updates_workspace() {
+    let dir = temp_workspace_dir("arcana_text_paragraph_updates");
+    let text_dep = owned_grimoire_root()
+        .join("arcana-text")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let graphics_dep = owned_grimoire_root()
+        .join("arcana-graphics")
+        .to_string_lossy()
+        .replace('\\', "/");
+    write_file(
+        &dir.join("book.toml"),
+        &format!(
+            concat!(
+                "name = \"runtime_arcana_text_paragraph_updates\"\n",
+                "kind = \"app\"\n",
+                "[deps]\n",
+                "arcana_graphics = {graphics_dep:?}\n",
+                "arcana_text = {{ path = {text_dep:?}, native_provider = \"default\" }}\n",
+            ),
+            graphics_dep = graphics_dep,
+            text_dep = text_dep,
+        ),
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "import arcana_graphics.paint\n",
+            "import arcana_text.builder\n",
+            "import arcana_text.fonts\n",
+            "import arcana_text.paragraphs\n",
+            "import arcana_text.types\n",
+            "import std.collections.list\n",
+            "import std.io\n",
+            "\n",
+            "fn rtl_code(read dir: arcana_text.types.TextDirection) -> Int:\n",
+            "    if dir == (arcana_text.types.TextDirection.RightToLeft :: :: call):\n",
+            "        return 1\n",
+            "    return 0\n",
+            "\n",
+            "fn demo_placeholder() -> arcana_text.types.PlaceholderStyle:\n",
+            "    let mut placeholder = arcana_text.types.PlaceholderStyle :: size = (9, 11), alignment = (arcana_text.types.PlaceholderAlignment.Middle :: :: call), baseline = (arcana_text.types.TextBaseline.Alphabetic :: :: call) :: call\n",
+            "    placeholder.baseline_offset = 0\n",
+            "    return placeholder\n",
+            "\n",
+            "fn main() -> Int:\n",
+            "    let mut collection = arcana_text.fonts.default_collection :: :: call\n",
+            "    arcana_text.fonts.add_source :: collection, \"assets/demo.font\" :: call\n",
+            "    arcana_text.fonts.set_host_fallback :: collection, true :: call\n",
+            "    let mut style = arcana_text.types.default_text_style :: 255 :: call\n",
+            "    let mut families = std.collections.list.new[Str] :: :: call\n",
+            "    families :: \"Demo Family\" :: push\n",
+            "    style.families = families\n",
+            "    let mut paragraph_style = arcana_text.types.default_paragraph_style :: :: call\n",
+            "    paragraph_style.align = arcana_text.types.TextAlign.Right :: :: call\n",
+            "    paragraph_style.direction = arcana_text.types.TextDirection.RightToLeft :: :: call\n",
+            "    let mut builder = arcana_text.builder.open :: collection, paragraph_style :: call\n",
+            "    arcana_text.builder.push_style :: builder, style :: call\n",
+            "    arcana_text.builder.add_text :: builder, \"ab cd\" :: call\n",
+            "    arcana_text.builder.add_placeholder :: builder, (demo_placeholder :: :: call) :: call\n",
+            "    arcana_text.builder.add_text :: builder, \" \u{03A9}\" :: call\n",
+            "    let mut paragraph = arcana_text.builder.build :: builder :: call\n",
+            "    arcana_text.paragraphs.layout :: paragraph, 40 :: call\n",
+            "    let lines = arcana_text.paragraphs.line_metrics :: paragraph :: call\n",
+            "    let range = arcana_text.types.TextRange :: start = 0, end = 2 :: call\n",
+            "    let boxes = arcana_text.paragraphs.range_boxes :: paragraph, range :: call\n",
+            "    let placeholders = arcana_text.paragraphs.placeholder_boxes :: paragraph :: call\n",
+            "    let boundary = arcana_text.paragraphs.word_boundary :: paragraph, 1 :: call\n",
+            "    let unresolved = arcana_text.paragraphs.unresolved_glyphs :: paragraph :: call\n",
+            "    let used = arcana_text.paragraphs.fonts_used :: paragraph :: call\n",
+            "    std.io.print[Int] :: (lines :: :: len) :: call\n",
+            "    std.io.print[Int] :: (placeholders :: :: len) :: call\n",
+            "    std.io.print[Int] :: (rtl_code :: boxes[0].direction :: call) :: call\n",
+            "    std.io.print[Bool] :: (boxes[0].position.0 > 0) :: call\n",
+            "    std.io.print[Int] :: boundary.start :: call\n",
+            "    std.io.print[Int] :: boundary.end :: call\n",
+            "    std.io.print[Int] :: (unresolved :: :: len) :: call\n",
+            "    std.io.print[Str] :: used[0] :: call\n",
+            "    arcana_text.paragraphs.update_text :: paragraph, \"xy\" :: call\n",
+            "    arcana_text.paragraphs.update_align :: paragraph, (arcana_text.types.TextAlign.Center :: :: call) :: call\n",
+            "    arcana_text.paragraphs.update_font_size :: paragraph, 24 :: call\n",
+            "    arcana_text.paragraphs.update_foreground :: paragraph, (arcana_graphics.paint.solid :: 77 :: call) :: call\n",
+            "    arcana_text.paragraphs.update_background :: paragraph, true, (arcana_graphics.paint.solid :: 88 :: call) :: call\n",
+            "    let boxes_after = arcana_text.paragraphs.range_boxes :: paragraph, (arcana_text.types.TextRange :: start = 0, end = 2 :: call) :: call\n",
+            "    let used_after = arcana_text.paragraphs.fonts_used :: paragraph :: call\n",
+            "    std.io.print[Bool] :: (boxes_after[0].size.1 > boxes[0].size.1) :: call\n",
+            "    std.io.print[Bool] :: (boxes_after[0].position.0 > 0) :: call\n",
+            "    std.io.print[Str] :: used_after[0] :: call\n",
+            "    return 0\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let (plan, artifact_dir) = build_workspace_plan_and_artifact_dir_for_member(
+        &dir,
+        "runtime_arcana_text_paragraph_updates",
+    );
+    let cwd = artifact_dir.to_string_lossy().replace('\\', "/");
+    let mut host = BufferedHost {
+        cwd: cwd.clone(),
+        sandbox_root: cwd,
+        ..BufferedHost::default()
+    };
+    let code = execute_main(&plan, &mut host).expect("runtime should execute");
+
+    assert_eq!(code, 0);
+    assert_eq!(
+        host.stdout,
+        vec![
+            "2".to_string(),
+            "1".to_string(),
+            "1".to_string(),
+            "true".to_string(),
+            "0".to_string(),
+            "2".to_string(),
+            "1".to_string(),
+            "Demo Family".to_string(),
+            "true".to_string(),
+            "true".to_string(),
+            "Demo Family".to_string(),
+        ]
+    );
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn execute_main_runs_arcana_text_asset_resolution_workspace() {
+    let dir = temp_workspace_dir("arcana_text_assets");
+    let text_dep = owned_grimoire_root()
+        .join("arcana-text")
+        .to_string_lossy()
+        .replace('\\', "/");
+    write_file(
+        &dir.join("book.toml"),
+        &format!(
+            concat!(
+                "name = \"runtime_arcana_text_assets\"\n",
+                "kind = \"app\"\n",
+                "[deps]\n",
+                "arcana_text = {{ path = {text_dep:?}, native_provider = \"default\" }}\n",
+            ),
+            text_dep = text_dep,
+        ),
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "import arcana_text.assets\n",
+            "import arcana_text.monaspace\n",
+            "import std.io\n",
+            "import std.path\n",
+            "import std.result\n",
+            "use std.result.Result\n",
+            "\n",
+            "fn unwrap(read result: Result[Str, Str]) -> Str:\n",
+            "    return match result:\n",
+            "        Result.Ok(value) => value\n",
+            "        Result.Err(err) => err\n",
+            "\n",
+            "fn main() -> Int:\n",
+            "    let root = unwrap :: (arcana_text.assets.package_root :: :: call) :: call\n",
+            "    let license = unwrap :: (arcana_text.assets.resolve :: \"LICENSE\" :: call) :: call\n",
+            "    let text = unwrap :: (arcana_text.assets.load_utf8 :: license :: call) :: call\n",
+            "    let neon = unwrap :: (arcana_text.assets.monaspace_source_path :: (arcana_text.monaspace.MonaspaceFamily.Neon :: :: call), (arcana_text.monaspace.MonaspaceForm.Variable :: :: call) :: call) :: call\n",
+            "    std.io.print[Str] :: (std.path.file_name :: neon :: call) :: call\n",
+            "    std.io.print[Bool] :: ((std.path.parent :: license :: call) == root) :: call\n",
+            "    std.io.print[Bool] :: ((std.path.file_name :: license :: call) == \"LICENSE\") :: call\n",
+            "    std.io.print[Bool] :: ((std.path.file_name :: neon :: call) == \"Monaspace Neon Var.ttf\") :: call\n",
+            "    std.io.print[Bool] :: ((std.path.parent :: neon :: call) != root) :: call\n",
+            "    std.io.print[Bool] :: (text != \"\") :: call\n",
+            "    return 0\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let graph = load_workspace_graph(&dir).expect("workspace graph should load");
+    let checked = check_workspace_graph(&graph).expect("workspace should check");
+    let fingerprints = compute_member_fingerprints_for_checked_workspace(&graph, &checked)
+        .expect("fingerprints should compute");
+    let order = plan_workspace(&graph).expect("workspace order should plan");
+    let statuses =
+        plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
+    execute_workspace_build(&graph, &fingerprints, &statuses);
+
+    let artifact_path = graph.root_dir.join(
+        statuses
+            .iter()
+            .find(|status| status.member_name() == "runtime_arcana_text_assets")
+            .expect("app artifact status should exist")
+            .artifact_rel_path(),
+    );
+    let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
+    let cwd = artifact_path
+        .parent()
+        .expect("artifact parent should exist")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let mut host = BufferedHost {
+        cwd: cwd.clone(),
+        sandbox_root: cwd,
+        ..BufferedHost::default()
+    };
+    let code = execute_main(&plan, &mut host).expect("runtime should execute");
+
+    assert_eq!(code, 0);
+    assert_eq!(
+        host.stdout,
+        vec![
+            "Monaspace Neon Var.ttf".to_string(),
+            "true".to_string(),
+            "true".to_string(),
+            "true".to_string(),
+            "true".to_string(),
+            "true".to_string(),
+        ]
+    );
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn runtime_arcana_owned_fast_path_is_desktop_only() {
+    let lib = include_str!("lib.rs");
+    assert!(
+        lib.contains("a == \"arcana_desktop\""),
+        "desktop grandfather branch should remain explicit during migration"
+    );
+    for forbidden in [
+        "a == \"arcana_text\"",
+        "a == \"arcana_graphics\"",
+        "text_font_collection_handle",
+        "text_paragraph_builder_handle",
+        "text_paragraph_handle",
+        "RuntimeFontCollectionHandle",
+        "RuntimeParagraphBuilderHandle",
+        "RuntimeParagraphHandle",
+    ] {
+        assert!(
+            !lib.contains(forbidden),
+            "runtime fast path must not special-case `{forbidden}`"
+        );
+    }
+}
+
+#[test]
+fn native_host_does_not_expose_text_grimoire_methods() {
+    let native_host = include_str!("native_host.rs");
+    for forbidden in [
+        "fn text_font_collection_",
+        "fn text_paragraph_builder_",
+        "fn text_paragraph_",
+    ] {
+        assert!(
+            !native_host.contains(forbidden),
+            "native host must not expose removed text grimoire method `{forbidden}`"
+        );
+    }
+}
+
+#[test]
+fn execute_main_runs_external_provider_backed_library_workspace() {
+    let dir = temp_workspace_dir("external_provider_library");
+    let dep_dir = dir.join("demo-counter");
+    write_file(
+        &dir.join("book.toml"),
+        concat!(
+            "name = \"runtime_external_provider_app\"\n",
+            "kind = \"app\"\n",
+            "[deps]\n",
+            "demo_counter = { path = \"./demo-counter\", native_provider = \"default\" }\n",
+        ),
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "import demo_counter.counter\n",
+            "import std.io\n",
+            "\n",
+            "fn main() -> Int:\n",
+            "    let mut counter = demo_counter.counter.new :: 7 :: call\n",
+            "    demo_counter.counter.add :: counter, 5 :: call\n",
+            "    let snapshot = demo_counter.counter.snapshot :: counter :: call\n",
+            "    std.io.print[Int] :: (demo_counter.counter.value :: counter :: call) :: call\n",
+            "    std.io.print[Int] :: snapshot.value :: call\n",
+            "    return 0\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    write_file(
+        &dep_dir.join("book.toml"),
+        concat!(
+            "name = \"demo_counter\"\n",
+            "kind = \"lib\"\n",
+            "\n",
+            "[native.products.default]\n",
+            "kind = \"dll\"\n",
+            "role = \"provider\"\n",
+            "producer = \"arcana-source\"\n",
+            "file = \"demo_counter_provider.dll\"\n",
+            "contract = \"arcana.cabi.provider.v1\"\n",
+            "sidecars = []\n",
+        ),
+    );
+    write_file(
+        &dep_dir.join("src").join("book.arc"),
+        concat!(
+            "reexport demo_counter.types\n",
+            "reexport demo_counter.counter\n",
+        ),
+    );
+    write_file(
+        &dep_dir.join("src").join("types.arc"),
+        concat!(
+            "export opaque type Counter as move, boundary_unsafe\n",
+            "\n",
+            "export record CounterSnapshot:\n",
+            "    value: Int\n",
+        ),
+    );
+    write_file(
+        &dep_dir.join("src").join("counter.arc"),
+        concat!(
+            "import demo_counter.types\n",
+            "\n",
+            "export fn new(seed: Int) -> demo_counter.types.Counter:\n",
+            "    return demo_counter.counter.new :: seed :: call\n",
+            "\n",
+            "export fn add(edit counter: demo_counter.types.Counter, amount: Int):\n",
+            "    demo_counter.counter.add :: counter, amount :: call\n",
+            "\n",
+            "export fn value(read counter: demo_counter.types.Counter) -> Int:\n",
+            "    return demo_counter.counter.value :: counter :: call\n",
+            "\n",
+            "export fn snapshot(read counter: demo_counter.types.Counter) -> demo_counter.types.CounterSnapshot:\n",
+            "    return demo_counter.counter.snapshot :: counter :: call\n",
+        ),
+    );
+    write_file(
+        &dep_dir.join("src").join("provider_impl").join("engine.arc"),
+        concat!("export record CounterState:\n", "    value: Int\n",),
+    );
+    write_file(
+        &dep_dir
+            .join("src")
+            .join("provider_impl")
+            .join("counter.arc"),
+        concat!(
+            "import demo_counter.provider_impl.engine\n",
+            "import demo_counter.types\n",
+            "\n",
+            "fn new(seed: Int) -> demo_counter.provider_impl.engine.CounterState:\n",
+            "    return demo_counter.provider_impl.engine.CounterState :: value = seed :: call\n",
+            "\n",
+            "fn add(edit counter: demo_counter.provider_impl.engine.CounterState, amount: Int):\n",
+            "    counter.value = counter.value + amount\n",
+            "\n",
+            "fn value(read counter: demo_counter.provider_impl.engine.CounterState) -> Int:\n",
+            "    return counter.value\n",
+            "\n",
+            "fn snapshot(read counter: demo_counter.provider_impl.engine.CounterState) -> demo_counter.types.CounterSnapshot:\n",
+            "    return demo_counter.types.CounterSnapshot :: value = counter.value :: call\n",
+        ),
+    );
+
+    let (plan, artifact_dir) =
+        build_workspace_plan_and_artifact_dir_for_member(&dir, "runtime_external_provider_app");
+    let cwd = artifact_dir.to_string_lossy().replace('\\', "/");
+    let mut host = BufferedHost {
+        cwd: cwd.clone(),
+        sandbox_root: cwd,
+        ..BufferedHost::default()
+    };
+    let code = execute_main(&plan, &mut host).expect("runtime should execute");
+
+    assert_eq!(code, 0);
+    assert_eq!(host.stdout, vec!["12".to_string(), "12".to_string()]);
+
+    let _ = fs::remove_dir_all(dir);
+}

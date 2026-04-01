@@ -1456,8 +1456,3 @@ mod tests {
         assert!(derive_runtime_requirements(&package).is_empty());
     }
 }
-
-
-
-
-

@@ -299,7 +299,7 @@ fn render_exe_main_rs(
         NativeRoutineLowering::RuntimeDispatch => {
             let template = concat!(
                 "#![windows_subsystem = \"windows\"]\n\n",
-                "use arcana_runtime::{RuntimeAbiValue, RuntimeExecutionState, RuntimePackagePlan, execute_current_bundle_entrypoint};\n\n",
+                "use arcana_runtime::execute_current_bundle_entrypoint;\n\n",
                 "static PACKAGE_IMAGE_TEXT: &str = include_str!(concat!(env!(\"OUT_DIR\"), \"/runtime-package.json\"));\n\n",
                 "static MAIN_ROUTINE_KEY: &str = __ARCANA_MAIN_ROUTINE_KEY__;\n\n",
                 "fn main() {\n",

@@ -7795,11 +7795,11 @@ mod tests {
     use super::freeze::{FROZEN_AST_NODE_KINDS, FROZEN_TOKEN_KINDS};
     use super::{
         AssignTarget, BUILTIN_TYPE_INFOS, BinaryOp, ChainConnector, ChainIntroducer, ChainStep,
-        DirectiveKind, Expr, ForewordAliasKind, ForewordApp, ForewordArg,
-        ForewordDefinitionTarget, HeaderAttachment, MatchPattern, OpaqueBoundaryPolicy,
-        OpaqueOwnershipPolicy, OpaqueTypePolicy, ParamMode, PhraseArg, Statement, StatementKind,
-        SurfaceTraitRef, SurfaceType, SurfaceWhereClause, SymbolBody, SymbolKind, UnaryOp,
-        builtin_type_info, parse_module,
+        DirectiveKind, Expr, ForewordAliasKind, ForewordApp, ForewordArg, ForewordDefinitionTarget,
+        HeaderAttachment, MatchPattern, OpaqueBoundaryPolicy, OpaqueOwnershipPolicy,
+        OpaqueTypePolicy, ParamMode, PhraseArg, Statement, StatementKind, SurfaceTraitRef,
+        SurfaceType, SurfaceWhereClause, SymbolBody, SymbolKind, UnaryOp, builtin_type_info,
+        parse_module,
     };
 
     fn expr_is_path(expr: &Expr, name: &str) -> bool {
@@ -8344,30 +8344,28 @@ mod tests {
 
     #[test]
     fn parse_module_collects_foreword_handlers_aliases_reexports_and_member_targets() {
-        let parsed = parse_module(
-            concat!(
-                "foreword tool.exec.trace:\n",
-                "    tier = executable\n",
-                "    visibility = public\n",
-                "    action = metadata\n",
-                "    targets = [fn, field, param]\n",
-                "    retention = runtime\n",
-                "    payload = [label: Str]\n",
-                "    handler = tool.exec.trace_handler\n",
-                "foreword handler tool.exec.trace_handler:\n",
-                "    protocol = \"stdio-v1\"\n",
-                "    product = \"trace\"\n",
-                "    entry = \"main\"\n",
-                "foreword alias tool.exec.local = tool.exec.trace\n",
-                "foreword reexport tool.exec.public = tool.exec.trace\n",
-                "record Box:\n",
-                "    #tool.exec.local[label = \"field\"]\n",
-                "    value: Int\n",
-                "#tool.exec.trace[label = \"fn\"]\n",
-                "fn helper(#tool.exec.public[label = \"param\"] value: Int) -> Int:\n",
-                "    return value\n",
-            ),
-        )
+        let parsed = parse_module(concat!(
+            "foreword tool.exec.trace:\n",
+            "    tier = executable\n",
+            "    visibility = public\n",
+            "    action = metadata\n",
+            "    targets = [fn, field, param]\n",
+            "    retention = runtime\n",
+            "    payload = [label: Str]\n",
+            "    handler = tool.exec.trace_handler\n",
+            "foreword handler tool.exec.trace_handler:\n",
+            "    protocol = \"stdio-v1\"\n",
+            "    product = \"trace\"\n",
+            "    entry = \"main\"\n",
+            "foreword alias tool.exec.local = tool.exec.trace\n",
+            "foreword reexport tool.exec.public = tool.exec.trace\n",
+            "record Box:\n",
+            "    #tool.exec.local[label = \"field\"]\n",
+            "    value: Int\n",
+            "#tool.exec.trace[label = \"fn\"]\n",
+            "fn helper(#tool.exec.public[label = \"param\"] value: Int) -> Int:\n",
+            "    return value\n",
+        ))
         .expect("module should parse");
 
         assert_eq!(parsed.foreword_definitions.len(), 1);
@@ -8401,9 +8399,15 @@ mod tests {
 
         assert_eq!(parsed.foreword_aliases.len(), 2);
         assert_eq!(parsed.foreword_aliases[0].kind, ForewordAliasKind::Alias);
-        assert_eq!(parsed.foreword_aliases[0].alias_name, vec!["tool", "exec", "local"]);
+        assert_eq!(
+            parsed.foreword_aliases[0].alias_name,
+            vec!["tool", "exec", "local"]
+        );
         assert_eq!(parsed.foreword_aliases[1].kind, ForewordAliasKind::Reexport);
-        assert_eq!(parsed.foreword_aliases[1].alias_name, vec!["tool", "exec", "public"]);
+        assert_eq!(
+            parsed.foreword_aliases[1].alias_name,
+            vec!["tool", "exec", "public"]
+        );
 
         let record = parsed
             .symbols
@@ -8423,7 +8427,10 @@ mod tests {
             .find(|symbol| symbol.name == "helper")
             .expect("helper should parse");
         assert_eq!(helper.forewords[0].path, vec!["tool", "exec", "trace"]);
-        assert_eq!(helper.params[0].forewords[0].path, vec!["tool", "exec", "public"]);
+        assert_eq!(
+            helper.params[0].forewords[0].path,
+            vec!["tool", "exec", "public"]
+        );
     }
 
     #[test]

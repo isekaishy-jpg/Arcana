@@ -4045,7 +4045,10 @@ mod tests {
 
         assert_eq!(module.foreword_aliases.len(), 2);
         assert_eq!(module.foreword_aliases[0].kind, HirForewordAliasKind::Alias);
-        assert_eq!(module.foreword_aliases[1].kind, HirForewordAliasKind::Reexport);
+        assert_eq!(
+            module.foreword_aliases[1].kind,
+            HirForewordAliasKind::Reexport
+        );
 
         let record = module
             .symbols
@@ -4065,7 +4068,10 @@ mod tests {
             .find(|symbol| symbol.name == "helper")
             .expect("helper should lower");
         assert_eq!(helper.forewords[0].path, vec!["tool", "exec", "trace"]);
-        assert_eq!(helper.params[0].forewords[0].path, vec!["tool", "exec", "public"]);
+        assert_eq!(
+            helper.params[0].forewords[0].path,
+            vec!["tool", "exec", "public"]
+        );
     }
 
     #[test]

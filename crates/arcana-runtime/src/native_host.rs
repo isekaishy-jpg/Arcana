@@ -9,7 +9,6 @@ use std::ptr::null_mut;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use font8x8::{BASIC_FONTS, UnicodeFonts};
 use windows_sys::Win32::Devices::HumanInterfaceDevice::{
     HID_USAGE_GENERIC_MOUSE, HID_USAGE_PAGE_GENERIC,
 };
@@ -83,7 +82,7 @@ use crate::{
     RuntimeAppSessionHandle, RuntimeAudioBufferHandle, RuntimeAudioDeviceHandle,
     RuntimeAudioPlaybackHandle, RuntimeEventRecord, RuntimeHost, RuntimeImageHandle,
     RuntimeWakeHandle, RuntimeWindowHandle, common_named_key_code, common_named_mouse_button_code,
-    ensure_audio_buffer_matches_device,
+    ensure_audio_buffer_matches_device, text_engine,
 };
 
 const WINDOW_CLASS_NAME: &str = "ArcanaNativeRuntimeWindow";
@@ -463,6 +462,12 @@ impl NativeProcessHost {
     fn image_ref(&self, handle: RuntimeImageHandle) -> Result<&NativeImage, String> {
         self.images
             .get(&handle)
+            .ok_or_else(|| format!("invalid Image handle `{}`", handle.0))
+    }
+
+    fn image_mut(&mut self, handle: RuntimeImageHandle) -> Result<&mut NativeImage, String> {
+        self.images
+            .get_mut(&handle)
             .ok_or_else(|| format!("invalid Image handle `{}`", handle.0))
     }
 
@@ -2362,10 +2367,9 @@ impl RuntimeHost for NativeProcessHost {
     }
 
     fn canvas_label_size(&mut self, text: &str) -> Result<(i64, i64), String> {
-        Ok((
-            i64::try_from(text.chars().count()).map_err(|_| "label width overflow".to_string())?
-                * 8,
-            16,
+        Ok(text_engine::measure_plain_text(
+            text,
+            text_engine::DEFAULT_FONT_SIZE,
         ))
     }
 
@@ -2382,6 +2386,48 @@ impl RuntimeHost for NativeProcessHost {
         let resolved = self.base.resolve_fs_path(path)?;
         let image = decode_bmp_image(&resolved)?;
         Ok(self.insert_image(image))
+    }
+
+    fn canvas_image_create(
+        &mut self,
+        width: i64,
+        height: i64,
+    ) -> Result<RuntimeImageHandle, String> {
+        if width < 0 || height < 0 {
+            return Err("canvas_image_create expects non-negative dimensions".to_string());
+        }
+        Ok(self.insert_image(NativeImage {
+            width,
+            height,
+            pixels: vec![0; usize::try_from(width.saturating_mul(height)).unwrap_or(0)],
+        }))
+    }
+
+    fn canvas_image_replace_rgba(
+        &mut self,
+        image: RuntimeImageHandle,
+        rgba: &[u8],
+    ) -> Result<(), String> {
+        let image = self.image_mut(image)?;
+        let expected = usize::try_from(image.width.saturating_mul(image.height))
+            .unwrap_or(0)
+            .saturating_mul(4);
+        if rgba.len() != expected {
+            return Err(format!(
+                "canvas_image_replace_rgba expected {expected} bytes for {}x{} image, got {}",
+                image.width,
+                image.height,
+                rgba.len()
+            ));
+        }
+        image.pixels.clear();
+        image.pixels.reserve(expected / 4);
+        for chunk in rgba.chunks_exact(4) {
+            image.pixels.push(
+                (u32::from(chunk[0]) << 16) | (u32::from(chunk[1]) << 8) | u32::from(chunk[2]),
+            );
+        }
+        Ok(())
     }
 
     fn canvas_image_size(&mut self, image: RuntimeImageHandle) -> Result<(i64, i64), String> {
@@ -3840,25 +3886,14 @@ impl CanvasSurface {
     }
 
     fn draw_label(&mut self, x: i64, y: i64, text: &str, color: u32) {
-        for (index, ch) in text.chars().enumerate() {
-            let x_offset = x + i64::try_from(index).unwrap_or(0) * 8;
-            self.draw_char(x_offset, y, ch, color);
-        }
-    }
-
-    fn draw_char(&mut self, x: i64, y: i64, ch: char, color: u32) {
-        let glyph = BASIC_FONTS.get(ch).unwrap_or([0; 8]);
-        for (row, bits) in glyph.into_iter().enumerate() {
-            for col in 0..8 {
-                if bits & (1 << col) == 0 {
-                    continue;
-                }
-                let px = x + col;
-                let py = y + row as i64 * 2;
-                self.set_pixel(px, py, color);
-                self.set_pixel(px, py + 1, color);
-            }
-        }
+        text_engine::paint_plain_text(
+            self,
+            x,
+            y,
+            text,
+            i64::from(color),
+            text_engine::DEFAULT_FONT_SIZE,
+        );
     }
 
     fn blit(
@@ -3903,6 +3938,12 @@ impl CanvasSurface {
         if let Some(slot) = self.pixels.get_mut(index) {
             *slot = color;
         }
+    }
+}
+
+impl text_engine::TextPaintSink for CanvasSurface {
+    fn fill_rect(&mut self, x: i64, y: i64, w: i64, h: i64, color: i64) {
+        self.fill_rect(x, y, w, h, pack_color(color));
     }
 }
 
