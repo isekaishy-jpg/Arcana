@@ -35,6 +35,13 @@ create Session [Counter] scope-exit:
     done: when Counter.value >= 10 hold [Counter]
 ```
 
+Owner declaration with explicit activation context:
+
+```arc
+create Session [Counter] context: SessionCtx scope-exit:
+    done: when Counter.value >= 10 hold [Counter]
+```
+
 Availability attachment:
 
 ```arc
@@ -64,6 +71,7 @@ fn main() -> Int:
 ## Owners
 
 - `create Owner [ObjectA, ObjectB, ...] scope-exit:` declares a managed lifetime domain.
+- Owners may optionally declare an explicit owner-level activation context with `context: Ctx` before `scope-exit:`.
 - Each listed object is owned under that owner.
 - An owner must declare at least one exit clause.
 - Exit names must be unique within the owner.
@@ -94,11 +102,14 @@ Session :: ctx :: call
 ```
 
 - Activation may carry zero or one context argument.
+- Owners without a `context:` clause accept zero activation args.
+- Owners with a `context:` clause require exactly one activation arg of that type on entry and re-entry.
 - Activation introduces the owner handle into active scope.
 - Attached owned-object names become directly usable locals while that owner is active in the attached scope.
 - That active-owner state carries through ordinary routine calls and newly entered attached blocks on the same execution path; attached helpers do not require explicit re-entry when the caller already has the owner active.
 - Re-attaching the object name is sufficient for direct object access on that path; helpers and nested blocks do not need to re-attach the owner when the same owner is already active.
-- If owned objects declare context-taking lifecycle hooks, the owner activation context type must match that declared hook context type across the owner domain.
+- If an owner declares `context: Ctx`, owned object lifecycle hooks may either omit context or use that exact `Ctx` type.
+- Mixed per-object lifecycle context types are not part of the current owner contract once an owner uses an explicit `context:` clause.
 
 ## Exit Checkpoints
 
@@ -118,7 +129,7 @@ If an exit condition resolves true:
 
 - In current v1 terms, suspension is modeled as owner exit plus `hold [...]`.
 - Held objects remain packaged under the owner after exit, but they are not active again until explicit re-entry.
-- Re-entry may provide zero or one context argument and may resume previously held state or realize fresh non-held objects on demand.
+- Re-entry follows the same zero-arg vs one-arg rule as entry based on the owner's declared `context:` clause and may resume previously held state or realize fresh non-held objects on demand.
 - Fresh realized owned objects run `init` once on first realization for the current activation.
 - Held objects resumed into a new activation run `resume` once on first access for that activation.
 - If only a context-taking lifecycle hook exists, that object requires activation with a matching context before the hook can run.

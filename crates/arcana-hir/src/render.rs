@@ -6,6 +6,7 @@ use super::{
     HirImplDecl, HirLangItem, HirMatchArm, HirMatchPattern, HirMemorySpecDecl, HirModuleDependency,
     HirOwnerExit, HirOwnerObject, HirPhraseArg, HirRecycleLineKind, HirStatement, HirStatementKind,
     HirSymbol, HirSymbolBody, HirUnaryOp, signature::render_symbol_signature,
+    HirType,
 };
 
 pub(crate) fn encode_surface_text(text: &str) -> String {
@@ -362,7 +363,7 @@ fn render_symbol_body_fingerprint(body: &HirSymbolBody) -> String {
                 .collect::<Vec<_>>()
                 .join(",")
         ),
-        HirSymbolBody::Owner { objects, exits } => format!(
+        HirSymbolBody::Owner { objects, exits, .. } => format!(
             "owner(objects=[{}]|exits=[{}])",
             objects
                 .iter()
@@ -844,13 +845,21 @@ pub fn render_expr_fingerprint(expr: &HirExpr) -> String {
         ),
         HirExpr::QualifiedPhrase {
             subject,
+            qualifier_kind,
             qualifier,
+            qualifier_type_args,
             args,
             attached,
         } => format!(
-            "qualified_phrase(subject={}|qualifier={}|args=[{}]|headers=[{}])",
+            "qualified_phrase(subject={}|qualifier_kind={:?}|qualifier={}|qualifier_type_args=[{}]|args=[{}]|headers=[{}])",
             render_expr_fingerprint(subject),
+            qualifier_kind,
             quote_fingerprint_text(qualifier),
+            qualifier_type_args
+                .iter()
+                .map(HirType::render)
+                .collect::<Vec<_>>()
+                .join(","),
             args.iter()
                 .map(render_phrase_arg_fingerprint)
                 .collect::<Vec<_>>()

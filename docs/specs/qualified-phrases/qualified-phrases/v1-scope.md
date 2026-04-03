@@ -10,11 +10,18 @@ This scope freezes the current qualified-phrase contract for the rewrite.
 - Qualified phrases remain a first-class Arcana call/operation surface, not a parsing convenience that runtime may reinterpret ad hoc.
 - The current qualifier family includes:
   - `call`
-  - bare method / path qualifiers
+  - bare method qualifiers
+  - named path qualifiers
   - apply-style qualifier `>`
   - try-propagation qualifier `?`
   - await-apply qualifier `>>`
-  - dotted callable paths such as `canvas.blit`
+  - await qualifier `await`
+  - spawn qualifiers `weave` and `split`
+  - failure qualifiers `must` and `fallback`
+- `call`, bare-method, and named-path qualifiers may carry explicit qualifier type args such as:
+  - `subject :: args :: call[T]`
+  - `subject :: args :: method[T]`
+  - `subject :: args :: pkg.fn[T]`
 
 ## Resolution Contract
 
@@ -43,9 +50,22 @@ This scope freezes the current qualified-phrase contract for the rewrite.
 - `task_expr :: :: >>` remains part of the frozen language surface.
 - These are explicit qualifier behaviors, not aliases for generic method lookup.
 
+## Await, Spawn, And Failure Qualifiers
+
+- `subject :: :: await` is the phrase-native await form.
+- `callable_subject :: args :: weave` is the phrase-native task-spawn form.
+- `callable_subject :: args :: split` is the phrase-native thread-spawn form.
+- `subject :: :: must` is the phrase-native hard unwrap for `Option[T]` and `Result[T, Str]`.
+- `subject :: fallback_value :: fallback` is the phrase-native fallback form for `Option[T]` and `Result[T, Str]`.
+- `must` accepts zero args.
+- `fallback` accepts exactly one positional fallback arg and no named args.
+- `split` remains conservative about cross-thread `edit` place capture until a broader transferable-place law is approved.
+
 ## Attachments
 
 - Qualified-phrase attachments follow syntax-side qualifier rules.
+- Named attachment entries are currently allowed only for `call`, bare-method, and `>`.
+- Named attachment entries are rejected for named-path, `?`, `>>`, `await`, `weave`, `split`, `must`, and `fallback`.
 - If validated metadata is retained through lowering, executor/runtime must tolerate its presence rather than failing simply because the phrase carried approved metadata.
 
 ## Phrase Arity

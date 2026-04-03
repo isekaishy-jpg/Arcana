@@ -592,6 +592,7 @@ fn parse_expr(text: &str) -> Result<ParsedExpr, String> {
             args,
             qualifier_kind,
             qualifier,
+            qualifier_type_args: Vec::new(),
             resolved_callable,
             resolved_routine,
             dynamic_dispatch: None,

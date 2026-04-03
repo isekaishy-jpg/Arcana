@@ -1090,7 +1090,7 @@ fn render_owner_api_fingerprint(
     symbol: &HirSymbol,
 ) -> String {
     let mut rendered = format!("owner:{}", symbol.name);
-    if let HirSymbolBody::Owner { objects, exits } = &symbol.body {
+    if let HirSymbolBody::Owner { objects, exits, .. } = &symbol.body {
         rendered.push_str("|objects=[");
         rendered.push_str(
             &objects

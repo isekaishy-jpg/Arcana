@@ -9,11 +9,16 @@ use std::ffi::{CStr, c_char, c_void};
 use std::fs;
 use std::io::{Read, Seek, Write};
 use std::path::{Component, Path, PathBuf};
+use std::sync::OnceLock;
 
 use arcana_aot::{
     AotOwnerArtifact, AotPackageArtifact, parse_package_artifact, validate_package_artifact,
 };
-use arcana_cabi::{ArcanaCabiProviderHostOpsV1, ArcanaCabiProviderValue, ArcanaOwnedStr};
+use arcana_cabi::{
+    ArcanaCabiProviderDescriptorView, ArcanaCabiProviderDescriptorViewBackingKind,
+    ArcanaCabiProviderDescriptorViewOwner, ArcanaCabiProviderHostOpsV1, ArcanaCabiProviderValue,
+    ArcanaOwnedStr, encode_provider_values,
+};
 use arcana_ir::{
     ExecAssignOp as ParsedAssignOp, ExecAssignTarget as ParsedAssignTarget,
     ExecAvailabilityAttachment as ParsedAvailabilityAttachment,
@@ -40,6 +45,7 @@ use arcana_language_law::{
 use pathdiff::diff_paths;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use stacker::grow;
 
 mod json_abi;
 mod native_abi;
@@ -107,6 +113,7 @@ pub struct RuntimeOwnerPlan {
     pub module_id: String,
     pub owner_path: Vec<String>,
     pub owner_name: String,
+    pub context_type: Option<String>,
     pub objects: Vec<RuntimeOwnerObjectPlan>,
     pub exits: Vec<RuntimeOwnerExitPlan>,
 }
@@ -329,10 +336,49 @@ pub struct RuntimeFrameArenaHandle(u64);
 pub struct RuntimePoolArenaHandle(u64);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RuntimeTempArenaHandle(u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RuntimeSessionArenaHandle(u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RuntimeRingBufferHandle(u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RuntimeSlabHandle(u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RuntimeReadViewHandle(u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RuntimeEditViewHandle(u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RuntimeByteViewHandle(u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RuntimeByteEditViewHandle(u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RuntimeStrViewHandle(u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct RuntimeElementViewBufferHandle(u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct RuntimeByteViewBufferHandle(u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct RuntimeStrViewBufferHandle(u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RuntimeTaskHandle(u64);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RuntimeThreadHandle(u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RuntimeLazyHandle(u64);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RuntimeProviderOpaqueHandle(u64);
@@ -361,6 +407,34 @@ pub struct RuntimePoolIdValue {
     generation: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RuntimeTempIdValue {
+    arena: RuntimeTempArenaHandle,
+    slot: u64,
+    generation: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RuntimeSessionIdValue {
+    arena: RuntimeSessionArenaHandle,
+    slot: u64,
+    generation: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RuntimeRingIdValue {
+    arena: RuntimeRingBufferHandle,
+    slot: u64,
+    generation: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RuntimeSlabIdValue {
+    arena: RuntimeSlabHandle,
+    slot: u64,
+    generation: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum RuntimeReferenceTarget {
     Local {
@@ -382,6 +456,22 @@ enum RuntimeReferenceTarget {
     },
     PoolSlot {
         id: RuntimePoolIdValue,
+        members: Vec<String>,
+    },
+    TempSlot {
+        id: RuntimeTempIdValue,
+        members: Vec<String>,
+    },
+    SessionSlot {
+        id: RuntimeSessionIdValue,
+        members: Vec<String>,
+    },
+    RingSlot {
+        id: RuntimeRingIdValue,
+        members: Vec<String>,
+    },
+    SlabSlot {
+        id: RuntimeSlabIdValue,
         members: Vec<String>,
     },
 }
@@ -419,8 +509,22 @@ enum RuntimeOpaqueValue {
     FrameId(RuntimeFrameIdValue),
     PoolArena(RuntimePoolArenaHandle),
     PoolId(RuntimePoolIdValue),
+    TempArena(RuntimeTempArenaHandle),
+    TempId(RuntimeTempIdValue),
+    SessionArena(RuntimeSessionArenaHandle),
+    SessionId(RuntimeSessionIdValue),
+    RingBuffer(RuntimeRingBufferHandle),
+    RingId(RuntimeRingIdValue),
+    Slab(RuntimeSlabHandle),
+    SlabId(RuntimeSlabIdValue),
+    ReadView(RuntimeReadViewHandle),
+    EditView(RuntimeEditViewHandle),
+    ByteView(RuntimeByteViewHandle),
+    ByteEditView(RuntimeByteEditViewHandle),
+    StrView(RuntimeStrViewHandle),
     Task(RuntimeTaskHandle),
     Thread(RuntimeThreadHandle),
+    Lazy(RuntimeLazyHandle),
     Provider(RuntimeProviderOpaqueHandle),
 }
 
@@ -445,12 +549,25 @@ enum RuntimeOpaqueFamily {
     FrameId,
     PoolArena,
     PoolId,
+    TempArena,
+    TempId,
+    SessionArena,
+    SessionId,
+    RingBuffer,
+    RingId,
+    Slab,
+    SlabId,
+    ReadView,
+    EditView,
+    ByteView,
+    ByteEditView,
+    StrView,
     Task,
     Thread,
 }
 
 impl RuntimeOpaqueFamily {
-    const ALL: [Self; 21] = [
+    const ALL: [Self; 34] = [
         Self::FileStream,
         Self::Window,
         Self::Image,
@@ -470,6 +587,19 @@ impl RuntimeOpaqueFamily {
         Self::FrameId,
         Self::PoolArena,
         Self::PoolId,
+        Self::TempArena,
+        Self::TempId,
+        Self::SessionArena,
+        Self::SessionId,
+        Self::RingBuffer,
+        Self::RingId,
+        Self::Slab,
+        Self::SlabId,
+        Self::ReadView,
+        Self::EditView,
+        Self::ByteView,
+        Self::ByteEditView,
+        Self::StrView,
         Self::Task,
         Self::Thread,
     ];
@@ -495,6 +625,19 @@ impl RuntimeOpaqueFamily {
             Self::FrameId => "frame_id_handle",
             Self::PoolArena => "pool_arena_handle",
             Self::PoolId => "pool_id_handle",
+            Self::TempArena => "temp_arena_handle",
+            Self::TempId => "temp_id_handle",
+            Self::SessionArena => "session_arena_handle",
+            Self::SessionId => "session_id_handle",
+            Self::RingBuffer => "ring_buffer_handle",
+            Self::RingId => "ring_id_handle",
+            Self::Slab => "slab_handle",
+            Self::SlabId => "slab_id_handle",
+            Self::ReadView => "read_view_handle",
+            Self::EditView => "edit_view_handle",
+            Self::ByteView => "byte_view_handle",
+            Self::ByteEditView => "byte_edit_view_handle",
+            Self::StrView => "str_view_handle",
             Self::Task => "task_handle",
             Self::Thread => "thread_handle",
         }
@@ -521,6 +664,19 @@ impl RuntimeOpaqueFamily {
             Self::FrameId => "std.memory.FrameId",
             Self::PoolArena => "std.memory.PoolArena",
             Self::PoolId => "std.memory.PoolId",
+            Self::TempArena => "std.memory.TempArena",
+            Self::TempId => "std.memory.TempId",
+            Self::SessionArena => "std.memory.SessionArena",
+            Self::SessionId => "std.memory.SessionId",
+            Self::RingBuffer => "std.memory.RingBuffer",
+            Self::RingId => "std.memory.RingId",
+            Self::Slab => "std.memory.Slab",
+            Self::SlabId => "std.memory.SlabId",
+            Self::ReadView => "std.memory.ReadView",
+            Self::EditView => "std.memory.EditView",
+            Self::ByteView => "std.memory.ByteView",
+            Self::ByteEditView => "std.memory.ByteEditView",
+            Self::StrView => "std.memory.StrView",
             Self::Task => "std.concurrent.Task",
             Self::Thread => "std.concurrent.Thread",
         }
@@ -547,6 +703,19 @@ impl RuntimeOpaqueFamily {
             "frame_id_handle" => Some(Self::FrameId),
             "pool_arena_handle" => Some(Self::PoolArena),
             "pool_id_handle" => Some(Self::PoolId),
+            "temp_arena_handle" => Some(Self::TempArena),
+            "temp_id_handle" => Some(Self::TempId),
+            "session_arena_handle" => Some(Self::SessionArena),
+            "session_id_handle" => Some(Self::SessionId),
+            "ring_buffer_handle" => Some(Self::RingBuffer),
+            "ring_id_handle" => Some(Self::RingId),
+            "slab_handle" => Some(Self::Slab),
+            "slab_id_handle" => Some(Self::SlabId),
+            "read_view_handle" => Some(Self::ReadView),
+            "edit_view_handle" => Some(Self::EditView),
+            "byte_view_handle" => Some(Self::ByteView),
+            "byte_edit_view_handle" => Some(Self::ByteEditView),
+            "str_view_handle" => Some(Self::StrView),
             "task_handle" => Some(Self::Task),
             "thread_handle" => Some(Self::Thread),
             _ => None,
@@ -574,8 +743,22 @@ impl RuntimeOpaqueFamily {
             RuntimeOpaqueValue::FrameId(_) => Self::FrameId,
             RuntimeOpaqueValue::PoolArena(_) => Self::PoolArena,
             RuntimeOpaqueValue::PoolId(_) => Self::PoolId,
+            RuntimeOpaqueValue::TempArena(_) => Self::TempArena,
+            RuntimeOpaqueValue::TempId(_) => Self::TempId,
+            RuntimeOpaqueValue::SessionArena(_) => Self::SessionArena,
+            RuntimeOpaqueValue::SessionId(_) => Self::SessionId,
+            RuntimeOpaqueValue::RingBuffer(_) => Self::RingBuffer,
+            RuntimeOpaqueValue::RingId(_) => Self::RingId,
+            RuntimeOpaqueValue::Slab(_) => Self::Slab,
+            RuntimeOpaqueValue::SlabId(_) => Self::SlabId,
+            RuntimeOpaqueValue::ReadView(_) => Self::ReadView,
+            RuntimeOpaqueValue::EditView(_) => Self::EditView,
+            RuntimeOpaqueValue::ByteView(_) => Self::ByteView,
+            RuntimeOpaqueValue::ByteEditView(_) => Self::ByteEditView,
+            RuntimeOpaqueValue::StrView(_) => Self::StrView,
             RuntimeOpaqueValue::Task(_) => Self::Task,
             RuntimeOpaqueValue::Thread(_) => Self::Thread,
+            RuntimeOpaqueValue::Lazy(_) => panic!("lazy opaques are internal"),
             RuntimeOpaqueValue::Provider(_) => panic!("provider opaques are dynamic"),
         }
     }
@@ -4041,6 +4224,7 @@ struct RuntimeMemorySpecState {
     spec: ParsedMemorySpecDecl,
     handle: Option<RuntimeValue>,
     handle_policy: Option<RuntimeMemoryHandlePolicy>,
+    owner_keys: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -4109,6 +4293,18 @@ enum RuntimePoolRecyclePolicy {
     Strict,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuntimeResetOnPolicy {
+    Manual,
+    Frame,
+    OwnerExit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuntimeRingOverwritePolicy {
+    Oldest,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RuntimeArenaPolicy {
     base_capacity: usize,
@@ -4125,6 +4321,7 @@ struct RuntimeFrameArenaPolicy {
     growth_step: usize,
     pressure: RuntimeMemoryPressurePolicy,
     recycle: RuntimeFrameRecyclePolicy,
+    reset_on: RuntimeResetOnPolicy,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -4138,10 +4335,52 @@ struct RuntimePoolArenaPolicy {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeTempArenaPolicy {
+    base_capacity: usize,
+    current_limit: usize,
+    growth_step: usize,
+    pressure: RuntimeMemoryPressurePolicy,
+    reset_on: RuntimeResetOnPolicy,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeSessionArenaPolicy {
+    base_capacity: usize,
+    current_limit: usize,
+    growth_step: usize,
+    pressure: RuntimeMemoryPressurePolicy,
+    handle: RuntimeMemoryHandlePolicy,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeRingBufferPolicy {
+    base_capacity: usize,
+    current_limit: usize,
+    growth_step: usize,
+    pressure: RuntimeMemoryPressurePolicy,
+    overwrite: RuntimeRingOverwritePolicy,
+    window: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeSlabPolicy {
+    base_capacity: usize,
+    current_limit: usize,
+    growth_step: usize,
+    pressure: RuntimeMemoryPressurePolicy,
+    handle: RuntimeMemoryHandlePolicy,
+    page: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum RuntimeMemorySpecMaterializationKind {
     Arena(RuntimeArenaPolicy),
     Frame(RuntimeFrameArenaPolicy),
     Pool(RuntimePoolArenaPolicy),
+    Temp(RuntimeTempArenaPolicy),
+    Session(RuntimeSessionArenaPolicy),
+    Ring(RuntimeRingBufferPolicy),
+    Slab(RuntimeSlabPolicy),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -4210,6 +4449,24 @@ fn runtime_pool_recycle_policy_from_atom(atom: &str) -> Result<RuntimePoolRecycl
     }
 }
 
+fn runtime_reset_on_policy_from_atom(atom: &str) -> Result<RuntimeResetOnPolicy, String> {
+    match atom {
+        "manual" => Ok(RuntimeResetOnPolicy::Manual),
+        "frame" => Ok(RuntimeResetOnPolicy::Frame),
+        "owner_exit" => Ok(RuntimeResetOnPolicy::OwnerExit),
+        other => Err(format!("unsupported reset_on atom `{other}`")),
+    }
+}
+
+fn runtime_ring_overwrite_policy_from_atom(
+    atom: &str,
+) -> Result<RuntimeRingOverwritePolicy, String> {
+    match atom {
+        "oldest" => Ok(RuntimeRingOverwritePolicy::Oldest),
+        other => Err(format!("unsupported ring overwrite atom `{other}`")),
+    }
+}
+
 fn runtime_default_memory_pressure(strategy: RuntimeMemoryStrategy) -> RuntimeMemoryPressurePolicy {
     match strategy {
         RuntimeMemoryStrategy::Grow => RuntimeMemoryPressurePolicy::Elastic,
@@ -4252,6 +4509,15 @@ fn runtime_default_pool_recycle_policy(
     }
 }
 
+fn runtime_default_reset_on_policy(strategy: RuntimeMemoryStrategy) -> RuntimeResetOnPolicy {
+    match strategy {
+        RuntimeMemoryStrategy::Recycle => RuntimeResetOnPolicy::Frame,
+        RuntimeMemoryStrategy::Alloc
+        | RuntimeMemoryStrategy::Grow
+        | RuntimeMemoryStrategy::Fixed => RuntimeResetOnPolicy::Manual,
+    }
+}
+
 fn runtime_default_growth_step(strategy: RuntimeMemoryStrategy, base_capacity: usize) -> usize {
     match strategy {
         RuntimeMemoryStrategy::Grow => base_capacity.max(1),
@@ -4275,6 +4541,10 @@ fn runtime_try_grow_limit(limit: &mut usize, growth_step: usize) -> bool {
     }
     *limit = next;
     true
+}
+
+fn runtime_try_grow_limit_by(limit: &mut usize, growth_step: usize) -> bool {
+    runtime_try_grow_limit(limit, growth_step.max(1))
 }
 
 fn memory_spec_alias_name(name: &str) -> String {
@@ -4303,6 +4573,7 @@ fn runtime_eval_message(signal: RuntimeEvalSignal) -> String {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RuntimeExecutionState {
     next_local_handle: u64,
+    captured_local_values: BTreeMap<RuntimeLocalHandle, RuntimeValue>,
     call_stack: Vec<String>,
     cleanup_footer_frames: Vec<RuntimeCleanupFooterFrame>,
     owners: BTreeMap<String, RuntimeOwnerState>,
@@ -4316,10 +4587,36 @@ pub struct RuntimeExecutionState {
     frame_arenas: BTreeMap<RuntimeFrameArenaHandle, RuntimeFrameArenaState>,
     next_pool_arena_handle: u64,
     pool_arenas: BTreeMap<RuntimePoolArenaHandle, RuntimePoolArenaState>,
+    next_temp_arena_handle: u64,
+    temp_arenas: BTreeMap<RuntimeTempArenaHandle, RuntimeTempArenaState>,
+    next_session_arena_handle: u64,
+    session_arenas: BTreeMap<RuntimeSessionArenaHandle, RuntimeSessionArenaState>,
+    next_ring_buffer_handle: u64,
+    ring_buffers: BTreeMap<RuntimeRingBufferHandle, RuntimeRingBufferState>,
+    next_slab_handle: u64,
+    slabs: BTreeMap<RuntimeSlabHandle, RuntimeSlabState>,
+    next_element_view_buffer_handle: u64,
+    element_view_buffers: BTreeMap<RuntimeElementViewBufferHandle, RuntimeElementViewBufferState>,
+    next_read_view_handle: u64,
+    read_views: BTreeMap<RuntimeReadViewHandle, RuntimeReadViewState>,
+    next_edit_view_handle: u64,
+    edit_views: BTreeMap<RuntimeEditViewHandle, RuntimeEditViewState>,
+    next_byte_view_buffer_handle: u64,
+    byte_view_buffers: BTreeMap<RuntimeByteViewBufferHandle, RuntimeByteViewBufferState>,
+    next_byte_view_handle: u64,
+    byte_views: BTreeMap<RuntimeByteViewHandle, RuntimeByteViewState>,
+    next_byte_edit_view_handle: u64,
+    byte_edit_views: BTreeMap<RuntimeByteEditViewHandle, RuntimeByteEditViewState>,
+    next_str_view_buffer_handle: u64,
+    str_view_buffers: BTreeMap<RuntimeStrViewBufferHandle, RuntimeStrViewBufferState>,
+    next_str_view_handle: u64,
+    str_views: BTreeMap<RuntimeStrViewHandle, RuntimeStrViewState>,
     next_task_handle: u64,
     tasks: BTreeMap<RuntimeTaskHandle, RuntimeTaskState>,
     next_thread_handle: u64,
     threads: BTreeMap<RuntimeThreadHandle, RuntimeThreadState>,
+    next_lazy_handle: u64,
+    lazy_values: BTreeMap<RuntimeLazyHandle, RuntimeTaskState>,
     async_context_depth: usize,
     next_scheduler_thread_id: i64,
     current_thread_id: i64,
@@ -4333,6 +4630,7 @@ pub struct RuntimeExecutionState {
     atomic_bools: BTreeMap<RuntimeAtomicBoolHandle, bool>,
     next_provider_opaque_handle: u64,
     provider_opaques: BTreeMap<RuntimeProviderOpaqueHandle, RuntimeProviderOpaqueState>,
+    exported_descriptor_counts: BTreeMap<RuntimeExportedDescriptorTarget, usize>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -4387,6 +4685,127 @@ struct RuntimePoolArenaState {
     generations: BTreeMap<u64, u64>,
     slots: BTreeMap<u64, RuntimeValue>,
     policy: RuntimePoolArenaPolicy,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeTempArenaState {
+    type_args: Vec<String>,
+    next_slot: u64,
+    generation: u64,
+    slots: BTreeMap<u64, RuntimeValue>,
+    policy: RuntimeTempArenaPolicy,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeSessionArenaState {
+    type_args: Vec<String>,
+    next_slot: u64,
+    generation: u64,
+    slots: BTreeMap<u64, RuntimeValue>,
+    policy: RuntimeSessionArenaPolicy,
+    sealed: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeRingBufferState {
+    type_args: Vec<String>,
+    next_slot: u64,
+    generations: BTreeMap<u64, u64>,
+    slots: BTreeMap<u64, RuntimeValue>,
+    order: VecDeque<u64>,
+    policy: RuntimeRingBufferPolicy,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeSlabState {
+    type_args: Vec<String>,
+    next_slot: u64,
+    free_slots: Vec<u64>,
+    generations: BTreeMap<u64, u64>,
+    slots: BTreeMap<u64, RuntimeValue>,
+    policy: RuntimeSlabPolicy,
+    sealed: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum RuntimeExportedDescriptorTarget {
+    SessionArena(RuntimeSessionArenaHandle),
+    Slab(RuntimeSlabHandle),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeElementViewBufferState {
+    type_args: Vec<String>,
+    values: Vec<RuntimeValue>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RuntimeElementViewBacking {
+    Buffer(RuntimeElementViewBufferHandle),
+    Reference(RuntimeReferenceValue),
+    RingWindow {
+        arena: RuntimeRingBufferHandle,
+        slots: Vec<u64>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeReadViewState {
+    type_args: Vec<String>,
+    backing: RuntimeElementViewBacking,
+    start: usize,
+    len: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeEditViewState {
+    type_args: Vec<String>,
+    backing: RuntimeElementViewBacking,
+    start: usize,
+    len: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeByteViewBufferState {
+    values: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RuntimeByteViewBacking {
+    Buffer(RuntimeByteViewBufferHandle),
+    Reference(RuntimeReferenceValue),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeByteViewState {
+    backing: RuntimeByteViewBacking,
+    start: usize,
+    len: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeByteEditViewState {
+    backing: RuntimeByteViewBacking,
+    start: usize,
+    len: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeStrViewBufferState {
+    text: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RuntimeStrViewBacking {
+    Buffer(RuntimeStrViewBufferHandle),
+    Reference(RuntimeReferenceValue),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeStrViewState {
+    backing: RuntimeStrViewBacking,
+    start: usize,
+    len: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -4677,6 +5096,83 @@ enum RuntimeIntrinsic {
     MemoryPoolSet,
     MemoryPoolRemove,
     MemoryPoolReset,
+    MemoryPoolLiveIds,
+    MemoryPoolCompact,
+    MemoryTempNew,
+    MemoryTempAlloc,
+    MemoryTempLen,
+    MemoryTempHas,
+    MemoryTempGet,
+    MemoryTempBorrowRead,
+    MemoryTempBorrowEdit,
+    MemoryTempSet,
+    MemoryTempReset,
+    MemorySessionNew,
+    MemorySessionAlloc,
+    MemorySessionLen,
+    MemorySessionHas,
+    MemorySessionGet,
+    MemorySessionBorrowRead,
+    MemorySessionBorrowEdit,
+    MemorySessionSet,
+    MemorySessionReset,
+    MemorySessionSeal,
+    MemorySessionUnseal,
+    MemorySessionIsSealed,
+    MemorySessionLiveIds,
+    MemoryRingNew,
+    MemoryRingPush,
+    MemoryRingTryPop,
+    MemoryRingLen,
+    MemoryRingHas,
+    MemoryRingGet,
+    MemoryRingBorrowRead,
+    MemoryRingBorrowEdit,
+    MemoryRingSet,
+    MemoryRingReset,
+    MemoryRingWindowRead,
+    MemoryRingWindowEdit,
+    MemorySlabNew,
+    MemorySlabAlloc,
+    MemorySlabLen,
+    MemorySlabHas,
+    MemorySlabGet,
+    MemorySlabBorrowRead,
+    MemorySlabBorrowEdit,
+    MemorySlabSet,
+    MemorySlabRemove,
+    MemorySlabReset,
+    MemorySlabSeal,
+    MemorySlabUnseal,
+    MemorySlabIsSealed,
+    MemorySlabLiveIds,
+    MemoryArrayViewRead,
+    MemoryArrayViewEdit,
+    MemoryBytesView,
+    MemoryBytesViewEdit,
+    MemoryStrView,
+    MemoryViewLen,
+    MemoryViewGet,
+    MemoryViewSubview,
+    MemoryEditViewLen,
+    MemoryEditViewGet,
+    MemoryEditViewSet,
+    MemoryEditViewSubviewRead,
+    MemoryEditViewSubviewEdit,
+    MemoryByteViewLen,
+    MemoryByteViewAt,
+    MemoryByteViewSubview,
+    MemoryByteViewToArray,
+    MemoryByteEditViewLen,
+    MemoryByteEditViewAt,
+    MemoryByteEditViewSet,
+    MemoryByteEditViewSubviewRead,
+    MemoryByteEditViewSubviewEdit,
+    MemoryByteEditViewToArray,
+    MemoryStrViewLenBytes,
+    MemoryStrViewByteAt,
+    MemoryStrViewSubview,
+    MemoryStrViewToStr,
     AudioDefaultOutputTry,
     AudioOutputClose,
     AudioOutputSampleRateHz,
@@ -4767,6 +5263,7 @@ fn lower_owner(owner: &AotOwnerArtifact) -> RuntimeOwnerPlan {
         module_id: owner.module_id.clone(),
         owner_path: owner.owner_path.clone(),
         owner_name: owner.owner_name.clone(),
+        context_type: owner.context_type.as_ref().map(IrRoutineType::render),
         objects: owner
             .objects
             .iter()
@@ -5665,6 +6162,151 @@ fn resolve_runtime_intrinsic_path(callable_path: &[String]) -> Option<RuntimeInt
         ["std", "kernel", "memory", "pool_set"] => Some(RuntimeIntrinsic::MemoryPoolSet),
         ["std", "kernel", "memory", "pool_remove"] => Some(RuntimeIntrinsic::MemoryPoolRemove),
         ["std", "kernel", "memory", "pool_reset"] => Some(RuntimeIntrinsic::MemoryPoolReset),
+        ["std", "kernel", "memory", "pool_live_ids"] => Some(RuntimeIntrinsic::MemoryPoolLiveIds),
+        ["std", "kernel", "memory", "pool_compact"] => Some(RuntimeIntrinsic::MemoryPoolCompact),
+        ["std", "memory", "temp_new"] | ["std", "kernel", "memory", "temp_new"] => {
+            Some(RuntimeIntrinsic::MemoryTempNew)
+        }
+        ["std", "kernel", "memory", "temp_alloc"] => Some(RuntimeIntrinsic::MemoryTempAlloc),
+        ["std", "kernel", "memory", "temp_len"] => Some(RuntimeIntrinsic::MemoryTempLen),
+        ["std", "kernel", "memory", "temp_has"] => Some(RuntimeIntrinsic::MemoryTempHas),
+        ["std", "kernel", "memory", "temp_get"] => Some(RuntimeIntrinsic::MemoryTempGet),
+        ["std", "kernel", "memory", "temp_borrow_read"] => {
+            Some(RuntimeIntrinsic::MemoryTempBorrowRead)
+        }
+        ["std", "kernel", "memory", "temp_borrow_edit"] => {
+            Some(RuntimeIntrinsic::MemoryTempBorrowEdit)
+        }
+        ["std", "kernel", "memory", "temp_set"] => Some(RuntimeIntrinsic::MemoryTempSet),
+        ["std", "kernel", "memory", "temp_reset"] => Some(RuntimeIntrinsic::MemoryTempReset),
+        ["std", "memory", "session_new"] | ["std", "kernel", "memory", "session_new"] => {
+            Some(RuntimeIntrinsic::MemorySessionNew)
+        }
+        ["std", "kernel", "memory", "session_alloc"] => Some(RuntimeIntrinsic::MemorySessionAlloc),
+        ["std", "kernel", "memory", "session_len"] => Some(RuntimeIntrinsic::MemorySessionLen),
+        ["std", "kernel", "memory", "session_has"] => Some(RuntimeIntrinsic::MemorySessionHas),
+        ["std", "kernel", "memory", "session_get"] => Some(RuntimeIntrinsic::MemorySessionGet),
+        ["std", "kernel", "memory", "session_borrow_read"] => {
+            Some(RuntimeIntrinsic::MemorySessionBorrowRead)
+        }
+        ["std", "kernel", "memory", "session_borrow_edit"] => {
+            Some(RuntimeIntrinsic::MemorySessionBorrowEdit)
+        }
+        ["std", "kernel", "memory", "session_set"] => Some(RuntimeIntrinsic::MemorySessionSet),
+        ["std", "kernel", "memory", "session_reset"] => Some(RuntimeIntrinsic::MemorySessionReset),
+        ["std", "kernel", "memory", "session_seal"] => Some(RuntimeIntrinsic::MemorySessionSeal),
+        ["std", "kernel", "memory", "session_unseal"] => {
+            Some(RuntimeIntrinsic::MemorySessionUnseal)
+        }
+        ["std", "kernel", "memory", "session_is_sealed"] => {
+            Some(RuntimeIntrinsic::MemorySessionIsSealed)
+        }
+        ["std", "kernel", "memory", "session_live_ids"] => {
+            Some(RuntimeIntrinsic::MemorySessionLiveIds)
+        }
+        ["std", "memory", "ring_new"] | ["std", "kernel", "memory", "ring_new"] => {
+            Some(RuntimeIntrinsic::MemoryRingNew)
+        }
+        ["std", "kernel", "memory", "ring_push"] => Some(RuntimeIntrinsic::MemoryRingPush),
+        ["std", "kernel", "memory", "ring_try_pop"] => Some(RuntimeIntrinsic::MemoryRingTryPop),
+        ["std", "kernel", "memory", "ring_len"] => Some(RuntimeIntrinsic::MemoryRingLen),
+        ["std", "kernel", "memory", "ring_has"] => Some(RuntimeIntrinsic::MemoryRingHas),
+        ["std", "kernel", "memory", "ring_get"] => Some(RuntimeIntrinsic::MemoryRingGet),
+        ["std", "kernel", "memory", "ring_borrow_read"] => {
+            Some(RuntimeIntrinsic::MemoryRingBorrowRead)
+        }
+        ["std", "kernel", "memory", "ring_borrow_edit"] => {
+            Some(RuntimeIntrinsic::MemoryRingBorrowEdit)
+        }
+        ["std", "kernel", "memory", "ring_set"] => Some(RuntimeIntrinsic::MemoryRingSet),
+        ["std", "kernel", "memory", "ring_reset"] => Some(RuntimeIntrinsic::MemoryRingReset),
+        ["std", "kernel", "memory", "ring_window_read"] => {
+            Some(RuntimeIntrinsic::MemoryRingWindowRead)
+        }
+        ["std", "kernel", "memory", "ring_window_edit"] => {
+            Some(RuntimeIntrinsic::MemoryRingWindowEdit)
+        }
+        ["std", "memory", "slab_new"] | ["std", "kernel", "memory", "slab_new"] => {
+            Some(RuntimeIntrinsic::MemorySlabNew)
+        }
+        ["std", "kernel", "memory", "slab_alloc"] => Some(RuntimeIntrinsic::MemorySlabAlloc),
+        ["std", "kernel", "memory", "slab_len"] => Some(RuntimeIntrinsic::MemorySlabLen),
+        ["std", "kernel", "memory", "slab_has"] => Some(RuntimeIntrinsic::MemorySlabHas),
+        ["std", "kernel", "memory", "slab_get"] => Some(RuntimeIntrinsic::MemorySlabGet),
+        ["std", "kernel", "memory", "slab_borrow_read"] => {
+            Some(RuntimeIntrinsic::MemorySlabBorrowRead)
+        }
+        ["std", "kernel", "memory", "slab_borrow_edit"] => {
+            Some(RuntimeIntrinsic::MemorySlabBorrowEdit)
+        }
+        ["std", "kernel", "memory", "slab_set"] => Some(RuntimeIntrinsic::MemorySlabSet),
+        ["std", "kernel", "memory", "slab_remove"] => Some(RuntimeIntrinsic::MemorySlabRemove),
+        ["std", "kernel", "memory", "slab_reset"] => Some(RuntimeIntrinsic::MemorySlabReset),
+        ["std", "kernel", "memory", "slab_seal"] => Some(RuntimeIntrinsic::MemorySlabSeal),
+        ["std", "kernel", "memory", "slab_unseal"] => Some(RuntimeIntrinsic::MemorySlabUnseal),
+        ["std", "kernel", "memory", "slab_is_sealed"] => Some(RuntimeIntrinsic::MemorySlabIsSealed),
+        ["std", "kernel", "memory", "slab_live_ids"] => Some(RuntimeIntrinsic::MemorySlabLiveIds),
+        ["std", "kernel", "memory", "array_view_read"] => {
+            Some(RuntimeIntrinsic::MemoryArrayViewRead)
+        }
+        ["std", "kernel", "memory", "array_view_edit"] => {
+            Some(RuntimeIntrinsic::MemoryArrayViewEdit)
+        }
+        ["std", "kernel", "memory", "bytes_view"] => Some(RuntimeIntrinsic::MemoryBytesView),
+        ["std", "kernel", "memory", "bytes_view_edit"] => {
+            Some(RuntimeIntrinsic::MemoryBytesViewEdit)
+        }
+        ["std", "kernel", "memory", "str_view"] => Some(RuntimeIntrinsic::MemoryStrView),
+        ["std", "kernel", "memory", "view_len"] => Some(RuntimeIntrinsic::MemoryViewLen),
+        ["std", "kernel", "memory", "view_get"] => Some(RuntimeIntrinsic::MemoryViewGet),
+        ["std", "kernel", "memory", "view_subview"] => Some(RuntimeIntrinsic::MemoryViewSubview),
+        ["std", "kernel", "memory", "edit_view_len"] => Some(RuntimeIntrinsic::MemoryEditViewLen),
+        ["std", "kernel", "memory", "edit_view_get"] => Some(RuntimeIntrinsic::MemoryEditViewGet),
+        ["std", "kernel", "memory", "edit_view_set"] => Some(RuntimeIntrinsic::MemoryEditViewSet),
+        ["std", "kernel", "memory", "edit_view_subview_read"] => {
+            Some(RuntimeIntrinsic::MemoryEditViewSubviewRead)
+        }
+        ["std", "kernel", "memory", "edit_view_subview_edit"] => {
+            Some(RuntimeIntrinsic::MemoryEditViewSubviewEdit)
+        }
+        ["std", "kernel", "memory", "byte_view_len"] => Some(RuntimeIntrinsic::MemoryByteViewLen),
+        ["std", "kernel", "memory", "byte_view_at"] => Some(RuntimeIntrinsic::MemoryByteViewAt),
+        ["std", "kernel", "memory", "byte_view_subview"] => {
+            Some(RuntimeIntrinsic::MemoryByteViewSubview)
+        }
+        ["std", "kernel", "memory", "byte_view_to_array"] => {
+            Some(RuntimeIntrinsic::MemoryByteViewToArray)
+        }
+        ["std", "kernel", "memory", "byte_edit_view_len"] => {
+            Some(RuntimeIntrinsic::MemoryByteEditViewLen)
+        }
+        ["std", "kernel", "memory", "byte_edit_view_at"] => {
+            Some(RuntimeIntrinsic::MemoryByteEditViewAt)
+        }
+        ["std", "kernel", "memory", "byte_edit_view_set"] => {
+            Some(RuntimeIntrinsic::MemoryByteEditViewSet)
+        }
+        ["std", "kernel", "memory", "byte_edit_view_subview_read"] => {
+            Some(RuntimeIntrinsic::MemoryByteEditViewSubviewRead)
+        }
+        ["std", "kernel", "memory", "byte_edit_view_subview_edit"] => {
+            Some(RuntimeIntrinsic::MemoryByteEditViewSubviewEdit)
+        }
+        ["std", "kernel", "memory", "byte_edit_view_to_array"] => {
+            Some(RuntimeIntrinsic::MemoryByteEditViewToArray)
+        }
+        ["std", "kernel", "memory", "str_view_len_bytes"] => {
+            Some(RuntimeIntrinsic::MemoryStrViewLenBytes)
+        }
+        ["std", "kernel", "memory", "str_view_byte_at"] => {
+            Some(RuntimeIntrinsic::MemoryStrViewByteAt)
+        }
+        ["std", "kernel", "memory", "str_view_subview"] => {
+            Some(RuntimeIntrinsic::MemoryStrViewSubview)
+        }
+        ["std", "kernel", "memory", "str_view_to_str"] => {
+            Some(RuntimeIntrinsic::MemoryStrViewToStr)
+        }
         ["std", "kernel", "concurrency", "channel_send"] => {
             Some(RuntimeIntrinsic::ConcurrentChannelSend)
         }
@@ -6062,6 +6704,83 @@ fn resolve_runtime_intrinsic_impl(intrinsic_impl: &str) -> Option<RuntimeIntrins
         "MemoryPoolSet" => Some(RuntimeIntrinsic::MemoryPoolSet),
         "MemoryPoolRemove" => Some(RuntimeIntrinsic::MemoryPoolRemove),
         "MemoryPoolReset" => Some(RuntimeIntrinsic::MemoryPoolReset),
+        "MemoryPoolLiveIds" => Some(RuntimeIntrinsic::MemoryPoolLiveIds),
+        "MemoryPoolCompact" => Some(RuntimeIntrinsic::MemoryPoolCompact),
+        "MemoryTempNew" => Some(RuntimeIntrinsic::MemoryTempNew),
+        "MemoryTempAlloc" => Some(RuntimeIntrinsic::MemoryTempAlloc),
+        "MemoryTempLen" => Some(RuntimeIntrinsic::MemoryTempLen),
+        "MemoryTempHas" => Some(RuntimeIntrinsic::MemoryTempHas),
+        "MemoryTempGet" => Some(RuntimeIntrinsic::MemoryTempGet),
+        "MemoryTempBorrowRead" => Some(RuntimeIntrinsic::MemoryTempBorrowRead),
+        "MemoryTempBorrowEdit" => Some(RuntimeIntrinsic::MemoryTempBorrowEdit),
+        "MemoryTempSet" => Some(RuntimeIntrinsic::MemoryTempSet),
+        "MemoryTempReset" => Some(RuntimeIntrinsic::MemoryTempReset),
+        "MemorySessionNew" => Some(RuntimeIntrinsic::MemorySessionNew),
+        "MemorySessionAlloc" => Some(RuntimeIntrinsic::MemorySessionAlloc),
+        "MemorySessionLen" => Some(RuntimeIntrinsic::MemorySessionLen),
+        "MemorySessionHas" => Some(RuntimeIntrinsic::MemorySessionHas),
+        "MemorySessionGet" => Some(RuntimeIntrinsic::MemorySessionGet),
+        "MemorySessionBorrowRead" => Some(RuntimeIntrinsic::MemorySessionBorrowRead),
+        "MemorySessionBorrowEdit" => Some(RuntimeIntrinsic::MemorySessionBorrowEdit),
+        "MemorySessionSet" => Some(RuntimeIntrinsic::MemorySessionSet),
+        "MemorySessionReset" => Some(RuntimeIntrinsic::MemorySessionReset),
+        "MemorySessionSeal" => Some(RuntimeIntrinsic::MemorySessionSeal),
+        "MemorySessionUnseal" => Some(RuntimeIntrinsic::MemorySessionUnseal),
+        "MemorySessionIsSealed" => Some(RuntimeIntrinsic::MemorySessionIsSealed),
+        "MemorySessionLiveIds" => Some(RuntimeIntrinsic::MemorySessionLiveIds),
+        "MemoryRingNew" => Some(RuntimeIntrinsic::MemoryRingNew),
+        "MemoryRingPush" => Some(RuntimeIntrinsic::MemoryRingPush),
+        "MemoryRingTryPop" => Some(RuntimeIntrinsic::MemoryRingTryPop),
+        "MemoryRingLen" => Some(RuntimeIntrinsic::MemoryRingLen),
+        "MemoryRingHas" => Some(RuntimeIntrinsic::MemoryRingHas),
+        "MemoryRingGet" => Some(RuntimeIntrinsic::MemoryRingGet),
+        "MemoryRingBorrowRead" => Some(RuntimeIntrinsic::MemoryRingBorrowRead),
+        "MemoryRingBorrowEdit" => Some(RuntimeIntrinsic::MemoryRingBorrowEdit),
+        "MemoryRingSet" => Some(RuntimeIntrinsic::MemoryRingSet),
+        "MemoryRingReset" => Some(RuntimeIntrinsic::MemoryRingReset),
+        "MemoryRingWindowRead" => Some(RuntimeIntrinsic::MemoryRingWindowRead),
+        "MemoryRingWindowEdit" => Some(RuntimeIntrinsic::MemoryRingWindowEdit),
+        "MemorySlabNew" => Some(RuntimeIntrinsic::MemorySlabNew),
+        "MemorySlabAlloc" => Some(RuntimeIntrinsic::MemorySlabAlloc),
+        "MemorySlabLen" => Some(RuntimeIntrinsic::MemorySlabLen),
+        "MemorySlabHas" => Some(RuntimeIntrinsic::MemorySlabHas),
+        "MemorySlabGet" => Some(RuntimeIntrinsic::MemorySlabGet),
+        "MemorySlabBorrowRead" => Some(RuntimeIntrinsic::MemorySlabBorrowRead),
+        "MemorySlabBorrowEdit" => Some(RuntimeIntrinsic::MemorySlabBorrowEdit),
+        "MemorySlabSet" => Some(RuntimeIntrinsic::MemorySlabSet),
+        "MemorySlabRemove" => Some(RuntimeIntrinsic::MemorySlabRemove),
+        "MemorySlabReset" => Some(RuntimeIntrinsic::MemorySlabReset),
+        "MemorySlabSeal" => Some(RuntimeIntrinsic::MemorySlabSeal),
+        "MemorySlabUnseal" => Some(RuntimeIntrinsic::MemorySlabUnseal),
+        "MemorySlabIsSealed" => Some(RuntimeIntrinsic::MemorySlabIsSealed),
+        "MemorySlabLiveIds" => Some(RuntimeIntrinsic::MemorySlabLiveIds),
+        "MemoryArrayViewRead" => Some(RuntimeIntrinsic::MemoryArrayViewRead),
+        "MemoryArrayViewEdit" => Some(RuntimeIntrinsic::MemoryArrayViewEdit),
+        "MemoryBytesView" => Some(RuntimeIntrinsic::MemoryBytesView),
+        "MemoryBytesViewEdit" => Some(RuntimeIntrinsic::MemoryBytesViewEdit),
+        "MemoryStrView" => Some(RuntimeIntrinsic::MemoryStrView),
+        "MemoryViewLen" => Some(RuntimeIntrinsic::MemoryViewLen),
+        "MemoryViewGet" => Some(RuntimeIntrinsic::MemoryViewGet),
+        "MemoryViewSubview" => Some(RuntimeIntrinsic::MemoryViewSubview),
+        "MemoryEditViewLen" => Some(RuntimeIntrinsic::MemoryEditViewLen),
+        "MemoryEditViewGet" => Some(RuntimeIntrinsic::MemoryEditViewGet),
+        "MemoryEditViewSet" => Some(RuntimeIntrinsic::MemoryEditViewSet),
+        "MemoryEditViewSubviewRead" => Some(RuntimeIntrinsic::MemoryEditViewSubviewRead),
+        "MemoryEditViewSubviewEdit" => Some(RuntimeIntrinsic::MemoryEditViewSubviewEdit),
+        "MemoryByteViewLen" => Some(RuntimeIntrinsic::MemoryByteViewLen),
+        "MemoryByteViewAt" => Some(RuntimeIntrinsic::MemoryByteViewAt),
+        "MemoryByteViewSubview" => Some(RuntimeIntrinsic::MemoryByteViewSubview),
+        "MemoryByteViewToArray" => Some(RuntimeIntrinsic::MemoryByteViewToArray),
+        "MemoryByteEditViewLen" => Some(RuntimeIntrinsic::MemoryByteEditViewLen),
+        "MemoryByteEditViewAt" => Some(RuntimeIntrinsic::MemoryByteEditViewAt),
+        "MemoryByteEditViewSet" => Some(RuntimeIntrinsic::MemoryByteEditViewSet),
+        "MemoryByteEditViewSubviewRead" => Some(RuntimeIntrinsic::MemoryByteEditViewSubviewRead),
+        "MemoryByteEditViewSubviewEdit" => Some(RuntimeIntrinsic::MemoryByteEditViewSubviewEdit),
+        "MemoryByteEditViewToArray" => Some(RuntimeIntrinsic::MemoryByteEditViewToArray),
+        "MemoryStrViewLenBytes" => Some(RuntimeIntrinsic::MemoryStrViewLenBytes),
+        "MemoryStrViewByteAt" => Some(RuntimeIntrinsic::MemoryStrViewByteAt),
+        "MemoryStrViewSubview" => Some(RuntimeIntrinsic::MemoryStrViewSubview),
+        "MemoryStrViewToStr" => Some(RuntimeIntrinsic::MemoryStrViewToStr),
         "AudioDefaultOutputTry" => Some(RuntimeIntrinsic::AudioDefaultOutputTry),
         "AudioOutputClose" => Some(RuntimeIntrinsic::AudioOutputClose),
         "AudioOutputSampleRateHz" => Some(RuntimeIntrinsic::AudioOutputSampleRateHz),
@@ -6241,6 +6960,58 @@ fn runtime_value_to_string(value: &RuntimeValue) -> String {
                     )
                 }
             }
+            RuntimeReferenceTarget::TempSlot { id, members } => {
+                if members.is_empty() {
+                    format!("<ref:Temp:{}:{}:{}>", id.arena.0, id.slot, id.generation)
+                } else {
+                    format!(
+                        "<ref:Temp:{}:{}:{}:{}>",
+                        id.arena.0,
+                        id.slot,
+                        id.generation,
+                        members.join(".")
+                    )
+                }
+            }
+            RuntimeReferenceTarget::SessionSlot { id, members } => {
+                if members.is_empty() {
+                    format!("<ref:Session:{}:{}:{}>", id.arena.0, id.slot, id.generation)
+                } else {
+                    format!(
+                        "<ref:Session:{}:{}:{}:{}>",
+                        id.arena.0,
+                        id.slot,
+                        id.generation,
+                        members.join(".")
+                    )
+                }
+            }
+            RuntimeReferenceTarget::RingSlot { id, members } => {
+                if members.is_empty() {
+                    format!("<ref:Ring:{}:{}:{}>", id.arena.0, id.slot, id.generation)
+                } else {
+                    format!(
+                        "<ref:Ring:{}:{}:{}:{}>",
+                        id.arena.0,
+                        id.slot,
+                        id.generation,
+                        members.join(".")
+                    )
+                }
+            }
+            RuntimeReferenceTarget::SlabSlot { id, members } => {
+                if members.is_empty() {
+                    format!("<ref:Slab:{}:{}:{}>", id.arena.0, id.slot, id.generation)
+                } else {
+                    format!(
+                        "<ref:Slab:{}:{}:{}:{}>",
+                        id.arena.0,
+                        id.slot,
+                        id.generation,
+                        members.join(".")
+                    )
+                }
+            }
         },
         RuntimeValue::Opaque(RuntimeOpaqueValue::FileStream(handle)) => {
             format!("<FileStream:{}>", handle.0)
@@ -6299,11 +7070,53 @@ fn runtime_value_to_string(value: &RuntimeValue) -> String {
         RuntimeValue::Opaque(RuntimeOpaqueValue::PoolId(id)) => {
             format!("<PoolId:{}:{}:{}>", id.arena.0, id.slot, id.generation)
         }
+        RuntimeValue::Opaque(RuntimeOpaqueValue::TempArena(handle)) => {
+            format!("<TempArena:{}>", handle.0)
+        }
+        RuntimeValue::Opaque(RuntimeOpaqueValue::TempId(id)) => {
+            format!("<TempId:{}:{}:{}>", id.arena.0, id.slot, id.generation)
+        }
+        RuntimeValue::Opaque(RuntimeOpaqueValue::SessionArena(handle)) => {
+            format!("<SessionArena:{}>", handle.0)
+        }
+        RuntimeValue::Opaque(RuntimeOpaqueValue::SessionId(id)) => {
+            format!("<SessionId:{}:{}:{}>", id.arena.0, id.slot, id.generation)
+        }
+        RuntimeValue::Opaque(RuntimeOpaqueValue::RingBuffer(handle)) => {
+            format!("<RingBuffer:{}>", handle.0)
+        }
+        RuntimeValue::Opaque(RuntimeOpaqueValue::RingId(id)) => {
+            format!("<RingId:{}:{}:{}>", id.arena.0, id.slot, id.generation)
+        }
+        RuntimeValue::Opaque(RuntimeOpaqueValue::Slab(handle)) => {
+            format!("<Slab:{}>", handle.0)
+        }
+        RuntimeValue::Opaque(RuntimeOpaqueValue::SlabId(id)) => {
+            format!("<SlabId:{}:{}:{}>", id.arena.0, id.slot, id.generation)
+        }
+        RuntimeValue::Opaque(RuntimeOpaqueValue::ReadView(handle)) => {
+            format!("<ReadView:{}>", handle.0)
+        }
+        RuntimeValue::Opaque(RuntimeOpaqueValue::EditView(handle)) => {
+            format!("<EditView:{}>", handle.0)
+        }
+        RuntimeValue::Opaque(RuntimeOpaqueValue::ByteView(handle)) => {
+            format!("<ByteView:{}>", handle.0)
+        }
+        RuntimeValue::Opaque(RuntimeOpaqueValue::ByteEditView(handle)) => {
+            format!("<ByteEditView:{}>", handle.0)
+        }
+        RuntimeValue::Opaque(RuntimeOpaqueValue::StrView(handle)) => {
+            format!("<StrView:{}>", handle.0)
+        }
         RuntimeValue::Opaque(RuntimeOpaqueValue::Task(handle)) => {
             format!("<Task:{}>", handle.0)
         }
         RuntimeValue::Opaque(RuntimeOpaqueValue::Thread(handle)) => {
             format!("<Thread:{}>", handle.0)
+        }
+        RuntimeValue::Opaque(RuntimeOpaqueValue::Lazy(handle)) => {
+            format!("<Lazy:{}>", handle.0)
         }
         RuntimeValue::Opaque(RuntimeOpaqueValue::Provider(handle)) => {
             format!("<ProviderOpaque:{}>", handle.0)
@@ -6360,13 +7173,21 @@ fn lookup_memory_spec_in_scopes_mut<'a>(
         .find_map(|scope| scope.memory_specs.get_mut(name))
 }
 
-fn read_runtime_local_value(scopes: &[RuntimeScope], name: &str) -> Result<RuntimeValue, String> {
+fn read_runtime_local_value(
+    scopes: &[RuntimeScope],
+    state: &RuntimeExecutionState,
+    name: &str,
+) -> Result<RuntimeValue, String> {
     let local = lookup_local(scopes, name)
         .ok_or_else(|| format!("unsupported runtime value path `{name}`"))?;
     if local.moved {
         return Err(format!("use of moved local `{name}`"));
     }
-    Ok(local.value.clone())
+    Ok(state
+        .captured_local_values
+        .get(&local.handle)
+        .cloned()
+        .unwrap_or_else(|| local.value.clone()))
 }
 
 fn lookup_local_mut_by_handle(
@@ -6391,6 +7212,20 @@ fn lookup_local_with_name_by_handle(
             .iter()
             .find_map(|(name, local)| (local.handle == handle).then_some((name.as_str(), local)))
     })
+}
+
+fn runtime_scope_local_summary(scopes: &[RuntimeScope]) -> String {
+    let mut entries = Vec::new();
+    for scope in scopes.iter().rev() {
+        for (name, local) in &scope.locals {
+            entries.push(format!("{name}#{}", local.handle.0));
+        }
+    }
+    if entries.is_empty() {
+        "none".to_string()
+    } else {
+        entries.join(", ")
+    }
 }
 
 fn push_runtime_cleanup_footer_frame(
@@ -7095,6 +7930,11 @@ fn execute_owner_object_lifecycle_hook(
             Vec::new(),
             args,
             &collect_active_owner_keys_from_state(state),
+            None,
+            None,
+            None,
+            None,
+            None,
             state,
             host,
             false,
@@ -7285,15 +8125,19 @@ fn apply_explicit_owner_exit(
                 owner_path.join(".")
             )
         })?;
-    let owner_state = state.owners.entry(owner_key.to_string()).or_default();
-    owner_state
-        .objects
-        .retain(|name, _| owner_exit.holds.iter().any(|hold| hold == name));
-    owner_state.pending_init.clear();
-    owner_state.pending_resume.clear();
-    owner_state.activation_context = None;
-    owner_state.active_bindings = 0;
+    {
+        let owner_state = state.owners.entry(owner_key.to_string()).or_default();
+        owner_state
+            .objects
+            .retain(|name, _| owner_exit.holds.iter().any(|hold| hold == name));
+        owner_state.pending_init.clear();
+        owner_state.pending_resume.clear();
+        owner_state.activation_context = None;
+        owner_state.active_bindings = 0;
+    }
+    runtime_reset_owner_exit_module_memory_specs(state, owner_key)?;
     if let Some(scopes) = scopes {
+        runtime_reset_owner_exit_memory_specs_in_scopes(scopes, state, owner_key)?;
         invalidate_owner_activations_in_scopes(scopes, owner_key);
     }
     Ok(())
@@ -7374,21 +8218,25 @@ fn evaluate_owner_exit_checkpoints(
                 host,
             )
             .map_err(runtime_eval_message)?;
-            if expect_bool(condition, "owner exit condition")? {
+            if expect_bool(force_runtime_value(condition, plan, state, host)?, "owner exit condition")? {
                 selected_exit = Some(owner_exit.clone());
                 break;
             }
         }
         if let Some(owner_exit) = selected_exit {
-            let owner_state = state.owners.entry(owner_key.clone()).or_default();
-            owner_state
-                .objects
-                .retain(|name, _| owner_exit.holds.iter().any(|hold| hold == name));
-            owner_state.pending_init.clear();
-            owner_state.pending_resume.clear();
-            owner_state.activation_context = None;
-            owner_state.active_bindings = 0;
+            {
+                let owner_state = state.owners.entry(owner_key.clone()).or_default();
+                owner_state
+                    .objects
+                    .retain(|name, _| owner_exit.holds.iter().any(|hold| hold == name));
+                owner_state.pending_init.clear();
+                owner_state.pending_resume.clear();
+                owner_state.activation_context = None;
+                owner_state.active_bindings = 0;
+            }
+            runtime_reset_owner_exit_module_memory_specs(state, owner_key)?;
             if let Some(scopes) = scopes.as_deref_mut() {
+                runtime_reset_owner_exit_memory_specs_in_scopes(scopes, state, owner_key)?;
                 invalidate_owner_activations_in_scopes(scopes, owner_key);
             }
         }
@@ -7515,6 +8363,38 @@ fn runtime_reference_with_member(
                 members: next_members,
             }
         }
+        RuntimeReferenceTarget::TempSlot { id, members } => {
+            let mut next_members = members.clone();
+            next_members.push(member);
+            RuntimeReferenceTarget::TempSlot {
+                id: *id,
+                members: next_members,
+            }
+        }
+        RuntimeReferenceTarget::SessionSlot { id, members } => {
+            let mut next_members = members.clone();
+            next_members.push(member);
+            RuntimeReferenceTarget::SessionSlot {
+                id: *id,
+                members: next_members,
+            }
+        }
+        RuntimeReferenceTarget::RingSlot { id, members } => {
+            let mut next_members = members.clone();
+            next_members.push(member);
+            RuntimeReferenceTarget::RingSlot {
+                id: *id,
+                members: next_members,
+            }
+        }
+        RuntimeReferenceTarget::SlabSlot { id, members } => {
+            let mut next_members = members.clone();
+            next_members.push(member);
+            RuntimeReferenceTarget::SlabSlot {
+                id: *id,
+                members: next_members,
+            }
+        }
     }
 }
 
@@ -7524,8 +8404,687 @@ fn runtime_reference_members(target: &RuntimeReferenceTarget) -> &[String] {
         | RuntimeReferenceTarget::OwnerObject { members, .. }
         | RuntimeReferenceTarget::ArenaSlot { members, .. }
         | RuntimeReferenceTarget::FrameSlot { members, .. }
-        | RuntimeReferenceTarget::PoolSlot { members, .. } => members,
+        | RuntimeReferenceTarget::PoolSlot { members, .. }
+        | RuntimeReferenceTarget::TempSlot { members, .. }
+        | RuntimeReferenceTarget::SessionSlot { members, .. }
+        | RuntimeReferenceTarget::RingSlot { members, .. }
+        | RuntimeReferenceTarget::SlabSlot { members, .. } => members,
     }
+}
+
+fn runtime_any_live_element_view_reference(
+    state: &RuntimeExecutionState,
+    predicate: impl Fn(&RuntimeReferenceValue) -> bool,
+) -> bool {
+    state.read_views.values().any(|view| {
+        matches!(
+            &view.backing,
+            RuntimeElementViewBacking::Reference(reference) if predicate(reference)
+        )
+    }) || state.edit_views.values().any(|view| {
+        matches!(
+            &view.backing,
+            RuntimeElementViewBacking::Reference(reference) if predicate(reference)
+        )
+    })
+}
+
+fn runtime_reference_targets_arena(
+    reference: &RuntimeReferenceValue,
+    handle: RuntimeArenaHandle,
+) -> bool {
+    matches!(
+        &reference.target,
+        RuntimeReferenceTarget::ArenaSlot { id, .. } if id.arena == handle
+    )
+}
+
+fn runtime_reference_targets_arena_id(
+    reference: &RuntimeReferenceValue,
+    id: RuntimeArenaIdValue,
+) -> bool {
+    matches!(
+        &reference.target,
+        RuntimeReferenceTarget::ArenaSlot {
+            id: reference_id,
+            ..
+        } if *reference_id == id
+    )
+}
+
+fn runtime_reference_targets_frame_arena(
+    reference: &RuntimeReferenceValue,
+    handle: RuntimeFrameArenaHandle,
+) -> bool {
+    matches!(
+        &reference.target,
+        RuntimeReferenceTarget::FrameSlot { id, .. } if id.arena == handle
+    )
+}
+
+fn runtime_reference_targets_pool_arena(
+    reference: &RuntimeReferenceValue,
+    handle: RuntimePoolArenaHandle,
+) -> bool {
+    matches!(
+        &reference.target,
+        RuntimeReferenceTarget::PoolSlot { id, .. } if id.arena == handle
+    )
+}
+
+fn runtime_reference_targets_pool_id(
+    reference: &RuntimeReferenceValue,
+    id: RuntimePoolIdValue,
+) -> bool {
+    matches!(
+        &reference.target,
+        RuntimeReferenceTarget::PoolSlot {
+            id: reference_id,
+            ..
+        } if *reference_id == id
+    )
+}
+
+fn runtime_reference_targets_temp_arena(
+    reference: &RuntimeReferenceValue,
+    handle: RuntimeTempArenaHandle,
+) -> bool {
+    matches!(
+        &reference.target,
+        RuntimeReferenceTarget::TempSlot { id, .. } if id.arena == handle
+    )
+}
+
+fn runtime_reference_targets_session_arena(
+    reference: &RuntimeReferenceValue,
+    handle: RuntimeSessionArenaHandle,
+) -> bool {
+    matches!(
+        &reference.target,
+        RuntimeReferenceTarget::SessionSlot { id, .. } if id.arena == handle
+    )
+}
+
+fn runtime_reference_targets_ring_arena(
+    reference: &RuntimeReferenceValue,
+    handle: RuntimeRingBufferHandle,
+) -> bool {
+    matches!(
+        &reference.target,
+        RuntimeReferenceTarget::RingSlot { id, .. } if id.arena == handle
+    )
+}
+
+fn runtime_reference_targets_ring_id(
+    reference: &RuntimeReferenceValue,
+    id: RuntimeRingIdValue,
+) -> bool {
+    matches!(
+        &reference.target,
+        RuntimeReferenceTarget::RingSlot {
+            id: reference_id,
+            ..
+        } if *reference_id == id
+    )
+}
+
+fn runtime_reference_targets_slab_arena(
+    reference: &RuntimeReferenceValue,
+    handle: RuntimeSlabHandle,
+) -> bool {
+    matches!(
+        &reference.target,
+        RuntimeReferenceTarget::SlabSlot { id, .. } if id.arena == handle
+    )
+}
+
+fn runtime_reference_targets_slab_id(
+    reference: &RuntimeReferenceValue,
+    id: RuntimeSlabIdValue,
+) -> bool {
+    matches!(
+        &reference.target,
+        RuntimeReferenceTarget::SlabSlot {
+            id: reference_id,
+            ..
+        } if *reference_id == id
+    )
+}
+
+fn runtime_reject_live_view_conflict(
+    state: &RuntimeExecutionState,
+    predicate: impl Fn(&RuntimeReferenceValue) -> bool,
+    message: String,
+) -> Result<(), String> {
+    if runtime_any_live_element_view_reference(state, predicate) {
+        return Err(message);
+    }
+    Ok(())
+}
+
+fn runtime_opaque_matches_reference_predicate(
+    opaque: &RuntimeOpaqueValue,
+    state: &RuntimeExecutionState,
+    predicate: &impl Fn(&RuntimeReferenceValue) -> bool,
+) -> bool {
+    match opaque {
+        RuntimeOpaqueValue::ReadView(handle) => state.read_views.get(handle).is_some_and(|view| {
+            matches!(
+                &view.backing,
+                RuntimeElementViewBacking::Reference(reference) if predicate(reference)
+            )
+        }),
+        RuntimeOpaqueValue::EditView(handle) => state.edit_views.get(handle).is_some_and(|view| {
+            matches!(
+                &view.backing,
+                RuntimeElementViewBacking::Reference(reference) if predicate(reference)
+            )
+        }),
+        RuntimeOpaqueValue::ByteView(handle) => state.byte_views.get(handle).is_some_and(|view| {
+            matches!(
+                &view.backing,
+                RuntimeByteViewBacking::Reference(reference) if predicate(reference)
+            )
+        }),
+        RuntimeOpaqueValue::ByteEditView(handle) => {
+            state.byte_edit_views.get(handle).is_some_and(|view| {
+                matches!(
+                    &view.backing,
+                    RuntimeByteViewBacking::Reference(reference) if predicate(reference)
+                )
+            })
+        }
+        RuntimeOpaqueValue::StrView(handle) => state.str_views.get(handle).is_some_and(|view| {
+            matches!(
+                &view.backing,
+                RuntimeStrViewBacking::Reference(reference) if predicate(reference)
+            )
+        }),
+        _ => false,
+    }
+}
+
+fn runtime_opaque_matches_element_buffer(
+    opaque: &RuntimeOpaqueValue,
+    state: &RuntimeExecutionState,
+    buffer: RuntimeElementViewBufferHandle,
+) -> bool {
+    match opaque {
+        RuntimeOpaqueValue::ReadView(handle) => state.read_views.get(handle).is_some_and(|view| {
+            matches!(&view.backing, RuntimeElementViewBacking::Buffer(backing) if *backing == buffer)
+        }),
+        RuntimeOpaqueValue::EditView(handle) => state.edit_views.get(handle).is_some_and(|view| {
+            matches!(&view.backing, RuntimeElementViewBacking::Buffer(backing) if *backing == buffer)
+        }),
+        _ => false,
+    }
+}
+
+fn runtime_ring_window_active_slots(slots: &[u64], start: usize, len: usize) -> Option<&[u64]> {
+    slots.get(start..start.checked_add(len)?)
+}
+
+fn runtime_ring_window_backing_matches_predicate(
+    backing: &RuntimeElementViewBacking,
+    start: usize,
+    len: usize,
+    predicate: &impl Fn(RuntimeRingBufferHandle, &[u64]) -> bool,
+) -> bool {
+    match backing {
+        RuntimeElementViewBacking::RingWindow { arena, slots } => {
+            runtime_ring_window_active_slots(slots, start, len)
+                .is_some_and(|active| predicate(*arena, active))
+        }
+        RuntimeElementViewBacking::Buffer(_) | RuntimeElementViewBacking::Reference(_) => false,
+    }
+}
+
+fn runtime_opaque_matches_ring_window_predicate(
+    opaque: &RuntimeOpaqueValue,
+    state: &RuntimeExecutionState,
+    predicate: &impl Fn(RuntimeRingBufferHandle, &[u64]) -> bool,
+) -> bool {
+    match opaque {
+        RuntimeOpaqueValue::ReadView(handle) => state.read_views.get(handle).is_some_and(|view| {
+            runtime_ring_window_backing_matches_predicate(
+                &view.backing,
+                view.start,
+                view.len,
+                predicate,
+            )
+        }),
+        RuntimeOpaqueValue::EditView(handle) => state.edit_views.get(handle).is_some_and(|view| {
+            runtime_ring_window_backing_matches_predicate(
+                &view.backing,
+                view.start,
+                view.len,
+                predicate,
+            )
+        }),
+        _ => false,
+    }
+}
+
+fn runtime_ring_window_overlaps_slots(
+    arena: RuntimeRingBufferHandle,
+    slots: &[u64],
+    candidate_arena: RuntimeRingBufferHandle,
+    candidate_slots: &[u64],
+) -> bool {
+    arena == candidate_arena
+        && candidate_slots
+            .iter()
+            .any(|slot| slots.iter().any(|candidate| candidate == slot))
+}
+
+fn runtime_opaque_matches_byte_buffer(
+    opaque: &RuntimeOpaqueValue,
+    state: &RuntimeExecutionState,
+    buffer: RuntimeByteViewBufferHandle,
+) -> bool {
+    match opaque {
+        RuntimeOpaqueValue::ByteView(handle) => {
+            state.byte_views.get(handle).is_some_and(|view| {
+                matches!(&view.backing, RuntimeByteViewBacking::Buffer(backing) if *backing == buffer)
+            })
+        }
+        RuntimeOpaqueValue::ByteEditView(handle) => {
+            state.byte_edit_views.get(handle).is_some_and(|view| {
+                matches!(&view.backing, RuntimeByteViewBacking::Buffer(backing) if *backing == buffer)
+            })
+        }
+        _ => false,
+    }
+}
+
+fn runtime_value_contains_reference_or_opaque_conflict(
+    value: &RuntimeValue,
+    state: &RuntimeExecutionState,
+    reference_predicate: &impl Fn(&RuntimeReferenceValue) -> bool,
+    opaque_predicate: &impl Fn(&RuntimeOpaqueValue, &RuntimeExecutionState) -> bool,
+    ignored_reference: Option<&RuntimeReferenceValue>,
+    ignored_opaque: Option<RuntimeOpaqueValue>,
+) -> bool {
+    match value {
+        RuntimeValue::Ref(reference) => {
+            !ignored_reference.is_some_and(|ignored| ignored == reference)
+                && reference_predicate(reference)
+        }
+        RuntimeValue::Opaque(opaque) => {
+            ignored_opaque != Some(*opaque) && opaque_predicate(opaque, state)
+        }
+        RuntimeValue::Pair(left, right) => {
+            runtime_value_contains_reference_or_opaque_conflict(
+                left,
+                state,
+                reference_predicate,
+                opaque_predicate,
+                ignored_reference,
+                ignored_opaque,
+            ) || runtime_value_contains_reference_or_opaque_conflict(
+                right,
+                state,
+                reference_predicate,
+                opaque_predicate,
+                ignored_reference,
+                ignored_opaque,
+            )
+        }
+        RuntimeValue::Array(values) | RuntimeValue::List(values) => values.iter().any(|value| {
+            runtime_value_contains_reference_or_opaque_conflict(
+                value,
+                state,
+                reference_predicate,
+                opaque_predicate,
+                ignored_reference,
+                ignored_opaque,
+            )
+        }),
+        RuntimeValue::Map(entries) => entries.iter().any(|(key, value)| {
+            runtime_value_contains_reference_or_opaque_conflict(
+                key,
+                state,
+                reference_predicate,
+                opaque_predicate,
+                ignored_reference,
+                ignored_opaque,
+            ) || runtime_value_contains_reference_or_opaque_conflict(
+                value,
+                state,
+                reference_predicate,
+                opaque_predicate,
+                ignored_reference,
+                ignored_opaque,
+            )
+        }),
+        RuntimeValue::Record { fields, .. } => fields.values().any(|value| {
+            runtime_value_contains_reference_or_opaque_conflict(
+                value,
+                state,
+                reference_predicate,
+                opaque_predicate,
+                ignored_reference,
+                ignored_opaque,
+            )
+        }),
+        RuntimeValue::Variant { payload, .. } => payload.iter().any(|value| {
+            runtime_value_contains_reference_or_opaque_conflict(
+                value,
+                state,
+                reference_predicate,
+                opaque_predicate,
+                ignored_reference,
+                ignored_opaque,
+            )
+        }),
+        RuntimeValue::Int(_)
+        | RuntimeValue::Bool(_)
+        | RuntimeValue::Str(_)
+        | RuntimeValue::OwnerHandle(_)
+        | RuntimeValue::Range { .. }
+        | RuntimeValue::Unit => false,
+    }
+}
+
+fn runtime_scopes_contain_reference_or_opaque_conflict(
+    scopes: &[RuntimeScope],
+    state: &RuntimeExecutionState,
+    reference_predicate: &impl Fn(&RuntimeReferenceValue) -> bool,
+    opaque_predicate: &impl Fn(&RuntimeOpaqueValue, &RuntimeExecutionState) -> bool,
+    ignored_reference: Option<&RuntimeReferenceValue>,
+    ignored_opaque: Option<RuntimeOpaqueValue>,
+    final_args: Option<&[RuntimeValue]>,
+) -> bool {
+    scopes.iter().any(|scope| {
+        scope.locals.values().any(|local| {
+            runtime_value_contains_reference_or_opaque_conflict(
+                &local.value,
+                state,
+                reference_predicate,
+                opaque_predicate,
+                ignored_reference,
+                ignored_opaque,
+            )
+        })
+    }) || final_args.is_some_and(|args| {
+        args.iter().any(|value| {
+            runtime_value_contains_reference_or_opaque_conflict(
+                value,
+                state,
+                reference_predicate,
+                opaque_predicate,
+                ignored_reference,
+                ignored_opaque,
+            )
+        })
+    }) || state.captured_local_values.values().any(|value| {
+        runtime_value_contains_reference_or_opaque_conflict(
+            value,
+            state,
+            reference_predicate,
+            opaque_predicate,
+            ignored_reference,
+            ignored_opaque,
+        )
+    }) || state.cleanup_footer_frames.iter().any(|frame| {
+        frame.activations.iter().any(|binding| {
+            runtime_value_contains_reference_or_opaque_conflict(
+                &binding.value,
+                state,
+                reference_predicate,
+                opaque_predicate,
+                ignored_reference,
+                ignored_opaque,
+            )
+        })
+    })
+}
+
+fn runtime_reject_live_reference_or_opaque_conflict(
+    scopes: Option<&[RuntimeScope]>,
+    final_args: Option<&[RuntimeValue]>,
+    state: &RuntimeExecutionState,
+    reference_predicate: impl Fn(&RuntimeReferenceValue) -> bool,
+    opaque_predicate: impl Fn(&RuntimeOpaqueValue, &RuntimeExecutionState) -> bool,
+    ignored_reference: Option<&RuntimeReferenceValue>,
+    ignored_opaque: Option<RuntimeOpaqueValue>,
+    fallback_conflict: impl Fn(&RuntimeExecutionState) -> bool,
+    message: String,
+) -> Result<(), String> {
+    if let Some(scopes) = scopes {
+        if runtime_scopes_contain_reference_or_opaque_conflict(
+            scopes,
+            state,
+            &reference_predicate,
+            &opaque_predicate,
+            ignored_reference,
+            ignored_opaque,
+            final_args,
+        ) {
+            return Err(message);
+        }
+    }
+    if fallback_conflict(state) {
+        return Err(message);
+    }
+    Ok(())
+}
+
+fn runtime_track_exported_descriptor_target(
+    state: &mut RuntimeExecutionState,
+    target: RuntimeExportedDescriptorTarget,
+    exports: &mut Vec<RuntimeExportedDescriptorTarget>,
+) {
+    *state.exported_descriptor_counts.entry(target).or_insert(0) += 1;
+    exports.push(target);
+}
+
+fn runtime_release_exported_descriptor_targets(
+    state: &mut RuntimeExecutionState,
+    exports: &mut Vec<RuntimeExportedDescriptorTarget>,
+) {
+    for target in exports.drain(..) {
+        let should_remove = match state.exported_descriptor_counts.get_mut(&target) {
+            Some(count) if *count > 1 => {
+                *count -= 1;
+                false
+            }
+            Some(_) => true,
+            None => false,
+        };
+        if should_remove {
+            state.exported_descriptor_counts.remove(&target);
+        }
+    }
+}
+
+fn runtime_reference_descriptor_export_target(
+    reference: &RuntimeReferenceValue,
+    state: &RuntimeExecutionState,
+) -> Result<Option<RuntimeExportedDescriptorTarget>, String> {
+    match &reference.target {
+        RuntimeReferenceTarget::SessionSlot { id, .. } => {
+            let arena = state
+                .session_arenas
+                .get(&id.arena)
+                .ok_or_else(|| format!("invalid SessionArena handle `{}`", id.arena.0))?;
+            if !session_id_is_live(id.arena, arena, *id) {
+                return Err(format!(
+                    "stale or invalid SessionId `{}` for SessionArena `{}`",
+                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::SessionId(
+                        *id
+                    ))),
+                    id.arena.0
+                ));
+            }
+            Ok(arena
+                .sealed
+                .then_some(RuntimeExportedDescriptorTarget::SessionArena(id.arena)))
+        }
+        RuntimeReferenceTarget::SlabSlot { id, .. } => {
+            let arena = state
+                .slabs
+                .get(&id.arena)
+                .ok_or_else(|| format!("invalid Slab handle `{}`", id.arena.0))?;
+            if !slab_id_is_live(id.arena, arena, *id) {
+                return Err(format!(
+                    "stale or invalid SlabId `{}` for Slab `{}`",
+                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::SlabId(*id))),
+                    id.arena.0
+                ));
+            }
+            Ok(arena
+                .sealed
+                .then_some(RuntimeExportedDescriptorTarget::Slab(id.arena)))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn runtime_reference_backed_descriptor_view_allowed(
+    reference: &RuntimeReferenceValue,
+    state: &RuntimeExecutionState,
+) -> Result<bool, String> {
+    Ok(runtime_reference_descriptor_export_target(reference, state)?.is_some())
+}
+
+fn runtime_reference_backed_descriptor_view_values(
+    reference: &RuntimeReferenceValue,
+    state: &RuntimeExecutionState,
+    view_start: usize,
+    view_len: usize,
+    start: usize,
+    len: usize,
+    context: &str,
+) -> Result<Vec<RuntimeValue>, String> {
+    if !runtime_reference_backed_descriptor_view_allowed(reference, state)? {
+        return Err(
+            "descriptor value materialization only supports sealed SessionArena/Slab-backed ReadView references"
+                .to_string(),
+        );
+    }
+    let mut value = match &reference.target {
+        RuntimeReferenceTarget::SessionSlot { id, .. } => state
+            .session_arenas
+            .get(&id.arena)
+            .and_then(|arena| arena.slots.get(&id.slot))
+            .cloned()
+            .ok_or_else(|| format!("SessionArena slot `{}` is missing", id.slot))?,
+        RuntimeReferenceTarget::SlabSlot { id, .. } => state
+            .slabs
+            .get(&id.arena)
+            .and_then(|arena| arena.slots.get(&id.slot))
+            .cloned()
+            .ok_or_else(|| format!("Slab slot `{}` is missing", id.slot))?,
+        _ => {
+            return Err(
+                "descriptor value materialization does not support this reference-backed ReadView"
+                    .to_string(),
+            );
+        }
+    };
+    for member in runtime_reference_members(&reference.target) {
+        value = eval_member_value(value, member)?;
+    }
+    let values = expect_runtime_array(value, context)?;
+    let (base_start, base_end) = runtime_view_range(view_start, view_len, values.len(), context)?;
+    let absolute_start = base_start
+        .checked_add(start)
+        .ok_or_else(|| "descriptor view range overflowed".to_string())?;
+    let absolute_end = absolute_start
+        .checked_add(len)
+        .ok_or_else(|| "descriptor view range overflowed".to_string())?;
+    if absolute_end > base_end {
+        return Err(format!(
+            "descriptor view `{start}..{}` is out of bounds for length `{}`",
+            start + len,
+            view_len
+        ));
+    }
+    Ok(values[absolute_start..absolute_end].to_vec())
+}
+
+fn runtime_reference_backed_descriptor_byte_values(
+    reference: &RuntimeReferenceValue,
+    state: &RuntimeExecutionState,
+    view_start: usize,
+    view_len: usize,
+    start: usize,
+    len: usize,
+    context: &str,
+) -> Result<Vec<u8>, String> {
+    let values = runtime_reference_backed_descriptor_view_values(
+        reference, state, view_start, view_len, start, len, context,
+    )?;
+    values
+        .into_iter()
+        .map(|value| {
+            let value = expect_int(value, context)?;
+            if !(0..=255).contains(&value) {
+                return Err(format!(
+                    "{context} byte `{value}` is out of range `0..=255`"
+                ));
+            }
+            Ok(value as u8)
+        })
+        .collect()
+}
+
+fn runtime_reference_backed_descriptor_str_bytes(
+    reference: &RuntimeReferenceValue,
+    state: &RuntimeExecutionState,
+    view_start: usize,
+    view_len: usize,
+    start: usize,
+    len: usize,
+    context: &str,
+) -> Result<Vec<u8>, String> {
+    if !runtime_reference_backed_descriptor_view_allowed(reference, state)? {
+        return Err(
+            "descriptor byte materialization only supports sealed SessionArena/Slab-backed StrView references"
+                .to_string(),
+        );
+    }
+    let mut value = match &reference.target {
+        RuntimeReferenceTarget::SessionSlot { id, .. } => state
+            .session_arenas
+            .get(&id.arena)
+            .and_then(|arena| arena.slots.get(&id.slot))
+            .cloned()
+            .ok_or_else(|| format!("SessionArena slot `{}` is missing", id.slot))?,
+        RuntimeReferenceTarget::SlabSlot { id, .. } => state
+            .slabs
+            .get(&id.arena)
+            .and_then(|arena| arena.slots.get(&id.slot))
+            .cloned()
+            .ok_or_else(|| format!("Slab slot `{}` is missing", id.slot))?,
+        _ => {
+            return Err(
+                "descriptor byte materialization does not support this reference-backed StrView"
+                    .to_string(),
+            );
+        }
+    };
+    for member in runtime_reference_members(&reference.target) {
+        value = eval_member_value(value, member)?;
+    }
+    let text = expect_str(value, context)?;
+    let bytes = text.as_bytes();
+    let (base_start, base_end) = runtime_view_range(view_start, view_len, bytes.len(), context)?;
+    let absolute_start = base_start
+        .checked_add(start)
+        .ok_or_else(|| "descriptor view range overflowed".to_string())?;
+    let absolute_end = absolute_start
+        .checked_add(len)
+        .ok_or_else(|| "descriptor view range overflowed".to_string())?;
+    if absolute_end > base_end {
+        return Err(format!(
+            "descriptor view `{start}..{}` is out of bounds for length `{}`",
+            start + len,
+            view_len
+        ));
+    }
+    Ok(bytes[absolute_start..absolute_end].to_vec())
 }
 
 fn runtime_reference_root_value(
@@ -7541,12 +9100,27 @@ fn runtime_reference_root_value(
 ) -> Result<RuntimeValue, String> {
     match target {
         RuntimeReferenceTarget::Local { local, .. } => {
-            let (name, runtime_local) = lookup_local_with_name_by_handle(scopes, *local)
-                .ok_or_else(|| format!("runtime reference local `{}` is unresolved", local.0))?;
-            if runtime_local.moved {
-                return Err(format!("use of moved local `{name}`"));
+            if let Some((name, runtime_local)) = lookup_local_with_name_by_handle(scopes, *local) {
+                if runtime_local.moved {
+                    return Err(format!("use of moved local `{name}`"));
+                }
+                return Ok(state
+                    .captured_local_values
+                    .get(local)
+                    .cloned()
+                    .unwrap_or_else(|| runtime_local.value.clone()));
             }
-            Ok(runtime_local.value.clone())
+            state
+                .captured_local_values
+                .get(local)
+                .cloned()
+                .ok_or_else(|| {
+                    format!(
+                        "runtime reference local `{}` is unresolved; visible locals: {}",
+                        local.0,
+                        runtime_scope_local_summary(scopes)
+                    )
+                })
         }
         RuntimeReferenceTarget::OwnerObject {
             owner_key,
@@ -7621,6 +9195,80 @@ fn runtime_reference_root_value(
                 .get(&id.slot)
                 .cloned()
                 .ok_or_else(|| format!("PoolArena slot `{}` is missing", id.slot))
+        }
+        RuntimeReferenceTarget::TempSlot { id, .. } => {
+            let arena = state
+                .temp_arenas
+                .get(&id.arena)
+                .ok_or_else(|| format!("invalid TempArena handle `{}`", id.arena.0))?;
+            if !temp_id_is_live(id.arena, arena, *id) {
+                return Err(format!(
+                    "stale or invalid TempId `{}` for TempArena `{}`",
+                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::TempId(*id))),
+                    id.arena.0
+                ));
+            }
+            arena
+                .slots
+                .get(&id.slot)
+                .cloned()
+                .ok_or_else(|| format!("TempArena slot `{}` is missing", id.slot))
+        }
+        RuntimeReferenceTarget::SessionSlot { id, .. } => {
+            let arena = state
+                .session_arenas
+                .get(&id.arena)
+                .ok_or_else(|| format!("invalid SessionArena handle `{}`", id.arena.0))?;
+            if !session_id_is_live(id.arena, arena, *id) {
+                return Err(format!(
+                    "stale or invalid SessionId `{}` for SessionArena `{}`",
+                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::SessionId(
+                        *id
+                    ))),
+                    id.arena.0
+                ));
+            }
+            arena
+                .slots
+                .get(&id.slot)
+                .cloned()
+                .ok_or_else(|| format!("SessionArena slot `{}` is missing", id.slot))
+        }
+        RuntimeReferenceTarget::RingSlot { id, .. } => {
+            let arena = state
+                .ring_buffers
+                .get(&id.arena)
+                .ok_or_else(|| format!("invalid RingBuffer handle `{}`", id.arena.0))?;
+            if !ring_id_is_live(id.arena, arena, *id) {
+                return Err(format!(
+                    "stale or invalid RingId `{}` for RingBuffer `{}`",
+                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::RingId(*id))),
+                    id.arena.0
+                ));
+            }
+            arena
+                .slots
+                .get(&id.slot)
+                .cloned()
+                .ok_or_else(|| format!("RingBuffer slot `{}` is missing", id.slot))
+        }
+        RuntimeReferenceTarget::SlabSlot { id, .. } => {
+            let arena = state
+                .slabs
+                .get(&id.arena)
+                .ok_or_else(|| format!("invalid Slab handle `{}`", id.arena.0))?;
+            if !slab_id_is_live(id.arena, arena, *id) {
+                return Err(format!(
+                    "stale or invalid SlabId `{}` for Slab `{}`",
+                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::SlabId(*id))),
+                    id.arena.0
+                ));
+            }
+            arena
+                .slots
+                .get(&id.slot)
+                .cloned()
+                .ok_or_else(|| format!("Slab slot `{}` is missing", id.slot))
         }
     }
 }
@@ -7716,12 +9364,22 @@ fn write_runtime_reference(
     };
     match &reference.target {
         RuntimeReferenceTarget::Local { local, .. } => {
-            let runtime_local = lookup_local_mut_by_handle(scopes, *local)
-                .ok_or_else(|| format!("runtime reference local `{}` is unresolved", local.0))?;
-            runtime_local.moved = false;
-            runtime_local.value = updated_root;
-            update_runtime_cleanup_footer_binding_value(state, *local, &runtime_local.value);
-            Ok(())
+            let visible_locals = runtime_scope_local_summary(scopes);
+            if let Some(runtime_local) = lookup_local_mut_by_handle(scopes, *local) {
+                runtime_local.moved = false;
+                runtime_local.value = updated_root.clone();
+                update_runtime_cleanup_footer_binding_value(state, *local, &runtime_local.value);
+                state.captured_local_values.insert(*local, updated_root);
+                Ok(())
+            } else if let Some(captured) = state.captured_local_values.get_mut(local) {
+                *captured = updated_root;
+                Ok(())
+            } else {
+                Err(format!(
+                    "runtime reference local `{}` is unresolved; visible locals: {}",
+                    local.0, visible_locals
+                ))
+            }
         }
         RuntimeReferenceTarget::OwnerObject {
             owner_key,
@@ -7791,6 +9449,68 @@ fn write_runtime_reference(
                 return Err(format!(
                     "stale or invalid PoolId `{}` for PoolArena `{}`",
                     runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::PoolId(*id))),
+                    id.arena.0
+                ));
+            }
+            arena.slots.insert(id.slot, updated_root);
+            Ok(())
+        }
+        RuntimeReferenceTarget::TempSlot { id, .. } => {
+            let arena = state
+                .temp_arenas
+                .get_mut(&id.arena)
+                .ok_or_else(|| format!("invalid TempArena handle `{}`", id.arena.0))?;
+            if !temp_id_is_live(id.arena, arena, *id) {
+                return Err(format!(
+                    "stale or invalid TempId `{}` for TempArena `{}`",
+                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::TempId(*id))),
+                    id.arena.0
+                ));
+            }
+            arena.slots.insert(id.slot, updated_root);
+            Ok(())
+        }
+        RuntimeReferenceTarget::SessionSlot { id, .. } => {
+            let arena = state
+                .session_arenas
+                .get_mut(&id.arena)
+                .ok_or_else(|| format!("invalid SessionArena handle `{}`", id.arena.0))?;
+            if !session_id_is_live(id.arena, arena, *id) {
+                return Err(format!(
+                    "stale or invalid SessionId `{}` for SessionArena `{}`",
+                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::SessionId(
+                        *id
+                    ))),
+                    id.arena.0
+                ));
+            }
+            arena.slots.insert(id.slot, updated_root);
+            Ok(())
+        }
+        RuntimeReferenceTarget::RingSlot { id, .. } => {
+            let arena = state
+                .ring_buffers
+                .get_mut(&id.arena)
+                .ok_or_else(|| format!("invalid RingBuffer handle `{}`", id.arena.0))?;
+            if !ring_id_is_live(id.arena, arena, *id) {
+                return Err(format!(
+                    "stale or invalid RingId `{}` for RingBuffer `{}`",
+                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::RingId(*id))),
+                    id.arena.0
+                ));
+            }
+            arena.slots.insert(id.slot, updated_root);
+            Ok(())
+        }
+        RuntimeReferenceTarget::SlabSlot { id, .. } => {
+            let arena = state
+                .slabs
+                .get_mut(&id.arena)
+                .ok_or_else(|| format!("invalid Slab handle `{}`", id.arena.0))?;
+            if !slab_id_is_live(id.arena, arena, *id) {
+                return Err(format!(
+                    "stale or invalid SlabId `{}` for Slab `{}`",
+                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::SlabId(*id))),
                     id.arena.0
                 ));
             }
@@ -9151,14 +10871,21 @@ fn with_runtime_native_products<R>(
 
 struct RuntimeProviderHostContext {
     host: *mut (dyn RuntimeHost + 'static),
+    state: *mut RuntimeExecutionState,
+    current_package_id: String,
     bundle_dir: PathBuf,
     package_asset_roots: BTreeMap<String, String>,
+    exported_descriptors: Vec<RuntimeExportedDescriptorTarget>,
     last_error: Option<Vec<u8>>,
 }
 
 impl RuntimeProviderHostContext {
     unsafe fn host_mut(&mut self) -> &mut dyn RuntimeHost {
         unsafe { &mut *self.host }
+    }
+
+    unsafe fn state_ref(&self) -> &RuntimeExecutionState {
+        unsafe { &*self.state }
     }
 
     fn set_last_error(&mut self, message: String) {
@@ -9199,6 +10926,206 @@ impl RuntimeProviderHostContext {
             "package assets for `{package_id}` are not staged under `{}`",
             fallback.display()
         ))
+    }
+
+    fn descriptor_view_values(
+        &mut self,
+        family: &str,
+        view_id: u64,
+        start: u64,
+        len: u64,
+    ) -> Result<Vec<ArcanaCabiProviderValue>, String> {
+        match family {
+            "std.memory.ReadView" => {
+                let handle = RuntimeReadViewHandle(view_id);
+                let start = usize::try_from(start).map_err(|_| {
+                    format!("descriptor view start `{start}` does not fit in usize")
+                })?;
+                let len = usize::try_from(len)
+                    .map_err(|_| format!("descriptor view len `{len}` does not fit in usize"))?;
+                let values = {
+                    let state = unsafe { self.state_ref() };
+                    let view = state
+                        .read_views
+                        .get(&handle)
+                        .ok_or_else(|| format!("invalid ReadView handle `{view_id}`"))?;
+                    match &view.backing {
+                        RuntimeElementViewBacking::Buffer(buffer) => {
+                            let backing =
+                                state.element_view_buffers.get(buffer).ok_or_else(|| {
+                                    format!("invalid element view buffer `{}`", buffer.0)
+                                })?;
+                            let (base_start, base_end) = runtime_view_range(
+                                view.start,
+                                view.len,
+                                backing.values.len(),
+                                "descriptor view",
+                            )?;
+                            let absolute_start = base_start
+                                .checked_add(start)
+                                .ok_or_else(|| "descriptor view range overflowed".to_string())?;
+                            let absolute_end = absolute_start
+                                .checked_add(len)
+                                .ok_or_else(|| "descriptor view range overflowed".to_string())?;
+                            if absolute_end > base_end {
+                                return Err(format!(
+                                    "descriptor view `{start}..{}` is out of bounds for length `{}`",
+                                    start + len,
+                                    view.len
+                                ));
+                            }
+                            backing.values[absolute_start..absolute_end].to_vec()
+                        }
+                        RuntimeElementViewBacking::Reference(reference) => {
+                            runtime_reference_backed_descriptor_view_values(
+                                reference,
+                                state,
+                                view.start,
+                                view.len,
+                                start,
+                                len,
+                                "descriptor view",
+                            )?
+                        }
+                        RuntimeElementViewBacking::RingWindow { .. } => {
+                            return Err(
+                                "descriptor value materialization does not support RingBuffer-backed ReadView"
+                                    .to_string(),
+                            )
+                        }
+                    }
+                };
+                let current_package_id = self.current_package_id.clone();
+                let state_ptr = self.state;
+                let exported_descriptors = &mut self.exported_descriptors;
+                let state = unsafe { &mut *state_ptr };
+                let mut encoded = Vec::with_capacity(values.len());
+                for value in &values {
+                    encoded.push(runtime_value_to_provider_value(
+                        value,
+                        state,
+                        &current_package_id,
+                        exported_descriptors,
+                    )?);
+                }
+                Ok(encoded)
+            }
+            other => Err(format!(
+                "descriptor value materialization does not support family `{other}`"
+            )),
+        }
+    }
+
+    fn descriptor_view_bytes(
+        &self,
+        family: &str,
+        view_id: u64,
+        start: u64,
+        len: u64,
+    ) -> Result<Vec<u8>, String> {
+        let start = usize::try_from(start)
+            .map_err(|_| format!("descriptor view start `{start}` does not fit in usize"))?;
+        let len = usize::try_from(len)
+            .map_err(|_| format!("descriptor view len `{len}` does not fit in usize"))?;
+        let state = unsafe { self.state_ref() };
+        match family {
+            "std.memory.ByteView" => {
+                let handle = RuntimeByteViewHandle(view_id);
+                let view = state
+                    .byte_views
+                    .get(&handle)
+                    .ok_or_else(|| format!("invalid ByteView handle `{view_id}`"))?;
+                match &view.backing {
+                    RuntimeByteViewBacking::Buffer(buffer) => {
+                        let values = state
+                            .byte_view_buffers
+                            .get(buffer)
+                            .ok_or_else(|| format!("invalid byte view buffer `{}`", buffer.0))?;
+                        let (base_start, base_end) = runtime_view_range(
+                            view.start,
+                            view.len,
+                            values.values.len(),
+                            "descriptor view",
+                        )?;
+                        let absolute_start = base_start
+                            .checked_add(start)
+                            .ok_or_else(|| "descriptor view range overflowed".to_string())?;
+                        let absolute_end = absolute_start
+                            .checked_add(len)
+                            .ok_or_else(|| "descriptor view range overflowed".to_string())?;
+                        if absolute_end > base_end {
+                            return Err(format!(
+                                "descriptor view `{start}..{}` is out of bounds for length `{}`",
+                                start + len,
+                                view.len
+                            ));
+                        }
+                        Ok(values.values[absolute_start..absolute_end].to_vec())
+                    }
+                    RuntimeByteViewBacking::Reference(reference) => {
+                        runtime_reference_backed_descriptor_byte_values(
+                            reference,
+                            state,
+                            view.start,
+                            view.len,
+                            start,
+                            len,
+                            "descriptor view",
+                        )
+                    }
+                }
+            }
+            "std.memory.StrView" => {
+                let handle = RuntimeStrViewHandle(view_id);
+                let view = state
+                    .str_views
+                    .get(&handle)
+                    .ok_or_else(|| format!("invalid StrView handle `{view_id}`"))?;
+                match &view.backing {
+                    RuntimeStrViewBacking::Buffer(buffer) => {
+                        let text = state
+                            .str_view_buffers
+                            .get(buffer)
+                            .ok_or_else(|| format!("invalid str view buffer `{}`", buffer.0))?;
+                        let bytes = text.text.as_bytes();
+                        let (base_start, base_end) = runtime_view_range(
+                            view.start,
+                            view.len,
+                            bytes.len(),
+                            "descriptor view",
+                        )?;
+                        let absolute_start = base_start
+                            .checked_add(start)
+                            .ok_or_else(|| "descriptor view range overflowed".to_string())?;
+                        let absolute_end = absolute_start
+                            .checked_add(len)
+                            .ok_or_else(|| "descriptor view range overflowed".to_string())?;
+                        if absolute_end > base_end {
+                            return Err(format!(
+                                "descriptor view `{start}..{}` is out of bounds for length `{}`",
+                                start + len,
+                                view.len
+                            ));
+                        }
+                        Ok(bytes[absolute_start..absolute_end].to_vec())
+                    }
+                    RuntimeStrViewBacking::Reference(reference) => {
+                        runtime_reference_backed_descriptor_str_bytes(
+                            reference,
+                            state,
+                            view.start,
+                            view.len,
+                            start,
+                            len,
+                            "descriptor view",
+                        )
+                    }
+                }
+            }
+            other => Err(format!(
+                "descriptor byte materialization does not support family `{other}`"
+            )),
+        }
     }
 }
 
@@ -9304,6 +11231,121 @@ unsafe extern "system" fn runtime_provider_host_canvas_image_create(
     }
 }
 
+unsafe extern "system" fn runtime_provider_host_read_descriptor_values(
+    host_context: *mut c_void,
+    family: *const c_char,
+    view_id: u64,
+    start: u64,
+    len: u64,
+    out_len: *mut usize,
+) -> *mut u8 {
+    if host_context.is_null() || family.is_null() {
+        if !out_len.is_null() {
+            unsafe {
+                *out_len = 0;
+            }
+        }
+        return std::ptr::null_mut();
+    }
+    let context = unsafe { &mut *(host_context as *mut RuntimeProviderHostContext) };
+    let family = match unsafe { CStr::from_ptr(family) }.to_str() {
+        Ok(value) => value,
+        Err(err) => {
+            context.set_last_error(format!(
+                "provider host descriptor family is not valid utf-8: {err}"
+            ));
+            if !out_len.is_null() {
+                unsafe {
+                    *out_len = 0;
+                }
+            }
+            return std::ptr::null_mut();
+        }
+    };
+    match context
+        .descriptor_view_values(family, view_id, start, len)
+        .and_then(|values| encode_provider_values(&values))
+    {
+        Ok(mut bytes) => {
+            let len = bytes.len();
+            let ptr = bytes.as_mut_ptr();
+            std::mem::forget(bytes);
+            if !out_len.is_null() {
+                unsafe {
+                    *out_len = len;
+                }
+            }
+            context.clear_last_error();
+            ptr
+        }
+        Err(err) => {
+            context.set_last_error(err);
+            if !out_len.is_null() {
+                unsafe {
+                    *out_len = 0;
+                }
+            }
+            std::ptr::null_mut()
+        }
+    }
+}
+
+unsafe extern "system" fn runtime_provider_host_read_descriptor_bytes(
+    host_context: *mut c_void,
+    family: *const c_char,
+    view_id: u64,
+    start: u64,
+    len: u64,
+    out_len: *mut usize,
+) -> *mut u8 {
+    if host_context.is_null() || family.is_null() {
+        if !out_len.is_null() {
+            unsafe {
+                *out_len = 0;
+            }
+        }
+        return std::ptr::null_mut();
+    }
+    let context = unsafe { &mut *(host_context as *mut RuntimeProviderHostContext) };
+    let family = match unsafe { CStr::from_ptr(family) }.to_str() {
+        Ok(value) => value,
+        Err(err) => {
+            context.set_last_error(format!(
+                "provider host descriptor family is not valid utf-8: {err}"
+            ));
+            if !out_len.is_null() {
+                unsafe {
+                    *out_len = 0;
+                }
+            }
+            return std::ptr::null_mut();
+        }
+    };
+    match context.descriptor_view_bytes(family, view_id, start, len) {
+        Ok(mut bytes) => {
+            let len = bytes.len();
+            let ptr = bytes.as_mut_ptr();
+            std::mem::forget(bytes);
+            if !out_len.is_null() {
+                unsafe {
+                    *out_len = len;
+                }
+            }
+            context.clear_last_error();
+            ptr
+        }
+        Err(err) => {
+            context.set_last_error(err);
+            if !out_len.is_null() {
+                unsafe {
+                    *out_len = 0;
+                }
+            }
+            std::ptr::null_mut()
+        }
+    }
+}
+
 unsafe extern "system" fn runtime_provider_host_canvas_image_replace_rgba(
     host_context: *mut c_void,
     image_id: u64,
@@ -9366,6 +11408,8 @@ fn runtime_provider_host_ops_v1() -> ArcanaCabiProviderHostOpsV1 {
         ops_size: std::mem::size_of::<ArcanaCabiProviderHostOpsV1>(),
         resolve_package_asset_root: runtime_provider_host_resolve_package_asset_root,
         host_owned_str_free: runtime_provider_host_owned_str_free,
+        read_descriptor_values: runtime_provider_host_read_descriptor_values,
+        read_descriptor_bytes: runtime_provider_host_read_descriptor_bytes,
         canvas_image_create: runtime_provider_host_canvas_image_create,
         canvas_image_replace_rgba: runtime_provider_host_canvas_image_replace_rgba,
         canvas_blit: runtime_provider_host_canvas_blit,
@@ -10412,6 +12456,106 @@ fn expect_pool_id(value: RuntimeValue, context: &str) -> Result<RuntimePoolIdVal
     Ok(id)
 }
 
+fn expect_temp_arena(value: RuntimeValue, context: &str) -> Result<RuntimeTempArenaHandle, String> {
+    let RuntimeValue::Opaque(RuntimeOpaqueValue::TempArena(handle)) = value else {
+        return Err(format!("{context} expected TempArena"));
+    };
+    Ok(handle)
+}
+
+fn expect_temp_id(value: RuntimeValue, context: &str) -> Result<RuntimeTempIdValue, String> {
+    let RuntimeValue::Opaque(RuntimeOpaqueValue::TempId(id)) = value else {
+        return Err(format!("{context} expected TempId"));
+    };
+    Ok(id)
+}
+
+fn expect_session_arena(
+    value: RuntimeValue,
+    context: &str,
+) -> Result<RuntimeSessionArenaHandle, String> {
+    let RuntimeValue::Opaque(RuntimeOpaqueValue::SessionArena(handle)) = value else {
+        return Err(format!("{context} expected SessionArena"));
+    };
+    Ok(handle)
+}
+
+fn expect_session_id(value: RuntimeValue, context: &str) -> Result<RuntimeSessionIdValue, String> {
+    let RuntimeValue::Opaque(RuntimeOpaqueValue::SessionId(id)) = value else {
+        return Err(format!("{context} expected SessionId"));
+    };
+    Ok(id)
+}
+
+fn expect_ring_buffer(
+    value: RuntimeValue,
+    context: &str,
+) -> Result<RuntimeRingBufferHandle, String> {
+    let RuntimeValue::Opaque(RuntimeOpaqueValue::RingBuffer(handle)) = value else {
+        return Err(format!("{context} expected RingBuffer"));
+    };
+    Ok(handle)
+}
+
+fn expect_ring_id(value: RuntimeValue, context: &str) -> Result<RuntimeRingIdValue, String> {
+    let RuntimeValue::Opaque(RuntimeOpaqueValue::RingId(id)) = value else {
+        return Err(format!("{context} expected RingId"));
+    };
+    Ok(id)
+}
+
+fn expect_slab(value: RuntimeValue, context: &str) -> Result<RuntimeSlabHandle, String> {
+    let RuntimeValue::Opaque(RuntimeOpaqueValue::Slab(handle)) = value else {
+        return Err(format!("{context} expected Slab"));
+    };
+    Ok(handle)
+}
+
+fn expect_slab_id(value: RuntimeValue, context: &str) -> Result<RuntimeSlabIdValue, String> {
+    let RuntimeValue::Opaque(RuntimeOpaqueValue::SlabId(id)) = value else {
+        return Err(format!("{context} expected SlabId"));
+    };
+    Ok(id)
+}
+
+fn expect_read_view(value: RuntimeValue, context: &str) -> Result<RuntimeReadViewHandle, String> {
+    let RuntimeValue::Opaque(RuntimeOpaqueValue::ReadView(handle)) = value else {
+        return Err(format!("{context} expected ReadView"));
+    };
+    Ok(handle)
+}
+
+fn expect_edit_view(value: RuntimeValue, context: &str) -> Result<RuntimeEditViewHandle, String> {
+    let RuntimeValue::Opaque(RuntimeOpaqueValue::EditView(handle)) = value else {
+        return Err(format!("{context} expected EditView"));
+    };
+    Ok(handle)
+}
+
+fn expect_byte_view(value: RuntimeValue, context: &str) -> Result<RuntimeByteViewHandle, String> {
+    let RuntimeValue::Opaque(RuntimeOpaqueValue::ByteView(handle)) = value else {
+        return Err(format!("{context} expected ByteView"));
+    };
+    Ok(handle)
+}
+
+fn expect_byte_edit_view(
+    value: RuntimeValue,
+    context: &str,
+) -> Result<RuntimeByteEditViewHandle, String> {
+    let RuntimeValue::Opaque(RuntimeOpaqueValue::ByteEditView(handle)) = value else {
+        return Err(format!("{context} expected ByteEditView"));
+    };
+    Ok(handle)
+}
+
+fn expect_str_view(value: RuntimeValue, context: &str) -> Result<RuntimeStrViewHandle, String> {
+    let RuntimeValue::Opaque(RuntimeOpaqueValue::StrView(handle)) = value else {
+        return Err(format!("{context} expected StrView"));
+    };
+    Ok(handle)
+}
+
 fn expect_task(value: RuntimeValue, context: &str) -> Result<RuntimeTaskHandle, String> {
     let RuntimeValue::Opaque(RuntimeOpaqueValue::Task(handle)) = value else {
         return Err(format!("{context} expected Task"));
@@ -10440,6 +12584,30 @@ fn bytes_to_runtime_array(bytes: impl IntoIterator<Item = u8>) -> RuntimeValue {
             .map(|byte| RuntimeValue::Int(i64::from(byte)))
             .collect(),
     )
+}
+
+fn expect_runtime_array(value: RuntimeValue, context: &str) -> Result<Vec<RuntimeValue>, String> {
+    let RuntimeValue::Array(values) = value else {
+        return Err(format!("{context} expected Array"));
+    };
+    Ok(values)
+}
+
+fn runtime_string_slice(
+    text: &str,
+    start: usize,
+    end: usize,
+    context: &str,
+) -> Result<String, String> {
+    if start > end || end > text.len() {
+        return Err(format!(
+            "{context} slice `{start}..{end}` is out of bounds for {} bytes",
+            text.len()
+        ));
+    }
+    text.get(start..end)
+        .map(ToString::to_string)
+        .ok_or_else(|| format!("{context} slice `{start}..{end}` is not on UTF-8 boundaries"))
 }
 
 fn require_runtime_type_key(type_args: &[String], context: &str) -> Result<Vec<String>, String> {
@@ -10583,6 +12751,483 @@ fn insert_runtime_pool_arena(
     handle
 }
 
+fn insert_runtime_temp_arena(
+    state: &mut RuntimeExecutionState,
+    type_args: &[String],
+    policy: RuntimeTempArenaPolicy,
+) -> RuntimeTempArenaHandle {
+    let handle = RuntimeTempArenaHandle(state.next_temp_arena_handle);
+    state.next_temp_arena_handle += 1;
+    state.temp_arenas.insert(
+        handle,
+        RuntimeTempArenaState {
+            type_args: type_args.to_vec(),
+            next_slot: 0,
+            generation: 0,
+            slots: BTreeMap::new(),
+            policy,
+        },
+    );
+    handle
+}
+
+fn insert_runtime_session_arena(
+    state: &mut RuntimeExecutionState,
+    type_args: &[String],
+    policy: RuntimeSessionArenaPolicy,
+) -> RuntimeSessionArenaHandle {
+    let handle = RuntimeSessionArenaHandle(state.next_session_arena_handle);
+    state.next_session_arena_handle += 1;
+    state.session_arenas.insert(
+        handle,
+        RuntimeSessionArenaState {
+            type_args: type_args.to_vec(),
+            next_slot: 0,
+            generation: 0,
+            slots: BTreeMap::new(),
+            policy,
+            sealed: false,
+        },
+    );
+    handle
+}
+
+fn insert_runtime_ring_buffer(
+    state: &mut RuntimeExecutionState,
+    type_args: &[String],
+    policy: RuntimeRingBufferPolicy,
+) -> RuntimeRingBufferHandle {
+    let handle = RuntimeRingBufferHandle(state.next_ring_buffer_handle);
+    state.next_ring_buffer_handle += 1;
+    state.ring_buffers.insert(
+        handle,
+        RuntimeRingBufferState {
+            type_args: type_args.to_vec(),
+            next_slot: 0,
+            generations: BTreeMap::new(),
+            slots: BTreeMap::new(),
+            order: VecDeque::new(),
+            policy,
+        },
+    );
+    handle
+}
+
+fn insert_runtime_slab(
+    state: &mut RuntimeExecutionState,
+    type_args: &[String],
+    policy: RuntimeSlabPolicy,
+) -> RuntimeSlabHandle {
+    let handle = RuntimeSlabHandle(state.next_slab_handle);
+    state.next_slab_handle += 1;
+    state.slabs.insert(
+        handle,
+        RuntimeSlabState {
+            type_args: type_args.to_vec(),
+            next_slot: 0,
+            free_slots: Vec::new(),
+            generations: BTreeMap::new(),
+            slots: BTreeMap::new(),
+            policy,
+            sealed: false,
+        },
+    );
+    handle
+}
+
+fn insert_runtime_element_view_buffer(
+    state: &mut RuntimeExecutionState,
+    type_args: &[String],
+    values: Vec<RuntimeValue>,
+) -> RuntimeElementViewBufferHandle {
+    let handle = RuntimeElementViewBufferHandle(state.next_element_view_buffer_handle);
+    state.next_element_view_buffer_handle += 1;
+    state.element_view_buffers.insert(
+        handle,
+        RuntimeElementViewBufferState {
+            type_args: type_args.to_vec(),
+            values,
+        },
+    );
+    handle
+}
+
+fn insert_runtime_read_view_from_buffer(
+    state: &mut RuntimeExecutionState,
+    type_args: &[String],
+    backing: RuntimeElementViewBufferHandle,
+    start: usize,
+    len: usize,
+) -> RuntimeReadViewHandle {
+    let handle = RuntimeReadViewHandle(state.next_read_view_handle);
+    state.next_read_view_handle += 1;
+    state.read_views.insert(
+        handle,
+        RuntimeReadViewState {
+            type_args: type_args.to_vec(),
+            backing: RuntimeElementViewBacking::Buffer(backing),
+            start,
+            len,
+        },
+    );
+    handle
+}
+
+fn insert_runtime_edit_view_from_buffer(
+    state: &mut RuntimeExecutionState,
+    type_args: &[String],
+    backing: RuntimeElementViewBufferHandle,
+    start: usize,
+    len: usize,
+) -> RuntimeEditViewHandle {
+    let handle = RuntimeEditViewHandle(state.next_edit_view_handle);
+    state.next_edit_view_handle += 1;
+    state.edit_views.insert(
+        handle,
+        RuntimeEditViewState {
+            type_args: type_args.to_vec(),
+            backing: RuntimeElementViewBacking::Buffer(backing),
+            start,
+            len,
+        },
+    );
+    handle
+}
+
+fn insert_runtime_read_view_from_reference(
+    state: &mut RuntimeExecutionState,
+    type_args: &[String],
+    reference: RuntimeReferenceValue,
+    start: usize,
+    len: usize,
+) -> RuntimeReadViewHandle {
+    let handle = RuntimeReadViewHandle(state.next_read_view_handle);
+    state.next_read_view_handle += 1;
+    state.read_views.insert(
+        handle,
+        RuntimeReadViewState {
+            type_args: type_args.to_vec(),
+            backing: RuntimeElementViewBacking::Reference(reference),
+            start,
+            len,
+        },
+    );
+    handle
+}
+
+fn insert_runtime_read_view_from_ring_window(
+    state: &mut RuntimeExecutionState,
+    type_args: &[String],
+    arena: RuntimeRingBufferHandle,
+    slots: Vec<u64>,
+    start: usize,
+    len: usize,
+) -> RuntimeReadViewHandle {
+    let handle = RuntimeReadViewHandle(state.next_read_view_handle);
+    state.next_read_view_handle += 1;
+    state.read_views.insert(
+        handle,
+        RuntimeReadViewState {
+            type_args: type_args.to_vec(),
+            backing: RuntimeElementViewBacking::RingWindow { arena, slots },
+            start,
+            len,
+        },
+    );
+    handle
+}
+
+fn insert_runtime_edit_view_from_reference(
+    state: &mut RuntimeExecutionState,
+    type_args: &[String],
+    reference: RuntimeReferenceValue,
+    start: usize,
+    len: usize,
+) -> RuntimeEditViewHandle {
+    let handle = RuntimeEditViewHandle(state.next_edit_view_handle);
+    state.next_edit_view_handle += 1;
+    state.edit_views.insert(
+        handle,
+        RuntimeEditViewState {
+            type_args: type_args.to_vec(),
+            backing: RuntimeElementViewBacking::Reference(reference),
+            start,
+            len,
+        },
+    );
+    handle
+}
+
+fn insert_runtime_edit_view_from_ring_window(
+    state: &mut RuntimeExecutionState,
+    type_args: &[String],
+    arena: RuntimeRingBufferHandle,
+    slots: Vec<u64>,
+    start: usize,
+    len: usize,
+) -> RuntimeEditViewHandle {
+    let handle = RuntimeEditViewHandle(state.next_edit_view_handle);
+    state.next_edit_view_handle += 1;
+    state.edit_views.insert(
+        handle,
+        RuntimeEditViewState {
+            type_args: type_args.to_vec(),
+            backing: RuntimeElementViewBacking::RingWindow { arena, slots },
+            start,
+            len,
+        },
+    );
+    handle
+}
+
+pub(crate) fn insert_runtime_read_view(
+    state: &mut RuntimeExecutionState,
+    type_args: &[String],
+    values: Vec<RuntimeValue>,
+) -> RuntimeReadViewHandle {
+    let len = values.len();
+    let backing = insert_runtime_element_view_buffer(state, type_args, values);
+    insert_runtime_read_view_from_buffer(state, type_args, backing, 0, len)
+}
+
+pub(crate) fn insert_runtime_edit_view(
+    state: &mut RuntimeExecutionState,
+    type_args: &[String],
+    values: Vec<RuntimeValue>,
+) -> RuntimeEditViewHandle {
+    let len = values.len();
+    let backing = insert_runtime_element_view_buffer(state, type_args, values);
+    insert_runtime_edit_view_from_buffer(state, type_args, backing, 0, len)
+}
+
+fn insert_runtime_read_view_from_backing(
+    state: &mut RuntimeExecutionState,
+    type_args: &[String],
+    backing: RuntimeElementViewBacking,
+    start: usize,
+    len: usize,
+) -> RuntimeReadViewHandle {
+    match backing {
+        RuntimeElementViewBacking::Buffer(buffer) => {
+            insert_runtime_read_view_from_buffer(state, type_args, buffer, start, len)
+        }
+        RuntimeElementViewBacking::Reference(reference) => {
+            insert_runtime_read_view_from_reference(state, type_args, reference, start, len)
+        }
+        RuntimeElementViewBacking::RingWindow { arena, slots } => {
+            insert_runtime_read_view_from_ring_window(state, type_args, arena, slots, start, len)
+        }
+    }
+}
+
+fn insert_runtime_byte_view_buffer(
+    state: &mut RuntimeExecutionState,
+    values: Vec<u8>,
+) -> RuntimeByteViewBufferHandle {
+    let handle = RuntimeByteViewBufferHandle(state.next_byte_view_buffer_handle);
+    state.next_byte_view_buffer_handle += 1;
+    state
+        .byte_view_buffers
+        .insert(handle, RuntimeByteViewBufferState { values });
+    handle
+}
+
+fn insert_runtime_byte_view_from_buffer(
+    state: &mut RuntimeExecutionState,
+    backing: RuntimeByteViewBufferHandle,
+    start: usize,
+    len: usize,
+) -> RuntimeByteViewHandle {
+    let handle = RuntimeByteViewHandle(state.next_byte_view_handle);
+    state.next_byte_view_handle += 1;
+    state.byte_views.insert(
+        handle,
+        RuntimeByteViewState {
+            backing: RuntimeByteViewBacking::Buffer(backing),
+            start,
+            len,
+        },
+    );
+    handle
+}
+
+fn insert_runtime_byte_edit_view_from_buffer(
+    state: &mut RuntimeExecutionState,
+    backing: RuntimeByteViewBufferHandle,
+    start: usize,
+    len: usize,
+) -> RuntimeByteEditViewHandle {
+    let handle = RuntimeByteEditViewHandle(state.next_byte_edit_view_handle);
+    state.next_byte_edit_view_handle += 1;
+    state.byte_edit_views.insert(
+        handle,
+        RuntimeByteEditViewState {
+            backing: RuntimeByteViewBacking::Buffer(backing),
+            start,
+            len,
+        },
+    );
+    handle
+}
+
+fn insert_runtime_byte_view_from_reference(
+    state: &mut RuntimeExecutionState,
+    reference: RuntimeReferenceValue,
+    start: usize,
+    len: usize,
+) -> RuntimeByteViewHandle {
+    let handle = RuntimeByteViewHandle(state.next_byte_view_handle);
+    state.next_byte_view_handle += 1;
+    state.byte_views.insert(
+        handle,
+        RuntimeByteViewState {
+            backing: RuntimeByteViewBacking::Reference(reference),
+            start,
+            len,
+        },
+    );
+    handle
+}
+
+fn insert_runtime_byte_edit_view_from_reference(
+    state: &mut RuntimeExecutionState,
+    reference: RuntimeReferenceValue,
+    start: usize,
+    len: usize,
+) -> RuntimeByteEditViewHandle {
+    let handle = RuntimeByteEditViewHandle(state.next_byte_edit_view_handle);
+    state.next_byte_edit_view_handle += 1;
+    state.byte_edit_views.insert(
+        handle,
+        RuntimeByteEditViewState {
+            backing: RuntimeByteViewBacking::Reference(reference),
+            start,
+            len,
+        },
+    );
+    handle
+}
+
+pub(crate) fn insert_runtime_byte_view(
+    state: &mut RuntimeExecutionState,
+    values: Vec<u8>,
+) -> RuntimeByteViewHandle {
+    let len = values.len();
+    let backing = insert_runtime_byte_view_buffer(state, values);
+    insert_runtime_byte_view_from_buffer(state, backing, 0, len)
+}
+
+#[allow(dead_code)]
+pub(crate) fn insert_runtime_byte_edit_view(
+    state: &mut RuntimeExecutionState,
+    values: Vec<u8>,
+) -> RuntimeByteEditViewHandle {
+    let len = values.len();
+    let backing = insert_runtime_byte_view_buffer(state, values);
+    insert_runtime_byte_edit_view_from_buffer(state, backing, 0, len)
+}
+
+fn insert_runtime_str_view_buffer(
+    state: &mut RuntimeExecutionState,
+    text: String,
+) -> RuntimeStrViewBufferHandle {
+    let handle = RuntimeStrViewBufferHandle(state.next_str_view_buffer_handle);
+    state.next_str_view_buffer_handle += 1;
+    state
+        .str_view_buffers
+        .insert(handle, RuntimeStrViewBufferState { text });
+    handle
+}
+
+fn insert_runtime_str_view_from_buffer(
+    state: &mut RuntimeExecutionState,
+    backing: RuntimeStrViewBufferHandle,
+    start: usize,
+    len: usize,
+) -> RuntimeStrViewHandle {
+    let handle = RuntimeStrViewHandle(state.next_str_view_handle);
+    state.next_str_view_handle += 1;
+    state.str_views.insert(
+        handle,
+        RuntimeStrViewState {
+            backing: RuntimeStrViewBacking::Buffer(backing),
+            start,
+            len,
+        },
+    );
+    handle
+}
+
+fn insert_runtime_str_view_from_reference(
+    state: &mut RuntimeExecutionState,
+    reference: RuntimeReferenceValue,
+    start: usize,
+    len: usize,
+) -> RuntimeStrViewHandle {
+    let handle = RuntimeStrViewHandle(state.next_str_view_handle);
+    state.next_str_view_handle += 1;
+    state.str_views.insert(
+        handle,
+        RuntimeStrViewState {
+            backing: RuntimeStrViewBacking::Reference(reference),
+            start,
+            len,
+        },
+    );
+    handle
+}
+
+pub(crate) fn insert_runtime_str_view(
+    state: &mut RuntimeExecutionState,
+    text: String,
+) -> RuntimeStrViewHandle {
+    let len = text.len();
+    let backing = insert_runtime_str_view_buffer(state, text);
+    insert_runtime_str_view_from_buffer(state, backing, 0, len)
+}
+
+#[cfg(test)]
+pub(crate) fn runtime_read_view_snapshot(
+    state: &RuntimeExecutionState,
+    handle: RuntimeReadViewHandle,
+) -> Option<Vec<RuntimeValue>> {
+    let view = state.read_views.get(&handle)?;
+    match &view.backing {
+        RuntimeElementViewBacking::Buffer(buffer) => {
+            let values = &state.element_view_buffers.get(buffer)?.values;
+            values
+                .get(view.start..view.start + view.len)
+                .map(|slice| slice.to_vec())
+        }
+        RuntimeElementViewBacking::Reference(_) => None,
+        RuntimeElementViewBacking::RingWindow { arena, slots } => {
+            let ring = state.ring_buffers.get(arena)?;
+            let slot_slice = slots.get(view.start..view.start + view.len)?;
+            slot_slice
+                .iter()
+                .map(|slot| ring.slots.get(slot).cloned())
+                .collect()
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn runtime_byte_view_snapshot(
+    state: &RuntimeExecutionState,
+    handle: RuntimeByteViewHandle,
+) -> Option<Vec<u8>> {
+    let view = state.byte_views.get(&handle)?;
+    match &view.backing {
+        RuntimeByteViewBacking::Buffer(buffer) => state
+            .byte_view_buffers
+            .get(buffer)?
+            .values
+            .get(view.start..view.start + view.len)
+            .map(|slice| slice.to_vec()),
+        RuntimeByteViewBacking::Reference(_) => None,
+    }
+}
+
 fn default_runtime_arena_policy(capacity: usize) -> RuntimeArenaPolicy {
     RuntimeArenaPolicy {
         base_capacity: capacity,
@@ -10600,6 +13245,7 @@ fn default_runtime_frame_policy(capacity: usize) -> RuntimeFrameArenaPolicy {
         growth_step: 0,
         pressure: RuntimeMemoryPressurePolicy::Bounded,
         recycle: RuntimeFrameRecyclePolicy::Manual,
+        reset_on: RuntimeResetOnPolicy::Manual,
     }
 }
 
@@ -10611,6 +13257,48 @@ fn default_runtime_pool_policy(capacity: usize) -> RuntimePoolArenaPolicy {
         pressure: RuntimeMemoryPressurePolicy::Bounded,
         recycle: RuntimePoolRecyclePolicy::Strict,
         handle: RuntimeMemoryHandlePolicy::Stable,
+    }
+}
+
+fn default_runtime_temp_policy(capacity: usize) -> RuntimeTempArenaPolicy {
+    RuntimeTempArenaPolicy {
+        base_capacity: capacity,
+        current_limit: capacity,
+        growth_step: 0,
+        pressure: RuntimeMemoryPressurePolicy::Bounded,
+        reset_on: RuntimeResetOnPolicy::Manual,
+    }
+}
+
+fn default_runtime_session_policy(capacity: usize) -> RuntimeSessionArenaPolicy {
+    RuntimeSessionArenaPolicy {
+        base_capacity: capacity,
+        current_limit: capacity,
+        growth_step: 0,
+        pressure: RuntimeMemoryPressurePolicy::Bounded,
+        handle: RuntimeMemoryHandlePolicy::Stable,
+    }
+}
+
+fn default_runtime_ring_policy(capacity: usize) -> RuntimeRingBufferPolicy {
+    RuntimeRingBufferPolicy {
+        base_capacity: capacity,
+        current_limit: capacity,
+        growth_step: 0,
+        pressure: RuntimeMemoryPressurePolicy::Bounded,
+        overwrite: RuntimeRingOverwritePolicy::Oldest,
+        window: capacity,
+    }
+}
+
+fn default_runtime_slab_policy(capacity: usize) -> RuntimeSlabPolicy {
+    RuntimeSlabPolicy {
+        base_capacity: capacity,
+        current_limit: capacity,
+        growth_step: 0,
+        pressure: RuntimeMemoryPressurePolicy::Bounded,
+        handle: RuntimeMemoryHandlePolicy::Stable,
+        page: capacity.max(1),
     }
 }
 
@@ -10638,7 +13326,9 @@ fn ensure_runtime_frame_capacity(arena: &mut RuntimeFrameArenaState) -> Result<(
     {
         return Ok(());
     }
-    if matches!(arena.policy.recycle, RuntimeFrameRecyclePolicy::Frame) {
+    if matches!(arena.policy.recycle, RuntimeFrameRecyclePolicy::Frame)
+        || matches!(arena.policy.reset_on, RuntimeResetOnPolicy::Frame)
+    {
         arena.generation += 1;
         arena.next_slot = 0;
         arena.slots.clear();
@@ -10646,12 +13336,225 @@ fn ensure_runtime_frame_capacity(arena: &mut RuntimeFrameArenaState) -> Result<(
         return Ok(());
     }
     Err(format!(
-        "frame arena capacity exhausted at {}; growth={} pressure={:?} recycle={:?}",
+        "frame arena capacity exhausted at {}; growth={} pressure={:?} recycle={:?} reset_on={:?}",
         arena.policy.current_limit,
         arena.policy.growth_step,
         arena.policy.pressure,
-        arena.policy.recycle
+        arena.policy.recycle,
+        arena.policy.reset_on
     ))
+}
+
+fn ensure_runtime_temp_capacity(arena: &mut RuntimeTempArenaState) -> Result<(), String> {
+    if arena.slots.len() < arena.policy.current_limit {
+        return Ok(());
+    }
+    if matches!(arena.policy.pressure, RuntimeMemoryPressurePolicy::Elastic)
+        && runtime_try_grow_limit(&mut arena.policy.current_limit, arena.policy.growth_step)
+    {
+        return Ok(());
+    }
+    if matches!(arena.policy.reset_on, RuntimeResetOnPolicy::Frame) {
+        arena.generation += 1;
+        arena.next_slot = 0;
+        arena.slots.clear();
+        arena.policy.current_limit = arena.policy.base_capacity;
+        return Ok(());
+    }
+    Err(format!(
+        "temp arena capacity exhausted at {}; growth={} pressure={:?} reset_on={:?}",
+        arena.policy.current_limit,
+        arena.policy.growth_step,
+        arena.policy.pressure,
+        arena.policy.reset_on
+    ))
+}
+
+fn ensure_runtime_session_capacity(arena: &mut RuntimeSessionArenaState) -> Result<(), String> {
+    if arena.slots.len() < arena.policy.current_limit {
+        return Ok(());
+    }
+    if matches!(arena.policy.pressure, RuntimeMemoryPressurePolicy::Elastic)
+        && runtime_try_grow_limit(&mut arena.policy.current_limit, arena.policy.growth_step)
+    {
+        return Ok(());
+    }
+    Err(format!(
+        "session arena capacity exhausted at {}; growth={} pressure={:?}",
+        arena.policy.current_limit, arena.policy.growth_step, arena.policy.pressure
+    ))
+}
+
+fn ensure_runtime_ring_capacity(arena: &mut RuntimeRingBufferState) -> Result<(), String> {
+    if arena.slots.len() < arena.policy.current_limit {
+        return Ok(());
+    }
+    if matches!(arena.policy.pressure, RuntimeMemoryPressurePolicy::Elastic)
+        && runtime_try_grow_limit(&mut arena.policy.current_limit, arena.policy.growth_step)
+    {
+        return Ok(());
+    }
+    if matches!(arena.policy.overwrite, RuntimeRingOverwritePolicy::Oldest) {
+        if let Some(oldest_slot) = arena.order.pop_front() {
+            arena.slots.remove(&oldest_slot);
+            *arena.generations.entry(oldest_slot).or_insert(0) += 1;
+            return Ok(());
+        }
+    }
+    Err(format!(
+        "ring capacity exhausted at {}; growth={} pressure={:?} overwrite={:?}",
+        arena.policy.current_limit,
+        arena.policy.growth_step,
+        arena.policy.pressure,
+        arena.policy.overwrite
+    ))
+}
+
+fn ensure_runtime_slab_capacity(arena: &mut RuntimeSlabState) -> Result<(), String> {
+    if arena.slots.len() < arena.policy.current_limit {
+        return Ok(());
+    }
+    let growth_step = arena.policy.growth_step.max(arena.policy.page);
+    if matches!(arena.policy.pressure, RuntimeMemoryPressurePolicy::Elastic)
+        && runtime_try_grow_limit_by(&mut arena.policy.current_limit, growth_step)
+    {
+        return Ok(());
+    }
+    Err(format!(
+        "slab capacity exhausted at {}; growth={} pressure={:?} page={}",
+        arena.policy.current_limit,
+        arena.policy.growth_step,
+        arena.policy.pressure,
+        arena.policy.page
+    ))
+}
+
+fn runtime_reset_frame_arena_handle(
+    state: &mut RuntimeExecutionState,
+    handle: RuntimeFrameArenaHandle,
+    context: &str,
+) -> Result<(), String> {
+    runtime_reject_live_view_conflict(
+        state,
+        |reference| runtime_reference_targets_frame_arena(reference, handle),
+        format!(
+            "{context} rejects invalidation while borrowed views for FrameArena `{}` are live",
+            handle.0
+        ),
+    )?;
+    let arena = state
+        .frame_arenas
+        .get_mut(&handle)
+        .ok_or_else(|| format!("invalid FrameArena handle `{}`", handle.0))?;
+    arena.generation += 1;
+    arena.next_slot = 0;
+    arena.slots.clear();
+    arena.policy.current_limit = arena.policy.base_capacity;
+    Ok(())
+}
+
+fn runtime_reset_temp_arena_handle(
+    state: &mut RuntimeExecutionState,
+    handle: RuntimeTempArenaHandle,
+    context: &str,
+) -> Result<(), String> {
+    runtime_reject_live_view_conflict(
+        state,
+        |reference| runtime_reference_targets_temp_arena(reference, handle),
+        format!(
+            "{context} rejects invalidation while borrowed views for TempArena `{}` are live",
+            handle.0
+        ),
+    )?;
+    let arena = state
+        .temp_arenas
+        .get_mut(&handle)
+        .ok_or_else(|| format!("invalid TempArena handle `{}`", handle.0))?;
+    arena.generation += 1;
+    arena.next_slot = 0;
+    arena.slots.clear();
+    arena.policy.current_limit = arena.policy.base_capacity;
+    Ok(())
+}
+
+fn runtime_reset_owner_exit_memory_specs_in_scopes(
+    scopes: &mut [RuntimeScope],
+    state: &mut RuntimeExecutionState,
+    owner_key: &str,
+) -> Result<(), String> {
+    for scope in scopes {
+        for spec_state in scope.memory_specs.values_mut() {
+            if !spec_state
+                .owner_keys
+                .iter()
+                .any(|active| active == owner_key)
+            {
+                continue;
+            }
+            let Some(handle) = spec_state.handle.clone() else {
+                continue;
+            };
+            match handle {
+                RuntimeValue::Opaque(RuntimeOpaqueValue::FrameArena(handle)) => {
+                    let should_reset = state.frame_arenas.get(&handle).is_some_and(|arena| {
+                        matches!(arena.policy.reset_on, RuntimeResetOnPolicy::OwnerExit)
+                    });
+                    if should_reset {
+                        runtime_reset_frame_arena_handle(state, handle, "owner_exit reset")?;
+                    }
+                }
+                RuntimeValue::Opaque(RuntimeOpaqueValue::TempArena(handle)) => {
+                    let should_reset = state.temp_arenas.get(&handle).is_some_and(|arena| {
+                        matches!(arena.policy.reset_on, RuntimeResetOnPolicy::OwnerExit)
+                    });
+                    if should_reset {
+                        runtime_reset_temp_arena_handle(state, handle, "owner_exit reset")?;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+fn runtime_reset_owner_exit_module_memory_specs(
+    state: &mut RuntimeExecutionState,
+    owner_key: &str,
+) -> Result<(), String> {
+    let handles = state
+        .module_memory_specs
+        .values()
+        .filter(|spec_state| {
+            spec_state
+                .owner_keys
+                .iter()
+                .any(|active| active == owner_key)
+        })
+        .filter_map(|spec_state| spec_state.handle.clone())
+        .collect::<Vec<_>>();
+    for handle in handles {
+        match handle {
+            RuntimeValue::Opaque(RuntimeOpaqueValue::FrameArena(handle)) => {
+                let should_reset = state.frame_arenas.get(&handle).is_some_and(|arena| {
+                    matches!(arena.policy.reset_on, RuntimeResetOnPolicy::OwnerExit)
+                });
+                if should_reset {
+                    runtime_reset_frame_arena_handle(state, handle, "owner_exit reset")?;
+                }
+            }
+            RuntimeValue::Opaque(RuntimeOpaqueValue::TempArena(handle)) => {
+                let should_reset = state.temp_arenas.get(&handle).is_some_and(|arena| {
+                    matches!(arena.policy.reset_on, RuntimeResetOnPolicy::OwnerExit)
+                });
+                if should_reset {
+                    runtime_reset_temp_arena_handle(state, handle, "owner_exit reset")?;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 fn insert_runtime_task(
@@ -10701,6 +13604,23 @@ fn insert_runtime_thread(
     handle
 }
 
+fn insert_runtime_lazy(
+    state: &mut RuntimeExecutionState,
+    type_args: &[String],
+    pending: RuntimePendingState,
+) -> RuntimeLazyHandle {
+    let handle = RuntimeLazyHandle(state.next_lazy_handle);
+    state.next_lazy_handle += 1;
+    state.lazy_values.insert(
+        handle,
+        RuntimeTaskState {
+            type_args: type_args.to_vec(),
+            state: pending,
+        },
+    );
+    handle
+}
+
 fn arena_id_is_live(
     handle: RuntimeArenaHandle,
     arena: &RuntimeArenaState,
@@ -10728,6 +13648,70 @@ fn pool_id_is_live(
 ) -> bool {
     id.arena == handle
         && id.generation == pool_slot_generation(arena, id.slot)
+        && arena.slots.contains_key(&id.slot)
+}
+
+fn temp_id_is_live(
+    handle: RuntimeTempArenaHandle,
+    arena: &RuntimeTempArenaState,
+    id: RuntimeTempIdValue,
+) -> bool {
+    id.arena == handle && id.generation == arena.generation && arena.slots.contains_key(&id.slot)
+}
+
+fn session_id_is_live(
+    handle: RuntimeSessionArenaHandle,
+    arena: &RuntimeSessionArenaState,
+    id: RuntimeSessionIdValue,
+) -> bool {
+    id.arena == handle && id.generation == arena.generation && arena.slots.contains_key(&id.slot)
+}
+
+fn ring_slot_generation(ring: &RuntimeRingBufferState, slot: u64) -> u64 {
+    ring.generations.get(&slot).copied().unwrap_or(0)
+}
+
+fn runtime_ring_ids_for_slots(
+    state: &RuntimeExecutionState,
+    arena: RuntimeRingBufferHandle,
+    slots: &[u64],
+) -> Result<Vec<RuntimeRingIdValue>, String> {
+    let ring = state
+        .ring_buffers
+        .get(&arena)
+        .ok_or_else(|| format!("invalid RingBuffer handle `{}`", arena.0))?;
+    Ok(slots
+        .iter()
+        .copied()
+        .map(|slot| RuntimeRingIdValue {
+            arena,
+            slot,
+            generation: ring_slot_generation(ring, slot),
+        })
+        .collect())
+}
+
+fn ring_id_is_live(
+    handle: RuntimeRingBufferHandle,
+    arena: &RuntimeRingBufferState,
+    id: RuntimeRingIdValue,
+) -> bool {
+    id.arena == handle
+        && id.generation == ring_slot_generation(arena, id.slot)
+        && arena.slots.contains_key(&id.slot)
+}
+
+fn slab_slot_generation(slab: &RuntimeSlabState, slot: u64) -> u64 {
+    slab.generations.get(&slot).copied().unwrap_or(0)
+}
+
+fn slab_id_is_live(
+    handle: RuntimeSlabHandle,
+    arena: &RuntimeSlabState,
+    id: RuntimeSlabIdValue,
+) -> bool {
+    id.arena == handle
+        && id.generation == slab_slot_generation(arena, id.slot)
         && arena.slots.contains_key(&id.slot)
 }
 
@@ -10905,6 +13889,230 @@ fn expect_single_arg(mut args: Vec<RuntimeValue>, name: &str) -> Result<RuntimeV
     Ok(args.remove(0))
 }
 
+const RUNTIME_DIRECT_CALLABLE_SIGNATURE_SOURCES: &[(&str, &str)] = &[
+    ("std.args", include_str!("../../../std/src/args.arc")),
+    ("std.audio", include_str!("../../../std/src/audio.arc")),
+    ("std.behaviors", include_str!("../../../std/src/behaviors.arc")),
+    ("std.bytes", include_str!("../../../std/src/bytes.arc")),
+    ("std.canvas", include_str!("../../../std/src/canvas.arc")),
+    ("std.clipboard", include_str!("../../../std/src/clipboard.arc")),
+    ("std.concurrent", include_str!("../../../std/src/concurrent.arc")),
+    ("std.ecs", include_str!("../../../std/src/ecs.arc")),
+    ("std.env", include_str!("../../../std/src/env.arc")),
+    ("std.events", include_str!("../../../std/src/events.arc")),
+    ("std.fs", include_str!("../../../std/src/fs.arc")),
+    ("std.input", include_str!("../../../std/src/input.arc")),
+    ("std.io", include_str!("../../../std/src/io.arc")),
+    ("std.memory", include_str!("../../../std/src/memory.arc")),
+    ("std.package", include_str!("../../../std/src/package.arc")),
+    ("std.path", include_str!("../../../std/src/path.arc")),
+    ("std.process", include_str!("../../../std/src/process.arc")),
+    ("std.text", include_str!("../../../std/src/text.arc")),
+    ("std.text_input", include_str!("../../../std/src/text_input.arc")),
+    ("std.time", include_str!("../../../std/src/time.arc")),
+    ("std.window", include_str!("../../../std/src/window.arc")),
+    (
+        "std.collections.array",
+        include_str!("../../../std/src/collections/array.arc"),
+    ),
+    (
+        "std.collections.list",
+        include_str!("../../../std/src/collections/list.arc"),
+    ),
+    (
+        "std.collections.map",
+        include_str!("../../../std/src/collections/map.arc"),
+    ),
+    (
+        "std.collections.set",
+        include_str!("../../../std/src/collections/set.arc"),
+    ),
+    ("std.kernel.args", include_str!("../../../std/src/kernel/args.arc")),
+    ("std.kernel.audio", include_str!("../../../std/src/kernel/audio.arc")),
+    (
+        "std.kernel.clipboard",
+        include_str!("../../../std/src/kernel/clipboard.arc"),
+    ),
+    (
+        "std.kernel.collections",
+        include_str!("../../../std/src/kernel/collections.arc"),
+    ),
+    (
+        "std.kernel.concurrency",
+        include_str!("../../../std/src/kernel/concurrency.arc"),
+    ),
+    ("std.kernel.ecs", include_str!("../../../std/src/kernel/ecs.arc")),
+    ("std.kernel.env", include_str!("../../../std/src/kernel/env.arc")),
+    ("std.kernel.events", include_str!("../../../std/src/kernel/events.arc")),
+    ("std.kernel.fs", include_str!("../../../std/src/kernel/fs.arc")),
+    ("std.kernel.gfx", include_str!("../../../std/src/kernel/gfx.arc")),
+    ("std.kernel.io", include_str!("../../../std/src/kernel/io.arc")),
+    (
+        "std.kernel.memory",
+        include_str!("../../../std/src/kernel/memory.arc"),
+    ),
+    (
+        "std.kernel.package",
+        include_str!("../../../std/src/kernel/package.arc"),
+    ),
+    ("std.kernel.path", include_str!("../../../std/src/kernel/path.arc")),
+    (
+        "std.kernel.process",
+        include_str!("../../../std/src/kernel/process.arc"),
+    ),
+    ("std.kernel.text", include_str!("../../../std/src/kernel/text.arc")),
+    (
+        "std.kernel.text_input",
+        include_str!("../../../std/src/kernel/text_input.arc"),
+    ),
+    ("std.kernel.time", include_str!("../../../std/src/kernel/time.arc")),
+];
+
+fn runtime_direct_callable_param_names() -> &'static BTreeMap<String, Vec<String>> {
+    static PARAMS: OnceLock<BTreeMap<String, Vec<String>>> = OnceLock::new();
+    PARAMS.get_or_init(|| {
+        let mut params = BTreeMap::new();
+        for (module_path, source) in RUNTIME_DIRECT_CALLABLE_SIGNATURE_SOURCES {
+            collect_runtime_direct_callable_signatures(module_path, source, &mut params);
+        }
+        for (path, names) in [
+            ("Option.None", Vec::<&str>::new()),
+            ("Option.Some", vec!["value"]),
+            ("Result.Ok", vec!["value"]),
+            ("Result.Err", vec!["error"]),
+            ("std.option.Option.None", Vec::<&str>::new()),
+            ("std.option.Option.Some", vec!["value"]),
+            ("std.result.Result.Ok", vec!["value"]),
+            ("std.result.Result.Err", vec!["error"]),
+            ("std.option.is_some", vec!["self"]),
+            ("std.option.is_none", vec!["self"]),
+            ("std.option.unwrap_or", vec!["self", "fallback"]),
+            ("std.result.is_ok", vec!["self"]),
+            ("std.result.is_err", vec!["self"]),
+            ("std.result.unwrap_or", vec!["self", "fallback"]),
+        ] {
+            params.insert(
+                path.to_string(),
+                names.into_iter().map(str::to_string).collect(),
+            );
+        }
+        params
+    })
+}
+
+fn collect_runtime_direct_callable_signatures(
+    module_path: &str,
+    source: &str,
+    params: &mut BTreeMap<String, Vec<String>>,
+) {
+    for line in source.lines() {
+        if line.starts_with(' ') || line.starts_with('\t') {
+            continue;
+        }
+        let trimmed = line.trim();
+        let Some((name, param_names)) = parse_runtime_direct_callable_signature(trimmed) else {
+            continue;
+        };
+        params.insert(format!("{module_path}.{name}"), param_names);
+    }
+}
+
+fn parse_runtime_direct_callable_signature(line: &str) -> Option<(String, Vec<String>)> {
+    let mut rest = line.strip_prefix("export ").map(str::trim_start).unwrap_or(line);
+    rest = if let Some(next) = rest.strip_prefix("intrinsic fn ") {
+        next
+    } else if let Some(next) = rest.strip_prefix("async fn ") {
+        next
+    } else if let Some(next) = rest.strip_prefix("fn ") {
+        next
+    } else {
+        return None;
+    };
+    let open = find_runtime_signature_open_paren(rest)?;
+    let name_text = rest[..open].trim();
+    let name = name_text.split('[').next()?.trim();
+    let close = find_runtime_signature_matching_paren(&rest[open..])?;
+    let params_text = &rest[open + 1..open + close];
+    Some((
+        name.to_string(),
+        split_runtime_signature_params(params_text)
+            .into_iter()
+            .filter_map(|param| parse_runtime_signature_param_name(param.trim()))
+            .collect(),
+    ))
+}
+
+fn find_runtime_signature_open_paren(text: &str) -> Option<usize> {
+    let mut bracket_depth = 0usize;
+    for (index, ch) in text.char_indices() {
+        match ch {
+            '[' => bracket_depth += 1,
+            ']' => bracket_depth = bracket_depth.saturating_sub(1),
+            '(' if bracket_depth == 0 => return Some(index),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn find_runtime_signature_matching_paren(text: &str) -> Option<usize> {
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    for (index, ch) in text.char_indices() {
+        match ch {
+            '[' => bracket_depth += 1,
+            ']' => bracket_depth = bracket_depth.saturating_sub(1),
+            '(' => paren_depth += 1,
+            ')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+                if paren_depth == 0 && bracket_depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn split_runtime_signature_params(text: &str) -> Vec<&str> {
+    if text.trim().is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    for (index, ch) in text.char_indices() {
+        match ch {
+            '[' => bracket_depth += 1,
+            ']' => bracket_depth = bracket_depth.saturating_sub(1),
+            '(' => paren_depth += 1,
+            ')' => paren_depth = paren_depth.saturating_sub(1),
+            ',' if paren_depth == 0 && bracket_depth == 0 => {
+                out.push(text[start..index].trim());
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(text[start..].trim());
+    out
+}
+
+fn parse_runtime_signature_param_name(param: &str) -> Option<String> {
+    if param.is_empty() {
+        return None;
+    }
+    let param = param
+        .strip_prefix("read ")
+        .or_else(|| param.strip_prefix("edit "))
+        .or_else(|| param.strip_prefix("take "))
+        .unwrap_or(param);
+    let (name, _) = param.split_once(':')?;
+    Some(name.trim().to_string())
+}
+
 fn collect_call_args(
     args: &[ParsedPhraseArg],
     attached: &[ParsedHeaderAttachment],
@@ -10923,14 +14131,19 @@ fn collect_call_args(
             Ok(RuntimeCallArg {
                 name: arg.name.clone(),
                 source_expr: arg.value.clone(),
-                value: eval_expr(
-                    &arg.value,
+                value: force_runtime_value(
+                    eval_expr(
+                        &arg.value,
+                        plan,
+                        current_package_id,
+                        current_module_id,
+                        scopes,
+                        aliases,
+                        type_bindings,
+                        state,
+                        host,
+                    )?,
                     plan,
-                    current_package_id,
-                    current_module_id,
-                    scopes,
-                    aliases,
-                    type_bindings,
                     state,
                     host,
                 )?,
@@ -10941,28 +14154,38 @@ fn collect_call_args(
         let (name, value) = match attachment {
             ParsedHeaderAttachment::Named { name, value } => (
                 Some(name.clone()),
-                eval_expr(
-                    value,
+                force_runtime_value(
+                    eval_expr(
+                        value,
+                        plan,
+                        current_package_id,
+                        current_module_id,
+                        scopes,
+                        aliases,
+                        type_bindings,
+                        state,
+                        host,
+                    )?,
                     plan,
-                    current_package_id,
-                    current_module_id,
-                    scopes,
-                    aliases,
-                    type_bindings,
                     state,
                     host,
                 )?,
             ),
             ParsedHeaderAttachment::Chain { expr } => (
                 None,
-                eval_expr(
-                    expr,
+                force_runtime_value(
+                    eval_expr(
+                        expr,
+                        plan,
+                        current_package_id,
+                        current_module_id,
+                        scopes,
+                        aliases,
+                        type_bindings,
+                        state,
+                        host,
+                    )?,
                     plan,
-                    current_package_id,
-                    current_module_id,
-                    scopes,
-                    aliases,
-                    type_bindings,
                     state,
                     host,
                 )?,
@@ -10979,6 +14202,72 @@ fn collect_call_args(
         });
     }
     Ok(values)
+}
+
+fn bind_call_args_for_intrinsic(
+    callable: &[String],
+    args: Vec<RuntimeCallArg>,
+) -> Result<Vec<RuntimeCallArg>, String> {
+    let callable_key = callable.join(".");
+    let Some(param_names) = runtime_direct_callable_param_names().get(&callable_key) else {
+        if args.iter().any(|arg| arg.name.is_some()) {
+            return Err(format!(
+                "runtime intrinsic `{callable_key}` does not expose named-argument metadata"
+            ));
+        }
+        return Ok(args
+            .into_iter()
+            .map(|mut arg| {
+                arg.name = None;
+                arg
+            })
+            .collect());
+    };
+    let mut bound = vec![None; param_names.len()];
+    let mut next_positional = 0usize;
+    for mut arg in args {
+        let index = if let Some(name) = arg.name.as_deref() {
+            param_names
+                .iter()
+                .position(|param_name| param_name == name)
+                .ok_or_else(|| {
+                    format!("runtime intrinsic `{callable_key}` has no parameter `{name}`")
+                })?
+        } else {
+            let Some(index) =
+                (next_positional..param_names.len()).find(|index| bound[*index].is_none())
+            else {
+                return Err(format!(
+                    "runtime intrinsic `{callable_key}` received too many arguments"
+                ));
+            };
+            next_positional = index + 1;
+            index
+        };
+        if bound[index].is_some() {
+            return Err(format!(
+                "runtime intrinsic `{callable_key}` received duplicate argument for `{}`",
+                param_names[index]
+            ));
+        }
+        arg.name = None;
+        bound[index] = Some(arg);
+    }
+    let missing = param_names
+        .iter()
+        .zip(bound.iter())
+        .filter_map(|(name, value)| value.is_none().then_some(name.clone()))
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(format!(
+            "runtime intrinsic `{callable_key}` is missing arguments for {}",
+            missing.join(", ")
+        ));
+    }
+    Ok(bound
+        .into_iter()
+        .map(|value| value.expect("missing args should have returned"))
+        .collect())
 }
 
 fn bind_call_args_for_routine(
@@ -11039,6 +14328,47 @@ fn bind_call_args_for_routine(
         .into_iter()
         .map(|value| value.expect("missing args should have returned"))
         .collect())
+}
+
+fn runtime_execution_arg_for_bound_param(
+    scopes: &[RuntimeScope],
+    state: &mut RuntimeExecutionState,
+    param: &RuntimeParamPlan,
+    arg: &BoundRuntimeArg,
+) -> RuntimeValue {
+    if param.mode.as_deref() != Some("edit") {
+        return arg.value.clone();
+    }
+    if !matches!(
+        arg.value,
+        RuntimeValue::Str(_)
+            | RuntimeValue::Pair(_, _)
+            | RuntimeValue::Array(_)
+            | RuntimeValue::List(_)
+            | RuntimeValue::Map(_)
+            | RuntimeValue::Record { .. }
+            | RuntimeValue::Variant { .. }
+    ) {
+        return arg.value.clone();
+    }
+    let Some(target) = expr_to_assign_target(&arg.source_expr) else {
+        return arg.value.clone();
+    };
+    let Ok(place) = resolve_assign_target_place(scopes, &target) else {
+        return arg.value.clone();
+    };
+    if let RuntimeReferenceTarget::Local { local, .. } = &place.target
+        && let Some((_, runtime_local)) = lookup_local_with_name_by_handle(scopes, *local)
+    {
+        state
+            .captured_local_values
+            .entry(*local)
+            .or_insert_with(|| runtime_local.value.clone());
+    }
+    RuntimeValue::Ref(RuntimeReferenceValue {
+        mutable: place.mutable,
+        target: place.target,
+    })
 }
 
 fn ok_variant(value: RuntimeValue) -> RuntimeValue {
@@ -11127,12 +14457,26 @@ fn runtime_opaque_id(value: &RuntimeOpaqueValue) -> Option<u64> {
         RuntimeOpaqueValue::Arena(handle) => Some(handle.0),
         RuntimeOpaqueValue::FrameArena(handle) => Some(handle.0),
         RuntimeOpaqueValue::PoolArena(handle) => Some(handle.0),
+        RuntimeOpaqueValue::TempArena(handle) => Some(handle.0),
+        RuntimeOpaqueValue::SessionArena(handle) => Some(handle.0),
+        RuntimeOpaqueValue::RingBuffer(handle) => Some(handle.0),
+        RuntimeOpaqueValue::Slab(handle) => Some(handle.0),
+        RuntimeOpaqueValue::ReadView(handle) => Some(handle.0),
+        RuntimeOpaqueValue::EditView(handle) => Some(handle.0),
+        RuntimeOpaqueValue::ByteView(handle) => Some(handle.0),
+        RuntimeOpaqueValue::ByteEditView(handle) => Some(handle.0),
+        RuntimeOpaqueValue::StrView(handle) => Some(handle.0),
         RuntimeOpaqueValue::Task(handle) => Some(handle.0),
         RuntimeOpaqueValue::Thread(handle) => Some(handle.0),
-        RuntimeOpaqueValue::Provider(_)
+        RuntimeOpaqueValue::Lazy(_)
+        | RuntimeOpaqueValue::Provider(_)
         | RuntimeOpaqueValue::ArenaId(_)
         | RuntimeOpaqueValue::FrameId(_)
-        | RuntimeOpaqueValue::PoolId(_) => None,
+        | RuntimeOpaqueValue::PoolId(_)
+        | RuntimeOpaqueValue::TempId(_)
+        | RuntimeOpaqueValue::SessionId(_)
+        | RuntimeOpaqueValue::RingId(_)
+        | RuntimeOpaqueValue::SlabId(_) => None,
     }
 }
 
@@ -11165,6 +14509,19 @@ fn runtime_substrate_opaque_from_family(
         "std.memory.Arena" => Ok(RuntimeOpaqueValue::Arena(RuntimeArenaHandle(id))),
         "std.memory.FrameArena" => Ok(RuntimeOpaqueValue::FrameArena(RuntimeFrameArenaHandle(id))),
         "std.memory.PoolArena" => Ok(RuntimeOpaqueValue::PoolArena(RuntimePoolArenaHandle(id))),
+        "std.memory.TempArena" => Ok(RuntimeOpaqueValue::TempArena(RuntimeTempArenaHandle(id))),
+        "std.memory.SessionArena" => Ok(RuntimeOpaqueValue::SessionArena(
+            RuntimeSessionArenaHandle(id),
+        )),
+        "std.memory.RingBuffer" => Ok(RuntimeOpaqueValue::RingBuffer(RuntimeRingBufferHandle(id))),
+        "std.memory.Slab" => Ok(RuntimeOpaqueValue::Slab(RuntimeSlabHandle(id))),
+        "std.memory.ReadView" => Ok(RuntimeOpaqueValue::ReadView(RuntimeReadViewHandle(id))),
+        "std.memory.EditView" => Ok(RuntimeOpaqueValue::EditView(RuntimeEditViewHandle(id))),
+        "std.memory.ByteView" => Ok(RuntimeOpaqueValue::ByteView(RuntimeByteViewHandle(id))),
+        "std.memory.ByteEditView" => Ok(RuntimeOpaqueValue::ByteEditView(
+            RuntimeByteEditViewHandle(id),
+        )),
+        "std.memory.StrView" => Ok(RuntimeOpaqueValue::StrView(RuntimeStrViewHandle(id))),
         "std.concurrent.Task" => Ok(RuntimeOpaqueValue::Task(RuntimeTaskHandle(id))),
         "std.concurrent.Thread" => Ok(RuntimeOpaqueValue::Thread(RuntimeThreadHandle(id))),
         _ => Err(format!(
@@ -11173,17 +14530,157 @@ fn runtime_substrate_opaque_from_family(
     }
 }
 
+fn runtime_descriptor_view_value(
+    value: &RuntimeOpaqueValue,
+    state: &mut RuntimeExecutionState,
+    current_package_id: &str,
+    exported_descriptors: &mut Vec<RuntimeExportedDescriptorTarget>,
+) -> Result<Option<ArcanaCabiProviderValue>, String> {
+    let owner = ArcanaCabiProviderDescriptorViewOwner::Runtime {
+        package_id: current_package_id.to_string(),
+    };
+    let descriptor = match value {
+        RuntimeOpaqueValue::ReadView(handle) => {
+            let (element_type, view_len, export_target) = {
+                let view = state
+                    .read_views
+                    .get(handle)
+                    .ok_or_else(|| format!("invalid ReadView handle `{}`", handle.0))?;
+                let export_target = match &view.backing {
+                    RuntimeElementViewBacking::Reference(reference) => {
+                        let Some(target) =
+                            runtime_reference_descriptor_export_target(reference, state)?
+                        else {
+                            return Err(
+                                "provider value transport only allows sealed SessionArena/Slab-backed ReadView across the provider boundary"
+                                    .to_string(),
+                            );
+                        };
+                        Some(target)
+                    }
+                    RuntimeElementViewBacking::Buffer(_) => None,
+                    RuntimeElementViewBacking::RingWindow { .. } => {
+                        return Err(
+                            "provider value transport does not allow RingBuffer-backed ReadView across the provider boundary"
+                                .to_string(),
+                        )
+                    }
+                };
+                (
+                    view.type_args
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| "Unknown".to_string()),
+                    view.len,
+                    export_target,
+                )
+            };
+            if let Some(target) = export_target {
+                runtime_track_exported_descriptor_target(state, target, exported_descriptors);
+            }
+            let element_layout = element_type.clone();
+            Some(ArcanaCabiProviderDescriptorView {
+                owner: owner.clone(),
+                backing_kind: ArcanaCabiProviderDescriptorViewBackingKind::ReadElements,
+                family: "std.memory.ReadView".to_string(),
+                id: handle.0,
+                element_type,
+                element_layout,
+                start: 0,
+                len: view_len as u64,
+                mutable: false,
+            })
+        }
+        RuntimeOpaqueValue::ByteView(handle) => {
+            let view = state
+                .byte_views
+                .get(handle)
+                .ok_or_else(|| format!("invalid ByteView handle `{}`", handle.0))?
+                .clone();
+            if let RuntimeByteViewBacking::Reference(reference) = &view.backing {
+                let Some(target) = runtime_reference_descriptor_export_target(reference, state)?
+                else {
+                    return Err(
+                        "provider value transport only allows sealed SessionArena/Slab-backed ByteView across the provider boundary"
+                            .to_string(),
+                    );
+                };
+                runtime_track_exported_descriptor_target(state, target, exported_descriptors);
+            }
+            Some(ArcanaCabiProviderDescriptorView {
+                owner: owner.clone(),
+                backing_kind: ArcanaCabiProviderDescriptorViewBackingKind::ReadBytes,
+                family: "std.memory.ByteView".to_string(),
+                id: handle.0,
+                element_type: "Int".to_string(),
+                element_layout: "Int".to_string(),
+                start: 0,
+                len: view.len as u64,
+                mutable: false,
+            })
+        }
+        RuntimeOpaqueValue::StrView(handle) => {
+            let view = state
+                .str_views
+                .get(handle)
+                .ok_or_else(|| format!("invalid StrView handle `{}`", handle.0))?
+                .clone();
+            if let RuntimeStrViewBacking::Reference(reference) = &view.backing {
+                let Some(target) = runtime_reference_descriptor_export_target(reference, state)?
+                else {
+                    return Err(
+                        "provider value transport only allows sealed SessionArena/Slab-backed StrView across the provider boundary"
+                            .to_string(),
+                    );
+                };
+                runtime_track_exported_descriptor_target(state, target, exported_descriptors);
+            }
+            Some(ArcanaCabiProviderDescriptorView {
+                owner: owner.clone(),
+                backing_kind: ArcanaCabiProviderDescriptorViewBackingKind::ReadUtf8,
+                family: "std.memory.StrView".to_string(),
+                id: handle.0,
+                element_type: "Utf8Byte".to_string(),
+                element_layout: "Utf8Byte".to_string(),
+                start: 0,
+                len: view.len as u64,
+                mutable: false,
+            })
+        }
+        RuntimeOpaqueValue::EditView(_) | RuntimeOpaqueValue::ByteEditView(_) => {
+            return Err(
+                "provider value transport does not allow editable views across the provider boundary"
+                    .to_string(),
+            );
+        }
+        _ => None,
+    };
+    Ok(descriptor.map(ArcanaCabiProviderValue::DescriptorView))
+}
+
 fn runtime_value_to_provider_value(
     value: &RuntimeValue,
-    state: &RuntimeExecutionState,
+    state: &mut RuntimeExecutionState,
+    current_package_id: &str,
+    exported_descriptors: &mut Vec<RuntimeExportedDescriptorTarget>,
 ) -> Result<ArcanaCabiProviderValue, String> {
     match value {
         RuntimeValue::Int(value) => Ok(ArcanaCabiProviderValue::Int(*value)),
         RuntimeValue::Bool(value) => Ok(ArcanaCabiProviderValue::Bool(*value)),
         RuntimeValue::Str(value) => Ok(ArcanaCabiProviderValue::Str(value.clone())),
         RuntimeValue::Pair(left, right) => Ok(ArcanaCabiProviderValue::Pair(
-            Box::new(runtime_value_to_provider_value(left, state)?),
-            Box::new(runtime_value_to_provider_value(right, state)?),
+            Box::new(runtime_value_to_provider_value(
+                left,
+                state,
+                current_package_id,
+                exported_descriptors,
+            )?),
+            Box::new(runtime_value_to_provider_value(
+                right,
+                state,
+                current_package_id,
+                exported_descriptors,
+            )?),
         )),
         RuntimeValue::Array(values) => {
             let mut bytes = Vec::with_capacity(values.len());
@@ -11202,7 +14699,14 @@ fn runtime_value_to_provider_value(
         RuntimeValue::List(values) => Ok(ArcanaCabiProviderValue::List(
             values
                 .iter()
-                .map(|value| runtime_value_to_provider_value(value, state))
+                .map(|value| {
+                    runtime_value_to_provider_value(
+                        value,
+                        state,
+                        current_package_id,
+                        exported_descriptors,
+                    )
+                })
                 .collect::<Result<Vec<_>, _>>()?,
         )),
         RuntimeValue::Map(entries) => Ok(ArcanaCabiProviderValue::Map(
@@ -11210,8 +14714,18 @@ fn runtime_value_to_provider_value(
                 .iter()
                 .map(|(key, value)| {
                     Ok((
-                        runtime_value_to_provider_value(key, state)?,
-                        runtime_value_to_provider_value(value, state)?,
+                        runtime_value_to_provider_value(
+                            key,
+                            state,
+                            current_package_id,
+                            exported_descriptors,
+                        )?,
+                        runtime_value_to_provider_value(
+                            value,
+                            state,
+                            current_package_id,
+                            exported_descriptors,
+                        )?,
                     ))
                 })
                 .collect::<Result<Vec<_>, String>>()?,
@@ -11233,21 +14747,39 @@ fn runtime_value_to_provider_value(
                 id: provider.opaque_id,
             })
         }
-        RuntimeValue::Opaque(value) => Ok(ArcanaCabiProviderValue::SubstrateOpaque {
-            family: opaque_type_name(value).to_string(),
-            id: runtime_opaque_id(value).ok_or_else(|| {
-                format!(
-                    "runtime opaque `{}` is not transportable across the provider boundary",
-                    opaque_type_name(value)
-                )
-            })?,
-        }),
+        RuntimeValue::Opaque(value) => {
+            if let Some(view) = runtime_descriptor_view_value(
+                value,
+                state,
+                current_package_id,
+                exported_descriptors,
+            )? {
+                return Ok(view);
+            }
+            Ok(ArcanaCabiProviderValue::SubstrateOpaque {
+                family: opaque_type_name(value).to_string(),
+                id: runtime_opaque_id(value).ok_or_else(|| {
+                    format!(
+                        "runtime opaque `{}` is not transportable across the provider boundary",
+                        opaque_type_name(value)
+                    )
+                })?,
+            })
+        }
         RuntimeValue::Record { name, fields } => Ok(ArcanaCabiProviderValue::Record {
             name: name.clone(),
             fields: fields
                 .iter()
                 .map(|(name, value)| {
-                    Ok((name.clone(), runtime_value_to_provider_value(value, state)?))
+                    Ok((
+                        name.clone(),
+                        runtime_value_to_provider_value(
+                            value,
+                            state,
+                            current_package_id,
+                            exported_descriptors,
+                        )?,
+                    ))
                 })
                 .collect::<Result<Vec<_>, String>>()?,
         }),
@@ -11255,7 +14787,14 @@ fn runtime_value_to_provider_value(
             name: name.clone(),
             payload: payload
                 .iter()
-                .map(|value| runtime_value_to_provider_value(value, state))
+                .map(|value| {
+                    runtime_value_to_provider_value(
+                        value,
+                        state,
+                        current_package_id,
+                        exported_descriptors,
+                    )
+                })
                 .collect::<Result<Vec<_>, _>>()?,
         }),
         RuntimeValue::Unit => Ok(ArcanaCabiProviderValue::Unit),
@@ -11377,6 +14916,15 @@ fn runtime_value_from_provider_value(
                 })
                 .collect::<Result<Vec<_>, _>>()?,
         }),
+        ArcanaCabiProviderValue::DescriptorView(view) => match view.owner {
+            ArcanaCabiProviderDescriptorViewOwner::Runtime { .. } => Ok(RuntimeValue::Opaque(
+                runtime_substrate_opaque_from_family(&view.family, view.id)?,
+            )),
+            ArcanaCabiProviderDescriptorViewOwner::ProviderBinding { .. } => Err(format!(
+                "provider-owned descriptor view `{}` is not materializable in runtime value transport",
+                view.family
+            )),
+        },
         ArcanaCabiProviderValue::SubstrateOpaque { family, id } => Ok(RuntimeValue::Opaque(
             runtime_substrate_opaque_from_family(&family, id)?,
         )),
@@ -11436,15 +14984,35 @@ fn try_execute_provider_call(
         )? {
             return Ok(None);
         }
-        let args = call_args
-            .iter()
-            .map(|arg| runtime_value_to_provider_value(&arg.value, state))
-            .collect::<Result<Vec<_>, _>>()?;
         let mut host_context = RuntimeProviderHostContext {
             host: host_ptr,
+            state: state as *mut RuntimeExecutionState,
+            current_package_id: current_package_id.to_string(),
             bundle_dir: catalog.bundle_dir().to_path_buf(),
             package_asset_roots: catalog.package_asset_roots().clone(),
+            exported_descriptors: Vec::new(),
             last_error: None,
+        };
+        let args = match call_args
+            .iter()
+            .map(|arg| {
+                runtime_value_to_provider_value(
+                    &arg.value,
+                    state,
+                    current_package_id,
+                    &mut host_context.exported_descriptors,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(args) => args,
+            Err(err) => {
+                runtime_release_exported_descriptor_targets(
+                    state,
+                    &mut host_context.exported_descriptors,
+                );
+                return Err(err);
+            }
         };
         let host_ops = runtime_provider_host_ops_v1();
         let outcome = unsafe {
@@ -11456,45 +15024,52 @@ fn try_execute_provider_call(
                 &host_ops,
                 &mut host_context as *mut RuntimeProviderHostContext as *mut c_void,
             )
-        }?;
-        let value = runtime_value_from_provider_value(
-            outcome.result,
-            state,
-            catalog,
-            current_package_id,
-            &binding.dependency_alias,
-        )?;
-        let mut final_args = call_args
-            .iter()
-            .map(|arg| arg.value.clone())
-            .collect::<Vec<_>>();
-        let mut edit_arg_indices = Vec::new();
-        for write_back in outcome.write_backs {
-            let Some(existing) = final_args.get(write_back.index).cloned() else {
-                return Err(format!(
-                    "provider callable `{callable_key}` returned write-back index {} outside arg count {}",
-                    write_back.index,
-                    final_args.len()
-                ));
-            };
-            let updated = runtime_value_from_provider_write_back(
-                write_back.value,
-                &existing,
-                state,
-                catalog,
-                current_package_id,
-                &binding.dependency_alias,
-            )?;
-            final_args[write_back.index] = updated;
-            if !edit_arg_indices.contains(&write_back.index) {
-                edit_arg_indices.push(write_back.index);
-            }
-        }
-        Ok(Some(RuntimeProviderCallResult {
-            value,
-            final_args,
-            edit_arg_indices,
-        }))
+        };
+        let result = match outcome {
+            Ok(outcome) => (|| -> Result<Option<RuntimeProviderCallResult>, String> {
+                let value = runtime_value_from_provider_value(
+                    outcome.result,
+                    state,
+                    catalog,
+                    current_package_id,
+                    &binding.dependency_alias,
+                )?;
+                let mut final_args = call_args
+                    .iter()
+                    .map(|arg| arg.value.clone())
+                    .collect::<Vec<_>>();
+                let mut edit_arg_indices = Vec::new();
+                for write_back in outcome.write_backs {
+                    let Some(existing) = final_args.get(write_back.index).cloned() else {
+                        return Err(format!(
+                            "provider callable `{callable_key}` returned write-back index {} outside arg count {}",
+                            write_back.index,
+                            final_args.len()
+                        ));
+                    };
+                    let updated = runtime_value_from_provider_write_back(
+                        write_back.value,
+                        &existing,
+                        state,
+                        catalog,
+                        current_package_id,
+                        &binding.dependency_alias,
+                    )?;
+                    final_args[write_back.index] = updated;
+                    if !edit_arg_indices.contains(&write_back.index) {
+                        edit_arg_indices.push(write_back.index);
+                    }
+                }
+                Ok(Some(RuntimeProviderCallResult {
+                    value,
+                    final_args,
+                    edit_arg_indices,
+                }))
+            })(),
+            Err(err) => Err(err),
+        };
+        runtime_release_exported_descriptor_targets(state, &mut host_context.exported_descriptors);
+        result
     })
 }
 
@@ -11632,6 +15207,36 @@ fn runtime_receiver_type_args(
             .get(handle)
             .map(|arena| arena.type_args.clone())
             .unwrap_or_default(),
+        RuntimeValue::Opaque(RuntimeOpaqueValue::TempArena(handle)) => state
+            .temp_arenas
+            .get(handle)
+            .map(|arena| arena.type_args.clone())
+            .unwrap_or_default(),
+        RuntimeValue::Opaque(RuntimeOpaqueValue::SessionArena(handle)) => state
+            .session_arenas
+            .get(handle)
+            .map(|arena| arena.type_args.clone())
+            .unwrap_or_default(),
+        RuntimeValue::Opaque(RuntimeOpaqueValue::RingBuffer(handle)) => state
+            .ring_buffers
+            .get(handle)
+            .map(|arena| arena.type_args.clone())
+            .unwrap_or_default(),
+        RuntimeValue::Opaque(RuntimeOpaqueValue::Slab(handle)) => state
+            .slabs
+            .get(handle)
+            .map(|arena| arena.type_args.clone())
+            .unwrap_or_default(),
+        RuntimeValue::Opaque(RuntimeOpaqueValue::ReadView(handle)) => state
+            .read_views
+            .get(handle)
+            .map(|view| view.type_args.clone())
+            .unwrap_or_default(),
+        RuntimeValue::Opaque(RuntimeOpaqueValue::EditView(handle)) => state
+            .edit_views
+            .get(handle)
+            .map(|view| view.type_args.clone())
+            .unwrap_or_default(),
         RuntimeValue::Opaque(RuntimeOpaqueValue::Task(handle)) => state
             .tasks
             .get(handle)
@@ -11678,14 +15283,117 @@ fn runtime_type_with_args(base: &str, type_args: &[String]) -> Option<IrRoutineT
     })
 }
 
-fn runtime_value_type_without_state(receiver: &RuntimeValue) -> Option<IrRoutineType> {
+fn runtime_uniform_value_type(
+    values: &[RuntimeValue],
+    state: Option<&RuntimeExecutionState>,
+) -> Option<IrRoutineType> {
+    let first = values
+        .first()
+        .and_then(|value| runtime_value_type_from_state(value, state))?;
+    let rendered = first.render();
+    values
+        .iter()
+        .skip(1)
+        .all(|value| {
+            runtime_value_type_from_state(value, state)
+                .map(|ty| ty.render() == rendered)
+                .unwrap_or(false)
+        })
+        .then_some(first)
+}
+
+fn runtime_map_entry_types(
+    entries: &[(RuntimeValue, RuntimeValue)],
+    state: Option<&RuntimeExecutionState>,
+) -> Option<(IrRoutineType, IrRoutineType)> {
+    let (first_key, first_value) = entries.first().and_then(|(key, value)| {
+        Some((
+            runtime_value_type_from_state(key, state)?,
+            runtime_value_type_from_state(value, state)?,
+        ))
+    })?;
+    let key_rendered = first_key.render();
+    let value_rendered = first_value.render();
+    entries
+        .iter()
+        .skip(1)
+        .all(|(key, value)| {
+            runtime_value_type_from_state(key, state)
+                .map(|ty| ty.render() == key_rendered)
+                .unwrap_or(false)
+                && runtime_value_type_from_state(value, state)
+                    .map(|ty| ty.render() == value_rendered)
+                    .unwrap_or(false)
+        })
+        .then_some((first_key, first_value))
+}
+
+fn runtime_value_type_from_state(
+    receiver: &RuntimeValue,
+    state: Option<&RuntimeExecutionState>,
+) -> Option<IrRoutineType> {
     match receiver {
-        RuntimeValue::OwnerHandle(owner_key) => Some(runtime_synthetic_owner_type(owner_key)),
+        RuntimeValue::Pair(left, right) => {
+            let left = runtime_value_type_from_state(left, state)?;
+            let right = runtime_value_type_from_state(right, state)?;
+            runtime_type_with_args("Pair", &[left.render(), right.render()])
+        }
+        RuntimeValue::Array(values) => {
+            if let Some(element) = runtime_uniform_value_type(values, state) {
+                runtime_type_with_args("std.collections.array.Array", &[element.render()])
+                    .or_else(|| runtime_simple_type("Array"))
+            } else {
+                runtime_simple_type("std.collections.array.Array")
+                    .or_else(|| runtime_simple_type("Array"))
+            }
+        }
+        RuntimeValue::List(values) => {
+            if let Some(element) = runtime_uniform_value_type(values, state) {
+                runtime_type_with_args("std.collections.list.List", &[element.render()])
+                    .or_else(|| runtime_simple_type("List"))
+            } else {
+                runtime_simple_type("std.collections.list.List")
+                    .or_else(|| runtime_simple_type("List"))
+            }
+        }
+        RuntimeValue::Map(entries) => {
+            if let Some((key, value)) = runtime_map_entry_types(entries, state) {
+                runtime_type_with_args("std.collections.map.Map", &[key.render(), value.render()])
+                    .or_else(|| runtime_simple_type("Map"))
+            } else {
+                runtime_simple_type("std.collections.map.Map")
+                    .or_else(|| runtime_simple_type("Map"))
+            }
+        }
+        RuntimeValue::Opaque(RuntimeOpaqueValue::Provider(handle)) => state.and_then(|state| {
+            runtime_simple_type(&provider_opaque_state(state, *handle)?.type_path)
+        }),
+        RuntimeValue::Opaque(
+            RuntimeOpaqueValue::Channel(_)
+            | RuntimeOpaqueValue::Mutex(_)
+            | RuntimeOpaqueValue::Arena(_)
+            | RuntimeOpaqueValue::FrameArena(_)
+            | RuntimeOpaqueValue::PoolArena(_)
+            | RuntimeOpaqueValue::TempArena(_)
+            | RuntimeOpaqueValue::SessionArena(_)
+            | RuntimeOpaqueValue::RingBuffer(_)
+            | RuntimeOpaqueValue::Slab(_)
+            | RuntimeOpaqueValue::ReadView(_)
+            | RuntimeOpaqueValue::EditView(_)
+            | RuntimeOpaqueValue::Task(_)
+            | RuntimeOpaqueValue::Thread(_),
+        ) => state.and_then(|state| {
+            runtime_type_with_args(
+                match receiver {
+                    RuntimeValue::Opaque(value) => opaque_type_name(value),
+                    _ => unreachable!(),
+                },
+                &runtime_receiver_type_args(receiver, state),
+            )
+        }),
         RuntimeValue::Record { name, .. } => parse_routine_type_text(name)
             .ok()
             .or_else(|| runtime_simple_type(runtime_type_root_name(name).as_str())),
-        RuntimeValue::Opaque(RuntimeOpaqueValue::Provider(_)) => None,
-        RuntimeValue::Opaque(value) => runtime_simple_type(opaque_type_name(value)),
         RuntimeValue::Variant { name, .. } => {
             let enum_name = runtime_variant_enum_name(name);
             parse_routine_type_text(&enum_name)
@@ -11696,35 +15404,20 @@ fn runtime_value_type_without_state(receiver: &RuntimeValue) -> Option<IrRoutine
     }
 }
 
+fn runtime_value_type_without_state(receiver: &RuntimeValue) -> Option<IrRoutineType> {
+    match receiver {
+        RuntimeValue::OwnerHandle(owner_key) => Some(runtime_synthetic_owner_type(owner_key)),
+        RuntimeValue::Opaque(RuntimeOpaqueValue::Provider(_)) => None,
+        RuntimeValue::Opaque(value) => runtime_simple_type(opaque_type_name(value)),
+        _ => runtime_value_type_from_state(receiver, None),
+    }
+}
+
 fn runtime_value_type(
     receiver: &RuntimeValue,
     state: &RuntimeExecutionState,
 ) -> Option<IrRoutineType> {
-    match receiver {
-        RuntimeValue::Opaque(RuntimeOpaqueValue::Provider(handle)) => {
-            runtime_simple_type(&provider_opaque_state(state, *handle)?.type_path)
-        }
-        RuntimeValue::Opaque(RuntimeOpaqueValue::Channel(_)) => runtime_type_with_args(
-            opaque_type_name(match receiver {
-                RuntimeValue::Opaque(value) => value,
-                _ => unreachable!(),
-            }),
-            &runtime_receiver_type_args(receiver, state),
-        ),
-        RuntimeValue::Opaque(RuntimeOpaqueValue::Mutex(_))
-        | RuntimeValue::Opaque(RuntimeOpaqueValue::Arena(_))
-        | RuntimeValue::Opaque(RuntimeOpaqueValue::FrameArena(_))
-        | RuntimeValue::Opaque(RuntimeOpaqueValue::PoolArena(_))
-        | RuntimeValue::Opaque(RuntimeOpaqueValue::Task(_))
-        | RuntimeValue::Opaque(RuntimeOpaqueValue::Thread(_)) => runtime_type_with_args(
-            match receiver {
-                RuntimeValue::Opaque(value) => opaque_type_name(value),
-                _ => unreachable!(),
-            },
-            &runtime_receiver_type_args(receiver, state),
-        ),
-        _ => runtime_value_type_without_state(receiver),
-    }
+    runtime_value_type_from_state(receiver, Some(state))
 }
 
 fn runtime_simple_root_fallback_allowed(ty: &IrRoutineType) -> bool {
@@ -11851,7 +15544,11 @@ fn runtime_value_is_copy(value: &RuntimeValue) -> bool {
         | RuntimeValue::Opaque(RuntimeOpaqueValue::ArenaId(_))
         | RuntimeValue::Opaque(RuntimeOpaqueValue::FrameId(_))
         | RuntimeValue::Opaque(RuntimeOpaqueValue::Wake(_))
-        | RuntimeValue::Opaque(RuntimeOpaqueValue::PoolId(_)) => true,
+        | RuntimeValue::Opaque(RuntimeOpaqueValue::PoolId(_))
+        | RuntimeValue::Opaque(RuntimeOpaqueValue::TempId(_))
+        | RuntimeValue::Opaque(RuntimeOpaqueValue::SessionId(_))
+        | RuntimeValue::Opaque(RuntimeOpaqueValue::RingId(_))
+        | RuntimeValue::Opaque(RuntimeOpaqueValue::SlabId(_)) => true,
         RuntimeValue::Str(_)
         | RuntimeValue::Array(_)
         | RuntimeValue::List(_)
@@ -11860,6 +15557,244 @@ fn runtime_value_is_copy(value: &RuntimeValue) -> bool {
         | RuntimeValue::Record { .. }
         | RuntimeValue::Variant { .. } => false,
     }
+}
+
+fn runtime_validate_split_value(
+    value: &RuntimeValue,
+    state: &RuntimeExecutionState,
+    context: &str,
+) -> Result<(), String> {
+    runtime_validate_split_value_with_ring_move(value, state, context, false)
+}
+
+fn runtime_validate_split_value_with_ring_move(
+    value: &RuntimeValue,
+    state: &RuntimeExecutionState,
+    context: &str,
+    allow_ring_move: bool,
+) -> Result<(), String> {
+    match value {
+        RuntimeValue::Int(_)
+        | RuntimeValue::Bool(_)
+        | RuntimeValue::Str(_)
+        | RuntimeValue::Unit
+        | RuntimeValue::OwnerHandle(_)
+        | RuntimeValue::Range { .. } => Ok(()),
+        RuntimeValue::Ref(_) => Err(format!(
+            "{context} cannot capture Ref values across split workers"
+        )),
+        RuntimeValue::Pair(left, right) => {
+            runtime_validate_split_value_with_ring_move(left, state, context, allow_ring_move)?;
+            runtime_validate_split_value_with_ring_move(right, state, context, allow_ring_move)
+        }
+        RuntimeValue::Array(values) | RuntimeValue::List(values) => {
+            values.iter().try_for_each(|value| {
+                runtime_validate_split_value_with_ring_move(value, state, context, allow_ring_move)
+            })
+        }
+        RuntimeValue::Map(entries) => entries.iter().try_for_each(|(key, value)| {
+            runtime_validate_split_value_with_ring_move(key, state, context, allow_ring_move)?;
+            runtime_validate_split_value_with_ring_move(value, state, context, allow_ring_move)
+        }),
+        RuntimeValue::Record { fields, .. } => fields.values().try_for_each(|value| {
+            runtime_validate_split_value_with_ring_move(value, state, context, allow_ring_move)
+        }),
+        RuntimeValue::Variant { payload, .. } => payload.iter().try_for_each(|value| {
+            runtime_validate_split_value_with_ring_move(value, state, context, allow_ring_move)
+        }),
+        RuntimeValue::Opaque(RuntimeOpaqueValue::Arena(_))
+        | RuntimeValue::Opaque(RuntimeOpaqueValue::ArenaId(_))
+        | RuntimeValue::Opaque(RuntimeOpaqueValue::FrameArena(_))
+        | RuntimeValue::Opaque(RuntimeOpaqueValue::FrameId(_))
+        | RuntimeValue::Opaque(RuntimeOpaqueValue::PoolArena(_))
+        | RuntimeValue::Opaque(RuntimeOpaqueValue::PoolId(_))
+        | RuntimeValue::Opaque(RuntimeOpaqueValue::TempArena(_))
+        | RuntimeValue::Opaque(RuntimeOpaqueValue::TempId(_)) => Err(format!(
+            "{context} cannot capture local memory families across split workers"
+        )),
+        RuntimeValue::Opaque(RuntimeOpaqueValue::Lazy(_)) => Err(format!(
+            "{context} cannot capture lazy values across split workers; force them before split"
+        )),
+        RuntimeValue::Opaque(RuntimeOpaqueValue::SessionArena(handle)) => {
+            let arena = state
+                .session_arenas
+                .get(handle)
+                .ok_or_else(|| format!("invalid SessionArena handle `{}`", handle.0))?;
+            if arena.sealed {
+                Ok(())
+            } else {
+                Err(format!(
+                    "{context} can only capture SessionArena `{}` across split workers while sealed",
+                    handle.0
+                ))
+            }
+        }
+        RuntimeValue::Opaque(RuntimeOpaqueValue::SessionId(id)) => {
+            let arena = state
+                .session_arenas
+                .get(&id.arena)
+                .ok_or_else(|| format!("invalid SessionArena handle `{}`", id.arena.0))?;
+            if arena.sealed && session_id_is_live(id.arena, arena, *id) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "{context} can only capture SessionId `{}` across split workers while the backing SessionArena is sealed and live",
+                    runtime_value_to_string(value)
+                ))
+            }
+        }
+        RuntimeValue::Opaque(RuntimeOpaqueValue::Slab(handle)) => {
+            let arena = state
+                .slabs
+                .get(handle)
+                .ok_or_else(|| format!("invalid Slab handle `{}`", handle.0))?;
+            if arena.sealed {
+                Ok(())
+            } else {
+                Err(format!(
+                    "{context} can only capture Slab `{}` across split workers while sealed",
+                    handle.0
+                ))
+            }
+        }
+        RuntimeValue::Opaque(RuntimeOpaqueValue::SlabId(id)) => {
+            let arena = state
+                .slabs
+                .get(&id.arena)
+                .ok_or_else(|| format!("invalid Slab handle `{}`", id.arena.0))?;
+            if arena.sealed && slab_id_is_live(id.arena, arena, *id) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "{context} can only capture SlabId `{}` across split workers while the backing Slab is sealed and live",
+                    runtime_value_to_string(value)
+                ))
+            }
+        }
+        RuntimeValue::Opaque(RuntimeOpaqueValue::RingBuffer(_))
+        | RuntimeValue::Opaque(RuntimeOpaqueValue::RingId(_)) => {
+            if allow_ring_move {
+                Ok(())
+            } else {
+                Err(format!(
+                    "{context} cannot capture ring memory across split workers without explicit move"
+                ))
+            }
+        }
+        RuntimeValue::Opaque(RuntimeOpaqueValue::ReadView(handle)) => {
+            let view = state
+                .read_views
+                .get(handle)
+                .ok_or_else(|| format!("invalid ReadView handle `{}`", handle.0))?;
+            match &view.backing {
+                RuntimeElementViewBacking::Buffer(_) => Ok(()),
+                RuntimeElementViewBacking::Reference(reference) => {
+                    if runtime_reference_backed_descriptor_view_allowed(reference, state)? {
+                        Ok(())
+                    } else {
+                        Err(format!(
+                            "{context} can only capture reference-backed ReadView values across split workers when backed by sealed SessionArena/Slab storage"
+                        ))
+                    }
+                }
+                RuntimeElementViewBacking::RingWindow { .. } => Err(format!(
+                    "{context} cannot capture RingBuffer-backed ReadView values across split workers; RingBuffer is move-only"
+                )),
+            }
+        }
+        RuntimeValue::Opaque(RuntimeOpaqueValue::EditView(_))
+        | RuntimeValue::Opaque(RuntimeOpaqueValue::ByteEditView(_)) => Err(format!(
+            "{context} cannot capture editable views across split workers"
+        )),
+        RuntimeValue::Opaque(RuntimeOpaqueValue::ByteView(handle)) => {
+            let view = state
+                .byte_views
+                .get(handle)
+                .ok_or_else(|| format!("invalid ByteView handle `{}`", handle.0))?;
+            match &view.backing {
+                RuntimeByteViewBacking::Buffer(_) => Ok(()),
+                RuntimeByteViewBacking::Reference(reference) => {
+                    if runtime_reference_backed_descriptor_view_allowed(reference, state)? {
+                        Ok(())
+                    } else {
+                        Err(format!(
+                            "{context} can only capture reference-backed ByteView values across split workers when backed by sealed SessionArena/Slab storage"
+                        ))
+                    }
+                }
+            }
+        }
+        RuntimeValue::Opaque(RuntimeOpaqueValue::StrView(handle)) => {
+            let view = state
+                .str_views
+                .get(handle)
+                .ok_or_else(|| format!("invalid StrView handle `{}`", handle.0))?;
+            match &view.backing {
+                RuntimeStrViewBacking::Buffer(_) => Ok(()),
+                RuntimeStrViewBacking::Reference(reference) => {
+                    if runtime_reference_backed_descriptor_view_allowed(reference, state)? {
+                        Ok(())
+                    } else {
+                        Err(format!(
+                            "{context} can only capture reference-backed StrView values across split workers when backed by sealed SessionArena/Slab storage"
+                        ))
+                    }
+                }
+            }
+        }
+        RuntimeValue::Opaque(RuntimeOpaqueValue::Task(_))
+        | RuntimeValue::Opaque(RuntimeOpaqueValue::Thread(_))
+        | RuntimeValue::Opaque(RuntimeOpaqueValue::Window(_))
+        | RuntimeValue::Opaque(RuntimeOpaqueValue::Image(_))
+        | RuntimeValue::Opaque(RuntimeOpaqueValue::FileStream(_))
+        | RuntimeValue::Opaque(RuntimeOpaqueValue::AppFrame(_))
+        | RuntimeValue::Opaque(RuntimeOpaqueValue::AppSession(_))
+        | RuntimeValue::Opaque(RuntimeOpaqueValue::Wake(_))
+        | RuntimeValue::Opaque(RuntimeOpaqueValue::AudioDevice(_))
+        | RuntimeValue::Opaque(RuntimeOpaqueValue::AudioBuffer(_))
+        | RuntimeValue::Opaque(RuntimeOpaqueValue::AudioPlayback(_))
+        | RuntimeValue::Opaque(RuntimeOpaqueValue::Channel(_))
+        | RuntimeValue::Opaque(RuntimeOpaqueValue::Mutex(_))
+        | RuntimeValue::Opaque(RuntimeOpaqueValue::AtomicInt(_))
+        | RuntimeValue::Opaque(RuntimeOpaqueValue::AtomicBool(_))
+        | RuntimeValue::Opaque(RuntimeOpaqueValue::Provider(_)) => Ok(()),
+    }
+}
+
+fn runtime_split_arg_allows_ring_move(arg: &RuntimeCallArg, scopes: &[RuntimeScope]) -> bool {
+    match expr_root_local_name(&arg.source_expr) {
+        Some(name) => lookup_local(scopes, name).is_some_and(|local| local.moved),
+        None => true,
+    }
+}
+
+fn runtime_validate_split_scope_capture(
+    scopes: &[RuntimeScope],
+    call_args: &[RuntimeCallArg],
+    state: &RuntimeExecutionState,
+    context: &str,
+) -> Result<(), String> {
+    for scope in scopes {
+        for (name, local) in &scope.locals {
+            if local.moved {
+                continue;
+            }
+            runtime_validate_split_value(
+                &local.value,
+                state,
+                &format!("{context} local `{name}`"),
+            )?;
+        }
+    }
+    for (index, arg) in call_args.iter().enumerate() {
+        runtime_validate_split_value_with_ring_move(
+            &arg.value,
+            state,
+            &format!("{context} arg {}", index + 1),
+            runtime_split_arg_allows_ring_move(arg, scopes),
+        )?;
+    }
+    Ok(())
 }
 
 fn expr_to_assign_target(expr: &ParsedExpr) -> Option<ParsedAssignTarget> {
@@ -11928,6 +15863,17 @@ fn consume_take_bound_args(
         consume_take_arg_root_local(scopes, &bound_arg.source_expr)?;
     }
     Ok(())
+}
+
+fn detach_moved_split_call_args(scopes: &[RuntimeScope], args: &mut [RuntimeCallArg]) {
+    for arg in args {
+        let Some(name) = expr_root_local_name(&arg.source_expr) else {
+            continue;
+        };
+        if lookup_local(scopes, name).is_some_and(|local| local.moved) {
+            arg.source_expr = ParsedExpr::Bool(true);
+        }
+    }
 }
 
 fn assign_record_member(
@@ -12541,8 +16487,9 @@ fn read_runtime_value_if_ref(
             state,
             &reference,
             host,
-        ),
-        other => Ok(other),
+        )
+        .and_then(|value| force_runtime_value(value, plan, state, host)),
+        other => force_runtime_value(other, plan, state, host),
     }
 }
 
@@ -12581,6 +16528,320 @@ fn runtime_slice_bound_to_usize(
         ));
     }
     Ok(bound)
+}
+
+fn runtime_view_bounds(
+    start: i64,
+    end: i64,
+    len: usize,
+    context: &str,
+) -> Result<(usize, usize), String> {
+    if start < 0 {
+        return Err(format!("{context} start must be non-negative"));
+    }
+    if end < 0 {
+        return Err(format!("{context} end must be non-negative"));
+    }
+    let start = usize::try_from(start)
+        .map_err(|_| format!("{context} start `{start}` does not fit in usize"))?;
+    let end =
+        usize::try_from(end).map_err(|_| format!("{context} end `{end}` does not fit in usize"))?;
+    if start > end {
+        return Err(format!(
+            "{context} start `{start}` must be less than or equal to end `{end}`"
+        ));
+    }
+    if end > len {
+        return Err(format!(
+            "{context} slice `{start}..{end}` is out of bounds for length `{len}`"
+        ));
+    }
+    Ok((start, end))
+}
+
+fn runtime_view_range(
+    start: usize,
+    len: usize,
+    total_len: usize,
+    context: &str,
+) -> Result<(usize, usize), String> {
+    let end = start
+        .checked_add(len)
+        .ok_or_else(|| format!("{context} range overflowed"))?;
+    if end > total_len {
+        return Err(format!(
+            "{context} `{start}..{end}` is out of bounds for length `{total_len}`"
+        ));
+    }
+    Ok((start, end))
+}
+
+fn runtime_reference_array_values(
+    scopes: &mut Vec<RuntimeScope>,
+    plan: &RuntimePackagePlan,
+    current_package_id: &str,
+    current_module_id: &str,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    reference: &RuntimeReferenceValue,
+    host: &mut dyn RuntimeHost,
+    context: &str,
+) -> Result<Vec<RuntimeValue>, String> {
+    expect_runtime_array(
+        read_runtime_reference(
+            scopes,
+            plan,
+            current_package_id,
+            current_module_id,
+            aliases,
+            type_bindings,
+            state,
+            reference,
+            host,
+        )?,
+        context,
+    )
+}
+
+fn runtime_reference_text_value(
+    scopes: &mut Vec<RuntimeScope>,
+    plan: &RuntimePackagePlan,
+    current_package_id: &str,
+    current_module_id: &str,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    reference: &RuntimeReferenceValue,
+    host: &mut dyn RuntimeHost,
+    context: &str,
+) -> Result<String, String> {
+    expect_str(
+        read_runtime_reference(
+            scopes,
+            plan,
+            current_package_id,
+            current_module_id,
+            aliases,
+            type_bindings,
+            state,
+            reference,
+            host,
+        )?,
+        context,
+    )
+}
+
+fn runtime_read_view_values(
+    scopes: &mut Vec<RuntimeScope>,
+    plan: &RuntimePackagePlan,
+    current_package_id: &str,
+    current_module_id: &str,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    view: &RuntimeReadViewState,
+    host: &mut dyn RuntimeHost,
+    context: &str,
+) -> Result<Vec<RuntimeValue>, String> {
+    match &view.backing {
+        RuntimeElementViewBacking::Buffer(buffer) => {
+            let values = &state
+                .element_view_buffers
+                .get(buffer)
+                .ok_or_else(|| format!("invalid element view buffer `{}`", buffer.0))?
+                .values;
+            let (start, end) = runtime_view_range(view.start, view.len, values.len(), context)?;
+            Ok(values[start..end].to_vec())
+        }
+        RuntimeElementViewBacking::Reference(reference) => {
+            let values = runtime_reference_array_values(
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                aliases,
+                type_bindings,
+                state,
+                reference,
+                host,
+                context,
+            )?;
+            let (start, end) = runtime_view_range(view.start, view.len, values.len(), context)?;
+            Ok(values[start..end].to_vec())
+        }
+        RuntimeElementViewBacking::RingWindow { arena, slots } => {
+            let active = runtime_ring_window_active_slots(slots, view.start, view.len)
+                .ok_or_else(|| {
+                    format!(
+                        "{context} view range `{}`..`{}` is out of bounds for ring window length `{}`",
+                        view.start,
+                        view.start + view.len,
+                        slots.len()
+                    )
+                })?;
+            let ring = state
+                .ring_buffers
+                .get(arena)
+                .ok_or_else(|| format!("invalid RingBuffer handle `{}`", arena.0))?;
+            active
+                .iter()
+                .map(|slot| {
+                    ring.slots
+                        .get(slot)
+                        .cloned()
+                        .ok_or_else(|| format!("RingBuffer slot `{slot}` is missing"))
+                })
+                .collect()
+        }
+    }
+}
+
+fn runtime_byte_view_values(
+    scopes: &mut Vec<RuntimeScope>,
+    plan: &RuntimePackagePlan,
+    current_package_id: &str,
+    current_module_id: &str,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    view: &RuntimeByteViewState,
+    host: &mut dyn RuntimeHost,
+    context: &str,
+) -> Result<Vec<u8>, String> {
+    match &view.backing {
+        RuntimeByteViewBacking::Buffer(buffer) => {
+            let values = &state
+                .byte_view_buffers
+                .get(buffer)
+                .ok_or_else(|| format!("invalid byte view buffer `{}`", buffer.0))?
+                .values;
+            let (start, end) = runtime_view_range(view.start, view.len, values.len(), context)?;
+            Ok(values[start..end].to_vec())
+        }
+        RuntimeByteViewBacking::Reference(reference) => {
+            let values = runtime_reference_array_values(
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                aliases,
+                type_bindings,
+                state,
+                reference,
+                host,
+                context,
+            )?;
+            let bytes = values
+                .into_iter()
+                .map(|value| {
+                    let value = expect_int(value, context)?;
+                    if !(0..=255).contains(&value) {
+                        return Err(format!(
+                            "{context} byte `{value}` is out of range `0..=255`"
+                        ));
+                    }
+                    Ok(value as u8)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let (start, end) = runtime_view_range(view.start, view.len, bytes.len(), context)?;
+            Ok(bytes[start..end].to_vec())
+        }
+    }
+}
+
+fn runtime_byte_edit_view_values(
+    scopes: &mut Vec<RuntimeScope>,
+    plan: &RuntimePackagePlan,
+    current_package_id: &str,
+    current_module_id: &str,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    view: &RuntimeByteEditViewState,
+    host: &mut dyn RuntimeHost,
+    context: &str,
+) -> Result<Vec<u8>, String> {
+    match &view.backing {
+        RuntimeByteViewBacking::Buffer(buffer) => {
+            let values = &state
+                .byte_view_buffers
+                .get(buffer)
+                .ok_or_else(|| format!("invalid byte view buffer `{}`", buffer.0))?
+                .values;
+            let (start, end) = runtime_view_range(view.start, view.len, values.len(), context)?;
+            Ok(values[start..end].to_vec())
+        }
+        RuntimeByteViewBacking::Reference(reference) => {
+            let values = runtime_reference_array_values(
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                aliases,
+                type_bindings,
+                state,
+                reference,
+                host,
+                context,
+            )?;
+            let bytes = values
+                .into_iter()
+                .map(|value| {
+                    let value = expect_int(value, context)?;
+                    if !(0..=255).contains(&value) {
+                        return Err(format!(
+                            "{context} byte `{value}` is out of range `0..=255`"
+                        ));
+                    }
+                    Ok(value as u8)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let (start, end) = runtime_view_range(view.start, view.len, bytes.len(), context)?;
+            Ok(bytes[start..end].to_vec())
+        }
+    }
+}
+
+fn runtime_str_view_text(
+    scopes: &mut Vec<RuntimeScope>,
+    plan: &RuntimePackagePlan,
+    current_package_id: &str,
+    current_module_id: &str,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    view: &RuntimeStrViewState,
+    host: &mut dyn RuntimeHost,
+    context: &str,
+) -> Result<String, String> {
+    match &view.backing {
+        RuntimeStrViewBacking::Buffer(buffer) => {
+            let text = &state
+                .str_view_buffers
+                .get(buffer)
+                .ok_or_else(|| format!("invalid str view buffer `{}`", buffer.0))?
+                .text;
+            let (start, end) = runtime_view_range(view.start, view.len, text.len(), context)?;
+            runtime_string_slice(text, start, end, context)
+        }
+        RuntimeStrViewBacking::Reference(reference) => {
+            let text = runtime_reference_text_value(
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                aliases,
+                type_bindings,
+                state,
+                reference,
+                host,
+                context,
+            )?;
+            let (start, end) = runtime_view_range(view.start, view.len, text.len(), context)?;
+            runtime_string_slice(&text, start, end, context)
+        }
+    }
 }
 
 fn eval_runtime_index_value(
@@ -12708,6 +16969,467 @@ fn eval_runtime_slice_value(
     })
 }
 
+fn runtime_slice_window(
+    start: Option<i64>,
+    end: Option<i64>,
+    inclusive_end: bool,
+    len: usize,
+    context: &str,
+) -> Result<(usize, usize), String> {
+    let start = runtime_slice_bound_to_usize(start, 0, len, context, "start")?;
+    let has_end = end.is_some();
+    let raw_end = runtime_slice_bound_to_usize(end, len, len, context, "end")?;
+    let end = if inclusive_end {
+        if has_end {
+            if raw_end >= len {
+                return Err(format!(
+                    "{context} inclusive end `{raw_end}` is out of bounds for length `{len}`"
+                ));
+            }
+            raw_end + 1
+        } else {
+            len
+        }
+    } else {
+        raw_end
+    };
+    if start > end {
+        return Err(format!(
+            "{context} start `{start}` must be less than or equal to end `{end}`"
+        ));
+    }
+    Ok((start, end))
+}
+
+fn eval_runtime_borrowed_slice_view(
+    base_expr: &ParsedExpr,
+    start: Option<&ParsedExpr>,
+    end: Option<&ParsedExpr>,
+    inclusive_end: bool,
+    mutable: bool,
+    plan: &RuntimePackagePlan,
+    current_package_id: &str,
+    current_module_id: &str,
+    scopes: &mut Vec<RuntimeScope>,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
+) -> Result<RuntimeValue, String> {
+    let borrowed_place = expr_to_assign_target(base_expr)
+        .and_then(|target| resolve_assign_target_place(scopes, &target).ok());
+    if mutable
+        && let Some(place) = &borrowed_place
+        && !place.mutable
+    {
+        return Err("runtime mutable borrowed slices require writable backing".to_string());
+    }
+    let base = read_runtime_value_if_ref(
+        eval_expr(
+            base_expr,
+            plan,
+            current_package_id,
+            current_module_id,
+            scopes,
+            aliases,
+            type_bindings,
+            state,
+            host,
+        )
+        .map_err(runtime_eval_message)?,
+        scopes,
+        plan,
+        current_package_id,
+        current_module_id,
+        aliases,
+        type_bindings,
+        state,
+        host,
+    )?;
+    let start = eval_optional_runtime_int_expr(
+        start,
+        plan,
+        current_package_id,
+        current_module_id,
+        scopes,
+        aliases,
+        type_bindings,
+        state,
+        host,
+        "borrowed slice start",
+    )
+    .map_err(runtime_eval_message)?;
+    let end = eval_optional_runtime_int_expr(
+        end,
+        plan,
+        current_package_id,
+        current_module_id,
+        scopes,
+        aliases,
+        type_bindings,
+        state,
+        host,
+        "borrowed slice end",
+    )
+    .map_err(runtime_eval_message)?;
+    match base {
+        RuntimeValue::List(_) => Err(
+            "runtime borrowed slices require contiguous backing; `List` is not supported"
+                .to_string(),
+        ),
+        RuntimeValue::Array(values) => {
+            let (start, end) =
+                runtime_slice_window(start, end, inclusive_end, values.len(), "borrowed slice")?;
+            let len = end - start;
+            if let Some(place) = borrowed_place {
+                if let RuntimeReferenceTarget::Local { local, .. } = &place.target
+                    && let Some((_, runtime_local)) =
+                        lookup_local_with_name_by_handle(scopes, *local)
+                {
+                    state
+                        .captured_local_values
+                        .entry(*local)
+                        .or_insert_with(|| runtime_local.value.clone());
+                }
+                let reference = RuntimeReferenceValue {
+                    mutable: place.mutable,
+                    target: place.target,
+                };
+                if mutable {
+                    runtime_reject_live_reference_or_opaque_conflict(
+                        Some(scopes.as_slice()),
+                        None,
+                        state,
+                        |candidate| candidate.target == reference.target,
+                        |opaque, state| runtime_opaque_matches_reference_predicate(
+                            opaque,
+                            state,
+                            &|candidate| candidate.target == reference.target,
+                        ),
+                        None,
+                        None,
+                        |_| false,
+                        "runtime mutable borrowed slices require exclusive view access while conflicting borrows or views are live".to_string(),
+                    )?;
+                    let handle =
+                        insert_runtime_edit_view_from_reference(state, &[], reference, start, len);
+                    Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::EditView(handle)))
+                } else {
+                    let handle =
+                        insert_runtime_read_view_from_reference(state, &[], reference, start, len);
+                    Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::ReadView(handle)))
+                }
+            } else if mutable {
+                let handle = insert_runtime_edit_view(state, &[], values[start..end].to_vec());
+                Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::EditView(handle)))
+            } else {
+                let handle = insert_runtime_read_view(state, &[], values[start..end].to_vec());
+                Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::ReadView(handle)))
+            }
+        }
+        RuntimeValue::Str(text) => {
+            if mutable {
+                return Err(
+                    "runtime string slices are read-only; `&mut x[a..b]` is not allowed"
+                        .to_string(),
+                );
+            }
+            let (start, end) =
+                runtime_slice_window(start, end, inclusive_end, text.len(), "borrowed slice")?;
+            let handle = {
+                let backing = insert_runtime_str_view_buffer(state, text);
+                insert_runtime_str_view_from_buffer(state, backing, start, end - start)
+            };
+            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::StrView(handle)))
+        }
+        RuntimeValue::Opaque(RuntimeOpaqueValue::ReadView(handle)) => {
+            if mutable {
+                return Err("runtime mutable borrowed slices require editable backing".to_string());
+            }
+            let (type_args, backing, view_start, view_len) = {
+                let view = state
+                    .read_views
+                    .get(&handle)
+                    .ok_or_else(|| format!("invalid ReadView handle `{}`", handle.0))?;
+                (
+                    view.type_args.clone(),
+                    view.backing.clone(),
+                    view.start,
+                    view.len,
+                )
+            };
+            let (start, end) =
+                runtime_slice_window(start, end, inclusive_end, view_len, "borrowed slice")?;
+            let next = insert_runtime_read_view_from_backing(
+                state,
+                &type_args,
+                backing,
+                view_start + start,
+                end - start,
+            );
+            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::ReadView(next)))
+        }
+        RuntimeValue::Opaque(RuntimeOpaqueValue::EditView(handle)) => {
+            let (type_args, backing, view_start, view_len) = {
+                let view = state
+                    .edit_views
+                    .get(&handle)
+                    .ok_or_else(|| format!("invalid EditView handle `{}`", handle.0))?;
+                (
+                    view.type_args.clone(),
+                    view.backing.clone(),
+                    view.start,
+                    view.len,
+                )
+            };
+            let (start, end) =
+                runtime_slice_window(start, end, inclusive_end, view_len, "borrowed slice")?;
+            if mutable {
+                let next = match backing {
+                    RuntimeElementViewBacking::Buffer(buffer) => {
+                        runtime_reject_live_reference_or_opaque_conflict(
+                            Some(scopes.as_slice()),
+                            None,
+                            state,
+                            |_| false,
+                            |opaque, state| {
+                                runtime_opaque_matches_element_buffer(opaque, state, buffer)
+                            },
+                            None,
+                            Some(RuntimeOpaqueValue::EditView(handle)),
+                            |_| false,
+                            "runtime mutable borrowed slices require exclusive view access while conflicting borrows or views are live".to_string(),
+                        )?;
+                        insert_runtime_edit_view_from_buffer(
+                            state,
+                            &type_args,
+                            buffer,
+                            view_start + start,
+                            end - start,
+                        )
+                    }
+                    RuntimeElementViewBacking::Reference(reference) => {
+                        runtime_reject_live_reference_or_opaque_conflict(
+                            Some(scopes.as_slice()),
+                            None,
+                            state,
+                            |candidate| candidate.target == reference.target,
+                            |opaque, state| runtime_opaque_matches_reference_predicate(
+                                opaque,
+                                state,
+                                &|candidate| candidate.target == reference.target,
+                            ),
+                            None,
+                            Some(RuntimeOpaqueValue::EditView(handle)),
+                            |_| false,
+                            "runtime mutable borrowed slices require exclusive view access while conflicting borrows or views are live".to_string(),
+                        )?;
+                        insert_runtime_edit_view_from_reference(
+                            state,
+                            &type_args,
+                            reference,
+                            view_start + start,
+                            end - start,
+                        )
+                    }
+                    RuntimeElementViewBacking::RingWindow { arena, slots } => {
+                        let active = runtime_ring_window_active_slots(
+                            &slots,
+                            view_start + start,
+                            end - start,
+                        )
+                        .ok_or_else(|| {
+                            "runtime mutable borrowed slice range is out of bounds for ring window"
+                                .to_string()
+                        })?
+                        .to_vec();
+                        let ids = runtime_ring_ids_for_slots(state, arena, &active)?;
+                        runtime_reject_live_reference_or_opaque_conflict(
+                            Some(scopes.as_slice()),
+                            None,
+                            state,
+                            |candidate| ids.iter().any(|id| runtime_reference_targets_ring_id(candidate, *id)),
+                            |opaque, state| runtime_opaque_matches_ring_window_predicate(
+                                opaque,
+                                state,
+                                &|candidate_arena, candidate_slots| {
+                                    runtime_ring_window_overlaps_slots(
+                                        arena,
+                                        &active,
+                                        candidate_arena,
+                                        candidate_slots,
+                                    )
+                                },
+                            ),
+                            None,
+                            Some(RuntimeOpaqueValue::EditView(handle)),
+                            |_| false,
+                            "runtime mutable borrowed slices require exclusive view access while conflicting borrows or views are live".to_string(),
+                        )?;
+                        insert_runtime_edit_view_from_ring_window(
+                            state,
+                            &type_args,
+                            arena,
+                            slots,
+                            view_start + start,
+                            end - start,
+                        )
+                    }
+                };
+                Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::EditView(next)))
+            } else {
+                let next = insert_runtime_read_view_from_backing(
+                    state,
+                    &type_args,
+                    backing,
+                    view_start + start,
+                    end - start,
+                );
+                Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::ReadView(next)))
+            }
+        }
+        RuntimeValue::Opaque(RuntimeOpaqueValue::ByteView(handle)) => {
+            if mutable {
+                return Err("runtime mutable borrowed slices require editable backing".to_string());
+            }
+            let view = state
+                .byte_views
+                .get(&handle)
+                .ok_or_else(|| format!("invalid ByteView handle `{}`", handle.0))?
+                .clone();
+            let (start, end) =
+                runtime_slice_window(start, end, inclusive_end, view.len, "borrowed slice")?;
+            let next = match view.backing {
+                RuntimeByteViewBacking::Buffer(buffer) => insert_runtime_byte_view_from_buffer(
+                    state,
+                    buffer,
+                    view.start + start,
+                    end - start,
+                ),
+                RuntimeByteViewBacking::Reference(reference) => {
+                    insert_runtime_byte_view_from_reference(
+                        state,
+                        reference,
+                        view.start + start,
+                        end - start,
+                    )
+                }
+            };
+            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::ByteView(next)))
+        }
+        RuntimeValue::Opaque(RuntimeOpaqueValue::ByteEditView(handle)) => {
+            let view = state
+                .byte_edit_views
+                .get(&handle)
+                .ok_or_else(|| format!("invalid ByteEditView handle `{}`", handle.0))?
+                .clone();
+            let (start, end) =
+                runtime_slice_window(start, end, inclusive_end, view.len, "borrowed slice")?;
+            if mutable {
+                runtime_reject_live_reference_or_opaque_conflict(
+                    Some(scopes.as_slice()),
+                    None,
+                    state,
+                    |candidate| match &view.backing {
+                        RuntimeByteViewBacking::Buffer(_) => false,
+                        RuntimeByteViewBacking::Reference(reference) => {
+                            candidate.target == reference.target
+                        }
+                    },
+                    |opaque, state| match &view.backing {
+                        RuntimeByteViewBacking::Buffer(buffer) => {
+                            runtime_opaque_matches_byte_buffer(opaque, state, *buffer)
+                        }
+                        RuntimeByteViewBacking::Reference(reference) => {
+                            runtime_opaque_matches_reference_predicate(
+                                opaque,
+                                state,
+                                &|candidate| candidate.target == reference.target,
+                            )
+                        }
+                    },
+                    None,
+                    Some(RuntimeOpaqueValue::ByteEditView(handle)),
+                    |_| false,
+                    "runtime mutable borrowed slices require exclusive view access while conflicting borrows or views are live".to_string(),
+                )?;
+                let next = match view.backing {
+                    RuntimeByteViewBacking::Buffer(buffer) => {
+                        insert_runtime_byte_edit_view_from_buffer(
+                            state,
+                            buffer,
+                            view.start + start,
+                            end - start,
+                        )
+                    }
+                    RuntimeByteViewBacking::Reference(reference) => {
+                        insert_runtime_byte_edit_view_from_reference(
+                            state,
+                            reference,
+                            view.start + start,
+                            end - start,
+                        )
+                    }
+                };
+                Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::ByteEditView(next)))
+            } else {
+                let next = match view.backing {
+                    RuntimeByteViewBacking::Buffer(buffer) => insert_runtime_byte_view_from_buffer(
+                        state,
+                        buffer,
+                        view.start + start,
+                        end - start,
+                    ),
+                    RuntimeByteViewBacking::Reference(reference) => {
+                        insert_runtime_byte_view_from_reference(
+                            state,
+                            reference,
+                            view.start + start,
+                            end - start,
+                        )
+                    }
+                };
+                Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::ByteView(next)))
+            }
+        }
+        RuntimeValue::Opaque(RuntimeOpaqueValue::StrView(handle)) => {
+            if mutable {
+                return Err(
+                    "runtime string slices are read-only; `&mut x[a..b]` is not allowed"
+                        .to_string(),
+                );
+            }
+            let view = state
+                .str_views
+                .get(&handle)
+                .ok_or_else(|| format!("invalid StrView handle `{}`", handle.0))?
+                .clone();
+            let (start, end) =
+                runtime_slice_window(start, end, inclusive_end, view.len, "borrowed slice")?;
+            let next = match view.backing {
+                RuntimeStrViewBacking::Buffer(buffer) => insert_runtime_str_view_from_buffer(
+                    state,
+                    buffer,
+                    view.start + start,
+                    end - start,
+                ),
+                RuntimeStrViewBacking::Reference(reference) => {
+                    insert_runtime_str_view_from_reference(
+                        state,
+                        reference,
+                        view.start + start,
+                        end - start,
+                    )
+                }
+            };
+            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::StrView(next)))
+        }
+        other => Err(format!(
+            "runtime borrowed slice expects contiguous array, view, or string backing, got `{other:?}`"
+        )),
+    }
+}
+
 fn eval_optional_runtime_int_expr(
     expr: Option<&ParsedExpr>,
     plan: &RuntimePackagePlan,
@@ -12762,7 +17484,8 @@ fn eval_match_expr(
         type_bindings,
         state,
         host,
-    )?;
+    )
+    .map_err(runtime_eval_message)?;
     for arm in arms {
         for pattern in &arm.patterns {
             let mut bindings = BTreeMap::new();
@@ -13264,16 +17987,55 @@ fn execute_call_by_path(
             .iter()
             .map(|arg| arg.value.clone())
             .collect::<Vec<_>>();
-        let outcome = execute_routine_call_with_state(
-            plan,
-            routine_index,
-            type_args,
-            values,
-            &collect_active_owner_keys_from_scopes(scopes),
-            state,
-            host,
-            allow_async,
-        )?;
+        let execution_args = routine
+            .params
+            .iter()
+            .zip(bound_args.iter())
+            .map(|(param, arg)| runtime_execution_arg_for_bound_param(scopes, state, param, arg))
+            .collect::<Vec<_>>();
+        let outcome = if let Some(intrinsic_impl) = &routine.intrinsic_impl {
+            let intrinsic = resolve_runtime_intrinsic_impl(intrinsic_impl).ok_or_else(|| {
+                format!(
+                    "unsupported runtime intrinsic `{intrinsic_impl}` for `{}`",
+                    routine.symbol_name
+                )
+            })?;
+            let mut final_args = values;
+            let value = execute_runtime_intrinsic(
+                intrinsic,
+                &type_args,
+                &mut final_args,
+                plan,
+                Some(scopes),
+                Some(current_package_id),
+                Some(current_module_id),
+                Some(&BTreeMap::new()),
+                Some(&BTreeMap::new()),
+                state,
+                host,
+            )?;
+            RoutineExecutionOutcome {
+                value,
+                final_args,
+                control: None,
+            }
+        } else {
+            execute_routine_call_with_state(
+                plan,
+                routine_index,
+                type_args,
+                execution_args,
+                &collect_active_owner_keys_from_scopes(scopes),
+                None,
+                None,
+                None,
+                None,
+                None,
+                state,
+                host,
+                allow_async,
+            )?
+        };
         write_back_bound_args(
             scopes,
             plan,
@@ -13301,19 +18063,25 @@ fn execute_call_by_path(
     }
     let intrinsic = resolve_runtime_intrinsic_path(callable)
         .ok_or_else(|| format!("unsupported runtime callable `{}`", callable.join(".")))?;
-    if call_args.iter().any(|arg| arg.name.is_some()) {
-        return Err(format!(
-            "runtime intrinsic `{}` does not yet support named-only fallback binding",
-            callable.join(".")
-        )
-        .into());
-    }
+    let call_args = bind_call_args_for_intrinsic(callable, call_args)?;
     consume_take_call_args(scopes, intrinsic_take_arg_indices(intrinsic), &call_args)?;
     let mut values = call_args
         .iter()
         .map(|arg| arg.value.clone())
         .collect::<Vec<_>>();
-    let value = execute_runtime_intrinsic(intrinsic, &type_args, &mut values, plan, state, host)?;
+    let value = execute_runtime_intrinsic(
+        intrinsic,
+        &type_args,
+        &mut values,
+        plan,
+        Some(scopes),
+        Some(current_package_id),
+        Some(current_module_id),
+        Some(&BTreeMap::new()),
+        Some(&BTreeMap::new()),
+        state,
+        host,
+    )?;
     write_back_call_args(
         scopes,
         plan,
@@ -13334,6 +18102,7 @@ fn execute_runtime_apply_phrase(
     subject: &ParsedExpr,
     args: &[ParsedPhraseArg],
     attached: &[ParsedHeaderAttachment],
+    qualifier_type_args: &[String],
     resolved_callable: Option<&[String]>,
     resolved_routine: Option<&str>,
     plan: &RuntimePackagePlan,
@@ -13350,7 +18119,11 @@ fn execute_runtime_apply_phrase(
         .map(|path| path.to_vec())
         .or_else(|| resolve_callable_path(subject, aliases))
         .ok_or_else(|| format!("unsupported runtime callable `{subject:?}`"))?;
-    let type_args = resolve_runtime_type_args(&extract_generic_type_args(subject), type_bindings);
+    let type_args = if qualifier_type_args.is_empty() {
+        resolve_runtime_type_args(&extract_generic_type_args(subject), type_bindings)
+    } else {
+        qualifier_type_args.to_vec()
+    };
     if resolve_routine_index(plan, current_package_id, current_module_id, &callable).is_none()
         && resolve_runtime_intrinsic_path(&callable).is_none()
     {
@@ -13416,11 +18189,12 @@ fn execute_runtime_apply_phrase(
     )
 }
 
-fn execute_runtime_method_call(
+fn execute_runtime_method_call_with_type_args(
     subject: &ParsedExpr,
     args: &[ParsedPhraseArg],
     attached: &[ParsedHeaderAttachment],
     qualifier: &str,
+    qualifier_type_args: &[String],
     resolved_callable: Option<&[String]>,
     resolved_routine: Option<&str>,
     dynamic_dispatch: Option<&ParsedDynamicDispatch>,
@@ -13457,7 +18231,11 @@ fn execute_runtime_method_call(
     let callable = resolved_callable
         .map(|callable| callable.to_vec())
         .unwrap_or_else(|| vec![qualifier.to_string()]);
-    let type_args = runtime_receiver_type_args(&receiver, state);
+    let type_args = if qualifier_type_args.is_empty() {
+        runtime_receiver_type_args(&receiver, state)
+    } else {
+        qualifier_type_args.to_vec()
+    };
     let mut call_args = vec![RuntimeCallArg {
         name: None,
         value: receiver,
@@ -13497,6 +18275,7 @@ fn execute_runtime_named_qualifier_call(
     args: &[ParsedPhraseArg],
     attached: &[ParsedHeaderAttachment],
     qualifier: &str,
+    qualifier_type_args: &[String],
     plan: &RuntimePackagePlan,
     current_package_id: &str,
     current_module_id: &str,
@@ -13530,8 +18309,11 @@ fn execute_runtime_named_qualifier_call(
     let callable_expr = parse_runtime_callable_expr(qualifier);
     let callable = resolve_named_qualifier_callable_path(&callable_expr, aliases)
         .ok_or_else(|| format!("unsupported runtime named qualifier callable `{qualifier}`"))?;
-    let type_args =
-        resolve_runtime_type_args(&extract_generic_type_args(&callable_expr), type_bindings);
+    let type_args = if qualifier_type_args.is_empty() {
+        resolve_runtime_type_args(&extract_generic_type_args(&callable_expr), type_bindings)
+    } else {
+        qualifier_type_args.to_vec()
+    };
     let mut call_args = vec![RuntimeCallArg {
         name: None,
         value: receiver,
@@ -13571,6 +18353,7 @@ fn eval_qualifier(
     args: &[ParsedPhraseArg],
     attached: &[ParsedHeaderAttachment],
     qualifier: &str,
+    qualifier_type_args: &[String],
     resolved_callable: Option<&[String]>,
     resolved_routine: Option<&str>,
     dynamic_dispatch: Option<&ParsedDynamicDispatch>,
@@ -13583,11 +18366,12 @@ fn eval_qualifier(
     state: &mut RuntimeExecutionState,
     host: &mut dyn RuntimeHost,
 ) -> RuntimeEvalResult<RuntimeValue> {
-    execute_runtime_method_call(
+    execute_runtime_method_call_with_type_args(
         subject,
         args,
         attached,
         qualifier,
+        qualifier_type_args,
         resolved_callable,
         resolved_routine,
         dynamic_dispatch,
@@ -14333,13 +19117,30 @@ fn execute_runtime_intrinsic(
     type_args: &[String],
     final_args: &mut Vec<RuntimeValue>,
     plan: &RuntimePackagePlan,
+    scopes: Option<&mut Vec<RuntimeScope>>,
+    current_package_id: Option<&str>,
+    current_module_id: Option<&str>,
+    aliases: Option<&BTreeMap<String, Vec<String>>>,
+    type_bindings: Option<&RuntimeTypeBindings>,
     state: &mut RuntimeExecutionState,
     host: &mut dyn RuntimeHost,
 ) -> Result<RuntimeValue, String> {
     if is_runtime_app_shell_intrinsic(intrinsic) {
         return execute_runtime_app_shell_intrinsic(intrinsic, final_args.as_slice(), host);
     }
-    execute_runtime_core_intrinsic(intrinsic, type_args, final_args, plan, state, host)
+    execute_runtime_core_intrinsic(
+        intrinsic,
+        type_args,
+        final_args,
+        plan,
+        scopes,
+        current_package_id,
+        current_module_id,
+        aliases,
+        type_bindings,
+        state,
+        host,
+    )
 }
 
 fn execute_runtime_core_intrinsic(
@@ -14347,6 +19148,11 @@ fn execute_runtime_core_intrinsic(
     type_args: &[String],
     final_args: &mut Vec<RuntimeValue>,
     plan: &RuntimePackagePlan,
+    mut scopes: Option<&mut Vec<RuntimeScope>>,
+    current_package_id: Option<&str>,
+    current_module_id: Option<&str>,
+    aliases: Option<&BTreeMap<String, Vec<String>>>,
+    type_bindings: Option<&RuntimeTypeBindings>,
     state: &mut RuntimeExecutionState,
     host: &mut dyn RuntimeHost,
 ) -> Result<RuntimeValue, String> {
@@ -15769,6 +20575,7 @@ fn execute_runtime_core_intrinsic(
                 return Err("channel_send expects two arguments".to_string());
             }
             let handle = expect_channel(args[0].clone(), "channel_send")?;
+            runtime_validate_split_value(&args[1], state, "channel_send payload")?;
             let channel = state
                 .channels
                 .get_mut(&handle)
@@ -15792,6 +20599,7 @@ fn execute_runtime_core_intrinsic(
         }
         RuntimeIntrinsic::ConcurrentMutexNew => {
             let value = expect_single_arg(args, "mutex_new")?;
+            runtime_validate_split_value(&value, state, "mutex_new payload")?;
             let handle = insert_runtime_mutex(state, type_args, value);
             Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::Mutex(handle)))
         }
@@ -15811,6 +20619,7 @@ fn execute_runtime_core_intrinsic(
                 return Err("mutex_put expects two arguments".to_string());
             }
             let handle = expect_mutex(args[0].clone(), "mutex_put")?;
+            runtime_validate_split_value(&args[1], state, "mutex_put payload")?;
             let mutex = state
                 .mutexes
                 .get_mut(&handle)
@@ -16060,6 +20869,14 @@ fn execute_runtime_core_intrinsic(
             }
             let handle = expect_arena(args[0].clone(), "arena_remove")?;
             let id = expect_arena_id(args[1].clone(), "arena_remove")?;
+            runtime_reject_live_view_conflict(
+                state,
+                |reference| runtime_reference_targets_arena_id(reference, id),
+                format!(
+                    "arena_remove rejects invalidation while borrowed views for ArenaId `{}` are live",
+                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::ArenaId(id)))
+                ),
+            )?;
             let arena = state
                 .arenas
                 .get_mut(&handle)
@@ -16076,6 +20893,14 @@ fn execute_runtime_core_intrinsic(
         }
         RuntimeIntrinsic::MemoryArenaReset => {
             let handle = expect_arena(expect_single_arg(args, "arena_reset")?, "arena_reset")?;
+            runtime_reject_live_view_conflict(
+                state,
+                |reference| runtime_reference_targets_arena(reference, handle),
+                format!(
+                    "arena_reset rejects invalidation while borrowed views for Arena `{}` are live",
+                    handle.0
+                ),
+            )?;
             let arena = state
                 .arenas
                 .get_mut(&handle)
@@ -16210,14 +21035,7 @@ fn execute_runtime_core_intrinsic(
         RuntimeIntrinsic::MemoryFrameReset => {
             let handle =
                 expect_frame_arena(expect_single_arg(args, "frame_reset")?, "frame_reset")?;
-            let arena = state
-                .frame_arenas
-                .get_mut(&handle)
-                .ok_or_else(|| format!("invalid FrameArena handle `{}`", handle.0))?;
-            arena.generation += 1;
-            arena.next_slot = 0;
-            arena.slots.clear();
-            arena.policy.current_limit = arena.policy.base_capacity;
+            runtime_reset_frame_arena_handle(state, handle, "frame_reset")?;
             Ok(RuntimeValue::Unit)
         }
         RuntimeIntrinsic::MemoryPoolNew => {
@@ -16372,6 +21190,14 @@ fn execute_runtime_core_intrinsic(
             }
             let handle = expect_pool_arena(args[0].clone(), "pool_remove")?;
             let id = expect_pool_id(args[1].clone(), "pool_remove")?;
+            runtime_reject_live_view_conflict(
+                state,
+                |reference| runtime_reference_targets_pool_id(reference, id),
+                format!(
+                    "pool_remove rejects invalidation while borrowed views for PoolId `{}` are live",
+                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::PoolId(id)))
+                ),
+            )?;
             let arena = state
                 .pool_arenas
                 .get_mut(&handle)
@@ -16392,6 +21218,14 @@ fn execute_runtime_core_intrinsic(
         }
         RuntimeIntrinsic::MemoryPoolReset => {
             let handle = expect_pool_arena(expect_single_arg(args, "pool_reset")?, "pool_reset")?;
+            runtime_reject_live_view_conflict(
+                state,
+                |reference| runtime_reference_targets_pool_arena(reference, handle),
+                format!(
+                    "pool_reset rejects invalidation while borrowed views for PoolArena `{}` are live",
+                    handle.0
+                ),
+            )?;
             let arena = state
                 .pool_arenas
                 .get_mut(&handle)
@@ -16411,6 +21245,2334 @@ fn execute_runtime_core_intrinsic(
             }
             arena.policy.current_limit = arena.policy.base_capacity;
             Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::MemoryPoolLiveIds => {
+            let handle =
+                expect_pool_arena(expect_single_arg(args, "pool_live_ids")?, "pool_live_ids")?;
+            let arena = state
+                .pool_arenas
+                .get(&handle)
+                .ok_or_else(|| format!("invalid PoolArena handle `{}`", handle.0))?;
+            Ok(RuntimeValue::List(
+                arena
+                    .slots
+                    .keys()
+                    .copied()
+                    .map(|slot| {
+                        RuntimeValue::Opaque(RuntimeOpaqueValue::PoolId(RuntimePoolIdValue {
+                            arena: handle,
+                            slot,
+                            generation: pool_slot_generation(arena, slot),
+                        }))
+                    })
+                    .collect(),
+            ))
+        }
+        RuntimeIntrinsic::MemoryPoolCompact => {
+            let handle =
+                expect_pool_arena(expect_single_arg(args, "pool_compact")?, "pool_compact")?;
+            runtime_reject_live_view_conflict(
+                state,
+                |reference| runtime_reference_targets_pool_arena(reference, handle),
+                format!(
+                    "pool_compact rejects invalidation while borrowed views for PoolArena `{}` are live",
+                    handle.0
+                ),
+            )?;
+            let arena = state
+                .pool_arenas
+                .get_mut(&handle)
+                .ok_or_else(|| format!("invalid PoolArena handle `{}`", handle.0))?;
+            let old_slots = arena.slots.keys().copied().collect::<Vec<_>>();
+            let mut new_slots = BTreeMap::new();
+            let mut new_generations = BTreeMap::new();
+            let mut relocations = Vec::new();
+            for (next_index, old_slot) in old_slots.iter().copied().enumerate() {
+                let generation = pool_slot_generation(arena, old_slot);
+                let next_generation = generation + 1;
+                let value = arena
+                    .slots
+                    .remove(&old_slot)
+                    .ok_or_else(|| format!("PoolArena slot `{old_slot}` is missing"))?;
+                let new_slot = next_index as u64;
+                new_slots.insert(new_slot, value);
+                new_generations.insert(new_slot, next_generation);
+                let mut fields = BTreeMap::new();
+                fields.insert(
+                    "old".to_string(),
+                    RuntimeValue::Opaque(RuntimeOpaqueValue::PoolId(RuntimePoolIdValue {
+                        arena: handle,
+                        slot: old_slot,
+                        generation,
+                    })),
+                );
+                fields.insert(
+                    "new".to_string(),
+                    RuntimeValue::Opaque(RuntimeOpaqueValue::PoolId(RuntimePoolIdValue {
+                        arena: handle,
+                        slot: new_slot,
+                        generation: next_generation,
+                    })),
+                );
+                relocations.push(RuntimeValue::Record {
+                    name: "std.memory.PoolRelocation".to_string(),
+                    fields,
+                });
+            }
+            arena.slots = new_slots;
+            arena.generations = new_generations;
+            arena.next_slot = arena.slots.len() as u64;
+            arena.free_slots.clear();
+            Ok(RuntimeValue::List(relocations))
+        }
+        RuntimeIntrinsic::MemoryTempNew => {
+            let capacity = expect_int(expect_single_arg(args, "temp_new")?, "temp_new")?;
+            let capacity = runtime_non_negative_usize(capacity, "temp_new capacity")?;
+            let handle =
+                insert_runtime_temp_arena(state, type_args, default_runtime_temp_policy(capacity));
+            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::TempArena(handle)))
+        }
+        RuntimeIntrinsic::MemoryTempAlloc => {
+            if args.len() != 2 {
+                return Err("temp_alloc expects two arguments".to_string());
+            }
+            let handle = expect_temp_arena(args[0].clone(), "temp_alloc")?;
+            let arena = state
+                .temp_arenas
+                .get_mut(&handle)
+                .ok_or_else(|| format!("invalid TempArena handle `{}`", handle.0))?;
+            ensure_runtime_temp_capacity(arena)?;
+            let slot = arena.next_slot;
+            arena.next_slot += 1;
+            arena.slots.insert(slot, args[1].clone());
+            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::TempId(
+                RuntimeTempIdValue {
+                    arena: handle,
+                    slot,
+                    generation: arena.generation,
+                },
+            )))
+        }
+        RuntimeIntrinsic::MemoryTempLen => {
+            let handle = expect_temp_arena(expect_single_arg(args, "temp_len")?, "temp_len")?;
+            let arena = state
+                .temp_arenas
+                .get(&handle)
+                .ok_or_else(|| format!("invalid TempArena handle `{}`", handle.0))?;
+            Ok(RuntimeValue::Int(arena.slots.len() as i64))
+        }
+        RuntimeIntrinsic::MemoryTempHas => {
+            if args.len() != 2 {
+                return Err("temp_has expects two arguments".to_string());
+            }
+            let handle = expect_temp_arena(args[0].clone(), "temp_has")?;
+            let id = expect_temp_id(args[1].clone(), "temp_has")?;
+            let arena = state
+                .temp_arenas
+                .get(&handle)
+                .ok_or_else(|| format!("invalid TempArena handle `{}`", handle.0))?;
+            Ok(RuntimeValue::Bool(temp_id_is_live(handle, arena, id)))
+        }
+        RuntimeIntrinsic::MemoryTempGet => {
+            if args.len() != 2 {
+                return Err("temp_get expects two arguments".to_string());
+            }
+            let handle = expect_temp_arena(args[0].clone(), "temp_get")?;
+            let id = expect_temp_id(args[1].clone(), "temp_get")?;
+            let arena = state
+                .temp_arenas
+                .get(&handle)
+                .ok_or_else(|| format!("invalid TempArena handle `{}`", handle.0))?;
+            if !temp_id_is_live(handle, arena, id) {
+                return Err(format!(
+                    "stale or invalid TempId `{}` for TempArena `{}`",
+                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::TempId(id))),
+                    handle.0
+                ));
+            }
+            arena
+                .slots
+                .get(&id.slot)
+                .cloned()
+                .ok_or_else(|| format!("TempArena slot `{}` is missing", id.slot))
+        }
+        RuntimeIntrinsic::MemoryTempBorrowRead | RuntimeIntrinsic::MemoryTempBorrowEdit => {
+            if args.len() != 2 {
+                return Err("temp borrow expects two arguments".to_string());
+            }
+            let handle = expect_temp_arena(args[0].clone(), "temp_borrow")?;
+            let id = expect_temp_id(args[1].clone(), "temp_borrow")?;
+            let arena = state
+                .temp_arenas
+                .get(&handle)
+                .ok_or_else(|| format!("invalid TempArena handle `{}`", handle.0))?;
+            if !temp_id_is_live(handle, arena, id) {
+                return Err(format!(
+                    "stale or invalid TempId `{}` for TempArena `{}`",
+                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::TempId(id))),
+                    handle.0
+                ));
+            }
+            Ok(RuntimeValue::Ref(RuntimeReferenceValue {
+                mutable: matches!(intrinsic, RuntimeIntrinsic::MemoryTempBorrowEdit),
+                target: RuntimeReferenceTarget::TempSlot {
+                    id,
+                    members: Vec::new(),
+                },
+            }))
+        }
+        RuntimeIntrinsic::MemoryTempSet => {
+            if args.len() != 3 {
+                return Err("temp_set expects three arguments".to_string());
+            }
+            let handle = expect_temp_arena(args[0].clone(), "temp_set")?;
+            let id = expect_temp_id(args[1].clone(), "temp_set")?;
+            let arena = state
+                .temp_arenas
+                .get_mut(&handle)
+                .ok_or_else(|| format!("invalid TempArena handle `{}`", handle.0))?;
+            if !temp_id_is_live(handle, arena, id) {
+                return Err(format!(
+                    "stale or invalid TempId `{}` for TempArena `{}`",
+                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::TempId(id))),
+                    handle.0
+                ));
+            }
+            arena.slots.insert(id.slot, args[2].clone());
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::MemoryTempReset => {
+            let handle = expect_temp_arena(expect_single_arg(args, "temp_reset")?, "temp_reset")?;
+            runtime_reset_temp_arena_handle(state, handle, "temp_reset")?;
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::MemorySessionNew => {
+            let capacity = expect_int(expect_single_arg(args, "session_new")?, "session_new")?;
+            let capacity = runtime_non_negative_usize(capacity, "session_new capacity")?;
+            let handle = insert_runtime_session_arena(
+                state,
+                type_args,
+                default_runtime_session_policy(capacity),
+            );
+            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::SessionArena(
+                handle,
+            )))
+        }
+        RuntimeIntrinsic::MemorySessionAlloc => {
+            if args.len() != 2 {
+                return Err("session_alloc expects two arguments".to_string());
+            }
+            let handle = expect_session_arena(args[0].clone(), "session_alloc")?;
+            let arena = state
+                .session_arenas
+                .get_mut(&handle)
+                .ok_or_else(|| format!("invalid SessionArena handle `{}`", handle.0))?;
+            if arena.sealed {
+                return Err("session_alloc rejects mutation while sealed".to_string());
+            }
+            ensure_runtime_session_capacity(arena)?;
+            let slot = arena.next_slot;
+            arena.next_slot += 1;
+            arena.slots.insert(slot, args[1].clone());
+            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::SessionId(
+                RuntimeSessionIdValue {
+                    arena: handle,
+                    slot,
+                    generation: arena.generation,
+                },
+            )))
+        }
+        RuntimeIntrinsic::MemorySessionLen => {
+            let handle =
+                expect_session_arena(expect_single_arg(args, "session_len")?, "session_len")?;
+            let arena = state
+                .session_arenas
+                .get(&handle)
+                .ok_or_else(|| format!("invalid SessionArena handle `{}`", handle.0))?;
+            Ok(RuntimeValue::Int(arena.slots.len() as i64))
+        }
+        RuntimeIntrinsic::MemorySessionHas => {
+            if args.len() != 2 {
+                return Err("session_has expects two arguments".to_string());
+            }
+            let handle = expect_session_arena(args[0].clone(), "session_has")?;
+            let id = expect_session_id(args[1].clone(), "session_has")?;
+            let arena = state
+                .session_arenas
+                .get(&handle)
+                .ok_or_else(|| format!("invalid SessionArena handle `{}`", handle.0))?;
+            Ok(RuntimeValue::Bool(session_id_is_live(handle, arena, id)))
+        }
+        RuntimeIntrinsic::MemorySessionGet => {
+            if args.len() != 2 {
+                return Err("session_get expects two arguments".to_string());
+            }
+            let handle = expect_session_arena(args[0].clone(), "session_get")?;
+            let id = expect_session_id(args[1].clone(), "session_get")?;
+            let arena = state
+                .session_arenas
+                .get(&handle)
+                .ok_or_else(|| format!("invalid SessionArena handle `{}`", handle.0))?;
+            if !session_id_is_live(handle, arena, id) {
+                return Err(format!(
+                    "stale or invalid SessionId `{}` for SessionArena `{}`",
+                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::SessionId(
+                        id
+                    ))),
+                    handle.0
+                ));
+            }
+            arena
+                .slots
+                .get(&id.slot)
+                .cloned()
+                .ok_or_else(|| format!("SessionArena slot `{}` is missing", id.slot))
+        }
+        RuntimeIntrinsic::MemorySessionBorrowRead | RuntimeIntrinsic::MemorySessionBorrowEdit => {
+            if args.len() != 2 {
+                return Err("session borrow expects two arguments".to_string());
+            }
+            let handle = expect_session_arena(args[0].clone(), "session_borrow")?;
+            let id = expect_session_id(args[1].clone(), "session_borrow")?;
+            let arena = state
+                .session_arenas
+                .get(&handle)
+                .ok_or_else(|| format!("invalid SessionArena handle `{}`", handle.0))?;
+            if !session_id_is_live(handle, arena, id) {
+                return Err(format!(
+                    "stale or invalid SessionId `{}` for SessionArena `{}`",
+                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::SessionId(
+                        id
+                    ))),
+                    handle.0
+                ));
+            }
+            if arena.sealed && matches!(intrinsic, RuntimeIntrinsic::MemorySessionBorrowEdit) {
+                return Err("session_borrow_edit rejects mutation while sealed".to_string());
+            }
+            Ok(RuntimeValue::Ref(RuntimeReferenceValue {
+                mutable: matches!(intrinsic, RuntimeIntrinsic::MemorySessionBorrowEdit),
+                target: RuntimeReferenceTarget::SessionSlot {
+                    id,
+                    members: Vec::new(),
+                },
+            }))
+        }
+        RuntimeIntrinsic::MemorySessionSet => {
+            if args.len() != 3 {
+                return Err("session_set expects three arguments".to_string());
+            }
+            let handle = expect_session_arena(args[0].clone(), "session_set")?;
+            let id = expect_session_id(args[1].clone(), "session_set")?;
+            let arena = state
+                .session_arenas
+                .get_mut(&handle)
+                .ok_or_else(|| format!("invalid SessionArena handle `{}`", handle.0))?;
+            if arena.sealed {
+                return Err("session_set rejects mutation while sealed".to_string());
+            }
+            if !session_id_is_live(handle, arena, id) {
+                return Err(format!(
+                    "stale or invalid SessionId `{}` for SessionArena `{}`",
+                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::SessionId(
+                        id
+                    ))),
+                    handle.0
+                ));
+            }
+            arena.slots.insert(id.slot, args[2].clone());
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::MemorySessionReset => {
+            let handle =
+                expect_session_arena(expect_single_arg(args, "session_reset")?, "session_reset")?;
+            runtime_reject_live_view_conflict(
+                state,
+                |reference| runtime_reference_targets_session_arena(reference, handle),
+                format!(
+                    "session_reset rejects invalidation while borrowed views for SessionArena `{}` are live",
+                    handle.0
+                ),
+            )?;
+            let arena = state
+                .session_arenas
+                .get_mut(&handle)
+                .ok_or_else(|| format!("invalid SessionArena handle `{}`", handle.0))?;
+            if arena.sealed {
+                return Err("session_reset rejects mutation while sealed".to_string());
+            }
+            arena.generation += 1;
+            arena.next_slot = 0;
+            arena.slots.clear();
+            arena.policy.current_limit = arena.policy.base_capacity;
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::MemorySessionSeal => {
+            let handle =
+                expect_session_arena(expect_single_arg(args, "session_seal")?, "session_seal")?;
+            let arena = state
+                .session_arenas
+                .get_mut(&handle)
+                .ok_or_else(|| format!("invalid SessionArena handle `{}`", handle.0))?;
+            arena.sealed = true;
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::MemorySessionUnseal => {
+            let handle =
+                expect_session_arena(expect_single_arg(args, "session_unseal")?, "session_unseal")?;
+            runtime_reject_live_reference_or_opaque_conflict(
+                scopes.as_ref().map(|scopes| scopes.as_slice()),
+                Some(final_args.as_slice()),
+                state,
+                |reference| runtime_reference_targets_session_arena(reference, handle),
+                |opaque, state| {
+                    runtime_opaque_matches_reference_predicate(opaque, state, &|reference| {
+                        runtime_reference_targets_session_arena(reference, handle)
+                    })
+                },
+                None,
+                None,
+                |state| {
+                    runtime_any_live_element_view_reference(state, |reference| {
+                        runtime_reference_targets_session_arena(reference, handle)
+                    })
+                },
+                format!(
+                    "session_unseal rejects publication rollback while borrowed views or borrows for SessionArena `{}` are live",
+                    handle.0
+                ),
+            )?;
+            if state
+                .exported_descriptor_counts
+                .contains_key(&RuntimeExportedDescriptorTarget::SessionArena(handle))
+            {
+                return Err(format!(
+                    "session_unseal rejects publication rollback while exported descriptor views for SessionArena `{}` are live",
+                    handle.0
+                ));
+            }
+            let arena = state
+                .session_arenas
+                .get_mut(&handle)
+                .ok_or_else(|| format!("invalid SessionArena handle `{}`", handle.0))?;
+            arena.sealed = false;
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::MemorySessionIsSealed => {
+            let handle = expect_session_arena(
+                expect_single_arg(args, "session_is_sealed")?,
+                "session_is_sealed",
+            )?;
+            let arena = state
+                .session_arenas
+                .get(&handle)
+                .ok_or_else(|| format!("invalid SessionArena handle `{}`", handle.0))?;
+            Ok(RuntimeValue::Bool(arena.sealed))
+        }
+        RuntimeIntrinsic::MemorySessionLiveIds => {
+            let handle = expect_session_arena(
+                expect_single_arg(args, "session_live_ids")?,
+                "session_live_ids",
+            )?;
+            let arena = state
+                .session_arenas
+                .get(&handle)
+                .ok_or_else(|| format!("invalid SessionArena handle `{}`", handle.0))?;
+            Ok(RuntimeValue::List(
+                arena
+                    .slots
+                    .keys()
+                    .copied()
+                    .map(|slot| {
+                        RuntimeValue::Opaque(RuntimeOpaqueValue::SessionId(RuntimeSessionIdValue {
+                            arena: handle,
+                            slot,
+                            generation: arena.generation,
+                        }))
+                    })
+                    .collect(),
+            ))
+        }
+        RuntimeIntrinsic::MemoryRingNew => {
+            let capacity = expect_int(expect_single_arg(args, "ring_new")?, "ring_new")?;
+            let capacity = runtime_non_negative_usize(capacity, "ring_new capacity")?;
+            let handle =
+                insert_runtime_ring_buffer(state, type_args, default_runtime_ring_policy(capacity));
+            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::RingBuffer(handle)))
+        }
+        RuntimeIntrinsic::MemoryRingPush => {
+            if args.len() != 2 {
+                return Err("ring_push expects two arguments".to_string());
+            }
+            let handle = expect_ring_buffer(args[0].clone(), "ring_push")?;
+            if let Some((oldest_id, oldest_slot)) =
+                state.ring_buffers.get(&handle).and_then(|arena| {
+                    if arena.slots.len() < arena.policy.current_limit {
+                        return None;
+                    }
+                    if matches!(arena.policy.pressure, RuntimeMemoryPressurePolicy::Elastic) {
+                        return None;
+                    }
+                    if !matches!(arena.policy.overwrite, RuntimeRingOverwritePolicy::Oldest) {
+                        return None;
+                    }
+                    let oldest_slot = *arena.order.front()?;
+                    Some((
+                        RuntimeRingIdValue {
+                            arena: handle,
+                            slot: oldest_slot,
+                            generation: ring_slot_generation(arena, oldest_slot),
+                        },
+                        oldest_slot,
+                    ))
+                })
+            {
+                runtime_reject_live_reference_or_opaque_conflict(
+                    scopes.as_ref().map(|scopes| scopes.as_slice()),
+                    Some(args.as_slice()),
+                    state,
+                    |reference| runtime_reference_targets_ring_id(reference, oldest_id),
+                    |opaque, state| {
+                        runtime_opaque_matches_ring_window_predicate(
+                            opaque,
+                            state,
+                            &|candidate_arena, candidate_slots| {
+                                runtime_ring_window_overlaps_slots(
+                                    handle,
+                                    &[oldest_slot],
+                                    candidate_arena,
+                                    candidate_slots,
+                                )
+                            },
+                        )
+                    },
+                    None,
+                    None,
+                    |_| false,
+                    format!(
+                        "ring_push rejects overwrite while borrowed views for RingId `{}` are live",
+                        runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::RingId(
+                            oldest_id
+                        )))
+                    ),
+                )?;
+            }
+            let arena = state
+                .ring_buffers
+                .get_mut(&handle)
+                .ok_or_else(|| format!("invalid RingBuffer handle `{}`", handle.0))?;
+            ensure_runtime_ring_capacity(arena)?;
+            let slot = arena.next_slot;
+            arena.next_slot += 1;
+            let generation = ring_slot_generation(arena, slot);
+            arena.slots.insert(slot, args[1].clone());
+            arena.order.push_back(slot);
+            arena.generations.entry(slot).or_insert(generation);
+            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::RingId(
+                RuntimeRingIdValue {
+                    arena: handle,
+                    slot,
+                    generation,
+                },
+            )))
+        }
+        RuntimeIntrinsic::MemoryRingTryPop => {
+            let handle = expect_ring_buffer(
+                expect_single_arg(args.clone(), "ring_try_pop")?,
+                "ring_try_pop",
+            )?;
+            if let Some((oldest_id, oldest_slot)) =
+                state.ring_buffers.get(&handle).and_then(|arena| {
+                    let oldest_slot = *arena.order.front()?;
+                    Some((
+                        RuntimeRingIdValue {
+                            arena: handle,
+                            slot: oldest_slot,
+                            generation: ring_slot_generation(arena, oldest_slot),
+                        },
+                        oldest_slot,
+                    ))
+                })
+            {
+                runtime_reject_live_reference_or_opaque_conflict(
+                    scopes.as_ref().map(|scopes| scopes.as_slice()),
+                    Some(args.as_slice()),
+                    state,
+                    |reference| runtime_reference_targets_ring_id(reference, oldest_id),
+                    |opaque, state| {
+                        runtime_opaque_matches_ring_window_predicate(
+                            opaque,
+                            state,
+                            &|candidate_arena, candidate_slots| {
+                                runtime_ring_window_overlaps_slots(
+                                    handle,
+                                    &[oldest_slot],
+                                    candidate_arena,
+                                    candidate_slots,
+                                )
+                            },
+                        )
+                    },
+                    None,
+                    None,
+                    |_| false,
+                    format!(
+                        "ring_try_pop rejects invalidation while borrowed views for RingId `{}` are live",
+                        runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::RingId(
+                            oldest_id
+                        )))
+                    ),
+                )?;
+            }
+            let arena = state
+                .ring_buffers
+                .get_mut(&handle)
+                .ok_or_else(|| format!("invalid RingBuffer handle `{}`", handle.0))?;
+            let Some(slot) = arena.order.pop_front() else {
+                return Ok(none_variant());
+            };
+            let value = arena
+                .slots
+                .remove(&slot)
+                .ok_or_else(|| format!("RingBuffer slot `{slot}` is missing"))?;
+            *arena.generations.entry(slot).or_insert(0) += 1;
+            Ok(some_variant(value))
+        }
+        RuntimeIntrinsic::MemoryRingLen => {
+            let handle = expect_ring_buffer(expect_single_arg(args, "ring_len")?, "ring_len")?;
+            let arena = state
+                .ring_buffers
+                .get(&handle)
+                .ok_or_else(|| format!("invalid RingBuffer handle `{}`", handle.0))?;
+            Ok(RuntimeValue::Int(arena.order.len() as i64))
+        }
+        RuntimeIntrinsic::MemoryRingHas => {
+            if args.len() != 2 {
+                return Err("ring_has expects two arguments".to_string());
+            }
+            let handle = expect_ring_buffer(args[0].clone(), "ring_has")?;
+            let id = expect_ring_id(args[1].clone(), "ring_has")?;
+            let arena = state
+                .ring_buffers
+                .get(&handle)
+                .ok_or_else(|| format!("invalid RingBuffer handle `{}`", handle.0))?;
+            Ok(RuntimeValue::Bool(ring_id_is_live(handle, arena, id)))
+        }
+        RuntimeIntrinsic::MemoryRingGet => {
+            if args.len() != 2 {
+                return Err("ring_get expects two arguments".to_string());
+            }
+            let handle = expect_ring_buffer(args[0].clone(), "ring_get")?;
+            let id = expect_ring_id(args[1].clone(), "ring_get")?;
+            let arena = state
+                .ring_buffers
+                .get(&handle)
+                .ok_or_else(|| format!("invalid RingBuffer handle `{}`", handle.0))?;
+            if !ring_id_is_live(handle, arena, id) {
+                return Err(format!(
+                    "stale or invalid RingId `{}` for RingBuffer `{}`",
+                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::RingId(id))),
+                    handle.0
+                ));
+            }
+            arena
+                .slots
+                .get(&id.slot)
+                .cloned()
+                .ok_or_else(|| format!("RingBuffer slot `{}` is missing", id.slot))
+        }
+        RuntimeIntrinsic::MemoryRingBorrowRead | RuntimeIntrinsic::MemoryRingBorrowEdit => {
+            if args.len() != 2 {
+                return Err("ring borrow expects two arguments".to_string());
+            }
+            let handle = expect_ring_buffer(args[0].clone(), "ring_borrow")?;
+            let id = expect_ring_id(args[1].clone(), "ring_borrow")?;
+            let arena = state
+                .ring_buffers
+                .get(&handle)
+                .ok_or_else(|| format!("invalid RingBuffer handle `{}`", handle.0))?;
+            if !ring_id_is_live(handle, arena, id) {
+                return Err(format!(
+                    "stale or invalid RingId `{}` for RingBuffer `{}`",
+                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::RingId(id))),
+                    handle.0
+                ));
+            }
+            Ok(RuntimeValue::Ref(RuntimeReferenceValue {
+                mutable: matches!(intrinsic, RuntimeIntrinsic::MemoryRingBorrowEdit),
+                target: RuntimeReferenceTarget::RingSlot {
+                    id,
+                    members: Vec::new(),
+                },
+            }))
+        }
+        RuntimeIntrinsic::MemoryRingSet => {
+            if args.len() != 3 {
+                return Err("ring_set expects three arguments".to_string());
+            }
+            let handle = expect_ring_buffer(args[0].clone(), "ring_set")?;
+            let id = expect_ring_id(args[1].clone(), "ring_set")?;
+            let arena = state
+                .ring_buffers
+                .get_mut(&handle)
+                .ok_or_else(|| format!("invalid RingBuffer handle `{}`", handle.0))?;
+            if !ring_id_is_live(handle, arena, id) {
+                return Err(format!(
+                    "stale or invalid RingId `{}` for RingBuffer `{}`",
+                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::RingId(id))),
+                    handle.0
+                ));
+            }
+            arena.slots.insert(id.slot, args[2].clone());
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::MemoryRingReset => {
+            let handle =
+                expect_ring_buffer(expect_single_arg(args.clone(), "ring_reset")?, "ring_reset")?;
+            runtime_reject_live_reference_or_opaque_conflict(
+                scopes.as_ref().map(|scopes| scopes.as_slice()),
+                Some(args.as_slice()),
+                state,
+                |reference| runtime_reference_targets_ring_arena(reference, handle),
+                |opaque, state| {
+                    runtime_opaque_matches_ring_window_predicate(
+                        opaque,
+                        state,
+                        &|candidate_arena, _| candidate_arena == handle,
+                    )
+                },
+                None,
+                None,
+                |_| false,
+                format!(
+                    "ring_reset rejects invalidation while borrowed views for RingBuffer `{}` are live",
+                    handle.0
+                ),
+            )?;
+            let arena = state
+                .ring_buffers
+                .get_mut(&handle)
+                .ok_or_else(|| format!("invalid RingBuffer handle `{}`", handle.0))?;
+            for slot in arena.slots.keys().copied().collect::<Vec<_>>() {
+                *arena.generations.entry(slot).or_insert(0) += 1;
+            }
+            arena.slots.clear();
+            arena.order.clear();
+            arena.policy.current_limit = arena.policy.base_capacity;
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::MemorySlabNew => {
+            let capacity = expect_int(expect_single_arg(args, "slab_new")?, "slab_new")?;
+            let capacity = runtime_non_negative_usize(capacity, "slab_new capacity")?;
+            let handle =
+                insert_runtime_slab(state, type_args, default_runtime_slab_policy(capacity));
+            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::Slab(handle)))
+        }
+        RuntimeIntrinsic::MemorySlabAlloc => {
+            if args.len() != 2 {
+                return Err("slab_alloc expects two arguments".to_string());
+            }
+            let handle = expect_slab(args[0].clone(), "slab_alloc")?;
+            let arena = state
+                .slabs
+                .get_mut(&handle)
+                .ok_or_else(|| format!("invalid Slab handle `{}`", handle.0))?;
+            if arena.sealed {
+                return Err("slab_alloc rejects mutation while sealed".to_string());
+            }
+            ensure_runtime_slab_capacity(arena)?;
+            let slot = arena.free_slots.pop().unwrap_or_else(|| {
+                let next = arena.next_slot;
+                arena.next_slot += 1;
+                arena.generations.entry(next).or_insert(0);
+                next
+            });
+            let generation = slab_slot_generation(arena, slot);
+            arena.slots.insert(slot, args[1].clone());
+            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::SlabId(
+                RuntimeSlabIdValue {
+                    arena: handle,
+                    slot,
+                    generation,
+                },
+            )))
+        }
+        RuntimeIntrinsic::MemorySlabLen => {
+            let handle = expect_slab(expect_single_arg(args, "slab_len")?, "slab_len")?;
+            let arena = state
+                .slabs
+                .get(&handle)
+                .ok_or_else(|| format!("invalid Slab handle `{}`", handle.0))?;
+            Ok(RuntimeValue::Int(arena.slots.len() as i64))
+        }
+        RuntimeIntrinsic::MemorySlabHas => {
+            if args.len() != 2 {
+                return Err("slab_has expects two arguments".to_string());
+            }
+            let handle = expect_slab(args[0].clone(), "slab_has")?;
+            let id = expect_slab_id(args[1].clone(), "slab_has")?;
+            let arena = state
+                .slabs
+                .get(&handle)
+                .ok_or_else(|| format!("invalid Slab handle `{}`", handle.0))?;
+            Ok(RuntimeValue::Bool(slab_id_is_live(handle, arena, id)))
+        }
+        RuntimeIntrinsic::MemorySlabGet => {
+            if args.len() != 2 {
+                return Err("slab_get expects two arguments".to_string());
+            }
+            let handle = expect_slab(args[0].clone(), "slab_get")?;
+            let id = expect_slab_id(args[1].clone(), "slab_get")?;
+            let arena = state
+                .slabs
+                .get(&handle)
+                .ok_or_else(|| format!("invalid Slab handle `{}`", handle.0))?;
+            if !slab_id_is_live(handle, arena, id) {
+                return Err(format!(
+                    "stale or invalid SlabId `{}` for Slab `{}`",
+                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::SlabId(id))),
+                    handle.0
+                ));
+            }
+            arena
+                .slots
+                .get(&id.slot)
+                .cloned()
+                .ok_or_else(|| format!("Slab slot `{}` is missing", id.slot))
+        }
+        RuntimeIntrinsic::MemorySlabBorrowRead | RuntimeIntrinsic::MemorySlabBorrowEdit => {
+            if args.len() != 2 {
+                return Err("slab borrow expects two arguments".to_string());
+            }
+            let handle = expect_slab(args[0].clone(), "slab_borrow")?;
+            let id = expect_slab_id(args[1].clone(), "slab_borrow")?;
+            let arena = state
+                .slabs
+                .get(&handle)
+                .ok_or_else(|| format!("invalid Slab handle `{}`", handle.0))?;
+            if !slab_id_is_live(handle, arena, id) {
+                return Err(format!(
+                    "stale or invalid SlabId `{}` for Slab `{}`",
+                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::SlabId(id))),
+                    handle.0
+                ));
+            }
+            if arena.sealed && matches!(intrinsic, RuntimeIntrinsic::MemorySlabBorrowEdit) {
+                return Err("slab_borrow_edit rejects mutation while sealed".to_string());
+            }
+            Ok(RuntimeValue::Ref(RuntimeReferenceValue {
+                mutable: matches!(intrinsic, RuntimeIntrinsic::MemorySlabBorrowEdit),
+                target: RuntimeReferenceTarget::SlabSlot {
+                    id,
+                    members: Vec::new(),
+                },
+            }))
+        }
+        RuntimeIntrinsic::MemorySlabSet => {
+            if args.len() != 3 {
+                return Err("slab_set expects three arguments".to_string());
+            }
+            let handle = expect_slab(args[0].clone(), "slab_set")?;
+            let id = expect_slab_id(args[1].clone(), "slab_set")?;
+            let arena = state
+                .slabs
+                .get_mut(&handle)
+                .ok_or_else(|| format!("invalid Slab handle `{}`", handle.0))?;
+            if arena.sealed {
+                return Err("slab_set rejects mutation while sealed".to_string());
+            }
+            if !slab_id_is_live(handle, arena, id) {
+                return Err(format!(
+                    "stale or invalid SlabId `{}` for Slab `{}`",
+                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::SlabId(id))),
+                    handle.0
+                ));
+            }
+            arena.slots.insert(id.slot, args[2].clone());
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::MemorySlabRemove => {
+            if args.len() != 2 {
+                return Err("slab_remove expects two arguments".to_string());
+            }
+            let handle = expect_slab(args[0].clone(), "slab_remove")?;
+            let id = expect_slab_id(args[1].clone(), "slab_remove")?;
+            runtime_reject_live_view_conflict(
+                state,
+                |reference| runtime_reference_targets_slab_id(reference, id),
+                format!(
+                    "slab_remove rejects invalidation while borrowed views for SlabId `{}` are live",
+                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::SlabId(id)))
+                ),
+            )?;
+            let arena = state
+                .slabs
+                .get_mut(&handle)
+                .ok_or_else(|| format!("invalid Slab handle `{}`", handle.0))?;
+            if arena.sealed {
+                return Err("slab_remove rejects mutation while sealed".to_string());
+            }
+            if !slab_id_is_live(handle, arena, id) {
+                return Err(format!(
+                    "stale or invalid SlabId `{}` for Slab `{}`",
+                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::SlabId(id))),
+                    handle.0
+                ));
+            }
+            arena.slots.remove(&id.slot);
+            *arena.generations.entry(id.slot).or_insert(0) += 1;
+            arena.free_slots.push(id.slot);
+            Ok(RuntimeValue::Bool(true))
+        }
+        RuntimeIntrinsic::MemorySlabReset => {
+            let handle = expect_slab(expect_single_arg(args, "slab_reset")?, "slab_reset")?;
+            runtime_reject_live_view_conflict(
+                state,
+                |reference| runtime_reference_targets_slab_arena(reference, handle),
+                format!(
+                    "slab_reset rejects invalidation while borrowed views for Slab `{}` are live",
+                    handle.0
+                ),
+            )?;
+            let arena = state
+                .slabs
+                .get_mut(&handle)
+                .ok_or_else(|| format!("invalid Slab handle `{}`", handle.0))?;
+            if arena.sealed {
+                return Err("slab_reset rejects mutation while sealed".to_string());
+            }
+            arena.slots.clear();
+            for generation in arena.generations.values_mut() {
+                *generation += 1;
+            }
+            arena.free_slots = arena.generations.keys().copied().rev().collect();
+            arena.policy.current_limit = arena.policy.base_capacity;
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::MemorySlabSeal => {
+            let handle = expect_slab(expect_single_arg(args, "slab_seal")?, "slab_seal")?;
+            let arena = state
+                .slabs
+                .get_mut(&handle)
+                .ok_or_else(|| format!("invalid Slab handle `{}`", handle.0))?;
+            arena.sealed = true;
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::MemorySlabUnseal => {
+            let handle = expect_slab(expect_single_arg(args, "slab_unseal")?, "slab_unseal")?;
+            runtime_reject_live_reference_or_opaque_conflict(
+                scopes.as_ref().map(|scopes| scopes.as_slice()),
+                Some(final_args.as_slice()),
+                state,
+                |reference| runtime_reference_targets_slab_arena(reference, handle),
+                |opaque, state| {
+                    runtime_opaque_matches_reference_predicate(opaque, state, &|reference| {
+                        runtime_reference_targets_slab_arena(reference, handle)
+                    })
+                },
+                None,
+                None,
+                |state| {
+                    runtime_any_live_element_view_reference(state, |reference| {
+                        runtime_reference_targets_slab_arena(reference, handle)
+                    })
+                },
+                format!(
+                    "slab_unseal rejects publication rollback while borrowed views or borrows for Slab `{}` are live",
+                    handle.0
+                ),
+            )?;
+            if state
+                .exported_descriptor_counts
+                .contains_key(&RuntimeExportedDescriptorTarget::Slab(handle))
+            {
+                return Err(format!(
+                    "slab_unseal rejects publication rollback while exported descriptor views for Slab `{}` are live",
+                    handle.0
+                ));
+            }
+            let arena = state
+                .slabs
+                .get_mut(&handle)
+                .ok_or_else(|| format!("invalid Slab handle `{}`", handle.0))?;
+            arena.sealed = false;
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::MemorySlabIsSealed => {
+            let handle = expect_slab(expect_single_arg(args, "slab_is_sealed")?, "slab_is_sealed")?;
+            let arena = state
+                .slabs
+                .get(&handle)
+                .ok_or_else(|| format!("invalid Slab handle `{}`", handle.0))?;
+            Ok(RuntimeValue::Bool(arena.sealed))
+        }
+        RuntimeIntrinsic::MemorySlabLiveIds => {
+            let handle = expect_slab(expect_single_arg(args, "slab_live_ids")?, "slab_live_ids")?;
+            let arena = state
+                .slabs
+                .get(&handle)
+                .ok_or_else(|| format!("invalid Slab handle `{}`", handle.0))?;
+            Ok(RuntimeValue::List(
+                arena
+                    .slots
+                    .keys()
+                    .copied()
+                    .map(|slot| {
+                        RuntimeValue::Opaque(RuntimeOpaqueValue::SlabId(RuntimeSlabIdValue {
+                            arena: handle,
+                            slot,
+                            generation: slab_slot_generation(arena, slot),
+                        }))
+                    })
+                    .collect(),
+            ))
+        }
+        RuntimeIntrinsic::MemoryRingWindowRead | RuntimeIntrinsic::MemoryRingWindowEdit => {
+            if args.len() != 3 {
+                return Err("ring_window expects three arguments".to_string());
+            }
+            let handle = expect_ring_buffer(args[0].clone(), "ring_window")?;
+            let start = expect_int(args[1].clone(), "ring_window start")?;
+            let len = expect_int(args[2].clone(), "ring_window len")?;
+            if len < 0 {
+                return Err("ring_window len must be non-negative".to_string());
+            }
+            let arena = state
+                .ring_buffers
+                .get(&handle)
+                .ok_or_else(|| format!("invalid RingBuffer handle `{}`", handle.0))?;
+            let start = runtime_non_negative_usize(start, "ring_window start")?;
+            let count = runtime_non_negative_usize(len, "ring_window len")?;
+            if count > arena.policy.window {
+                return Err(format!(
+                    "ring_window len `{count}` exceeds configured window `{}` for RingBuffer `{}`",
+                    arena.policy.window, handle.0
+                ));
+            }
+            let end = start
+                .checked_add(count)
+                .ok_or_else(|| "ring_window range overflowed".to_string())?;
+            if end > arena.order.len() {
+                return Err(format!(
+                    "ring_window `{start}..{end}` is out of bounds for length `{}`",
+                    arena.order.len()
+                ));
+            }
+            let slots = arena
+                .order
+                .iter()
+                .skip(start)
+                .take(count)
+                .copied()
+                .collect::<Vec<_>>();
+            if matches!(intrinsic, RuntimeIntrinsic::MemoryRingWindowEdit) {
+                let ids = runtime_ring_ids_for_slots(state, handle, &slots)?;
+                runtime_reject_live_reference_or_opaque_conflict(
+                    scopes.as_ref().map(|scopes| scopes.as_slice()),
+                    Some(args.as_slice()),
+                    state,
+                    |candidate| ids.iter().any(|id| runtime_reference_targets_ring_id(candidate, *id)),
+                    |opaque, state| runtime_opaque_matches_ring_window_predicate(
+                        opaque,
+                        state,
+                        &|candidate_arena, candidate_slots| {
+                            runtime_ring_window_overlaps_slots(
+                                handle,
+                                &slots,
+                                candidate_arena,
+                                candidate_slots,
+                            )
+                        },
+                    ),
+                    None,
+                    None,
+                    |_| false,
+                    "ring_window_edit rejects exclusive view acquisition while conflicting borrows or views are live".to_string(),
+                )?;
+                let view = insert_runtime_edit_view_from_ring_window(
+                    state, &type_args, handle, slots, 0, count,
+                );
+                Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::EditView(view)))
+            } else {
+                let view = insert_runtime_read_view_from_ring_window(
+                    state, &type_args, handle, slots, 0, count,
+                );
+                Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::ReadView(view)))
+            }
+        }
+        RuntimeIntrinsic::MemoryArrayViewRead | RuntimeIntrinsic::MemoryArrayViewEdit => {
+            if args.len() != 3 {
+                return Err("array_view expects three arguments".to_string());
+            }
+            let reference = match &args[0] {
+                RuntimeValue::Ref(reference) => Some(reference.clone()),
+                _ => None,
+            };
+            let values = if let Some(reference) = reference.as_ref() {
+                let scopes = scopes
+                    .as_deref_mut()
+                    .ok_or_else(|| "array_view on refs requires runtime scopes".to_string())?;
+                let current_package_id = current_package_id
+                    .ok_or_else(|| "array_view on refs requires package context".to_string())?;
+                let current_module_id = current_module_id
+                    .ok_or_else(|| "array_view on refs requires module context".to_string())?;
+                let empty_aliases = BTreeMap::new();
+                let aliases = aliases.unwrap_or(&empty_aliases);
+                let empty_type_bindings = BTreeMap::new();
+                let type_bindings = type_bindings.unwrap_or(&empty_type_bindings);
+                expect_runtime_array(
+                    read_runtime_reference(
+                        scopes,
+                        plan,
+                        current_package_id,
+                        current_module_id,
+                        aliases,
+                        type_bindings,
+                        state,
+                        reference,
+                        host,
+                    )?,
+                    "array_view",
+                )?
+            } else {
+                expect_runtime_array(args[0].clone(), "array_view")?
+            };
+            let start = expect_int(args[1].clone(), "array_view start")?;
+            let end = expect_int(args[2].clone(), "array_view end")?;
+            let (start, end) = runtime_view_bounds(start, end, values.len(), "array_view")?;
+            if let Some(reference) = reference {
+                if matches!(intrinsic, RuntimeIntrinsic::MemoryArrayViewEdit) {
+                    runtime_reject_live_reference_or_opaque_conflict(
+                        scopes.as_ref().map(|scopes| scopes.as_slice()),
+                        Some(args.as_slice()),
+                        state,
+                        |candidate| candidate.target == reference.target,
+                        |opaque, state| runtime_opaque_matches_reference_predicate(
+                            opaque,
+                            state,
+                            &|candidate| candidate.target == reference.target,
+                        ),
+                        Some(&reference),
+                        None,
+                        |_| false,
+                        "array_view_edit rejects exclusive view acquisition while conflicting borrows or views are live".to_string(),
+                    )?;
+                    let view = insert_runtime_edit_view_from_reference(
+                        state,
+                        &type_args,
+                        reference,
+                        start,
+                        end - start,
+                    );
+                    Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::EditView(view)))
+                } else {
+                    let view = insert_runtime_read_view_from_reference(
+                        state,
+                        &type_args,
+                        reference,
+                        start,
+                        end - start,
+                    );
+                    Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::ReadView(view)))
+                }
+            } else {
+                let backing = insert_runtime_element_view_buffer(state, &type_args, values);
+                if matches!(intrinsic, RuntimeIntrinsic::MemoryArrayViewEdit) {
+                    let view = insert_runtime_edit_view_from_buffer(
+                        state,
+                        &type_args,
+                        backing,
+                        start,
+                        end - start,
+                    );
+                    Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::EditView(view)))
+                } else {
+                    let view = insert_runtime_read_view_from_buffer(
+                        state,
+                        &type_args,
+                        backing,
+                        start,
+                        end - start,
+                    );
+                    Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::ReadView(view)))
+                }
+            }
+        }
+        RuntimeIntrinsic::MemoryBytesView | RuntimeIntrinsic::MemoryBytesViewEdit => {
+            if args.len() != 3 {
+                return Err("bytes_view expects three arguments".to_string());
+            }
+            let reference = match &args[0] {
+                RuntimeValue::Ref(reference) => Some(reference.clone()),
+                _ => None,
+            };
+            let values = if let Some(reference) = reference.as_ref() {
+                let scopes = scopes
+                    .as_deref_mut()
+                    .ok_or_else(|| "bytes_view on refs requires runtime scopes".to_string())?;
+                let current_package_id = current_package_id
+                    .ok_or_else(|| "bytes_view on refs requires package context".to_string())?;
+                let current_module_id = current_module_id
+                    .ok_or_else(|| "bytes_view on refs requires module context".to_string())?;
+                let empty_aliases = BTreeMap::new();
+                let aliases = aliases.unwrap_or(&empty_aliases);
+                let empty_type_bindings = BTreeMap::new();
+                let type_bindings = type_bindings.unwrap_or(&empty_type_bindings);
+                runtime_reference_array_values(
+                    scopes,
+                    plan,
+                    current_package_id,
+                    current_module_id,
+                    aliases,
+                    type_bindings,
+                    state,
+                    reference,
+                    host,
+                    "bytes_view",
+                )?
+            } else {
+                expect_runtime_array(args[0].clone(), "bytes_view")?
+            };
+            let byte_count = values
+                .into_iter()
+                .map(|value| {
+                    let value = expect_int(value, "bytes_view")?;
+                    if !(0..=255).contains(&value) {
+                        return Err(format!(
+                            "bytes_view byte `{value}` is out of range `0..=255`"
+                        ));
+                    }
+                    Ok(())
+                })
+                .collect::<Result<Vec<_>, _>>()?
+                .len();
+            let start = expect_int(args[1].clone(), "bytes_view start")?;
+            let end = expect_int(args[2].clone(), "bytes_view end")?;
+            let (start, end) = runtime_view_bounds(start, end, byte_count, "bytes_view")?;
+            if let Some(reference) = reference {
+                if matches!(intrinsic, RuntimeIntrinsic::MemoryBytesViewEdit) {
+                    runtime_reject_live_reference_or_opaque_conflict(
+                        scopes.as_ref().map(|scopes| scopes.as_slice()),
+                        Some(args.as_slice()),
+                        state,
+                        |candidate| candidate.target == reference.target,
+                        |opaque, state| runtime_opaque_matches_reference_predicate(
+                            opaque,
+                            state,
+                            &|candidate| candidate.target == reference.target,
+                        ),
+                        Some(&reference),
+                        None,
+                        |_| false,
+                        "bytes_view_edit rejects exclusive view acquisition while conflicting borrows or views are live".to_string(),
+                    )?;
+                    let view = insert_runtime_byte_edit_view_from_reference(
+                        state,
+                        reference,
+                        start,
+                        end - start,
+                    );
+                    Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::ByteEditView(view)))
+                } else {
+                    let view = insert_runtime_byte_view_from_reference(
+                        state,
+                        reference,
+                        start,
+                        end - start,
+                    );
+                    Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::ByteView(view)))
+                }
+            } else {
+                let bytes = expect_runtime_array(args[0].clone(), "bytes_view")?
+                    .into_iter()
+                    .map(|value| {
+                        let value = expect_int(value, "bytes_view")?;
+                        if !(0..=255).contains(&value) {
+                            return Err(format!(
+                                "bytes_view byte `{value}` is out of range `0..=255`"
+                            ));
+                        }
+                        Ok(value as u8)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let backing = insert_runtime_byte_view_buffer(state, bytes);
+                if matches!(intrinsic, RuntimeIntrinsic::MemoryBytesViewEdit) {
+                    let view = insert_runtime_byte_edit_view_from_buffer(
+                        state,
+                        backing,
+                        start,
+                        end - start,
+                    );
+                    Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::ByteEditView(view)))
+                } else {
+                    let view =
+                        insert_runtime_byte_view_from_buffer(state, backing, start, end - start);
+                    Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::ByteView(view)))
+                }
+            }
+        }
+        RuntimeIntrinsic::MemoryStrView => {
+            if args.len() != 3 {
+                return Err("str_view expects three arguments".to_string());
+            }
+            let reference = match &args[0] {
+                RuntimeValue::Ref(reference) => Some(reference.clone()),
+                _ => None,
+            };
+            let text = if let Some(reference) = reference.as_ref() {
+                let scopes = scopes
+                    .as_deref_mut()
+                    .ok_or_else(|| "str_view on refs requires runtime scopes".to_string())?;
+                let current_package_id = current_package_id
+                    .ok_or_else(|| "str_view on refs requires package context".to_string())?;
+                let current_module_id = current_module_id
+                    .ok_or_else(|| "str_view on refs requires module context".to_string())?;
+                let empty_aliases = BTreeMap::new();
+                let aliases = aliases.unwrap_or(&empty_aliases);
+                let empty_type_bindings = BTreeMap::new();
+                let type_bindings = type_bindings.unwrap_or(&empty_type_bindings);
+                runtime_reference_text_value(
+                    scopes,
+                    plan,
+                    current_package_id,
+                    current_module_id,
+                    aliases,
+                    type_bindings,
+                    state,
+                    reference,
+                    host,
+                    "str_view",
+                )?
+            } else {
+                expect_str(args[0].clone(), "str_view")?
+            };
+            let start = expect_int(args[1].clone(), "str_view start")?;
+            let end = expect_int(args[2].clone(), "str_view end")?;
+            let (start, end) = runtime_view_bounds(start, end, text.len(), "str_view")?;
+            let view = if let Some(reference) = reference {
+                insert_runtime_str_view_from_reference(state, reference, start, end - start)
+            } else {
+                let backing = insert_runtime_str_view_buffer(state, text);
+                insert_runtime_str_view_from_buffer(state, backing, start, end - start)
+            };
+            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::StrView(view)))
+        }
+        RuntimeIntrinsic::MemoryViewLen => {
+            let handle = expect_read_view(expect_single_arg(args, "view_len")?, "view_len")?;
+            let (backing, view_start, view_len) = {
+                let view = state
+                    .read_views
+                    .get(&handle)
+                    .ok_or_else(|| format!("invalid ReadView handle `{}`", handle.0))?;
+                (view.backing.clone(), view.start, view.len)
+            };
+            match &backing {
+                RuntimeElementViewBacking::Buffer(buffer) => {
+                    let values = &state
+                        .element_view_buffers
+                        .get(buffer)
+                        .ok_or_else(|| format!("invalid element view buffer `{}`", buffer.0))?
+                        .values;
+                    let _ = runtime_view_range(view_start, view_len, values.len(), "view_len")?;
+                }
+                RuntimeElementViewBacking::Reference(reference) => {
+                    let scopes = scopes.as_deref_mut().ok_or_else(|| {
+                        "view_len on reference-backed ReadView requires runtime call context"
+                            .to_string()
+                    })?;
+                    let values = runtime_reference_array_values(
+                        scopes,
+                        plan,
+                        current_package_id.ok_or_else(|| {
+                            "view_len is missing current package context".to_string()
+                        })?,
+                        current_module_id.ok_or_else(|| {
+                            "view_len is missing current module context".to_string()
+                        })?,
+                        aliases.ok_or_else(|| "view_len is missing alias context".to_string())?,
+                        type_bindings.ok_or_else(|| {
+                            "view_len is missing type binding context".to_string()
+                        })?,
+                        state,
+                        reference,
+                        host,
+                        "view_len",
+                    )?;
+                    let _ = runtime_view_range(view_start, view_len, values.len(), "view_len")?;
+                }
+                RuntimeElementViewBacking::RingWindow { slots, .. } => {
+                    let _ = runtime_view_range(view_start, view_len, slots.len(), "view_len")?;
+                }
+            }
+            Ok(RuntimeValue::Int(view_len as i64))
+        }
+        RuntimeIntrinsic::MemoryViewGet => {
+            if args.len() != 2 {
+                return Err("view_get expects two arguments".to_string());
+            }
+            let handle = expect_read_view(args[0].clone(), "view_get")?;
+            let view = state
+                .read_views
+                .get(&handle)
+                .ok_or_else(|| format!("invalid ReadView handle `{}`", handle.0))?
+                .clone();
+            let index = runtime_index_to_usize(
+                expect_int(args[1].clone(), "view_get index")?,
+                view.len,
+                "view_get",
+            )?;
+            let scopes = scopes.as_deref_mut().ok_or_else(|| {
+                "view_get on borrowed views requires runtime call context".to_string()
+            })?;
+            Ok(runtime_read_view_values(
+                scopes,
+                plan,
+                current_package_id
+                    .ok_or_else(|| "view_get is missing current package context".to_string())?,
+                current_module_id
+                    .ok_or_else(|| "view_get is missing current module context".to_string())?,
+                aliases.ok_or_else(|| "view_get is missing alias context".to_string())?,
+                type_bindings
+                    .ok_or_else(|| "view_get is missing type binding context".to_string())?,
+                state,
+                &view,
+                host,
+                "view_get",
+            )?[index]
+                .clone())
+        }
+        RuntimeIntrinsic::MemoryViewSubview => {
+            if args.len() != 3 {
+                return Err("view_subview expects three arguments".to_string());
+            }
+            let handle = expect_read_view(args[0].clone(), "view_subview")?;
+            let (type_args, backing, view_start, view_len) = {
+                let view = state
+                    .read_views
+                    .get(&handle)
+                    .ok_or_else(|| format!("invalid ReadView handle `{}`", handle.0))?;
+                (
+                    view.type_args.clone(),
+                    view.backing.clone(),
+                    view.start,
+                    view.len,
+                )
+            };
+            let start = expect_int(args[1].clone(), "view_subview start")?;
+            let end = expect_int(args[2].clone(), "view_subview end")?;
+            let (start, end) = runtime_view_bounds(start, end, view_len, "view_subview")?;
+            let next = insert_runtime_read_view_from_backing(
+                state,
+                &type_args,
+                backing,
+                view_start + start,
+                end - start,
+            );
+            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::ReadView(next)))
+        }
+        RuntimeIntrinsic::MemoryEditViewLen => {
+            let handle =
+                expect_edit_view(expect_single_arg(args, "edit_view_len")?, "edit_view_len")?;
+            let (backing, view_start, view_len) = {
+                let view = state
+                    .edit_views
+                    .get(&handle)
+                    .ok_or_else(|| format!("invalid EditView handle `{}`", handle.0))?;
+                (view.backing.clone(), view.start, view.len)
+            };
+            match &backing {
+                RuntimeElementViewBacking::Buffer(buffer) => {
+                    let values = &state
+                        .element_view_buffers
+                        .get(buffer)
+                        .ok_or_else(|| format!("invalid element view buffer `{}`", buffer.0))?
+                        .values;
+                    let _ =
+                        runtime_view_range(view_start, view_len, values.len(), "edit_view_len")?;
+                }
+                RuntimeElementViewBacking::Reference(reference) => {
+                    let scopes = scopes.as_deref_mut().ok_or_else(|| {
+                        "edit_view_len on reference-backed EditView requires runtime call context"
+                            .to_string()
+                    })?;
+                    let values = runtime_reference_array_values(
+                        scopes,
+                        plan,
+                        current_package_id.ok_or_else(|| {
+                            "edit_view_len is missing current package context".to_string()
+                        })?,
+                        current_module_id.ok_or_else(|| {
+                            "edit_view_len is missing current module context".to_string()
+                        })?,
+                        aliases
+                            .ok_or_else(|| "edit_view_len is missing alias context".to_string())?,
+                        type_bindings.ok_or_else(|| {
+                            "edit_view_len is missing type binding context".to_string()
+                        })?,
+                        state,
+                        reference,
+                        host,
+                        "edit_view_len",
+                    )?;
+                    let _ =
+                        runtime_view_range(view_start, view_len, values.len(), "edit_view_len")?;
+                }
+                RuntimeElementViewBacking::RingWindow { slots, .. } => {
+                    let _ = runtime_view_range(view_start, view_len, slots.len(), "edit_view_len")?;
+                }
+            }
+            Ok(RuntimeValue::Int(view_len as i64))
+        }
+        RuntimeIntrinsic::MemoryEditViewGet => {
+            if args.len() != 2 {
+                return Err("edit_view_get expects two arguments".to_string());
+            }
+            let handle = expect_edit_view(args[0].clone(), "edit_view_get")?;
+            let view = state
+                .edit_views
+                .get(&handle)
+                .ok_or_else(|| format!("invalid EditView handle `{}`", handle.0))?
+                .clone();
+            let index = runtime_index_to_usize(
+                expect_int(args[1].clone(), "edit_view_get index")?,
+                view.len,
+                "edit_view_get",
+            )?;
+            let read_view = RuntimeReadViewState {
+                type_args: view.type_args.clone(),
+                backing: view.backing.clone(),
+                start: view.start,
+                len: view.len,
+            };
+            let scopes = scopes.as_deref_mut().ok_or_else(|| {
+                "edit_view_get on borrowed views requires runtime call context".to_string()
+            })?;
+            Ok(runtime_read_view_values(
+                scopes,
+                plan,
+                current_package_id.ok_or_else(|| {
+                    "edit_view_get is missing current package context".to_string()
+                })?,
+                current_module_id
+                    .ok_or_else(|| "edit_view_get is missing current module context".to_string())?,
+                aliases.ok_or_else(|| "edit_view_get is missing alias context".to_string())?,
+                type_bindings
+                    .ok_or_else(|| "edit_view_get is missing type binding context".to_string())?,
+                state,
+                &read_view,
+                host,
+                "edit_view_get",
+            )?[index]
+                .clone())
+        }
+        RuntimeIntrinsic::MemoryEditViewSet => {
+            if args.len() != 3 {
+                return Err("edit_view_set expects three arguments".to_string());
+            }
+            let handle = expect_edit_view(args[0].clone(), "edit_view_set")?;
+            let view = state
+                .edit_views
+                .get(&handle)
+                .ok_or_else(|| format!("invalid EditView handle `{}`", handle.0))?
+                .clone();
+            let index = runtime_index_to_usize(
+                expect_int(args[1].clone(), "edit_view_set index")?,
+                view.len,
+                "edit_view_set",
+            )?;
+            match view.backing {
+                RuntimeElementViewBacking::Buffer(buffer) => {
+                    let values = &mut state
+                        .element_view_buffers
+                        .get_mut(&buffer)
+                        .ok_or_else(|| format!("invalid element view buffer `{}`", buffer.0))?
+                        .values;
+                    let absolute = view.start + index;
+                    if absolute >= values.len() {
+                        return Err(format!(
+                            "edit_view_set index `{index}` is out of bounds for length `{}`",
+                            view.len
+                        ));
+                    }
+                    values[absolute] = args[2].clone();
+                }
+                RuntimeElementViewBacking::Reference(reference) => {
+                    let scopes = scopes.as_deref_mut().ok_or_else(|| {
+                        "edit_view_set on borrowed views requires runtime call context".to_string()
+                    })?;
+                    let mut values = runtime_reference_array_values(
+                        scopes,
+                        plan,
+                        current_package_id.ok_or_else(|| {
+                            "edit_view_set is missing current package context".to_string()
+                        })?,
+                        current_module_id.ok_or_else(|| {
+                            "edit_view_set is missing current module context".to_string()
+                        })?,
+                        aliases
+                            .ok_or_else(|| "edit_view_set is missing alias context".to_string())?,
+                        type_bindings.ok_or_else(|| {
+                            "edit_view_set is missing type binding context".to_string()
+                        })?,
+                        state,
+                        &reference,
+                        host,
+                        "edit_view_set",
+                    )?;
+                    let absolute = view.start + index;
+                    if absolute >= values.len() {
+                        return Err(format!(
+                            "edit_view_set index `{index}` is out of bounds for length `{}`",
+                            view.len
+                        ));
+                    }
+                    values[absolute] = args[2].clone();
+                    write_runtime_reference(
+                        scopes,
+                        plan,
+                        current_package_id.ok_or_else(|| {
+                            "edit_view_set is missing current package context".to_string()
+                        })?,
+                        current_module_id.ok_or_else(|| {
+                            "edit_view_set is missing current module context".to_string()
+                        })?,
+                        aliases
+                            .ok_or_else(|| "edit_view_set is missing alias context".to_string())?,
+                        type_bindings.ok_or_else(|| {
+                            "edit_view_set is missing type binding context".to_string()
+                        })?,
+                        state,
+                        &reference,
+                        RuntimeValue::Array(values),
+                        host,
+                    )?;
+                }
+                RuntimeElementViewBacking::RingWindow { arena, slots } => {
+                    let absolute = view.start + index;
+                    let slot = *slots.get(absolute).ok_or_else(|| {
+                        format!(
+                            "edit_view_set index `{index}` is out of bounds for length `{}`",
+                            view.len
+                        )
+                    })?;
+                    let ring = state
+                        .ring_buffers
+                        .get_mut(&arena)
+                        .ok_or_else(|| format!("invalid RingBuffer handle `{}`", arena.0))?;
+                    let entry = ring
+                        .slots
+                        .get_mut(&slot)
+                        .ok_or_else(|| format!("RingBuffer slot `{slot}` is missing"))?;
+                    *entry = args[2].clone();
+                }
+            }
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::MemoryEditViewSubviewRead => {
+            if args.len() != 3 {
+                return Err("edit_view_subview_read expects three arguments".to_string());
+            }
+            let handle = expect_edit_view(args[0].clone(), "edit_view_subview_read")?;
+            let (type_args, backing, view_start, view_len) = {
+                let view = state
+                    .edit_views
+                    .get(&handle)
+                    .ok_or_else(|| format!("invalid EditView handle `{}`", handle.0))?;
+                (
+                    view.type_args.clone(),
+                    view.backing.clone(),
+                    view.start,
+                    view.len,
+                )
+            };
+            let start = expect_int(args[1].clone(), "edit_view_subview_read start")?;
+            let end = expect_int(args[2].clone(), "edit_view_subview_read end")?;
+            let (start, end) = runtime_view_bounds(start, end, view_len, "edit_view_subview_read")?;
+            let next = insert_runtime_read_view_from_backing(
+                state,
+                &type_args,
+                backing,
+                view_start + start,
+                end - start,
+            );
+            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::ReadView(next)))
+        }
+        RuntimeIntrinsic::MemoryEditViewSubviewEdit => {
+            if args.len() != 3 {
+                return Err("edit_view_subview_edit expects three arguments".to_string());
+            }
+            let handle = expect_edit_view(args[0].clone(), "edit_view_subview_edit")?;
+            let (type_args, backing, view_start, view_len) = {
+                let view = state
+                    .edit_views
+                    .get(&handle)
+                    .ok_or_else(|| format!("invalid EditView handle `{}`", handle.0))?;
+                (
+                    view.type_args.clone(),
+                    view.backing.clone(),
+                    view.start,
+                    view.len,
+                )
+            };
+            let start = expect_int(args[1].clone(), "edit_view_subview_edit start")?;
+            let end = expect_int(args[2].clone(), "edit_view_subview_edit end")?;
+            let (start, end) = runtime_view_bounds(start, end, view_len, "edit_view_subview_edit")?;
+            let next = match backing {
+                RuntimeElementViewBacking::Buffer(buffer) => {
+                    runtime_reject_live_reference_or_opaque_conflict(
+                        scopes.as_ref().map(|scopes| scopes.as_slice()),
+                        Some(args.as_slice()),
+                        state,
+                        |_| false,
+                        |opaque, state| runtime_opaque_matches_element_buffer(opaque, state, buffer),
+                        None,
+                        Some(RuntimeOpaqueValue::EditView(handle)),
+                        |_| false,
+                        "edit_view_subview_edit rejects exclusive view acquisition while conflicting borrows or views are live".to_string(),
+                    )?;
+                    insert_runtime_edit_view_from_buffer(
+                        state,
+                        &type_args,
+                        buffer,
+                        view_start + start,
+                        end - start,
+                    )
+                }
+                RuntimeElementViewBacking::Reference(reference) => {
+                    runtime_reject_live_reference_or_opaque_conflict(
+                        scopes.as_ref().map(|scopes| scopes.as_slice()),
+                        Some(args.as_slice()),
+                        state,
+                        |candidate| candidate.target == reference.target,
+                        |opaque, state| runtime_opaque_matches_reference_predicate(
+                            opaque,
+                            state,
+                            &|candidate| candidate.target == reference.target,
+                        ),
+                        None,
+                        Some(RuntimeOpaqueValue::EditView(handle)),
+                        |_| false,
+                        "edit_view_subview_edit rejects exclusive view acquisition while conflicting borrows or views are live".to_string(),
+                    )?;
+                    insert_runtime_edit_view_from_reference(
+                        state,
+                        &type_args,
+                        reference,
+                        view_start + start,
+                        end - start,
+                    )
+                }
+                RuntimeElementViewBacking::RingWindow { arena, slots } => {
+                    let active = runtime_ring_window_active_slots(
+                        &slots,
+                        view_start + start,
+                        end - start,
+                    )
+                    .ok_or_else(|| {
+                        "edit_view_subview_edit range is out of bounds for RingBuffer-backed EditView"
+                            .to_string()
+                    })?
+                    .to_vec();
+                    let ids = runtime_ring_ids_for_slots(state, arena, &active)?;
+                    runtime_reject_live_reference_or_opaque_conflict(
+                        scopes.as_ref().map(|scopes| scopes.as_slice()),
+                        Some(args.as_slice()),
+                        state,
+                        |candidate| ids.iter().any(|id| runtime_reference_targets_ring_id(candidate, *id)),
+                        |opaque, state| runtime_opaque_matches_ring_window_predicate(
+                            opaque,
+                            state,
+                            &|candidate_arena, candidate_slots| {
+                                runtime_ring_window_overlaps_slots(
+                                    arena,
+                                    &active,
+                                    candidate_arena,
+                                    candidate_slots,
+                                )
+                            },
+                        ),
+                        None,
+                        Some(RuntimeOpaqueValue::EditView(handle)),
+                        |_| false,
+                        "edit_view_subview_edit rejects exclusive view acquisition while conflicting borrows or views are live".to_string(),
+                    )?;
+                    insert_runtime_edit_view_from_ring_window(
+                        state,
+                        &type_args,
+                        arena,
+                        slots,
+                        view_start + start,
+                        end - start,
+                    )
+                }
+            };
+            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::EditView(next)))
+        }
+        RuntimeIntrinsic::MemoryByteViewLen => {
+            let handle =
+                expect_byte_view(expect_single_arg(args, "byte_view_len")?, "byte_view_len")?;
+            let view = state
+                .byte_views
+                .get(&handle)
+                .ok_or_else(|| format!("invalid ByteView handle `{}`", handle.0))?
+                .clone();
+            let scopes = scopes.as_deref_mut().ok_or_else(|| {
+                "byte_view_len on borrowed ByteView requires runtime call context".to_string()
+            })?;
+            let _ = runtime_byte_view_values(
+                scopes,
+                plan,
+                current_package_id.ok_or_else(|| {
+                    "byte_view_len is missing current package context".to_string()
+                })?,
+                current_module_id
+                    .ok_or_else(|| "byte_view_len is missing current module context".to_string())?,
+                aliases.ok_or_else(|| "byte_view_len is missing alias context".to_string())?,
+                type_bindings
+                    .ok_or_else(|| "byte_view_len is missing type binding context".to_string())?,
+                state,
+                &view,
+                host,
+                "byte_view_len",
+            )?;
+            Ok(RuntimeValue::Int(view.len as i64))
+        }
+        RuntimeIntrinsic::MemoryByteViewAt => {
+            if args.len() != 2 {
+                return Err("byte_view_at expects two arguments".to_string());
+            }
+            let handle = expect_byte_view(args[0].clone(), "byte_view_at")?;
+            let view = state
+                .byte_views
+                .get(&handle)
+                .ok_or_else(|| format!("invalid ByteView handle `{}`", handle.0))?
+                .clone();
+            let index = runtime_index_to_usize(
+                expect_int(args[1].clone(), "byte_view_at index")?,
+                view.len,
+                "byte_view_at",
+            )?;
+            let scopes = scopes.as_deref_mut().ok_or_else(|| {
+                "byte_view_at on borrowed ByteView requires runtime call context".to_string()
+            })?;
+            Ok(RuntimeValue::Int(i64::from(
+                runtime_byte_view_values(
+                    scopes,
+                    plan,
+                    current_package_id.ok_or_else(|| {
+                        "byte_view_at is missing current package context".to_string()
+                    })?,
+                    current_module_id.ok_or_else(|| {
+                        "byte_view_at is missing current module context".to_string()
+                    })?,
+                    aliases.ok_or_else(|| "byte_view_at is missing alias context".to_string())?,
+                    type_bindings.ok_or_else(|| {
+                        "byte_view_at is missing type binding context".to_string()
+                    })?,
+                    state,
+                    &view,
+                    host,
+                    "byte_view_at",
+                )?[index],
+            )))
+        }
+        RuntimeIntrinsic::MemoryByteViewSubview => {
+            if args.len() != 3 {
+                return Err("byte_view_subview expects three arguments".to_string());
+            }
+            let handle = expect_byte_view(args[0].clone(), "byte_view_subview")?;
+            let view = state
+                .byte_views
+                .get(&handle)
+                .ok_or_else(|| format!("invalid ByteView handle `{}`", handle.0))?
+                .clone();
+            let start = expect_int(args[1].clone(), "byte_view_subview start")?;
+            let end = expect_int(args[2].clone(), "byte_view_subview end")?;
+            let (start, end) = runtime_view_bounds(start, end, view.len, "byte_view_subview")?;
+            let next = match view.backing {
+                RuntimeByteViewBacking::Buffer(buffer) => insert_runtime_byte_view_from_buffer(
+                    state,
+                    buffer,
+                    view.start + start,
+                    end - start,
+                ),
+                RuntimeByteViewBacking::Reference(reference) => {
+                    insert_runtime_byte_view_from_reference(
+                        state,
+                        reference,
+                        view.start + start,
+                        end - start,
+                    )
+                }
+            };
+            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::ByteView(next)))
+        }
+        RuntimeIntrinsic::MemoryByteViewToArray => {
+            let handle = expect_byte_view(
+                expect_single_arg(args, "byte_view_to_array")?,
+                "byte_view_to_array",
+            )?;
+            let view = state
+                .byte_views
+                .get(&handle)
+                .ok_or_else(|| format!("invalid ByteView handle `{}`", handle.0))?
+                .clone();
+            let scopes = scopes.as_deref_mut().ok_or_else(|| {
+                "byte_view_to_array on borrowed ByteView requires runtime call context".to_string()
+            })?;
+            Ok(bytes_to_runtime_array(
+                runtime_byte_view_values(
+                    scopes,
+                    plan,
+                    current_package_id.ok_or_else(|| {
+                        "byte_view_to_array is missing current package context".to_string()
+                    })?,
+                    current_module_id.ok_or_else(|| {
+                        "byte_view_to_array is missing current module context".to_string()
+                    })?,
+                    aliases
+                        .ok_or_else(|| "byte_view_to_array is missing alias context".to_string())?,
+                    type_bindings.ok_or_else(|| {
+                        "byte_view_to_array is missing type binding context".to_string()
+                    })?,
+                    state,
+                    &view,
+                    host,
+                    "byte_view_to_array",
+                )?
+                .into_iter(),
+            ))
+        }
+        RuntimeIntrinsic::MemoryByteEditViewLen => {
+            let handle = expect_byte_edit_view(
+                expect_single_arg(args, "byte_edit_view_len")?,
+                "byte_edit_view_len",
+            )?;
+            let view = state
+                .byte_edit_views
+                .get(&handle)
+                .ok_or_else(|| format!("invalid ByteEditView handle `{}`", handle.0))?
+                .clone();
+            let scopes = scopes.as_deref_mut().ok_or_else(|| {
+                "byte_edit_view_len on borrowed ByteEditView requires runtime call context"
+                    .to_string()
+            })?;
+            let _ = runtime_byte_edit_view_values(
+                scopes,
+                plan,
+                current_package_id.ok_or_else(|| {
+                    "byte_edit_view_len is missing current package context".to_string()
+                })?,
+                current_module_id.ok_or_else(|| {
+                    "byte_edit_view_len is missing current module context".to_string()
+                })?,
+                aliases.ok_or_else(|| "byte_edit_view_len is missing alias context".to_string())?,
+                type_bindings.ok_or_else(|| {
+                    "byte_edit_view_len is missing type binding context".to_string()
+                })?,
+                state,
+                &view,
+                host,
+                "byte_edit_view_len",
+            )?;
+            Ok(RuntimeValue::Int(view.len as i64))
+        }
+        RuntimeIntrinsic::MemoryByteEditViewAt => {
+            if args.len() != 2 {
+                return Err("byte_edit_view_at expects two arguments".to_string());
+            }
+            let handle = expect_byte_edit_view(args[0].clone(), "byte_edit_view_at")?;
+            let view = state
+                .byte_edit_views
+                .get(&handle)
+                .ok_or_else(|| format!("invalid ByteEditView handle `{}`", handle.0))?
+                .clone();
+            let index = runtime_index_to_usize(
+                expect_int(args[1].clone(), "byte_edit_view_at index")?,
+                view.len,
+                "byte_edit_view_at",
+            )?;
+            let scopes = scopes.as_deref_mut().ok_or_else(|| {
+                "byte_edit_view_at on borrowed ByteEditView requires runtime call context"
+                    .to_string()
+            })?;
+            Ok(RuntimeValue::Int(i64::from(
+                runtime_byte_edit_view_values(
+                    scopes,
+                    plan,
+                    current_package_id.ok_or_else(|| {
+                        "byte_edit_view_at is missing current package context".to_string()
+                    })?,
+                    current_module_id.ok_or_else(|| {
+                        "byte_edit_view_at is missing current module context".to_string()
+                    })?,
+                    aliases
+                        .ok_or_else(|| "byte_edit_view_at is missing alias context".to_string())?,
+                    type_bindings.ok_or_else(|| {
+                        "byte_edit_view_at is missing type binding context".to_string()
+                    })?,
+                    state,
+                    &view,
+                    host,
+                    "byte_edit_view_at",
+                )?[index],
+            )))
+        }
+        RuntimeIntrinsic::MemoryByteEditViewSet => {
+            if args.len() != 3 {
+                return Err("byte_edit_view_set expects three arguments".to_string());
+            }
+            let handle = expect_byte_edit_view(args[0].clone(), "byte_edit_view_set")?;
+            let view = state
+                .byte_edit_views
+                .get(&handle)
+                .ok_or_else(|| format!("invalid ByteEditView handle `{}`", handle.0))?
+                .clone();
+            let index = runtime_index_to_usize(
+                expect_int(args[1].clone(), "byte_edit_view_set index")?,
+                view.len,
+                "byte_edit_view_set",
+            )?;
+            let byte = expect_int(args[2].clone(), "byte_edit_view_set value")?;
+            if !(0..=255).contains(&byte) {
+                return Err(format!(
+                    "byte_edit_view_set value `{byte}` is out of range `0..=255`"
+                ));
+            }
+            match &view.backing {
+                RuntimeByteViewBacking::Buffer(buffer) => {
+                    let values = &mut state
+                        .byte_view_buffers
+                        .get_mut(buffer)
+                        .ok_or_else(|| format!("invalid byte view buffer `{}`", buffer.0))?
+                        .values;
+                    let absolute = view.start + index;
+                    if absolute >= values.len() {
+                        return Err(format!(
+                            "byte_edit_view_set index `{index}` is out of bounds for length `{}`",
+                            view.len
+                        ));
+                    }
+                    values[absolute] = byte as u8;
+                }
+                RuntimeByteViewBacking::Reference(reference) => {
+                    let scopes = scopes.as_deref_mut().ok_or_else(|| {
+                        "byte_edit_view_set on borrowed ByteEditView requires runtime call context"
+                            .to_string()
+                    })?;
+                    let current_package_id = current_package_id.ok_or_else(|| {
+                        "byte_edit_view_set is missing current package context".to_string()
+                    })?;
+                    let current_module_id = current_module_id.ok_or_else(|| {
+                        "byte_edit_view_set is missing current module context".to_string()
+                    })?;
+                    let aliases = aliases
+                        .ok_or_else(|| "byte_edit_view_set is missing alias context".to_string())?;
+                    let type_bindings = type_bindings.ok_or_else(|| {
+                        "byte_edit_view_set is missing type binding context".to_string()
+                    })?;
+                    let mut values = runtime_reference_array_values(
+                        scopes,
+                        plan,
+                        current_package_id,
+                        current_module_id,
+                        aliases,
+                        type_bindings,
+                        state,
+                        reference,
+                        host,
+                        "byte_edit_view_set",
+                    )?;
+                    let absolute = view.start + index;
+                    if absolute >= values.len() {
+                        return Err(format!(
+                            "byte_edit_view_set index `{index}` is out of bounds for length `{}`",
+                            view.len
+                        ));
+                    }
+                    values[absolute] = RuntimeValue::Int(byte);
+                    write_runtime_reference(
+                        scopes,
+                        plan,
+                        current_package_id,
+                        current_module_id,
+                        aliases,
+                        type_bindings,
+                        state,
+                        reference,
+                        RuntimeValue::Array(values),
+                        host,
+                    )?;
+                }
+            }
+            Ok(RuntimeValue::Unit)
+        }
+        RuntimeIntrinsic::MemoryByteEditViewSubviewRead => {
+            if args.len() != 3 {
+                return Err("byte_edit_view_subview_read expects three arguments".to_string());
+            }
+            let handle = expect_byte_edit_view(args[0].clone(), "byte_edit_view_subview_read")?;
+            let view = state
+                .byte_edit_views
+                .get(&handle)
+                .ok_or_else(|| format!("invalid ByteEditView handle `{}`", handle.0))?
+                .clone();
+            let start = expect_int(args[1].clone(), "byte_edit_view_subview_read start")?;
+            let end = expect_int(args[2].clone(), "byte_edit_view_subview_read end")?;
+            let (start, end) =
+                runtime_view_bounds(start, end, view.len, "byte_edit_view_subview_read")?;
+            let next = match view.backing {
+                RuntimeByteViewBacking::Buffer(buffer) => insert_runtime_byte_view_from_buffer(
+                    state,
+                    buffer,
+                    view.start + start,
+                    end - start,
+                ),
+                RuntimeByteViewBacking::Reference(reference) => {
+                    insert_runtime_byte_view_from_reference(
+                        state,
+                        reference,
+                        view.start + start,
+                        end - start,
+                    )
+                }
+            };
+            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::ByteView(next)))
+        }
+        RuntimeIntrinsic::MemoryByteEditViewSubviewEdit => {
+            if args.len() != 3 {
+                return Err("byte_edit_view_subview_edit expects three arguments".to_string());
+            }
+            let handle = expect_byte_edit_view(args[0].clone(), "byte_edit_view_subview_edit")?;
+            let view = state
+                .byte_edit_views
+                .get(&handle)
+                .ok_or_else(|| format!("invalid ByteEditView handle `{}`", handle.0))?
+                .clone();
+            let start = expect_int(args[1].clone(), "byte_edit_view_subview_edit start")?;
+            let end = expect_int(args[2].clone(), "byte_edit_view_subview_edit end")?;
+            let (start, end) =
+                runtime_view_bounds(start, end, view.len, "byte_edit_view_subview_edit")?;
+            runtime_reject_live_reference_or_opaque_conflict(
+                scopes.as_ref().map(|scopes| scopes.as_slice()),
+                Some(args.as_slice()),
+                state,
+                |candidate| match &view.backing {
+                    RuntimeByteViewBacking::Buffer(_) => false,
+                    RuntimeByteViewBacking::Reference(reference) => {
+                        candidate.target == reference.target
+                    }
+                },
+                |opaque, state| match &view.backing {
+                    RuntimeByteViewBacking::Buffer(buffer) => {
+                        runtime_opaque_matches_byte_buffer(opaque, state, *buffer)
+                    }
+                    RuntimeByteViewBacking::Reference(reference) => {
+                        runtime_opaque_matches_reference_predicate(
+                            opaque,
+                            state,
+                            &|candidate| candidate.target == reference.target,
+                        )
+                    }
+                },
+                None,
+                Some(RuntimeOpaqueValue::ByteEditView(handle)),
+                |_| false,
+                "byte_edit_view_subview_edit rejects exclusive view acquisition while conflicting borrows or views are live".to_string(),
+            )?;
+            let next = match view.backing {
+                RuntimeByteViewBacking::Buffer(buffer) => {
+                    insert_runtime_byte_edit_view_from_buffer(
+                        state,
+                        buffer,
+                        view.start + start,
+                        end - start,
+                    )
+                }
+                RuntimeByteViewBacking::Reference(reference) => {
+                    insert_runtime_byte_edit_view_from_reference(
+                        state,
+                        reference,
+                        view.start + start,
+                        end - start,
+                    )
+                }
+            };
+            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::ByteEditView(next)))
+        }
+        RuntimeIntrinsic::MemoryByteEditViewToArray => {
+            let handle = expect_byte_edit_view(
+                expect_single_arg(args, "byte_edit_view_to_array")?,
+                "byte_edit_view_to_array",
+            )?;
+            let view = state
+                .byte_edit_views
+                .get(&handle)
+                .ok_or_else(|| format!("invalid ByteEditView handle `{}`", handle.0))?
+                .clone();
+            let scopes = scopes.as_deref_mut().ok_or_else(|| {
+                "byte_edit_view_to_array on borrowed ByteEditView requires runtime call context"
+                    .to_string()
+            })?;
+            Ok(bytes_to_runtime_array(
+                runtime_byte_edit_view_values(
+                    scopes,
+                    plan,
+                    current_package_id.ok_or_else(|| {
+                        "byte_edit_view_to_array is missing current package context".to_string()
+                    })?,
+                    current_module_id.ok_or_else(|| {
+                        "byte_edit_view_to_array is missing current module context".to_string()
+                    })?,
+                    aliases.ok_or_else(|| {
+                        "byte_edit_view_to_array is missing alias context".to_string()
+                    })?,
+                    type_bindings.ok_or_else(|| {
+                        "byte_edit_view_to_array is missing type binding context".to_string()
+                    })?,
+                    state,
+                    &view,
+                    host,
+                    "byte_edit_view_to_array",
+                )?
+                .into_iter(),
+            ))
+        }
+        RuntimeIntrinsic::MemoryStrViewLenBytes => {
+            let handle = expect_str_view(
+                expect_single_arg(args, "str_view_len_bytes")?,
+                "str_view_len_bytes",
+            )?;
+            let view = state
+                .str_views
+                .get(&handle)
+                .ok_or_else(|| format!("invalid StrView handle `{}`", handle.0))?
+                .clone();
+            let scopes = scopes.as_deref_mut().ok_or_else(|| {
+                "str_view_len_bytes on borrowed StrView requires runtime call context".to_string()
+            })?;
+            let _ = runtime_str_view_text(
+                scopes,
+                plan,
+                current_package_id.ok_or_else(|| {
+                    "str_view_len_bytes is missing current package context".to_string()
+                })?,
+                current_module_id.ok_or_else(|| {
+                    "str_view_len_bytes is missing current module context".to_string()
+                })?,
+                aliases.ok_or_else(|| "str_view_len_bytes is missing alias context".to_string())?,
+                type_bindings.ok_or_else(|| {
+                    "str_view_len_bytes is missing type binding context".to_string()
+                })?,
+                state,
+                &view,
+                host,
+                "str_view_len_bytes",
+            )?;
+            Ok(RuntimeValue::Int(view.len as i64))
+        }
+        RuntimeIntrinsic::MemoryStrViewByteAt => {
+            if args.len() != 2 {
+                return Err("str_view_byte_at expects two arguments".to_string());
+            }
+            let handle = expect_str_view(args[0].clone(), "str_view_byte_at")?;
+            let view = state
+                .str_views
+                .get(&handle)
+                .ok_or_else(|| format!("invalid StrView handle `{}`", handle.0))?
+                .clone();
+            let index = runtime_index_to_usize(
+                expect_int(args[1].clone(), "str_view_byte_at index")?,
+                view.len,
+                "str_view_byte_at",
+            )?;
+            let scopes = scopes.as_deref_mut().ok_or_else(|| {
+                "str_view_byte_at on borrowed StrView requires runtime call context".to_string()
+            })?;
+            Ok(RuntimeValue::Int(i64::from(
+                runtime_str_view_text(
+                    scopes,
+                    plan,
+                    current_package_id.ok_or_else(|| {
+                        "str_view_byte_at is missing current package context".to_string()
+                    })?,
+                    current_module_id.ok_or_else(|| {
+                        "str_view_byte_at is missing current module context".to_string()
+                    })?,
+                    aliases
+                        .ok_or_else(|| "str_view_byte_at is missing alias context".to_string())?,
+                    type_bindings.ok_or_else(|| {
+                        "str_view_byte_at is missing type binding context".to_string()
+                    })?,
+                    state,
+                    &view,
+                    host,
+                    "str_view_byte_at",
+                )?
+                .as_bytes()[index],
+            )))
+        }
+        RuntimeIntrinsic::MemoryStrViewSubview => {
+            if args.len() != 3 {
+                return Err("str_view_subview expects three arguments".to_string());
+            }
+            let handle = expect_str_view(args[0].clone(), "str_view_subview")?;
+            let view = state
+                .str_views
+                .get(&handle)
+                .ok_or_else(|| format!("invalid StrView handle `{}`", handle.0))?
+                .clone();
+            let start = expect_int(args[1].clone(), "str_view_subview start")?;
+            let end = expect_int(args[2].clone(), "str_view_subview end")?;
+            let (start, end) = runtime_view_bounds(start, end, view.len, "str_view_subview")?;
+            let next = match view.backing {
+                RuntimeStrViewBacking::Buffer(buffer) => insert_runtime_str_view_from_buffer(
+                    state,
+                    buffer,
+                    view.start + start,
+                    end - start,
+                ),
+                RuntimeStrViewBacking::Reference(reference) => {
+                    insert_runtime_str_view_from_reference(
+                        state,
+                        reference,
+                        view.start + start,
+                        end - start,
+                    )
+                }
+            };
+            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::StrView(next)))
+        }
+        RuntimeIntrinsic::MemoryStrViewToStr => {
+            let handle = expect_str_view(
+                expect_single_arg(args, "str_view_to_str")?,
+                "str_view_to_str",
+            )?;
+            let view = state
+                .str_views
+                .get(&handle)
+                .ok_or_else(|| format!("invalid StrView handle `{}`", handle.0))?
+                .clone();
+            let scopes = scopes.as_deref_mut().ok_or_else(|| {
+                "str_view_to_str on borrowed StrView requires runtime call context".to_string()
+            })?;
+            Ok(RuntimeValue::Str(runtime_str_view_text(
+                scopes,
+                plan,
+                current_package_id.ok_or_else(|| {
+                    "str_view_to_str is missing current package context".to_string()
+                })?,
+                current_module_id.ok_or_else(|| {
+                    "str_view_to_str is missing current module context".to_string()
+                })?,
+                aliases.ok_or_else(|| "str_view_to_str is missing alias context".to_string())?,
+                type_bindings
+                    .ok_or_else(|| "str_view_to_str is missing type binding context".to_string())?,
+                state,
+                &view,
+                host,
+                "str_view_to_str",
+            )?))
         }
         RuntimeIntrinsic::AudioDefaultOutputTry => {
             if !args.is_empty() {
@@ -16966,6 +24128,47 @@ fn execute_runtime_core_intrinsic(
             if args.len() != 2 {
                 return Err("list_push expects two arguments".to_string());
             }
+            if let Some(RuntimeValue::Ref(reference)) = final_args.first().cloned() {
+                let scopes = scopes
+                    .as_deref_mut()
+                    .ok_or_else(|| "list_push on refs requires runtime scopes".to_string())?;
+                let current_package_id = current_package_id
+                    .ok_or_else(|| "list_push on refs requires package context".to_string())?;
+                let current_module_id = current_module_id
+                    .ok_or_else(|| "list_push on refs requires module context".to_string())?;
+                let empty_aliases = BTreeMap::new();
+                let aliases = aliases.unwrap_or(&empty_aliases);
+                let empty_type_bindings = BTreeMap::new();
+                let type_bindings = type_bindings.unwrap_or(&empty_type_bindings);
+                let RuntimeValue::List(mut values) = read_runtime_reference(
+                    scopes,
+                    plan,
+                    current_package_id,
+                    current_module_id,
+                    aliases,
+                    type_bindings,
+                    state,
+                    &reference,
+                    host,
+                )?
+                else {
+                    return Err("list_push expects List".to_string());
+                };
+                values.push(args[1].clone());
+                write_runtime_reference(
+                    scopes,
+                    plan,
+                    current_package_id,
+                    current_module_id,
+                    aliases,
+                    type_bindings,
+                    state,
+                    &reference,
+                    RuntimeValue::List(values),
+                    host,
+                )?;
+                return Ok(RuntimeValue::Unit);
+            }
             let Some(RuntimeValue::List(values)) = final_args.get_mut(0) else {
                 return Err("list_push expects List".to_string());
             };
@@ -16975,6 +24178,49 @@ fn execute_runtime_core_intrinsic(
         RuntimeIntrinsic::ListPop => {
             if args.len() != 1 {
                 return Err("list_pop expects one argument".to_string());
+            }
+            if let Some(RuntimeValue::Ref(reference)) = final_args.first().cloned() {
+                let scopes = scopes
+                    .as_deref_mut()
+                    .ok_or_else(|| "list_pop on refs requires runtime scopes".to_string())?;
+                let current_package_id = current_package_id
+                    .ok_or_else(|| "list_pop on refs requires package context".to_string())?;
+                let current_module_id = current_module_id
+                    .ok_or_else(|| "list_pop on refs requires module context".to_string())?;
+                let empty_aliases = BTreeMap::new();
+                let aliases = aliases.unwrap_or(&empty_aliases);
+                let empty_type_bindings = BTreeMap::new();
+                let type_bindings = type_bindings.unwrap_or(&empty_type_bindings);
+                let RuntimeValue::List(mut values) = read_runtime_reference(
+                    scopes,
+                    plan,
+                    current_package_id,
+                    current_module_id,
+                    aliases,
+                    type_bindings,
+                    state,
+                    &reference,
+                    host,
+                )?
+                else {
+                    return Err("list_pop expects List".to_string());
+                };
+                let value = values
+                    .pop()
+                    .ok_or_else(|| "list_pop called on empty list".to_string())?;
+                write_runtime_reference(
+                    scopes,
+                    plan,
+                    current_package_id,
+                    current_module_id,
+                    aliases,
+                    type_bindings,
+                    state,
+                    &reference,
+                    RuntimeValue::List(values),
+                    host,
+                )?;
+                return Ok(value);
             }
             let Some(RuntimeValue::List(values)) = final_args.get_mut(0) else {
                 return Err("list_pop expects List".to_string());
@@ -16986,6 +24232,51 @@ fn execute_runtime_core_intrinsic(
         RuntimeIntrinsic::ListTryPopOr => {
             if args.len() != 2 {
                 return Err("list_try_pop_or expects two arguments".to_string());
+            }
+            if let Some(RuntimeValue::Ref(reference)) = final_args.first().cloned() {
+                let scopes = scopes
+                    .as_deref_mut()
+                    .ok_or_else(|| "list_try_pop_or on refs requires runtime scopes".to_string())?;
+                let current_package_id = current_package_id.ok_or_else(|| {
+                    "list_try_pop_or on refs requires package context".to_string()
+                })?;
+                let current_module_id = current_module_id
+                    .ok_or_else(|| "list_try_pop_or on refs requires module context".to_string())?;
+                let empty_aliases = BTreeMap::new();
+                let aliases = aliases.unwrap_or(&empty_aliases);
+                let empty_type_bindings = BTreeMap::new();
+                let type_bindings = type_bindings.unwrap_or(&empty_type_bindings);
+                let RuntimeValue::List(mut values) = read_runtime_reference(
+                    scopes,
+                    plan,
+                    current_package_id,
+                    current_module_id,
+                    aliases,
+                    type_bindings,
+                    state,
+                    &reference,
+                    host,
+                )?
+                else {
+                    return Err("list_try_pop_or expects List".to_string());
+                };
+                let result = match values.pop() {
+                    Some(value) => make_pair(RuntimeValue::Bool(true), value),
+                    None => make_pair(RuntimeValue::Bool(false), args[1].clone()),
+                };
+                write_runtime_reference(
+                    scopes,
+                    plan,
+                    current_package_id,
+                    current_module_id,
+                    aliases,
+                    type_bindings,
+                    state,
+                    &reference,
+                    RuntimeValue::List(values),
+                    host,
+                )?;
+                return Ok(result);
             }
             let Some(RuntimeValue::List(values)) = final_args.get_mut(0) else {
                 return Err("list_try_pop_or expects List".to_string());
@@ -17381,13 +24672,13 @@ fn build_runtime_call_args_from_chain_stage(
     Ok((callable, type_args, call_args))
 }
 
-fn reject_edit_chain_stage_call(
+fn call_uses_edit_modes(
     callable: &[String],
     current_package_id: &str,
     current_module_id: &str,
     call_args: &[RuntimeCallArg],
     plan: &RuntimePackagePlan,
-) -> RuntimeEvalResult<()> {
+) -> RuntimeEvalResult<bool> {
     if let Some(routine_index) = resolve_routine_index_for_call(
         plan,
         current_package_id,
@@ -17403,24 +24694,36 @@ fn reject_edit_chain_stage_call(
             .routines
             .get(routine_index)
             .ok_or_else(|| format!("invalid routine index `{routine_index}`"))?;
-        if routine
+        return Ok(routine
             .params
             .iter()
-            .any(|param| param.mode.as_deref() == Some("edit"))
-        {
-            return Err(format!(
-                "chain stage `{}` does not yet support `edit` parameters",
-                callable.join(".")
-            )
-            .into());
-        }
-        return Ok(());
+            .any(|param| param.mode.as_deref() == Some("edit")));
     }
     let intrinsic = resolve_runtime_intrinsic_path(callable)
         .ok_or_else(|| format!("unsupported runtime callable `{}`", callable.join(".")))?;
-    if !intrinsic_edit_arg_indices(intrinsic).is_empty() {
+    Ok(!intrinsic_edit_arg_indices(intrinsic).is_empty())
+}
+
+fn validate_spawned_call_capabilities(
+    op: ParsedUnaryOp,
+    callable: &[String],
+    current_package_id: &str,
+    current_module_id: &str,
+    call_args: &[RuntimeCallArg],
+    plan: &RuntimePackagePlan,
+    context: &str,
+) -> RuntimeEvalResult<()> {
+    if matches!(op, ParsedUnaryOp::Split)
+        && call_uses_edit_modes(
+            callable,
+            current_package_id,
+            current_module_id,
+            call_args,
+            plan,
+        )?
+    {
         return Err(format!(
-            "chain stage `{}` does not yet support `edit` intrinsic arguments",
+            "{context} `{}` does not yet support `edit` parameters or intrinsic arguments across split/thread boundaries",
             callable.join(".")
         )
         .into());
@@ -17453,13 +24756,6 @@ fn execute_runtime_chain_stage(
         state,
         host,
     )?;
-    reject_edit_chain_stage_call(
-        &callable,
-        current_package_id,
-        current_module_id,
-        &call_args,
-        plan,
-    )?;
     execute_call_by_path(
         &callable,
         None,
@@ -17490,7 +24786,7 @@ fn spawn_runtime_chain_stage(
     state: &mut RuntimeExecutionState,
     host: &mut dyn RuntimeHost,
 ) -> RuntimeEvalResult<RuntimeValue> {
-    let (callable, type_args, call_args) = build_runtime_call_args_from_chain_stage(
+    let (callable, type_args, mut call_args) = build_runtime_call_args_from_chain_stage(
         stage,
         Some(input),
         plan,
@@ -17502,12 +24798,14 @@ fn spawn_runtime_chain_stage(
         state,
         host,
     )?;
-    reject_edit_chain_stage_call(
+    validate_spawned_call_capabilities(
+        op,
         &callable,
         current_package_id,
         current_module_id,
         &call_args,
         plan,
+        "chain stage",
     )?;
     if let Some(routine_index) = resolve_routine_index_for_call(
         plan,
@@ -17529,6 +24827,7 @@ fn spawn_runtime_chain_stage(
     } else {
         let intrinsic = resolve_runtime_intrinsic_path(&callable)
             .ok_or_else(|| format!("unsupported runtime callable `{}`", callable.join(".")))?;
+        call_args = bind_call_args_for_intrinsic(&callable, call_args)?;
         consume_take_call_args(scopes, intrinsic_take_arg_indices(intrinsic), &call_args)?;
     }
     let thread_id = match op {
@@ -17536,6 +24835,13 @@ fn spawn_runtime_chain_stage(
         ParsedUnaryOp::Split => allocate_scheduler_thread_id(state),
         _ => unreachable!(),
     };
+    if matches!(op, ParsedUnaryOp::Split) {
+        runtime_validate_split_scope_capture(scopes, &call_args, state, "split capture")?;
+    }
+    let mut call_args = call_args;
+    if matches!(op, ParsedUnaryOp::Split) {
+        detach_moved_split_call_args(scopes, &mut call_args);
+    }
     let pending = RuntimePendingState::Pending(RuntimeDeferredWork::Call(RuntimeDeferredCall {
         callable,
         resolved_routine: None,
@@ -17560,6 +24866,284 @@ fn spawn_runtime_chain_stage(
     Ok(value)
 }
 
+fn auto_await_runtime_value(
+    value: RuntimeValue,
+    plan: &RuntimePackagePlan,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
+) -> RuntimeEvalResult<RuntimeValue> {
+    match value {
+        RuntimeValue::Opaque(RuntimeOpaqueValue::Task(_))
+        | RuntimeValue::Opaque(RuntimeOpaqueValue::Thread(_)) => {
+            Ok(await_runtime_value(value, plan, state, host)?)
+        }
+        other => Ok(other),
+    }
+}
+
+fn build_runtime_lazy_chain_value(
+    introducer: ParsedChainIntroducer,
+    steps: &[ParsedChainStep],
+    current_package_id: &str,
+    current_module_id: &str,
+    scopes: &[RuntimeScope],
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+) -> RuntimeValue {
+    let pending = RuntimePendingState::Pending(RuntimeDeferredWork::Expr(RuntimeDeferredExpr {
+        expr: ParsedExpr::Chain {
+            style: "forward".to_string(),
+            introducer,
+            steps: steps.to_vec(),
+        },
+        current_package_id: current_package_id.to_string(),
+        current_module_id: current_module_id.to_string(),
+        aliases: aliases.clone(),
+        type_bindings: type_bindings.clone(),
+        scopes: scopes.to_vec(),
+        thread_id: state.current_thread_id,
+        allow_async: true,
+    }));
+    RuntimeValue::Opaque(RuntimeOpaqueValue::Lazy(insert_runtime_lazy(
+        state,
+        &[],
+        pending,
+    )))
+}
+
+fn choose_parallel_chain_stage_op(
+    stage: &ParsedChainStep,
+    seed: &RuntimeValue,
+    plan: &RuntimePackagePlan,
+    current_package_id: &str,
+    current_module_id: &str,
+    scopes: &mut Vec<RuntimeScope>,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
+) -> ParsedUnaryOp {
+    let Ok((callable, _, call_args)) = build_runtime_call_args_from_chain_stage(
+        stage,
+        Some(seed.clone()),
+        plan,
+        current_package_id,
+        current_module_id,
+        scopes,
+        aliases,
+        type_bindings,
+        state,
+        host,
+    ) else {
+        return ParsedUnaryOp::Split;
+    };
+    let is_async_stage = resolve_routine_index_for_call(
+        plan,
+        current_package_id,
+        current_module_id,
+        &callable,
+        &call_args,
+        None,
+        None,
+        false,
+        None,
+    )
+    .ok()
+    .flatten()
+    .and_then(|routine_index| plan.routines.get(routine_index))
+    .map(|routine| routine.is_async)
+    .unwrap_or(false);
+    if is_async_stage
+        || call_uses_edit_modes(
+            &callable,
+            current_package_id,
+            current_module_id,
+            &call_args,
+            plan,
+        )
+        .unwrap_or(false)
+    {
+        ParsedUnaryOp::Weave
+    } else {
+        ParsedUnaryOp::Split
+    }
+}
+
+fn eval_forward_runtime_chain(
+    ordered: &[&ParsedChainStep],
+    seed: RuntimeValue,
+    plan: &RuntimePackagePlan,
+    current_package_id: &str,
+    current_module_id: &str,
+    scopes: &mut Vec<RuntimeScope>,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
+) -> RuntimeEvalResult<RuntimeValue> {
+    let mut current = seed;
+    for stage in ordered.iter().skip(1) {
+        current = execute_runtime_chain_stage(
+            stage,
+            Some(current),
+            true,
+            plan,
+            current_package_id,
+            current_module_id,
+            scopes,
+            aliases,
+            type_bindings,
+            state,
+            host,
+        )?;
+    }
+    Ok(current)
+}
+
+fn eval_async_runtime_chain(
+    ordered: &[&ParsedChainStep],
+    seed: RuntimeValue,
+    plan: &RuntimePackagePlan,
+    current_package_id: &str,
+    current_module_id: &str,
+    scopes: &mut Vec<RuntimeScope>,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
+) -> RuntimeEvalResult<RuntimeValue> {
+    let mut current = auto_await_runtime_value(seed, plan, state, host)?;
+    for stage in ordered.iter().skip(1) {
+        current = execute_runtime_chain_stage(
+            stage,
+            Some(current),
+            true,
+            plan,
+            current_package_id,
+            current_module_id,
+            scopes,
+            aliases,
+            type_bindings,
+            state,
+            host,
+        )?;
+        current = auto_await_runtime_value(current, plan, state, host)?;
+    }
+    Ok(current)
+}
+
+fn eval_broadcast_runtime_chain(
+    ordered: &[&ParsedChainStep],
+    seed: RuntimeValue,
+    plan: &RuntimePackagePlan,
+    current_package_id: &str,
+    current_module_id: &str,
+    scopes: &mut Vec<RuntimeScope>,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
+) -> RuntimeEvalResult<RuntimeValue> {
+    let mut values = Vec::new();
+    for stage in ordered.iter().skip(1) {
+        values.push(execute_runtime_chain_stage(
+            stage,
+            Some(seed.clone()),
+            true,
+            plan,
+            current_package_id,
+            current_module_id,
+            scopes,
+            aliases,
+            type_bindings,
+            state,
+            host,
+        )?);
+    }
+    Ok(RuntimeValue::List(values))
+}
+
+fn eval_collect_runtime_chain(
+    ordered: &[&ParsedChainStep],
+    seed: RuntimeValue,
+    plan: &RuntimePackagePlan,
+    current_package_id: &str,
+    current_module_id: &str,
+    scopes: &mut Vec<RuntimeScope>,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
+) -> RuntimeEvalResult<RuntimeValue> {
+    let mut current = seed;
+    let mut values = Vec::new();
+    for stage in ordered.iter().skip(1) {
+        current = execute_runtime_chain_stage(
+            stage,
+            Some(current),
+            true,
+            plan,
+            current_package_id,
+            current_module_id,
+            scopes,
+            aliases,
+            type_bindings,
+            state,
+            host,
+        )?;
+        values.push(current.clone());
+    }
+    Ok(RuntimeValue::List(values))
+}
+
+fn eval_parallel_runtime_chain(
+    ordered: &[&ParsedChainStep],
+    seed: RuntimeValue,
+    plan: &RuntimePackagePlan,
+    current_package_id: &str,
+    current_module_id: &str,
+    scopes: &mut Vec<RuntimeScope>,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
+) -> RuntimeEvalResult<RuntimeValue> {
+    let mut spawned = Vec::new();
+    for stage in ordered.iter().skip(1) {
+        let op = choose_parallel_chain_stage_op(
+            stage,
+            &seed,
+            plan,
+            current_package_id,
+            current_module_id,
+            &mut scopes.clone(),
+            aliases,
+            type_bindings,
+            state,
+            host,
+        );
+        spawned.push(spawn_runtime_chain_stage(
+            op,
+            stage,
+            seed.clone(),
+            plan,
+            current_package_id,
+            current_module_id,
+            scopes,
+            aliases,
+            type_bindings,
+            state,
+            host,
+        )?);
+    }
+    let mut values = Vec::new();
+    for value in spawned {
+        values.push(await_runtime_value(value, plan, state, host)?);
+    }
+    Ok(RuntimeValue::List(values))
+}
+
 fn eval_runtime_chain_expr(
     style: &str,
     introducer: ParsedChainIntroducer,
@@ -17578,6 +25162,18 @@ fn eval_runtime_chain_expr(
             .to_string()
             .into());
     }
+    if style == "lazy" {
+        return Ok(build_runtime_lazy_chain_value(
+            introducer,
+            steps,
+            current_package_id,
+            current_module_id,
+            scopes,
+            aliases,
+            type_bindings,
+            state,
+        ));
+    }
     let ordered = normalized_chain_indices(introducer, steps)
         .into_iter()
         .map(|index| &steps[index])
@@ -17595,112 +25191,73 @@ fn eval_runtime_chain_expr(
         state,
         host,
     )?;
+    if style == "plan" {
+        return Ok(seed);
+    }
     if ordered.len() == 1 {
         return Ok(seed);
     }
     match style {
-        "forward" | "lazy" | "async" | "plan" => {
-            let mut current = seed;
-            for stage in ordered.iter().skip(1) {
-                current = execute_runtime_chain_stage(
-                    stage,
-                    Some(current),
-                    true,
-                    plan,
-                    current_package_id,
-                    current_module_id,
-                    scopes,
-                    aliases,
-                    type_bindings,
-                    state,
-                    host,
-                )?;
-                if style == "async" {
-                    match current {
-                        RuntimeValue::Opaque(RuntimeOpaqueValue::Task(_))
-                        | RuntimeValue::Opaque(RuntimeOpaqueValue::Thread(_)) => {
-                            current = await_runtime_value(current, plan, state, host)?
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            Ok(current)
-        }
-        "collect" | "broadcast" => {
-            let mut values = Vec::new();
-            for stage in ordered.iter().skip(1) {
-                values.push(execute_runtime_chain_stage(
-                    stage,
-                    Some(seed.clone()),
-                    true,
-                    plan,
-                    current_package_id,
-                    current_module_id,
-                    scopes,
-                    aliases,
-                    type_bindings,
-                    state,
-                    host,
-                )?);
-            }
-            Ok(RuntimeValue::List(values))
-        }
-        "parallel" => {
-            let mut values = Vec::new();
-            for stage in ordered.iter().skip(1) {
-                let is_async_stage = build_runtime_call_args_from_chain_stage(
-                    stage,
-                    Some(seed.clone()),
-                    plan,
-                    current_package_id,
-                    current_module_id,
-                    &mut scopes.clone(),
-                    aliases,
-                    type_bindings,
-                    state,
-                    host,
-                )
-                .ok()
-                .and_then(|(callable, _, call_args)| {
-                    resolve_routine_index_for_call(
-                        plan,
-                        current_package_id,
-                        current_module_id,
-                        &callable,
-                        &call_args,
-                        None,
-                        None,
-                        false,
-                        None,
-                    )
-                    .ok()
-                    .flatten()
-                })
-                .and_then(|routine_index| plan.routines.get(routine_index))
-                .map(|routine| routine.is_async)
-                .unwrap_or(false);
-                let spawned = spawn_runtime_chain_stage(
-                    if is_async_stage {
-                        ParsedUnaryOp::Weave
-                    } else {
-                        ParsedUnaryOp::Split
-                    },
-                    stage,
-                    seed.clone(),
-                    plan,
-                    current_package_id,
-                    current_module_id,
-                    scopes,
-                    aliases,
-                    type_bindings,
-                    state,
-                    host,
-                )?;
-                values.push(await_runtime_value(spawned, plan, state, host)?);
-            }
-            Ok(RuntimeValue::List(values))
-        }
+        "forward" => eval_forward_runtime_chain(
+            &ordered,
+            seed,
+            plan,
+            current_package_id,
+            current_module_id,
+            scopes,
+            aliases,
+            type_bindings,
+            state,
+            host,
+        ),
+        "async" => eval_async_runtime_chain(
+            &ordered,
+            seed,
+            plan,
+            current_package_id,
+            current_module_id,
+            scopes,
+            aliases,
+            type_bindings,
+            state,
+            host,
+        ),
+        "broadcast" => eval_broadcast_runtime_chain(
+            &ordered,
+            seed,
+            plan,
+            current_package_id,
+            current_module_id,
+            scopes,
+            aliases,
+            type_bindings,
+            state,
+            host,
+        ),
+        "collect" => eval_collect_runtime_chain(
+            &ordered,
+            seed,
+            plan,
+            current_package_id,
+            current_module_id,
+            scopes,
+            aliases,
+            type_bindings,
+            state,
+            host,
+        ),
+        "parallel" => eval_parallel_runtime_chain(
+            &ordered,
+            seed,
+            plan,
+            current_package_id,
+            current_module_id,
+            scopes,
+            aliases,
+            type_bindings,
+            state,
+            host,
+        ),
         other => Err(format!("unsupported runtime chain style `{other}`").into()),
     }
 }
@@ -17873,6 +25430,63 @@ fn drive_runtime_thread(
     Ok(())
 }
 
+fn drive_runtime_lazy(
+    handle: RuntimeLazyHandle,
+    plan: &RuntimePackagePlan,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
+) -> Result<(), String> {
+    let pending = {
+        let lazy = state
+            .lazy_values
+            .get_mut(&handle)
+            .ok_or_else(|| format!("invalid Lazy handle `{}`", handle.0))?;
+        match std::mem::replace(&mut lazy.state, RuntimePendingState::Running) {
+            RuntimePendingState::Pending(pending) => pending,
+            RuntimePendingState::Completed(value) => {
+                lazy.state = RuntimePendingState::Completed(value);
+                return Ok(());
+            }
+            RuntimePendingState::Failed(message) => {
+                lazy.state = RuntimePendingState::Failed(message);
+                return Ok(());
+            }
+            RuntimePendingState::Running => {
+                return Err(format!("Lazy `{}` is already running", handle.0));
+            }
+        }
+    };
+    let next_state = match execute_deferred_work(pending, plan, state, host) {
+        Ok(value) => RuntimePendingState::Completed(value),
+        Err(message) => RuntimePendingState::Failed(message),
+    };
+    state
+        .lazy_values
+        .get_mut(&handle)
+        .ok_or_else(|| format!("invalid Lazy handle `{}`", handle.0))?
+        .state = next_state;
+    Ok(())
+}
+
+fn force_runtime_value(
+    value: RuntimeValue,
+    plan: &RuntimePackagePlan,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
+) -> Result<RuntimeValue, String> {
+    match value {
+        RuntimeValue::Opaque(RuntimeOpaqueValue::Lazy(handle)) => {
+            drive_runtime_lazy(handle, plan, state, host)?;
+            let lazy = state
+                .lazy_values
+                .get(&handle)
+                .ok_or_else(|| format!("invalid Lazy handle `{}`", handle.0))?;
+            pending_state_value(&lazy.state, &format!("Lazy `{}`", handle.0))
+        }
+        other => Ok(other),
+    }
+}
+
 fn capture_spawned_phrase_call(
     op: ParsedUnaryOp,
     subject: &ParsedExpr,
@@ -17880,6 +25494,7 @@ fn capture_spawned_phrase_call(
     attached: &[ParsedHeaderAttachment],
     qualifier_kind: ParsedPhraseQualifierKind,
     qualifier: &str,
+    qualifier_type_args: &[String],
     resolved_callable: Option<&[String]>,
     resolved_routine: Option<&str>,
     dynamic_dispatch: Option<&ParsedDynamicDispatch>,
@@ -17892,18 +25507,33 @@ fn capture_spawned_phrase_call(
     state: &mut RuntimeExecutionState,
     host: &mut dyn RuntimeHost,
 ) -> RuntimeEvalResult<Option<RuntimeValue>> {
-    let (callable, type_args, call_args, call_routine, call_dynamic_dispatch) = match qualifier_kind
+    let (callable, type_args, mut call_args, call_routine, call_dynamic_dispatch) =
+        match qualifier_kind
     {
-        ParsedPhraseQualifierKind::Call | ParsedPhraseQualifierKind::Apply => {
-            if qualifier != "call" && qualifier_kind == ParsedPhraseQualifierKind::Call {
+        ParsedPhraseQualifierKind::Call
+        | ParsedPhraseQualifierKind::Apply
+        | ParsedPhraseQualifierKind::Weave
+        | ParsedPhraseQualifierKind::Split => {
+            if !matches!(
+                qualifier_kind,
+                ParsedPhraseQualifierKind::Apply
+                    | ParsedPhraseQualifierKind::Weave
+                    | ParsedPhraseQualifierKind::Split
+            ) && qualifier != "call"
+            {
                 return Ok(None);
             }
             let callable = resolved_callable
                 .map(|path| path.to_vec())
                 .or_else(|| resolve_callable_path(subject, aliases))
                 .ok_or_else(|| format!("unsupported runtime callable `{subject:?}`"))?;
-            let type_args =
-                resolve_runtime_type_args(&extract_generic_type_args(subject), type_bindings);
+            let type_args = if matches!(qualifier_kind, ParsedPhraseQualifierKind::Apply)
+                || qualifier_type_args.is_empty()
+            {
+                resolve_runtime_type_args(&extract_generic_type_args(subject), type_bindings)
+            } else {
+                qualifier_type_args.to_vec()
+            };
             let call_args = collect_call_args(
                 args,
                 attached,
@@ -17941,10 +25571,11 @@ fn capture_spawned_phrase_call(
                 .ok_or_else(|| {
                     format!("unsupported runtime named qualifier callable `{qualifier}`")
                 })?;
-            let type_args = resolve_runtime_type_args(
-                &extract_generic_type_args(&callable_expr),
-                type_bindings,
-            );
+            let type_args = if qualifier_type_args.is_empty() {
+                resolve_runtime_type_args(&extract_generic_type_args(&callable_expr), type_bindings)
+            } else {
+                qualifier_type_args.to_vec()
+            };
             let mut call_args = vec![RuntimeCallArg {
                 name: None,
                 value: receiver,
@@ -17979,7 +25610,11 @@ fn capture_spawned_phrase_call(
             let callable = resolved_callable
                 .map(|callable| callable.to_vec())
                 .unwrap_or_else(|| vec![qualifier.to_string()]);
-            let type_args = runtime_receiver_type_args(&receiver, state);
+            let type_args = if qualifier_type_args.is_empty() {
+                runtime_receiver_type_args(&receiver, state)
+            } else {
+                qualifier_type_args.to_vec()
+            };
             let mut call_args = vec![RuntimeCallArg {
                 name: None,
                 value: receiver,
@@ -18005,7 +25640,11 @@ fn capture_spawned_phrase_call(
                 dynamic_dispatch.cloned(),
             )
         }
-        ParsedPhraseQualifierKind::Try | ParsedPhraseQualifierKind::AwaitApply => return Ok(None),
+        ParsedPhraseQualifierKind::Try
+        | ParsedPhraseQualifierKind::AwaitApply
+        | ParsedPhraseQualifierKind::Await
+        | ParsedPhraseQualifierKind::Must
+        | ParsedPhraseQualifierKind::Fallback => return Ok(None),
     };
 
     if let Some(routine_index) = resolve_routine_index_for_call(
@@ -18024,26 +25663,29 @@ fn capture_spawned_phrase_call(
             .get(routine_index)
             .ok_or_else(|| format!("invalid routine index `{routine_index}`"))?;
         let bound_args = bind_call_args_for_routine(routine, call_args.clone())?;
-        if routine
-            .params
-            .iter()
-            .any(|param| param.mode.as_deref() == Some("edit"))
-        {
-            return Err("spawned runtime calls do not yet support `edit` parameters"
-                .to_string()
-                .into());
-        }
+        validate_spawned_call_capabilities(
+            op,
+            &callable,
+            current_package_id,
+            current_module_id,
+            &call_args,
+            plan,
+            "spawned runtime call",
+        )?;
         consume_take_bound_args(scopes, routine, &bound_args)?;
     } else {
         let intrinsic = resolve_runtime_intrinsic_path(&callable)
             .ok_or_else(|| format!("unsupported runtime callable `{}`", callable.join(".")))?;
-        if !intrinsic_edit_arg_indices(intrinsic).is_empty() {
-            return Err(
-                "spawned runtime intrinsic calls do not yet support `edit` arguments"
-                    .to_string()
-                    .into(),
-            );
-        }
+        call_args = bind_call_args_for_intrinsic(&callable, call_args)?;
+        validate_spawned_call_capabilities(
+            op,
+            &callable,
+            current_package_id,
+            current_module_id,
+            &call_args,
+            plan,
+            "spawned runtime intrinsic call",
+        )?;
         consume_take_call_args(scopes, intrinsic_take_arg_indices(intrinsic), &call_args)?;
     }
 
@@ -18052,6 +25694,13 @@ fn capture_spawned_phrase_call(
         ParsedUnaryOp::Split => allocate_scheduler_thread_id(state),
         _ => unreachable!(),
     };
+    if matches!(op, ParsedUnaryOp::Split) {
+        runtime_validate_split_scope_capture(scopes, &call_args, state, "split capture")?;
+    }
+    let mut call_args = call_args;
+    if matches!(op, ParsedUnaryOp::Split) {
+        detach_moved_split_call_args(scopes, &mut call_args);
+    }
     let pending = RuntimePendingState::Pending(RuntimeDeferredWork::Call(RuntimeDeferredCall {
         callable,
         resolved_routine: call_routine,
@@ -18085,7 +25734,11 @@ fn spawn_runtime_expr(
     aliases: &BTreeMap<String, Vec<String>>,
     type_bindings: &RuntimeTypeBindings,
     state: &mut RuntimeExecutionState,
-) -> RuntimeValue {
+) -> RuntimeEvalResult<RuntimeValue> {
+    if matches!(op, ParsedUnaryOp::Split) {
+        runtime_validate_split_scope_capture(scopes, &[], state, "split capture")
+            .map_err(RuntimeEvalSignal::from)?;
+    }
     let thread_id = match op {
         ParsedUnaryOp::Weave => state.current_thread_id,
         ParsedUnaryOp::Split => allocate_scheduler_thread_id(state),
@@ -18101,7 +25754,7 @@ fn spawn_runtime_expr(
         thread_id,
         allow_async: true,
     }));
-    match op {
+    Ok(match op {
         ParsedUnaryOp::Weave => RuntimeValue::Opaque(RuntimeOpaqueValue::Task(
             insert_runtime_task(state, &[], pending),
         )),
@@ -18109,7 +25762,7 @@ fn spawn_runtime_expr(
             insert_runtime_thread(state, &[], pending),
         )),
         _ => unreachable!(),
-    }
+    })
 }
 
 fn await_runtime_value(
@@ -18139,6 +25792,87 @@ fn await_runtime_value(
     }
 }
 
+fn must_unwrap_runtime_value(value: RuntimeValue) -> RuntimeEvalResult<RuntimeValue> {
+    match value {
+        RuntimeValue::Variant { name, payload } if variant_name_matches(&name, "Option.Some") => {
+            match payload.as_slice() {
+                [value] => Ok(value.clone()),
+                _ => Err(format!(
+                    "runtime must qualifier `must` expected Option.Some with one payload value, got `{name}`"
+                )
+                .into()),
+            }
+        }
+        RuntimeValue::Variant { ref name, .. } if variant_name_matches(name, "Option.None") => {
+            Err("runtime must qualifier `must` encountered Option.None"
+                .to_string()
+                .into())
+        }
+        RuntimeValue::Variant { name, payload } if variant_name_matches(&name, "Result.Ok") => {
+            match payload.as_slice() {
+                [value] => Ok(value.clone()),
+                _ => Err(format!(
+                    "runtime must qualifier `must` expected Result.Ok with one payload value, got `{name}`"
+                )
+                .into()),
+            }
+        }
+        RuntimeValue::Variant { name, payload } if variant_name_matches(&name, "Result.Err") => {
+            match payload.as_slice() {
+                [RuntimeValue::Str(message)] => Err(message.clone().into()),
+                [other] => Err(format!(
+                    "runtime must qualifier `must` expected Result.Err(Str), got `{other:?}`"
+                )
+                .into()),
+                _ => Err(format!(
+                    "runtime must qualifier `must` expected Result.Err with one payload value, got `{name}`"
+                )
+                .into()),
+            }
+        }
+        other => Err(format!(
+            "runtime must qualifier `must` expects Option-shape or Result[T, Str], got `{other:?}`"
+        )
+        .into()),
+    }
+}
+
+fn fallback_runtime_value(
+    value: RuntimeValue,
+    fallback: RuntimeValue,
+) -> RuntimeEvalResult<RuntimeValue> {
+    match value {
+        RuntimeValue::Variant { name, payload } if variant_name_matches(&name, "Option.Some") => {
+            match payload.as_slice() {
+                [value] => Ok(value.clone()),
+                _ => Err(format!(
+                    "runtime fallback qualifier `fallback` expected Option.Some with one payload value, got `{name}`"
+                )
+                .into()),
+            }
+        }
+        RuntimeValue::Variant { ref name, .. } if variant_name_matches(name, "Option.None") => {
+            Ok(fallback)
+        }
+        RuntimeValue::Variant { name, payload } if variant_name_matches(&name, "Result.Ok") => {
+            match payload.as_slice() {
+                [value] => Ok(value.clone()),
+                _ => Err(format!(
+                    "runtime fallback qualifier `fallback` expected Result.Ok with one payload value, got `{name}`"
+                )
+                .into()),
+            }
+        }
+        RuntimeValue::Variant { ref name, .. } if variant_name_matches(name, "Result.Err") => {
+            Ok(fallback)
+        }
+        other => Err(format!(
+            "runtime fallback qualifier `fallback` expects Option-shape or Result[T, Str], got `{other:?}`"
+        )
+        .into()),
+    }
+}
+
 fn eval_spawn_expr(
     op: ParsedUnaryOp,
     expr: &ParsedExpr,
@@ -18156,6 +25890,7 @@ fn eval_spawn_expr(
         args,
         qualifier_kind,
         qualifier,
+        qualifier_type_args,
         resolved_callable,
         resolved_routine,
         dynamic_dispatch,
@@ -18168,6 +25903,7 @@ fn eval_spawn_expr(
             attached,
             *qualifier_kind,
             qualifier,
+            qualifier_type_args,
             resolved_callable.as_deref(),
             resolved_routine.as_deref(),
             dynamic_dispatch.as_ref(),
@@ -18183,7 +25919,7 @@ fn eval_spawn_expr(
     {
         return Ok(spawned);
     }
-    Ok(spawn_runtime_expr(
+    spawn_runtime_expr(
         op,
         expr,
         current_package_id,
@@ -18192,7 +25928,7 @@ fn eval_spawn_expr(
         aliases,
         type_bindings,
         state,
-    ))
+    )
 }
 
 fn runtime_expr_path_name(expr: &ParsedExpr) -> Option<String> {
@@ -18313,6 +26049,10 @@ fn build_runtime_memory_spec_materialization(
     let mut handle_policy = None;
     let mut frame_recycle = None;
     let mut pool_recycle = None;
+    let mut reset_on = None;
+    let mut ring_overwrite = None;
+    let mut ring_window = None;
+    let mut slab_page = None;
     for detail in &spec.details {
         let key = memory_detail_key_from_text(&detail.key).map_err(RuntimeEvalSignal::from)?;
         let descriptor = memory_detail_descriptor(family, key).ok_or_else(|| {
@@ -18347,7 +26087,11 @@ fn build_runtime_memory_spec_materialization(
                         .map_err(RuntimeEvalSignal::from)?;
                 if matches!(
                     key,
-                    MemoryDetailKey::Capacity | MemoryDetailKey::Growth | MemoryDetailKey::Pressure
+                    MemoryDetailKey::Capacity
+                        | MemoryDetailKey::Growth
+                        | MemoryDetailKey::Pressure
+                        | MemoryDetailKey::Page
+                        | MemoryDetailKey::Window
                 ) && let Some(strategy) = detail_strategy
                 {
                     budget_strategy = strategy;
@@ -18355,6 +26099,8 @@ fn build_runtime_memory_spec_materialization(
                 match key {
                     MemoryDetailKey::Capacity => capacity = normalized,
                     MemoryDetailKey::Growth => growth = Some(normalized),
+                    MemoryDetailKey::Page => slab_page = Some(normalized),
+                    MemoryDetailKey::Window => ring_window = Some(normalized),
                     _ => unreachable!("only int memory detail keys reach this branch"),
                 }
             }
@@ -18430,7 +26176,28 @@ fn build_runtime_memory_spec_materialization(
                                         .map_err(RuntimeEvalSignal::from)?,
                                 );
                             }
+                            MemoryFamily::Temp
+                            | MemoryFamily::Session
+                            | MemoryFamily::Ring
+                            | MemoryFamily::Slab => {
+                                return Err(RuntimeEvalSignal::from(format!(
+                                    "{} does not support recycle atoms",
+                                    spec.family
+                                )));
+                            }
                         }
+                    }
+                    MemoryDetailKey::ResetOn => {
+                        reset_on = Some(
+                            runtime_reset_on_policy_from_atom(&atom)
+                                .map_err(RuntimeEvalSignal::from)?,
+                        );
+                    }
+                    MemoryDetailKey::Overwrite => {
+                        ring_overwrite = Some(
+                            runtime_ring_overwrite_policy_from_atom(&atom)
+                                .map_err(RuntimeEvalSignal::from)?,
+                        );
                     }
                     _ => unreachable!("only atom memory detail keys reach this branch"),
                 }
@@ -18465,6 +26232,8 @@ fn build_runtime_memory_spec_materialization(
                     .unwrap_or_else(|| runtime_default_memory_pressure(budget_strategy)),
                 recycle: frame_recycle
                     .unwrap_or_else(|| runtime_default_frame_recycle_policy(recycle_strategy)),
+                reset_on: reset_on
+                    .unwrap_or_else(|| runtime_default_reset_on_policy(recycle_strategy)),
             }),
         ),
         MemoryFamily::Pool => {
@@ -18483,6 +26252,63 @@ fn build_runtime_memory_spec_materialization(
             (
                 policy.handle,
                 RuntimeMemorySpecMaterializationKind::Pool(policy),
+            )
+        }
+        MemoryFamily::Temp => (
+            RuntimeMemoryHandlePolicy::Stable,
+            RuntimeMemorySpecMaterializationKind::Temp(RuntimeTempArenaPolicy {
+                base_capacity: capacity,
+                current_limit: capacity,
+                growth_step: growth
+                    .unwrap_or_else(|| runtime_default_growth_step(budget_strategy, capacity)),
+                pressure: pressure
+                    .unwrap_or_else(|| runtime_default_memory_pressure(budget_strategy)),
+                reset_on: reset_on
+                    .unwrap_or_else(|| runtime_default_reset_on_policy(recycle_strategy)),
+            }),
+        ),
+        MemoryFamily::Session => {
+            let policy = RuntimeSessionArenaPolicy {
+                base_capacity: capacity,
+                current_limit: capacity,
+                growth_step: growth
+                    .unwrap_or_else(|| runtime_default_growth_step(budget_strategy, capacity)),
+                pressure: pressure
+                    .unwrap_or_else(|| runtime_default_memory_pressure(budget_strategy)),
+                handle: handle_policy.unwrap_or(RuntimeMemoryHandlePolicy::Stable),
+            };
+            (
+                policy.handle,
+                RuntimeMemorySpecMaterializationKind::Session(policy),
+            )
+        }
+        MemoryFamily::Ring => (
+            RuntimeMemoryHandlePolicy::Stable,
+            RuntimeMemorySpecMaterializationKind::Ring(RuntimeRingBufferPolicy {
+                base_capacity: capacity,
+                current_limit: capacity,
+                growth_step: growth
+                    .unwrap_or_else(|| runtime_default_growth_step(budget_strategy, capacity)),
+                pressure: pressure
+                    .unwrap_or_else(|| runtime_default_memory_pressure(budget_strategy)),
+                overwrite: ring_overwrite.unwrap_or(RuntimeRingOverwritePolicy::Oldest),
+                window: ring_window.unwrap_or(capacity.max(1)),
+            }),
+        ),
+        MemoryFamily::Slab => {
+            let policy = RuntimeSlabPolicy {
+                base_capacity: capacity,
+                current_limit: capacity,
+                growth_step: growth
+                    .unwrap_or_else(|| runtime_default_growth_step(budget_strategy, capacity)),
+                pressure: pressure
+                    .unwrap_or_else(|| runtime_default_memory_pressure(budget_strategy)),
+                handle: handle_policy.unwrap_or(RuntimeMemoryHandlePolicy::Stable),
+                page: slab_page.unwrap_or(capacity.max(1)),
+            };
+            (
+                policy.handle,
+                RuntimeMemorySpecMaterializationKind::Slab(policy),
             )
         }
     };
@@ -18545,6 +26371,63 @@ fn materialize_runtime_pool_spec_hook(
     )))
 }
 
+fn materialize_runtime_temp_spec_hook(
+    kind: &RuntimeMemorySpecMaterializationKind,
+    state: &mut RuntimeExecutionState,
+) -> RuntimeEvalResult<RuntimeValue> {
+    let RuntimeMemorySpecMaterializationKind::Temp(policy) = kind else {
+        return Err(RuntimeEvalSignal::from(
+            "runtime memory materialization hook `temp_new` received a non-temp policy".to_string(),
+        ));
+    };
+    Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::TempArena(
+        insert_runtime_temp_arena(state, &[], policy.clone()),
+    )))
+}
+
+fn materialize_runtime_session_spec_hook(
+    kind: &RuntimeMemorySpecMaterializationKind,
+    state: &mut RuntimeExecutionState,
+) -> RuntimeEvalResult<RuntimeValue> {
+    let RuntimeMemorySpecMaterializationKind::Session(policy) = kind else {
+        return Err(RuntimeEvalSignal::from(
+            "runtime memory materialization hook `session_new` received a non-session policy"
+                .to_string(),
+        ));
+    };
+    Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::SessionArena(
+        insert_runtime_session_arena(state, &[], policy.clone()),
+    )))
+}
+
+fn materialize_runtime_ring_spec_hook(
+    kind: &RuntimeMemorySpecMaterializationKind,
+    state: &mut RuntimeExecutionState,
+) -> RuntimeEvalResult<RuntimeValue> {
+    let RuntimeMemorySpecMaterializationKind::Ring(policy) = kind else {
+        return Err(RuntimeEvalSignal::from(
+            "runtime memory materialization hook `ring_new` received a non-ring policy".to_string(),
+        ));
+    };
+    Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::RingBuffer(
+        insert_runtime_ring_buffer(state, &[], policy.clone()),
+    )))
+}
+
+fn materialize_runtime_slab_spec_hook(
+    kind: &RuntimeMemorySpecMaterializationKind,
+    state: &mut RuntimeExecutionState,
+) -> RuntimeEvalResult<RuntimeValue> {
+    let RuntimeMemorySpecMaterializationKind::Slab(policy) = kind else {
+        return Err(RuntimeEvalSignal::from(
+            "runtime memory materialization hook `slab_new` received a non-slab policy".to_string(),
+        ));
+    };
+    Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::Slab(
+        insert_runtime_slab(state, &[], policy.clone()),
+    )))
+}
+
 const RUNTIME_MEMORY_MATERIALIZATION_HOOKS: &[RuntimeMemoryMaterializationHook] = &[
     RuntimeMemoryMaterializationHook {
         id: "arena_new",
@@ -18557,6 +26440,22 @@ const RUNTIME_MEMORY_MATERIALIZATION_HOOKS: &[RuntimeMemoryMaterializationHook] 
     RuntimeMemoryMaterializationHook {
         id: "pool_new",
         materialize: materialize_runtime_pool_spec_hook,
+    },
+    RuntimeMemoryMaterializationHook {
+        id: "temp_new",
+        materialize: materialize_runtime_temp_spec_hook,
+    },
+    RuntimeMemoryMaterializationHook {
+        id: "session_new",
+        materialize: materialize_runtime_session_spec_hook,
+    },
+    RuntimeMemoryMaterializationHook {
+        id: "ring_new",
+        materialize: materialize_runtime_ring_spec_hook,
+    },
+    RuntimeMemoryMaterializationHook {
+        id: "slab_new",
+        materialize: materialize_runtime_slab_spec_hook,
     },
 ];
 
@@ -18701,6 +26600,7 @@ fn resolve_runtime_memory_phrase_instance(
                     spec: spec.clone(),
                     handle: None,
                     handle_policy: None,
+                    owner_keys: collect_active_owner_keys_from_scopes(scopes),
                 },
             );
             spec
@@ -18721,6 +26621,23 @@ fn resolve_runtime_memory_phrase_instance(
             && existing.handle_policy == Some(RuntimeMemoryHandlePolicy::Stable)
             && let Some(handle) = existing.handle
         {
+            let active_owner_keys = collect_active_owner_keys_from_scopes(scopes);
+            if !active_owner_keys.is_empty() {
+                state
+                    .module_memory_specs
+                    .entry(key.clone())
+                    .and_modify(|spec_state| {
+                        for owner_key in &active_owner_keys {
+                            if !spec_state
+                                .owner_keys
+                                .iter()
+                                .any(|active| active == owner_key)
+                            {
+                                spec_state.owner_keys.push(owner_key.clone());
+                            }
+                        }
+                    });
+            }
             return Ok(handle);
         }
         let (handle, handle_policy) = materialize_runtime_memory_spec(
@@ -18741,12 +26658,23 @@ fn resolve_runtime_memory_phrase_instance(
                 spec_state.handle_policy = Some(handle_policy);
                 spec_state.handle = matches!(handle_policy, RuntimeMemoryHandlePolicy::Stable)
                     .then(|| handle.clone());
+                let active_owner_keys = collect_active_owner_keys_from_scopes(scopes);
+                for owner_key in active_owner_keys {
+                    if !spec_state
+                        .owner_keys
+                        .iter()
+                        .any(|active| active == &owner_key)
+                    {
+                        spec_state.owner_keys.push(owner_key);
+                    }
+                }
             })
             .or_insert(RuntimeMemorySpecState {
                 spec,
                 handle: matches!(handle_policy, RuntimeMemoryHandlePolicy::Stable)
                     .then(|| handle.clone()),
                 handle_policy: Some(handle_policy),
+                owner_keys: collect_active_owner_keys_from_scopes(scopes),
             });
         return Ok(handle);
     }
@@ -19009,7 +26937,12 @@ fn eval_expr(
             host,
         ),
         ParsedExpr::Path(segments) if segments.len() == 1 => {
-            Ok(read_runtime_local_value(scopes, &segments[0])?)
+            Ok(force_runtime_value(
+                read_runtime_local_value(scopes, state, &segments[0])?,
+                plan,
+                state,
+                host,
+            )?)
         }
         ParsedExpr::Path(segments) => {
             Err(format!("unsupported runtime value path `{}`", segments.join(".")).into())
@@ -19201,6 +27134,30 @@ fn eval_expr(
                 host,
             ),
             ParsedUnaryOp::BorrowRead | ParsedUnaryOp::BorrowMut => {
+                if let ParsedExpr::Slice {
+                    expr,
+                    start,
+                    end,
+                    inclusive_end,
+                } = expr.as_ref()
+                {
+                    return eval_runtime_borrowed_slice_view(
+                        expr,
+                        start.as_deref(),
+                        end.as_deref(),
+                        *inclusive_end,
+                        matches!(op, ParsedUnaryOp::BorrowMut),
+                        plan,
+                        current_package_id,
+                        current_module_id,
+                        scopes,
+                        aliases,
+                        type_bindings,
+                        state,
+                        host,
+                    )
+                    .map_err(RuntimeEvalSignal::from);
+                }
                 let target = expr_to_assign_target(expr).ok_or_else(|| {
                     format!(
                         "runtime borrow operand `{:?}` is not a writable place",
@@ -19248,42 +27205,57 @@ fn eval_expr(
                 )?)
             }
             ParsedUnaryOp::Neg => Ok(RuntimeValue::Int(-expect_int(
-                eval_expr(
-                    expr,
+                force_runtime_value(
+                    eval_expr(
+                        expr,
+                        plan,
+                        current_package_id,
+                        current_module_id,
+                        scopes,
+                        aliases,
+                        type_bindings,
+                        state,
+                        host,
+                    )?,
                     plan,
-                    current_package_id,
-                    current_module_id,
-                    scopes,
-                    aliases,
-                    type_bindings,
                     state,
                     host,
                 )?,
                 "unary -",
             )?)),
             ParsedUnaryOp::Not => Ok(RuntimeValue::Bool(!expect_bool(
-                eval_expr(
-                    expr,
+                force_runtime_value(
+                    eval_expr(
+                        expr,
+                        plan,
+                        current_package_id,
+                        current_module_id,
+                        scopes,
+                        aliases,
+                        type_bindings,
+                        state,
+                        host,
+                    )?,
                     plan,
-                    current_package_id,
-                    current_module_id,
-                    scopes,
-                    aliases,
-                    type_bindings,
                     state,
                     host,
                 )?,
                 "not",
             )?)),
             ParsedUnaryOp::BitNot => Ok(RuntimeValue::Int(!expect_int(
-                eval_expr(
-                    expr,
+                force_runtime_value(
+                    eval_expr(
+                        expr,
+                        plan,
+                        current_package_id,
+                        current_module_id,
+                        scopes,
+                        aliases,
+                        type_bindings,
+                        state,
+                        host,
+                    )?,
                     plan,
-                    current_package_id,
-                    current_module_id,
-                    scopes,
-                    aliases,
-                    type_bindings,
                     state,
                     host,
                 )?,
@@ -19293,14 +27265,19 @@ fn eval_expr(
         ParsedExpr::Binary { left, op, right } => match op {
             ParsedBinaryOp::Or => {
                 let left = expect_bool(
-                    eval_expr(
-                        left,
+                    force_runtime_value(
+                        eval_expr(
+                            left,
+                            plan,
+                            current_package_id,
+                            current_module_id,
+                            scopes,
+                            aliases,
+                            type_bindings,
+                            state,
+                            host,
+                        )?,
                         plan,
-                        current_package_id,
-                        current_module_id,
-                        scopes,
-                        aliases,
-                        type_bindings,
                         state,
                         host,
                     )?,
@@ -19310,14 +27287,19 @@ fn eval_expr(
                     Ok(RuntimeValue::Bool(true))
                 } else {
                     Ok(RuntimeValue::Bool(expect_bool(
-                        eval_expr(
-                            right,
+                        force_runtime_value(
+                            eval_expr(
+                                right,
+                                plan,
+                                current_package_id,
+                                current_module_id,
+                                scopes,
+                                aliases,
+                                type_bindings,
+                                state,
+                                host,
+                            )?,
                             plan,
-                            current_package_id,
-                            current_module_id,
-                            scopes,
-                            aliases,
-                            type_bindings,
                             state,
                             host,
                         )?,
@@ -19327,6 +27309,50 @@ fn eval_expr(
             }
             ParsedBinaryOp::And => {
                 let left = expect_bool(
+                    force_runtime_value(
+                        eval_expr(
+                            left,
+                            plan,
+                            current_package_id,
+                            current_module_id,
+                            scopes,
+                            aliases,
+                            type_bindings,
+                            state,
+                            host,
+                        )?,
+                        plan,
+                        state,
+                        host,
+                    )?,
+                    "and",
+                )?;
+                if !left {
+                    Ok(RuntimeValue::Bool(false))
+                } else {
+                    Ok(RuntimeValue::Bool(expect_bool(
+                        force_runtime_value(
+                            eval_expr(
+                                right,
+                                plan,
+                                current_package_id,
+                                current_module_id,
+                                scopes,
+                                aliases,
+                                type_bindings,
+                                state,
+                                host,
+                            )?,
+                            plan,
+                            state,
+                            host,
+                        )?,
+                        "and",
+                    )?))
+                }
+            }
+            other => {
+                let left = force_runtime_value(
                     eval_expr(
                         left,
                         plan,
@@ -19338,47 +27364,23 @@ fn eval_expr(
                         state,
                         host,
                     )?,
-                    "and",
-                )?;
-                if !left {
-                    Ok(RuntimeValue::Bool(false))
-                } else {
-                    Ok(RuntimeValue::Bool(expect_bool(
-                        eval_expr(
-                            right,
-                            plan,
-                            current_package_id,
-                            current_module_id,
-                            scopes,
-                            aliases,
-                            type_bindings,
-                            state,
-                            host,
-                        )?,
-                        "and",
-                    )?))
-                }
-            }
-            other => {
-                let left = eval_expr(
-                    left,
                     plan,
-                    current_package_id,
-                    current_module_id,
-                    scopes,
-                    aliases,
-                    type_bindings,
                     state,
                     host,
                 )?;
-                let right = eval_expr(
-                    right,
+                let right = force_runtime_value(
+                    eval_expr(
+                        right,
+                        plan,
+                        current_package_id,
+                        current_module_id,
+                        scopes,
+                        aliases,
+                        type_bindings,
+                        state,
+                        host,
+                    )?,
                     plan,
-                    current_package_id,
-                    current_module_id,
-                    scopes,
-                    aliases,
-                    type_bindings,
                     state,
                     host,
                 )?;
@@ -19390,6 +27392,7 @@ fn eval_expr(
             args,
             qualifier_kind,
             qualifier,
+            qualifier_type_args,
             resolved_callable,
             resolved_routine,
             dynamic_dispatch,
@@ -19399,6 +27402,7 @@ fn eval_expr(
                 subject,
                 args,
                 attached,
+                qualifier_type_args,
                 resolved_callable.as_deref(),
                 resolved_routine.as_deref(),
                 plan,
@@ -19416,6 +27420,7 @@ fn eval_expr(
                 args,
                 attached,
                 qualifier,
+                qualifier_type_args,
                 plan,
                 current_package_id,
                 current_module_id,
@@ -19430,6 +27435,7 @@ fn eval_expr(
                 args,
                 attached,
                 qualifier,
+                qualifier_type_args,
                 resolved_callable.as_deref(),
                 resolved_routine.as_deref(),
                 dynamic_dispatch.as_ref(),
@@ -19459,6 +27465,7 @@ fn eval_expr(
                 subject,
                 args,
                 attached,
+                &[],
                 resolved_callable.as_deref(),
                 None,
                 plan,
@@ -19494,6 +27501,7 @@ fn eval_expr(
                     subject,
                     args,
                     attached,
+                    &[],
                     None,
                     None,
                     plan,
@@ -19513,6 +27521,159 @@ fn eval_expr(
                     }
                     other => Ok(other),
                 }
+            }
+            ParsedPhraseQualifierKind::Await => {
+                if !args.is_empty() {
+                    return Err("`:: await` does not accept arguments"
+                        .to_string()
+                        .into());
+                }
+                if !attached.is_empty() {
+                    return Err("`:: await` does not support an attached block"
+                        .to_string()
+                        .into());
+                }
+                Ok(await_runtime_value(
+                    eval_expr(
+                        subject,
+                        plan,
+                        current_package_id,
+                        current_module_id,
+                        scopes,
+                        aliases,
+                        type_bindings,
+                        state,
+                        host,
+                    )?,
+                    plan,
+                    state,
+                    host,
+                )?)
+            }
+            ParsedPhraseQualifierKind::Weave => {
+                if let Some(spawned) = capture_spawned_phrase_call(
+                    ParsedUnaryOp::Weave,
+                    subject,
+                    args,
+                    attached,
+                    ParsedPhraseQualifierKind::Weave,
+                    qualifier,
+                    qualifier_type_args,
+                    resolved_callable.as_deref(),
+                    resolved_routine.as_deref(),
+                    dynamic_dispatch.as_ref(),
+                    plan,
+                    current_package_id,
+                    current_module_id,
+                    scopes,
+                    aliases,
+                    type_bindings,
+                    state,
+                    host,
+                )? {
+                    Ok(spawned)
+                } else {
+                    Err("`:: weave` expects a callable phrase target"
+                        .to_string()
+                        .into())
+                }
+            }
+            ParsedPhraseQualifierKind::Split => {
+                if let Some(spawned) = capture_spawned_phrase_call(
+                    ParsedUnaryOp::Split,
+                    subject,
+                    args,
+                    attached,
+                    ParsedPhraseQualifierKind::Split,
+                    qualifier,
+                    qualifier_type_args,
+                    resolved_callable.as_deref(),
+                    resolved_routine.as_deref(),
+                    dynamic_dispatch.as_ref(),
+                    plan,
+                    current_package_id,
+                    current_module_id,
+                    scopes,
+                    aliases,
+                    type_bindings,
+                    state,
+                    host,
+                )? {
+                    Ok(spawned)
+                } else {
+                    Err("`:: split` expects a callable phrase target"
+                        .to_string()
+                        .into())
+                }
+            }
+            ParsedPhraseQualifierKind::Must => {
+                if !args.is_empty() {
+                    return Err("`:: must` does not accept arguments"
+                        .to_string()
+                        .into());
+                }
+                if !attached.is_empty() {
+                    return Err("`:: must` does not support an attached block"
+                        .to_string()
+                        .into());
+                }
+                must_unwrap_runtime_value(eval_expr(
+                    subject,
+                    plan,
+                    current_package_id,
+                    current_module_id,
+                    scopes,
+                    aliases,
+                    type_bindings,
+                    state,
+                    host,
+                )?)
+            }
+            ParsedPhraseQualifierKind::Fallback => {
+                if !attached.is_empty() {
+                    return Err("`:: fallback` does not support an attached block"
+                        .to_string()
+                        .into());
+                }
+                let [fallback_arg] = args.as_slice() else {
+                    return Err(
+                        "`:: fallback` expects exactly one positional fallback argument"
+                            .to_string()
+                            .into(),
+                    );
+                };
+                let Some(fallback_expr) =
+                    (fallback_arg.name.is_none()).then_some(&fallback_arg.value)
+                else {
+                    return Err(
+                        "`:: fallback` expects exactly one positional fallback argument"
+                            .to_string()
+                            .into(),
+                    );
+                };
+                let subject_value = eval_expr(
+                    subject,
+                    plan,
+                    current_package_id,
+                    current_module_id,
+                    scopes,
+                    aliases,
+                    type_bindings,
+                    state,
+                    host,
+                )?;
+                let fallback_value = eval_expr(
+                    fallback_expr,
+                    plan,
+                    current_package_id,
+                    current_module_id,
+                    scopes,
+                    aliases,
+                    type_bindings,
+                    state,
+                    host,
+                )?;
+                fallback_runtime_value(subject_value, fallback_value)
             }
         },
         ParsedExpr::MemoryPhrase {
@@ -19538,6 +27699,7 @@ fn eval_expr(
                 constructor,
                 init_args,
                 attached,
+                &[],
                 None,
                 None,
                 plan,
@@ -19554,6 +27716,10 @@ fn eval_expr(
                 "arena" => RuntimeIntrinsic::MemoryArenaAlloc,
                 "frame" => RuntimeIntrinsic::MemoryFrameAlloc,
                 "pool" => RuntimeIntrinsic::MemoryPoolAlloc,
+                "temp" => RuntimeIntrinsic::MemoryTempAlloc,
+                "session" => RuntimeIntrinsic::MemorySessionAlloc,
+                "ring" => RuntimeIntrinsic::MemoryRingPush,
+                "slab" => RuntimeIntrinsic::MemorySlabAlloc,
                 other => return Err(format!("unsupported runtime memory family `{other}`").into()),
             };
             let type_args = runtime_receiver_type_args(&arena_value, state);
@@ -19563,6 +27729,11 @@ fn eval_expr(
                 &type_args,
                 &mut values,
                 plan,
+                None,
+                None,
+                None,
+                None,
+                None,
                 state,
                 host,
             )?)
@@ -19951,14 +28122,19 @@ fn execute_statements(
                 availability,
             } => {
                 if expect_bool(
-                    eval_expr(
-                        condition,
+                    force_runtime_value(
+                        eval_expr(
+                            condition,
+                            plan,
+                            current_package_id,
+                            current_module_id,
+                            scopes,
+                            aliases,
+                            type_bindings,
+                            state,
+                            host,
+                        )?,
                         plan,
-                        current_package_id,
-                        current_module_id,
-                        scopes,
-                        aliases,
-                        type_bindings,
                         state,
                         host,
                     )?,
@@ -20006,14 +28182,19 @@ fn execute_statements(
                 availability,
             } => loop {
                 if !expect_bool(
-                    eval_expr(
-                        condition,
+                    force_runtime_value(
+                        eval_expr(
+                            condition,
+                            plan,
+                            current_package_id,
+                            current_module_id,
+                            scopes,
+                            aliases,
+                            type_bindings,
+                            state,
+                            host,
+                        )?,
                         plan,
-                        current_package_id,
-                        current_module_id,
-                        scopes,
-                        aliases,
-                        type_bindings,
                         state,
                         host,
                     )?,
@@ -20058,14 +28239,19 @@ fn execute_statements(
                 cleanup_footers,
                 availability,
             } => {
-                let values = into_iterable_values(eval_expr(
-                    iterable,
+                let values = into_iterable_values(force_runtime_value(
+                    eval_expr(
+                        iterable,
+                        plan,
+                        current_package_id,
+                        current_module_id,
+                        scopes,
+                        aliases,
+                        type_bindings,
+                        state,
+                        host,
+                    )?,
                     plan,
-                    current_package_id,
-                    current_module_id,
-                    scopes,
-                    aliases,
-                    type_bindings,
                     state,
                     host,
                 )?)?;
@@ -20643,6 +28829,7 @@ fn execute_statements(
                 FlowSignal::Next
             }
             ParsedStmt::MemorySpec(spec) => {
+                let owner_keys = collect_active_owner_keys_from_scopes(scopes);
                 let current_scope = scopes
                     .last_mut()
                     .ok_or_else(|| "runtime scope stack is empty".to_string())?;
@@ -20652,6 +28839,7 @@ fn execute_statements(
                         spec: spec.clone(),
                         handle: None,
                         handle_policy: None,
+                        owner_keys,
                     },
                 );
                 FlowSignal::Next
@@ -20699,6 +28887,11 @@ fn execute_routine_call_with_state(
     type_args: Vec<String>,
     mut args: Vec<RuntimeValue>,
     inherited_active_owner_keys: &[String],
+    caller_scopes: Option<&mut Vec<RuntimeScope>>,
+    current_package_id: Option<&str>,
+    current_module_id: Option<&str>,
+    aliases: Option<&BTreeMap<String, Vec<String>>>,
+    type_bindings: Option<&RuntimeTypeBindings>,
     state: &mut RuntimeExecutionState,
     host: &mut dyn RuntimeHost,
     allow_async: bool,
@@ -20708,341 +28901,355 @@ fn execute_routine_call_with_state(
         .get(routine_index)
         .ok_or_else(|| format!("invalid routine index `{routine_index}`"))?;
     push_runtime_call_frame(state, &routine.module_id, &routine.symbol_name)?;
-    let execution_result = (|| -> RuntimeEvalResult<RoutineExecutionOutcome> {
-        if let Some(intrinsic_impl) = &routine.intrinsic_impl {
-            let intrinsic = resolve_runtime_intrinsic_impl(intrinsic_impl).ok_or_else(|| {
-                format!(
-                    "unsupported runtime intrinsic `{intrinsic_impl}` for `{}`",
+    let execution_result = grow(16 * 1024 * 1024, || {
+        (|| -> RuntimeEvalResult<RoutineExecutionOutcome> {
+            if let Some(intrinsic_impl) = &routine.intrinsic_impl {
+                let intrinsic =
+                    resolve_runtime_intrinsic_impl(intrinsic_impl).ok_or_else(|| {
+                        format!(
+                            "unsupported runtime intrinsic `{intrinsic_impl}` for `{}`",
+                            routine.symbol_name
+                        )
+                    })?;
+                let value = execute_runtime_intrinsic(
+                    intrinsic,
+                    &type_args,
+                    &mut args,
+                    plan,
+                    caller_scopes,
+                    current_package_id,
+                    current_module_id,
+                    aliases,
+                    type_bindings,
+                    state,
+                    host,
+                )?;
+                return Ok(RoutineExecutionOutcome {
+                    value,
+                    final_args: args,
+                    control: None,
+                });
+            }
+            if routine.is_async && !allow_async {
+                return Err(format!(
+                    "async routine `{}` is not executable in the current runtime lane",
                     routine.symbol_name
                 )
-            })?;
-            let value =
-                execute_runtime_intrinsic(intrinsic, &type_args, &mut args, plan, state, host)?;
-            return Ok(RoutineExecutionOutcome {
-                value,
-                final_args: args,
-                control: None,
-            });
-        }
-        if routine.is_async && !allow_async {
-            return Err(format!(
-                "async routine `{}` is not executable in the current runtime lane",
-                routine.symbol_name
-            )
-            .into());
-        }
-        if args.len() != routine.params.len() {
-            return Err(format!(
-                "routine `{}` expected {} arguments, got {}",
-                routine.symbol_name,
-                routine.params.len(),
-                args.len()
-            )
-            .into());
-        }
-        if !routine.type_params.is_empty()
-            && !type_args.is_empty()
-            && type_args.len() != routine.type_params.len()
-        {
-            return Err(format!(
-                "routine `{}` expected {} type arguments, got {}",
-                routine.symbol_name,
-                routine.type_params.len(),
-                type_args.len()
-            )
-            .into());
-        }
-        let aliases = plan
-            .module_aliases
-            .get(&module_alias_scope_key(
-                &routine.package_id,
-                &routine.module_id,
-            ))
-            .cloned()
-            .unwrap_or_default();
-        let resolved_type_args = if type_args.is_empty() {
-            routine.type_params.clone()
-        } else {
-            type_args
-        };
-        let type_bindings = routine
-            .type_params
-            .iter()
-            .cloned()
-            .zip(resolved_type_args)
-            .collect::<RuntimeTypeBindings>();
-        let entered_async_context = routine.is_async;
-        if entered_async_context {
-            state.async_context_depth += 1;
-        }
-        let outcome = (|| -> RuntimeEvalResult<RoutineExecutionOutcome> {
-            let mut initial_scope = RuntimeScope {
-                inherited_active_owner_keys: inherited_active_owner_keys.to_vec(),
-                ..Default::default()
-            };
-            apply_runtime_availability_attachments(&mut initial_scope, &routine.availability);
-            push_runtime_cleanup_footer_frame(
-                state,
-                &routine.cleanup_footers,
-                &[],
-                &routine.package_id,
-                &routine.module_id,
-            );
-            for (param, value) in routine.params.iter().zip(args) {
-                insert_runtime_local(
-                    state,
-                    0,
-                    &mut initial_scope,
-                    param.binding_id,
-                    param.name.clone(),
-                    param.mode.as_deref() == Some("edit"),
-                    value,
-                );
+                .into());
             }
-            let mut scopes = Vec::new();
-            scopes.push(initial_scope);
-            activate_attached_runtime_owners_for_current_scope(
-                &mut scopes,
-                inherited_active_owner_keys,
-                plan,
-                &routine.package_id,
-                state,
-            )?;
-            activate_attached_runtime_objects_for_current_scope(
-                &mut scopes,
-                inherited_active_owner_keys,
-                plan,
-                &routine.package_id,
-                state,
-            )?;
-            let result = execute_statements(
-                &routine.statements,
-                &mut scopes,
-                plan,
-                &routine.package_id,
-                &routine.module_id,
-                &aliases,
-                &type_bindings,
-                state,
-                host,
-            );
-            let defer_result = run_scope_defers(
-                plan,
-                &routine.package_id,
-                &routine.module_id,
-                &mut scopes,
-                &aliases,
-                &type_bindings,
-                state,
-                host,
-            );
-            let routine_cleanup_footer_frame = pop_runtime_cleanup_footer_frame(state);
-            let final_scope = scopes
-                .pop()
-                .ok_or_else(|| "runtime scope stack is empty".to_string())?;
-            match defer_result {
-                Ok(()) => {}
-                Err(RuntimeEvalSignal::Message(message)) => return Err(message.into()),
-                Err(RuntimeEvalSignal::Return(value)) => {
-                    if let Some(frame) = routine_cleanup_footer_frame.clone() {
-                        execute_cleanup_footers(frame, plan, &mut scopes, state, host)
-                            .map_err(runtime_eval_message)?;
-                    }
-                    evaluate_owner_exit_checkpoints(
-                        &final_scope.activated_owner_keys,
-                        plan,
-                        &routine.package_id,
-                        &routine.module_id,
-                        &aliases,
-                        &type_bindings,
-                        state,
-                        host,
-                        None,
-                    )?;
-                    release_scope_owner_activations(state, &final_scope.activated_owner_keys);
-                    let final_args = routine
-                        .params
-                        .iter()
-                        .map(|param| {
-                            final_scope
-                                .locals
-                                .get(&param.name)
-                                .map(|local| local.value.clone())
-                                .ok_or_else(|| {
-                                    format!(
-                                        "runtime routine `{}` lost bound parameter `{}`",
-                                        routine.symbol_name, param.name
-                                    )
-                                })
-                        })
-                        .collect::<Result<Vec<_>, String>>()
-                        .map_err(RuntimeEvalSignal::from)?;
-                    return Ok(RoutineExecutionOutcome {
-                        value,
-                        final_args,
-                        control: None,
-                    });
-                }
-                Err(RuntimeEvalSignal::OwnerExit {
-                    owner_key,
-                    exit_name,
-                }) => {
-                    if let Some(frame) = routine_cleanup_footer_frame.clone() {
-                        execute_cleanup_footers(frame, plan, &mut scopes, state, host)
-                            .map_err(runtime_eval_message)?;
-                    }
-                    evaluate_owner_exit_checkpoints(
-                        &final_scope.activated_owner_keys,
-                        plan,
-                        &routine.package_id,
-                        &routine.module_id,
-                        &aliases,
-                        &type_bindings,
-                        state,
-                        host,
-                        None,
-                    )
-                    .map_err(RuntimeEvalSignal::from)?;
-                    release_scope_owner_activations(state, &final_scope.activated_owner_keys);
-                    let final_args = routine
-                        .params
-                        .iter()
-                        .map(|param| {
-                            final_scope
-                                .locals
-                                .get(&param.name)
-                                .map(|local| local.value.clone())
-                                .ok_or_else(|| {
-                                    format!(
-                                        "runtime routine `{}` lost bound parameter `{}`",
-                                        routine.symbol_name, param.name
-                                    )
-                                })
-                        })
-                        .collect::<Result<Vec<_>, String>>()
-                        .map_err(RuntimeEvalSignal::from)?;
-                    return Ok(RoutineExecutionOutcome {
-                        value: RuntimeValue::Unit,
-                        final_args,
-                        control: Some(FlowSignal::OwnerExit {
-                            owner_key,
-                            exit_name,
-                        }),
-                    });
-                }
+            if args.len() != routine.params.len() {
+                return Err(format!(
+                    "routine `{}` expected {} arguments, got {}",
+                    routine.symbol_name,
+                    routine.params.len(),
+                    args.len()
+                )
+                .into());
             }
-            if let Some(frame) = routine_cleanup_footer_frame.clone()
-                && !matches!(result, Err(RuntimeEvalSignal::Message(_)))
+            if !routine.type_params.is_empty()
+                && !type_args.is_empty()
+                && type_args.len() != routine.type_params.len()
             {
-                execute_cleanup_footers(frame, plan, &mut scopes, state, host)
-                    .map_err(runtime_eval_message)?;
+                return Err(format!(
+                    "routine `{}` expected {} type arguments, got {}",
+                    routine.symbol_name,
+                    routine.type_params.len(),
+                    type_args.len()
+                )
+                .into());
             }
-            evaluate_owner_exit_checkpoints(
-                &final_scope.activated_owner_keys,
-                plan,
-                &routine.package_id,
-                &routine.module_id,
-                &aliases,
-                &type_bindings,
-                state,
-                host,
-                None,
-            )?;
-            release_scope_owner_activations(state, &final_scope.activated_owner_keys);
-            let result = match result {
-                Ok(signal) => signal,
-                Err(RuntimeEvalSignal::Message(message)) => return Err(message.into()),
-                Err(RuntimeEvalSignal::Return(value)) => FlowSignal::Return(value),
-                Err(RuntimeEvalSignal::OwnerExit {
-                    owner_key,
-                    exit_name,
-                }) => FlowSignal::OwnerExit {
-                    owner_key,
-                    exit_name,
-                },
+            let aliases = plan
+                .module_aliases
+                .get(&module_alias_scope_key(
+                    &routine.package_id,
+                    &routine.module_id,
+                ))
+                .cloned()
+                .unwrap_or_default();
+            let resolved_type_args = if type_args.is_empty() {
+                routine.type_params.clone()
+            } else {
+                type_args
             };
-            let result = match result {
-                FlowSignal::OwnerExit {
-                    owner_key,
-                    exit_name,
-                } if final_scope
-                    .activated_owner_keys
-                    .iter()
-                    .any(|active| active == &owner_key) =>
-                {
-                    apply_explicit_owner_exit(plan, state, &owner_key, &exit_name, None)?;
-                    FlowSignal::Next
-                }
-                other => other,
-            };
-            let value = match result {
-                FlowSignal::Next => RuntimeValue::Unit,
-                FlowSignal::Return(value) => value,
-                FlowSignal::Break => {
-                    return Err("break escaped the top-level routine".to_string().into());
-                }
-                FlowSignal::Continue => {
-                    return Err("continue escaped the top-level routine".to_string().into());
-                }
-                FlowSignal::OwnerExit {
-                    owner_key,
-                    exit_name,
-                } => {
-                    let final_args = routine
-                        .params
-                        .iter()
-                        .map(|param| {
-                            final_scope
-                                .locals
-                                .get(&param.name)
-                                .map(|local| local.value.clone())
-                                .ok_or_else(|| {
-                                    format!(
-                                        "runtime routine `{}` lost bound parameter `{}`",
-                                        routine.symbol_name, param.name
-                                    )
-                                })
-                        })
-                        .collect::<Result<Vec<_>, String>>()
-                        .map_err(RuntimeEvalSignal::from)?;
-                    return Ok(RoutineExecutionOutcome {
-                        value: RuntimeValue::Unit,
-                        final_args,
-                        control: Some(FlowSignal::OwnerExit {
-                            owner_key,
-                            exit_name,
-                        }),
-                    });
-                }
-            };
-            let final_args = routine
-                .params
+            let type_bindings = routine
+                .type_params
                 .iter()
-                .map(|param| {
-                    final_scope
-                        .locals
-                        .get(&param.name)
-                        .map(|local| local.value.clone())
-                        .ok_or_else(|| {
-                            format!(
-                                "runtime routine `{}` lost bound parameter `{}`",
-                                routine.symbol_name, param.name
-                            )
-                        })
+                .cloned()
+                .zip(resolved_type_args)
+                .collect::<RuntimeTypeBindings>();
+            let entered_async_context = routine.is_async;
+            if entered_async_context {
+                state.async_context_depth += 1;
+            }
+            let outcome = (|| -> RuntimeEvalResult<RoutineExecutionOutcome> {
+                let mut initial_scope = RuntimeScope {
+                    inherited_active_owner_keys: inherited_active_owner_keys.to_vec(),
+                    ..Default::default()
+                };
+                apply_runtime_availability_attachments(&mut initial_scope, &routine.availability);
+                push_runtime_cleanup_footer_frame(
+                    state,
+                    &routine.cleanup_footers,
+                    &[],
+                    &routine.package_id,
+                    &routine.module_id,
+                );
+                for (param, value) in routine.params.iter().zip(args) {
+                    insert_runtime_local(
+                        state,
+                        0,
+                        &mut initial_scope,
+                        param.binding_id,
+                        param.name.clone(),
+                        param.mode.as_deref() == Some("edit"),
+                        value,
+                    );
+                }
+                let mut scopes = Vec::new();
+                scopes.push(initial_scope);
+                activate_attached_runtime_owners_for_current_scope(
+                    &mut scopes,
+                    inherited_active_owner_keys,
+                    plan,
+                    &routine.package_id,
+                    state,
+                )?;
+                activate_attached_runtime_objects_for_current_scope(
+                    &mut scopes,
+                    inherited_active_owner_keys,
+                    plan,
+                    &routine.package_id,
+                    state,
+                )?;
+                let result = execute_statements(
+                    &routine.statements,
+                    &mut scopes,
+                    plan,
+                    &routine.package_id,
+                    &routine.module_id,
+                    &aliases,
+                    &type_bindings,
+                    state,
+                    host,
+                );
+                let defer_result = run_scope_defers(
+                    plan,
+                    &routine.package_id,
+                    &routine.module_id,
+                    &mut scopes,
+                    &aliases,
+                    &type_bindings,
+                    state,
+                    host,
+                );
+                let routine_cleanup_footer_frame = pop_runtime_cleanup_footer_frame(state);
+                let final_scope = scopes
+                    .pop()
+                    .ok_or_else(|| "runtime scope stack is empty".to_string())?;
+                match defer_result {
+                    Ok(()) => {}
+                    Err(RuntimeEvalSignal::Message(message)) => return Err(message.into()),
+                    Err(RuntimeEvalSignal::Return(value)) => {
+                        if let Some(frame) = routine_cleanup_footer_frame.clone() {
+                            execute_cleanup_footers(frame, plan, &mut scopes, state, host)
+                                .map_err(runtime_eval_message)?;
+                        }
+                        evaluate_owner_exit_checkpoints(
+                            &final_scope.activated_owner_keys,
+                            plan,
+                            &routine.package_id,
+                            &routine.module_id,
+                            &aliases,
+                            &type_bindings,
+                            state,
+                            host,
+                            None,
+                        )?;
+                        release_scope_owner_activations(state, &final_scope.activated_owner_keys);
+                        let final_args = routine
+                            .params
+                            .iter()
+                            .map(|param| {
+                                final_scope
+                                    .locals
+                                    .get(&param.name)
+                                    .map(|local| local.value.clone())
+                                    .ok_or_else(|| {
+                                        format!(
+                                            "runtime routine `{}` lost bound parameter `{}`",
+                                            routine.symbol_name, param.name
+                                        )
+                                    })
+                            })
+                            .collect::<Result<Vec<_>, String>>()
+                            .map_err(RuntimeEvalSignal::from)?;
+                        return Ok(RoutineExecutionOutcome {
+                            value,
+                            final_args,
+                            control: None,
+                        });
+                    }
+                    Err(RuntimeEvalSignal::OwnerExit {
+                        owner_key,
+                        exit_name,
+                    }) => {
+                        if let Some(frame) = routine_cleanup_footer_frame.clone() {
+                            execute_cleanup_footers(frame, plan, &mut scopes, state, host)
+                                .map_err(runtime_eval_message)?;
+                        }
+                        evaluate_owner_exit_checkpoints(
+                            &final_scope.activated_owner_keys,
+                            plan,
+                            &routine.package_id,
+                            &routine.module_id,
+                            &aliases,
+                            &type_bindings,
+                            state,
+                            host,
+                            None,
+                        )
+                        .map_err(RuntimeEvalSignal::from)?;
+                        release_scope_owner_activations(state, &final_scope.activated_owner_keys);
+                        let final_args = routine
+                            .params
+                            .iter()
+                            .map(|param| {
+                                final_scope
+                                    .locals
+                                    .get(&param.name)
+                                    .map(|local| local.value.clone())
+                                    .ok_or_else(|| {
+                                        format!(
+                                            "runtime routine `{}` lost bound parameter `{}`",
+                                            routine.symbol_name, param.name
+                                        )
+                                    })
+                            })
+                            .collect::<Result<Vec<_>, String>>()
+                            .map_err(RuntimeEvalSignal::from)?;
+                        return Ok(RoutineExecutionOutcome {
+                            value: RuntimeValue::Unit,
+                            final_args,
+                            control: Some(FlowSignal::OwnerExit {
+                                owner_key,
+                                exit_name,
+                            }),
+                        });
+                    }
+                }
+                if let Some(frame) = routine_cleanup_footer_frame.clone()
+                    && !matches!(result, Err(RuntimeEvalSignal::Message(_)))
+                {
+                    execute_cleanup_footers(frame, plan, &mut scopes, state, host)
+                        .map_err(runtime_eval_message)?;
+                }
+                evaluate_owner_exit_checkpoints(
+                    &final_scope.activated_owner_keys,
+                    plan,
+                    &routine.package_id,
+                    &routine.module_id,
+                    &aliases,
+                    &type_bindings,
+                    state,
+                    host,
+                    None,
+                )?;
+                release_scope_owner_activations(state, &final_scope.activated_owner_keys);
+                let result = match result {
+                    Ok(signal) => signal,
+                    Err(RuntimeEvalSignal::Message(message)) => return Err(message.into()),
+                    Err(RuntimeEvalSignal::Return(value)) => FlowSignal::Return(value),
+                    Err(RuntimeEvalSignal::OwnerExit {
+                        owner_key,
+                        exit_name,
+                    }) => FlowSignal::OwnerExit {
+                        owner_key,
+                        exit_name,
+                    },
+                };
+                let result = match result {
+                    FlowSignal::OwnerExit {
+                        owner_key,
+                        exit_name,
+                    } if final_scope
+                        .activated_owner_keys
+                        .iter()
+                        .any(|active| active == &owner_key) =>
+                    {
+                        apply_explicit_owner_exit(plan, state, &owner_key, &exit_name, None)?;
+                        FlowSignal::Next
+                    }
+                    other => other,
+                };
+                let value = match result {
+                    FlowSignal::Next => RuntimeValue::Unit,
+                    FlowSignal::Return(value) => value,
+                    FlowSignal::Break => {
+                        return Err("break escaped the top-level routine".to_string().into());
+                    }
+                    FlowSignal::Continue => {
+                        return Err("continue escaped the top-level routine".to_string().into());
+                    }
+                    FlowSignal::OwnerExit {
+                        owner_key,
+                        exit_name,
+                    } => {
+                        let final_args = routine
+                            .params
+                            .iter()
+                            .map(|param| {
+                                final_scope
+                                    .locals
+                                    .get(&param.name)
+                                    .map(|local| local.value.clone())
+                                    .ok_or_else(|| {
+                                        format!(
+                                            "runtime routine `{}` lost bound parameter `{}`",
+                                            routine.symbol_name, param.name
+                                        )
+                                    })
+                            })
+                            .collect::<Result<Vec<_>, String>>()
+                            .map_err(RuntimeEvalSignal::from)?;
+                        return Ok(RoutineExecutionOutcome {
+                            value: RuntimeValue::Unit,
+                            final_args,
+                            control: Some(FlowSignal::OwnerExit {
+                                owner_key,
+                                exit_name,
+                            }),
+                        });
+                    }
+                };
+                let final_args = routine
+                    .params
+                    .iter()
+                    .map(|param| {
+                        final_scope
+                            .locals
+                            .get(&param.name)
+                            .map(|local| local.value.clone())
+                            .ok_or_else(|| {
+                                format!(
+                                    "runtime routine `{}` lost bound parameter `{}`",
+                                    routine.symbol_name, param.name
+                                )
+                            })
+                    })
+                    .collect::<Result<Vec<_>, String>>()
+                    .map_err(RuntimeEvalSignal::from)?;
+                Ok(RoutineExecutionOutcome {
+                    value,
+                    final_args,
+                    control: None,
                 })
-                .collect::<Result<Vec<_>, String>>()
-                .map_err(RuntimeEvalSignal::from)?;
-            Ok(RoutineExecutionOutcome {
-                value,
-                final_args,
-                control: None,
-            })
-        })();
-        if entered_async_context {
-            state.async_context_depth = state.async_context_depth.saturating_sub(1);
-        }
-        outcome
-    })();
+            })();
+            if entered_async_context {
+                state.async_context_depth = state.async_context_depth.saturating_sub(1);
+            }
+            outcome
+        })()
+    });
     pop_runtime_call_frame(state);
     execution_result
 }
@@ -21061,6 +29268,11 @@ fn execute_routine_with_state(
         type_args,
         args,
         &collect_active_owner_keys_from_state(state),
+        None,
+        None,
+        None,
+        None,
+        None,
         state,
         host,
         false,
@@ -21160,6 +29372,11 @@ pub fn execute_entrypoint_routine(
         Vec::new(),
         Vec::new(),
         &[],
+        None,
+        None,
+        None,
+        None,
+        None,
         &mut state,
         host,
         true,

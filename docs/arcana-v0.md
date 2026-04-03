@@ -21,9 +21,9 @@ Arcana v0 currently includes:
 - Arcana-native concurrency/behavior support (`async fn`, `weave`, `split`, `>> await`, `behavior[...] fn`)
 - Core operators: unary `-` / `not` / `~`, `%`, `!=`, `<=`, `>=`, `and`, `or`, bitwise `& | ^ << shr`, `Str + Str`, compound assignments
 - Collections v0.9: `List[T]`, list literals, slicing with ranges, indexed assignment, `RangeInt`, pair tuples `(A, B)`
-- Memory phrases v0.35: `arena|frame|pool: instance :> ... <: qualifier` with typed allocator storage (`Arena[T]`, `FrameArena[T]`, `PoolArena[T]` + corresponding ID handles)
+- Memory phrases v0.35+: `arena|frame|pool|temp|session|ring|slab: instance :> ... <: qualifier` with typed allocator storage plus explicit views/publication state
 - Headed regions v0.42: `recycle`, `construct`, `bind`, and `Memory` as structural inner blocks with head-defined rides, default modifiers, and head-specific completion/target slots
-- Ownership/lifetimes v0.32 surface: explicit refs (`&'a T`, `&'a mut T`), borrow/deref expressions (`&x`, `&mut x`, `*x`), a carried lexical borrow contract, and `#boundary[target="lua|sql"]` signature contracts
+- Ownership/lifetimes v0.32 surface: explicit refs (`&'a T`, `&'a mut T`), borrow/deref expressions (`&x`, `&mut x`, `*x`), explicit borrowed-slice forms (`&x[a..b]`, `&mut x[a..b]`), a carried lexical borrow contract, and `#boundary[target="lua|sql"]` signature contracts
 - Trait v2: associated types, default trait methods, supertrait bounds, projection equality in `where`
 
 ## Commands
@@ -66,6 +66,7 @@ Arcana now includes an explicit object/owner lifetime model.
 
 - `obj Name:` declares nominal packaged state with optional nested methods.
 - `create Owner [ObjectA, ObjectB] scope-exit:` declares a managed owner lifetime domain.
+- Owners may optionally declare `context: Ctx` before `scope-exit:` to make activation payload shape explicit.
 - Owner exits use `exit when ...` or `name: when ...`, optionally with `hold [...]`.
 - Bare path lines immediately above block-owning headers attach owner/object availability.
 - Availability does not create live state by itself.
@@ -76,7 +77,9 @@ Arcana now includes an explicit object/owner lifetime model.
 - That active-owner state carries through ordinary routine calls and newly entered attached blocks on the same execution path; attached helpers do not require re-entry when the caller already has the owner active.
 - Re-attaching the object name is enough for direct object access on that path; helpers and nested blocks do not need to re-attach the owner when the same owner is already active.
 - Owned objects may define lifecycle hooks with nested `init` / `resume` methods; first realization runs `init`, and held-state re-entry runs `resume`.
-- Activation context is only meaningful through those lifecycle hooks and must match the hook context type used by that owner.
+- Owners without `context:` accept zero activation args.
+- Owners with `context:` require exactly one activation arg of that type.
+- Activation context is only meaningful through those lifecycle hooks and must match the owner-declared context type for that domain.
 - Suspension is modeled as owner exit plus `hold [...]`; held state requires explicit re-entry before it becomes active again.
 - When multiple owner exit conditions are true at the same checkpoint, the first matching exit in source order wins.
 - Callable objects and context objects are ordinary `obj` roles inside this same model.
@@ -220,8 +223,8 @@ Arcana now includes headed regions as a separate structural family from phrases 
 Implementation note:
 
 - Headed regions are approved source-language contract now.
-- Parser/frontend/runtime support is still pending.
-- `conformance/selfhost_language_matrix.toml` intentionally remains unchanged until implementation lands.
+- Parser/frontend/runtime support for the approved head family is landed on the current rewrite path.
+- Current selfhost/conformance coverage tracks the approved head family explicitly.
 
 ## Qualified Phrases (v0.22)
 
@@ -231,9 +234,16 @@ Arcana now supports qualified phrase invocation syntax:
 - args are comma-separated top-level inline items, with at most 3 top-level args
 - trailing comma before the qualifier is rejected
 - qualifier forms:
-  - named/path (for example `call`, `join`, `std.io.print`)
+  - `call`
+  - bare method / named path
   - symbols: `?`, `>`, `>>`
+  - `await`
+  - `weave`
+  - `split`
+  - `must`
+  - `fallback`
 - attached blocks are valid only on standalone statement-form qualified phrases
+- `call`, bare method, and named-path qualifiers may carry explicit qualifier type args such as `:: call[T]`
 
 Core behavior:
 
@@ -242,6 +252,11 @@ Core behavior:
 - `value :: :: std.io.print` dispatches `std.io.print(value)`
 - `result_expr :: :: ?` applies try-propagation
 - `task_expr :: :: >>` awaits task value
+- `task_expr :: :: await` awaits task/thread value
+- `callable :: args :: weave` spawns a task-qualified phrase call
+- `callable :: args :: split` spawns a thread-qualified phrase call
+- `value_expr :: :: must` hard-unwraps `Option[T]` or `Result[T, Str]`
+- `value_expr :: fallback_value :: fallback` supplies a fallback for `Option[T]` or `Result[T, Str]`
 
 Statement-form phrases can carry attached blocks:
 
@@ -253,7 +268,7 @@ Counter :: :: call
 For `call`, `>`, and bare method qualifiers, attached `name = expr` entries are treated as
 additional named arguments.
 
-For dotted path qualifiers, `?`, and `>>`, attached `name = expr` entries are rejected.
+For dotted path qualifiers, `?`, `>>`, `await`, `weave`, `split`, `must`, and `fallback`, attached `name = expr` entries are rejected.
 
 If a call needs more than 3 independent top-level inline inputs, group them explicitly into
 pair/record data or move named overflow into a statement-form attached block. The 3-arg cap is
@@ -315,6 +330,7 @@ Notes:
 - `RangeInt` values support equality and are primarily used for slicing.
 - Generic calls use phrase style (`foo[T] :: ... :: call`), while `foo[T]` without a qualifier remains subscript syntax.
 - Pair tuples are the current selfhost baseline. Richer tuple expansion is intentionally deferred rather than rejected outright; see `docs/specs/tuples/tuples/v1-scope.md` and `docs/specs/tuples/tuples/deferred-roadmap.md`.
+- Exact recursive pair destructuring in `let` and `for` is part of the current pair-tuple baseline; parameter destructuring and tuple `match` patterns remain deferred.
 
 Historical note: the archived MeadowLang collection examples now live outside this repo. Current in-repo behavioral pressure comes from rewrite-owned `std/src`, `grimoires/owned/app/*`, conformance fixtures, and crate tests.
 
@@ -430,23 +446,27 @@ Collections are now de-builtinized through an internal intrinsic bridge.
 
 ## Memory Phrase + Typed Allocators (v0.35)
 
-Arcana supports explicit memory-context allocation phrases with three allocator families.
+Arcana supports explicit memory-context allocation phrases with seven allocator families plus explicit view/publication support.
 
 Memory source surface now has two distinct roles:
 
 - `Memory` headed regions define reusable memory specs
 - memory phrases are the consumer surface for those specs
 
-The current approved `Memory` headed-region family set remains:
+The current approved `Memory` headed-region family set is:
 
 - `arena`
 - `frame`
 - `pool`
+- `temp`
+- `session`
+- `ring`
+- `slab`
 
 Memory phrase syntax:
 
 - `memory_type: instance :> args? <: qualifier`
-- v2 supports `memory_type = arena | frame | pool`
+- v2 supports `memory_type = arena | frame | pool | temp | session | ring | slab`
 - inline args are comma-separated top-level items, with at most 3 top-level args
 - arg items support positional and named (`name = expr`)
 - trailing comma before the qualifier is rejected
@@ -469,6 +489,22 @@ Allocator phrase lowering:
   - allocates into `entities: PoolArena[Entity]`
   - returns `PoolId[Entity]`
 
+- `temp: scratch :> value = 7 <: Temp`
+  - allocates into `scratch: TempArena[Temp]`
+  - returns `TempId[Temp]`
+
+- `session: interned :> value = 9 <: Node`
+  - allocates into `interned: SessionArena[Node]`
+  - returns `SessionId[Node]`
+
+- `ring: recent :> value = 11 <: Sample`
+  - pushes into `recent: RingBuffer[Sample]`
+  - returns `RingId[Sample]`
+
+- `slab: graph :> value = 13 <: Node`
+  - allocates into `graph: Slab[Node]`
+  - returns `SlabId[Node]`
+
 New shelf module:
 
 - `std.memory`
@@ -478,6 +514,10 @@ Public surface:
 - `std.memory.new[T](capacity) -> Arena[T]`
 - `std.memory.frame_new[T](capacity) -> FrameArena[T]`
 - `std.memory.pool_new[T](capacity) -> PoolArena[T]`
+- `std.memory.temp_new[T](capacity) -> TempArena[T]`
+- `std.memory.session_new[T](capacity) -> SessionArena[T]`
+- `std.memory.ring_new[T](capacity) -> RingBuffer[T]`
+- `std.memory.slab_new[T](capacity) -> Slab[T]`
 - `arena :: :: len`
 - `arena :: id :: has`
 - `arena :: id :: get`
@@ -495,6 +535,50 @@ Public surface:
 - `pool_arena :: id, value :: set`
 - `pool_arena :: id :: remove`
 - `pool_arena :: :: reset`
+- `pool_arena :: :: live_ids`
+- `pool_arena :: :: compact`
+- `temp_arena :: :: len`
+- `temp_arena :: id :: has`
+- `temp_arena :: id :: get`
+- `temp_arena :: id, value :: set`
+- `temp_arena :: :: reset`
+- `session_arena :: :: len`
+- `session_arena :: id :: has`
+- `session_arena :: id :: get`
+- `session_arena :: id, value :: set`
+- `session_arena :: :: reset`
+- `session_arena :: :: seal`
+- `session_arena :: :: unseal`
+- `session_arena :: :: is_sealed`
+- `session_arena :: :: live_ids`
+- `ring_buffer :: value :: push`
+- `ring_buffer :: :: pop`
+- `ring_buffer :: :: len`
+- `ring_buffer :: id :: has`
+- `ring_buffer :: id :: get`
+- `ring_buffer :: id, value :: set`
+- `ring_buffer :: start, len :: window_read`
+- `ring_buffer :: start, len :: window_edit`
+- `slab :: :: len`
+- `slab :: id :: has`
+- `slab :: id :: get`
+- `slab :: id, value :: set`
+- `slab :: id :: remove`
+- `slab :: :: reset`
+- `slab :: :: seal`
+- `slab :: :: unseal`
+- `slab :: :: is_sealed`
+- `slab :: :: live_ids`
+- explicit view types:
+  - `ReadView[T]`
+  - `EditView[T]`
+  - `ByteView`
+  - `ByteEditView`
+  - `StrView`
+- explicit borrowed slices:
+  - `&x[a..b]`
+  - `&mut x[a..b]`
+- `std.binary` provides explicit reader/writer helpers over byte views
 
 Runtime semantics:
 
@@ -503,12 +587,20 @@ Runtime semantics:
 - `ArenaId[T]` and `FrameId[T]` are copy-like and non-sendable.
 - `PoolId[T]` is copy-like and sendable when `T` is sendable.
 - `frame` is append-only with explicit `reset` and generation invalidation.
-- `pool` supports `remove` + free-list reuse with generation checks.
+- `pool` supports `remove` + free-list reuse with generation checks plus explicit compaction.
+- `temp` is scratch append-only storage with `reset_on` policy.
+- `session` is long-lived append-only storage with publication through `seal` / `unseal`.
+- `ring` is overwrite-oldest circular storage with oldest-to-newest window order.
+- `slab` is stable-slot reusable storage with publication through `seal` / `unseal`.
 - `reset` is explicit only (no auto-reset semantics).
 - stale/invalid id access raises deterministic runtime errors:
   - `arena id is invalid or stale`
   - `frame id is invalid or stale`
   - `pool id is invalid or stale`
+  - `temp id is invalid or stale`
+  - `session id is invalid or stale`
+  - `ring id is invalid or stale`
+  - `slab id is invalid or stale`
 
 `Memory` headed-region shape:
 
@@ -532,7 +624,10 @@ Notes:
 - Unknown memory types are rejected with a future-reserved diagnostic.
 - If a memory phrase needs more than 3 independent top-level inline inputs, group them explicitly into pair/record data. The 3-arg cap is intentional.
 - `std.memory` exposes allocator borrow APIs:
-  - `borrow_read` / `borrow_edit` for `Arena`, `FrameArena`, and `PoolArena`.
+  - `borrow_read` / `borrow_edit` for `Arena`, `FrameArena`, `PoolArena`, `TempArena`, `SessionArena`, `RingBuffer`, and `Slab`.
+- `std.memory` also exposes explicit view adapters and publication-state operations:
+  - `ReadView[T]`, `EditView[T]`, `ByteView`, `ByteEditView`, `StrView`
+  - `seal` / `unseal` / `is_sealed` for `SessionArena` and `Slab`
 - `reset`/`remove` are compile-time rejected when live allocator borrows would be invalidated.
 
 Historical note: the broader MeadowLang memory examples now live outside this repo. Current in-repo behavioral pressure comes from rewrite-owned `std/src`, conformance fixtures, and crate tests.
@@ -552,7 +647,7 @@ Core syntax:
 
 - lifetime params: `'a`, `'b`
 - reference types: `&'a T`, `&'a mut T`
-- borrow/deref expressions: `&x`, `&mut x`, `*x`
+- borrow/deref expressions: `&x`, `&mut x`, `&x[a..b]`, `&mut x[a..b]`, `*x`
 - where outlives predicates: `'a: 'b`, `T: 'a`
 
 Core rules:

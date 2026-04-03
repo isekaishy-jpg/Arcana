@@ -3,16 +3,28 @@ use super::NativeProcessHost;
 use super::{
     BufferedEvent, BufferedFrameInput, BufferedHost, ParsedAssignOp, ParsedAssignTarget,
     ParsedCleanupFooter, ParsedExpr, ParsedPhraseArg, ParsedPhraseQualifierKind, ParsedStmt,
-    RuntimeCallArg, RuntimeEntrypointPlan, RuntimeExecutionState, RuntimeHost, RuntimeIntrinsic,
-    RuntimeOpaqueValue, RuntimePackagePlan, RuntimeParamPlan, RuntimeRoutinePlan, RuntimeValue,
-    arcana_desktop_session_record, arcana_desktop_wake_record, arcana_desktop_window_value,
-    arcana_window_id_record, err_variant, execute_entrypoint_routine, execute_exported_abi_routine,
+    RuntimeCallArg, RuntimeEntrypointPlan, RuntimeExecutionState, RuntimeFrameArenaHandle,
+    RuntimeFrameArenaPolicy, RuntimeFrameArenaState, RuntimeFrameRecyclePolicy, RuntimeHost,
+    RuntimeIntrinsic, RuntimeMemoryHandlePolicy, RuntimeMemoryPressurePolicy, RuntimeOpaqueValue,
+    RuntimePackagePlan, RuntimeParamPlan, RuntimePoolIdValue, RuntimeProviderHostContext,
+    RuntimeReferenceTarget, RuntimeReferenceValue, RuntimeResetOnPolicy, RuntimeRingIdValue,
+    RuntimeRoutinePlan, RuntimeScope, RuntimeSessionIdValue, RuntimeSlabIdValue, RuntimeSlabPolicy,
+    RuntimeSlabState, RuntimeTempArenaHandle, RuntimeValue, arcana_desktop_session_record,
+    arcana_desktop_wake_record, arcana_desktop_window_value, arcana_window_id_record,
+    default_runtime_pool_policy, default_runtime_ring_policy, default_runtime_session_policy,
+    default_runtime_slab_policy, ensure_runtime_frame_capacity, ensure_runtime_slab_capacity,
+    err_variant, execute_entrypoint_routine, execute_exported_abi_routine,
     execute_exported_json_abi_routine, execute_main, execute_routine, execute_routine_with_state,
-    execute_runtime_intrinsic, insert_runtime_channel, load_package_plan,
+    execute_runtime_intrinsic, insert_runtime_channel, insert_runtime_local,
+    insert_runtime_pool_arena, insert_runtime_read_view_from_reference,
+    insert_runtime_read_view_from_ring_window, insert_runtime_ring_buffer,
+    insert_runtime_session_arena, insert_runtime_slab, load_package_plan,
     lookup_runtime_owner_plan, none_variant, ok_variant, owner_state_key, parse_cleanup_footer_row,
-    parse_runtime_package_image, parse_stmt, plan_from_artifact, render_exported_json_abi_manifest,
-    render_runtime_package_image, resolve_routine_index, resolve_routine_index_for_call,
-    some_variant, try_execute_arcana_owned_api_call,
+    parse_runtime_package_image, parse_stmt, plan_from_artifact, pool_id_is_live,
+    render_exported_json_abi_manifest, render_runtime_package_image, resolve_routine_index,
+    resolve_routine_index_for_call, runtime_descriptor_view_value, runtime_read_view_snapshot,
+    runtime_release_exported_descriptor_targets, runtime_reset_owner_exit_memory_specs_in_scopes,
+    runtime_validate_split_value, some_variant, try_execute_arcana_owned_api_call,
 };
 use arcana_aot::{
     AOT_INTERNAL_FORMAT, AotEntrypointArtifact, AotOwnerArtifact, AotPackageArtifact,
@@ -20,8 +32,8 @@ use arcana_aot::{
 };
 use arcana_frontend::{check_workspace_graph, compute_member_fingerprints_for_checked_workspace};
 use arcana_ir::{
-    IrForewordArg, IrForewordMetadata, IrForewordRetention, IrRoutineType, IrRoutineTypeKind,
-    parse_routine_type_text,
+    ExecMemorySpecDecl, IrForewordArg, IrForewordMetadata, IrForewordRetention, IrRoutineType,
+    IrRoutineTypeKind, parse_routine_type_text,
 };
 use arcana_package::{execute_build, load_workspace_graph, plan_workspace, prepare_build};
 use std::collections::{BTreeMap, BTreeSet};
@@ -74,6 +86,35 @@ fn test_return_type(signature: &str) -> Option<IrRoutineType> {
 
 fn test_package_id_for_module(module_id: &str) -> String {
     module_id.split('.').next().unwrap_or(module_id).to_string()
+}
+
+fn empty_runtime_plan(package_id: &str) -> RuntimePackagePlan {
+    RuntimePackagePlan {
+        package_id: package_id.to_string(),
+        package_name: package_id.to_string(),
+        root_module_id: package_id.to_string(),
+        direct_deps: Vec::new(),
+        direct_dep_ids: Vec::new(),
+        package_display_names: test_package_display_names_with_deps(
+            package_id.to_string(),
+            package_id.to_string(),
+            Vec::new(),
+            Vec::new(),
+        ),
+        package_direct_dep_ids: test_package_direct_dep_ids(
+            package_id.to_string(),
+            Vec::new(),
+            Vec::new(),
+        ),
+        runtime_requirements: Vec::new(),
+        foreword_index: Vec::new(),
+        foreword_registrations: Vec::new(),
+        module_aliases: BTreeMap::new(),
+        opaque_family_types: BTreeMap::new(),
+        entrypoints: Vec::new(),
+        routines: Vec::new(),
+        owners: Vec::new(),
+    }
 }
 
 fn test_package_display_names_with_deps(
@@ -3090,6 +3131,7 @@ fn execute_main_manual_routine_cleanup_footers_run_after_defers() {
                         }],
                         qualifier_kind: ParsedPhraseQualifierKind::Call,
                         qualifier: "call".to_string(),
+                        qualifier_type_args: Vec::new(),
                         resolved_callable: None,
                         resolved_routine: None,
                         dynamic_dispatch: None,
@@ -3108,6 +3150,7 @@ fn execute_main_manual_routine_cleanup_footers_run_after_defers() {
                                 }],
                                 qualifier_kind: ParsedPhraseQualifierKind::Call,
                                 qualifier: "call".to_string(),
+                                qualifier_type_args: Vec::new(),
                                 resolved_callable: None,
                                 resolved_routine: None,
                                 dynamic_dispatch: None,
@@ -3116,6 +3159,7 @@ fn execute_main_manual_routine_cleanup_footers_run_after_defers() {
                             args: Vec::new(),
                             qualifier_kind: ParsedPhraseQualifierKind::Try,
                             qualifier: "?".to_string(),
+                            qualifier_type_args: Vec::new(),
                             resolved_callable: None,
                             resolved_routine: None,
                             dynamic_dispatch: None,
@@ -3152,6 +3196,7 @@ fn execute_main_manual_routine_cleanup_footers_run_after_defers() {
                             }],
                             qualifier_kind: ParsedPhraseQualifierKind::Call,
                             qualifier: "call".to_string(),
+                            qualifier_type_args: Vec::new(),
                             resolved_callable: None,
                             resolved_routine: None,
                             dynamic_dispatch: None,
@@ -3936,6 +3981,373 @@ fn execute_main_runs_linked_std_memory_borrow_routines() {
 }
 
 #[test]
+fn execute_main_runs_memory_views_and_new_family_workspace() {
+    let dir = temp_workspace_dir("memory_views_and_new_families");
+    write_file(
+        &dir.join("book.toml"),
+        "name = \"runtime_memory_views_new_families\"\nkind = \"app\"\n",
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "import std.binary\n",
+            "import std.bytes\n",
+            "import std.collections.array\n",
+            "import std.collections.list\n",
+            "import std.memory\n",
+            "import std.text\n",
+            "record Item:\n",
+            "    value: Int\n",
+            "fn main() -> Int:\n",
+            "    let mut temp_store = std.memory.temp_new[Item] :: 2 :: call\n",
+            "    let temp_a = temp: temp_store :> value = 3 <: Item\n",
+            "    let _temp_b = temp: temp_store :> value = 4 <: Item\n",
+            "    temp_store :: :: reset\n",
+            "    if temp_store :: temp_a :: has:\n",
+            "        return 101\n",
+            "    let mut session_store = std.memory.session_new[Item] :: 2 :: call\n",
+            "    let session_a = session: session_store :> value = 10 <: Item\n",
+            "    let _session_b = session: session_store :> value = 12 <: Item\n",
+            "    session_store :: :: seal\n",
+            "    if not (session_store :: :: is_sealed):\n",
+            "        return 102\n",
+            "    let session_ids = session_store :: :: live_ids\n",
+            "    if (session_ids :: :: len) != 2:\n",
+            "        return 103\n",
+            "    let mut session_live = std.collections.list.new[Int] :: :: call\n",
+            "    for id in session_ids:\n",
+            "        session_live :: (session_store :: id :: get).value :: push\n",
+            "    let session_order = std.collections.array.from_list[Int] :: session_live :: call\n",
+            "    if session_order[0] != 10:\n",
+            "        return 127\n",
+            "    if session_order[1] != 12:\n",
+            "        return 128\n",
+            "    session_store :: :: unseal\n",
+            "    session_store :: session_a, (Item :: value = 11 :: call) :: set\n",
+            "    if (session_store :: session_a :: get).value != 11:\n",
+            "        return 104\n",
+            "    let mut ring_store = std.memory.ring_new[Item] :: 2 :: call\n",
+            "    let ring_a = ring: ring_store :> value = 20 <: Item\n",
+            "    let ring_b = ring: ring_store :> value = 21 <: Item\n",
+            "    let ring_c = ring: ring_store :> value = 22 <: Item\n",
+            "    if ring_store :: ring_a :: has:\n",
+            "        return 105\n",
+            "    if not (ring_store :: ring_b :: has):\n",
+            "        return 106\n",
+            "    if not (ring_store :: ring_c :: has):\n",
+            "        return 107\n",
+            "    if true:\n",
+            "        let ring_window = ring_store :: 0, 2 :: window_read\n",
+            "        if (ring_window :: 0 :: get).value != 21:\n",
+            "            return 108\n",
+            "        if (ring_window :: 1 :: get).value != 22:\n",
+            "            return 109\n",
+            "        ring_store :: ring_b, (Item :: value = 23 :: call) :: set\n",
+            "        if (ring_window :: 0 :: get).value != 23:\n",
+            "            return 137\n",
+            "    if true:\n",
+            "        let mut ring_window_edit = ring_store :: 0, 2 :: window_edit\n",
+            "        ring_window_edit :: 1, (Item :: value = 24 :: call) :: set\n",
+            "    if (ring_store :: ring_c :: get).value != 24:\n",
+            "        return 138\n",
+            "    let mut slab_store = std.memory.slab_new[Item] :: 2 :: call\n",
+            "    let slab_a = slab: slab_store :> value = 30 <: Item\n",
+            "    let _slab_b = slab: slab_store :> value = 31 <: Item\n",
+            "    if not (slab_store :: slab_a :: remove):\n",
+            "        return 110\n",
+            "    let slab_c = slab: slab_store :> value = 32 <: Item\n",
+            "    if slab_store :: slab_a :: has:\n",
+            "        return 111\n",
+            "    if (slab_store :: slab_c :: get).value != 32:\n",
+            "        return 112\n",
+            "    let slab_ids = slab_store :: :: live_ids\n",
+            "    let mut slab_live = std.collections.list.new[Int] :: :: call\n",
+            "    for id in slab_ids:\n",
+            "        slab_live :: (slab_store :: id :: get).value :: push\n",
+            "    let slab_order = std.collections.array.from_list[Int] :: slab_live :: call\n",
+            "    if slab_order[0] != 32:\n",
+            "        return 129\n",
+            "    if slab_order[1] != 31:\n",
+            "        return 130\n",
+            "    slab_store :: :: seal\n",
+            "    if not (slab_store :: :: is_sealed):\n",
+            "        return 113\n",
+            "    slab_store :: :: unseal\n",
+            "    let mut read_values = std.collections.array.new[Int] :: 4, 0 :: call\n",
+            "    read_values[0] = 18\n",
+            "    read_values[1] = 52\n",
+            "    read_values[2] = 171\n",
+            "    read_values[3] = 205\n",
+            "    let view = &read_values[1..3]\n",
+            "    if (view :: :: len) != 2:\n",
+            "        return 114\n",
+            "    if (view :: 0 :: get) != 52:\n",
+            "        return 115\n",
+            "    let mut edit_values = std.collections.array.new[Int] :: 2, 0 :: call\n",
+            "    edit_values[0] = 18\n",
+            "    edit_values[1] = 52\n",
+            "    if true:\n",
+            "        let mut edit = &mut edit_values[0..2]\n",
+            "        edit :: 1, 255 :: set\n",
+            "        if (edit :: 1 :: get) != 255:\n",
+            "            return 116\n",
+            "    if edit_values[1] != 255:\n",
+            "        return 121\n",
+            "    let mut byte_values = std.collections.array.new[Int] :: 4, 0 :: call\n",
+            "    byte_values[0] = 18\n",
+            "    byte_values[1] = 52\n",
+            "    byte_values[2] = 171\n",
+            "    byte_values[3] = 205\n",
+            "    let bytes = std.memory.bytes_view :: byte_values, 1, 3 :: call\n",
+            "    let mut reader = std.binary.from_view :: bytes :: call\n",
+            "    if (reader :: :: read_u16_be) != 13483:\n",
+            "        return 117\n",
+            "    let mut bytes_edit = std.bytes.view_edit :: byte_values, 0, 2 :: call\n",
+            "    bytes_edit :: 1, 99 :: set\n",
+            "    if byte_values[1] != 99:\n",
+            "        return 133\n",
+            "    let bytes_copy_view = std.bytes.view :: byte_values, 1, 3 :: call\n",
+            "    let bytes_copy = std.bytes.from_view :: bytes_copy_view :: call\n",
+            "    if bytes_copy[0] != 99:\n",
+            "        return 134\n",
+            "    if bytes_copy[1] != 171:\n",
+            "        return 135\n",
+            "    let mut writer = std.binary.writer :: :: call\n",
+            "    writer :: 4660 :: push_u16_be\n",
+            "    let written = writer :: :: into_array\n",
+            "    if written[0] != 18:\n",
+            "        return 131\n",
+            "    if written[1] != 52:\n",
+            "        return 132\n",
+            "    let text = \"hello\"\n",
+            "    let text_view = &text[1..4]\n",
+            "    if (text_view :: :: len_bytes) != 3:\n",
+            "        return 118\n",
+            "    if (text_view :: 0 :: byte_at) != 101:\n",
+            "        return 119\n",
+            "    if (text_view :: :: to_str) != \"ell\":\n",
+            "        return 120\n",
+            "    let copied_text_view = std.text.view :: text, 1, 4 :: call\n",
+            "    let text_copy = std.text.from_view :: copied_text_view :: call\n",
+            "    if text_copy != \"ell\":\n",
+            "        return 136\n",
+            "    return 0\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// memory test types\n");
+
+    let graph = load_workspace_graph(&dir).expect("workspace graph should load");
+    let checked = check_workspace_graph(&graph).expect("workspace should check");
+    let fingerprints = compute_member_fingerprints_for_checked_workspace(&graph, &checked)
+        .expect("fingerprints should compute");
+    let order = plan_workspace(&graph).expect("workspace order should plan");
+    let statuses =
+        plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
+    execute_workspace_build(&graph, &fingerprints, &statuses);
+
+    let artifact_path = graph.root_dir.join(
+        statuses
+            .iter()
+            .find(|status| status.member_name() == "runtime_memory_views_new_families")
+            .expect("app artifact status should exist")
+            .artifact_rel_path(),
+    );
+    let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
+    let mut host = BufferedHost::default();
+    let code = execute_main(&plan, &mut host).expect("runtime should execute");
+
+    assert_eq!(code, 0);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn workspace_checks_memory_and_binary_trait_surface() {
+    let dir = temp_workspace_dir("memory_binary_trait_surface");
+    write_file(
+        &dir.join("book.toml"),
+        "name = \"runtime_memory_binary_trait_surface\"\nkind = \"app\"\n",
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "import std.binary\n",
+            "import std.collections.array\n",
+            "import std.memory\n",
+            "import std.option\n",
+            "use std.binary.BinaryReadable\n",
+            "use std.binary.ByteSink\n",
+            "use std.memory.Compactable\n",
+            "use std.memory.EditViewSource\n",
+            "use std.memory.IdAllocating\n",
+            "use std.memory.LiveIterable\n",
+            "use std.memory.Resettable\n",
+            "use std.memory.Sealable\n",
+            "use std.memory.SequenceBuffer\n",
+            "use std.memory.ViewSource\n",
+            "record Item:\n",
+            "    value: Int\n",
+            "record Header:\n",
+            "    value: Int\n",
+            "impl std.binary.BinaryReadable[Header] for Header:\n",
+            "    fn read_from(edit reader: std.binary.Reader) -> Header:\n",
+            "        return Header :: value = (reader :: :: read_u16_be) :: call\n",
+            "impl std.binary.ByteSink[Header] for Header:\n",
+            "    fn write_to(read value: Header, edit writer: std.binary.Writer):\n",
+            "        writer :: value.value :: push_u16_be\n",
+            "fn clear_store[S, where std.memory.Resettable[S]](edit source: S):\n",
+            "    source :: :: reset_value\n",
+            "fn first_value[S, where std.memory.ViewSource[S]](read source: S) -> Int:\n",
+            "    let view = source :: 0, 1 :: as_view\n",
+            "    return view :: 0 :: get\n",
+            "fn overwrite_head[S, where std.memory.EditViewSource[S]](edit source: S, value: Int) -> Int:\n",
+            "    let mut view = source :: 0, 1 :: as_edit_view\n",
+            "    view :: 0, value :: set\n",
+            "    return view :: 0 :: get\n",
+            "fn supports_id[S, where std.memory.IdAllocating[S]](read source: S, id: std.memory.IdAllocating[S].Id) -> Bool:\n",
+            "    return source :: id :: has_id\n",
+            "fn live_count[S, where std.memory.LiveIterable[S]](read source: S) -> Int:\n",
+            "    return (source :: :: live_ids_of) :: :: len\n",
+            "fn publish_cycle[S, where std.memory.Sealable[S]](edit source: S) -> Bool:\n",
+            "    source :: :: seal_state\n",
+            "    let sealed = source :: :: state_is_sealed\n",
+            "    source :: :: unseal_state\n",
+            "    return sealed and (not (source :: :: state_is_sealed))\n",
+            "fn compact_count[S, where std.memory.Compactable[S]](edit source: S) -> Int:\n",
+            "    return (source :: :: compact_items) :: :: len\n",
+            "fn push_pop[S, where std.memory.SequenceBuffer[S]](edit source: S, take value: std.memory.SequenceBuffer[S].Item) -> Bool:\n",
+            "    let _ = source :: value :: push_item\n",
+            "    let popped = source :: :: pop_item\n",
+            "    return match popped:\n",
+            "        Option.Some(_) => true\n",
+            "        Option.None => false\n",
+            "fn main() -> Int:\n",
+            "    return 0\n",
+        ),
+    );
+    write_file(
+        &dir.join("src").join("types.arc"),
+        "// trait surface types\n",
+    );
+
+    let graph = load_workspace_graph(&dir).expect("workspace graph should load");
+    let _checked = check_workspace_graph(&graph).expect("workspace should check");
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn execute_main_runs_memory_and_binary_trait_helpers_workspace() {
+    let dir = temp_workspace_dir("memory_binary_trait_helpers");
+    write_file(
+        &dir.join("book.toml"),
+        "name = \"runtime_memory_binary_trait_helpers\"\nkind = \"app\"\n",
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "import std.binary\n",
+            "import std.option\n",
+            "import std.memory\n",
+            "use std.binary.ByteSink\n",
+            "use std.memory.Compactable\n",
+            "use std.memory.EditViewSource\n",
+            "use std.memory.IdAllocating\n",
+            "use std.memory.LiveIterable\n",
+            "use std.memory.Resettable\n",
+            "use std.memory.Sealable\n",
+            "use std.memory.SequenceBuffer\n",
+            "use std.memory.ViewSource\n",
+            "record Item:\n",
+            "    value: Int\n",
+            "record Header:\n",
+            "    value: Int\n",
+            "impl std.binary.ByteSink[Header] for Header:\n",
+            "    fn write_to(read value: Header, edit writer: std.binary.Writer):\n",
+            "        writer :: value.value :: push_u16_be\n",
+            "fn clear_store[S, where std.memory.Resettable[S]](edit source: S):\n",
+            "    source :: :: reset_value\n",
+            "fn first_value[S, where std.memory.ViewSource[S]](read source: S) -> Int:\n",
+            "    let view = source :: 0, 1 :: as_view\n",
+            "    return view :: 0 :: get\n",
+            "fn overwrite_head[S, where std.memory.EditViewSource[S]](edit source: S, value: Int) -> Int:\n",
+            "    let mut view = source :: 0, 1 :: as_edit_view\n",
+            "    view :: 0, value :: set\n",
+            "    return view :: 0 :: get\n",
+            "fn supports_id[S, where std.memory.IdAllocating[S]](read source: S, id: std.memory.IdAllocating[S].Id) -> Bool:\n",
+            "    return source :: id :: has_id\n",
+            "fn live_count[S, where std.memory.LiveIterable[S]](read source: S) -> Int:\n",
+            "    return (source :: :: live_ids_of) :: :: len\n",
+            "fn publish_cycle[S, where std.memory.Sealable[S]](edit source: S) -> Bool:\n",
+            "    source :: :: seal_state\n",
+            "    let sealed = source :: :: state_is_sealed\n",
+            "    source :: :: unseal_state\n",
+            "    return sealed and (not (source :: :: state_is_sealed))\n",
+            "fn compact_count[S, where std.memory.Compactable[S]](edit source: S) -> Int:\n",
+            "    return (source :: :: compact_items) :: :: len\n",
+            "fn push_pop[S, where std.memory.SequenceBuffer[S]](edit source: S, take value: std.memory.SequenceBuffer[S].Item) -> Bool:\n",
+            "    let _ = source :: value :: push_item\n",
+            "    let popped = source :: :: pop_item\n",
+            "    return match popped:\n",
+            "        Option.Some(_) => true\n",
+            "        Option.None => false\n",
+            "fn emit_word[S, where std.binary.ByteSink[S]](read value: S) -> Int:\n",
+            "    let mut writer = std.binary.writer :: :: call\n",
+            "    value :: writer :: write_to\n",
+            "    let bytes = writer :: :: into_array\n",
+            "    return (bytes[0] << 8) | bytes[1]\n",
+            "fn main() -> Int:\n",
+            "    let mut temp_store = std.memory.temp_new[Item] :: 2 :: call\n",
+            "    let temp_id = temp: temp_store :> value = 1 <: Item\n",
+            "    clear_store :: temp_store :: call\n",
+            "    if temp_store :: temp_id :: has:\n",
+            "        return 201\n",
+            "    let mut values = std.collections.array.new[Int] :: 2, 0 :: call\n",
+            "    values[0] = 7\n",
+            "    values[1] = 8\n",
+            "    if (first_value :: values :: call) != 7:\n",
+            "        return 202\n",
+            "    if (overwrite_head :: values, 9 :: call) != 9:\n",
+            "        return 203\n",
+            "    if values[0] != 9:\n",
+            "        return 204\n",
+            "    let mut session_store = std.memory.session_new[Item] :: 2 :: call\n",
+            "    let session_id = session: session_store :> value = 11 <: Item\n",
+            "    if not (supports_id :: session_store, session_id :: call):\n",
+            "        return 205\n",
+            "    if (live_count :: session_store :: call) != 1:\n",
+            "        return 206\n",
+            "    if not (publish_cycle :: session_store :: call):\n",
+            "        return 207\n",
+            "    let mut pool_store = std.memory.pool_new[Item] :: 2 :: call\n",
+            "    let pool_a = pool: pool_store :> value = 21 <: Item\n",
+            "    let _pool_b = pool: pool_store :> value = 22 <: Item\n",
+            "    if not (pool_store :: pool_a :: remove):\n",
+            "        return 208\n",
+            "    if (compact_count :: pool_store :: call) != 1:\n",
+            "        return 209\n",
+            "    let mut ring_store = std.memory.ring_new[Item] :: 2 :: call\n",
+            "    if not (push_pop :: ring_store, (Item :: value = 30 :: call) :: call):\n",
+            "        return 210\n",
+            "    let header = Header :: value = 4660 :: call\n",
+            "    if (emit_word :: header :: call) != 4660:\n",
+            "        return 211\n",
+            "    return 0\n",
+        ),
+    );
+    write_file(
+        &dir.join("src").join("types.arc"),
+        "// trait execution types\n",
+    );
+
+    let plan = build_workspace_plan_for_member(&dir, "runtime_memory_binary_trait_helpers");
+    let mut host = BufferedHost::default();
+    let code = execute_main(&plan, &mut host).expect("runtime should execute trait helpers");
+
+    assert_eq!(code, 0);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn execute_main_resolves_overloaded_method_on_borrowed_receiver() {
     let dir = temp_workspace_dir("borrowed_receiver_method");
     write_file(
@@ -4243,6 +4655,11 @@ fn execute_main_memory_specs_apply_runtime_policies() {
             RuntimeValue::Int(11),
         ],
         &plan,
+        None,
+        None,
+        None,
+        None,
+        None,
         &mut state,
         &mut host,
     )
@@ -4255,6 +4672,11 @@ fn execute_main_memory_specs_apply_runtime_policies() {
             free_id.clone(),
         ],
         &plan,
+        None,
+        None,
+        None,
+        None,
+        None,
         &mut state,
         &mut host,
     )
@@ -4267,6 +4689,11 @@ fn execute_main_memory_specs_apply_runtime_policies() {
             RuntimeValue::Int(12),
         ],
         &plan,
+        None,
+        None,
+        None,
+        None,
+        None,
         &mut state,
         &mut host,
     )
@@ -4280,6 +4707,11 @@ fn execute_main_memory_specs_apply_runtime_policies() {
             RuntimeValue::Int(21),
         ],
         &plan,
+        None,
+        None,
+        None,
+        None,
+        None,
         &mut state,
         &mut host,
     )
@@ -4292,6 +4724,11 @@ fn execute_main_memory_specs_apply_runtime_policies() {
             strict_id.clone(),
         ],
         &plan,
+        None,
+        None,
+        None,
+        None,
+        None,
         &mut state,
         &mut host,
     )
@@ -4304,6 +4741,11 @@ fn execute_main_memory_specs_apply_runtime_policies() {
             RuntimeValue::Int(22),
         ],
         &plan,
+        None,
+        None,
+        None,
+        None,
+        None,
         &mut state,
         &mut host,
     )
@@ -4315,6 +4757,11 @@ fn execute_main_memory_specs_apply_runtime_policies() {
             strict_handle,
         ))],
         &plan,
+        None,
+        None,
+        None,
+        None,
+        None,
         &mut state,
         &mut host,
     )
@@ -4327,6 +4774,11 @@ fn execute_main_memory_specs_apply_runtime_policies() {
             RuntimeValue::Int(23),
         ],
         &plan,
+        None,
+        None,
+        None,
+        None,
+        None,
         &mut state,
         &mut host,
     )
@@ -4428,6 +4880,1644 @@ fn runtime_memory_spec_materialization_uses_descriptor_hook_registry() {
         super::runtime_eval_message(err)
             .contains("unsupported runtime memory materialization hook `unknown_memory_new`")
     );
+}
+
+#[test]
+fn descriptor_export_rejects_unsealed_session_read_views() {
+    let mut state = RuntimeExecutionState::default();
+    let handle = insert_runtime_session_arena(
+        &mut state,
+        &["Int".to_string()],
+        default_runtime_session_policy(4),
+    );
+    let id = RuntimeSessionIdValue {
+        arena: handle,
+        slot: 0,
+        generation: 0,
+    };
+    let arena = state
+        .session_arenas
+        .get_mut(&handle)
+        .expect("session arena should exist");
+    arena.slots.insert(
+        0,
+        RuntimeValue::Array(vec![1, 2, 3].into_iter().map(RuntimeValue::Int).collect()),
+    );
+    arena.next_slot = 1;
+
+    let read_view = insert_runtime_read_view_from_reference(
+        &mut state,
+        &["Int".to_string()],
+        RuntimeReferenceValue {
+            mutable: false,
+            target: RuntimeReferenceTarget::SessionSlot {
+                id,
+                members: Vec::new(),
+            },
+        },
+        0,
+        3,
+    );
+
+    let err = runtime_descriptor_view_value(
+        &RuntimeOpaqueValue::ReadView(read_view),
+        &mut state,
+        "demo",
+        &mut Vec::new(),
+    )
+    .expect_err("unsealed session views should not export");
+    assert!(
+        err.contains("sealed SessionArena/Slab-backed ReadView"),
+        "{err}"
+    );
+}
+
+#[test]
+fn descriptor_export_materializes_sealed_session_read_views() {
+    let mut state = RuntimeExecutionState::default();
+    let handle = insert_runtime_session_arena(
+        &mut state,
+        &["Int".to_string()],
+        default_runtime_session_policy(4),
+    );
+    let id = RuntimeSessionIdValue {
+        arena: handle,
+        slot: 0,
+        generation: 0,
+    };
+    let arena = state
+        .session_arenas
+        .get_mut(&handle)
+        .expect("session arena should exist");
+    arena.slots.insert(
+        0,
+        RuntimeValue::Array(vec![1, 2, 3].into_iter().map(RuntimeValue::Int).collect()),
+    );
+    arena.next_slot = 1;
+    arena.sealed = true;
+
+    let read_view = insert_runtime_read_view_from_reference(
+        &mut state,
+        &["Int".to_string()],
+        RuntimeReferenceValue {
+            mutable: false,
+            target: RuntimeReferenceTarget::SessionSlot {
+                id,
+                members: Vec::new(),
+            },
+        },
+        1,
+        2,
+    );
+
+    let mut exports = Vec::new();
+    let descriptor = runtime_descriptor_view_value(
+        &RuntimeOpaqueValue::ReadView(read_view),
+        &mut state,
+        "demo",
+        &mut exports,
+    )
+    .expect("sealed session views should export")
+    .expect("read view should transport as descriptor");
+    let arcana_cabi::ArcanaCabiProviderValue::DescriptorView(descriptor) = descriptor else {
+        panic!("expected descriptor view export");
+    };
+    assert_eq!(descriptor.family, "std.memory.ReadView");
+    assert_eq!(descriptor.element_layout, "Int");
+    assert_eq!(descriptor.len, 2);
+
+    let mut host = BufferedHost::default();
+    let mut context = RuntimeProviderHostContext {
+        host: &mut host,
+        state: &mut state,
+        current_package_id: "demo".to_string(),
+        bundle_dir: PathBuf::new(),
+        package_asset_roots: BTreeMap::new(),
+        exported_descriptors: Vec::new(),
+        last_error: None,
+    };
+    let values = context
+        .descriptor_view_values("std.memory.ReadView", read_view.0, 0, 2)
+        .expect("sealed session descriptor should materialize");
+    assert_eq!(
+        values,
+        vec![
+            arcana_cabi::ArcanaCabiProviderValue::Int(2),
+            arcana_cabi::ArcanaCabiProviderValue::Int(3),
+        ]
+    );
+}
+
+#[test]
+fn descriptor_export_materializes_sealed_slab_read_views() {
+    let mut state = RuntimeExecutionState::default();
+    let handle = insert_runtime_slab(
+        &mut state,
+        &["Int".to_string()],
+        default_runtime_slab_policy(4),
+    );
+    let id = RuntimeSlabIdValue {
+        arena: handle,
+        slot: 0,
+        generation: 0,
+    };
+    let arena = state.slabs.get_mut(&handle).expect("slab should exist");
+    arena.slots.insert(
+        0,
+        RuntimeValue::Array(vec![4, 5, 6].into_iter().map(RuntimeValue::Int).collect()),
+    );
+    arena.generations.insert(0, 0);
+    arena.next_slot = 1;
+    arena.sealed = true;
+
+    let read_view = insert_runtime_read_view_from_reference(
+        &mut state,
+        &["Int".to_string()],
+        RuntimeReferenceValue {
+            mutable: false,
+            target: RuntimeReferenceTarget::SlabSlot {
+                id,
+                members: Vec::new(),
+            },
+        },
+        0,
+        2,
+    );
+
+    let mut exports = Vec::new();
+    let descriptor = runtime_descriptor_view_value(
+        &RuntimeOpaqueValue::ReadView(read_view),
+        &mut state,
+        "demo",
+        &mut exports,
+    )
+    .expect("sealed slab views should export")
+    .expect("read view should transport as descriptor");
+    let arcana_cabi::ArcanaCabiProviderValue::DescriptorView(descriptor) = descriptor else {
+        panic!("expected descriptor view export");
+    };
+    assert_eq!(descriptor.family, "std.memory.ReadView");
+    assert_eq!(descriptor.element_layout, "Int");
+    assert_eq!(descriptor.len, 2);
+
+    let mut host = BufferedHost::default();
+    let mut context = RuntimeProviderHostContext {
+        host: &mut host,
+        state: &mut state,
+        current_package_id: "demo".to_string(),
+        bundle_dir: PathBuf::new(),
+        package_asset_roots: BTreeMap::new(),
+        exported_descriptors: Vec::new(),
+        last_error: None,
+    };
+    let values = context
+        .descriptor_view_values("std.memory.ReadView", read_view.0, 0, 2)
+        .expect("sealed slab descriptor should materialize");
+    assert_eq!(
+        values,
+        vec![
+            arcana_cabi::ArcanaCabiProviderValue::Int(4),
+            arcana_cabi::ArcanaCabiProviderValue::Int(5),
+        ]
+    );
+}
+
+#[test]
+fn session_unseal_rejects_live_reference_views() {
+    let plan = empty_runtime_plan("demo");
+    let mut state = RuntimeExecutionState::default();
+    let handle = insert_runtime_session_arena(
+        &mut state,
+        &["Int".to_string()],
+        default_runtime_session_policy(4),
+    );
+    let id = RuntimeSessionIdValue {
+        arena: handle,
+        slot: 0,
+        generation: 0,
+    };
+    let arena = state
+        .session_arenas
+        .get_mut(&handle)
+        .expect("session arena should exist");
+    arena
+        .slots
+        .insert(0, RuntimeValue::Array(vec![RuntimeValue::Int(1)]));
+    arena.next_slot = 1;
+    arena.sealed = true;
+    let _ = insert_runtime_read_view_from_reference(
+        &mut state,
+        &["Int".to_string()],
+        RuntimeReferenceValue {
+            mutable: false,
+            target: RuntimeReferenceTarget::SessionSlot {
+                id,
+                members: Vec::new(),
+            },
+        },
+        0,
+        1,
+    );
+
+    let mut host = BufferedHost::default();
+    let err = execute_runtime_intrinsic(
+        RuntimeIntrinsic::MemorySessionUnseal,
+        &[],
+        &mut vec![RuntimeValue::Opaque(RuntimeOpaqueValue::SessionArena(
+            handle,
+        ))],
+        &plan,
+        None,
+        None,
+        None,
+        None,
+        None,
+        &mut state,
+        &mut host,
+    )
+    .expect_err("session unseal should reject while borrowed views are live");
+    assert!(err.contains("borrowed views"), "{err}");
+}
+
+#[test]
+fn session_borrow_edit_rejects_while_sealed() {
+    let plan = empty_runtime_plan("demo");
+    let mut state = RuntimeExecutionState::default();
+    let handle = insert_runtime_session_arena(
+        &mut state,
+        &["Int".to_string()],
+        default_runtime_session_policy(2),
+    );
+    let id = RuntimeSessionIdValue {
+        arena: handle,
+        slot: 0,
+        generation: 0,
+    };
+    let arena = state
+        .session_arenas
+        .get_mut(&handle)
+        .expect("session arena should exist");
+    arena.slots.insert(0, RuntimeValue::Int(7));
+    arena.next_slot = 1;
+    arena.sealed = true;
+
+    let mut host = BufferedHost::default();
+    let err = execute_runtime_intrinsic(
+        RuntimeIntrinsic::MemorySessionBorrowEdit,
+        &[],
+        &mut vec![
+            RuntimeValue::Opaque(RuntimeOpaqueValue::SessionArena(handle)),
+            RuntimeValue::Opaque(RuntimeOpaqueValue::SessionId(id)),
+        ],
+        &plan,
+        None,
+        None,
+        None,
+        None,
+        None,
+        &mut state,
+        &mut host,
+    )
+    .expect_err("session borrow_edit should reject while sealed");
+    assert!(err.contains("while sealed"), "{err}");
+}
+
+#[test]
+fn session_unseal_rejects_live_borrows() {
+    let plan = empty_runtime_plan("demo");
+    let mut state = RuntimeExecutionState::default();
+    let handle = insert_runtime_session_arena(
+        &mut state,
+        &["Int".to_string()],
+        default_runtime_session_policy(2),
+    );
+    let id = RuntimeSessionIdValue {
+        arena: handle,
+        slot: 0,
+        generation: 0,
+    };
+    let arena = state
+        .session_arenas
+        .get_mut(&handle)
+        .expect("session arena should exist");
+    arena.slots.insert(0, RuntimeValue::Int(3));
+    arena.next_slot = 1;
+    arena.sealed = true;
+
+    let mut scopes = vec![RuntimeScope::default()];
+    insert_runtime_local(
+        &mut state,
+        0,
+        &mut scopes[0],
+        0,
+        "borrow".to_string(),
+        false,
+        RuntimeValue::Ref(RuntimeReferenceValue {
+            mutable: false,
+            target: RuntimeReferenceTarget::SessionSlot {
+                id,
+                members: Vec::new(),
+            },
+        }),
+    );
+
+    let mut host = BufferedHost::default();
+    let err = execute_runtime_intrinsic(
+        RuntimeIntrinsic::MemorySessionUnseal,
+        &[],
+        &mut vec![RuntimeValue::Opaque(RuntimeOpaqueValue::SessionArena(
+            handle,
+        ))],
+        &plan,
+        Some(&mut scopes),
+        None,
+        None,
+        None,
+        None,
+        &mut state,
+        &mut host,
+    )
+    .expect_err("session unseal should reject while borrows are live");
+    assert!(err.contains("borrows"), "{err}");
+}
+
+#[test]
+fn slab_unseal_rejects_live_reference_views() {
+    let plan = empty_runtime_plan("demo");
+    let mut state = RuntimeExecutionState::default();
+    let handle = insert_runtime_slab(
+        &mut state,
+        &["Int".to_string()],
+        default_runtime_slab_policy(4),
+    );
+    let id = RuntimeSlabIdValue {
+        arena: handle,
+        slot: 0,
+        generation: 0,
+    };
+    let arena = state.slabs.get_mut(&handle).expect("slab should exist");
+    arena
+        .slots
+        .insert(0, RuntimeValue::Array(vec![RuntimeValue::Int(1)]));
+    arena.generations.insert(0, 0);
+    arena.next_slot = 1;
+    arena.sealed = true;
+    let _ = insert_runtime_read_view_from_reference(
+        &mut state,
+        &["Int".to_string()],
+        RuntimeReferenceValue {
+            mutable: false,
+            target: RuntimeReferenceTarget::SlabSlot {
+                id,
+                members: Vec::new(),
+            },
+        },
+        0,
+        1,
+    );
+
+    let mut host = BufferedHost::default();
+    let err = execute_runtime_intrinsic(
+        RuntimeIntrinsic::MemorySlabUnseal,
+        &[],
+        &mut vec![RuntimeValue::Opaque(RuntimeOpaqueValue::Slab(handle))],
+        &plan,
+        None,
+        None,
+        None,
+        None,
+        None,
+        &mut state,
+        &mut host,
+    )
+    .expect_err("slab unseal should reject while borrowed views are live");
+    assert!(err.contains("borrowed views"), "{err}");
+}
+
+#[test]
+fn slab_borrow_edit_rejects_while_sealed() {
+    let plan = empty_runtime_plan("demo");
+    let mut state = RuntimeExecutionState::default();
+    let handle = insert_runtime_slab(
+        &mut state,
+        &["Int".to_string()],
+        default_runtime_slab_policy(2),
+    );
+    let id = RuntimeSlabIdValue {
+        arena: handle,
+        slot: 0,
+        generation: 0,
+    };
+    let arena = state.slabs.get_mut(&handle).expect("slab should exist");
+    arena.slots.insert(0, RuntimeValue::Int(9));
+    arena.generations.insert(0, 0);
+    arena.next_slot = 1;
+    arena.sealed = true;
+
+    let mut host = BufferedHost::default();
+    let err = execute_runtime_intrinsic(
+        RuntimeIntrinsic::MemorySlabBorrowEdit,
+        &[],
+        &mut vec![
+            RuntimeValue::Opaque(RuntimeOpaqueValue::Slab(handle)),
+            RuntimeValue::Opaque(RuntimeOpaqueValue::SlabId(id)),
+        ],
+        &plan,
+        None,
+        None,
+        None,
+        None,
+        None,
+        &mut state,
+        &mut host,
+    )
+    .expect_err("slab borrow_edit should reject while sealed");
+    assert!(err.contains("while sealed"), "{err}");
+}
+
+#[test]
+fn slab_unseal_rejects_live_borrows() {
+    let plan = empty_runtime_plan("demo");
+    let mut state = RuntimeExecutionState::default();
+    let handle = insert_runtime_slab(
+        &mut state,
+        &["Int".to_string()],
+        default_runtime_slab_policy(2),
+    );
+    let id = RuntimeSlabIdValue {
+        arena: handle,
+        slot: 0,
+        generation: 0,
+    };
+    let arena = state.slabs.get_mut(&handle).expect("slab should exist");
+    arena.slots.insert(0, RuntimeValue::Int(4));
+    arena.generations.insert(0, 0);
+    arena.next_slot = 1;
+    arena.sealed = true;
+
+    let mut scopes = vec![RuntimeScope::default()];
+    insert_runtime_local(
+        &mut state,
+        0,
+        &mut scopes[0],
+        0,
+        "borrow".to_string(),
+        false,
+        RuntimeValue::Ref(RuntimeReferenceValue {
+            mutable: false,
+            target: RuntimeReferenceTarget::SlabSlot {
+                id,
+                members: Vec::new(),
+            },
+        }),
+    );
+
+    let mut host = BufferedHost::default();
+    let err = execute_runtime_intrinsic(
+        RuntimeIntrinsic::MemorySlabUnseal,
+        &[],
+        &mut vec![RuntimeValue::Opaque(RuntimeOpaqueValue::Slab(handle))],
+        &plan,
+        Some(&mut scopes),
+        None,
+        None,
+        None,
+        None,
+        &mut state,
+        &mut host,
+    )
+    .expect_err("slab unseal should reject while borrows are live");
+    assert!(err.contains("borrows"), "{err}");
+}
+
+#[test]
+fn array_view_edit_rejects_conflicting_live_read_view() {
+    let plan = empty_runtime_plan("demo");
+    let mut state = RuntimeExecutionState::default();
+    let mut scopes = vec![RuntimeScope::default()];
+    insert_runtime_local(
+        &mut state,
+        0,
+        &mut scopes[0],
+        0,
+        "values".to_string(),
+        true,
+        RuntimeValue::Array(vec![RuntimeValue::Int(1), RuntimeValue::Int(2)]),
+    );
+    let local = scopes[0]
+        .locals
+        .get("values")
+        .expect("values local should exist")
+        .handle;
+    let reference = RuntimeReferenceValue {
+        mutable: true,
+        target: RuntimeReferenceTarget::Local {
+            local,
+            members: Vec::new(),
+        },
+    };
+    let read_view = insert_runtime_read_view_from_reference(
+        &mut state,
+        &["Int".to_string()],
+        reference.clone(),
+        0,
+        1,
+    );
+    insert_runtime_local(
+        &mut state,
+        0,
+        &mut scopes[0],
+        1,
+        "alias".to_string(),
+        false,
+        RuntimeValue::Opaque(RuntimeOpaqueValue::ReadView(read_view)),
+    );
+
+    let mut host = BufferedHost::default();
+    let err = execute_runtime_intrinsic(
+        RuntimeIntrinsic::MemoryArrayViewEdit,
+        &["Int".to_string()],
+        &mut vec![
+            RuntimeValue::Ref(reference),
+            RuntimeValue::Int(0),
+            RuntimeValue::Int(1),
+        ],
+        &plan,
+        Some(&mut scopes),
+        Some("demo"),
+        Some("demo"),
+        None,
+        None,
+        &mut state,
+        &mut host,
+    )
+    .expect_err("array_view_edit should reject conflicting live read views");
+    assert!(err.contains("exclusive view acquisition"), "{err}");
+}
+
+#[test]
+fn edit_view_subview_edit_allows_source_reborrow_without_other_aliases() {
+    let plan = empty_runtime_plan("demo");
+    let mut state = RuntimeExecutionState::default();
+    let mut scopes = vec![RuntimeScope::default()];
+    insert_runtime_local(
+        &mut state,
+        0,
+        &mut scopes[0],
+        0,
+        "values".to_string(),
+        true,
+        RuntimeValue::Array(vec![RuntimeValue::Int(10), RuntimeValue::Int(20)]),
+    );
+    let local = scopes[0]
+        .locals
+        .get("values")
+        .expect("values local should exist")
+        .handle;
+    let reference = RuntimeReferenceValue {
+        mutable: true,
+        target: RuntimeReferenceTarget::Local {
+            local,
+            members: Vec::new(),
+        },
+    };
+
+    let mut host = BufferedHost::default();
+    let root_view = match execute_runtime_intrinsic(
+        RuntimeIntrinsic::MemoryArrayViewEdit,
+        &["Int".to_string()],
+        &mut vec![
+            RuntimeValue::Ref(reference),
+            RuntimeValue::Int(0),
+            RuntimeValue::Int(2),
+        ],
+        &plan,
+        Some(&mut scopes),
+        Some("demo"),
+        Some("demo"),
+        None,
+        None,
+        &mut state,
+        &mut host,
+    )
+    .expect("root edit view should succeed")
+    {
+        RuntimeValue::Opaque(RuntimeOpaqueValue::EditView(handle)) => handle,
+        other => panic!("expected edit view handle, got {other:?}"),
+    };
+
+    let nested = execute_runtime_intrinsic(
+        RuntimeIntrinsic::MemoryEditViewSubviewEdit,
+        &["Int".to_string()],
+        &mut vec![
+            RuntimeValue::Opaque(RuntimeOpaqueValue::EditView(root_view)),
+            RuntimeValue::Int(0),
+            RuntimeValue::Int(1),
+        ],
+        &plan,
+        Some(&mut scopes),
+        Some("demo"),
+        Some("demo"),
+        None,
+        None,
+        &mut state,
+        &mut host,
+    )
+    .expect("subview edit should allow reborrow of the source handle");
+    assert!(
+        matches!(
+            nested,
+            RuntimeValue::Opaque(RuntimeOpaqueValue::EditView(_))
+        ),
+        "expected nested edit view, got {nested:?}"
+    );
+}
+
+#[test]
+fn slab_unseal_rejects_exported_descriptor_views() {
+    let plan = empty_runtime_plan("demo");
+    let mut state = RuntimeExecutionState::default();
+    let handle = insert_runtime_slab(
+        &mut state,
+        &["Int".to_string()],
+        default_runtime_slab_policy(4),
+    );
+    let id = RuntimeSlabIdValue {
+        arena: handle,
+        slot: 0,
+        generation: 0,
+    };
+    let arena = state.slabs.get_mut(&handle).expect("slab should exist");
+    arena
+        .slots
+        .insert(0, RuntimeValue::Array(vec![RuntimeValue::Int(1)]));
+    arena.generations.insert(0, 0);
+    arena.next_slot = 1;
+    arena.sealed = true;
+    let read_view = insert_runtime_read_view_from_reference(
+        &mut state,
+        &["Int".to_string()],
+        RuntimeReferenceValue {
+            mutable: false,
+            target: RuntimeReferenceTarget::SlabSlot {
+                id,
+                members: Vec::new(),
+            },
+        },
+        0,
+        1,
+    );
+    let mut exports = Vec::new();
+    let _ = runtime_descriptor_view_value(
+        &RuntimeOpaqueValue::ReadView(read_view),
+        &mut state,
+        "demo",
+        &mut exports,
+    )
+    .expect("sealed slab views should export");
+    state.read_views.remove(&read_view);
+
+    let mut host = BufferedHost::default();
+    let err = execute_runtime_intrinsic(
+        RuntimeIntrinsic::MemorySlabUnseal,
+        &[],
+        &mut vec![RuntimeValue::Opaque(RuntimeOpaqueValue::Slab(handle))],
+        &plan,
+        None,
+        None,
+        None,
+        None,
+        None,
+        &mut state,
+        &mut host,
+    )
+    .expect_err("slab unseal should reject while exported descriptors are live");
+    assert!(err.contains("exported descriptor views"), "{err}");
+
+    runtime_release_exported_descriptor_targets(&mut state, &mut exports);
+}
+
+#[test]
+fn session_unseal_rejects_exported_descriptor_views() {
+    let plan = empty_runtime_plan("demo");
+    let mut state = RuntimeExecutionState::default();
+    let handle = insert_runtime_session_arena(
+        &mut state,
+        &["Int".to_string()],
+        default_runtime_session_policy(4),
+    );
+    let id = RuntimeSessionIdValue {
+        arena: handle,
+        slot: 0,
+        generation: 0,
+    };
+    let arena = state
+        .session_arenas
+        .get_mut(&handle)
+        .expect("session arena should exist");
+    arena
+        .slots
+        .insert(0, RuntimeValue::Array(vec![RuntimeValue::Int(1)]));
+    arena.next_slot = 1;
+    arena.sealed = true;
+    let read_view = insert_runtime_read_view_from_reference(
+        &mut state,
+        &["Int".to_string()],
+        RuntimeReferenceValue {
+            mutable: false,
+            target: RuntimeReferenceTarget::SessionSlot {
+                id,
+                members: Vec::new(),
+            },
+        },
+        0,
+        1,
+    );
+    let mut exports = Vec::new();
+    let _ = runtime_descriptor_view_value(
+        &RuntimeOpaqueValue::ReadView(read_view),
+        &mut state,
+        "demo",
+        &mut exports,
+    )
+    .expect("sealed session views should export");
+    state.read_views.remove(&read_view);
+
+    let mut host = BufferedHost::default();
+    let err = execute_runtime_intrinsic(
+        RuntimeIntrinsic::MemorySessionUnseal,
+        &[],
+        &mut vec![RuntimeValue::Opaque(RuntimeOpaqueValue::SessionArena(
+            handle,
+        ))],
+        &plan,
+        None,
+        None,
+        None,
+        None,
+        None,
+        &mut state,
+        &mut host,
+    )
+    .expect_err("session unseal should reject while exported descriptors are live");
+    assert!(err.contains("exported descriptor views"), "{err}");
+
+    runtime_release_exported_descriptor_targets(&mut state, &mut exports);
+}
+
+#[test]
+fn frame_capacity_reset_on_frame_resets_without_recycle() {
+    let handle = RuntimeFrameArenaHandle(1);
+    let mut state = RuntimeExecutionState::default();
+    state.frame_arenas.insert(
+        handle,
+        RuntimeFrameArenaState {
+            type_args: vec!["Int".to_string()],
+            next_slot: 2,
+            generation: 7,
+            slots: BTreeMap::from([(0, RuntimeValue::Int(1)), (1, RuntimeValue::Int(2))]),
+            policy: RuntimeFrameArenaPolicy {
+                base_capacity: 2,
+                current_limit: 2,
+                growth_step: 0,
+                pressure: RuntimeMemoryPressurePolicy::Bounded,
+                recycle: RuntimeFrameRecyclePolicy::Manual,
+                reset_on: RuntimeResetOnPolicy::Frame,
+            },
+        },
+    );
+
+    let arena = state
+        .frame_arenas
+        .get_mut(&handle)
+        .expect("frame arena should exist");
+    ensure_runtime_frame_capacity(arena).expect("frame reset_on=frame should reset on saturation");
+    assert_eq!(arena.generation, 8);
+    assert_eq!(arena.next_slot, 0);
+    assert!(arena.slots.is_empty());
+    assert_eq!(arena.policy.current_limit, arena.policy.base_capacity);
+}
+
+#[test]
+fn slab_capacity_growth_uses_page_size() {
+    let mut arena = RuntimeSlabState {
+        type_args: vec!["Int".to_string()],
+        next_slot: 1,
+        free_slots: Vec::new(),
+        generations: BTreeMap::from([(0, 0)]),
+        slots: BTreeMap::from([(0, RuntimeValue::Int(1))]),
+        policy: RuntimeSlabPolicy {
+            base_capacity: 1,
+            current_limit: 1,
+            growth_step: 0,
+            pressure: RuntimeMemoryPressurePolicy::Elastic,
+            handle: RuntimeMemoryHandlePolicy::Stable,
+            page: 4,
+        },
+        sealed: false,
+    };
+
+    ensure_runtime_slab_capacity(&mut arena).expect("elastic slab should grow by page size");
+    assert_eq!(arena.policy.current_limit, 5);
+}
+
+#[test]
+fn owner_exit_resets_owner_bound_frame_specs() {
+    let handle = RuntimeFrameArenaHandle(7);
+    let mut state = RuntimeExecutionState::default();
+    state.frame_arenas.insert(
+        handle,
+        RuntimeFrameArenaState {
+            type_args: vec!["Int".to_string()],
+            next_slot: 1,
+            generation: 0,
+            slots: BTreeMap::from([(0, RuntimeValue::Int(9))]),
+            policy: RuntimeFrameArenaPolicy {
+                base_capacity: 1,
+                current_limit: 1,
+                growth_step: 0,
+                pressure: RuntimeMemoryPressurePolicy::Bounded,
+                recycle: RuntimeFrameRecyclePolicy::Manual,
+                reset_on: RuntimeResetOnPolicy::OwnerExit,
+            },
+        },
+    );
+    let mut scopes = vec![RuntimeScope {
+        memory_specs: BTreeMap::from([(
+            "scratch".to_string(),
+            super::RuntimeMemorySpecState {
+                spec: ExecMemorySpecDecl {
+                    family: "frame".to_string(),
+                    name: "scratch".to_string(),
+                    default_modifier: None,
+                    details: Vec::new(),
+                },
+                handle: Some(RuntimeValue::Opaque(RuntimeOpaqueValue::FrameArena(handle))),
+                handle_policy: Some(RuntimeMemoryHandlePolicy::Stable),
+                owner_keys: vec!["demo::Owner".to_string()],
+            },
+        )]),
+        ..RuntimeScope::default()
+    }];
+
+    runtime_reset_owner_exit_memory_specs_in_scopes(&mut scopes, &mut state, "demo::Owner")
+        .expect("owner_exit should reset owner-bound frame specs");
+    let arena = state
+        .frame_arenas
+        .get(&handle)
+        .expect("frame arena should still exist");
+    assert!(arena.slots.is_empty());
+    assert_eq!(arena.generation, 1);
+}
+
+#[test]
+fn owner_exit_resets_owner_bound_temp_specs() {
+    let handle = RuntimeTempArenaHandle(8);
+    let mut state = RuntimeExecutionState::default();
+    state.temp_arenas.insert(
+        handle,
+        super::RuntimeTempArenaState {
+            type_args: vec!["Int".to_string()],
+            next_slot: 1,
+            generation: 0,
+            slots: BTreeMap::from([(0, RuntimeValue::Int(5))]),
+            policy: super::RuntimeTempArenaPolicy {
+                base_capacity: 1,
+                current_limit: 1,
+                growth_step: 0,
+                pressure: RuntimeMemoryPressurePolicy::Bounded,
+                reset_on: RuntimeResetOnPolicy::OwnerExit,
+            },
+        },
+    );
+    let mut scopes = vec![RuntimeScope {
+        memory_specs: BTreeMap::from([(
+            "scratch".to_string(),
+            super::RuntimeMemorySpecState {
+                spec: ExecMemorySpecDecl {
+                    family: "temp".to_string(),
+                    name: "scratch".to_string(),
+                    default_modifier: None,
+                    details: Vec::new(),
+                },
+                handle: Some(RuntimeValue::Opaque(RuntimeOpaqueValue::TempArena(handle))),
+                handle_policy: Some(RuntimeMemoryHandlePolicy::Stable),
+                owner_keys: vec!["demo::Owner".to_string()],
+            },
+        )]),
+        ..RuntimeScope::default()
+    }];
+
+    runtime_reset_owner_exit_memory_specs_in_scopes(&mut scopes, &mut state, "demo::Owner")
+        .expect("owner_exit should reset owner-bound temp specs");
+    let arena = state
+        .temp_arenas
+        .get(&handle)
+        .expect("temp arena should still exist");
+    assert!(arena.slots.is_empty());
+    assert_eq!(arena.generation, 1);
+}
+
+#[test]
+fn ring_window_rejects_requests_past_configured_window() {
+    let plan = empty_runtime_plan("demo");
+    let mut state = RuntimeExecutionState::default();
+    let handle = insert_runtime_ring_buffer(
+        &mut state,
+        &["Int".to_string()],
+        super::RuntimeRingBufferPolicy {
+            window: 1,
+            ..default_runtime_ring_policy(4)
+        },
+    );
+    let arena = state
+        .ring_buffers
+        .get_mut(&handle)
+        .expect("ring buffer should exist");
+    arena.slots.insert(0, RuntimeValue::Int(1));
+    arena.slots.insert(1, RuntimeValue::Int(2));
+    arena.order.push_back(0);
+    arena.order.push_back(1);
+    arena.next_slot = 2;
+    arena.generations.insert(0, 0);
+    arena.generations.insert(1, 0);
+
+    let mut host = BufferedHost::default();
+    let err = execute_runtime_intrinsic(
+        RuntimeIntrinsic::MemoryRingWindowRead,
+        &["Int".to_string()],
+        &mut vec![
+            RuntimeValue::Opaque(RuntimeOpaqueValue::RingBuffer(handle)),
+            RuntimeValue::Int(0),
+            RuntimeValue::Int(2),
+        ],
+        &plan,
+        None,
+        None,
+        None,
+        None,
+        None,
+        &mut state,
+        &mut host,
+    )
+    .expect_err("ring_window should reject requests beyond configured policy.window");
+    assert!(err.contains("configured window `1`"), "{err}");
+}
+
+#[test]
+fn ring_window_read_tracks_live_ring_updates() {
+    let plan = empty_runtime_plan("demo");
+    let mut state = RuntimeExecutionState::default();
+    let handle = insert_runtime_ring_buffer(
+        &mut state,
+        &["Int".to_string()],
+        default_runtime_ring_policy(4),
+    );
+    let arena = state
+        .ring_buffers
+        .get_mut(&handle)
+        .expect("ring buffer should exist");
+    arena.slots.insert(0, RuntimeValue::Int(21));
+    arena.slots.insert(1, RuntimeValue::Int(22));
+    arena.order.push_back(0);
+    arena.order.push_back(1);
+    arena.next_slot = 2;
+    arena.generations.insert(0, 0);
+    arena.generations.insert(1, 0);
+
+    let mut host = BufferedHost::default();
+    let read_view = match execute_runtime_intrinsic(
+        RuntimeIntrinsic::MemoryRingWindowRead,
+        &["Int".to_string()],
+        &mut vec![
+            RuntimeValue::Opaque(RuntimeOpaqueValue::RingBuffer(handle)),
+            RuntimeValue::Int(0),
+            RuntimeValue::Int(2),
+        ],
+        &plan,
+        None,
+        None,
+        None,
+        None,
+        None,
+        &mut state,
+        &mut host,
+    )
+    .expect("ring_window_read should succeed")
+    {
+        RuntimeValue::Opaque(RuntimeOpaqueValue::ReadView(view)) => view,
+        other => panic!("expected ReadView, got {other:?}"),
+    };
+
+    execute_runtime_intrinsic(
+        RuntimeIntrinsic::MemoryRingSet,
+        &[],
+        &mut vec![
+            RuntimeValue::Opaque(RuntimeOpaqueValue::RingBuffer(handle)),
+            RuntimeValue::Opaque(RuntimeOpaqueValue::RingId(RuntimeRingIdValue {
+                arena: handle,
+                slot: 0,
+                generation: 0,
+            })),
+            RuntimeValue::Int(55),
+        ],
+        &plan,
+        None,
+        None,
+        None,
+        None,
+        None,
+        &mut state,
+        &mut host,
+    )
+    .expect("ring_set should succeed");
+
+    let snapshot =
+        runtime_read_view_snapshot(&state, read_view).expect("ring-backed view should stay live");
+    assert_eq!(snapshot, vec![RuntimeValue::Int(55), RuntimeValue::Int(22)]);
+}
+
+#[test]
+fn ring_window_edit_writes_through_to_ring_buffer() {
+    let plan = empty_runtime_plan("demo");
+    let mut state = RuntimeExecutionState::default();
+    let handle = insert_runtime_ring_buffer(
+        &mut state,
+        &["Int".to_string()],
+        default_runtime_ring_policy(4),
+    );
+    let arena = state
+        .ring_buffers
+        .get_mut(&handle)
+        .expect("ring buffer should exist");
+    arena.slots.insert(0, RuntimeValue::Int(21));
+    arena.slots.insert(1, RuntimeValue::Int(22));
+    arena.order.push_back(0);
+    arena.order.push_back(1);
+    arena.next_slot = 2;
+    arena.generations.insert(0, 0);
+    arena.generations.insert(1, 0);
+
+    let mut host = BufferedHost::default();
+    let edit_view = match execute_runtime_intrinsic(
+        RuntimeIntrinsic::MemoryRingWindowEdit,
+        &["Int".to_string()],
+        &mut vec![
+            RuntimeValue::Opaque(RuntimeOpaqueValue::RingBuffer(handle)),
+            RuntimeValue::Int(0),
+            RuntimeValue::Int(2),
+        ],
+        &plan,
+        None,
+        None,
+        None,
+        None,
+        None,
+        &mut state,
+        &mut host,
+    )
+    .expect("ring_window_edit should succeed")
+    {
+        RuntimeValue::Opaque(RuntimeOpaqueValue::EditView(view)) => view,
+        other => panic!("expected EditView, got {other:?}"),
+    };
+
+    execute_runtime_intrinsic(
+        RuntimeIntrinsic::MemoryEditViewSet,
+        &[],
+        &mut vec![
+            RuntimeValue::Opaque(RuntimeOpaqueValue::EditView(edit_view)),
+            RuntimeValue::Int(1),
+            RuntimeValue::Int(77),
+        ],
+        &plan,
+        None,
+        None,
+        None,
+        None,
+        None,
+        &mut state,
+        &mut host,
+    )
+    .expect("edit_view_set should write through to the ring");
+
+    let updated = state
+        .ring_buffers
+        .get(&handle)
+        .and_then(|arena| arena.slots.get(&1))
+        .cloned()
+        .expect("ring slot should still exist");
+    assert_eq!(updated, RuntimeValue::Int(77));
+}
+
+#[test]
+fn ring_window_edit_rejects_overlapping_live_read_window() {
+    let plan = empty_runtime_plan("demo");
+    let mut state = RuntimeExecutionState::default();
+    let handle = insert_runtime_ring_buffer(
+        &mut state,
+        &["Int".to_string()],
+        default_runtime_ring_policy(4),
+    );
+    let arena = state
+        .ring_buffers
+        .get_mut(&handle)
+        .expect("ring buffer should exist");
+    arena.slots.insert(0, RuntimeValue::Int(1));
+    arena.slots.insert(1, RuntimeValue::Int(2));
+    arena.order.push_back(0);
+    arena.order.push_back(1);
+    arena.next_slot = 2;
+    arena.generations.insert(0, 0);
+    arena.generations.insert(1, 0);
+
+    let mut scopes = vec![RuntimeScope::default()];
+    let mut host = BufferedHost::default();
+    let read_view = execute_runtime_intrinsic(
+        RuntimeIntrinsic::MemoryRingWindowRead,
+        &["Int".to_string()],
+        &mut vec![
+            RuntimeValue::Opaque(RuntimeOpaqueValue::RingBuffer(handle)),
+            RuntimeValue::Int(0),
+            RuntimeValue::Int(2),
+        ],
+        &plan,
+        Some(&mut scopes),
+        None,
+        None,
+        None,
+        None,
+        &mut state,
+        &mut host,
+    )
+    .expect("ring_window_read should succeed");
+    insert_runtime_local(
+        &mut state,
+        0,
+        &mut scopes[0],
+        0,
+        "live_window".to_string(),
+        false,
+        read_view,
+    );
+
+    let err = execute_runtime_intrinsic(
+        RuntimeIntrinsic::MemoryRingWindowEdit,
+        &["Int".to_string()],
+        &mut vec![
+            RuntimeValue::Opaque(RuntimeOpaqueValue::RingBuffer(handle)),
+            RuntimeValue::Int(0),
+            RuntimeValue::Int(2),
+        ],
+        &plan,
+        Some(&mut scopes),
+        None,
+        None,
+        None,
+        None,
+        &mut state,
+        &mut host,
+    )
+    .expect_err("ring_window_edit should reject overlapping live read windows");
+    assert!(err.contains("exclusive view acquisition"), "{err}");
+}
+
+#[test]
+fn ring_push_rejects_overwrite_while_live_ring_window_read_is_live() {
+    let plan = empty_runtime_plan("demo");
+    let mut state = RuntimeExecutionState::default();
+    let handle = insert_runtime_ring_buffer(
+        &mut state,
+        &["Int".to_string()],
+        default_runtime_ring_policy(2),
+    );
+    let arena = state
+        .ring_buffers
+        .get_mut(&handle)
+        .expect("ring buffer should exist");
+    arena.slots.insert(0, RuntimeValue::Int(1));
+    arena.slots.insert(1, RuntimeValue::Int(2));
+    arena.order.push_back(0);
+    arena.order.push_back(1);
+    arena.next_slot = 2;
+    arena.generations.insert(0, 0);
+    arena.generations.insert(1, 0);
+
+    let mut scopes = vec![RuntimeScope::default()];
+    let mut host = BufferedHost::default();
+    let read_view = execute_runtime_intrinsic(
+        RuntimeIntrinsic::MemoryRingWindowRead,
+        &["Int".to_string()],
+        &mut vec![
+            RuntimeValue::Opaque(RuntimeOpaqueValue::RingBuffer(handle)),
+            RuntimeValue::Int(0),
+            RuntimeValue::Int(1),
+        ],
+        &plan,
+        Some(&mut scopes),
+        None,
+        None,
+        None,
+        None,
+        &mut state,
+        &mut host,
+    )
+    .expect("ring_window_read should succeed");
+    insert_runtime_local(
+        &mut state,
+        0,
+        &mut scopes[0],
+        0,
+        "live_window".to_string(),
+        false,
+        read_view,
+    );
+
+    let err = execute_runtime_intrinsic(
+        RuntimeIntrinsic::MemoryRingPush,
+        &[],
+        &mut vec![
+            RuntimeValue::Opaque(RuntimeOpaqueValue::RingBuffer(handle)),
+            RuntimeValue::Int(3),
+        ],
+        &plan,
+        Some(&mut scopes),
+        None,
+        None,
+        None,
+        None,
+        &mut state,
+        &mut host,
+    )
+    .expect_err(
+        "ring_push should reject overwrite while a ring window still covers the oldest slot",
+    );
+    assert!(err.contains("RingId"), "{err}");
+}
+
+#[test]
+fn ring_window_read_rejects_split_capture() {
+    let mut state = RuntimeExecutionState::default();
+    let handle = insert_runtime_ring_buffer(
+        &mut state,
+        &["Int".to_string()],
+        default_runtime_ring_policy(2),
+    );
+    let read_view = insert_runtime_read_view_from_ring_window(
+        &mut state,
+        &["Int".to_string()],
+        handle,
+        vec![0, 1],
+        0,
+        2,
+    );
+    let err = runtime_validate_split_value(
+        &RuntimeValue::Opaque(RuntimeOpaqueValue::ReadView(read_view)),
+        &state,
+        "split",
+    )
+    .expect_err("split should reject RingBuffer-backed ReadView values");
+    assert!(err.contains("move-only"), "{err}");
+}
+
+#[test]
+fn ring_window_read_rejects_provider_descriptor_export() {
+    let mut state = RuntimeExecutionState::default();
+    let handle = insert_runtime_ring_buffer(
+        &mut state,
+        &["Int".to_string()],
+        default_runtime_ring_policy(2),
+    );
+    let read_view = insert_runtime_read_view_from_ring_window(
+        &mut state,
+        &["Int".to_string()],
+        handle,
+        vec![0, 1],
+        0,
+        2,
+    );
+    let err = runtime_descriptor_view_value(
+        &RuntimeOpaqueValue::ReadView(read_view),
+        &mut state,
+        "demo",
+        &mut Vec::new(),
+    )
+    .expect_err("provider export should reject RingBuffer-backed ReadView values");
+    assert!(err.contains("RingBuffer-backed ReadView"), "{err}");
+}
+
+#[test]
+fn session_reset_rejects_live_reference_views() {
+    let plan = empty_runtime_plan("demo");
+    let mut state = RuntimeExecutionState::default();
+    let handle = insert_runtime_session_arena(
+        &mut state,
+        &["Int".to_string()],
+        default_runtime_session_policy(4),
+    );
+    let id = RuntimeSessionIdValue {
+        arena: handle,
+        slot: 0,
+        generation: 0,
+    };
+    let arena = state
+        .session_arenas
+        .get_mut(&handle)
+        .expect("session arena should exist");
+    arena
+        .slots
+        .insert(0, RuntimeValue::Array(vec![RuntimeValue::Int(1)]));
+    arena.next_slot = 1;
+    let _ = insert_runtime_read_view_from_reference(
+        &mut state,
+        &["Int".to_string()],
+        RuntimeReferenceValue {
+            mutable: false,
+            target: RuntimeReferenceTarget::SessionSlot {
+                id,
+                members: Vec::new(),
+            },
+        },
+        0,
+        1,
+    );
+
+    let mut host = BufferedHost::default();
+    let err = execute_runtime_intrinsic(
+        RuntimeIntrinsic::MemorySessionReset,
+        &[],
+        &mut vec![RuntimeValue::Opaque(RuntimeOpaqueValue::SessionArena(
+            handle,
+        ))],
+        &plan,
+        None,
+        None,
+        None,
+        None,
+        None,
+        &mut state,
+        &mut host,
+    )
+    .expect_err("session reset should reject while borrowed views are live");
+    assert!(err.contains("borrowed views"), "{err}");
+}
+
+#[test]
+fn slab_remove_rejects_live_reference_views() {
+    let plan = empty_runtime_plan("demo");
+    let mut state = RuntimeExecutionState::default();
+    let handle = insert_runtime_slab(
+        &mut state,
+        &["Int".to_string()],
+        default_runtime_slab_policy(4),
+    );
+    let id = RuntimeSlabIdValue {
+        arena: handle,
+        slot: 0,
+        generation: 0,
+    };
+    let arena = state.slabs.get_mut(&handle).expect("slab should exist");
+    arena
+        .slots
+        .insert(0, RuntimeValue::Array(vec![RuntimeValue::Int(1)]));
+    arena.generations.insert(0, 0);
+    arena.next_slot = 1;
+    let _ = insert_runtime_read_view_from_reference(
+        &mut state,
+        &["Int".to_string()],
+        RuntimeReferenceValue {
+            mutable: false,
+            target: RuntimeReferenceTarget::SlabSlot {
+                id,
+                members: Vec::new(),
+            },
+        },
+        0,
+        1,
+    );
+
+    let mut host = BufferedHost::default();
+    let err = execute_runtime_intrinsic(
+        RuntimeIntrinsic::MemorySlabRemove,
+        &[],
+        &mut vec![
+            RuntimeValue::Opaque(RuntimeOpaqueValue::Slab(handle)),
+            RuntimeValue::Opaque(RuntimeOpaqueValue::SlabId(id)),
+        ],
+        &plan,
+        None,
+        None,
+        None,
+        None,
+        None,
+        &mut state,
+        &mut host,
+    )
+    .expect_err("slab remove should reject while borrowed views are live");
+    assert!(err.contains("borrowed views"), "{err}");
+}
+
+#[test]
+fn ring_push_rejects_overwrite_while_live_reference_views() {
+    let plan = empty_runtime_plan("demo");
+    let mut state = RuntimeExecutionState::default();
+    let handle = insert_runtime_ring_buffer(
+        &mut state,
+        &["Int".to_string()],
+        default_runtime_ring_policy(1),
+    );
+    let id = RuntimeRingIdValue {
+        arena: handle,
+        slot: 0,
+        generation: 0,
+    };
+    let arena = state
+        .ring_buffers
+        .get_mut(&handle)
+        .expect("ring buffer should exist");
+    arena
+        .slots
+        .insert(0, RuntimeValue::Array(vec![RuntimeValue::Int(1)]));
+    arena.generations.insert(0, 0);
+    arena.order.push_back(0);
+    arena.next_slot = 1;
+    let _ = insert_runtime_read_view_from_reference(
+        &mut state,
+        &["Int".to_string()],
+        RuntimeReferenceValue {
+            mutable: false,
+            target: RuntimeReferenceTarget::RingSlot {
+                id,
+                members: Vec::new(),
+            },
+        },
+        0,
+        1,
+    );
+
+    let mut host = BufferedHost::default();
+    let err = execute_runtime_intrinsic(
+        RuntimeIntrinsic::MemoryRingPush,
+        &[],
+        &mut vec![
+            RuntimeValue::Opaque(RuntimeOpaqueValue::RingBuffer(handle)),
+            RuntimeValue::Int(2),
+        ],
+        &plan,
+        None,
+        None,
+        None,
+        None,
+        None,
+        &mut state,
+        &mut host,
+    )
+    .expect_err("ring push should reject overwrite while borrowed views are live");
+    assert!(err.contains("borrowed views"), "{err}");
+}
+
+#[test]
+fn pool_compact_rejects_live_reference_views() {
+    let plan = empty_runtime_plan("demo");
+    let mut state = RuntimeExecutionState::default();
+    let handle = insert_runtime_pool_arena(
+        &mut state,
+        &["Int".to_string()],
+        default_runtime_pool_policy(4),
+    );
+    let id = RuntimePoolIdValue {
+        arena: handle,
+        slot: 0,
+        generation: 0,
+    };
+    let arena = state
+        .pool_arenas
+        .get_mut(&handle)
+        .expect("pool arena should exist");
+    arena
+        .slots
+        .insert(0, RuntimeValue::Array(vec![RuntimeValue::Int(1)]));
+    arena.generations.insert(0, 0);
+    arena.next_slot = 1;
+    let _ = insert_runtime_read_view_from_reference(
+        &mut state,
+        &["Int".to_string()],
+        RuntimeReferenceValue {
+            mutable: false,
+            target: RuntimeReferenceTarget::PoolSlot {
+                id,
+                members: Vec::new(),
+            },
+        },
+        0,
+        1,
+    );
+
+    let mut host = BufferedHost::default();
+    let err = execute_runtime_intrinsic(
+        RuntimeIntrinsic::MemoryPoolCompact,
+        &[],
+        &mut vec![RuntimeValue::Opaque(RuntimeOpaqueValue::PoolArena(handle))],
+        &plan,
+        None,
+        None,
+        None,
+        None,
+        None,
+        &mut state,
+        &mut host,
+    )
+    .expect_err("pool compact should reject while borrowed views are live");
+    assert!(err.contains("borrowed views"), "{err}");
+}
+
+#[test]
+fn pool_compact_invalidates_all_old_ids_even_when_slot_stays_put() {
+    let plan = empty_runtime_plan("demo");
+    let mut state = RuntimeExecutionState::default();
+    let handle = insert_runtime_pool_arena(
+        &mut state,
+        &["Int".to_string()],
+        default_runtime_pool_policy(4),
+    );
+    let arena = state
+        .pool_arenas
+        .get_mut(&handle)
+        .expect("pool arena should exist");
+    arena.slots.insert(0, RuntimeValue::Int(10));
+    arena.slots.insert(1, RuntimeValue::Int(20));
+    arena.generations.insert(0, 0);
+    arena.generations.insert(1, 0);
+    arena.next_slot = 2;
+
+    let old_a = RuntimePoolIdValue {
+        arena: handle,
+        slot: 0,
+        generation: 0,
+    };
+    let old_b = RuntimePoolIdValue {
+        arena: handle,
+        slot: 1,
+        generation: 0,
+    };
+
+    let mut host = BufferedHost::default();
+    let relocations = execute_runtime_intrinsic(
+        RuntimeIntrinsic::MemoryPoolCompact,
+        &["Int".to_string()],
+        &mut vec![RuntimeValue::Opaque(RuntimeOpaqueValue::PoolArena(handle))],
+        &plan,
+        None,
+        None,
+        None,
+        None,
+        None,
+        &mut state,
+        &mut host,
+    )
+    .expect("pool compact should succeed");
+
+    let RuntimeValue::List(relocations) = relocations else {
+        panic!("expected pool compact relocations list");
+    };
+    assert_eq!(
+        relocations.len(),
+        2,
+        "every live entry should produce a relocation row"
+    );
+
+    let arena = state
+        .pool_arenas
+        .get(&handle)
+        .expect("pool arena should exist");
+    assert!(!pool_id_is_live(handle, arena, old_a));
+    assert!(!pool_id_is_live(handle, arena, old_b));
+
+    let new_ids = relocations
+        .iter()
+        .map(|row| match row {
+            RuntimeValue::Record { fields, .. } => {
+                let RuntimeValue::Opaque(RuntimeOpaqueValue::PoolId(old)) =
+                    fields.get("old").expect("old field should exist")
+                else {
+                    panic!("expected old pool id");
+                };
+                let RuntimeValue::Opaque(RuntimeOpaqueValue::PoolId(new)) =
+                    fields.get("new").expect("new field should exist")
+                else {
+                    panic!("expected new pool id");
+                };
+                (*old, *new)
+            }
+            other => panic!("expected relocation row, got {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(new_ids[0].0, old_a);
+    assert_eq!(new_ids[1].0, old_b);
+    assert_eq!(new_ids[0].1.generation, 1);
+    assert_eq!(new_ids[1].1.generation, 1);
+    assert!(pool_id_is_live(handle, arena, new_ids[0].1));
+    assert!(pool_id_is_live(handle, arena, new_ids[1].1));
 }
 
 #[test]
@@ -4955,6 +7045,360 @@ fn execute_main_split_threads_report_distinct_thread_ids() {
 }
 
 #[test]
+fn execute_main_split_rejects_unsealed_session_capture() {
+    let dir = temp_workspace_dir("split_unsealed_session_capture");
+    write_file(
+        &dir.join("book.toml"),
+        "name = \"runtime_split_unsealed_session_capture\"\nkind = \"app\"\n",
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "import std.memory\n",
+            "fn worker(read arena: std.memory.SessionArena[Int]) -> Int:\n",
+            "    return arena :: :: len\n",
+            "fn main() -> Int:\n",
+            "    let arena = std.memory.session_new[Int] :: 2 :: call\n",
+            "    let thread = split worker :: arena :: call\n",
+            "    return thread :: :: join\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let graph = load_workspace_graph(&dir).expect("workspace graph should load");
+    let checked = check_workspace_graph(&graph).expect("workspace should check");
+    let fingerprints = compute_member_fingerprints_for_checked_workspace(&graph, &checked)
+        .expect("fingerprints should compute");
+    let order = plan_workspace(&graph).expect("workspace order should plan");
+    let statuses =
+        plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
+    execute_workspace_build(&graph, &fingerprints, &statuses);
+    let artifact_path = graph.root_dir.join(
+        statuses
+            .iter()
+            .find(|status| status.member_name() == "runtime_split_unsealed_session_capture")
+            .expect("app artifact status should exist")
+            .artifact_rel_path(),
+    );
+    let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
+    let mut host = BufferedHost::default();
+    let err =
+        execute_main(&plan, &mut host).expect_err("split should reject unsealed session capture");
+    assert!(err.contains("while sealed"), "{err}");
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn execute_main_split_allows_sealed_session_capture() {
+    let dir = temp_workspace_dir("split_sealed_session_capture");
+    write_file(
+        &dir.join("book.toml"),
+        "name = \"runtime_split_sealed_session_capture\"\nkind = \"app\"\n",
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "import std.memory\n",
+            "fn worker(read arena: std.memory.SessionArena[Int]) -> Bool:\n",
+            "    return arena :: :: is_sealed\n",
+            "fn main() -> Int:\n",
+            "    let mut arena = std.memory.session_new[Int] :: 2 :: call\n",
+            "    arena :: :: seal\n",
+            "    let thread = split worker :: arena :: call\n",
+            "    if not (thread :: :: join):\n",
+            "        return 1\n",
+            "    return 0\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let graph = load_workspace_graph(&dir).expect("workspace graph should load");
+    let checked = check_workspace_graph(&graph).expect("workspace should check");
+    let fingerprints = compute_member_fingerprints_for_checked_workspace(&graph, &checked)
+        .expect("fingerprints should compute");
+    let order = plan_workspace(&graph).expect("workspace order should plan");
+    let statuses =
+        plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
+    execute_workspace_build(&graph, &fingerprints, &statuses);
+    let artifact_path = graph.root_dir.join(
+        statuses
+            .iter()
+            .find(|status| status.member_name() == "runtime_split_sealed_session_capture")
+            .expect("app artifact status should exist")
+            .artifact_rel_path(),
+    );
+    let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
+    let mut host = BufferedHost::default();
+    let code = execute_main(&plan, &mut host).expect("sealed session capture should execute");
+    assert_eq!(code, 0);
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn execute_main_split_rejects_unsealed_slab_capture() {
+    let dir = temp_workspace_dir("split_unsealed_slab_capture");
+    write_file(
+        &dir.join("book.toml"),
+        "name = \"runtime_split_unsealed_slab_capture\"\nkind = \"app\"\n",
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "import std.memory\n",
+            "fn worker(read arena: std.memory.Slab[Int]) -> Int:\n",
+            "    return arena :: :: len\n",
+            "fn main() -> Int:\n",
+            "    let arena = std.memory.slab_new[Int] :: 2 :: call\n",
+            "    let thread = split worker :: arena :: call\n",
+            "    return thread :: :: join\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let graph = load_workspace_graph(&dir).expect("workspace graph should load");
+    let checked = check_workspace_graph(&graph).expect("workspace should check");
+    let fingerprints = compute_member_fingerprints_for_checked_workspace(&graph, &checked)
+        .expect("fingerprints should compute");
+    let order = plan_workspace(&graph).expect("workspace order should plan");
+    let statuses =
+        plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
+    execute_workspace_build(&graph, &fingerprints, &statuses);
+    let artifact_path = graph.root_dir.join(
+        statuses
+            .iter()
+            .find(|status| status.member_name() == "runtime_split_unsealed_slab_capture")
+            .expect("app artifact status should exist")
+            .artifact_rel_path(),
+    );
+    let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
+    let mut host = BufferedHost::default();
+    let err =
+        execute_main(&plan, &mut host).expect_err("split should reject unsealed slab capture");
+    assert!(err.contains("while sealed"), "{err}");
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn execute_main_split_allows_sealed_slab_capture() {
+    let dir = temp_workspace_dir("split_sealed_slab_capture");
+    write_file(
+        &dir.join("book.toml"),
+        "name = \"runtime_split_sealed_slab_capture\"\nkind = \"app\"\n",
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "import std.memory\n",
+            "fn worker(read arena: std.memory.Slab[Int]) -> Bool:\n",
+            "    return arena :: :: is_sealed\n",
+            "fn main() -> Int:\n",
+            "    let mut arena = std.memory.slab_new[Int] :: 2 :: call\n",
+            "    arena :: :: seal\n",
+            "    let thread = split worker :: arena :: call\n",
+            "    if not (thread :: :: join):\n",
+            "        return 1\n",
+            "    return 0\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let graph = load_workspace_graph(&dir).expect("workspace graph should load");
+    let checked = check_workspace_graph(&graph).expect("workspace should check");
+    let fingerprints = compute_member_fingerprints_for_checked_workspace(&graph, &checked)
+        .expect("fingerprints should compute");
+    let order = plan_workspace(&graph).expect("workspace order should plan");
+    let statuses =
+        plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
+    execute_workspace_build(&graph, &fingerprints, &statuses);
+    let artifact_path = graph.root_dir.join(
+        statuses
+            .iter()
+            .find(|status| status.member_name() == "runtime_split_sealed_slab_capture")
+            .expect("app artifact status should exist")
+            .artifact_rel_path(),
+    );
+    let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
+    let mut host = BufferedHost::default();
+    let code = execute_main(&plan, &mut host).expect("sealed slab capture should execute");
+    assert_eq!(code, 0);
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn execute_main_split_rejects_ring_capture() {
+    let dir = temp_workspace_dir("split_ring_capture");
+    write_file(
+        &dir.join("book.toml"),
+        "name = \"runtime_split_ring_capture\"\nkind = \"app\"\n",
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "import std.memory\n",
+            "fn worker(read arena: std.memory.RingBuffer[Int]) -> Int:\n",
+            "    return arena :: :: len\n",
+            "fn main() -> Int:\n",
+            "    let arena = std.memory.ring_new[Int] :: 2 :: call\n",
+            "    let thread = split worker :: arena :: call\n",
+            "    return thread :: :: join\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let graph = load_workspace_graph(&dir).expect("workspace graph should load");
+    let checked = check_workspace_graph(&graph).expect("workspace should check");
+    let fingerprints = compute_member_fingerprints_for_checked_workspace(&graph, &checked)
+        .expect("fingerprints should compute");
+    let order = plan_workspace(&graph).expect("workspace order should plan");
+    let statuses =
+        plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
+    execute_workspace_build(&graph, &fingerprints, &statuses);
+    let artifact_path = graph.root_dir.join(
+        statuses
+            .iter()
+            .find(|status| status.member_name() == "runtime_split_ring_capture")
+            .expect("app artifact status should exist")
+            .artifact_rel_path(),
+    );
+    let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
+    let mut host = BufferedHost::default();
+    let err = execute_main(&plan, &mut host)
+        .expect_err("split should reject implicit ring capture without explicit move");
+    assert!(err.contains("explicit move"), "{err}");
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn execute_main_split_allows_take_ring_capture() {
+    let dir = temp_workspace_dir("split_take_ring_capture");
+    write_file(
+        &dir.join("book.toml"),
+        "name = \"runtime_split_take_ring_capture\"\nkind = \"app\"\n",
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "import std.memory\n",
+            "fn worker(take arena: std.memory.RingBuffer[Int]) -> Int:\n",
+            "    return arena :: :: len\n",
+            "fn main() -> Int:\n",
+            "    let mut arena = std.memory.ring_new[Int] :: 2 :: call\n",
+            "    arena :: 5 :: push\n",
+            "    let thread = split worker :: arena :: call\n",
+            "    return thread :: :: join\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let graph = load_workspace_graph(&dir).expect("workspace graph should load");
+    let checked = check_workspace_graph(&graph).expect("workspace should check");
+    let fingerprints = compute_member_fingerprints_for_checked_workspace(&graph, &checked)
+        .expect("fingerprints should compute");
+    let order = plan_workspace(&graph).expect("workspace order should plan");
+    let statuses =
+        plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
+    execute_workspace_build(&graph, &fingerprints, &statuses);
+    let artifact_path = graph.root_dir.join(
+        statuses
+            .iter()
+            .find(|status| status.member_name() == "runtime_split_take_ring_capture")
+            .expect("app artifact status should exist")
+            .artifact_rel_path(),
+    );
+    let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
+    let mut host = BufferedHost::default();
+    let code = execute_main(&plan, &mut host).expect("split should allow explicit take ring move");
+    assert_eq!(code, 1);
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn channel_send_rejects_unsealed_session_memory() {
+    let plan = empty_runtime_plan("demo");
+    let mut state = RuntimeExecutionState::default();
+    let channel = insert_runtime_channel(&mut state, &["Int".to_string()], 2);
+    let session = insert_runtime_session_arena(
+        &mut state,
+        &["Int".to_string()],
+        default_runtime_session_policy(2),
+    );
+    let mut host = BufferedHost::default();
+    let err = execute_runtime_intrinsic(
+        RuntimeIntrinsic::ConcurrentChannelSend,
+        &[],
+        &mut vec![
+            RuntimeValue::Opaque(RuntimeOpaqueValue::Channel(channel)),
+            RuntimeValue::Opaque(RuntimeOpaqueValue::SessionArena(session)),
+        ],
+        &plan,
+        None,
+        None,
+        None,
+        None,
+        None,
+        &mut state,
+        &mut host,
+    )
+    .expect_err("channel_send should reject unsealed session memory");
+    assert!(err.contains("while sealed"), "{err}");
+}
+
+#[test]
+fn mutex_put_rejects_ring_memory() {
+    let plan = empty_runtime_plan("demo");
+    let mut state = RuntimeExecutionState::default();
+    let mutex_value = RuntimeValue::Int(0);
+    let mut host = BufferedHost::default();
+    let mutex = match execute_runtime_intrinsic(
+        RuntimeIntrinsic::ConcurrentMutexNew,
+        &["Int".to_string()],
+        &mut vec![mutex_value],
+        &plan,
+        None,
+        None,
+        None,
+        None,
+        None,
+        &mut state,
+        &mut host,
+    )
+    .expect("mutex_new should succeed for ints")
+    {
+        RuntimeValue::Opaque(RuntimeOpaqueValue::Mutex(handle)) => handle,
+        other => panic!("expected mutex handle, got {other:?}"),
+    };
+    let ring = insert_runtime_ring_buffer(
+        &mut state,
+        &["Int".to_string()],
+        default_runtime_ring_policy(2),
+    );
+    let err = execute_runtime_intrinsic(
+        RuntimeIntrinsic::ConcurrentMutexPut,
+        &[],
+        &mut vec![
+            RuntimeValue::Opaque(RuntimeOpaqueValue::Mutex(mutex)),
+            RuntimeValue::Opaque(RuntimeOpaqueValue::RingBuffer(ring)),
+        ],
+        &plan,
+        None,
+        None,
+        None,
+        None,
+        None,
+        &mut state,
+        &mut host,
+    )
+    .expect_err("mutex_put should reject ring memory");
+    assert!(err.contains("move-only"), "{err}");
+}
+
+#[test]
 fn execute_main_runs_chain_expressions_with_parallel_fanout() {
     let dir = temp_workspace_dir("chain_runtime");
     write_file(
@@ -5007,6 +7451,180 @@ fn execute_main_runs_chain_expressions_with_parallel_fanout() {
         host.stdout,
         vec!["6".to_string(), "3".to_string(), "4".to_string()]
     );
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn execute_main_parallel_chain_stages_observe_overlap() {
+    let dir = temp_workspace_dir("chain_runtime_parallel_overlap");
+    write_file(
+        &dir.join("book.toml"),
+        "name = \"runtime_chain_parallel_overlap\"\nkind = \"app\"\n",
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "import std.concurrent\n",
+            "import std.io\n",
+            "fn seed() -> Int:\n",
+            "    return 1\n",
+            "fn observe(value: Int, read started: AtomicInt, read overlap: AtomicBool) -> Int:\n",
+            "    let already = started :: 1 :: add\n",
+            "    if already > 0:\n",
+            "        overlap :: true :: store\n",
+            "    std.concurrent.sleep :: 250 :: call\n",
+            "    started :: 1 :: sub\n",
+            "    return value + 1\n",
+            "fn main() -> Int:\n",
+            "    let started = std.concurrent.atomic_int :: 0 :: call\n",
+            "    let overlap = std.concurrent.atomic_bool :: false :: call\n",
+            "    let fanout = parallel :=> seed => observe with (started, overlap) => observe with (started, overlap)\n",
+            "    std.io.print[Int] :: fanout[0] :: call\n",
+            "    std.io.print[Int] :: fanout[1] :: call\n",
+            "    std.io.print[Bool] :: (overlap :: :: load) :: call\n",
+            "    return 0\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let plan = build_workspace_plan_for_member(&dir, "runtime_chain_parallel_overlap");
+    let mut host = BufferedHost::default();
+    let code = execute_main(&plan, &mut host).expect("parallel chain should execute");
+
+    assert_eq!(code, 0);
+    assert_eq!(
+        host.stdout,
+        vec!["2".to_string(), "2".to_string(), "true".to_string()]
+    );
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn execute_main_runs_collect_broadcast_plan_and_async_chain_styles() {
+    let dir = temp_workspace_dir("chain_runtime_styles");
+    write_file(
+        &dir.join("book.toml"),
+        "name = \"runtime_chain_styles\"\nkind = \"app\"\n",
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "import std.io\n",
+            "fn seed() -> Int:\n",
+            "    return 2\n",
+            "fn inc(value: Int) -> Int:\n",
+            "    return value + 1\n",
+            "fn mul(value: Int) -> Int:\n",
+            "    return value * 2\n",
+            "async fn seed_async() -> Int:\n",
+            "    return 2\n",
+            "async fn inc_async(value: Int) -> Int:\n",
+            "    return value + 1\n",
+            "async fn mul_async(value: Int) -> Int:\n",
+            "    return value * 2\n",
+            "fn main() -> Int:\n",
+            "    std.io.print[Int] :: (async :=> seed_async => inc_async => mul_async) :: call\n",
+            "    let broadcasted = broadcast :=> seed => inc => mul\n",
+            "    std.io.print[Int] :: broadcasted[0] :: call\n",
+            "    std.io.print[Int] :: broadcasted[1] :: call\n",
+            "    let collected = collect :=> seed => inc => mul\n",
+            "    std.io.print[Int] :: collected[0] :: call\n",
+            "    std.io.print[Int] :: collected[1] :: call\n",
+            "    let planned = plan :=> seed => inc => mul\n",
+            "    std.io.print[Int] :: planned :: call\n",
+            "    return 0\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let plan = build_workspace_plan_for_member(&dir, "runtime_chain_styles");
+    let mut host = BufferedHost::default();
+    let code = execute_main(&plan, &mut host).expect("runtime should execute");
+
+    assert_eq!(code, 0);
+    assert_eq!(
+        host.stdout,
+        vec![
+            "6".to_string(),
+            "3".to_string(),
+            "4".to_string(),
+            "3".to_string(),
+            "6".to_string(),
+            "2".to_string(),
+        ]
+    );
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn execute_main_forces_lazy_chain_once_and_skips_unused_values() {
+    let dir = temp_workspace_dir("chain_runtime_lazy");
+    write_file(
+        &dir.join("book.toml"),
+        "name = \"runtime_chain_lazy\"\nkind = \"app\"\n",
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "import std.io\n",
+            "fn seed() -> Int:\n",
+            "    std.io.print[Str] :: \"seed\" :: call\n",
+            "    return 2\n",
+            "fn inc(value: Int) -> Int:\n",
+            "    return value + 1\n",
+            "fn mul(value: Int) -> Int:\n",
+            "    return value * 2\n",
+            "fn main() -> Int:\n",
+            "    let unused = lazy :=> seed => inc => mul\n",
+            "    let forced = lazy :=> seed => inc => mul\n",
+            "    std.io.print[Int] :: forced :: call\n",
+            "    std.io.print[Int] :: forced :: call\n",
+            "    return 0\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let plan = build_workspace_plan_for_member(&dir, "runtime_chain_lazy");
+    let mut host = BufferedHost::default();
+    let code = execute_main(&plan, &mut host).expect("runtime should execute");
+
+    assert_eq!(code, 0);
+    assert_eq!(
+        host.stdout,
+        vec!["seed".to_string(), "6".to_string(), "6".to_string()]
+    );
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn execute_main_runs_tuple_destructuring_in_let_and_for() {
+    let dir = temp_workspace_dir("tuple_destructure_runtime");
+    write_file(
+        &dir.join("book.toml"),
+        "name = \"runtime_tuple_destructure\"\nkind = \"app\"\n",
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "fn main() -> Int:\n",
+            "    let pair = (2, 3)\n",
+            "    let (left, right) = pair\n",
+            "    for (first, second) in [(left, right)]:\n",
+            "        return first + second\n",
+            "    return 0\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let plan = build_workspace_plan_for_member(&dir, "runtime_tuple_destructure");
+    let mut host = BufferedHost::default();
+    let code = execute_main(&plan, &mut host).expect("runtime should execute");
+
+    assert_eq!(code, 5);
 
     let _ = fs::remove_dir_all(dir);
 }
@@ -6062,6 +8680,7 @@ fn execute_main_rejects_try_qualifier_arguments() {
                         }],
                         qualifier_kind: ParsedPhraseQualifierKind::Call,
                         qualifier: "call".to_string(),
+                        qualifier_type_args: Vec::new(),
                         resolved_callable: None,
                         resolved_routine: None,
                         dynamic_dispatch: None,
@@ -6077,6 +8696,7 @@ fn execute_main_rejects_try_qualifier_arguments() {
                         }],
                         qualifier_kind: ParsedPhraseQualifierKind::Try,
                         qualifier: "?".to_string(),
+                        qualifier_type_args: Vec::new(),
                         resolved_callable: None,
                         resolved_routine: None,
                         dynamic_dispatch: None,
@@ -6452,6 +9072,7 @@ fn execute_main_rejects_use_after_take_move() {
                             }],
                             qualifier_kind: ParsedPhraseQualifierKind::Call,
                             qualifier: "call".to_string(),
+                            qualifier_type_args: Vec::new(),
                             resolved_callable: None,
                             resolved_routine: None,
                             dynamic_dispatch: None,
@@ -6468,6 +9089,7 @@ fn execute_main_rejects_use_after_take_move() {
                             }],
                             qualifier_kind: ParsedPhraseQualifierKind::Call,
                             qualifier: "call".to_string(),
+                            qualifier_type_args: Vec::new(),
                             resolved_callable: None,
                             resolved_routine: None,
                             dynamic_dispatch: None,
@@ -6558,6 +9180,7 @@ fn execute_main_rejects_direct_intrinsic_take_fallback_reuse() {
                         }],
                         qualifier_kind: ParsedPhraseQualifierKind::Call,
                         qualifier: "call".to_string(),
+                        qualifier_type_args: Vec::new(),
                         resolved_callable: None,
                         resolved_routine: None,
                         dynamic_dispatch: None,
@@ -6579,6 +9202,7 @@ fn execute_main_rejects_direct_intrinsic_take_fallback_reuse() {
                         }],
                         qualifier_kind: ParsedPhraseQualifierKind::Call,
                         qualifier: "call".to_string(),
+                        qualifier_type_args: Vec::new(),
                         resolved_callable: None,
                         resolved_routine: None,
                         dynamic_dispatch: None,
@@ -6592,6 +9216,122 @@ fn execute_main_rejects_direct_intrinsic_take_fallback_reuse() {
     let err = execute_main(&plan, &mut host).expect_err("runtime should reject moved-local reuse");
 
     assert!(err.contains("use of moved local `xs`"), "{err}");
+}
+
+#[test]
+fn execute_main_binds_named_args_for_direct_intrinsic_fallback() {
+    let plan = RuntimePackagePlan {
+        package_id: "named_intrinsic_runtime".to_string(),
+        package_name: "named_intrinsic_runtime".to_string(),
+        root_module_id: "named_intrinsic_runtime".to_string(),
+        direct_deps: Vec::new(),
+        direct_dep_ids: Vec::new(),
+        package_display_names: test_package_display_names_with_deps(
+            "named_intrinsic_runtime".to_string(),
+            "named_intrinsic_runtime".to_string(),
+            Vec::new(),
+            Vec::new(),
+        ),
+        package_direct_dep_ids: test_package_direct_dep_ids(
+            "named_intrinsic_runtime".to_string(),
+            Vec::new(),
+            Vec::new(),
+        ),
+        runtime_requirements: Vec::new(),
+        foreword_index: Vec::new(),
+        foreword_registrations: Vec::new(),
+        module_aliases: BTreeMap::new(),
+        opaque_family_types: BTreeMap::new(),
+        entrypoints: vec![RuntimeEntrypointPlan {
+            package_id: test_package_id_for_module("named_intrinsic_runtime"),
+            module_id: "named_intrinsic_runtime".to_string(),
+            symbol_name: "main".to_string(),
+            symbol_kind: "fn".to_string(),
+            is_async: false,
+            exported: true,
+            routine_index: 0,
+        }],
+        owners: Vec::new(),
+        routines: vec![RuntimeRoutinePlan {
+            package_id: test_package_id_for_module("named_intrinsic_runtime"),
+            module_id: "named_intrinsic_runtime".to_string(),
+            routine_key: "named_intrinsic_runtime#sym-0".to_string(),
+            symbol_name: "main".to_string(),
+            symbol_kind: "fn".to_string(),
+            exported: true,
+            is_async: false,
+            type_params: Vec::new(),
+            behavior_attrs: BTreeMap::new(),
+            params: Vec::new(),
+            return_type: test_return_type("fn main() -> Int:"),
+            intrinsic_impl: None,
+            impl_target_type: None,
+            impl_trait_path: None,
+            availability: Vec::new(),
+            cleanup_footers: Vec::new(),
+            statements: vec![
+                ParsedStmt::Let {
+                    binding_id: 0,
+                    mutable: true,
+                    name: "xs".to_string(),
+                    value: ParsedExpr::Collection { items: Vec::new() },
+                },
+                ParsedStmt::Expr {
+                    expr: ParsedExpr::Phrase {
+                        subject: Box::new(ParsedExpr::Path(vec![
+                            "std".to_string(),
+                            "kernel".to_string(),
+                            "collections".to_string(),
+                            "list_push".to_string(),
+                        ])),
+                        args: vec![
+                            ParsedPhraseArg {
+                                name: Some("value".to_string()),
+                                value: ParsedExpr::Int(7),
+                            },
+                            ParsedPhraseArg {
+                                name: Some("xs".to_string()),
+                                value: ParsedExpr::Path(vec!["xs".to_string()]),
+                            },
+                        ],
+                        qualifier_kind: ParsedPhraseQualifierKind::Call,
+                        qualifier: "call".to_string(),
+                        qualifier_type_args: vec!["Int".to_string()],
+                        resolved_callable: None,
+                        resolved_routine: None,
+                        dynamic_dispatch: None,
+                        attached: Vec::new(),
+                    },
+                    cleanup_footers: Vec::new(),
+                },
+                ParsedStmt::ReturnValue {
+                    value: ParsedExpr::Phrase {
+                        subject: Box::new(ParsedExpr::Path(vec![
+                            "std".to_string(),
+                            "kernel".to_string(),
+                            "collections".to_string(),
+                            "list_pop".to_string(),
+                        ])),
+                        args: vec![ParsedPhraseArg {
+                            name: None,
+                            value: ParsedExpr::Path(vec!["xs".to_string()]),
+                        }],
+                        qualifier_kind: ParsedPhraseQualifierKind::Call,
+                        qualifier: "call".to_string(),
+                        qualifier_type_args: vec!["Int".to_string()],
+                        resolved_callable: None,
+                        resolved_routine: None,
+                        dynamic_dispatch: None,
+                        attached: Vec::new(),
+                    },
+                },
+            ],
+        }],
+    };
+    let mut host = BufferedHost::default();
+    let code = execute_main(&plan, &mut host).expect("runtime should bind direct intrinsic args");
+
+    assert_eq!(code, 7);
 }
 
 #[test]
@@ -6700,6 +9440,57 @@ fn execute_main_runs_apply_and_await_apply_qualifiers() {
     assert_eq!(
         host.stdout,
         vec!["5".to_string(), "7".to_string(), "7".to_string()]
+    );
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn execute_main_runs_phrase_await_weave_split_must_and_fallback_qualifiers() {
+    let dir = temp_workspace_dir("phrase_runtime_qualifiers");
+    write_file(
+        &dir.join("book.toml"),
+        "name = \"runtime_phrase_qualifiers\"\nkind = \"app\"\n",
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "import std.io\n",
+            "import std.option\n",
+            "import std.result\n",
+            "use std.option.Option\n",
+            "use std.result.Result\n",
+            "async fn worker(value: Int) -> Int:\n",
+            "    return value + 1\n",
+            "fn helper(value: Int) -> Int:\n",
+            "    return value * 2\n",
+            "fn main() -> Int:\n",
+            "    let awaited_task = ((worker :: 4 :: weave) :: :: await)\n",
+            "    let awaited_thread = ((helper :: 5 :: split) :: :: await)\n",
+            "    let must_value = ((Result.Ok[Int, Str] :: 6 :: call) :: :: must)\n",
+            "    let fallback_value = ((Option.None[Int] :: :: call) :: 7 :: fallback)\n",
+            "    std.io.print[Int] :: awaited_task :: call\n",
+            "    std.io.print[Int] :: awaited_thread :: call\n",
+            "    std.io.print[Int] :: must_value :: call\n",
+            "    std.io.print[Int] :: fallback_value :: call\n",
+            "    return 0\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let plan = build_workspace_plan_for_member(&dir, "runtime_phrase_qualifiers");
+    let mut host = BufferedHost::default();
+    let code = execute_main(&plan, &mut host).expect("runtime should execute");
+
+    assert_eq!(code, 0);
+    assert_eq!(
+        host.stdout,
+        vec![
+            "5".to_string(),
+            "10".to_string(),
+            "6".to_string(),
+            "7".to_string(),
+        ]
     );
 
     let _ = fs::remove_dir_all(dir);
@@ -7584,6 +10375,7 @@ fn plan_from_artifact_keeps_owner_package_ids_distinct_when_display_names_collid
             module_id: "core".to_string(),
             owner_path: owner_path.clone(),
             owner_name: "Session".to_string(),
+            context_type: None,
             objects: Vec::new(),
             exits: Vec::new(),
         },
@@ -7592,6 +10384,7 @@ fn plan_from_artifact_keeps_owner_package_ids_distinct_when_display_names_collid
             module_id: "core".to_string(),
             owner_path: owner_path.clone(),
             owner_name: "Session".to_string(),
+            context_type: None,
             objects: Vec::new(),
             exits: Vec::new(),
         },
@@ -8259,6 +11052,46 @@ fn execute_main_rejects_owner_object_init_without_required_context() {
         execute_main(&plan, &mut host).expect_err("owner object init without context should fail");
 
     assert!(err.contains("requires an activation context"), "{err}");
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn execute_main_runs_owner_activation_with_explicit_context_clause() {
+    let dir = temp_workspace_dir("owner_explicit_context");
+    write_file(
+        &dir.join("book.toml"),
+        "name = \"runtime_owner_explicit_context\"\nkind = \"app\"\n",
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "obj SessionCtx:\n",
+            "    base: Int\n",
+            "\n",
+            "obj Counter:\n",
+            "    value: Int\n",
+            "    fn init(edit self: Self, read ctx: SessionCtx):\n",
+            "        self.value = ctx.base\n",
+            "\n",
+            "create Session [Counter] context: SessionCtx scope-exit:\n",
+            "    done: when false hold [Counter]\n",
+            "\n",
+            "Session\n",
+            "Counter\n",
+            "fn main() -> Int:\n",
+            "    let ctx = SessionCtx :: base = 12 :: call\n",
+            "    Session :: ctx :: call\n",
+            "    return Counter.value\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let plan = build_workspace_plan_for_member(&dir, "runtime_owner_explicit_context");
+    let mut host = BufferedHost::default();
+    let code = execute_main(&plan, &mut host).expect("owner activation should execute");
+
+    assert_eq!(code, 12);
 
     let _ = fs::remove_dir_all(dir);
 }
@@ -10290,6 +13123,204 @@ fn execute_main_runs_arcana_text_paragraph_metrics_and_updates_workspace() {
 }
 
 #[test]
+fn execute_main_loads_arcana_text_monaspace_collection_workspace() {
+    let dir = temp_workspace_dir("arcana_text_monaspace_collection");
+    let text_dep = owned_grimoire_root()
+        .join("arcana-text")
+        .to_string_lossy()
+        .replace('\\', "/");
+    write_file(
+        &dir.join("book.toml"),
+        &format!(
+            concat!(
+                "name = \"runtime_arcana_text_monaspace_collection\"\n",
+                "kind = \"app\"\n",
+                "[deps]\n",
+                "arcana_text = {{ path = {text_dep:?}, native_provider = \"default\" }}\n",
+            ),
+            text_dep = text_dep,
+        ),
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "import arcana_text.builder\n",
+            "import arcana_text.fonts\n",
+            "import arcana_text.monaspace\n",
+            "import std.io\n",
+            "import std.result\n",
+            "use std.result.Result\n",
+            "\n",
+            "fn result_text(read value: Result[Unit, Str]) -> Str:\n",
+            "    return match value:\n",
+            "        Result.Ok(_) => \"ok\"\n",
+            "        Result.Err(err) => err\n",
+            "\n",
+            "fn main() -> Int:\n",
+            "    let mut collection = arcana_text.fonts.new_collection :: :: call\n",
+            "    let add_variable = arcana_text.fonts.add_monaspace :: collection, (arcana_text.monaspace.MonaspaceFamily.Neon :: :: call), (arcana_text.monaspace.MonaspaceForm.Variable :: :: call) :: call\n",
+            "    std.io.print[Bool] :: (add_variable :: :: is_ok) :: call\n",
+            "    std.io.print[Str] :: (result_text :: add_variable :: call) :: call\n",
+            "    return 0\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let (plan, artifact_dir) = build_workspace_plan_and_artifact_dir_for_member(
+        &dir,
+        "runtime_arcana_text_monaspace_collection",
+    );
+    let cwd = artifact_dir.to_string_lossy().replace('\\', "/");
+    let mut host = BufferedHost {
+        cwd: cwd.clone(),
+        sandbox_root: cwd,
+        ..BufferedHost::default()
+    };
+    let code = execute_main(&plan, &mut host).expect("runtime should execute");
+    assert_eq!(code, 0);
+    assert_eq!(host.stdout, vec!["true".to_string(), "ok".to_string(),]);
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn execute_main_rasterizes_arcana_text_paragraph_pixels_via_desktop_app() {
+    let dir = temp_workspace_dir("arcana_text_desktop_pixels");
+    let desktop_dep = owned_grimoire_root()
+        .join("arcana-desktop")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let graphics_dep = owned_grimoire_root()
+        .join("arcana-graphics")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let text_dep = owned_grimoire_root()
+        .join("arcana-text")
+        .to_string_lossy()
+        .replace('\\', "/");
+    write_file(
+        &dir.join("book.toml"),
+        &format!(
+            concat!(
+                "name = \"runtime_arcana_text_desktop_pixels\"\n",
+                "kind = \"app\"\n",
+                "[deps]\n",
+                "arcana_desktop = {{ path = {desktop_dep:?}, native_child = \"default\" }}\n",
+                "arcana_graphics = {graphics_dep:?}\n",
+                "arcana_text = {{ path = {text_dep:?}, native_provider = \"default\" }}\n",
+            ),
+            desktop_dep = desktop_dep,
+            graphics_dep = graphics_dep,
+            text_dep = text_dep,
+        ),
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "import arcana_desktop.app\n",
+            "import arcana_graphics.canvas\n",
+            "import arcana_text.builder\n",
+            "import arcana_text.fonts\n",
+            "import arcana_text.paragraphs\n",
+            "\n",
+            "record Demo:\n",
+            "    drawn: Bool\n",
+            "\n",
+            "impl arcana_desktop.app.Application[Demo] for Demo:\n",
+            "    fn resumed(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
+            "        let mut main_window = (arcana_desktop.app.main_window_or_cached :: cx :: call)\n",
+            "        arcana_desktop.app.request_window_redraw :: cx, main_window :: call\n",
+            "        return\n",
+            "\n",
+            "    fn suspended(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
+            "        return\n",
+            "\n",
+            "    fn window_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read target: arcana_desktop.types.TargetedEvent) -> arcana_desktop.types.ControlFlow:\n",
+            "        return match target.event:\n",
+            "            arcana_desktop.types.WindowEvent.WindowRedrawRequested(id) => on_redraw :: self, cx, id :: call\n",
+            "            _ => cx.control.control_flow\n",
+            "\n",
+            "    fn device_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read event: arcana_desktop.types.DeviceEvent) -> arcana_desktop.types.ControlFlow:\n",
+            "        return cx.control.control_flow\n",
+            "\n",
+            "    fn about_to_wait(edit self: Demo, edit cx: arcana_desktop.types.AppContext) -> arcana_desktop.types.ControlFlow:\n",
+            "        return cx.control.control_flow\n",
+            "\n",
+            "    fn wake(edit self: Demo, edit cx: arcana_desktop.types.AppContext) -> arcana_desktop.types.ControlFlow:\n",
+            "        return cx.control.control_flow\n",
+            "\n",
+            "    fn exiting(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
+            "        return\n",
+            "\n",
+            "fn demo_paragraph() -> arcana_text.types.Paragraph:\n",
+            "    let collection = arcana_text.fonts.default_collection :: :: call\n",
+            "    let paragraph_style = arcana_text.types.default_paragraph_style :: :: call\n",
+            "    let mut style = arcana_text.types.default_text_style :: (arcana_graphics.canvas.rgb :: 255, 255, 255 :: call) :: call\n",
+            "    style.background_enabled = false\n",
+            "    let mut builder = arcana_text.builder.open :: collection, paragraph_style :: call\n",
+            "    arcana_text.builder.push_style :: builder, style :: call\n",
+            "    arcana_text.builder.add_text :: builder, \"Arcana Text\" :: call\n",
+            "    let mut paragraph = arcana_text.builder.build :: builder :: call\n",
+            "    arcana_text.paragraphs.layout :: paragraph, 220 :: call\n",
+            "    return paragraph\n",
+            "\n",
+            "fn on_redraw(edit self: Demo, edit cx: arcana_desktop.types.AppContext, id: Int) -> arcana_desktop.types.ControlFlow:\n",
+            "    let _ = id\n",
+            "    let mut main_window = (arcana_desktop.app.main_window_or_cached :: cx :: call)\n",
+            "    arcana_graphics.canvas.fill :: main_window, (arcana_graphics.canvas.rgb :: 0, 0, 0 :: call) :: call\n",
+            "    let paragraph = demo_paragraph :: :: call\n",
+            "    arcana_text.paragraphs.paint :: main_window, paragraph, (8, 8) :: call\n",
+            "    arcana_graphics.canvas.present :: main_window :: call\n",
+            "    self.drawn = true\n",
+            "    arcana_desktop.app.request_exit :: cx, 0 :: call\n",
+            "    return arcana_desktop.types.ControlFlow.Wait :: :: call\n",
+            "\n",
+            "fn main() -> Int:\n",
+            "    let mut app = Demo :: drawn = false :: call\n",
+            "    return arcana_desktop.app.run :: app, (arcana_desktop.app.default_app_config :: :: call) :: call\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let (plan, artifact_dir) = build_workspace_plan_and_artifact_dir_for_member(
+        &dir,
+        "runtime_arcana_text_desktop_pixels",
+    );
+    let cwd = artifact_dir.to_string_lossy().replace('\\', "/");
+    let mut host = synthetic_window_canvas_host(&artifact_dir);
+    host.cwd = cwd.clone();
+    host.sandbox_root = cwd;
+    let code = execute_main(&plan, &mut host).expect("runtime should execute");
+
+    assert_eq!(code, 0);
+    assert!(
+        host.canvas_log
+            .iter()
+            .any(|entry| entry.starts_with("blit:<generated:")),
+        "paragraph paint should upload a generated image, log was {:?}",
+        host.canvas_log
+    );
+    let generated = host
+        .images
+        .values()
+        .find(|image| image.path.starts_with("<generated:"))
+        .expect("generated text image should exist");
+    assert!(generated.width > 0, "generated image should have width");
+    assert!(generated.height > 0, "generated image should have height");
+    assert!(
+        generated.pixels.iter().any(|pixel| *pixel == 0x00FF_FFFF),
+        "generated image should contain white foreground pixels, image was {:?}",
+        generated
+    );
+    assert!(
+        generated.pixels.iter().any(|pixel| *pixel == 0),
+        "generated image should also contain empty background pixels"
+    );
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn execute_main_runs_arcana_text_asset_resolution_workspace() {
     let dir = temp_workspace_dir("arcana_text_assets");
     let text_dep = owned_grimoire_root()
@@ -10440,14 +13471,22 @@ fn execute_main_runs_external_provider_backed_library_workspace() {
         &dir.join("src").join("shelf.arc"),
         concat!(
             "import demo_counter.counter\n",
+            "import std.collections.array\n",
             "import std.io\n",
+            "import std.memory\n",
             "\n",
             "fn main() -> Int:\n",
             "    let mut counter = demo_counter.counter.new :: 7 :: call\n",
             "    demo_counter.counter.add :: counter, 5 :: call\n",
             "    let snapshot = demo_counter.counter.snapshot :: counter :: call\n",
+            "    let mut bytes = std.collections.array.new[Int] :: 3, 0 :: call\n",
+            "    bytes[0] = 10\n",
+            "    bytes[1] = 20\n",
+            "    bytes[2] = 30\n",
+            "    let view = std.memory.bytes_view :: bytes, 0, 3 :: call\n",
             "    std.io.print[Int] :: (demo_counter.counter.value :: counter :: call) :: call\n",
             "    std.io.print[Int] :: snapshot.value :: call\n",
+            "    std.io.print[Int] :: (demo_counter.counter.sum_bytes :: view :: call) :: call\n",
             "    return 0\n",
         ),
     );
@@ -10500,6 +13539,9 @@ fn execute_main_runs_external_provider_backed_library_workspace() {
             "\n",
             "export fn snapshot(read counter: demo_counter.types.Counter) -> demo_counter.types.CounterSnapshot:\n",
             "    return demo_counter.counter.snapshot :: counter :: call\n",
+            "\n",
+            "export fn sum_bytes(read view: std.memory.ByteView) -> Int:\n",
+            "    return demo_counter.counter.sum_bytes :: view :: call\n",
         ),
     );
     write_file(
@@ -10513,6 +13555,7 @@ fn execute_main_runs_external_provider_backed_library_workspace() {
             .join("counter.arc"),
         concat!(
             "import demo_counter.provider_impl.engine\n",
+            "import std.memory\n",
             "import demo_counter.types\n",
             "\n",
             "fn new(seed: Int) -> demo_counter.provider_impl.engine.CounterState:\n",
@@ -10526,6 +13569,9 @@ fn execute_main_runs_external_provider_backed_library_workspace() {
             "\n",
             "fn snapshot(read counter: demo_counter.provider_impl.engine.CounterState) -> demo_counter.types.CounterSnapshot:\n",
             "    return demo_counter.types.CounterSnapshot :: value = counter.value :: call\n",
+            "\n",
+            "fn sum_bytes(read view: std.memory.ByteView) -> Int:\n",
+            "    return (view :: 0 :: at) + (view :: 1 :: at) + (view :: 2 :: at)\n",
         ),
     );
 
@@ -10540,7 +13586,10 @@ fn execute_main_runs_external_provider_backed_library_workspace() {
     let code = execute_main(&plan, &mut host).expect("runtime should execute");
 
     assert_eq!(code, 0);
-    assert_eq!(host.stdout, vec!["12".to_string(), "12".to_string()]);
+    assert_eq!(
+        host.stdout,
+        vec!["12".to_string(), "12".to_string(), "60".to_string()]
+    );
 
     let _ = fs::remove_dir_all(dir);
 }

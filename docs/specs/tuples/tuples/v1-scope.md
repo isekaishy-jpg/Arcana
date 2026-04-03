@@ -11,6 +11,7 @@ Pair-only tuples are the current stabilization point, not the intended permanent
 - Tuple type syntax is `(A, B)`.
 - Tuple literal syntax is `(a, b)`.
 - Nested pairs are allowed.
+- Exact recursive pair destructuring is supported in `let` bindings and `for` headers.
 - Three-or-more-element tuples are not part of the contract.
 - This is the current selfhost baseline, not a claim that generalized tuples are undesirable.
 
@@ -25,13 +26,17 @@ Pair-only tuples are the current stabilization point, not the intended permanent
 
 - Tuples are value aggregates.
 - Whole-tuple construction and whole-value passing/returning are supported.
+- Tuple destructuring is exact-shape only in current v1:
+  - `let (left, right) = pair`
+  - `for (left, right) in values:`
+- Nested exact pair destructuring is allowed inside those `let` and `for` forms.
 - Tuple-specific `match` patterns are not part of the v1 contract.
 - Current tuple use around `match` is limited to ordinary whole-value flow plus explicit `.0` / `.1` access before matching.
 - Tuples may be nested to build protocol payloads, but named records are preferred once the shape becomes semantically meaningful.
 
 ## Explicit Exclusions
 
-- No tuple destructuring in bindings, parameters, or `for` headers.
+- No tuple destructuring in parameter lists.
 - No tuple patterns in `match`.
 - No named tuple fields.
 - No tuple methods or special tuple traits.

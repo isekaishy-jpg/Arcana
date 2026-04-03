@@ -102,11 +102,16 @@ This document defines how Arcana spec files are interpreted during the rewrite.
 
 - Cleanup footers are a pre-selfhost contract, not a post-selfhost cleanup idea.
 - Headed regions (`recycle`, `construct`, `bind`, `Memory`) are an approved pre-selfhost contract, but this docs patch does not imply implementation or selfhost-matrix readiness yet.
+- A third explicit freeze exception is now approved in the memory domain: views, borrowed-slice syntax, `temp` / `session` / `ring` / `slab`, publication state (`seal` / `unseal`), and the narrow `std.binary` layer are pre-selfhost contract rather than post-selfhost speculation.
 - Rewrite-era scopes for access modes, qualified phrases, collections/ranges, `where`, concurrency, resources, memory, and chain surface now supersede stale Meadow-era planning notes where they overlap.
 - Chain surface should stay explicit as style qualifier plus introducer family plus connector-directed edges.
 - Pair-tuple rules must be explicit before selfhost because the imported corpus already depends on them heavily.
 - Pair-only tuples are the current baseline, not a statement that generalized tuples are off the table forever.
+- Exact recursive pair destructuring in `let` and `for` is now part of the approved tuple baseline; parameter destructuring, tuple `match` patterns, tuple field assignment, and 3+ tuples remain out of scope.
 - `plan` and `lazy` chain semantics must stay explicit in the frozen docs so pipeline validation and demand-sensitive execution are not inferred from old implementation shortcuts.
+- Chain runtime semantics are now explicit rewrite contract, not name-based inference: `parallel` is true fanout, `broadcast` is same-input fanout, `collect` is directional output collection, `plan` is pass-through validation, `async` auto-awaits between stages, and `lazy` is deferred-until-demand.
+- Qualified-phrase surface now includes dedicated `call`, `await`, `weave`, `split`, `must`, and `fallback` qualifier kinds plus optional qualifier type args on `call`, bare-method, and named-path qualifiers.
+- Owner activation context is now an explicit owner-level `context:` clause rather than an implicit "discover a shared hook context type" rule.
 - `AnyBox` or equivalent erased Arcana value carriers are banned from the rewrite contract.
 - Closures are not the intended direction; if first-class callable capability is added later, it should be through explicit function/context objects.
 - The 3-top-level-arg phrase cap is intentional and does not, by itself, justify reopening closure semantics or general function values; use explicit data shaping and the approved object/owner model where that surface fits.

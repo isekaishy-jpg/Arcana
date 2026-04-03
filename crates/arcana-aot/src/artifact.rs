@@ -91,6 +91,8 @@ pub struct AotOwnerArtifact {
     pub module_id: String,
     pub owner_path: Vec<String>,
     pub owner_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_type: Option<IrRoutineType>,
     pub objects: Vec<AotOwnerObjectArtifact>,
     pub exits: Vec<AotOwnerExitArtifact>,
 }

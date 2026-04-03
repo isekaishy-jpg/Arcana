@@ -487,6 +487,21 @@ pub struct OwnerObjectDecl {
     pub span: Span,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QualifiedPhraseQualifierKind {
+    Call,
+    Try,
+    Apply,
+    AwaitApply,
+    Await,
+    Weave,
+    Split,
+    Must,
+    Fallback,
+    BareMethod,
+    NamedPath,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OwnerExitDecl {
     pub name: String,
@@ -744,7 +759,9 @@ pub enum Expr {
     QualifiedPhrase {
         subject: Box<Expr>,
         args: Vec<PhraseArg>,
+        qualifier_kind: QualifiedPhraseQualifierKind,
         qualifier: String,
+        qualifier_type_args: Vec<SurfaceType>,
         attached: Vec<HeaderAttachment>,
     },
     Await {
@@ -901,6 +918,7 @@ pub enum SymbolBody {
     },
     Owner {
         objects: Vec<OwnerObjectDecl>,
+        context_type: Option<SurfaceType>,
         exits: Vec<OwnerExitDecl>,
     },
     Trait {
@@ -2074,11 +2092,15 @@ fn parse_symbol_entry(entry: &RawBlockEntry) -> Result<Option<SymbolDecl>, Strin
     }
     symbol.surface_text = collect_symbol_surface(&entry.text, &symbol.kind, &entry.children);
     symbol.body = if symbol.kind == SymbolKind::Owner {
-        let objects = match &symbol.body {
-            SymbolBody::Owner { objects, .. } => objects.clone(),
-            _ => Vec::new(),
+        let (objects, context_type) = match &symbol.body {
+            SymbolBody::Owner {
+                objects,
+                context_type,
+                ..
+            } => (objects.clone(), context_type.clone()),
+            _ => (Vec::new(), None),
         };
-        parse_owner_body(&entry.children, objects)?
+        parse_owner_body(&entry.children, objects, context_type)?
     } else {
         parse_symbol_body(&symbol.kind, &entry.children)?
     };
@@ -2152,7 +2174,7 @@ fn parse_symbol_header(trimmed: &str, span: Span) -> Option<SymbolDecl> {
 
 fn parse_owner_symbol(rest: &str, exported: bool, span: Span) -> Option<SymbolDecl> {
     let rest = rest.strip_prefix("create ")?;
-    let (name, objects) = parse_owner_signature(rest)?;
+    let (name, objects, context_type) = parse_owner_signature(rest)?;
     Some(SymbolDecl {
         name,
         kind: SymbolKind::Owner,
@@ -2169,6 +2191,7 @@ fn parse_owner_symbol(rest: &str, exported: bool, span: Span) -> Option<SymbolDe
         intrinsic_impl: None,
         body: SymbolBody::Owner {
             objects,
+            context_type,
             exits: Vec::new(),
         },
         statements: Vec::new(),
@@ -2453,7 +2476,9 @@ fn parse_const_signature_tail(
     (Vec::new(), None, Vec::new(), return_type)
 }
 
-fn parse_owner_signature(rest: &str) -> Option<(String, Vec<OwnerObjectDecl>)> {
+fn parse_owner_signature(
+    rest: &str,
+) -> Option<(String, Vec<OwnerObjectDecl>, Option<SurfaceType>)> {
     let header = rest.trim().strip_suffix(':').unwrap_or(rest.trim()).trim();
     let name = parse_symbol_name(header)?;
     let after_name = header[name.len()..].trim();
@@ -2462,10 +2487,7 @@ fn parse_owner_signature(rest: &str) -> Option<(String, Vec<OwnerObjectDecl>)> {
     }
     let close_idx = find_matching_delim(after_name, 0, '[', ']')?;
     let objects_text = &after_name[1..close_idx];
-    let remainder = after_name[close_idx + 1..].trim();
-    if remainder != "scope-exit" {
-        return None;
-    }
+    let mut remainder = after_name[close_idx + 1..].trim();
     let mut objects = Vec::new();
     for item in split_top_level(objects_text, ',') {
         let item = item.trim();
@@ -2480,7 +2502,21 @@ fn parse_owner_signature(rest: &str) -> Option<(String, Vec<OwnerObjectDecl>)> {
             span: Span::default(),
         });
     }
-    Some((name, objects))
+    let context_type = if let Some(context_rest) = remainder.strip_prefix("context:") {
+        let (context_text, next) = context_rest.rsplit_once(" scope-exit")?;
+        let context_text = context_text.trim();
+        if context_text.is_empty() || !next.trim().is_empty() {
+            return None;
+        }
+        remainder = "scope-exit";
+        Some(parse_surface_type(context_text).ok()?)
+    } else {
+        None
+    };
+    if remainder != "scope-exit" {
+        return None;
+    }
+    Some((name, objects, context_type))
 }
 
 fn parse_type_params_and_where(
@@ -2731,7 +2767,11 @@ fn parse_symbol_body(kind: &SymbolKind, entries: &[RawBlockEntry]) -> Result<Sym
                     .map(parse_owner_exit_decl)
                     .collect::<Result<Vec<_>, _>>()?;
                 let objects = Vec::new();
-                return Ok(SymbolBody::Owner { objects, exits });
+                return Ok(SymbolBody::Owner {
+                    objects,
+                    context_type: None,
+                    exits,
+                });
             }
             Ok(SymbolBody::None)
         }
@@ -2917,12 +2957,17 @@ fn parse_symbol_statements(
 fn parse_owner_body(
     entries: &[RawBlockEntry],
     objects: Vec<OwnerObjectDecl>,
+    context_type: Option<SurfaceType>,
 ) -> Result<SymbolBody, String> {
     let exits = entries
         .iter()
         .map(parse_owner_exit_decl)
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(SymbolBody::Owner { objects, exits })
+    Ok(SymbolBody::Owner {
+        objects,
+        context_type,
+        exits,
+    })
 }
 
 fn parse_owner_exit_decl(entry: &RawBlockEntry) -> Result<OwnerExitDecl, String> {
@@ -3146,13 +3191,7 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
         })?;
         let binding = binding.trim();
         let iterable = iterable.trim();
-        if looks_like_tuple_binding(binding) {
-            return Err(format!(
-                "{}:{}: tuple destructuring is not allowed in `for` bindings",
-                entry.span.line, entry.span.column
-            ));
-        }
-        if !is_identifier(binding) || iterable.is_empty() {
+        if !is_valid_tuple_binding_pattern(binding) || iterable.is_empty() {
             return Err(format!(
                 "{}:{}: malformed `for` statement",
                 entry.span.line, entry.span.column
@@ -3185,13 +3224,7 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
         })?;
         let name = name.trim();
         let value = value.trim();
-        if looks_like_tuple_binding(name) {
-            return Err(format!(
-                "{}:{}: tuple destructuring is not allowed in `let` statements",
-                entry.span.line, entry.span.column
-            ));
-        }
-        if !is_identifier(name) || value.is_empty() {
+        if !is_valid_tuple_binding_pattern(name) || value.is_empty() {
             return Err(format!(
                 "{}:{}: malformed `let` statement",
                 entry.span.line, entry.span.column
@@ -3926,12 +3959,16 @@ fn parse_expression(text: &str, attached: &[RawBlockEntry], span: Span) -> Resul
         Expr::QualifiedPhrase {
             subject,
             args,
+            qualifier_kind,
             qualifier,
+            qualifier_type_args,
             ..
         } => Ok(Expr::QualifiedPhrase {
             subject,
             args,
+            qualifier_kind,
             qualifier,
+            qualifier_type_args,
             attached: parse_header_attachments(attached)?,
         }),
         Expr::MemoryPhrase {
@@ -4558,9 +4595,9 @@ fn parse_memory_phrase(text: &str) -> Result<Option<Expr>, String> {
     if !is_identifier(family) || arena_text.is_empty() || constructor.is_empty() {
         return Ok(None);
     }
-    if !matches!(family, "arena" | "frame" | "pool") {
+    if MemoryFamily::parse(family).is_none() {
         return Err(format!(
-            "unknown memory type `{family}`; supported now: arena, frame, pool (reserved for future expansion)"
+            "unknown memory type `{family}`; supported now: arena, frame, pool, temp, session, ring, slab"
         ));
     }
     let arena = parse_expression_core(arena_text)?;
@@ -4635,7 +4672,11 @@ fn parse_qualified_phrase(text: &str) -> Result<Option<Expr>, String> {
     }
 
     let subject = parse_expression_core(subject_text)?;
-
+    let Some((qualifier_kind, qualifier, qualifier_type_args)) =
+        parse_qualified_phrase_qualifier(qualifier)
+    else {
+        return Ok(None);
+    };
     let args = match parse_phrase_args(args_text, PhraseArgContext::Qualified)? {
         Some(args) => args,
         None => return Ok(None),
@@ -4643,9 +4684,28 @@ fn parse_qualified_phrase(text: &str) -> Result<Option<Expr>, String> {
     Ok(Some(Expr::QualifiedPhrase {
         subject: Box::new(subject),
         args,
-        qualifier: qualifier.to_string(),
+        qualifier_kind,
+        qualifier,
+        qualifier_type_args,
         attached: Vec::new(),
     }))
+}
+
+fn parse_qualified_phrase_qualifier(
+    text: &str,
+) -> Option<(QualifiedPhraseQualifierKind, String, Vec<SurfaceType>)> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let (base, type_args) = if let Some((base, inside)) = split_trailing_bracket_suffix(trimmed) {
+        let type_args = parse_generic_arg_types(inside)?;
+        (base.trim(), type_args)
+    } else {
+        (trimmed, Vec::new())
+    };
+    let kind = classify_qualified_phrase_qualifier(base)?;
+    Some((kind, base.to_string(), type_args))
 }
 
 fn subject_text_defers_to_unary(text: &str) -> bool {
@@ -6916,19 +6976,28 @@ fn validate_expr_phrase_contract(
         Expr::QualifiedPhrase {
             subject,
             args,
+            qualifier_kind,
             qualifier,
+            qualifier_type_args,
             attached,
         } => {
             validate_expr_phrase_contract(subject, span, false)?;
             for arg in args {
                 validate_phrase_arg_contract(arg, span)?;
             }
-            let qualifier_kind = classify_qualified_phrase_qualifier(qualifier).ok_or_else(|| {
-                format!(
-                    "{}:{}: invalid phrase qualifier `{}`; expected path or one of `?`, `>`, `>>`",
-                    span.line, span.column, qualifier
+            if !qualifier_type_args.is_empty()
+                && !matches!(
+                    qualifier_kind,
+                    QualifiedPhraseQualifierKind::Call
+                        | QualifiedPhraseQualifierKind::BareMethod
+                        | QualifiedPhraseQualifierKind::NamedPath
                 )
-            })?;
+            {
+                return Err(format!(
+                    "{}:{}: qualifier `{}` does not support generic arguments",
+                    span.line, span.column, qualifier
+                ));
+            }
             if !attached.is_empty() {
                 if !allow_header_attachments {
                     return Err(format!(
@@ -6936,7 +7005,7 @@ fn validate_expr_phrase_contract(
                         span.line, span.column
                     ));
                 }
-                validate_qualified_phrase_attachment_contract(&qualifier_kind, attached)?;
+                validate_qualified_phrase_attachment_contract(*qualifier_kind, attached)?;
             }
         }
         Expr::Await { expr } | Expr::Unary { expr, .. } => {
@@ -6996,20 +7065,17 @@ fn validate_headed_modifier_phrase_contract(
     Ok(())
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum QualifiedPhraseQualifierKind {
-    Try,
-    Apply,
-    AwaitApply,
-    BareMethod,
-    NamedPath,
-}
-
 fn classify_qualified_phrase_qualifier(qualifier: &str) -> Option<QualifiedPhraseQualifierKind> {
     match qualifier.trim() {
+        "call" => Some(QualifiedPhraseQualifierKind::Call),
         "?" => Some(QualifiedPhraseQualifierKind::Try),
         ">" => Some(QualifiedPhraseQualifierKind::Apply),
         ">>" => Some(QualifiedPhraseQualifierKind::AwaitApply),
+        "await" => Some(QualifiedPhraseQualifierKind::Await),
+        "weave" => Some(QualifiedPhraseQualifierKind::Weave),
+        "split" => Some(QualifiedPhraseQualifierKind::Split),
+        "must" => Some(QualifiedPhraseQualifierKind::Must),
+        "fallback" => Some(QualifiedPhraseQualifierKind::Fallback),
         value if is_path_like(value) => {
             if value.contains('.') {
                 Some(QualifiedPhraseQualifierKind::NamedPath)
@@ -7053,13 +7119,15 @@ fn validate_header_attachment_phrase_contract(
 }
 
 fn validate_qualified_phrase_attachment_contract(
-    qualifier_kind: &QualifiedPhraseQualifierKind,
+    qualifier_kind: QualifiedPhraseQualifierKind,
     attachments: &[HeaderAttachment],
 ) -> Result<(), String> {
     validate_header_attachment_phrase_contract(attachments)?;
     let allow_named = matches!(
         qualifier_kind,
-        QualifiedPhraseQualifierKind::Apply | QualifiedPhraseQualifierKind::BareMethod
+        QualifiedPhraseQualifierKind::Call
+            | QualifiedPhraseQualifierKind::Apply
+            | QualifiedPhraseQualifierKind::BareMethod
     );
     for attachment in attachments {
         let HeaderAttachment::Named { span, .. } = attachment else {
@@ -7067,9 +7135,15 @@ fn validate_qualified_phrase_attachment_contract(
         };
         if !allow_named {
             let qualifier = match qualifier_kind {
+                QualifiedPhraseQualifierKind::Call => "call",
                 QualifiedPhraseQualifierKind::Try => "?",
                 QualifiedPhraseQualifierKind::Apply => ">",
                 QualifiedPhraseQualifierKind::AwaitApply => ">>",
+                QualifiedPhraseQualifierKind::Await => "await",
+                QualifiedPhraseQualifierKind::Weave => "weave",
+                QualifiedPhraseQualifierKind::Split => "split",
+                QualifiedPhraseQualifierKind::Must => "must",
+                QualifiedPhraseQualifierKind::Fallback => "fallback",
                 QualifiedPhraseQualifierKind::BareMethod => "method",
                 QualifiedPhraseQualifierKind::NamedPath => "path qualifier",
             };
@@ -7631,6 +7705,23 @@ fn looks_like_tuple_binding(text: &str) -> bool {
     tuple_parts_if_whole(text).is_some()
 }
 
+fn is_valid_tuple_binding_pattern(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if is_identifier(trimmed) {
+        return true;
+    }
+    let Some(parts) = tuple_parts_if_whole(trimmed) else {
+        return false;
+    };
+    parts.len() == 2
+        && parts
+            .iter()
+            .all(|part| is_valid_tuple_binding_pattern(part.trim()))
+}
+
 fn tuple_parts_if_whole(text: &str) -> Option<Vec<&str>> {
     let trimmed = text.trim();
     if !trimmed.starts_with('(') || !trimmed.ends_with(')') {
@@ -7797,9 +7888,9 @@ mod tests {
         AssignTarget, BUILTIN_TYPE_INFOS, BinaryOp, ChainConnector, ChainIntroducer, ChainStep,
         DirectiveKind, Expr, ForewordAliasKind, ForewordApp, ForewordArg, ForewordDefinitionTarget,
         HeaderAttachment, MatchPattern, OpaqueBoundaryPolicy, OpaqueOwnershipPolicy,
-        OpaqueTypePolicy, ParamMode, PhraseArg, Statement, StatementKind, SurfaceTraitRef,
-        SurfaceType, SurfaceWhereClause, SymbolBody, SymbolKind, UnaryOp, builtin_type_info,
-        parse_module,
+        OpaqueTypePolicy, ParamMode, PhraseArg, QualifiedPhraseQualifierKind, Statement,
+        StatementKind, SurfaceTraitRef, SurfaceType, SurfaceWhereClause, SymbolBody, SymbolKind,
+        UnaryOp, builtin_type_info, parse_module,
     };
 
     fn expr_is_path(expr: &Expr, name: &str) -> bool {
@@ -8560,7 +8651,7 @@ mod tests {
             ),
             (
                 "fn main() -> Int:\n    let item = weird: store :> value = 1 <: Item\n    return 0\n",
-                "unknown memory type `weird`; supported now: arena, frame, pool (reserved for future expansion)",
+                "unknown memory type `weird`; supported now: arena, frame, pool, temp, session, ring, slab",
             ),
             (
                 "fn main() -> Int:\n    let item = arena: store :> value = 1 <: Node()\n    return 0\n",
@@ -8673,13 +8764,20 @@ mod tests {
     }
 
     #[test]
-    fn parse_module_rejects_tuple_destructuring_in_let_statements() {
-        let err = parse_module("fn main() -> Int:\n    let (left, right) = pair\n    return 0\n")
-            .expect_err("tuple destructuring should fail");
-        assert!(
-            err.contains("tuple destructuring is not allowed in `let` statements"),
-            "{err}"
-        );
+    fn parse_module_accepts_exact_pair_destructuring_in_let_and_for_statements() {
+        let parsed = parse_module(
+            "fn main() -> Int:\n    let (left, right) = pair\n    for (first, second) in pairs:\n        return first\n    return 0\n",
+        )
+        .expect("tuple destructuring should parse");
+
+        match &parsed.symbols[0].statements[0].kind {
+            StatementKind::Let { name, .. } => assert_eq!(name, "(left, right)"),
+            other => panic!("expected tuple let statement, got {other:?}"),
+        }
+        match &parsed.symbols[0].statements[1].kind {
+            StatementKind::For { binding, .. } => assert_eq!(binding, "(first, second)"),
+            other => panic!("expected tuple for statement, got {other:?}"),
+        }
     }
 
     #[test]
@@ -8719,6 +8817,7 @@ mod tests {
                     args,
                     qualifier,
                     attached,
+                    ..
                 } => {
                     assert_eq!(qualifier, "call");
                     assert!(attached.is_empty());
@@ -8834,6 +8933,7 @@ mod tests {
                         args,
                         qualifier,
                         attached,
+                        ..
                     } => {
                         assert_eq!(qualifier, "call");
                         assert!(attached.is_empty());
@@ -8863,6 +8963,7 @@ mod tests {
                         args,
                         qualifier,
                         attached,
+                        ..
                     } => {
                         assert_eq!(qualifier, "call");
                         assert!(attached.is_empty());
@@ -9267,6 +9368,95 @@ mod tests {
             }
             other => panic!("expected generic qualified phrase, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_module_collects_extended_phrase_qualifier_kinds() {
+        let parsed = parse_module(
+            concat!(
+                "fn main() -> Int:\n",
+                "    let called = target :: :: call[Int]\n",
+                "    let awaited = task :: :: await\n",
+                "    let woven = worker :: 1 :: weave\n",
+                "    let split_out = helper :: 2 :: split\n",
+                "    let required = maybe :: :: must\n",
+                "    let fallback_value = maybe :: 7 :: fallback\n",
+                "    return 0\n",
+            ),
+        )
+        .expect("extended qualifier forms should parse");
+
+        let statements = &parsed.symbols[0].statements;
+        let expected = [
+            (QualifiedPhraseQualifierKind::Call, "call", vec!["Int".to_string()]),
+            (QualifiedPhraseQualifierKind::Await, "await", Vec::new()),
+            (QualifiedPhraseQualifierKind::Weave, "weave", Vec::new()),
+            (QualifiedPhraseQualifierKind::Split, "split", Vec::new()),
+            (QualifiedPhraseQualifierKind::Must, "must", Vec::new()),
+            (QualifiedPhraseQualifierKind::Fallback, "fallback", Vec::new()),
+        ];
+        for (statement, (expected_kind, expected_qualifier, expected_type_args)) in
+            statements.iter().take(6).zip(expected.iter())
+        {
+            let StatementKind::Let {
+                value:
+                    Expr::QualifiedPhrase {
+                        qualifier_kind,
+                        qualifier,
+                        qualifier_type_args,
+                        ..
+                    },
+                ..
+            } = &statement.kind
+            else {
+                panic!("expected qualified phrase let statement, got {:?}", statement.kind);
+            };
+            assert_eq!(qualifier_kind, expected_kind);
+            assert_eq!(qualifier, expected_qualifier);
+            assert_eq!(
+                qualifier_type_args
+                    .iter()
+                    .map(SurfaceType::render)
+                    .collect::<Vec<_>>(),
+                *expected_type_args
+            );
+        }
+    }
+
+    #[test]
+    fn parse_module_collects_owner_context_clause() {
+        let parsed = parse_module(
+            concat!(
+                "obj SessionCtx:\n",
+                "    base: Int\n",
+                "\n",
+                "obj Counter:\n",
+                "    value: Int\n",
+                "\n",
+                "create Session [Counter] context: SessionCtx scope-exit:\n",
+                "    done: when false hold [Counter]\n",
+                "\n",
+                "fn main() -> Int:\n",
+                "    return 0\n",
+            ),
+        )
+        .expect("owner context clause should parse");
+
+        let owner = parsed
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "Session")
+            .expect("owner symbol should exist");
+        let SymbolBody::Owner { context_type, .. } = &owner.body else {
+            panic!("expected owner symbol body");
+        };
+        assert_eq!(
+            context_type
+                .as_ref()
+                .map(SurfaceType::render)
+                .as_deref(),
+            Some("SessionCtx")
+        );
     }
 
     #[test]

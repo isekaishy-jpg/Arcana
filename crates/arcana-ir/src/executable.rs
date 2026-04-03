@@ -62,6 +62,8 @@ pub enum ExecExpr {
         args: Vec<ExecPhraseArg>,
         qualifier_kind: ExecPhraseQualifierKind,
         qualifier: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        qualifier_type_args: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resolved_callable: Option<Vec<String>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -90,6 +92,11 @@ pub enum ExecPhraseQualifierKind {
     Try,
     Apply,
     AwaitApply,
+    Await,
+    Weave,
+    Split,
+    Must,
+    Fallback,
     BareMethod,
     NamedPath,
 }

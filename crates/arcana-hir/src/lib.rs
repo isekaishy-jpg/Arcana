@@ -518,6 +518,21 @@ pub struct HirOwnerObject {
     pub span: Span,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HirQualifiedPhraseQualifierKind {
+    Call,
+    Try,
+    Apply,
+    AwaitApply,
+    Await,
+    Weave,
+    Split,
+    Must,
+    Fallback,
+    BareMethod,
+    NamedPath,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HirOwnerExit {
     pub name: String,
@@ -768,7 +783,9 @@ pub enum HirExpr {
     QualifiedPhrase {
         subject: Box<HirExpr>,
         args: Vec<HirPhraseArg>,
+        qualifier_kind: HirQualifiedPhraseQualifierKind,
         qualifier: String,
+        qualifier_type_args: Vec<HirType>,
         attached: Vec<HirHeaderAttachment>,
     },
     Await {
@@ -939,6 +956,7 @@ pub enum HirSymbolBody {
     },
     Owner {
         objects: Vec<HirOwnerObject>,
+        context_type: Option<HirType>,
         exits: Vec<HirOwnerExit>,
     },
     Trait {
@@ -1436,6 +1454,19 @@ fn canonical_ambient_type_root(path: &[String]) -> Option<&'static str> {
             "FrameId" => Some("std.memory.FrameId"),
             "PoolArena" => Some("std.memory.PoolArena"),
             "PoolId" => Some("std.memory.PoolId"),
+            "TempArena" => Some("std.memory.TempArena"),
+            "TempId" => Some("std.memory.TempId"),
+            "SessionArena" => Some("std.memory.SessionArena"),
+            "SessionId" => Some("std.memory.SessionId"),
+            "RingBuffer" => Some("std.memory.RingBuffer"),
+            "RingId" => Some("std.memory.RingId"),
+            "Slab" => Some("std.memory.Slab"),
+            "SlabId" => Some("std.memory.SlabId"),
+            "ReadView" => Some("std.memory.ReadView"),
+            "EditView" => Some("std.memory.EditView"),
+            "ByteView" => Some("std.memory.ByteView"),
+            "ByteEditView" => Some("std.memory.ByteEditView"),
+            "StrView" => Some("std.memory.StrView"),
             "Task" => Some("std.concurrent.Task"),
             "Thread" => Some("std.concurrent.Thread"),
             "Channel" => Some("std.concurrent.Channel"),
@@ -1665,6 +1696,16 @@ fn builtin_hir_type(name: &str) -> HirType {
     }
 }
 
+fn ambient_path_hir_type(path: &[&str]) -> HirType {
+    HirType {
+        kind: HirTypeKind::Path(HirPath {
+            segments: path.iter().map(|segment| segment.to_string()).collect(),
+            span: Span::default(),
+        }),
+        span: Span::default(),
+    }
+}
+
 fn ambient_apply_hir_type(base: &[&str], args: Vec<HirType>) -> HirType {
     let base = HirPath {
         segments: base.iter().map(|segment| segment.to_string()).collect(),
@@ -1724,6 +1765,7 @@ fn extract_expr_generic_hir_type_args(expr: &HirExpr) -> Vec<HirType> {
             inherited.extend(type_args.iter().cloned());
             inherited
         }
+        HirExpr::MemberAccess { expr, .. } => extract_expr_generic_hir_type_args(expr),
         _ => Vec::new(),
     }
 }
@@ -1792,14 +1834,40 @@ fn symbol_call_return_type(
     ))
 }
 
+fn hir_option_payload_type(ty: &HirType) -> Option<HirType> {
+    match &hir_strip_reference_type(ty).kind {
+        HirTypeKind::Apply { base, args }
+            if base.segments.last().map(String::as_str) == Some("Option") && args.len() == 1 =>
+        {
+            args.first().cloned()
+        }
+        _ => None,
+    }
+}
+
+fn hir_result_ok_payload_type(ty: &HirType) -> Option<HirType> {
+    match &hir_strip_reference_type(ty).kind {
+        HirTypeKind::Apply { base, args }
+            if base.segments.last().map(String::as_str) == Some("Result") && args.len() == 2 =>
+        {
+            args.first().cloned()
+        }
+        _ => None,
+    }
+}
+
 fn infer_call_target_return_hir_type<L: HirLocalTypeLookup>(
     workspace: &HirWorkspaceSummary,
     resolved_module: &HirResolvedModule,
     locals: &L,
     subject: &HirExpr,
+    qualifier_type_args: Option<&[HirType]>,
 ) -> Option<HirType> {
     let path = flatten_callable_expr_path(subject)?;
-    let generic_args = extract_expr_generic_hir_type_args(subject)
+    let generic_args = qualifier_type_args
+        .filter(|args| !args.is_empty())
+        .map(|args| args.to_vec())
+        .unwrap_or_else(|| extract_expr_generic_hir_type_args(subject))
         .into_iter()
         .map(|arg| {
             let package = current_workspace_package_for_module(workspace, resolved_module)?;
@@ -1941,6 +2009,80 @@ fn infer_slice_hir_type<L: HirLocalTypeLookup>(
     }
 }
 
+fn infer_borrowed_slice_hir_type<L: HirLocalTypeLookup>(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    locals: &L,
+    expr: &HirExpr,
+    mutable: bool,
+) -> Option<HirType> {
+    let base_ty = infer_receiver_expr_type(workspace, resolved_module, locals, expr)?;
+    match &hir_strip_reference_type(&base_ty).kind {
+        HirTypeKind::Apply { base, args }
+            if hir_path_matches_any(
+                base,
+                &[&["Array"], &["std", "collections", "array", "Array"]],
+            ) =>
+        {
+            let elem = args
+                .first()
+                .cloned()
+                .unwrap_or_else(|| builtin_hir_type("_"));
+            Some(ambient_apply_hir_type(
+                &[if mutable { "EditView" } else { "ReadView" }],
+                vec![elem],
+            ))
+        }
+        HirTypeKind::Apply { base, args }
+            if hir_path_matches_any(base, &[&["ReadView"], &["std", "memory", "ReadView"]]) =>
+        {
+            let elem = args
+                .first()
+                .cloned()
+                .unwrap_or_else(|| builtin_hir_type("_"));
+            Some(ambient_apply_hir_type(&["ReadView"], vec![elem]))
+        }
+        HirTypeKind::Apply { base, args }
+            if hir_path_matches_any(base, &[&["EditView"], &["std", "memory", "EditView"]]) =>
+        {
+            let elem = args
+                .first()
+                .cloned()
+                .unwrap_or_else(|| builtin_hir_type("_"));
+            Some(ambient_apply_hir_type(
+                &[if mutable { "EditView" } else { "ReadView" }],
+                vec![elem],
+            ))
+        }
+        HirTypeKind::Path(path)
+            if hir_path_matches_any(path, &[&["ByteView"], &["std", "memory", "ByteView"]]) =>
+        {
+            Some(ambient_path_hir_type(&["ByteView"]))
+        }
+        HirTypeKind::Path(path)
+            if hir_path_matches_any(
+                path,
+                &[&["ByteEditView"], &["std", "memory", "ByteEditView"]],
+            ) =>
+        {
+            Some(ambient_path_hir_type(&[if mutable {
+                "ByteEditView"
+            } else {
+                "ByteView"
+            }]))
+        }
+        HirTypeKind::Path(path)
+            if hir_path_matches_any(
+                path,
+                &[&["Str"], &["StrView"], &["std", "memory", "StrView"]],
+            ) =>
+        {
+            Some(ambient_path_hir_type(&["StrView"]))
+        }
+        _ => None,
+    }
+}
+
 pub fn infer_receiver_expr_type<L: HirLocalTypeLookup>(
     workspace: &HirWorkspaceSummary,
     resolved_module: &HirResolvedModule,
@@ -1951,10 +2093,25 @@ pub fn infer_receiver_expr_type<L: HirLocalTypeLookup>(
         HirExpr::BoolLiteral { .. } => Some(builtin_hir_type("Bool")),
         HirExpr::IntLiteral { .. } => Some(builtin_hir_type("Int")),
         HirExpr::StrLiteral { .. } => Some(builtin_hir_type("Str")),
-        HirExpr::CollectionLiteral { .. } => Some(ambient_apply_hir_type(
-            &["List"],
-            vec![builtin_hir_type("_")],
-        )),
+        HirExpr::Pair { left, right } => Some(HirType {
+            kind: HirTypeKind::Tuple(vec![
+                infer_receiver_expr_type(workspace, resolved_module, locals, left)?,
+                infer_receiver_expr_type(workspace, resolved_module, locals, right)?,
+            ]),
+            span: Span::default(),
+        }),
+        HirExpr::CollectionLiteral { items } => {
+            let item_ty = items
+                .iter()
+                .filter_map(|item| infer_receiver_expr_type(workspace, resolved_module, locals, item))
+                .collect::<Vec<_>>();
+            let element_ty = item_ty
+                .first()
+                .cloned()
+                .filter(|first| item_ty.iter().all(|candidate| candidate == first))
+                .unwrap_or_else(|| builtin_hir_type("_"));
+            Some(ambient_apply_hir_type(&["List"], vec![element_ty]))
+        }
         HirExpr::Range { .. } => Some(builtin_hir_type("RangeInt")),
         HirExpr::Path { segments }
             if segments.len() == 1 && locals.contains_local(&segments[0]) =>
@@ -1968,6 +2125,19 @@ pub fn infer_receiver_expr_type<L: HirLocalTypeLookup>(
         HirExpr::Unary { op, expr }
             if matches!(op, HirUnaryOp::BorrowRead | HirUnaryOp::BorrowMut) =>
         {
+            if let HirExpr::Slice {
+                expr: slice_base, ..
+            } = expr.as_ref()
+                && let Some(view_ty) = infer_borrowed_slice_hir_type(
+                    workspace,
+                    resolved_module,
+                    locals,
+                    slice_base,
+                    matches!(op, HirUnaryOp::BorrowMut),
+                )
+            {
+                return Some(view_ty);
+            }
             infer_receiver_expr_type(workspace, resolved_module, locals, expr).map(|inner| {
                 HirType {
                     kind: HirTypeKind::Ref {
@@ -2003,18 +2173,97 @@ pub fn infer_receiver_expr_type<L: HirLocalTypeLookup>(
             infer_receiver_expr_type(workspace, resolved_module, locals, expr)
         }
         HirExpr::QualifiedPhrase {
-            subject, qualifier, ..
-        } if qualifier == "call" => {
-            infer_call_target_return_hir_type(workspace, resolved_module, locals, subject)
+            subject,
+            qualifier_kind: HirQualifiedPhraseQualifierKind::Call,
+            qualifier_type_args,
+            ..
+        } => infer_call_target_return_hir_type(
+            workspace,
+            resolved_module,
+            locals,
+            subject,
+            Some(qualifier_type_args),
+        ),
+        HirExpr::QualifiedPhrase {
+            subject,
+            qualifier_kind: HirQualifiedPhraseQualifierKind::Weave,
+            qualifier_type_args,
+            ..
+        } => infer_call_target_return_hir_type(
+            workspace,
+            resolved_module,
+            locals,
+            subject,
+            Some(qualifier_type_args),
+        )
+        .map(|inner| ambient_apply_hir_type(&["std", "concurrent", "Task"], vec![inner])),
+        HirExpr::QualifiedPhrase {
+            subject,
+            qualifier_kind: HirQualifiedPhraseQualifierKind::Split,
+            qualifier_type_args,
+            ..
+        } => infer_call_target_return_hir_type(
+            workspace,
+            resolved_module,
+            locals,
+            subject,
+            Some(qualifier_type_args),
+        )
+        .map(|inner| ambient_apply_hir_type(&["std", "concurrent", "Thread"], vec![inner])),
+        HirExpr::QualifiedPhrase {
+            subject,
+            qualifier_kind: HirQualifiedPhraseQualifierKind::Await,
+            ..
+        } => {
+            let awaited = infer_receiver_expr_type(workspace, resolved_module, locals, subject)?;
+            match &hir_strip_reference_type(&awaited).kind {
+                HirTypeKind::Apply { base, args }
+                    if hir_path_matches_any(
+                        base,
+                        &[
+                            &["Task"],
+                            &["Thread"],
+                            &["std", "concurrent", "Task"],
+                            &["std", "concurrent", "Thread"],
+                        ],
+                    ) =>
+                {
+                    args.first().cloned()
+                }
+                _ => None,
+            }
         }
-        HirExpr::QualifiedPhrase { qualifier, .. } if qualifier.contains('.') => {
+        HirExpr::QualifiedPhrase {
+            subject,
+            qualifier_kind: HirQualifiedPhraseQualifierKind::Must,
+            ..
+        } => {
+            let subject_ty = infer_receiver_expr_type(workspace, resolved_module, locals, subject)?;
+            hir_option_payload_type(&subject_ty).or_else(|| hir_result_ok_payload_type(&subject_ty))
+        }
+        HirExpr::QualifiedPhrase {
+            subject,
+            qualifier_kind: HirQualifiedPhraseQualifierKind::Fallback,
+            ..
+        } => {
+            let subject_ty = infer_receiver_expr_type(workspace, resolved_module, locals, subject)?;
+            hir_option_payload_type(&subject_ty).or_else(|| hir_result_ok_payload_type(&subject_ty))
+        }
+        HirExpr::QualifiedPhrase {
+            qualifier_kind: HirQualifiedPhraseQualifierKind::NamedPath,
+            qualifier,
+            ..
+        } => {
             let path = split_simple_path(qualifier)?;
             lookup_symbol_path(workspace, resolved_module, &path)
                 .and_then(|symbol_ref| symbol_return_type(workspace, symbol_ref))
         }
         HirExpr::QualifiedPhrase {
-            subject, qualifier, ..
-        } if split_simple_path(qualifier).is_some() => {
+            subject,
+            qualifier_kind: HirQualifiedPhraseQualifierKind::BareMethod,
+            qualifier,
+            ..
+        } => {
             let subject_ty = infer_receiver_expr_type(workspace, resolved_module, locals, subject)?;
             let candidates = lookup_method_candidates_for_hir_type(
                 workspace,
@@ -2950,7 +3199,11 @@ fn lower_symbol_body(body: &arcana_syntax::SymbolBody) -> HirSymbolBody {
                 })
                 .collect(),
         },
-        arcana_syntax::SymbolBody::Owner { objects, exits } => HirSymbolBody::Owner {
+        arcana_syntax::SymbolBody::Owner {
+            objects,
+            context_type,
+            exits,
+        } => HirSymbolBody::Owner {
             objects: objects
                 .iter()
                 .map(|object| HirOwnerObject {
@@ -2959,6 +3212,9 @@ fn lower_symbol_body(body: &arcana_syntax::SymbolBody) -> HirSymbolBody {
                     span: object.span,
                 })
                 .collect(),
+            context_type: context_type
+                .as_ref()
+                .map(type_surface::lower_surface_type),
             exits: exits
                 .iter()
                 .map(|owner_exit| HirOwnerExit {
@@ -3418,12 +3674,19 @@ fn lower_expr(expr: &ParsedExpr) -> HirExpr {
         ParsedExpr::QualifiedPhrase {
             subject,
             args,
+            qualifier_kind,
             qualifier,
+            qualifier_type_args,
             attached,
         } => HirExpr::QualifiedPhrase {
             subject: Box::new(lower_expr(subject)),
             args: args.iter().map(lower_phrase_arg).collect(),
+            qualifier_kind: lower_phrase_qualifier_kind(*qualifier_kind),
             qualifier: qualifier.clone(),
+            qualifier_type_args: qualifier_type_args
+                .iter()
+                .map(type_surface::lower_surface_type)
+                .collect(),
             attached: lower_header_attachments(attached),
         },
         ParsedExpr::Await { expr } => HirExpr::Await {
@@ -3526,6 +3789,44 @@ fn lower_unary_op(op: &arcana_syntax::UnaryOp) -> HirUnaryOp {
         arcana_syntax::UnaryOp::Deref => HirUnaryOp::Deref,
         arcana_syntax::UnaryOp::Weave => HirUnaryOp::Weave,
         arcana_syntax::UnaryOp::Split => HirUnaryOp::Split,
+    }
+}
+
+fn lower_phrase_qualifier_kind(
+    kind: arcana_syntax::QualifiedPhraseQualifierKind,
+) -> HirQualifiedPhraseQualifierKind {
+    match kind {
+        arcana_syntax::QualifiedPhraseQualifierKind::Call => {
+            HirQualifiedPhraseQualifierKind::Call
+        }
+        arcana_syntax::QualifiedPhraseQualifierKind::Try => HirQualifiedPhraseQualifierKind::Try,
+        arcana_syntax::QualifiedPhraseQualifierKind::Apply => {
+            HirQualifiedPhraseQualifierKind::Apply
+        }
+        arcana_syntax::QualifiedPhraseQualifierKind::AwaitApply => {
+            HirQualifiedPhraseQualifierKind::AwaitApply
+        }
+        arcana_syntax::QualifiedPhraseQualifierKind::Await => {
+            HirQualifiedPhraseQualifierKind::Await
+        }
+        arcana_syntax::QualifiedPhraseQualifierKind::Weave => {
+            HirQualifiedPhraseQualifierKind::Weave
+        }
+        arcana_syntax::QualifiedPhraseQualifierKind::Split => {
+            HirQualifiedPhraseQualifierKind::Split
+        }
+        arcana_syntax::QualifiedPhraseQualifierKind::Must => {
+            HirQualifiedPhraseQualifierKind::Must
+        }
+        arcana_syntax::QualifiedPhraseQualifierKind::Fallback => {
+            HirQualifiedPhraseQualifierKind::Fallback
+        }
+        arcana_syntax::QualifiedPhraseQualifierKind::BareMethod => {
+            HirQualifiedPhraseQualifierKind::BareMethod
+        }
+        arcana_syntax::QualifiedPhraseQualifierKind::NamedPath => {
+            HirQualifiedPhraseQualifierKind::NamedPath
+        }
     }
 }
 

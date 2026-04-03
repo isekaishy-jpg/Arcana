@@ -1013,6 +1013,19 @@ enum PlaceMutability {
     Unknown,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BorrowedSliceSurfaceKind {
+    Array,
+    List,
+    ReadView,
+    EditView,
+    ByteView,
+    ByteEditView,
+    Str,
+    StrView,
+    Unsupported,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct LocalBorrowState {
     shared_count: usize,
@@ -1080,6 +1093,79 @@ impl BorrowFlowState {
     }
 }
 
+fn hir_type_matches_path(ty: &HirType, expected: &[&str]) -> bool {
+    match &ty.kind {
+        HirTypeKind::Path(path) => {
+            path.segments.len() == expected.len()
+                && path
+                    .segments
+                    .iter()
+                    .map(String::as_str)
+                    .eq(expected.iter().copied())
+        }
+        HirTypeKind::Apply { base, .. } => {
+            base.segments.len() == expected.len()
+                && base
+                    .segments
+                    .iter()
+                    .map(String::as_str)
+                    .eq(expected.iter().copied())
+        }
+        HirTypeKind::Ref { inner, .. } => hir_type_matches_path(inner, expected),
+        _ => false,
+    }
+}
+
+fn classify_borrowed_slice_surface(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    scope: &ValueScope,
+    expr: &HirExpr,
+) -> BorrowedSliceSurfaceKind {
+    let Some(ty) = infer_receiver_expr_type(workspace, resolved_module, scope, expr) else {
+        return BorrowedSliceSurfaceKind::Unsupported;
+    };
+    if hir_type_matches_path(&ty, &["Array"])
+        || hir_type_matches_path(&ty, &["std", "collections", "array", "Array"])
+    {
+        return BorrowedSliceSurfaceKind::Array;
+    }
+    if hir_type_matches_path(&ty, &["List"])
+        || hir_type_matches_path(&ty, &["std", "collections", "list", "List"])
+    {
+        return BorrowedSliceSurfaceKind::List;
+    }
+    if hir_type_matches_path(&ty, &["ReadView"])
+        || hir_type_matches_path(&ty, &["std", "memory", "ReadView"])
+    {
+        return BorrowedSliceSurfaceKind::ReadView;
+    }
+    if hir_type_matches_path(&ty, &["EditView"])
+        || hir_type_matches_path(&ty, &["std", "memory", "EditView"])
+    {
+        return BorrowedSliceSurfaceKind::EditView;
+    }
+    if hir_type_matches_path(&ty, &["ByteView"])
+        || hir_type_matches_path(&ty, &["std", "memory", "ByteView"])
+    {
+        return BorrowedSliceSurfaceKind::ByteView;
+    }
+    if hir_type_matches_path(&ty, &["ByteEditView"])
+        || hir_type_matches_path(&ty, &["std", "memory", "ByteEditView"])
+    {
+        return BorrowedSliceSurfaceKind::ByteEditView;
+    }
+    if hir_type_matches_path(&ty, &["Str"]) {
+        return BorrowedSliceSurfaceKind::Str;
+    }
+    if hir_type_matches_path(&ty, &["StrView"])
+        || hir_type_matches_path(&ty, &["std", "memory", "StrView"])
+    {
+        return BorrowedSliceSurfaceKind::StrView;
+    }
+    BorrowedSliceSurfaceKind::Unsupported
+}
+
 fn expr_place_mutability(expr: &HirExpr, scope: &ValueScope) -> Option<PlaceMutability> {
     match expr {
         HirExpr::Path { segments } if segments.len() == 1 && scope.contains(&segments[0]) => {
@@ -1089,9 +1175,9 @@ fn expr_place_mutability(expr: &HirExpr, scope: &ValueScope) -> Option<PlaceMuta
                 PlaceMutability::Immutable
             })
         }
-        HirExpr::MemberAccess { expr, .. } | HirExpr::Index { expr, .. } => {
-            expr_place_mutability(expr, scope)
-        }
+        HirExpr::MemberAccess { expr, .. }
+        | HirExpr::Index { expr, .. }
+        | HirExpr::Slice { expr, .. } => expr_place_mutability(expr, scope),
         HirExpr::Unary {
             op: HirUnaryOp::Deref,
             ..
@@ -1105,9 +1191,9 @@ fn expr_place_root_local<'a>(expr: &'a HirExpr, scope: &ValueScope) -> Option<&'
         HirExpr::Path { segments } if segments.len() == 1 && scope.contains(&segments[0]) => {
             Some(segments[0].as_str())
         }
-        HirExpr::MemberAccess { expr, .. } | HirExpr::Index { expr, .. } => {
-            expr_place_root_local(expr, scope)
-        }
+        HirExpr::MemberAccess { expr, .. }
+        | HirExpr::Index { expr, .. }
+        | HirExpr::Slice { expr, .. } => expr_place_root_local(expr, scope),
         _ => None,
     }
 }
@@ -1170,6 +1256,19 @@ enum OpaqueLangFamily {
     FrameIdHandle,
     PoolArenaHandle,
     PoolIdHandle,
+    TempArenaHandle,
+    TempIdHandle,
+    SessionArenaHandle,
+    SessionIdHandle,
+    RingBufferHandle,
+    RingIdHandle,
+    SlabHandle,
+    SlabIdHandle,
+    ReadViewHandle,
+    EditViewHandle,
+    ByteViewHandle,
+    ByteEditViewHandle,
+    StrViewHandle,
     TaskHandle,
     ThreadHandle,
 }
@@ -1196,6 +1295,19 @@ impl OpaqueLangFamily {
             Self::FrameIdHandle => "frame_id_handle",
             Self::PoolArenaHandle => "pool_arena_handle",
             Self::PoolIdHandle => "pool_id_handle",
+            Self::TempArenaHandle => "temp_arena_handle",
+            Self::TempIdHandle => "temp_id_handle",
+            Self::SessionArenaHandle => "session_arena_handle",
+            Self::SessionIdHandle => "session_id_handle",
+            Self::RingBufferHandle => "ring_buffer_handle",
+            Self::RingIdHandle => "ring_id_handle",
+            Self::SlabHandle => "slab_handle",
+            Self::SlabIdHandle => "slab_id_handle",
+            Self::ReadViewHandle => "read_view_handle",
+            Self::EditViewHandle => "edit_view_handle",
+            Self::ByteViewHandle => "byte_view_handle",
+            Self::ByteEditViewHandle => "byte_edit_view_handle",
+            Self::StrViewHandle => "str_view_handle",
             Self::TaskHandle => "task_handle",
             Self::ThreadHandle => "thread_handle",
         }
@@ -1208,7 +1320,11 @@ impl OpaqueLangFamily {
             | Self::AtomicBoolHandle
             | Self::ArenaIdHandle
             | Self::FrameIdHandle
-            | Self::PoolIdHandle => OwnershipClass::Copy,
+            | Self::PoolIdHandle
+            | Self::TempIdHandle
+            | Self::SessionIdHandle
+            | Self::RingIdHandle
+            | Self::SlabIdHandle => OwnershipClass::Copy,
             Self::FileStreamHandle
             | Self::WindowHandle
             | Self::ImageHandle
@@ -1222,6 +1338,15 @@ impl OpaqueLangFamily {
             | Self::ArenaHandle
             | Self::FrameArenaHandle
             | Self::PoolArenaHandle
+            | Self::TempArenaHandle
+            | Self::SessionArenaHandle
+            | Self::RingBufferHandle
+            | Self::SlabHandle
+            | Self::ReadViewHandle
+            | Self::EditViewHandle
+            | Self::ByteViewHandle
+            | Self::ByteEditViewHandle
+            | Self::StrViewHandle
             | Self::TaskHandle
             | Self::ThreadHandle => OwnershipClass::Move,
         }
@@ -1249,6 +1374,19 @@ fn opaque_lang_family(name: &str) -> Option<OpaqueLangFamily> {
         "frame_id_handle" => Some(OpaqueLangFamily::FrameIdHandle),
         "pool_arena_handle" => Some(OpaqueLangFamily::PoolArenaHandle),
         "pool_id_handle" => Some(OpaqueLangFamily::PoolIdHandle),
+        "temp_arena_handle" => Some(OpaqueLangFamily::TempArenaHandle),
+        "temp_id_handle" => Some(OpaqueLangFamily::TempIdHandle),
+        "session_arena_handle" => Some(OpaqueLangFamily::SessionArenaHandle),
+        "session_id_handle" => Some(OpaqueLangFamily::SessionIdHandle),
+        "ring_buffer_handle" => Some(OpaqueLangFamily::RingBufferHandle),
+        "ring_id_handle" => Some(OpaqueLangFamily::RingIdHandle),
+        "slab_handle" => Some(OpaqueLangFamily::SlabHandle),
+        "slab_id_handle" => Some(OpaqueLangFamily::SlabIdHandle),
+        "read_view_handle" => Some(OpaqueLangFamily::ReadViewHandle),
+        "edit_view_handle" => Some(OpaqueLangFamily::EditViewHandle),
+        "byte_view_handle" => Some(OpaqueLangFamily::ByteViewHandle),
+        "byte_edit_view_handle" => Some(OpaqueLangFamily::ByteEditViewHandle),
+        "str_view_handle" => Some(OpaqueLangFamily::StrViewHandle),
         "task_handle" => Some(OpaqueLangFamily::TaskHandle),
         "thread_handle" => Some(OpaqueLangFamily::ThreadHandle),
         _ => None,
@@ -1463,28 +1601,28 @@ fn resolve_qualified_phrase_target_symbol<'a>(
     _type_scope: &TypeScope,
     scope: &ValueScope,
     subject: &HirExpr,
+    qualifier_kind: arcana_hir::HirQualifiedPhraseQualifierKind,
     qualifier: &str,
 ) -> Option<&'a HirSymbol> {
-    if qualifier == "call" {
-        let path = flatten_callable_expr_path(subject)?;
-        return lookup_symbol_path(workspace, resolved_module, &path)
-            .map(|resolved| resolved.symbol);
+    match qualifier_kind {
+        arcana_hir::HirQualifiedPhraseQualifierKind::Call
+        | arcana_hir::HirQualifiedPhraseQualifierKind::Weave
+        | arcana_hir::HirQualifiedPhraseQualifierKind::Split => {
+            let path = flatten_callable_expr_path(subject)?;
+            lookup_symbol_path(workspace, resolved_module, &path).map(|resolved| resolved.symbol)
+        }
+        arcana_hir::HirQualifiedPhraseQualifierKind::NamedPath => {
+            let path = split_simple_path(qualifier)?;
+            lookup_symbol_path(workspace, resolved_module, &path).map(|resolved| resolved.symbol)
+        }
+        arcana_hir::HirQualifiedPhraseQualifierKind::BareMethod => {
+            let subject_ty = infer_receiver_expr_type(workspace, resolved_module, scope, subject)?;
+            lookup_method_symbol_for_type(workspace, resolved_module, &subject_ty, qualifier)
+                .ok()
+                .flatten()
+        }
+        _ => None,
     }
-
-    if let Some(path) = split_simple_path(qualifier)
-        && let Some(resolved) = lookup_symbol_path(workspace, resolved_module, &path)
-    {
-        return Some(resolved.symbol);
-    }
-
-    if is_identifier_text(qualifier) {
-        let subject_ty = infer_receiver_expr_type(workspace, resolved_module, scope, subject)?;
-        return lookup_method_symbol_for_type(workspace, resolved_module, &subject_ty, qualifier)
-            .ok()
-            .flatten();
-    }
-
-    None
 }
 
 struct ResolvedOwnerActivation<'a> {
@@ -1502,13 +1640,14 @@ fn resolve_owner_activation_expr<'a>(
     let HirExpr::QualifiedPhrase {
         subject,
         args,
-        qualifier,
+        qualifier_kind,
+        qualifier: _,
         ..
     } = expr
     else {
         return None;
     };
-    if qualifier != "call" {
+    if *qualifier_kind != arcana_hir::HirQualifiedPhraseQualifierKind::Call {
         return None;
     }
     let path = flatten_callable_expr_path(subject)?;
@@ -1518,13 +1657,14 @@ fn resolve_owner_activation_expr<'a>(
     }
     let owner =
         resolve_available_owner_binding(workspace, resolved_workspace, resolved_module, &path)?;
-    let invalid = if args
-        .iter()
-        .any(|arg| matches!(arg, HirPhraseArg::Named { .. }))
-    {
+    let invalid = if args.iter().any(|arg| matches!(arg, HirPhraseArg::Named { .. })) {
         Some("owner activation does not support named arguments".to_string())
     } else if args.len() > 1 {
         Some("owner activation accepts at most one context argument".to_string())
+    } else if owner.activation_context_type.is_some() && args.is_empty() {
+        Some("owner activation requires exactly one context argument".to_string())
+    } else if owner.activation_context_type.is_none() && !args.is_empty() {
+        Some("owner activation does not use an activation context".to_string())
     } else {
         None
     };
@@ -1599,12 +1739,17 @@ fn collect_qualified_phrase_param_exprs<'a>(
     symbol: &'a HirSymbol,
     subject: &'a HirExpr,
     args: &'a [arcana_hir::HirPhraseArg],
-    qualifier: &str,
+    qualifier_kind: arcana_hir::HirQualifiedPhraseQualifierKind,
 ) -> Vec<(&'a arcana_hir::HirParam, &'a HirExpr)> {
     let mut bindings = Vec::new();
     let mut next_positional = 0usize;
 
-    if qualifier != "call"
+    if !matches!(
+        qualifier_kind,
+        arcana_hir::HirQualifiedPhraseQualifierKind::Call
+            | arcana_hir::HirQualifiedPhraseQualifierKind::Weave
+            | arcana_hir::HirQualifiedPhraseQualifierKind::Split
+    )
         && let Some(param) = symbol.params.first()
     {
         bindings.push((param, subject));
@@ -1637,11 +1782,14 @@ fn validate_bare_method_resolution(
     scope: &ValueScope,
     module_path: &Path,
     subject: &HirExpr,
+    qualifier_kind: arcana_hir::HirQualifiedPhraseQualifierKind,
     qualifier: &str,
     span: Span,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    if !is_identifier_text(qualifier) || qualifier == "call" {
+    if qualifier_kind != arcana_hir::HirQualifiedPhraseQualifierKind::BareMethod
+        || !is_identifier_text(qualifier)
+    {
         return;
     }
     let Some(subject_ty) = infer_receiver_expr_type(workspace, resolved_module, scope, subject)
@@ -1661,6 +1809,8 @@ fn validate_bare_method_resolution(
 }
 
 fn validate_borrow_operand_place(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
     module_path: &Path,
     scope: &ValueScope,
     expr: &HirExpr,
@@ -1700,6 +1850,48 @@ fn validate_borrow_operand_place(
             diagnostics,
             format!("cannot mutably borrow immutable local `{name}`"),
         );
+        return;
+    }
+
+    if let HirExpr::Slice { expr: target, .. } = expr {
+        match classify_borrowed_slice_surface(workspace, resolved_module, scope, target) {
+            BorrowedSliceSurfaceKind::Array | BorrowedSliceSurfaceKind::EditView => {}
+            BorrowedSliceSurfaceKind::ByteEditView if mutable => {}
+            BorrowedSliceSurfaceKind::Str | BorrowedSliceSurfaceKind::StrView if mutable => {
+                push_type_contract_diagnostic(
+                    module_path,
+                    span,
+                    diagnostics,
+                    "string slices are read-only; `&mut x[a..b]` is not allowed".to_string(),
+                );
+            }
+            BorrowedSliceSurfaceKind::ReadView | BorrowedSliceSurfaceKind::ByteView if mutable => {
+                push_type_contract_diagnostic(
+                    module_path,
+                    span,
+                    diagnostics,
+                    format!("operand of `{op}` is a read-only slice surface"),
+                );
+            }
+            BorrowedSliceSurfaceKind::List => {
+                push_type_contract_diagnostic(
+                    module_path,
+                    span,
+                    diagnostics,
+                    "borrowed slices require contiguous backing; `List` is not supported"
+                        .to_string(),
+                );
+            }
+            BorrowedSliceSurfaceKind::Unsupported => {
+                push_type_contract_diagnostic(
+                    module_path,
+                    span,
+                    diagnostics,
+                    "borrowed slices require array, string, or view backing".to_string(),
+                );
+            }
+            _ => {}
+        }
     }
 }
 
@@ -1874,6 +2066,7 @@ fn validate_call_param_mode_flow(
     scope: &ValueScope,
     subject: &HirExpr,
     args: &[arcana_hir::HirPhraseArg],
+    qualifier_kind: arcana_hir::HirQualifiedPhraseQualifierKind,
     qualifier: &str,
     span: Span,
     state: &mut BorrowFlowState,
@@ -1885,12 +2078,15 @@ fn validate_call_param_mode_flow(
         type_scope,
         scope,
         subject,
+        qualifier_kind,
         qualifier,
     ) else {
         return;
     };
 
-    for (param, expr) in collect_qualified_phrase_param_exprs(symbol, subject, args, qualifier) {
+    for (param, expr) in
+        collect_qualified_phrase_param_exprs(symbol, subject, args, qualifier_kind)
+    {
         match param.mode {
             Some(arcana_hir::HirParamMode::Read) | None => {
                 if let Some(name) = expr_place_root_local(expr, scope) {
@@ -2019,6 +2215,7 @@ fn note_qualified_phrase_moves(
     scope: &ValueScope,
     subject: &HirExpr,
     args: &[arcana_hir::HirPhraseArg],
+    qualifier_kind: arcana_hir::HirQualifiedPhraseQualifierKind,
     qualifier: &str,
     state: &mut BorrowFlowState,
 ) {
@@ -2028,12 +2225,15 @@ fn note_qualified_phrase_moves(
         type_scope,
         scope,
         subject,
+        qualifier_kind,
         qualifier,
     ) else {
         return;
     };
 
-    for (param, expr) in collect_qualified_phrase_param_exprs(symbol, subject, args, qualifier) {
+    for (param, expr) in
+        collect_qualified_phrase_param_exprs(symbol, subject, args, qualifier_kind)
+    {
         if !matches!(param.mode, Some(arcana_hir::HirParamMode::Take)) {
             continue;
         }
@@ -2350,6 +2550,7 @@ fn validate_expr_borrow_flow_inner(
         HirExpr::QualifiedPhrase {
             subject,
             args,
+            qualifier_kind,
             qualifier,
             attached,
             ..
@@ -2412,6 +2613,7 @@ fn validate_expr_borrow_flow_inner(
                 scope,
                 subject,
                 args,
+                *qualifier_kind,
                 qualifier,
                 span,
                 state,
@@ -2811,6 +3013,7 @@ fn note_expr_moves(
         HirExpr::QualifiedPhrase {
             subject,
             args,
+            qualifier_kind,
             qualifier,
             ..
         } => {
@@ -2821,6 +3024,7 @@ fn note_expr_moves(
                 scope,
                 subject,
                 args,
+                *qualifier_kind,
                 qualifier,
                 state,
             );
@@ -3174,11 +3378,95 @@ fn validate_opaque_constructor_semantics(
     type_scope: &TypeScope,
     scope: &ValueScope,
     subject: &HirExpr,
+    qualifier_kind: &arcana_hir::HirQualifiedPhraseQualifierKind,
     qualifier: &str,
+    qualifier_type_args: &[HirType],
+    args: &[arcana_hir::HirPhraseArg],
     span: Span,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    if qualifier != "call" {
+    match qualifier_kind {
+        arcana_hir::HirQualifiedPhraseQualifierKind::Must => {
+            if !args.is_empty() {
+                diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: span.line,
+                    column: span.column,
+                    message: "`:: must` does not accept arguments".to_string(),
+                });
+            }
+            if let Some(subject_ty) = infer_expr_value_type(workspace, resolved_module, type_scope, scope, subject)
+                && type_option_payload(&subject_ty).is_none()
+                && type_result_payloads(&subject_ty)
+                    .is_none_or(|(_, err)| err.render() != "Str")
+            {
+                diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: span.line,
+                    column: span.column,
+                    message: "`:: must` expects `Option[T]` or `Result[T, Str]`".to_string(),
+                });
+            }
+            return;
+        }
+        arcana_hir::HirQualifiedPhraseQualifierKind::Fallback => {
+            let positional = args
+                .iter()
+                .filter(|arg| matches!(arg, arcana_hir::HirPhraseArg::Positional(_)))
+                .count();
+            let named = args
+                .iter()
+                .any(|arg| matches!(arg, arcana_hir::HirPhraseArg::Named { .. }));
+            if positional != 1 || named {
+                diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: span.line,
+                    column: span.column,
+                    message:
+                        "`:: fallback` expects exactly one positional fallback argument"
+                            .to_string(),
+                });
+            }
+            if let Some(subject_ty) = infer_expr_value_type(workspace, resolved_module, type_scope, scope, subject)
+                && type_option_payload(&subject_ty).is_none()
+                && type_result_payloads(&subject_ty)
+                    .is_none_or(|(_, err)| err.render() != "Str")
+            {
+                diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: span.line,
+                    column: span.column,
+                    message: "`:: fallback` expects `Option[T]` or `Result[T, Str]`".to_string(),
+                });
+            }
+            return;
+        }
+        arcana_hir::HirQualifiedPhraseQualifierKind::Await => {
+            if !args.is_empty() {
+                diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: span.line,
+                    column: span.column,
+                    message: "`:: await` does not accept arguments".to_string(),
+                });
+            }
+            return;
+        }
+        arcana_hir::HirQualifiedPhraseQualifierKind::Call
+        | arcana_hir::HirQualifiedPhraseQualifierKind::Weave
+        | arcana_hir::HirQualifiedPhraseQualifierKind::Split => {}
+        _ => return,
+    }
+    if !qualifier_type_args.is_empty()
+        && !matches!(
+            qualifier_kind,
+            arcana_hir::HirQualifiedPhraseQualifierKind::Call
+                | arcana_hir::HirQualifiedPhraseQualifierKind::Weave
+                | arcana_hir::HirQualifiedPhraseQualifierKind::Split
+                | arcana_hir::HirQualifiedPhraseQualifierKind::BareMethod
+                | arcana_hir::HirQualifiedPhraseQualifierKind::NamedPath
+        )
+    {
         return;
     }
     let Some(symbol) = resolve_qualified_phrase_target_symbol(
@@ -3187,6 +3475,7 @@ fn validate_opaque_constructor_semantics(
         type_scope,
         scope,
         subject,
+        *qualifier_kind,
         qualifier,
     ) else {
         return;
@@ -4676,7 +4965,7 @@ fn build_adapter_symbol_snapshot(symbol: &HirSymbol) -> AdapterSymbolSnapshot {
             Vec::new(),
             assoc_types.iter().map(|assoc| assoc.name.clone()).collect(),
         ),
-        HirSymbolBody::Owner { objects, exits } => (
+        HirSymbolBody::Owner { objects, exits, .. } => (
             Vec::new(),
             Vec::new(),
             objects
@@ -7291,6 +7580,7 @@ fn collect_deprecated_call_warnings_in_expr(
         HirExpr::QualifiedPhrase {
             subject,
             args,
+            qualifier_kind,
             qualifier,
             ..
         } => {
@@ -7300,6 +7590,7 @@ fn collect_deprecated_call_warnings_in_expr(
                 type_scope,
                 scope,
                 subject,
+                *qualifier_kind,
                 qualifier,
             ) && let Some(message) = deprecated_message(symbol)
             {
@@ -7723,11 +8014,15 @@ fn collect_deprecated_call_warnings_in_statements(
                 );
                 let ty =
                     infer_expr_value_type(workspace, resolved_module, type_scope, scope, value);
-                let ownership = ty
-                    .as_ref()
-                    .map(|ty| infer_type_ownership(workspace, resolved_module, type_scope, ty))
-                    .unwrap_or_default();
-                scope.insert_typed(name, *mutable, ownership, ty);
+                let _ = bind_pattern_into_scope(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    scope,
+                    name,
+                    *mutable,
+                    ty,
+                );
             }
             HirStatementKind::Return { value } => {
                 if let Some(value) = value {
@@ -7833,7 +8128,22 @@ fn collect_deprecated_call_warnings_in_statements(
                     diagnostics,
                 );
                 let mut body_scope = scope.clone();
-                body_scope.insert(binding, false);
+                let iterable_binding_ty = infer_iterable_binding_type(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    scope,
+                    iterable,
+                );
+                let _ = bind_pattern_into_scope(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    &mut body_scope,
+                    binding,
+                    false,
+                    iterable_binding_ty,
+                );
                 collect_deprecated_call_warnings_in_statements(
                     workspace,
                     resolved_module,
@@ -9424,7 +9734,11 @@ fn validate_symbol_surface_types(
                 }
             }
         }
-        HirSymbolBody::Owner { objects, exits } => {
+        HirSymbolBody::Owner {
+            objects,
+            context_type,
+            exits,
+        } => {
             if exits.is_empty() {
                 diagnostics.push(Diagnostic {
                     path: module_path.to_path_buf(),
@@ -9500,19 +9814,30 @@ fn validate_symbol_surface_types(
                 resolved_module,
                 objects,
             );
-            if owner_context_types.len() > 1 {
+            if let Some(owner_context_type) = context_type {
+                for actual in owner_context_types {
+                    if actual.render() != owner_context_type.render() {
+                        diagnostics.push(Diagnostic {
+                            path: module_path.to_path_buf(),
+                            line: symbol.span.line,
+                            column: symbol.span.column,
+                            message: format!(
+                                "owner `{}` declares context `{}` but owned lifecycle hook uses `{}`",
+                                symbol.name,
+                                owner_context_type.render(),
+                                actual.render()
+                            ),
+                        });
+                    }
+                }
+            } else if !owner_context_types.is_empty() {
                 diagnostics.push(Diagnostic {
                     path: module_path.to_path_buf(),
                     line: symbol.span.line,
                     column: symbol.span.column,
                     message: format!(
-                        "owner `{}` uses incompatible lifecycle context types across owned objects: {}",
-                        symbol.name,
-                        owner_context_types
-                            .into_iter()
-                            .map(|ty| ty.render())
-                            .collect::<Vec<_>>()
-                            .join(", ")
+                        "owner `{}` must declare `context: ...` to use lifecycle context hooks",
+                        symbol.name
                     ),
                 });
             }
@@ -9937,33 +10262,19 @@ fn collect_owner_activation_context_types(
     context_types.into_values().collect()
 }
 
-fn resolve_owner_activation_context_type(
-    workspace: &HirWorkspaceSummary,
-    resolved_workspace: &HirResolvedWorkspace,
-    resolved_module: &HirResolvedModule,
-    objects: &[arcana_hir::HirOwnerObject],
-) -> Option<HirType> {
-    let context_types = collect_owner_activation_context_types(
-        workspace,
-        resolved_workspace,
-        resolved_module,
-        objects,
-    );
-    if context_types.len() == 1 {
-        context_types.into_iter().next()
-    } else {
-        None
-    }
-}
-
 fn resolve_available_owner_binding(
     workspace: &HirWorkspaceSummary,
-    resolved_workspace: &HirResolvedWorkspace,
+    _resolved_workspace: &HirResolvedWorkspace,
     resolved_module: &HirResolvedModule,
     path: &[String],
 ) -> Option<AvailableOwnerBinding> {
     let resolved = lookup_symbol_path(workspace, resolved_module, path)?;
-    let HirSymbolBody::Owner { objects, exits } = &resolved.symbol.body else {
+    let HirSymbolBody::Owner {
+        objects,
+        context_type,
+        exits,
+    } = &resolved.symbol.body
+    else {
         return None;
     };
     Some(AvailableOwnerBinding {
@@ -9985,12 +10296,7 @@ fn resolve_available_owner_binding(
             .iter()
             .map(|owner_exit| owner_exit.name.clone())
             .collect(),
-        activation_context_type: resolve_owner_activation_context_type(
-            workspace,
-            resolved_workspace,
-            resolved_module,
-            objects,
-        ),
+        activation_context_type: context_type.clone(),
     })
 }
 
@@ -10683,7 +10989,12 @@ fn validate_symbol_value_semantics(
         diagnostics,
     );
 
-    if let HirSymbolBody::Owner { objects, exits } = &symbol.body {
+    if let HirSymbolBody::Owner {
+        objects,
+        context_type,
+        exits,
+    } = &symbol.body
+    {
         let owner_path = canonical_symbol_path(&resolved_module.module_id, &symbol.name);
         let mut owner_scope = scope.clone();
         owner_scope.insert_typed(&symbol.name, false, OwnershipClass::Copy, None);
@@ -10706,12 +11017,7 @@ fn validate_symbol_value_semantics(
                 .iter()
                 .map(|owner_exit| owner_exit.name.clone())
                 .collect(),
-            activation_context_type: resolve_owner_activation_context_type(
-                workspace,
-                resolved_workspace,
-                resolved_module,
-                objects,
-            ),
+            activation_context_type: context_type.clone(),
         };
         let _ = owner_scope.activate_owner(&available_owner, None, false);
         for owner_exit in exits {
@@ -10987,13 +11293,7 @@ fn infer_iterable_binding_type(
         {
             match (args.first(), args.get(1)) {
                 (Some(key), Some(value)) => Some(HirType {
-                    kind: HirTypeKind::Apply {
-                        base: arcana_hir::HirPath {
-                            segments: vec!["Pair".to_string()],
-                            span: Span::default(),
-                        },
-                        args: vec![key.clone(), value.clone()],
-                    },
+                    kind: HirTypeKind::Tuple(vec![key.clone(), value.clone()]),
                     span: Span::default(),
                 }),
                 _ => None,
@@ -11077,9 +11377,38 @@ fn collect_cleanup_footer_candidates_recursive(
                     &body_scope,
                     value,
                 );
-                body_scope.insert_typed(name, *mutable, ownership, ty);
+                let inserted = bind_pattern_into_scope(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    &mut body_scope,
+                    name,
+                    *mutable,
+                    ty,
+                )
+                .unwrap_or_else(|_| {
+                    let mut names = Vec::new();
+                    if let Some(pattern) = parse_binding_pattern(name) {
+                        collect_binding_pattern_names(&pattern, &mut names);
+                    }
+                    for binding_name in &names {
+                        body_scope.insert_typed(
+                            binding_name,
+                            *mutable,
+                            ownership,
+                            None,
+                        );
+                    }
+                    names
+                });
                 if collect_bindings {
-                    push_cleanup_footer_candidate(&mut candidates, &body_scope, name);
+                    for inserted_name in inserted {
+                        push_cleanup_footer_candidate(
+                            &mut candidates,
+                            &body_scope,
+                            &inserted_name,
+                        );
+                    }
                 }
             }
             HirStatementKind::Expr { expr } => {
@@ -11217,14 +11546,34 @@ fn collect_cleanup_footer_candidates_recursive(
                     .as_ref()
                     .map(|ty| infer_type_ownership(workspace, resolved_module, type_scope, ty))
                     .unwrap_or_default();
-                nested_scope.insert_typed(
+                let inserted = bind_pattern_into_scope(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    &mut nested_scope,
                     binding,
                     false,
-                    iterable_binding_ownership,
                     iterable_binding_ty,
-                );
+                )
+                .unwrap_or_else(|_| {
+                    let mut names = Vec::new();
+                    if let Some(pattern) = parse_binding_pattern(binding) {
+                        collect_binding_pattern_names(&pattern, &mut names);
+                    }
+                    for binding_name in &names {
+                        nested_scope.insert_typed(
+                            binding_name,
+                            false,
+                            iterable_binding_ownership,
+                            None,
+                        );
+                    }
+                    names
+                });
                 if nested_collect {
-                    push_cleanup_footer_candidate(&mut candidates, &nested_scope, binding);
+                    for binding_name in inserted {
+                        push_cleanup_footer_candidate(&mut candidates, &nested_scope, &binding_name);
+                    }
                 }
                 let mut ignored = Vec::new();
                 apply_availability_attachments_to_scope(
@@ -11491,12 +11840,22 @@ fn validate_statement_block_semantics(
                 name,
                 value,
             } => {
+                let destructuring_binding = binding_pattern_is_destructuring(name);
                 if let Some(owner_activation) = resolve_owner_activation_expr(
                     workspace,
                     resolved_workspace,
                     resolved_module,
                     value,
                 ) {
+                    if destructuring_binding {
+                        diagnostics.push(Diagnostic {
+                            path: module_path.to_path_buf(),
+                            line: statement.span.line,
+                            column: statement.span.column,
+                            message: "owner activation bindings must use a simple name".to_string(),
+                        });
+                        continue;
+                    }
                     if let Some(ref message) = owner_activation.invalid {
                         diagnostics.push(Diagnostic {
                             path: module_path.to_path_buf(),
@@ -11592,20 +11951,37 @@ fn validate_statement_block_semantics(
                     borrow_state,
                 );
                 note_escaping_expr_borrows(borrow_state, value, scope);
-                borrow_state.clear_local(name);
-                let ownership =
-                    infer_expr_ownership(workspace, resolved_module, type_scope, scope, value);
                 let ty =
                     infer_expr_value_type(workspace, resolved_module, type_scope, scope, value);
-                scope.insert_typed(name, *mutable, ownership, ty);
-                activate_current_cleanup_binding(
+                match bind_pattern_into_scope(
                     workspace,
                     resolved_module,
-                    borrow_state,
+                    type_scope,
                     scope,
-                    current_block_cleanup_policy,
                     name,
-                );
+                    *mutable,
+                    ty,
+                ) {
+                    Ok(inserted) => {
+                        for inserted_name in inserted {
+                            borrow_state.clear_local(&inserted_name);
+                            activate_current_cleanup_binding(
+                                workspace,
+                                resolved_module,
+                                borrow_state,
+                                scope,
+                                current_block_cleanup_policy,
+                                &inserted_name,
+                            );
+                        }
+                    }
+                    Err(message) => diagnostics.push(Diagnostic {
+                        path: module_path.to_path_buf(),
+                        line: statement.span.line,
+                        column: statement.span.column,
+                        message,
+                    }),
+                }
             }
             HirStatementKind::Return { value } => {
                 if let Some(value) = value {
@@ -11921,16 +12297,26 @@ fn validate_statement_block_semantics(
                     scope,
                     iterable,
                 );
-                let iterable_binding_ownership = iterable_binding_ty
-                    .as_ref()
-                    .map(|ty| infer_type_ownership(workspace, resolved_module, type_scope, ty))
-                    .unwrap_or_default();
-                body_scope.insert_typed(
+                let inserted_bindings = match bind_pattern_into_scope(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    &mut body_scope,
                     binding,
                     false,
-                    iterable_binding_ownership,
                     iterable_binding_ty,
-                );
+                ) {
+                    Ok(inserted) => inserted,
+                    Err(message) => {
+                        diagnostics.push(Diagnostic {
+                            path: module_path.to_path_buf(),
+                            line: statement.span.line,
+                            column: statement.span.column,
+                            message,
+                        });
+                        Vec::new()
+                    }
+                };
                 apply_availability_attachments_to_scope(
                     workspace,
                     resolved_workspace,
@@ -11942,17 +12328,19 @@ fn validate_statement_block_semantics(
                 );
                 let statement_has_own_cleanup = !statement.cleanup_footers.is_empty();
                 let mut nested_cleanup_candidates = if statement_has_own_cleanup {
-                    body_scope
-                        .binding_id_of(binding)
-                        .map(|binding_id| {
-                            vec![CleanupFooterCandidate {
-                                name: binding.clone(),
-                                binding_id,
-                                ownership: body_scope.ownership_of(binding),
-                                ty: body_scope.type_of(binding).cloned(),
-                            }]
+                    inserted_bindings
+                        .iter()
+                        .filter_map(|binding_name| {
+                            body_scope.binding_id_of(binding_name).map(|binding_id| {
+                                CleanupFooterCandidate {
+                                    name: binding_name.clone(),
+                                    binding_id,
+                                    ownership: body_scope.ownership_of(binding_name),
+                                    ty: body_scope.type_of(binding_name).cloned(),
+                                }
+                            })
                         })
-                        .unwrap_or_default()
+                        .collect::<Vec<_>>()
                 } else {
                     Vec::new()
                 };
@@ -11981,14 +12369,16 @@ fn validate_statement_block_semantics(
                     current_block_cleanup_policy.clone()
                 };
                 let mut body_borrows = borrow_state.clone();
-                activate_current_cleanup_binding(
-                    workspace,
-                    resolved_module,
-                    &mut body_borrows,
-                    &body_scope,
-                    &nested_cleanup_policy,
-                    binding,
-                );
+                for binding_name in &inserted_bindings {
+                    activate_current_cleanup_binding(
+                        workspace,
+                        resolved_module,
+                        &mut body_borrows,
+                        &body_scope,
+                        &nested_cleanup_policy,
+                        binding_name,
+                    );
+                }
                 validate_statement_block_semantics(
                     workspace,
                     resolved_workspace,
@@ -12002,7 +12392,9 @@ fn validate_statement_block_semantics(
                     expected_return_type,
                     diagnostics,
                 );
-                body_borrows.clear_local(binding);
+                for binding_name in inserted_bindings {
+                    body_borrows.clear_local(&binding_name);
+                }
                 borrow_state.merge_moves_from(&body_borrows);
             }
             HirStatementKind::Defer { expr } | HirStatementKind::Expr { expr } => {
@@ -13414,7 +13806,9 @@ fn validate_expr_semantics(
         HirExpr::QualifiedPhrase {
             subject,
             args,
+            qualifier_kind,
             qualifier,
+            qualifier_type_args,
             attached,
             ..
         } => {
@@ -13435,10 +13829,23 @@ fn validate_expr_semantics(
                 scope,
                 module_path,
                 subject,
+                *qualifier_kind,
                 qualifier,
                 span,
                 diagnostics,
             );
+            for type_arg in qualifier_type_args {
+                validate_type_surface(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    type_arg,
+                    span,
+                    &format!("phrase qualifier generic argument `{}`", type_arg.render()),
+                    diagnostics,
+                );
+            }
             for arg in args {
                 validate_phrase_arg_semantics(
                     workspace,
@@ -13469,7 +13876,10 @@ fn validate_expr_semantics(
                 type_scope,
                 scope,
                 subject,
+                qualifier_kind,
                 qualifier,
+                qualifier_type_args,
+                args,
                 span,
                 diagnostics,
             );
@@ -13514,6 +13924,8 @@ fn validate_expr_semantics(
                 ),
                 HirUnaryOp::BorrowRead => {
                     validate_borrow_operand_place(
+                        workspace,
+                        resolved_module,
                         module_path,
                         scope,
                         expr,
@@ -13524,6 +13936,8 @@ fn validate_expr_semantics(
                 }
                 HirUnaryOp::BorrowMut => {
                     validate_borrow_operand_place(
+                        workspace,
+                        resolved_module,
                         module_path,
                         scope,
                         expr,
@@ -14215,6 +14629,123 @@ fn is_identifier_text(text: &str) -> bool {
         && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum BindingPattern {
+    Name(String),
+    Pair(Box<BindingPattern>, Box<BindingPattern>),
+}
+
+fn split_binding_pattern_top_level(source: &str, separator: char) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    for (idx, ch) in source.char_indices() {
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            _ if ch == separator && depth == 0 => {
+                parts.push(source[start..idx].trim());
+                start = idx + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    parts.push(source[start..].trim());
+    parts
+}
+
+fn parse_binding_pattern(text: &str) -> Option<BindingPattern> {
+    let trimmed = text.trim();
+    if is_identifier_text(trimmed) {
+        return Some(BindingPattern::Name(trimmed.to_string()));
+    }
+    let inner = trimmed.strip_prefix('(')?.strip_suffix(')')?;
+    let parts = split_binding_pattern_top_level(inner, ',');
+    if parts.len() != 2 {
+        return None;
+    }
+    Some(BindingPattern::Pair(
+        Box::new(parse_binding_pattern(parts[0])?),
+        Box::new(parse_binding_pattern(parts[1])?),
+    ))
+}
+
+fn binding_pattern_is_destructuring(text: &str) -> bool {
+    matches!(parse_binding_pattern(text), Some(BindingPattern::Pair(_, _)))
+}
+
+fn collect_binding_pattern_names(pattern: &BindingPattern, names: &mut Vec<String>) {
+    match pattern {
+        BindingPattern::Name(name) => names.push(name.clone()),
+        BindingPattern::Pair(left, right) => {
+            collect_binding_pattern_names(left, names);
+            collect_binding_pattern_names(right, names);
+        }
+    }
+}
+
+fn collect_typed_binding_pattern_entries(
+    pattern: &BindingPattern,
+    ty: Option<&HirType>,
+    entries: &mut Vec<(String, Option<HirType>)>,
+) -> Result<(), String> {
+    match pattern {
+        BindingPattern::Name(name) => {
+            entries.push((name.clone(), ty.cloned()));
+            Ok(())
+        }
+        BindingPattern::Pair(left, right) => {
+            let Some(ty) = ty else {
+                collect_typed_binding_pattern_entries(left, None, entries)?;
+                return collect_typed_binding_pattern_entries(right, None, entries);
+            };
+            let HirTypeKind::Tuple(items) = &ty.kind else {
+                return Err(format!(
+                    "tuple destructuring requires a pair value, found {}",
+                    ty.render()
+                ));
+            };
+            let [left_ty, right_ty] = items.as_slice() else {
+                return Err(format!(
+                    "tuple destructuring requires a pair value, found {}",
+                    ty.render()
+                ));
+            };
+            collect_typed_binding_pattern_entries(left, Some(left_ty), entries)?;
+            collect_typed_binding_pattern_entries(right, Some(right_ty), entries)
+        }
+    }
+}
+
+fn bind_pattern_into_scope(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    type_scope: &TypeScope,
+    scope: &mut ValueScope,
+    pattern_text: &str,
+    mutable: bool,
+    value_ty: Option<HirType>,
+) -> Result<Vec<String>, String> {
+    let pattern = parse_binding_pattern(pattern_text)
+        .ok_or_else(|| format!("invalid binding pattern `{pattern_text}`"))?;
+    let mut entries = Vec::new();
+    collect_typed_binding_pattern_entries(&pattern, value_ty.as_ref(), &mut entries)?;
+    let mut seen = BTreeSet::new();
+    let mut inserted = Vec::new();
+    for (name, ty) in entries {
+        if !seen.insert(name.clone()) {
+            return Err(format!("duplicate binding `{name}` in tuple pattern"));
+        }
+        let ownership = ty
+            .as_ref()
+            .map(|ty| infer_type_ownership(workspace, resolved_module, type_scope, ty))
+            .unwrap_or_default();
+        scope.insert_typed(&name, mutable, ownership, ty);
+        inserted.push(name);
+    }
+    Ok(inserted)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -14497,10 +15028,6 @@ mod tests {
                 "tuple field access only supports `.0` and `.1` in v1",
             ),
             (
-                "tuple_destructure_let.arc",
-                "tuple destructuring is not allowed in `let` statements",
-            ),
-            (
                 "tuple_triple_type.arc",
                 "tuple types must have exactly 2 elements in v1",
             ),
@@ -14522,6 +15049,82 @@ mod tests {
             };
             assert!(err.contains(expected), "{fixture}: {err}");
         }
+    }
+
+    #[test]
+    fn check_sources_accept_tuple_destructuring_in_let_and_for() {
+        let summary = check_sources([concat!(
+            "fn main() -> Int:\n",
+            "    let pair = (1, 2)\n",
+            "    let (left, right) = pair\n",
+            "    for (first, second) in [(left, right)]:\n",
+            "        return first + second\n",
+            "    return 0\n",
+        )])
+        .expect("tuple destructuring should check");
+        assert_eq!(summary.module_count, 1);
+    }
+
+    #[test]
+    fn check_sources_accept_owner_activation_with_explicit_context_clause() {
+        let root = make_temp_package(
+            "owner_explicit_context_positive",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    concat!(
+                        "obj SessionCtx:\n",
+                        "    base: Int\n",
+                        "\n",
+                        "obj Counter:\n",
+                        "    value: Int\n",
+                        "    fn init(edit self: Self, read ctx: SessionCtx):\n",
+                        "        self.value = ctx.base\n",
+                        "\n",
+                        "create Session [Counter] context: SessionCtx scope-exit:\n",
+                        "    done: when Counter.value > 10 hold [Counter]\n",
+                        "\n",
+                        "Session\n",
+                        "Counter\n",
+                        "fn main() -> Int:\n",
+                        "    let ctx = SessionCtx :: base = 12 :: call\n",
+                        "    Session :: ctx :: call\n",
+                        "    return Counter.value\n",
+                    ),
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let summary = check_path(&root).expect("owner with explicit context should check");
+        assert_eq!(summary.package_count, 1);
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_sources_accept_must_and_fallback_for_option_and_result() {
+        let summary = check_sources([concat!(
+            "enum Option[T]:\n",
+            "    Some(T)\n",
+            "    None\n",
+            "\n",
+            "enum Result[T, E]:\n",
+            "    Ok(T)\n",
+            "    Err(E)\n",
+            "\n",
+            "fn main() -> Int:\n",
+            "    let maybe = Option.Some[Int] :: 4 :: call\n",
+            "    let none_value = Option.None[Int] :: :: call\n",
+            "    let fallback = none_value :: 7 :: fallback\n",
+            "    let ok = Result.Ok[Int, Str] :: 3 :: call\n",
+            "    let maybe_value = maybe :: :: must\n",
+            "    let must_value = ok :: :: must\n",
+            "    return maybe_value + fallback + must_value\n",
+        )])
+        .expect("must/fallback surface should type-check");
+        assert_eq!(summary.module_count, 1);
     }
 
     #[test]
@@ -17697,6 +18300,89 @@ mod tests {
         let err = check_path(&root).expect_err("conflicting borrows should fail");
         assert!(
             err.contains("cannot mutably borrow `x` while it is already borrowed"),
+            "{err}"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_accepts_borrowed_array_slices_as_views() {
+        let std_dep = repo_root().join("std").to_string_lossy().replace('\\', "/");
+        let root = make_temp_package(
+            "typed_borrowed_slice_views",
+            "app",
+            &[("std", std_dep.as_str())],
+            &[
+                (
+                    "src/shelf.arc",
+                    concat!(
+                        "import std.collections.array\n",
+                        "fn main() -> Int:\n",
+                        "    let mut read_xs = std.collections.array.new[Int] :: 4, 0 :: call\n",
+                        "    read_xs[0] = 1\n",
+                        "    read_xs[1] = 2\n",
+                        "    read_xs[2] = 3\n",
+                        "    read_xs[3] = 4\n",
+                        "    let view = &read_xs[1..3]\n",
+                        "    let mut edit_xs = std.collections.array.new[Int] :: 2, 0 :: call\n",
+                        "    edit_xs[0] = 5\n",
+                        "    edit_xs[1] = 6\n",
+                        "    let mut edit = &mut edit_xs[0..2]\n",
+                        "    edit :: 1, 9 :: set\n",
+                        "    return (view :: :: len) + (edit :: :: len)\n",
+                    ),
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        check_path(&root).expect("borrowed array slices should type-check as views");
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_mutable_string_slice_borrow() {
+        let root = make_temp_package(
+            "typed_mut_borrow_string_slice",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    "fn main() -> Int:\n    let mut text = \"hello\"\n    let x = &mut text[1..4]\n    return 0\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("mutable string slice borrow should fail");
+        assert!(
+            err.contains("string slices are read-only; `&mut x[a..b]` is not allowed"),
+            "{err}"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_borrowed_list_slices() {
+        let root = make_temp_package(
+            "typed_list_slice_borrow",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    "fn main() -> Int:\n    let xs = [1, 2, 3]\n    let view = &xs[0..2]\n    return 0\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("list slice borrow should fail");
+        assert!(
+            err.contains("borrowed slices require contiguous backing; `List` is not supported"),
             "{err}"
         );
 

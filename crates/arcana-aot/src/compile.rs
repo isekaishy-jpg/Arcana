@@ -93,6 +93,7 @@ fn compile_owner(owner: &IrOwnerDecl) -> AotOwnerArtifact {
         module_id: owner.module_id.clone(),
         owner_path: owner.owner_path.clone(),
         owner_name: owner.owner_name.clone(),
+        context_type: owner.context_type.clone(),
         objects: owner.objects.iter().map(compile_owner_object).collect(),
         exits: owner.exits.iter().map(compile_owner_exit).collect(),
     }
