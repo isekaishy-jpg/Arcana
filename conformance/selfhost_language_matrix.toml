@@ -1,5 +1,5 @@
 version = 1
-as_of = "2026-03-17"
+as_of = "2026-04-02"
 owner = "Arcana selfhost/compiler team"
 # Positive targets now use current in-repo rewrite-owned corpus after the
 # archived broad MeadowLang corpus moved out of the repository.
@@ -119,6 +119,15 @@ negative = [
     "conformance/check_parity_fixtures/memory_phrase_arg_arity.arc",
     "conformance/check_parity_fixtures/unresolved_symbol.arc",
     "conformance/check_parity_fixtures/unknown_memory_type.arc",
+]
+
+[[feature]]
+id = "memory_views_and_publication"
+status = "required"
+positive = ["std/src", "grimoires/owned/libs/arcana-text/src"]
+negative = [
+    "conformance/check_parity_fixtures/borrowed_slice_mut_str.arc",
+    "conformance/check_parity_fixtures/borrowed_slice_list.arc",
 ]
 
 [[feature]]

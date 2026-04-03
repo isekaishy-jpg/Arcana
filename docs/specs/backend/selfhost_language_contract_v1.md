@@ -1,6 +1,6 @@
 # Selfhost Language Contract v1
 
-This document freezes the canonical selfhost language target for Arcana as of **March 5, 2026**.
+This document freezes the canonical selfhost language target for Arcana as of **April 2, 2026**.
 
 Scope note:
 - This file freezes the required language corpus for selfhost.

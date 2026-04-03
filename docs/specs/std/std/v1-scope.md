@@ -45,6 +45,7 @@ Scope notes:
   - `std.result`
   - `std.option`
   - `std.bytes`
+  - `std.binary`
   - `std.text`
   - `std.iter`
   - `std.collections.*`
@@ -109,3 +110,6 @@ Scope notes:
 - Move app/demo/showcase-specific convenience back out of `std` unless it earns explicit first-party scope.
 - Avoid broad root/prelude reexports of unratified convenience layers.
 - If Milestone 6 or owned-grimoire work discovers a missing substrate capability, prefer adding it inside an already approved domain rather than reopening top-level std architecture.
+- `std.binary` is approved as the narrow binary reader/writer layer over `std.memory` views; it is not a generic serialization umbrella.
+- `std.memory` is approved to expose explicit capability traits over the concrete family/view surface (`ViewSource`, `EditViewSource`, `ContiguousBytes`, `ContiguousBytesEdit`, `Resettable`, `IdAllocating`, `LiveIterable`, `Compactable`, `SequenceBuffer`, `Sealable`) as generic glue only; these traits do not authorize implicit coercion or autoderef growth.
+- `std.binary` is approved to expose narrow opt-in binary traits (`BinaryReadable`, `ByteSink`) alongside `Reader` / `Writer`; those traits are explicit codec hooks, not a generic serialization policy layer.

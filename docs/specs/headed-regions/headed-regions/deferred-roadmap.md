@@ -40,12 +40,12 @@ status: deferred
 
 id: HR-D3
 title: additional `Memory` region families
-reason_deferred: v1 keeps `Memory` aligned with the already-approved `arena` / `frame` / `pool` memory family set.
-target_window: next memory expansion window
-trigger_condition: ready_when=memory-family expansion is approved in the memory domain and consumer semantics stay explicit; verify=headed-region and memory-phrase tests pass for every new family; blocked_by=current memory family set is intentionally limited in approved memory scope.
+reason_deferred: completed in the memory views/publication expansion window.
+target_window: completed
+trigger_condition: ready_when=memory-family expansion is approved in the memory domain and consumer semantics stay explicit; verify=headed-region and memory-phrase tests pass for every new family; blocked_by=none.
 owner: Arcana memory/runtime team
 acceptance_criteria: each added `Memory` family has explicit strategy modifiers, participating-line classes, and consumer semantics documented and implemented.
-status: deferred
+status: done
 
 id: HR-D4
 title: foreword participation inside headed-region bodies

@@ -138,6 +138,37 @@ pub struct ArcanaCabiExport {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ArcanaCabiProviderDescriptorViewOwner {
+    Runtime {
+        package_id: String,
+    },
+    ProviderBinding {
+        consumer_package_id: String,
+        dependency_alias: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ArcanaCabiProviderDescriptorViewBackingKind {
+    ReadElements,
+    ReadBytes,
+    ReadUtf8,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArcanaCabiProviderDescriptorView {
+    pub owner: ArcanaCabiProviderDescriptorViewOwner,
+    pub backing_kind: ArcanaCabiProviderDescriptorViewBackingKind,
+    pub family: String,
+    pub id: u64,
+    pub element_type: String,
+    pub element_layout: String,
+    pub start: u64,
+    pub len: u64,
+    pub mutable: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ArcanaCabiProviderValue {
     Int(i64),
     Bool(bool),
@@ -159,6 +190,7 @@ pub enum ArcanaCabiProviderValue {
         name: String,
         payload: Vec<ArcanaCabiProviderValue>,
     },
+    DescriptorView(ArcanaCabiProviderDescriptorView),
     SubstrateOpaque {
         family: String,
         id: u64,
@@ -227,9 +259,10 @@ const PROVIDER_TAG_MAP: u8 = 7;
 const PROVIDER_TAG_RANGE: u8 = 8;
 const PROVIDER_TAG_RECORD: u8 = 9;
 const PROVIDER_TAG_VARIANT: u8 = 10;
-const PROVIDER_TAG_SUBSTRATE_OPAQUE: u8 = 11;
-const PROVIDER_TAG_PROVIDER_OPAQUE: u8 = 12;
-const PROVIDER_TAG_UNIT: u8 = 13;
+const PROVIDER_TAG_DESCRIPTOR_VIEW: u8 = 11;
+const PROVIDER_TAG_SUBSTRATE_OPAQUE: u8 = 12;
+const PROVIDER_TAG_PROVIDER_OPAQUE: u8 = 13;
+const PROVIDER_TAG_UNIT: u8 = 14;
 const PROVIDER_DESCRIPTOR_MAGIC: &[u8] = b"arcana.provider.descriptor.v1\0";
 
 pub fn encode_provider_value(value: &ArcanaCabiProviderValue) -> Result<Vec<u8>, String> {
@@ -500,6 +533,18 @@ fn encode_provider_value_inner(
                 encode_provider_value_inner(value, out)?;
             }
         }
+        ArcanaCabiProviderValue::DescriptorView(view) => {
+            out.push(PROVIDER_TAG_DESCRIPTOR_VIEW);
+            encode_provider_descriptor_view_owner(&view.owner, out)?;
+            encode_provider_descriptor_view_backing_kind(&view.backing_kind, out);
+            write_string(&view.family, out)?;
+            write_u64(view.id, out);
+            write_string(&view.element_type, out)?;
+            write_string(&view.element_layout, out)?;
+            write_u64(view.start, out);
+            write_u64(view.len, out);
+            write_bool(view.mutable, out);
+        }
         ArcanaCabiProviderValue::SubstrateOpaque { family, id } => {
             out.push(PROVIDER_TAG_SUBSTRATE_OPAQUE);
             write_string(family, out)?;
@@ -581,6 +626,19 @@ fn decode_provider_value_inner(
             }
             Ok(ArcanaCabiProviderValue::Variant { name, payload })
         }
+        PROVIDER_TAG_DESCRIPTOR_VIEW => Ok(ArcanaCabiProviderValue::DescriptorView(
+            ArcanaCabiProviderDescriptorView {
+                owner: decode_provider_descriptor_view_owner(cursor)?,
+                backing_kind: decode_provider_descriptor_view_backing_kind(cursor)?,
+                family: cursor.read_string("provider DescriptorView family")?,
+                id: cursor.read_u64("provider DescriptorView id")?,
+                element_type: cursor.read_string("provider DescriptorView element_type")?,
+                element_layout: cursor.read_string("provider DescriptorView element_layout")?,
+                start: cursor.read_u64("provider DescriptorView start")?,
+                len: cursor.read_u64("provider DescriptorView len")?,
+                mutable: cursor.read_bool("provider DescriptorView mutable")?,
+            },
+        )),
         PROVIDER_TAG_SUBSTRATE_OPAQUE => Ok(ArcanaCabiProviderValue::SubstrateOpaque {
             family: cursor.read_string("provider SubstrateOpaque family")?,
             id: cursor.read_u64("provider SubstrateOpaque id")?,
@@ -604,6 +662,71 @@ fn write_len(len: usize, out: &mut Vec<u8>) -> Result<(), String> {
 
 fn write_bool(value: bool, out: &mut Vec<u8>) {
     out.push(u8::from(value));
+}
+
+fn encode_provider_descriptor_view_owner(
+    owner: &ArcanaCabiProviderDescriptorViewOwner,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    match owner {
+        ArcanaCabiProviderDescriptorViewOwner::Runtime { package_id } => {
+            out.push(1);
+            write_string(package_id, out)?;
+        }
+        ArcanaCabiProviderDescriptorViewOwner::ProviderBinding {
+            consumer_package_id,
+            dependency_alias,
+        } => {
+            out.push(2);
+            write_string(consumer_package_id, out)?;
+            write_string(dependency_alias, out)?;
+        }
+    }
+    Ok(())
+}
+
+fn decode_provider_descriptor_view_owner(
+    cursor: &mut ProviderDecodeCursor<'_>,
+) -> Result<ArcanaCabiProviderDescriptorViewOwner, String> {
+    match cursor.read_u8("provider DescriptorView owner tag")? {
+        1 => Ok(ArcanaCabiProviderDescriptorViewOwner::Runtime {
+            package_id: cursor.read_string("provider DescriptorView owner package_id")?,
+        }),
+        2 => Ok(ArcanaCabiProviderDescriptorViewOwner::ProviderBinding {
+            consumer_package_id: cursor
+                .read_string("provider DescriptorView owner consumer_package_id")?,
+            dependency_alias: cursor
+                .read_string("provider DescriptorView owner dependency_alias")?,
+        }),
+        other => Err(format!(
+            "unsupported provider DescriptorView owner tag `{other}`"
+        )),
+    }
+}
+
+fn encode_provider_descriptor_view_backing_kind(
+    kind: &ArcanaCabiProviderDescriptorViewBackingKind,
+    out: &mut Vec<u8>,
+) {
+    let tag = match kind {
+        ArcanaCabiProviderDescriptorViewBackingKind::ReadElements => 1,
+        ArcanaCabiProviderDescriptorViewBackingKind::ReadBytes => 2,
+        ArcanaCabiProviderDescriptorViewBackingKind::ReadUtf8 => 3,
+    };
+    out.push(tag);
+}
+
+fn decode_provider_descriptor_view_backing_kind(
+    cursor: &mut ProviderDecodeCursor<'_>,
+) -> Result<ArcanaCabiProviderDescriptorViewBackingKind, String> {
+    match cursor.read_u8("provider DescriptorView backing kind")? {
+        1 => Ok(ArcanaCabiProviderDescriptorViewBackingKind::ReadElements),
+        2 => Ok(ArcanaCabiProviderDescriptorViewBackingKind::ReadBytes),
+        3 => Ok(ArcanaCabiProviderDescriptorViewBackingKind::ReadUtf8),
+        other => Err(format!(
+            "unsupported provider DescriptorView backing kind `{other}`"
+        )),
+    }
 }
 
 fn write_i64(value: i64, out: &mut Vec<u8>) {
@@ -801,6 +924,22 @@ pub type ArcanaCabiProviderHostResolvePackageAssetRootFn =
         package_id: *const c_char,
     ) -> ArcanaOwnedStr;
 pub type ArcanaCabiProviderHostOwnedStrFreeFn = unsafe extern "system" fn(ptr: *mut u8, len: usize);
+pub type ArcanaCabiProviderHostReadDescriptorValuesFn = unsafe extern "system" fn(
+    host_context: *mut c_void,
+    family: *const c_char,
+    view_id: u64,
+    start: u64,
+    len: u64,
+    out_len: *mut usize,
+) -> *mut u8;
+pub type ArcanaCabiProviderHostReadDescriptorBytesFn = unsafe extern "system" fn(
+    host_context: *mut c_void,
+    family: *const c_char,
+    view_id: u64,
+    start: u64,
+    len: u64,
+    out_len: *mut usize,
+) -> *mut u8;
 pub type ArcanaCabiProviderHostCanvasImageCreateFn = unsafe extern "system" fn(
     host_context: *mut c_void,
     width: i64,
@@ -920,6 +1059,8 @@ pub struct ArcanaCabiProviderHostOpsV1 {
     pub ops_size: usize,
     pub resolve_package_asset_root: ArcanaCabiProviderHostResolvePackageAssetRootFn,
     pub host_owned_str_free: ArcanaCabiProviderHostOwnedStrFreeFn,
+    pub read_descriptor_values: ArcanaCabiProviderHostReadDescriptorValuesFn,
+    pub read_descriptor_bytes: ArcanaCabiProviderHostReadDescriptorBytesFn,
     pub canvas_image_create: ArcanaCabiProviderHostCanvasImageCreateFn,
     pub canvas_image_replace_rgba: ArcanaCabiProviderHostCanvasImageReplaceRgbaFn,
     pub canvas_blit: ArcanaCabiProviderHostCanvasBlitFn,
@@ -1032,6 +1173,8 @@ pub fn render_c_descriptor_type_defs() -> String {
         "    size_t ops_size;\n",
         "    ArcanaOwnedStr (*resolve_package_asset_root)(void* host_context, const char* package_id);\n",
         "    void (*host_owned_str_free)(uint8_t* ptr, size_t len);\n",
+        "    uint8_t* (*read_descriptor_values)(void* host_context, const char* family, uint64_t view_id, uint64_t start, uint64_t len, size_t* out_len);\n",
+        "    uint8_t* (*read_descriptor_bytes)(void* host_context, const char* family, uint64_t view_id, uint64_t start, uint64_t len, size_t* out_len);\n",
         "    int32_t (*canvas_image_create)(void* host_context, int64_t width, int64_t height, uint64_t* out_image_id);\n",
         "    int32_t (*canvas_image_replace_rgba)(void* host_context, uint64_t image_id, const uint8_t* rgba_ptr, size_t rgba_len);\n",
         "    int32_t (*canvas_blit)(void* host_context, uint64_t window_id, uint64_t image_id, int64_t x, int64_t y);\n",
@@ -1057,10 +1200,12 @@ pub fn render_c_descriptor_type_defs() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ArcanaCabiProviderCallOutcome, ArcanaCabiProviderValue, ArcanaCabiProviderWriteBack,
-        decode_provider_call_outcome, decode_provider_value, decode_provider_values,
-        encode_provider_call_outcome, encode_provider_value, encode_provider_values,
-        render_c_descriptor_type_defs, render_c_value_type_defs,
+        ArcanaCabiProviderCallOutcome, ArcanaCabiProviderDescriptorView,
+        ArcanaCabiProviderDescriptorViewBackingKind, ArcanaCabiProviderDescriptorViewOwner,
+        ArcanaCabiProviderValue, ArcanaCabiProviderWriteBack, decode_provider_call_outcome,
+        decode_provider_value, decode_provider_values, encode_provider_call_outcome,
+        encode_provider_value, encode_provider_values, render_c_descriptor_type_defs,
+        render_c_value_type_defs,
     };
 
     #[test]
@@ -1090,6 +1235,22 @@ mod tests {
             fields: vec![
                 ("x".to_string(), ArcanaCabiProviderValue::Int(10)),
                 ("rtl".to_string(), ArcanaCabiProviderValue::Bool(true)),
+                (
+                    "bytes".to_string(),
+                    ArcanaCabiProviderValue::DescriptorView(ArcanaCabiProviderDescriptorView {
+                        owner: ArcanaCabiProviderDescriptorViewOwner::Runtime {
+                            package_id: "path:app".to_string(),
+                        },
+                        backing_kind: ArcanaCabiProviderDescriptorViewBackingKind::ReadBytes,
+                        family: "std.memory.ByteView".to_string(),
+                        id: 5,
+                        element_type: "Int".to_string(),
+                        element_layout: "Int".to_string(),
+                        start: 0,
+                        len: 4,
+                        mutable: false,
+                    }),
+                ),
                 (
                     "family".to_string(),
                     ArcanaCabiProviderValue::ProviderOpaque {

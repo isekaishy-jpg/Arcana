@@ -154,31 +154,54 @@ Memory <memory_type>:<name> -<memory_modifier>
   - it does not become an ordinary value binding merely by being established
 - Target slot:
   - `<memory_type>:<name>`
-- Current approved `Memory` families are still:
+- Current approved `Memory` families are:
   - `arena`
   - `frame`
   - `pool`
+  - `temp`
+  - `session`
+  - `ring`
+  - `slab`
 - Default/per-line modifier class:
   - memory strategy / pressure behavior such as `alloc`, `grow`, `fixed`, or `recycle`, constrained by family
 - Current approved `Memory` modifiers are:
   - `arena`: `alloc`, `grow`, `fixed`
   - `frame`: `alloc`, `grow`, `recycle`
   - `pool`: `alloc`, `grow`, `fixed`, `recycle`
+  - `temp`: `alloc`, `grow`, `fixed`
+  - `session`: `alloc`, `grow`, `fixed`
+  - `ring`: `alloc`, `grow`, `fixed`
+  - `slab`: `alloc`, `grow`, `fixed`
 - `Memory` modifiers do not take payload expressions in v1.
 - Current detail-line keys are:
-  - `capacity`
-  - `growth`
-  - `recycle`
-  - `handle`
-  - `pressure`
+  - common:
+    - `capacity`
+    - `growth`
+    - `pressure`
+    - `handle`
+    - `reset_on`
+  - carried family-specific:
+    - `recycle` for `frame` and `pool`
+    - `overwrite` and `window` for `ring`
+    - `page` for `slab`
 - Current family-specific atom tables are:
   - `arena.pressure`: `bounded`, `elastic`
   - `arena.handle`: `stable`, `unstable`
   - `frame.pressure`: `bounded`, `elastic`
   - `frame.recycle`: `manual`, `frame`
+  - `frame.reset_on`: `manual`, `frame`, `owner_exit`
   - `pool.pressure`: `bounded`, `elastic`
   - `pool.recycle`: `free_list`, `strict`
   - `pool.handle`: `stable`, `unstable`
+  - `temp.pressure`: `bounded`, `elastic`
+  - `temp.reset_on`: `manual`, `frame`, `owner_exit`
+  - `session.pressure`: `bounded`, `elastic`
+  - `session.handle`: `stable`
+  - `session.reset_on`: `manual`
+  - `ring.pressure`: `bounded`, `elastic`
+  - `ring.overwrite`: `oldest`
+  - `slab.pressure`: `bounded`, `elastic`
+  - `slab.handle`: `stable`
 - Intended scope:
   - explicit budgeting
   - lifetime shape
@@ -190,7 +213,9 @@ Memory <memory_type>:<name> -<memory_modifier>
   - `pressure = elastic` allows the allocator budget to expand by `growth` when full
   - `pressure = bounded` rejects additional allocation once the current budget is exhausted
   - `frame.recycle = frame` may reset the frame arena on saturation instead of rejecting immediately
+  - `temp.reset_on = frame` may reset the temp arena on saturation instead of rejecting immediately
   - `pool.recycle = free_list` reuses removed slots before issuing fresh ones, while `strict` withholds reuse until reset
+  - `ring.overwrite = oldest` evicts the oldest live slot when the ring is saturated and growth does not occur
   - `handle = stable` reuses the same materialized spec handle for the spec lifetime, while `unstable` rematerializes a fresh handle on each consumer resolution
 - `Memory` default modifiers provide the default strategy for omitted policy dimensions, and per-detail modifiers locally override that strategy for the participating detail.
 - Explicitly not the purpose of `Memory`:

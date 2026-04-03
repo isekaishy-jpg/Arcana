@@ -4,7 +4,8 @@ use std::collections::BTreeMap;
 use arcana_aot::parse_package_artifact;
 use arcana_cabi::{
     ArcanaCabiParamSourceMode, ArcanaCabiPassMode, ArcanaCabiProviderCallOutcome,
-    ArcanaCabiProviderCallable, ArcanaCabiProviderOpaqueFamily, ArcanaCabiProviderParam,
+    ArcanaCabiProviderCallable, ArcanaCabiProviderDescriptorViewBackingKind,
+    ArcanaCabiProviderDescriptorViewOwner, ArcanaCabiProviderOpaqueFamily, ArcanaCabiProviderParam,
     ArcanaCabiProviderValue, ArcanaCabiProviderWriteBack,
 };
 use arcana_ir::IrRoutineType;
@@ -12,12 +13,27 @@ use arcana_ir::IrRoutineType;
 use crate::{
     FlowSignal, RuntimeExecutionState, RuntimeHost, RuntimeImageHandle, RuntimeOpaqueValue,
     RuntimePackagePlan, RuntimeRoutinePlan, RuntimeValue, execute_routine_call_with_state,
+    insert_runtime_byte_view, insert_runtime_read_view, insert_runtime_str_view,
     parse_runtime_package_image, plan_from_artifact, runtime_eval_message,
     runtime_substrate_opaque_from_family,
 };
 
 pub trait RuntimeSourceProviderCallbacks {
     fn package_asset_root(&mut self, package_id: &str) -> Result<String, String>;
+    fn descriptor_view_values(
+        &mut self,
+        family: &str,
+        view_id: u64,
+        start: u64,
+        len: u64,
+    ) -> Result<Vec<ArcanaCabiProviderValue>, String>;
+    fn descriptor_view_bytes(
+        &mut self,
+        family: &str,
+        view_id: u64,
+        start: u64,
+        len: u64,
+    ) -> Result<Vec<u8>, String>;
     fn canvas_image_create(&mut self, width: i64, height: i64) -> Result<u64, String>;
     fn canvas_image_replace_rgba(&mut self, image_id: u64, rgba: &[u8]) -> Result<(), String>;
     fn canvas_blit(&mut self, window_id: u64, image_id: u64, x: i64, y: i64) -> Result<(), String>;
@@ -147,17 +163,17 @@ impl ArcanaSourceProvider {
             ));
         }
 
+        let mut state = RuntimeExecutionState::default();
         let mut runtime_args = Vec::with_capacity(args.len());
         for (index, (arg, param)) in args.iter().zip(&bridge.params).enumerate() {
             runtime_args.push(match &param.kind {
-                SourceBridgeKind::Direct => {
-                    provider_value_to_runtime_direct(arg).map_err(|err| {
+                SourceBridgeKind::Direct => provider_value_to_runtime_direct(arg, &mut state)
+                    .map_err(|err| {
                         format!(
                             "source provider arg {index} `{}` for `{callable_key}`: {err}",
                             param.descriptor.name
                         )
-                    })?
-                }
+                    })?,
                 SourceBridgeKind::Opaque {
                     family_key,
                     type_path,
@@ -172,13 +188,17 @@ impl ArcanaSourceProvider {
         }
 
         let outcome = with_active_source_provider_callbacks(callbacks, || {
-            let mut state = RuntimeExecutionState::default();
             execute_routine_call_with_state(
                 &self.plan,
                 bridge.routine_index,
                 Vec::new(),
                 runtime_args,
                 &Vec::new(),
+                None,
+                None,
+                None,
+                None,
+                None,
                 &mut state,
                 host,
                 false,
@@ -199,6 +219,7 @@ impl ArcanaSourceProvider {
             &bridge.result_kind,
             &bridge.descriptor.return_type,
             outcome.value,
+            &state,
             None,
             callable_key,
         )?;
@@ -232,6 +253,7 @@ impl ArcanaSourceProvider {
                     .as_deref()
                     .unwrap_or(&param.descriptor.input_type),
                 final_value,
+                &state,
                 prior_opaque,
                 callable_key,
             )?;
@@ -241,7 +263,6 @@ impl ArcanaSourceProvider {
                 value,
             });
         }
-
         Ok(ArcanaCabiProviderCallOutcome {
             result,
             write_backs,
@@ -297,11 +318,14 @@ impl ArcanaSourceProvider {
         kind: &SourceBridgeKind,
         type_path: &str,
         value: RuntimeValue,
+        state: &RuntimeExecutionState,
         existing_opaque_id: Option<u64>,
         callable_key: &str,
     ) -> Result<ArcanaCabiProviderValue, String> {
         match kind {
-            SourceBridgeKind::Direct => runtime_value_to_provider_direct(value),
+            SourceBridgeKind::Direct => {
+                runtime_value_to_provider_direct(value, state, &self.plan.package_id)
+            }
             SourceBridgeKind::Opaque {
                 family_key,
                 type_path: expected_type,
@@ -358,6 +382,40 @@ pub(crate) fn active_source_provider_package_asset_root(
         };
         let callbacks = unsafe { &mut *ptr };
         callbacks.package_asset_root(package_id).map(Some)
+    })
+}
+
+pub(crate) fn active_source_provider_descriptor_view_values(
+    family: &str,
+    view_id: u64,
+    start: u64,
+    len: u64,
+) -> Result<Option<Vec<ArcanaCabiProviderValue>>, String> {
+    ACTIVE_SOURCE_PROVIDER_CALLBACKS.with(|slot| {
+        let Some(ptr) = *slot.borrow() else {
+            return Ok(None);
+        };
+        let callbacks = unsafe { &mut *ptr };
+        callbacks
+            .descriptor_view_values(family, view_id, start, len)
+            .map(Some)
+    })
+}
+
+pub(crate) fn active_source_provider_descriptor_view_bytes(
+    family: &str,
+    view_id: u64,
+    start: u64,
+    len: u64,
+) -> Result<Option<Vec<u8>>, String> {
+    ACTIVE_SOURCE_PROVIDER_CALLBACKS.with(|slot| {
+        let Some(ptr) = *slot.borrow() else {
+            return Ok(None);
+        };
+        let callbacks = unsafe { &mut *ptr };
+        callbacks
+            .descriptor_view_bytes(family, view_id, start, len)
+            .map(Some)
     })
 }
 
@@ -592,6 +650,7 @@ fn pass_mode_for_param(mode: Option<&str>) -> ArcanaCabiPassMode {
 
 fn provider_value_to_runtime_direct(
     value: &ArcanaCabiProviderValue,
+    state: &mut RuntimeExecutionState,
 ) -> Result<RuntimeValue, String> {
     match value {
         ArcanaCabiProviderValue::Int(value) => Ok(RuntimeValue::Int(*value)),
@@ -604,21 +663,21 @@ fn provider_value_to_runtime_direct(
                 .collect(),
         )),
         ArcanaCabiProviderValue::Pair(left, right) => Ok(RuntimeValue::Pair(
-            Box::new(provider_value_to_runtime_direct(left)?),
-            Box::new(provider_value_to_runtime_direct(right)?),
+            Box::new(provider_value_to_runtime_direct(left, state)?),
+            Box::new(provider_value_to_runtime_direct(right, state)?),
         )),
         ArcanaCabiProviderValue::List(values) => Ok(RuntimeValue::List(
             values
                 .iter()
-                .map(provider_value_to_runtime_direct)
+                .map(|value| provider_value_to_runtime_direct(value, state))
                 .collect::<Result<Vec<_>, _>>()?,
         )),
         ArcanaCabiProviderValue::Map(entries) => {
             let mut map = Vec::new();
             for (key, value) in entries {
                 map.push((
-                    provider_value_to_runtime_direct(key)?,
-                    provider_value_to_runtime_direct(value)?,
+                    provider_value_to_runtime_direct(key, state)?,
+                    provider_value_to_runtime_direct(value, state)?,
                 ));
             }
             Ok(RuntimeValue::Map(map))
@@ -636,16 +695,78 @@ fn provider_value_to_runtime_direct(
             name: name.clone(),
             fields: fields
                 .iter()
-                .map(|(key, value)| Ok((key.clone(), provider_value_to_runtime_direct(value)?)))
+                .map(|(key, value)| {
+                    Ok((key.clone(), provider_value_to_runtime_direct(value, state)?))
+                })
                 .collect::<Result<BTreeMap<_, _>, String>>()?,
         }),
         ArcanaCabiProviderValue::Variant { name, payload } => Ok(RuntimeValue::Variant {
             name: name.clone(),
             payload: payload
                 .iter()
-                .map(provider_value_to_runtime_direct)
+                .map(|value| provider_value_to_runtime_direct(value, state))
                 .collect::<Result<Vec<_>, _>>()?,
         }),
+        ArcanaCabiProviderValue::DescriptorView(view) => match &view.owner {
+            ArcanaCabiProviderDescriptorViewOwner::Runtime { .. } => match view.backing_kind {
+                ArcanaCabiProviderDescriptorViewBackingKind::ReadElements => {
+                    let values = active_source_provider_descriptor_view_values(
+                        &view.family,
+                        view.id,
+                        view.start,
+                        view.len,
+                    )?
+                    .ok_or_else(|| {
+                        "descriptor element views require active source provider callbacks"
+                            .to_string()
+                    })?;
+                    let runtime_values = values
+                        .iter()
+                        .map(|value| provider_value_to_runtime_direct(value, state))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let handle = insert_runtime_read_view(
+                        state,
+                        &[view.element_layout.clone()],
+                        runtime_values,
+                    );
+                    Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::ReadView(handle)))
+                }
+                ArcanaCabiProviderDescriptorViewBackingKind::ReadBytes => {
+                    let bytes = active_source_provider_descriptor_view_bytes(
+                        &view.family,
+                        view.id,
+                        view.start,
+                        view.len,
+                    )?
+                    .ok_or_else(|| {
+                        "descriptor byte views require active source provider callbacks".to_string()
+                    })?;
+                    let handle = insert_runtime_byte_view(state, bytes);
+                    Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::ByteView(handle)))
+                }
+                ArcanaCabiProviderDescriptorViewBackingKind::ReadUtf8 => {
+                    let bytes = active_source_provider_descriptor_view_bytes(
+                        &view.family,
+                        view.id,
+                        view.start,
+                        view.len,
+                    )?
+                    .ok_or_else(|| {
+                        "descriptor string views require active source provider callbacks"
+                            .to_string()
+                    })?;
+                    let text = String::from_utf8(bytes).map_err(|err| {
+                        format!("descriptor string view is not valid utf-8: {err}")
+                    })?;
+                    let handle = insert_runtime_str_view(state, text);
+                    Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::StrView(handle)))
+                }
+            },
+            ArcanaCabiProviderDescriptorViewOwner::ProviderBinding { .. } => Err(format!(
+                "provider-owned descriptor view `{}` cannot cross a direct provider value bridge",
+                view.family
+            )),
+        },
         ArcanaCabiProviderValue::SubstrateOpaque { family, id } => Ok(RuntimeValue::Opaque(
             runtime_substrate_opaque_from_family(family, *id)?,
         )),
@@ -658,6 +779,8 @@ fn provider_value_to_runtime_direct(
 
 fn runtime_value_to_provider_direct(
     value: RuntimeValue,
+    state: &RuntimeExecutionState,
+    package_id: &str,
 ) -> Result<ArcanaCabiProviderValue, String> {
     match value {
         RuntimeValue::Int(value) => Ok(ArcanaCabiProviderValue::Int(value)),
@@ -677,13 +800,13 @@ fn runtime_value_to_provider_direct(
             Ok(ArcanaCabiProviderValue::Bytes(bytes))
         }
         RuntimeValue::Pair(left, right) => Ok(ArcanaCabiProviderValue::Pair(
-            Box::new(runtime_value_to_provider_direct(*left)?),
-            Box::new(runtime_value_to_provider_direct(*right)?),
+            Box::new(runtime_value_to_provider_direct(*left, state, package_id)?),
+            Box::new(runtime_value_to_provider_direct(*right, state, package_id)?),
         )),
         RuntimeValue::List(values) => Ok(ArcanaCabiProviderValue::List(
             values
                 .into_iter()
-                .map(runtime_value_to_provider_direct)
+                .map(|value| runtime_value_to_provider_direct(value, state, package_id))
                 .collect::<Result<Vec<_>, _>>()?,
         )),
         RuntimeValue::Map(entries) => Ok(ArcanaCabiProviderValue::Map(
@@ -691,8 +814,8 @@ fn runtime_value_to_provider_direct(
                 .into_iter()
                 .map(|(key, value)| {
                     Ok((
-                        runtime_value_to_provider_direct(key)?,
-                        runtime_value_to_provider_direct(value)?,
+                        runtime_value_to_provider_direct(key, state, package_id)?,
+                        runtime_value_to_provider_direct(value, state, package_id)?,
                     ))
                 })
                 .collect::<Result<Vec<_>, String>>()?,
@@ -710,14 +833,16 @@ fn runtime_value_to_provider_direct(
             name,
             fields: fields
                 .into_iter()
-                .map(|(key, value)| Ok((key, runtime_value_to_provider_direct(value)?)))
+                .map(|(key, value)| {
+                    Ok((key, runtime_value_to_provider_direct(value, state, package_id)?))
+                })
                 .collect::<Result<Vec<_>, String>>()?,
         }),
         RuntimeValue::Variant { name, payload } => Ok(ArcanaCabiProviderValue::Variant {
             name,
             payload: payload
                 .into_iter()
-                .map(runtime_value_to_provider_direct)
+                .map(|value| runtime_value_to_provider_direct(value, state, package_id))
                 .collect::<Result<Vec<_>, _>>()?,
         }),
         RuntimeValue::Opaque(RuntimeOpaqueValue::Image(handle)) => {
@@ -732,6 +857,14 @@ fn runtime_value_to_provider_direct(
                 id: handle.0,
             })
         }
+        RuntimeValue::Opaque(RuntimeOpaqueValue::EditView(_))
+        | RuntimeValue::Opaque(RuntimeOpaqueValue::ByteEditView(_))
+        | RuntimeValue::Opaque(RuntimeOpaqueValue::ReadView(_))
+        | RuntimeValue::Opaque(RuntimeOpaqueValue::ByteView(_))
+        | RuntimeValue::Opaque(RuntimeOpaqueValue::StrView(_)) => Err(
+            "direct provider conversion does not support provider-originated view results across the provider boundary"
+                .to_string(),
+        ),
         RuntimeValue::Opaque(other) => Err(format!(
             "direct provider conversion does not support substrate opaque `{}`",
             crate::opaque_type_name(&other)
@@ -747,5 +880,145 @@ fn provider_write_back_needed(kind: &SourceBridgeKind, value: &RuntimeValue) -> 
     match kind {
         SourceBridgeKind::Direct => !matches!(value, RuntimeValue::Opaque(_)),
         SourceBridgeKind::Opaque { .. } => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        RuntimeSourceProviderCallbacks, provider_value_to_runtime_direct,
+        with_active_source_provider_callbacks,
+    };
+    use arcana_cabi::{
+        ArcanaCabiProviderDescriptorView, ArcanaCabiProviderDescriptorViewBackingKind,
+        ArcanaCabiProviderDescriptorViewOwner, ArcanaCabiProviderValue,
+    };
+
+    use crate::{
+        RuntimeExecutionState, RuntimeOpaqueValue, RuntimeValue, runtime_byte_view_snapshot,
+        runtime_read_view_snapshot,
+    };
+
+    struct TestCallbacks;
+
+    impl RuntimeSourceProviderCallbacks for TestCallbacks {
+        fn package_asset_root(&mut self, _package_id: &str) -> Result<String, String> {
+            Ok(String::new())
+        }
+
+        fn descriptor_view_values(
+            &mut self,
+            family: &str,
+            view_id: u64,
+            start: u64,
+            len: u64,
+        ) -> Result<Vec<ArcanaCabiProviderValue>, String> {
+            assert_eq!(family, "std.memory.ReadView");
+            assert_eq!(view_id, 77);
+            assert_eq!(start, 0);
+            assert_eq!(len, 2);
+            Ok(vec![
+                ArcanaCabiProviderValue::Int(11),
+                ArcanaCabiProviderValue::Int(29),
+            ])
+        }
+
+        fn descriptor_view_bytes(
+            &mut self,
+            family: &str,
+            view_id: u64,
+            start: u64,
+            len: u64,
+        ) -> Result<Vec<u8>, String> {
+            assert_eq!(family, "std.memory.ByteView");
+            assert_eq!(view_id, 41);
+            assert_eq!(start, 0);
+            assert_eq!(len, 3);
+            Ok(vec![10, 20, 30])
+        }
+
+        fn canvas_image_create(&mut self, _width: i64, _height: i64) -> Result<u64, String> {
+            Err("unused".to_string())
+        }
+
+        fn canvas_image_replace_rgba(
+            &mut self,
+            _image_id: u64,
+            _rgba: &[u8],
+        ) -> Result<(), String> {
+            Err("unused".to_string())
+        }
+
+        fn canvas_blit(
+            &mut self,
+            _window_id: u64,
+            _image_id: u64,
+            _x: i64,
+            _y: i64,
+        ) -> Result<(), String> {
+            Err("unused".to_string())
+        }
+    }
+
+    #[test]
+    fn descriptor_byte_view_materializes_local_runtime_handle() {
+        let descriptor =
+            ArcanaCabiProviderValue::DescriptorView(ArcanaCabiProviderDescriptorView {
+                owner: ArcanaCabiProviderDescriptorViewOwner::Runtime {
+                    package_id: "path:app".to_string(),
+                },
+                backing_kind: ArcanaCabiProviderDescriptorViewBackingKind::ReadBytes,
+                family: "std.memory.ByteView".to_string(),
+                id: 41,
+                element_type: "Int".to_string(),
+                element_layout: "Int".to_string(),
+                start: 0,
+                len: 3,
+                mutable: false,
+            });
+        let mut callbacks = TestCallbacks;
+        let mut state = RuntimeExecutionState::default();
+        let value = with_active_source_provider_callbacks(&mut callbacks, || {
+            provider_value_to_runtime_direct(&descriptor, &mut state)
+        })
+        .expect("descriptor byte view should materialize");
+        let RuntimeValue::Opaque(RuntimeOpaqueValue::ByteView(handle)) = value else {
+            panic!("expected ByteView runtime value");
+        };
+        assert_eq!(
+            runtime_byte_view_snapshot(&state, handle).expect("byte view should exist"),
+            vec![10, 20, 30]
+        );
+    }
+
+    #[test]
+    fn descriptor_element_view_materializes_local_runtime_handle() {
+        let descriptor =
+            ArcanaCabiProviderValue::DescriptorView(ArcanaCabiProviderDescriptorView {
+                owner: ArcanaCabiProviderDescriptorViewOwner::Runtime {
+                    package_id: "path:app".to_string(),
+                },
+                backing_kind: ArcanaCabiProviderDescriptorViewBackingKind::ReadElements,
+                family: "std.memory.ReadView".to_string(),
+                id: 77,
+                element_type: "Int".to_string(),
+                element_layout: "Int".to_string(),
+                start: 0,
+                len: 2,
+                mutable: false,
+            });
+        let mut callbacks = TestCallbacks;
+        let mut state = RuntimeExecutionState::default();
+        let value = with_active_source_provider_callbacks(&mut callbacks, || {
+            provider_value_to_runtime_direct(&descriptor, &mut state)
+        })
+        .expect("descriptor element view should materialize");
+        let RuntimeValue::Opaque(RuntimeOpaqueValue::ReadView(handle)) = value else {
+            panic!("expected ReadView runtime value");
+        };
+        assert_eq!(
+            runtime_read_view_snapshot(&state, handle).expect("read view should exist"),
+            vec![RuntimeValue::Int(11), RuntimeValue::Int(29)]
+        );
     }
 }

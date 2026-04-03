@@ -164,8 +164,24 @@ It defines:
   - named variants
   - runtime-owned substrate opaque handles
   - provider-owned opaque handles
+- The provider codec also approves typed descriptor views for the memory/view surface:
+  - `ReadView[T]`
+  - `EditView[T]`
+  - `ByteView`
+  - `ByteEditView`
+  - `StrView`
 - Provider `edit` params are represented as input values plus explicit write-backs in the provider outcome payload.
 - Owner handles, refs, and erased Arcana-value carriers must not cross the provider boundary.
+- Descriptor views are explicit typed values, not raw refs.
+- Descriptor-view metadata must include:
+  - backing owner/binding identity
+  - family/backing kind
+  - element type/layout identity
+  - start
+  - length
+  - mutability
+- `StrView` remains UTF-8-valid and read-only at the boundary.
+- Read descriptor views over `session` and `slab` are exportable/shareable only while the backing allocator is sealed.
 
 ## Export Contract
 

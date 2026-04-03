@@ -1,3 +1,6 @@
+import std.memory
+import std.option
+
 intrinsic fn arena_new[T](capacity: Int) -> Arena[T] = MemoryArenaNew
 intrinsic fn arena_alloc[T](edit arena: Arena[T], take value: T) -> ArenaId[T] = MemoryArenaAlloc
 intrinsic fn arena_len[T](read arena: Arena[T]) -> Int = MemoryArenaLen
@@ -29,3 +32,88 @@ intrinsic fn pool_borrow_edit['pool, T](edit arena: PoolArena[T], id: PoolId[T])
 intrinsic fn pool_set[T](edit arena: PoolArena[T], id: PoolId[T], take value: T) = MemoryPoolSet
 intrinsic fn pool_remove[T](edit arena: PoolArena[T], id: PoolId[T]) -> Bool = MemoryPoolRemove
 intrinsic fn pool_reset[T](edit arena: PoolArena[T]) = MemoryPoolReset
+intrinsic fn pool_live_ids[T](read arena: PoolArena[T]) -> List[PoolId[T]] = MemoryPoolLiveIds
+intrinsic fn pool_compact[T](edit arena: PoolArena[T]) -> List[std.memory.PoolRelocation[T]] = MemoryPoolCompact
+
+intrinsic fn temp_new[T](capacity: Int) -> std.memory.TempArena[T] = MemoryTempNew
+intrinsic fn temp_alloc[T](edit arena: std.memory.TempArena[T], take value: T) -> std.memory.TempId[T] = MemoryTempAlloc
+intrinsic fn temp_len[T](read arena: std.memory.TempArena[T]) -> Int = MemoryTempLen
+intrinsic fn temp_has[T](read arena: std.memory.TempArena[T], id: std.memory.TempId[T]) -> Bool = MemoryTempHas
+intrinsic fn temp_get[T](read arena: std.memory.TempArena[T], id: std.memory.TempId[T]) -> T = MemoryTempGet
+intrinsic fn temp_borrow_read['temp, T](read arena: std.memory.TempArena[T], id: std.memory.TempId[T]) -> &'temp T = MemoryTempBorrowRead
+intrinsic fn temp_borrow_edit['temp, T](edit arena: std.memory.TempArena[T], id: std.memory.TempId[T]) -> &'temp mut T = MemoryTempBorrowEdit
+intrinsic fn temp_set[T](edit arena: std.memory.TempArena[T], id: std.memory.TempId[T], take value: T) = MemoryTempSet
+intrinsic fn temp_reset[T](edit arena: std.memory.TempArena[T]) = MemoryTempReset
+
+intrinsic fn session_new[T](capacity: Int) -> std.memory.SessionArena[T] = MemorySessionNew
+intrinsic fn session_alloc[T](edit arena: std.memory.SessionArena[T], take value: T) -> std.memory.SessionId[T] = MemorySessionAlloc
+intrinsic fn session_len[T](read arena: std.memory.SessionArena[T]) -> Int = MemorySessionLen
+intrinsic fn session_has[T](read arena: std.memory.SessionArena[T], id: std.memory.SessionId[T]) -> Bool = MemorySessionHas
+intrinsic fn session_get[T](read arena: std.memory.SessionArena[T], id: std.memory.SessionId[T]) -> T = MemorySessionGet
+intrinsic fn session_borrow_read['session, T](read arena: std.memory.SessionArena[T], id: std.memory.SessionId[T]) -> &'session T = MemorySessionBorrowRead
+intrinsic fn session_borrow_edit['session, T](edit arena: std.memory.SessionArena[T], id: std.memory.SessionId[T]) -> &'session mut T = MemorySessionBorrowEdit
+intrinsic fn session_set[T](edit arena: std.memory.SessionArena[T], id: std.memory.SessionId[T], take value: T) = MemorySessionSet
+intrinsic fn session_reset[T](edit arena: std.memory.SessionArena[T]) = MemorySessionReset
+intrinsic fn session_seal[T](edit arena: std.memory.SessionArena[T]) = MemorySessionSeal
+intrinsic fn session_unseal[T](edit arena: std.memory.SessionArena[T]) = MemorySessionUnseal
+intrinsic fn session_is_sealed[T](read arena: std.memory.SessionArena[T]) -> Bool = MemorySessionIsSealed
+intrinsic fn session_live_ids[T](read arena: std.memory.SessionArena[T]) -> List[std.memory.SessionId[T]] = MemorySessionLiveIds
+
+intrinsic fn ring_new[T](capacity: Int) -> std.memory.RingBuffer[T] = MemoryRingNew
+intrinsic fn ring_push[T](edit arena: std.memory.RingBuffer[T], take value: T) -> std.memory.RingId[T] = MemoryRingPush
+intrinsic fn ring_try_pop[T](edit arena: std.memory.RingBuffer[T]) -> std.option.Option[T] = MemoryRingTryPop
+intrinsic fn ring_len[T](read arena: std.memory.RingBuffer[T]) -> Int = MemoryRingLen
+intrinsic fn ring_has[T](read arena: std.memory.RingBuffer[T], id: std.memory.RingId[T]) -> Bool = MemoryRingHas
+intrinsic fn ring_get[T](read arena: std.memory.RingBuffer[T], id: std.memory.RingId[T]) -> T = MemoryRingGet
+intrinsic fn ring_borrow_read['ring, T](read arena: std.memory.RingBuffer[T], id: std.memory.RingId[T]) -> &'ring T = MemoryRingBorrowRead
+intrinsic fn ring_borrow_edit['ring, T](edit arena: std.memory.RingBuffer[T], id: std.memory.RingId[T]) -> &'ring mut T = MemoryRingBorrowEdit
+intrinsic fn ring_set[T](edit arena: std.memory.RingBuffer[T], id: std.memory.RingId[T], take value: T) = MemoryRingSet
+intrinsic fn ring_reset[T](edit arena: std.memory.RingBuffer[T]) = MemoryRingReset
+intrinsic fn ring_window_read[T](read arena: std.memory.RingBuffer[T], start: Int, len: Int) -> std.memory.ReadView[T] = MemoryRingWindowRead
+intrinsic fn ring_window_edit[T](edit arena: std.memory.RingBuffer[T], start: Int, len: Int) -> std.memory.EditView[T] = MemoryRingWindowEdit
+
+intrinsic fn slab_new[T](capacity: Int) -> std.memory.Slab[T] = MemorySlabNew
+intrinsic fn slab_alloc[T](edit arena: std.memory.Slab[T], take value: T) -> std.memory.SlabId[T] = MemorySlabAlloc
+intrinsic fn slab_len[T](read arena: std.memory.Slab[T]) -> Int = MemorySlabLen
+intrinsic fn slab_has[T](read arena: std.memory.Slab[T], id: std.memory.SlabId[T]) -> Bool = MemorySlabHas
+intrinsic fn slab_get[T](read arena: std.memory.Slab[T], id: std.memory.SlabId[T]) -> T = MemorySlabGet
+intrinsic fn slab_borrow_read['slab, T](read arena: std.memory.Slab[T], id: std.memory.SlabId[T]) -> &'slab T = MemorySlabBorrowRead
+intrinsic fn slab_borrow_edit['slab, T](edit arena: std.memory.Slab[T], id: std.memory.SlabId[T]) -> &'slab mut T = MemorySlabBorrowEdit
+intrinsic fn slab_set[T](edit arena: std.memory.Slab[T], id: std.memory.SlabId[T], take value: T) = MemorySlabSet
+intrinsic fn slab_remove[T](edit arena: std.memory.Slab[T], id: std.memory.SlabId[T]) -> Bool = MemorySlabRemove
+intrinsic fn slab_reset[T](edit arena: std.memory.Slab[T]) = MemorySlabReset
+intrinsic fn slab_seal[T](edit arena: std.memory.Slab[T]) = MemorySlabSeal
+intrinsic fn slab_unseal[T](edit arena: std.memory.Slab[T]) = MemorySlabUnseal
+intrinsic fn slab_is_sealed[T](read arena: std.memory.Slab[T]) -> Bool = MemorySlabIsSealed
+intrinsic fn slab_live_ids[T](read arena: std.memory.Slab[T]) -> List[std.memory.SlabId[T]] = MemorySlabLiveIds
+
+intrinsic fn array_view_read[T](read values: Array[T], start: Int, end: Int) -> std.memory.ReadView[T] = MemoryArrayViewRead
+intrinsic fn array_view_edit[T](edit values: Array[T], start: Int, end: Int) -> std.memory.EditView[T] = MemoryArrayViewEdit
+intrinsic fn bytes_view(read values: Array[Int], start: Int, end: Int) -> std.memory.ByteView = MemoryBytesView
+intrinsic fn bytes_view_edit(edit values: Array[Int], start: Int, end: Int) -> std.memory.ByteEditView = MemoryBytesViewEdit
+intrinsic fn str_view(read text: Str, start: Int, end: Int) -> std.memory.StrView = MemoryStrView
+
+intrinsic fn view_len[T](read view: std.memory.ReadView[T]) -> Int = MemoryViewLen
+intrinsic fn view_get[T](read view: std.memory.ReadView[T], index: Int) -> T = MemoryViewGet
+intrinsic fn view_subview[T](read view: std.memory.ReadView[T], start: Int, end: Int) -> std.memory.ReadView[T] = MemoryViewSubview
+intrinsic fn edit_view_len[T](read view: std.memory.EditView[T]) -> Int = MemoryEditViewLen
+intrinsic fn edit_view_get[T](read view: std.memory.EditView[T], index: Int) -> T = MemoryEditViewGet
+intrinsic fn edit_view_set[T](edit view: std.memory.EditView[T], index: Int, take value: T) = MemoryEditViewSet
+intrinsic fn edit_view_subview_read[T](read view: std.memory.EditView[T], start: Int, end: Int) -> std.memory.ReadView[T] = MemoryEditViewSubviewRead
+intrinsic fn edit_view_subview_edit[T](edit view: std.memory.EditView[T], start: Int, end: Int) -> std.memory.EditView[T] = MemoryEditViewSubviewEdit
+
+intrinsic fn byte_view_len(read view: std.memory.ByteView) -> Int = MemoryByteViewLen
+intrinsic fn byte_view_at(read view: std.memory.ByteView, index: Int) -> Int = MemoryByteViewAt
+intrinsic fn byte_view_subview(read view: std.memory.ByteView, start: Int, end: Int) -> std.memory.ByteView = MemoryByteViewSubview
+intrinsic fn byte_view_to_array(read view: std.memory.ByteView) -> Array[Int] = MemoryByteViewToArray
+intrinsic fn byte_edit_view_len(read view: std.memory.ByteEditView) -> Int = MemoryByteEditViewLen
+intrinsic fn byte_edit_view_at(read view: std.memory.ByteEditView, index: Int) -> Int = MemoryByteEditViewAt
+intrinsic fn byte_edit_view_set(edit view: std.memory.ByteEditView, index: Int, value: Int) = MemoryByteEditViewSet
+intrinsic fn byte_edit_view_subview_read(read view: std.memory.ByteEditView, start: Int, end: Int) -> std.memory.ByteView = MemoryByteEditViewSubviewRead
+intrinsic fn byte_edit_view_subview_edit(edit view: std.memory.ByteEditView, start: Int, end: Int) -> std.memory.ByteEditView = MemoryByteEditViewSubviewEdit
+intrinsic fn byte_edit_view_to_array(read view: std.memory.ByteEditView) -> Array[Int] = MemoryByteEditViewToArray
+
+intrinsic fn str_view_len_bytes(read view: std.memory.StrView) -> Int = MemoryStrViewLenBytes
+intrinsic fn str_view_byte_at(read view: std.memory.StrView, index: Int) -> Int = MemoryStrViewByteAt
+intrinsic fn str_view_subview(read view: std.memory.StrView, start: Int, end: Int) -> std.memory.StrView = MemoryStrViewSubview
+intrinsic fn str_view_to_str(read view: std.memory.StrView) -> Str = MemoryStrViewToStr

@@ -46,9 +46,13 @@ Scope notes:
 - Borrow and dereference remain explicit source operations:
   - `&x`
   - `&mut x`
+  - `&x[a..b]`
+  - `&mut x[a..b]`
   - `*x`
 - Ownership and borrow rules are place-based, not copy-shaped.
 - Runtime and backend lowering must preserve place identity across member access, indexing, and call boundaries where the source contract treats the operation as acting on the same place.
+- Borrowed-slice creation is explicit adaptation, not implicit coercion.
+- This scope does not approve general implicit autoderef or coercion growth.
 
 ## Diagnostics
 

@@ -18,12 +18,12 @@ Trigger Condition Template (required single-line format):
 
 id: MEM-D1
 title: executable `temp` and `session` memory categories
-reason_deferred: Plan 31 focused on `frame` + `pool` runtime closure with stable semantics first.
-target_window: next memory expansion window
-trigger_condition: ready_when=frame/pool runtime is stable and no open frame/pool regressions remain; verify=memory/compiler/vm validation matrix stays green across consecutive post-change runs; blocked_by=active frame/pool correctness bugs.
+reason_deferred: completed in the memory views/publication expansion window.
+target_window: completed
+trigger_condition: ready_when=frame/pool runtime is stable and no open frame/pool regressions remain; verify=memory/compiler/vm validation matrix stays green across consecutive post-change runs; blocked_by=none.
 owner: Arcana language/runtime team
 acceptance_criteria: `temp` and `session` compile, lower, and run with deterministic semantics and full parser/compiler/vm tests.
-status: deferred
+status: done
 
 id: MEM-D2
 title: borrowed read views for allocator-backed values
@@ -45,9 +45,9 @@ status: done
 
 id: MEM-D4
 title: pool iterators and compaction
-reason_deferred: iterator invalidation and compaction semantics need profiling-driven requirements.
-target_window: performance/iteration window
-trigger_condition: ready_when=profiling shows sustained compaction/iteration need and invalidation semantics are spec-locked; verify=pool iterator/compaction determinism and regression tests are green; blocked_by=unspecified iterator invalidation behavior.
+reason_deferred: completed in the memory views/publication expansion window.
+target_window: completed
+trigger_condition: ready_when=profiling shows sustained compaction/iteration need and invalidation semantics are spec-locked; verify=pool iterator/compaction determinism and regression tests are green; blocked_by=none.
 owner: Arcana std/runtime team
 acceptance_criteria: pool iteration/compaction APIs are documented, implemented, and covered by determinism/regression tests.
-status: deferred
+status: done

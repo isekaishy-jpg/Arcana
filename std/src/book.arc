@@ -26,6 +26,7 @@ reexport std.path
 reexport std.fs
 reexport std.process
 reexport std.bytes
+reexport std.binary
 reexport std.text
 reexport std.config
 reexport std.manifest

@@ -74,6 +74,12 @@ export enum PlaceholderAlignment:
     Bottom
     Middle
 
+fn empty_decorations() -> List[arcana_text.types.TextDecoration]:
+    return std.collections.list.new[arcana_text.types.TextDecoration] :: :: call
+
+fn empty_shadows() -> List[arcana_text.types.Shadow]:
+    return std.collections.list.new[arcana_text.types.Shadow] :: :: call
+
 export record StrutStyle:
     enabled: Bool
     font_size: Int
@@ -121,6 +127,10 @@ export record TextStyle:
     foreground: arcana_graphics.types.Paint
     background_enabled: Bool
     background: arcana_graphics.types.Paint
+    decorations: List[arcana_text.types.TextDecoration]
+    decoration_style: arcana_text.types.TextDecorationStyle
+    decoration_paint: arcana_graphics.types.Paint
+    shadows: List[arcana_text.types.Shadow]
     letter_spacing_milli: Int
     word_spacing_milli: Int
     line_height_milli: Int
@@ -163,6 +173,10 @@ export fn default_text_style(color: Int) -> arcana_text.types.TextStyle:
     style.foreground = foreground
     style.background_enabled = false
     style.background = background
+    style.decorations = arcana_text.types.empty_decorations :: :: call
+    style.decoration_style = arcana_text.types.TextDecorationStyle.Solid :: :: call
+    style.decoration_paint = foreground
+    style.shadows = arcana_text.types.empty_shadows :: :: call
     style.letter_spacing_milli = 0
     style.word_spacing_milli = 0
     style.line_height_milli = 1000

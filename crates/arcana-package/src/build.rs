@@ -1118,9 +1118,7 @@ fn emit_artifact_for_target(
             build_key.target_ref()
         )),
     }?;
-    if !matches!(build_key.target_ref(), BuildTarget::InternalAot) {
-        append_package_asset_support_files(graph, root_member, &mut emission)?;
-    }
+    append_package_asset_support_files(graph, root_member, &mut emission)?;
     append_internal_native_bundle_support(graph, root_member, build_key, &mut emission)?;
     Ok(emission)
 }

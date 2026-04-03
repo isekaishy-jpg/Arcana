@@ -1,5 +1,6 @@
 import std.collections.array
 import std.collections.list
+import std.memory
 import std.kernel.text
 import std.result
 use std.result.Result
@@ -18,6 +19,18 @@ export fn at(read bytes: Array[Int], index: Int) -> Int:
 
 export fn slice(read bytes: Array[Int], start: Int, end: Int) -> Array[Int]:
     return std.kernel.text.bytes_slice :: bytes, start, end :: call
+
+export fn view(read bytes: Array[Int], start: Int, end: Int) -> std.memory.ByteView:
+    return std.memory.bytes_view :: bytes, start, end :: call
+
+export fn view_edit(edit bytes: Array[Int], start: Int, end: Int) -> std.memory.ByteEditView:
+    return std.memory.bytes_view_edit :: bytes, start, end :: call
+
+export fn from_view(read view: std.memory.ByteView) -> Array[Int]:
+    return view :: :: to_array
+
+export fn from_edit_view(read view: std.memory.ByteEditView) -> Array[Int]:
+    return view :: :: to_array
 
 export fn starts_with(read bytes: Array[Int], read prefix: Array[Int]) -> Bool:
     let n = std.bytes.len :: bytes :: call

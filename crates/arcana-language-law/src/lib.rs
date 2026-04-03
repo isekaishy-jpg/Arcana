@@ -89,6 +89,10 @@ pub enum MemoryFamily {
     Arena,
     Frame,
     Pool,
+    Temp,
+    Session,
+    Ring,
+    Slab,
 }
 
 impl MemoryFamily {
@@ -97,6 +101,10 @@ impl MemoryFamily {
             Self::Arena => "arena",
             Self::Frame => "frame",
             Self::Pool => "pool",
+            Self::Temp => "temp",
+            Self::Session => "session",
+            Self::Ring => "ring",
+            Self::Slab => "slab",
         }
     }
 
@@ -105,6 +113,10 @@ impl MemoryFamily {
             "arena" => Some(Self::Arena),
             "frame" => Some(Self::Frame),
             "pool" => Some(Self::Pool),
+            "temp" => Some(Self::Temp),
+            "session" => Some(Self::Session),
+            "ring" => Some(Self::Ring),
+            "slab" => Some(Self::Slab),
             _ => None,
         }
     }
@@ -117,6 +129,10 @@ pub enum MemoryDetailKey {
     Recycle,
     Handle,
     Pressure,
+    ResetOn,
+    Page,
+    Overwrite,
+    Window,
 }
 
 impl MemoryDetailKey {
@@ -127,6 +143,10 @@ impl MemoryDetailKey {
             Self::Recycle => "recycle",
             Self::Handle => "handle",
             Self::Pressure => "pressure",
+            Self::ResetOn => "reset_on",
+            Self::Page => "page",
+            Self::Overwrite => "overwrite",
+            Self::Window => "window",
         }
     }
 
@@ -137,6 +157,10 @@ impl MemoryDetailKey {
             "recycle" => Some(Self::Recycle),
             "handle" => Some(Self::Handle),
             "pressure" => Some(Self::Pressure),
+            "reset_on" => Some(Self::ResetOn),
+            "page" => Some(Self::Page),
+            "overwrite" => Some(Self::Overwrite),
+            "window" => Some(Self::Window),
             _ => None,
         }
     }
@@ -171,6 +195,10 @@ const MEMORY_PHRASE_CONSUMERS: &[&str] = &["memory_phrase"];
 const ARENA_MODIFIERS: &[&str] = &["alloc", "grow", "fixed"];
 const FRAME_MODIFIERS: &[&str] = &["alloc", "grow", "recycle"];
 const POOL_MODIFIERS: &[&str] = &["alloc", "grow", "fixed", "recycle"];
+const TEMP_MODIFIERS: &[&str] = &["alloc", "grow", "fixed"];
+const SESSION_MODIFIERS: &[&str] = &["alloc", "grow", "fixed"];
+const RING_MODIFIERS: &[&str] = &["alloc", "grow", "fixed"];
+const SLAB_MODIFIERS: &[&str] = &["alloc", "grow", "fixed"];
 
 const ARENA_DETAILS: &[MemoryDetailDescriptor] = &[
     MemoryDetailDescriptor {
@@ -224,6 +252,12 @@ const FRAME_DETAILS: &[MemoryDetailDescriptor] = &[
         operational: true,
         atoms: &["manual", "frame"],
     },
+    MemoryDetailDescriptor {
+        key: MemoryDetailKey::ResetOn,
+        value_kind: MemoryDetailValueKind::Atom,
+        operational: true,
+        atoms: &["manual", "frame", "owner_exit"],
+    },
 ];
 
 const POOL_DETAILS: &[MemoryDetailDescriptor] = &[
@@ -259,6 +293,132 @@ const POOL_DETAILS: &[MemoryDetailDescriptor] = &[
     },
 ];
 
+const TEMP_DETAILS: &[MemoryDetailDescriptor] = &[
+    MemoryDetailDescriptor {
+        key: MemoryDetailKey::Capacity,
+        value_kind: MemoryDetailValueKind::IntExpr,
+        operational: true,
+        atoms: &[],
+    },
+    MemoryDetailDescriptor {
+        key: MemoryDetailKey::Growth,
+        value_kind: MemoryDetailValueKind::IntExpr,
+        operational: true,
+        atoms: &[],
+    },
+    MemoryDetailDescriptor {
+        key: MemoryDetailKey::Pressure,
+        value_kind: MemoryDetailValueKind::Atom,
+        operational: true,
+        atoms: &["bounded", "elastic"],
+    },
+    MemoryDetailDescriptor {
+        key: MemoryDetailKey::ResetOn,
+        value_kind: MemoryDetailValueKind::Atom,
+        operational: true,
+        atoms: &["manual", "frame", "owner_exit"],
+    },
+];
+
+const SESSION_DETAILS: &[MemoryDetailDescriptor] = &[
+    MemoryDetailDescriptor {
+        key: MemoryDetailKey::Capacity,
+        value_kind: MemoryDetailValueKind::IntExpr,
+        operational: true,
+        atoms: &[],
+    },
+    MemoryDetailDescriptor {
+        key: MemoryDetailKey::Growth,
+        value_kind: MemoryDetailValueKind::IntExpr,
+        operational: true,
+        atoms: &[],
+    },
+    MemoryDetailDescriptor {
+        key: MemoryDetailKey::Pressure,
+        value_kind: MemoryDetailValueKind::Atom,
+        operational: true,
+        atoms: &["bounded", "elastic"],
+    },
+    MemoryDetailDescriptor {
+        key: MemoryDetailKey::Handle,
+        value_kind: MemoryDetailValueKind::Atom,
+        operational: true,
+        atoms: &["stable"],
+    },
+    MemoryDetailDescriptor {
+        key: MemoryDetailKey::ResetOn,
+        value_kind: MemoryDetailValueKind::Atom,
+        operational: true,
+        atoms: &["manual"],
+    },
+];
+
+const RING_DETAILS: &[MemoryDetailDescriptor] = &[
+    MemoryDetailDescriptor {
+        key: MemoryDetailKey::Capacity,
+        value_kind: MemoryDetailValueKind::IntExpr,
+        operational: true,
+        atoms: &[],
+    },
+    MemoryDetailDescriptor {
+        key: MemoryDetailKey::Growth,
+        value_kind: MemoryDetailValueKind::IntExpr,
+        operational: true,
+        atoms: &[],
+    },
+    MemoryDetailDescriptor {
+        key: MemoryDetailKey::Pressure,
+        value_kind: MemoryDetailValueKind::Atom,
+        operational: true,
+        atoms: &["bounded", "elastic"],
+    },
+    MemoryDetailDescriptor {
+        key: MemoryDetailKey::Overwrite,
+        value_kind: MemoryDetailValueKind::Atom,
+        operational: true,
+        atoms: &["oldest"],
+    },
+    MemoryDetailDescriptor {
+        key: MemoryDetailKey::Window,
+        value_kind: MemoryDetailValueKind::IntExpr,
+        operational: true,
+        atoms: &[],
+    },
+];
+
+const SLAB_DETAILS: &[MemoryDetailDescriptor] = &[
+    MemoryDetailDescriptor {
+        key: MemoryDetailKey::Capacity,
+        value_kind: MemoryDetailValueKind::IntExpr,
+        operational: true,
+        atoms: &[],
+    },
+    MemoryDetailDescriptor {
+        key: MemoryDetailKey::Growth,
+        value_kind: MemoryDetailValueKind::IntExpr,
+        operational: true,
+        atoms: &[],
+    },
+    MemoryDetailDescriptor {
+        key: MemoryDetailKey::Pressure,
+        value_kind: MemoryDetailValueKind::Atom,
+        operational: true,
+        atoms: &["bounded", "elastic"],
+    },
+    MemoryDetailDescriptor {
+        key: MemoryDetailKey::Handle,
+        value_kind: MemoryDetailValueKind::Atom,
+        operational: true,
+        atoms: &["stable"],
+    },
+    MemoryDetailDescriptor {
+        key: MemoryDetailKey::Page,
+        value_kind: MemoryDetailValueKind::IntExpr,
+        operational: true,
+        atoms: &[],
+    },
+];
+
 const MEMORY_FAMILY_DESCRIPTORS: &[MemoryFamilyDescriptor] = &[
     MemoryFamilyDescriptor {
         family: MemoryFamily::Arena,
@@ -285,6 +445,42 @@ const MEMORY_FAMILY_DESCRIPTORS: &[MemoryFamilyDescriptor] = &[
         detail_keys: POOL_DETAILS,
         supported_modifiers: POOL_MODIFIERS,
         lazy_materialization_hook_id: "pool_new",
+        phrase_consumers: MEMORY_PHRASE_CONSUMERS,
+    },
+    MemoryFamilyDescriptor {
+        family: MemoryFamily::Temp,
+        module_specs: true,
+        block_specs: true,
+        detail_keys: TEMP_DETAILS,
+        supported_modifiers: TEMP_MODIFIERS,
+        lazy_materialization_hook_id: "temp_new",
+        phrase_consumers: MEMORY_PHRASE_CONSUMERS,
+    },
+    MemoryFamilyDescriptor {
+        family: MemoryFamily::Session,
+        module_specs: true,
+        block_specs: true,
+        detail_keys: SESSION_DETAILS,
+        supported_modifiers: SESSION_MODIFIERS,
+        lazy_materialization_hook_id: "session_new",
+        phrase_consumers: MEMORY_PHRASE_CONSUMERS,
+    },
+    MemoryFamilyDescriptor {
+        family: MemoryFamily::Ring,
+        module_specs: true,
+        block_specs: true,
+        detail_keys: RING_DETAILS,
+        supported_modifiers: RING_MODIFIERS,
+        lazy_materialization_hook_id: "ring_new",
+        phrase_consumers: MEMORY_PHRASE_CONSUMERS,
+    },
+    MemoryFamilyDescriptor {
+        family: MemoryFamily::Slab,
+        module_specs: true,
+        block_specs: true,
+        detail_keys: SLAB_DETAILS,
+        supported_modifiers: SLAB_MODIFIERS,
+        lazy_materialization_hook_id: "slab_new",
         phrase_consumers: MEMORY_PHRASE_CONSUMERS,
     },
 ];

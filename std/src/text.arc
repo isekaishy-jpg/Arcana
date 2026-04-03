@@ -1,5 +1,6 @@
 import std.kernel.text
 import std.collections.list
+import std.memory
 import std.result
 use std.result.Result
 
@@ -11,6 +12,12 @@ export fn byte_at(read text: Str, index: Int) -> Int:
 
 export fn slice_bytes(read text: Str, start: Int, end: Int) -> Str:
     return std.kernel.text.text_slice_bytes :: text, start, end :: call
+
+export fn view(read text: Str, start: Int, end: Int) -> std.memory.StrView:
+    return std.memory.str_view :: text, start, end :: call
+
+export fn from_view(read view: std.memory.StrView) -> Str:
+    return view :: :: to_str
 
 export fn starts_with(read text: Str, read prefix: Str) -> Bool:
     return std.kernel.text.text_starts_with :: text, prefix :: call

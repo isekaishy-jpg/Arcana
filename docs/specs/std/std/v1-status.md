@@ -103,6 +103,15 @@ still_needs_rebuild: keep byte-oriented UTF-8 helpers while preventing parser-sp
 update_note: the approved baseline now includes explicit search/trim/split/join/repeat/int-parse text helpers plus explicit bytes search/concat and `sha256_hex` helpers, but parser-specific or formatting-policy helpers still need review before entering std
 promotion_condition: rewrite-owned toolchain uses a narrowed, explicitly justified text/bytes surface
 
+id: STD-BINARY
+classification: bootstrap-required
+why: explicit binary parsing/emission substrate for font/image/audio/tooling work on top of memory views
+consumers: `grimoires/owned/libs/arcana-text`, future asset/codegen/runtime readers, owned tooling helpers
+current_source: rewrite-owned
+still_needs_rebuild: keep the surface narrow and explicit rather than turning it into a generic serialization framework
+update_note: `std.binary` now provides the narrow reader/writer floor over `std.memory` byte views plus explicit opt-in codec hooks (`BinaryReadable`, `ByteSink`); keep it to seek/skip/remaining, endian-aware integer reads/writes, subview operations, and explicit codec traits only, with structured formats still living in domain libraries or explicit cabi/tooling contracts
+promotion_condition: rewrite-owned toolchain and grimoires keep using the narrow binary-reader surface without pressure to broaden it into a generic format umbrella
+
 id: STD-ITER-COLLECTIONS
 classification: bootstrap-required
 why: core data-structure support for compiler, runtime, and showcase corpus
@@ -114,11 +123,11 @@ promotion_condition: rewrite-owned compiler/runtime corpus uses a documented, st
 
 id: STD-MEMORY
 classification: bootstrap-required
-why: memory phrases and arena/frame/pool ownership model are part of the carried baseline
-consumers: memory examples, showcase core, compiler/runtime paths that rely on arena-style ownership
+why: memory phrases, views, and allocator/publication semantics are part of the approved pre-selfhost baseline
+consumers: memory examples, compiler/runtime paths, `std.binary`, and grimoires such as `arcana_text`
 current_source: mixed
-still_needs_rebuild: preserve typed ownership contract while keeping any broader allocator or borrow/resource-model expansion behind explicit scope updates now that the current arena/frame/pool plus borrow lane runs on the rewrite backend
-update_note: arena/frame/pool core, executable memory phrases, and current borrow_read/borrow_edit write-through behavior now run on the rewrite backend through an explicit runtime reference/place lane; future allocator families or richer borrow/resource extensions still go through explicit scope/deferred docs
+still_needs_rebuild: preserve typed ownership/publication contract while hardening aliasing/runtime details under the approved family/view surface
+update_note: arena/frame/pool plus temp/session/ring/slab, executable memory phrases, explicit view types, borrowed-slice syntax, deterministic pool compaction/live-id behavior, current `seal` / `unseal` publication state for session/slab, and the explicit capability-trait layer (`ViewSource`, `EditViewSource`, `ContiguousBytes`, `ContiguousBytesEdit`, `Resettable`, `IdAllocating`, `LiveIterable`, `Compactable`, `SequenceBuffer`, `Sealable`) now sit on the rewrite backend; further allocator or borrow/resource-model expansion still goes through explicit scope/deferred docs
 promotion_condition: rewrite-owned runtime fully supports approved memory surface and ownership rules
 
 id: STD-CONCURRENT
