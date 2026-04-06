@@ -1,6 +1,9 @@
 import std.collections.array
 import std.kernel.collections
 
+export fn empty[T]() -> List[T]:
+    return std.kernel.collections.list_new[T] :: :: call
+
 export fn new[T]() -> List[T]:
     return std.kernel.collections.list_new[T] :: :: call
 
@@ -31,3 +34,12 @@ impl[T] List[T]:
     fn extend_array(edit self: List[T], read other: Array[T]):
         for value in other:
             self :: value :: push
+
+    fn drain(edit self: List[T]) -> List[T]:
+        let mut out = std.collections.list.empty[T] :: :: call
+        out :: self :: extend_list
+        self :: :: clear
+        return out
+
+export fn drain[T](edit values: List[T]) -> List[T]:
+    return values :: :: drain

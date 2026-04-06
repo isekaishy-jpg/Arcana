@@ -1,5 +1,8 @@
 import std.kernel.collections
 
+export fn empty[K, V]() -> Map[K, V]:
+    return std.kernel.collections.map_new[K, V] :: :: call
+
 export fn new[K, V]() -> Map[K, V]:
     return std.kernel.collections.map_new[K, V] :: :: call
 
@@ -46,3 +49,19 @@ impl[K, V] Map[K, V]:
 
     fn try_get_or(read self: Map[K, V], key: K, take fallback: V) -> (Bool, V):
         return std.kernel.collections.map_try_get_or :: self, key, fallback :: call
+
+    fn clear(edit self: Map[K, V]):
+        let keys = std.collections.map.keys[K, V] :: self :: call
+        for key in keys:
+            let _ = self :: key :: remove
+
+    fn drain(edit self: Map[K, V]) -> List[(K, V)]:
+        let out = std.collections.map.items[K, V] :: self :: call
+        self :: :: clear
+        return out
+
+export fn clear[K, V](edit m: Map[K, V]):
+    m :: :: clear
+
+export fn drain[K, V](edit m: Map[K, V]) -> List[(K, V)]:
+    return m :: :: drain

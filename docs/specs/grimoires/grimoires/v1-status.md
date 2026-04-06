@@ -9,11 +9,12 @@ Rules:
 - Carried roles must include an update note explaining what still needs to be rebuilt or replaced before they can be treated as rewrite-owned.
 - This ledger may classify required app/media roles; it may not expand the required grimoire set by itself.
 - Archived historical MeadowLang corpus is bootstrap context only, not future grimoire architecture.
+- Generic OS-binding grimoires such as `arcana_winapi` are tracked separately under the OS-binding scope rather than this app/media ledger.
 
 id: GRIMOIRE-DESKTOP-APP-SHELL
 classification: bootstrap-required
 role: desktop/app-shell grimoire
-current_package: `grimoires/owned/libs/arcana-desktop`
+current_package: `grimoires/libs/arcana-desktop`
 historical_seed: archived MeadowLang desktop app corpus
 why: Arcana-owned public desktop/window/event-loop boundary for native desktop apps above the low-level app/runtime substrate
 current_source: rewrite-owned-in-progress
@@ -24,7 +25,7 @@ promotion_condition: the rewrite-owned desktop/app-shell package reaches the app
 id: GRIMOIRE-GRAPHICS
 classification: bootstrap-required
 role: graphics grimoire
-current_package: `grimoires/owned/libs/arcana-graphics`
+current_package: `grimoires/libs/arcana-graphics`
 historical_seed: archived MeadowLang desktop app corpus
 why: Arcana-owned 2D graphics/image boundary above the low-level canvas substrate
 current_source: rewrite-owned-in-progress
@@ -35,18 +36,18 @@ promotion_condition: a rewrite-owned graphics grimoire exists and proves the low
 id: GRIMOIRE-TEXT
 classification: bootstrap-required
 role: text grimoire
-current_package: `grimoires/owned/libs/arcana-text`
+current_package: `grimoires/libs/arcana-text`
 historical_seed: archived MeadowLang desktop app corpus
 why: Arcana-owned text draw, shaping, layout, and text-asset boundary above `std.canvas`, `std.text`, and `std.fs`
 current_source: rewrite-owned-in-progress
-still_needs_rebuild: grow the current rewrite-owned paragraph/builder/font-collection foundation into full SkParagraph-class shaping, fallback, and glyph rasterization while keeping file IO itself in `std.fs`
-update_note: the scaffold-era `arcana_text -> arcana_desktop` label wrapper path has been removed from the public design center. `arcana_text` now owns paragraph handles, builder/style records, font-collection APIs, paragraph metrics queries, mutable paragraph updates, package-id-keyed bundled asset resolution, a vendored Monaspace `v1.400` desktop asset set, and a package-owned default provider product, with first-party proof/template callers moved onto the paragraph path instead of `arcana_text.labels.*`. Runtime now hosts text only through the generic provider lane plus minimal canvas/image substrate; it no longer hardcodes `arcana_text.*` dispatch or fixed text opaque families. The current implementation is still bootstrap-level and uses a source-backed bitmap paragraph engine rather than final font parsing/shaping/raster code, but the contract now points in the right direction: no desktop helper layer, no third-party text crate dependence, no public label-wrapper facade, and no runtime-builtin text grimoire.
+still_needs_rebuild: rebuild `arcana_text` into a full Arcana-owned paragraph/font/layout engine with shaping, fallback, and glyph rasterization while keeping file IO itself in `std.fs`
+update_note: the scaffold-era `arcana_text -> arcana_desktop` label wrapper path has been removed from the public design center, and the provider-backed bootstrap path has been torn back out. `arcana_text` is again a plain first-party source library with the pinned Monaspace `v1.400` Variable asset set retained, while the old in-tree paragraph/provider implementation has been cleared so the engine can be rebuilt cleanly in Arcana source. Runtime no longer owns text-specific dispatch or fixed text opaque families, and the long-term direction remains the same: no desktop helper layer, no third-party text crate dependence, no public label-wrapper facade, and no runtime-builtin text grimoire.
 promotion_condition: a rewrite-owned text grimoire exists and proves paragraph layout, text draw, and text-asset flows without pushing file APIs into grimoire policy or falling back to scaffold-era label wrappers
 
 id: GRIMOIRE-AUDIO
 classification: bootstrap-required
 role: audio grimoire
-current_package: `grimoires/owned/libs/arcana-audio`
+current_package: `grimoires/libs/arcana-audio`
 historical_seed: archived MeadowLang audio app corpus
 why: Arcana-owned playback/audio boundary above the low-level `std.audio` substrate
 current_source: rewrite-owned-in-progress

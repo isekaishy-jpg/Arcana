@@ -106,7 +106,7 @@ promotion_condition: rewrite-owned toolchain uses a narrowed, explicitly justifi
 id: STD-BINARY
 classification: bootstrap-required
 why: explicit binary parsing/emission substrate for font/image/audio/tooling work on top of memory views
-consumers: `grimoires/owned/libs/arcana-text`, future asset/codegen/runtime readers, owned tooling helpers
+consumers: `grimoires/libs/arcana-text`, future asset/codegen/runtime readers, owned tooling helpers
 current_source: rewrite-owned
 still_needs_rebuild: keep the surface narrow and explicit rather than turning it into a generic serialization framework
 update_note: `std.binary` now provides the narrow reader/writer floor over `std.memory` byte views plus explicit opt-in codec hooks (`BinaryReadable`, `ByteSink`); keep it to seek/skip/remaining, endian-aware integer reads/writes, subview operations, and explicit codec traits only, with structured formats still living in domain libraries or explicit cabi/tooling contracts
@@ -160,7 +160,7 @@ promotion_condition: rewrite-owned substrate uses a small stable core-type layer
 id: STD-WINDOW
 classification: bootstrap-required
 why: raw window lifecycle/state/control substrate for desktop apps and showcases
-consumers: `grimoires/owned/libs/arcana-desktop`, owned window/showcase proofs
+consumers: `grimoires/libs/arcana-desktop`, owned window/showcase proofs
 current_source: rewrite-owned
 still_needs_rebuild: keep the substrate low-level and continue expanding only where future grimoires prove shared need without inheriting framework policy
 update_note: keep only raw window substrate here; `open`/`open_cfg`/`open_in` are explicitly fallible (`Result[Window, Str]`), `close` is a consuming `take` operation with explicit `Result[Unit, Str]`, `alive` remains a lifecycle query rather than the input/event frame pump, the approved low-level surface now includes explicit title/visibility/decoration/resizable/topmost/cursor-visible state, min/max size constraints, transparency and theme override state, cursor icon/grab/position hooks, text-input enablement, monitor/theme queries, `request_redraw`, `request_attention`, and the matching config/settings records above the opaque `Window` handle; `std.canvas.open`/`alive` remain bootstrap compatibility wrappers, ergonomic desktop loops and policies belong in future Arcana-owned grimoire layers, and the current source-declared opaque `Window` handle is a bootstrap seam rather than a permanently ratified resource model
@@ -169,7 +169,7 @@ promotion_condition: rewrite-owned app/runtime backend implements the approved l
 id: STD-INPUT
 classification: bootstrap-required
 why: raw keyboard/mouse polling and code lookup for desktop apps and showcases
-consumers: `grimoires/owned/libs/arcana-desktop`, owned input/showcase proofs
+consumers: `grimoires/libs/arcana-desktop`, owned input/showcase proofs
 current_source: rewrite-owned
 still_needs_rebuild: keep timing semantics documented and resist drift into shortcut/action policy
 update_note: action mapping and shortcut policy belong in grimoires above `std.input`; edge-triggered and per-frame state now flows through the move-only source-declared opaque `AppFrame` handle produced by `std.events.pump(edit win)`, that frame-advance operation is an explicit window mutation rather than a read-only query, low-level named key/button lookup now includes the common modifier, navigation, function-key, numpad, punctuation, and auxiliary-mouse families needed by future grimoires, and the approved helper floor now includes logical key, physical key, location, text, and repeat accessors over key events without turning `std.input` into an action/router layer
@@ -178,7 +178,7 @@ promotion_condition: rewrite-owned input substrate satisfies the approved low-le
 id: STD-TEXT-INPUT
 classification: bootstrap-required
 why: low-level committed-text and IME-composition settings substrate needed by the desktop app-shell grimoire and future UI/text grimoires
-consumers: `grimoires/owned/libs/arcana-desktop`, future text/UI layers, showcase apps
+consumers: `grimoires/libs/arcana-desktop`, future text/UI layers, showcase apps
 current_source: rewrite-owned
 still_needs_rebuild: keep the surface low-level and host-facing without growing editing, shortcut, or widget policy
 update_note: `std.text_input` is intentionally narrow: window-level enablement plus composition target/settings records only, layered on top of committed-text and composition events from `std.events`; rendering, composition UX, shortcut routing, and text editing remain grimoire-layer responsibilities
@@ -187,7 +187,7 @@ promotion_condition: rewrite-owned runtime provides stable text-input settings b
 id: STD-EVENTS
 classification: bootstrap-required
 why: typed event queue and frame-pump boundary for desktop consumers
-consumers: `grimoires/owned/libs/arcana-desktop`, owned event/showcase proofs
+consumers: `grimoires/libs/arcana-desktop`, owned event/showcase proofs
 current_source: rewrite-owned
 still_needs_rebuild: keep deterministic event semantics documented while avoiding facade-level routing policy in std
 update_note: routing, snapshots, and keybind helpers belong in grimoires above `std.events`; the public event surface is `Option`/`List`-based, assumes a single backend event-record poll per step rather than separate kind/payload probes, requires `poll(edit frame)` / `drain(take frame)` to consume the queue carried by the move-only source-declared opaque `AppFrame` handle so event reads stay aligned with the explicit frame boundary, now includes low-level app resumed/suspended/about-to-wait plus wake notifications, redraw, committed text-input, text-composition start/update/commit/cancel, DPI/theme change, raw mouse-motion, and external file-drop events in addition to window-move and pointer-enter/leave coverage, and key events now carry low-level physical/logical/location/text/repeat metadata while `AppSession` plus `WakeHandle` provide the blocking multi-window app-shell substrate
@@ -196,7 +196,7 @@ promotion_condition: rewrite-owned event substrate and pump semantics are docume
 id: STD-CLIPBOARD
 classification: bootstrap-required
 why: low-level clipboard substrate needed by the desktop app-shell grimoire and future UI/text grimoires
-consumers: `grimoires/owned/libs/arcana-desktop`, future text/UI layers, showcase apps
+consumers: `grimoires/libs/arcana-desktop`, future text/UI layers, showcase apps
 current_source: rewrite-owned
 still_needs_rebuild: keep the surface low-level and host-facing without growing history, selection, or UI policy
 update_note: `std.clipboard` is intentionally narrow: text and raw bytes only, explicit `Result[...]` failure transport, and no framework policy; host implementations may differ under the same contract, but the public Arcana surface stays typed and low-level
@@ -205,7 +205,7 @@ promotion_condition: rewrite-owned runtime provides stable clipboard read/write 
 id: STD-CANVAS
 classification: bootstrap-required
 why: primitive render/text/image substrate for desktop apps and showcase proof
-consumers: `grimoires/owned/libs/arcana-graphics`, `grimoires/owned/libs/arcana-text`, owned window/showcase proofs
+consumers: `grimoires/libs/arcana-graphics`, `grimoires/libs/arcana-text`, owned window/showcase proofs
 current_source: carried
 still_needs_rebuild: backend/runtime ownership under the rewrite and explicit primitive-graphics contract
 update_note: keep canvas low-level; the approved independent-development baseline now includes line draw, filled circle draw, and default-font label measurement in addition to rect/text/image primitives, `open` stays as a bootstrap compatibility wrapper over `std.window.open`, `image_load` is now explicitly fallible (`Result[Image, Str]`), UI kits and richer scene/render abstractions belong in grimoires, and the current source-declared opaque `Image` handle is only a bootstrap seam until the rewrite-owned resource model is revisited
@@ -214,7 +214,7 @@ promotion_condition: rewrite-owned app/runtime backend satisfies primitive rende
 id: STD-TIME
 classification: bootstrap-required
 why: low-level monotonic timing substrate for run-loop and frame-timing grimoires
-consumers: `grimoires/owned/libs/arcana-desktop`, owned showcase/runtime-smoke proofs
+consumers: `grimoires/libs/arcana-desktop`, owned showcase/runtime-smoke proofs
 current_source: rewrite-owned
 still_needs_rebuild: runtime/backend implementation of monotonic clocks beyond the current compile-time substrate
 update_note: keep `std.time` low-level; fixed-step or app-loop policy stays out of std
@@ -223,7 +223,7 @@ promotion_condition: rewrite-owned runtime implements the documented monotonic t
 id: STD-AUDIO
 classification: bootstrap-required
 why: low-level audio output/buffer/playback substrate needed to support a later first-party audio grimoire
-consumers: `grimoires/owned/libs/arcana-audio`, owned audio-smoke proofs
+consumers: `grimoires/libs/arcana-audio`, owned audio-smoke proofs
 current_source: rewrite-owned
 still_needs_rebuild: runtime/backend implementation of audio device/buffer/playback intrinsics
 update_note: keep `std.audio` substrate-level; `default_output`, `buffer_load_wav`, and `play_buffer(edit device, read buffer)` are explicitly fallible (`Result[...]`) acquisition/start operations, `output_close` and playback `stop` are consuming lifecycle operations with explicit `Result[Unit, Str]`, the current bootstrap lane does not implicitly resample or remix so `play_buffer` requires the buffer sample rate/channel count to match the selected device config, output lifecycle/info hooks plus pause/resume/looping/gain/position playback control remain baseline, mixing/streaming policy and ergonomic playback helpers belong in grimoires, and the current source-declared opaque audio handles are bootstrap seams rather than long-term resource-model commitments

@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use arcana_aot::{AotEntrypointArtifact, AotRoutineArtifact};
+use arcana_aot::{AotEntrypointArtifact, AotNativeCallbackArtifact, AotRoutineArtifact};
 use arcana_ir::{
     ExecAvailabilityAttachment as ParsedAvailabilityAttachment,
     ExecCleanupFooter as ParsedCleanupFooter, ExecStmt as ParsedStmt, IrRoutineParam,
@@ -24,11 +24,23 @@ pub struct RuntimeRoutinePlan {
     pub params: Vec<RuntimeParamPlan>,
     pub return_type: Option<IrRoutineType>,
     pub intrinsic_impl: Option<String>,
+    pub native_impl: Option<String>,
     pub impl_target_type: Option<IrRoutineType>,
     pub impl_trait_path: Option<Vec<String>>,
     pub availability: Vec<ParsedAvailabilityAttachment>,
     pub cleanup_footers: Vec<ParsedCleanupFooter>,
     pub statements: Vec<ParsedStmt>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeNativeCallbackPlan {
+    pub package_id: String,
+    pub module_id: String,
+    pub name: String,
+    pub params: Vec<RuntimeParamPlan>,
+    pub return_type: Option<IrRoutineType>,
+    pub target: Vec<String>,
+    pub target_routine_key: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,11 +68,26 @@ pub(crate) fn lower_routine(routine: &AotRoutineArtifact) -> RuntimeRoutinePlan 
         params: routine.params.clone(),
         return_type: routine.return_type.clone(),
         intrinsic_impl: routine.intrinsic_impl.clone(),
+        native_impl: routine.native_impl.clone(),
         impl_target_type: routine.impl_target_type.clone(),
         impl_trait_path: routine.impl_trait_path.clone(),
         availability: routine.availability.clone(),
         cleanup_footers: routine.cleanup_footers.clone(),
         statements: routine.statements.clone(),
+    }
+}
+
+pub(crate) fn lower_native_callback(
+    callback: &AotNativeCallbackArtifact,
+) -> RuntimeNativeCallbackPlan {
+    RuntimeNativeCallbackPlan {
+        package_id: callback.package_id.clone(),
+        module_id: callback.module_id.clone(),
+        name: callback.name.clone(),
+        params: callback.params.clone(),
+        return_type: callback.return_type.clone(),
+        target: callback.target.clone(),
+        target_routine_key: callback.target_routine_key.clone(),
     }
 }
 

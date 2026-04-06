@@ -38,6 +38,7 @@ impl NativeLayoutCatalog {
             (NativeAbiType::Str, NativeAbiRole::Return) => "ArcanaOwnedStr".to_string(),
             (NativeAbiType::Bytes, NativeAbiRole::Param) => "ArcanaBytesView".to_string(),
             (NativeAbiType::Bytes, NativeAbiRole::Return) => "ArcanaOwnedBytes".to_string(),
+            (NativeAbiType::Opaque(_), _) => "u64".to_string(),
             (NativeAbiType::Unit, _) => "()".to_string(),
             (NativeAbiType::Pair(_, _), _) => pair_struct_name(ty, role),
         }
@@ -59,6 +60,7 @@ impl NativeLayoutCatalog {
             (NativeAbiType::Str, NativeAbiRole::Return) => "ArcanaOwnedStr".to_string(),
             (NativeAbiType::Bytes, NativeAbiRole::Param) => "ArcanaBytesView".to_string(),
             (NativeAbiType::Bytes, NativeAbiRole::Return) => "ArcanaOwnedBytes".to_string(),
+            (NativeAbiType::Opaque(_), _) => "uint64_t".to_string(),
             (NativeAbiType::Unit, _) => "void".to_string(),
             (NativeAbiType::Pair(_, _), _) => pair_struct_name(ty, role),
         }
@@ -147,6 +149,7 @@ fn rust_field_type(ty: &NativeAbiType, role: NativeAbiRole) -> String {
         (NativeAbiType::Str, NativeAbiRole::Return) => "ArcanaOwnedStr".to_string(),
         (NativeAbiType::Bytes, NativeAbiRole::Param) => "ArcanaBytesView".to_string(),
         (NativeAbiType::Bytes, NativeAbiRole::Return) => "ArcanaOwnedBytes".to_string(),
+        (NativeAbiType::Opaque(_), _) => "u64".to_string(),
         (NativeAbiType::Unit, _) => "()".to_string(),
         (NativeAbiType::Pair(_, _), _) => pair_struct_name(ty, role),
     }
@@ -160,6 +163,7 @@ fn c_field_type(ty: &NativeAbiType, role: NativeAbiRole) -> String {
         (NativeAbiType::Str, NativeAbiRole::Return) => "ArcanaOwnedStr".to_string(),
         (NativeAbiType::Bytes, NativeAbiRole::Param) => "ArcanaBytesView".to_string(),
         (NativeAbiType::Bytes, NativeAbiRole::Return) => "ArcanaOwnedBytes".to_string(),
+        (NativeAbiType::Opaque(_), _) => "uint64_t".to_string(),
         (NativeAbiType::Unit, _) => "void".to_string(),
         (NativeAbiType::Pair(_, _), _) => pair_struct_name(ty, role),
     }
@@ -179,6 +183,12 @@ fn mangle_type_name(ty: &NativeAbiType) -> String {
         NativeAbiType::Bool => "Bool".to_string(),
         NativeAbiType::Str => "Str".to_string(),
         NativeAbiType::Bytes => "Bytes".to_string(),
+        NativeAbiType::Opaque(name) => format!(
+            "Opaque__{}",
+            name.chars()
+                .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+                .collect::<String>()
+        ),
         NativeAbiType::Unit => "Unit".to_string(),
         NativeAbiType::Pair(left, right) => {
             format!(

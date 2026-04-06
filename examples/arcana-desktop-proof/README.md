@@ -32,7 +32,7 @@ That prints:
 - `smoke_score=767`
 
 The desktop runtime DLL is selected through the normal dependency metadata on `app/book.toml`:
-- `arcana_desktop = { path = "../../../grimoires/owned/libs/arcana-desktop", native_child = "default" }`
+- `arcana_desktop = { path = "../../../grimoires/libs/arcana-desktop", native_child = "default" }`
 
 That keeps the Arcana source-level desktop APIs in the app package while staging the sibling `arcwin.dll` child product through declared native product metadata.
 

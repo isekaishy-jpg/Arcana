@@ -55,12 +55,27 @@ pub struct AotRoutineArtifact {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intrinsic_impl: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_impl: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub impl_target_type: Option<IrRoutineType>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub impl_trait_path: Option<Vec<String>>,
     pub availability: Vec<ExecAvailabilityAttachment>,
     pub cleanup_footers: Vec<ExecCleanupFooter>,
     pub statements: Vec<ExecStmt>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AotNativeCallbackArtifact {
+    pub package_id: String,
+    pub module_id: String,
+    pub name: String,
+    pub params: Vec<IrRoutineParam>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_type: Option<IrRoutineType>,
+    pub target: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_routine_key: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -119,6 +134,8 @@ pub struct AotPackageArtifact {
     pub foreword_registrations: Vec<IrForewordRegistrationRow>,
     pub entrypoints: Vec<AotEntrypointArtifact>,
     pub routines: Vec<AotRoutineArtifact>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub native_callbacks: Vec<AotNativeCallbackArtifact>,
     pub owners: Vec<AotOwnerArtifact>,
     pub modules: Vec<AotPackageModuleArtifact>,
 }

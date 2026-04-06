@@ -19,16 +19,16 @@ export record ConfigDoc:
     order: List[Str]
 
 fn empty_string_list() -> List[Str]:
-    return std.collections.list.new[Str] :: :: call
+    return std.collections.list.empty[Str] :: :: call
 
 fn empty_string_map() -> Map[Str, Str]:
-    return std.collections.map.new[Str, Str] :: :: call
+    return std.collections.map.empty[Str, Str] :: :: call
 
 fn empty_section_map() -> Map[Str, std.config.ConfigSection]:
-    return std.collections.map.new[Str, std.config.ConfigSection] :: :: call
+    return std.collections.map.empty[Str, std.config.ConfigSection] :: :: call
 
 fn empty_entry_list() -> List[std.config.ConfigEntry]:
-    return std.collections.list.new[std.config.ConfigEntry] :: :: call
+    return std.collections.list.empty[std.config.ConfigEntry] :: :: call
 
 fn empty_section_named(read name: Str) -> std.config.ConfigSection:
     return std.config.ConfigSection :: name = name, values = (std.config.empty_string_map :: :: call), order = (std.config.empty_string_list :: :: call) :: call
@@ -175,7 +175,7 @@ fn parse_string_array_literal(read text: Str) -> Result[List[Str], Str]:
     let n = std.text.len_bytes :: value :: call
     if n < 2 or (std.text.byte_at :: value, 0 :: call) != 91 or (std.text.byte_at :: value, n - 1 :: call) != 93:
         return Result.Err[List[Str], Str] :: "expected string array literal" :: call
-    let mut out = std.collections.list.new[Str] :: :: call
+    let mut out = std.collections.list.empty[Str] :: :: call
     let mut i = 1
     while i < (n - 1):
         while i < (n - 1) and (std.text.is_space_byte :: (std.text.byte_at :: value, i :: call) :: call):
@@ -302,7 +302,11 @@ fn copy_string_map(read values: Map[Str, Str]) -> Map[Str, Str]:
     return out
 
 fn copy_section(read section: std.config.ConfigSection) -> std.config.ConfigSection:
-    return std.config.ConfigSection :: name = section.name, values = (std.config.copy_string_map :: section.values :: call), order = (std.config.copy_string_list :: section.order :: call) :: call
+    let mut copy = section
+    record place std.config.ConfigSection from section -> copy -return copy
+        values = std.config.copy_string_map :: section.values :: call
+        order = std.config.copy_string_list :: section.order :: call
+    return copy
 
 fn section_entries(read section: std.config.ConfigSection) -> List[std.config.ConfigEntry]:
     let mut out = std.config.empty_entry_list :: :: call

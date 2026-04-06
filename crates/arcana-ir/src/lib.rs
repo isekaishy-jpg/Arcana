@@ -39,8 +39,8 @@ pub use executable::{
     ExecCleanupFooter, ExecConstructContributionMode, ExecConstructDestination, ExecConstructLine,
     ExecConstructRegion, ExecDynamicDispatch, ExecExpr, ExecHeadedModifier, ExecHeaderAttachment,
     ExecMatchArm, ExecMatchPattern, ExecMemoryDetailLine, ExecMemorySpecDecl, ExecNamedBindingId,
-    ExecPhraseArg, ExecPhraseQualifierKind, ExecRecycleLine, ExecRecycleLineKind, ExecStmt,
-    ExecUnaryOp,
+    ExecPhraseArg, ExecPhraseQualifierKind, ExecRecordRegion, ExecRecycleLine,
+    ExecRecycleLineKind, ExecStmt, ExecUnaryOp,
 };
 pub use routine_signature::{
     IrRoutineParam, IrRoutineProvenance, IrRoutineType, IrRoutineTypeKind, parse_routine_type_text,
@@ -206,6 +206,7 @@ pub struct IrRoutine {
     pub params: Vec<IrRoutineParam>,
     pub return_type: Option<IrRoutineType>,
     pub intrinsic_impl: Option<String>,
+    pub native_impl: Option<String>,
     pub impl_target_type: Option<IrRoutineType>,
     pub impl_trait_path: Option<Vec<String>>,
     pub availability: Vec<ExecAvailabilityAttachment>,
@@ -213,6 +214,17 @@ pub struct IrRoutine {
     pub cold_hint: bool,
     pub cleanup_footers: Vec<ExecCleanupFooter>,
     pub statements: Vec<ExecStmt>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IrNativeCallbackDecl {
+    pub package_id: String,
+    pub module_id: String,
+    pub name: String,
+    pub params: Vec<IrRoutineParam>,
+    pub return_type: Option<IrRoutineType>,
+    pub target: Vec<String>,
+    pub target_routine_key: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -261,6 +273,7 @@ pub struct IrPackage {
     pub foreword_registrations: Vec<IrForewordRegistrationRow>,
     pub entrypoints: Vec<IrEntrypoint>,
     pub routines: Vec<IrRoutine>,
+    pub native_callbacks: Vec<IrNativeCallbackDecl>,
     pub owners: Vec<IrOwnerDecl>,
 }
 
@@ -355,6 +368,27 @@ pub fn disambiguate_package_routine_keys(package: &mut IrPackage) -> Result<(), 
                 &owner.package_id,
                 &mut owner_exit.condition,
             )?;
+        }
+    }
+    for callback in &mut package.native_callbacks {
+        if let Some(target_routine_key) = &mut callback.target_routine_key
+            && duplicate_keys.contains(target_routine_key)
+        {
+            let target_package_id = resolve_duplicate_routine_target_package_id(
+                &package_display_names,
+                &package_direct_dep_ids,
+                &callback.package_id,
+                target_routine_key,
+            )?;
+            *target_routine_key = routine_key_map
+                .get(&(target_package_id, target_routine_key.clone()))
+                .ok_or_else(|| {
+                    format!(
+                        "missing disambiguated callback target routine key for `{}` in package `{}`",
+                        callback.name, callback.package_id
+                    )
+                })?
+                .clone();
         }
     }
 
@@ -708,6 +742,71 @@ fn rewrite_stmt_routine_keys(
             }
             Ok(())
         }
+        ExecStmt::Record(region) => {
+            rewrite_expr_routine_keys(
+                package_display_names,
+                package_direct_dep_ids,
+                duplicate_keys,
+                routine_key_map,
+                current_package_id,
+                &mut region.target,
+            )?;
+            if let Some(base) = &mut region.base {
+                rewrite_expr_routine_keys(
+                    package_display_names,
+                    package_direct_dep_ids,
+                    duplicate_keys,
+                    routine_key_map,
+                    current_package_id,
+                    base,
+                )?;
+            }
+            if let Some(ExecConstructDestination::Place { target }) = &mut region.destination {
+                rewrite_assign_target_routine_keys(
+                    package_display_names,
+                    package_direct_dep_ids,
+                    duplicate_keys,
+                    routine_key_map,
+                    current_package_id,
+                    target,
+                )?;
+            }
+            if let Some(modifier) = &mut region.default_modifier
+                && let Some(payload) = &mut modifier.payload
+            {
+                rewrite_expr_routine_keys(
+                    package_display_names,
+                    package_direct_dep_ids,
+                    duplicate_keys,
+                    routine_key_map,
+                    current_package_id,
+                    payload,
+                )?;
+            }
+            for line in &mut region.lines {
+                rewrite_expr_routine_keys(
+                    package_display_names,
+                    package_direct_dep_ids,
+                    duplicate_keys,
+                    routine_key_map,
+                    current_package_id,
+                    &mut line.value,
+                )?;
+                if let Some(modifier) = &mut line.modifier
+                    && let Some(payload) = &mut modifier.payload
+                {
+                    rewrite_expr_routine_keys(
+                        package_display_names,
+                        package_direct_dep_ids,
+                        duplicate_keys,
+                        routine_key_map,
+                        current_package_id,
+                        payload,
+                    )?;
+                }
+            }
+            Ok(())
+        }
         ExecStmt::MemorySpec(spec) => {
             if let Some(modifier) = &mut spec.default_modifier
                 && let Some(payload) = &mut modifier.payload
@@ -858,6 +957,71 @@ fn rewrite_expr_routine_keys(
                 current_package_id,
                 &mut region.target,
             )?;
+            if let Some(ExecConstructDestination::Place { target }) = &mut region.destination {
+                rewrite_assign_target_routine_keys(
+                    package_display_names,
+                    package_direct_dep_ids,
+                    duplicate_keys,
+                    routine_key_map,
+                    current_package_id,
+                    target,
+                )?;
+            }
+            if let Some(modifier) = &mut region.default_modifier
+                && let Some(payload) = &mut modifier.payload
+            {
+                rewrite_expr_routine_keys(
+                    package_display_names,
+                    package_direct_dep_ids,
+                    duplicate_keys,
+                    routine_key_map,
+                    current_package_id,
+                    payload,
+                )?;
+            }
+            for line in &mut region.lines {
+                rewrite_expr_routine_keys(
+                    package_display_names,
+                    package_direct_dep_ids,
+                    duplicate_keys,
+                    routine_key_map,
+                    current_package_id,
+                    &mut line.value,
+                )?;
+                if let Some(modifier) = &mut line.modifier
+                    && let Some(payload) = &mut modifier.payload
+                {
+                    rewrite_expr_routine_keys(
+                        package_display_names,
+                        package_direct_dep_ids,
+                        duplicate_keys,
+                        routine_key_map,
+                        current_package_id,
+                        payload,
+                    )?;
+                }
+            }
+            Ok(())
+        }
+        ExecExpr::RecordRegion(region) => {
+            rewrite_expr_routine_keys(
+                package_display_names,
+                package_direct_dep_ids,
+                duplicate_keys,
+                routine_key_map,
+                current_package_id,
+                &mut region.target,
+            )?;
+            if let Some(base) = &mut region.base {
+                rewrite_expr_routine_keys(
+                    package_display_names,
+                    package_direct_dep_ids,
+                    duplicate_keys,
+                    routine_key_map,
+                    current_package_id,
+                    base,
+                )?;
+            }
             if let Some(ExecConstructDestination::Place { target }) = &mut region.destination {
                 rewrite_assign_target_routine_keys(
                     package_display_names,
@@ -2611,6 +2775,10 @@ fn infer_expr_hir_type(scope: &ResolvedRenderScope<'_>, expr: &HirExpr) -> Optio
         return Some(inferred);
     }
     match expr {
+        HirExpr::ConstructRegion(region) => flatten_callable_expr_path(&region.target)
+            .and_then(|path| resolve_construct_result_type_for_scope(scope, &path)),
+        HirExpr::RecordRegion(region) => flatten_callable_expr_path(&region.target)
+            .and_then(|path| resolve_record_result_type_for_scope(scope, &path)),
         HirExpr::Pair { left, right } => Some(pair_hir_type(
             infer_expr_hir_type(scope, left)?,
             infer_expr_hir_type(scope, right)?,
@@ -2693,6 +2861,35 @@ fn resolve_construct_target_shape_for_scope(
     ))
 }
 
+fn resolve_record_target_fields_for_scope(
+    scope: &ResolvedRenderScope<'_>,
+    path: &[String],
+) -> Option<BTreeMap<String, HirType>> {
+    let resolved = lookup_symbol_path(scope.workspace, scope.resolved_module, path)?;
+    let HirSymbolBody::Record { fields } = &resolved.symbol.body else {
+        return None;
+    };
+    let mut lowered = BTreeMap::new();
+    for field in fields {
+        lowered.insert(
+            field.name.clone(),
+            canonicalize_scope_hir_type(scope, &field.ty)?,
+        );
+    }
+    Some(lowered)
+}
+
+fn resolve_record_fields_for_hir_type(
+    scope: &ResolvedRenderScope<'_>,
+    ty: &HirType,
+) -> Option<BTreeMap<String, HirType>> {
+    let path = match &ty.kind {
+        HirTypeKind::Path(path) | HirTypeKind::Apply { base: path, .. } => &path.segments,
+        _ => return None,
+    };
+    resolve_record_target_fields_for_scope(scope, path)
+}
+
 fn canonical_scope_type_from_path(scope: &ResolvedRenderScope<'_>, path: &[String]) -> HirType {
     let segments = lookup_symbol_path(scope.workspace, scope.resolved_module, path)
         .map(resolved_symbol_path)
@@ -2720,6 +2917,50 @@ fn resolve_construct_result_type_for_scope(
     Some(canonical_scope_type_from_path(scope, &canonical_path))
 }
 
+fn resolve_record_result_type_for_scope(
+    scope: &ResolvedRenderScope<'_>,
+    path: &[String],
+) -> Option<HirType> {
+    resolve_record_target_fields_for_scope(scope, path)?;
+    Some(canonical_scope_type_from_path(scope, path))
+}
+
+fn collect_record_copied_fields(
+    scope: &ResolvedRenderScope<'_>,
+    region: &arcana_hir::HirRecordRegion,
+) -> Vec<String> {
+    let Some(target_path) = flatten_callable_expr_path(&region.target) else {
+        return Vec::new();
+    };
+    let Some(target_fields) = resolve_record_target_fields_for_scope(scope, &target_path) else {
+        return Vec::new();
+    };
+    let Some(base) = &region.base else {
+        return Vec::new();
+    };
+    let Some(base_ty) = infer_expr_hir_type(scope, base).and_then(|ty| canonicalize_scope_hir_type(scope, &ty)) else {
+        return Vec::new();
+    };
+    let Some(base_fields) = resolve_record_fields_for_hir_type(scope, &base_ty) else {
+        return Vec::new();
+    };
+    let explicit = region
+        .lines
+        .iter()
+        .map(|line| line.name.as_str())
+        .collect::<BTreeSet<_>>();
+    target_fields
+        .into_iter()
+        .filter_map(|(field, ty)| {
+            (!explicit.contains(field.as_str())
+                && base_fields
+                    .get(&field)
+                    .is_some_and(|base_ty| base_ty == &ty))
+            .then_some(field)
+        })
+        .collect()
+}
+
 fn infer_construct_contribution_mode(
     scope: &ResolvedRenderScope<'_>,
     region: &arcana_hir::HirConstructRegion,
@@ -2735,6 +2976,43 @@ fn infer_construct_contribution_mode(
         }
         _ => None,
     }) else {
+        return ExecConstructContributionMode::Direct;
+    };
+    let expected_key = expected_ty.render();
+    let Some(actual_ty) = infer_expr_hir_type(scope, &line.value)
+        .and_then(|ty| canonicalize_scope_hir_type(scope, &ty))
+    else {
+        return ExecConstructContributionMode::Direct;
+    };
+    if actual_ty.render() == expected_key {
+        return ExecConstructContributionMode::Direct;
+    }
+    if type_option_payload_for_construct(&actual_ty)
+        .is_some_and(|payload| payload.render() == expected_key)
+    {
+        return ExecConstructContributionMode::OptionPayload;
+    }
+    if type_result_payloads_for_construct(&actual_ty)
+        .is_some_and(|(ok, _)| ok.render() == expected_key)
+    {
+        return ExecConstructContributionMode::ResultPayload;
+    }
+    ExecConstructContributionMode::Direct
+}
+
+fn infer_record_contribution_mode(
+    scope: &ResolvedRenderScope<'_>,
+    region: &arcana_hir::HirRecordRegion,
+    line: &arcana_hir::HirConstructLine,
+) -> ExecConstructContributionMode {
+    let Some(target_path) = flatten_callable_expr_path(&region.target) else {
+        return ExecConstructContributionMode::Direct;
+    };
+    let Some(expected_ty) =
+        resolve_record_target_fields_for_scope(scope, &target_path).and_then(|fields| {
+            fields.get(&line.name).cloned()
+        })
+    else {
         return ExecConstructContributionMode::Direct;
     };
     let expected_key = expected_ty.render();
@@ -3633,6 +3911,42 @@ fn lower_construct_region_exec(region: &arcana_hir::HirConstructRegion) -> ExecC
     }
 }
 
+fn lower_record_region_exec(region: &arcana_hir::HirRecordRegion) -> ExecRecordRegion {
+    ExecRecordRegion {
+        completion: region.completion.as_str().to_string(),
+        target: Box::new(lower_exec_expr(&region.target)),
+        base: region.base.as_ref().map(|base| Box::new(lower_exec_expr(base))),
+        destination: region
+            .destination
+            .as_ref()
+            .map(|destination| match destination {
+                arcana_hir::HirConstructDestination::Deliver { name } => {
+                    ExecConstructDestination::Deliver { name: name.clone() }
+                }
+                arcana_hir::HirConstructDestination::Place { target } => {
+                    ExecConstructDestination::Place {
+                        target: lower_assign_target_exec(target),
+                    }
+                }
+            }),
+        default_modifier: region
+            .default_modifier
+            .as_ref()
+            .map(lower_headed_modifier_exec),
+        lines: region
+            .lines
+            .iter()
+            .map(|line| ExecConstructLine {
+                name: line.name.clone(),
+                value: lower_exec_expr(&line.value),
+                mode: ExecConstructContributionMode::Direct,
+                modifier: line.modifier.as_ref().map(lower_headed_modifier_exec),
+            })
+            .collect(),
+        copied_fields: Vec::new(),
+    }
+}
+
 fn lower_construct_region_exec_resolved(
     region: &arcana_hir::HirConstructRegion,
     scope: &ResolvedRenderScope<'_>,
@@ -3673,6 +3987,51 @@ fn lower_construct_region_exec_resolved(
     }
 }
 
+fn lower_record_region_exec_resolved(
+    region: &arcana_hir::HirRecordRegion,
+    scope: &ResolvedRenderScope<'_>,
+) -> ExecRecordRegion {
+    ExecRecordRegion {
+        completion: region.completion.as_str().to_string(),
+        target: Box::new(lower_exec_expr_resolved(&region.target, scope)),
+        base: region
+            .base
+            .as_ref()
+            .map(|base| Box::new(lower_exec_expr_resolved(base, scope))),
+        destination: region
+            .destination
+            .as_ref()
+            .map(|destination| match destination {
+                arcana_hir::HirConstructDestination::Deliver { name } => {
+                    ExecConstructDestination::Deliver { name: name.clone() }
+                }
+                arcana_hir::HirConstructDestination::Place { target } => {
+                    ExecConstructDestination::Place {
+                        target: lower_assign_target_exec_resolved(target, scope),
+                    }
+                }
+            }),
+        default_modifier: region
+            .default_modifier
+            .as_ref()
+            .map(|modifier| lower_headed_modifier_exec_resolved(modifier, scope)),
+        lines: region
+            .lines
+            .iter()
+            .map(|line| ExecConstructLine {
+                name: line.name.clone(),
+                value: lower_exec_expr_resolved(&line.value, scope),
+                mode: infer_record_contribution_mode(scope, region, line),
+                modifier: line
+                    .modifier
+                    .as_ref()
+                    .map(|modifier| lower_headed_modifier_exec_resolved(modifier, scope)),
+            })
+            .collect(),
+        copied_fields: collect_record_copied_fields(scope, region),
+    }
+}
+
 fn lower_exec_expr(expr: &HirExpr) -> ExecExpr {
     match expr {
         HirExpr::Path { segments } => ExecExpr::Path(segments.clone()),
@@ -3700,6 +4059,9 @@ fn lower_exec_expr(expr: &HirExpr) -> ExecExpr {
         },
         HirExpr::ConstructRegion(region) => {
             ExecExpr::ConstructRegion(Box::new(lower_construct_region_exec(region)))
+        }
+        HirExpr::RecordRegion(region) => {
+            ExecExpr::RecordRegion(Box::new(lower_record_region_exec(region)))
         }
         HirExpr::Chain {
             style,
@@ -3827,6 +4189,9 @@ fn lower_exec_expr_resolved(expr: &HirExpr, scope: &ResolvedRenderScope<'_>) -> 
         },
         HirExpr::ConstructRegion(region) => ExecExpr::ConstructRegion(Box::new(
             lower_construct_region_exec_resolved(region, scope),
+        )),
+        HirExpr::RecordRegion(region) => ExecExpr::RecordRegion(Box::new(
+            lower_record_region_exec_resolved(region, scope),
         )),
         HirExpr::Chain {
             style,
@@ -4188,6 +4553,9 @@ fn lower_exec_stmt_sequence(statement: &HirStatement) -> Vec<ExecStmt> {
         }],
         HirStatementKind::Construct(region) => {
             vec![ExecStmt::Construct(lower_construct_region_exec(region))]
+        }
+        HirStatementKind::Record(region) => {
+            vec![ExecStmt::Record(lower_record_region_exec(region))]
         }
         HirStatementKind::MemorySpec(spec) => {
             vec![ExecStmt::MemorySpec(lower_module_memory_spec_exec(spec))]
@@ -4697,6 +5065,16 @@ fn lower_exec_stmt_resolved(
             }
             (vec![lowered], Vec::new())
         }
+        HirStatementKind::Record(region) => {
+            let lowered = ExecStmt::Record(lower_record_region_exec_resolved(region, scope));
+            if let Some(arcana_hir::HirConstructDestination::Deliver { name }) = &region.destination
+                && let Some(target_path) = flatten_callable_expr_path(&region.target)
+                && let Some(ty) = resolve_record_result_type_for_scope(scope, &target_path)
+            {
+                scope.value_scope.insert(name.clone(), ty);
+            }
+            (vec![lowered], Vec::new())
+        }
         HirStatementKind::MemorySpec(spec) => (
             vec![ExecStmt::MemorySpec(ExecMemorySpecDecl {
                 family: spec.family.as_str().to_string(),
@@ -5014,6 +5392,7 @@ fn lower_routine(
         params: lower_routine_params(symbol),
         return_type: symbol.return_type.as_ref().map(lower_symbol_routine_type),
         intrinsic_impl: symbol.intrinsic_impl.clone(),
+        native_impl: symbol.native_impl.clone(),
         impl_target_type: impl_decl.map(|decl| lower_symbol_routine_type(&decl.target_type)),
         impl_trait_path: impl_decl
             .and_then(|decl| decl.trait_path.as_ref().map(canonical_impl_trait_path)),
@@ -5079,6 +5458,7 @@ fn lower_routine_resolved(
             .as_ref()
             .map(|ty| lower_resolved_routine_type(workspace, resolved_module, ty)),
         intrinsic_impl: symbol.intrinsic_impl.clone(),
+        native_impl: symbol.native_impl.clone(),
         impl_target_type: impl_decl
             .map(|decl| lower_resolved_routine_type(workspace, resolved_module, &decl.target_type)),
         impl_trait_path: impl_decl
@@ -5227,6 +5607,30 @@ fn lower_package(package: &HirPackageSummary) -> IrPackage {
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
+    let native_callbacks = package
+        .modules
+        .iter()
+        .flat_map(|module| {
+            module.native_callbacks.iter().map(|callback| IrNativeCallbackDecl {
+                package_id: package.package_name.clone(),
+                module_id: module.module_id.clone(),
+                name: callback.name.clone(),
+                params: callback
+                    .params
+                    .iter()
+                    .map(|param| IrRoutineParam {
+                        binding_id: 0,
+                        mode: param.mode.as_ref().map(|mode| mode.as_str().to_string()),
+                        name: param.name.clone(),
+                        ty: lower_symbol_routine_type(&param.ty),
+                    })
+                    .collect(),
+                return_type: callback.return_type.as_ref().map(lower_symbol_routine_type),
+                target: callback.target.clone(),
+                target_routine_key: None,
+            })
+        })
+        .collect::<Vec<_>>();
 
     let mut lowered = IrPackage {
         package_id: package.package_name.clone(),
@@ -5248,6 +5652,7 @@ fn lower_package(package: &HirPackageSummary) -> IrPackage {
         foreword_registrations: Vec::new(),
         entrypoints,
         routines,
+        native_callbacks,
         owners,
     };
     lowered.runtime_requirements = derive_runtime_requirements(&lowered);
@@ -5275,6 +5680,9 @@ fn retarget_package_identity(package: &mut IrPackage, package_id: &str) {
     }
     for routine in &mut package.routines {
         routine.package_id = package_id.to_string();
+    }
+    for callback in &mut package.native_callbacks {
+        callback.package_id = package_id.to_string();
     }
     for owner in &mut package.owners {
         owner.package_id = package_id.to_string();
@@ -5394,6 +5802,68 @@ pub fn lower_workspace_package_with_resolution(
                 module,
             )?);
             Ok(routines)
+        })
+        .collect::<Result<Vec<_>, String>>()?
+        .into_iter()
+        .flatten()
+        .collect();
+    lowered.native_callbacks = package
+        .summary
+        .modules
+        .iter()
+        .map(|module| {
+            let Some(resolved_module) = resolved_package.module(&module.module_id) else {
+                return Ok(Vec::new());
+            };
+            module
+                .native_callbacks
+                .iter()
+                .map(|callback| {
+                    let Some(symbol_ref) =
+                        lookup_symbol_path(workspace, resolved_module, &callback.target)
+                    else {
+                        return Err(format!(
+                            "native callback `{}` in module `{}` targets unresolved path `{}`",
+                            callback.name,
+                            module.module_id,
+                            callback.target.join(".")
+                        ));
+                    };
+                    if !is_routine_symbol(symbol_ref.symbol) {
+                        return Err(format!(
+                            "native callback `{}` in module `{}` must target a routine path, found `{}`",
+                            callback.name, module.module_id, callback.target.join(".")
+                        ));
+                    }
+                    Ok(IrNativeCallbackDecl {
+                        package_id: package.package_id.clone(),
+                        module_id: module.module_id.clone(),
+                        name: callback.name.clone(),
+                        params: callback
+                            .params
+                            .iter()
+                            .map(|param| IrRoutineParam {
+                                binding_id: 0,
+                                mode: param.mode.map(|mode| mode.as_str().to_string()),
+                                name: param.name.clone(),
+                                ty: lower_resolved_routine_type(
+                                    workspace,
+                                    resolved_module,
+                                    &param.ty,
+                                ),
+                            })
+                            .collect(),
+                        return_type: callback.return_type.as_ref().map(|ty| {
+                            lower_resolved_routine_type(workspace, resolved_module, ty)
+                        }),
+                        target: callback.target.clone(),
+                        target_routine_key: Some(routine_key_for_symbol(
+                            symbol_ref.module_id,
+                            symbol_ref.symbol_index,
+                        )),
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()
         })
         .collect::<Result<Vec<_>, String>>()?
         .into_iter()
@@ -6104,6 +6574,143 @@ mod tests {
         assert!(
             resolved_routine.is_some(),
             "construct deliver survivor should resolve bare method"
+        );
+    }
+
+    #[test]
+    fn lower_workspace_package_with_resolution_collects_record_copied_fields() {
+        let app_summary = build_package_summary(
+            "app",
+            vec![
+                lower_module_text(
+                    "app",
+                    concat!(
+                        "record Seed:\n",
+                        "    title: Str\n",
+                        "    count: Int\n",
+                        "record Widget:\n",
+                        "    title: Str\n",
+                        "    count: Int\n",
+                        "    ready: Bool\n",
+                        "fn main() -> Int:\n",
+                        "    let base = Seed :: title = \"seed\", count = 4 :: call\n",
+                        "    let built = record yield Widget from base -return 0\n",
+                        "        ready = true\n",
+                        "    return built.count\n",
+                    ),
+                )
+                .expect("module should lower"),
+            ],
+        );
+        let app_layout = build_package_layout(
+            &app_summary,
+            BTreeMap::from([(
+                "app".to_string(),
+                Path::new("C:/repo/app/src/shelf.arc").to_path_buf(),
+            )]),
+            BTreeMap::new(),
+        )
+        .expect("app layout should build");
+        let app_workspace = build_workspace_package(
+            "app".to_string(),
+            Path::new("C:/repo/app").to_path_buf(),
+            BTreeSet::new(),
+            app_summary,
+            app_layout,
+        )
+        .expect("app workspace should build");
+
+        let workspace =
+            build_workspace_summary(vec![app_workspace]).expect("workspace should build");
+        let resolved = resolve_workspace(&workspace).expect("workspace should resolve");
+        let package = workspace.package("app").expect("app package should exist");
+
+        let lowered = lower_workspace_package_with_resolution(&workspace, &resolved, package)
+            .expect("workspace package should lower");
+        let main = lowered
+            .routines
+            .iter()
+            .find(|routine| routine.symbol_name == "main")
+            .expect("main routine should exist");
+        let ExecStmt::Let { value, .. } = &main.statements[1] else {
+            panic!("expected let binding for record yield");
+        };
+        let ExecExpr::RecordRegion(region) = value else {
+            panic!("expected record region expression");
+        };
+        assert_eq!(
+            region.copied_fields,
+            vec!["count".to_string(), "title".to_string()],
+            "resolved lowering should carry exact copied fields for record lift",
+        );
+    }
+
+    #[test]
+    fn lower_workspace_package_with_resolution_collects_record_copied_fields_from_construct_base()
+    {
+        let app_summary = build_package_summary(
+            "app",
+            vec![
+                lower_module_text(
+                    "app",
+                    concat!(
+                        "record Widget:\n",
+                        "    ready: Bool\n",
+                        "    title: Str\n",
+                        "    count: Int\n",
+                        "fn main() -> Int:\n",
+                        "    let base = construct yield Widget -return 0\n",
+                        "        ready = false\n",
+                        "        title = \"seed\"\n",
+                        "        count = 4\n",
+                        "    let built = record yield Widget from base -return 0\n",
+                        "        ready = true\n",
+                        "    return 0\n",
+                    ),
+                )
+                .expect("module should lower"),
+            ],
+        );
+        let app_layout = build_package_layout(
+            &app_summary,
+            BTreeMap::from([(
+                "app".to_string(),
+                Path::new("C:/repo/app/src/shelf.arc").to_path_buf(),
+            )]),
+            BTreeMap::new(),
+        )
+        .expect("app layout should build");
+        let app_workspace = build_workspace_package(
+            "app".to_string(),
+            Path::new("C:/repo/app").to_path_buf(),
+            BTreeSet::new(),
+            app_summary,
+            app_layout,
+        )
+        .expect("app workspace should build");
+
+        let workspace =
+            build_workspace_summary(vec![app_workspace]).expect("workspace should build");
+        let resolved = resolve_workspace(&workspace).expect("workspace should resolve");
+        let package = workspace.package("app").expect("app package should exist");
+
+        let lowered = lower_workspace_package_with_resolution(&workspace, &resolved, package)
+            .expect("workspace package should lower");
+        let main = lowered
+            .routines
+            .iter()
+            .find(|routine| routine.symbol_name == "main")
+            .expect("main routine should exist");
+        let ExecStmt::Let { value, .. } = &main.statements[1] else {
+            panic!("expected let binding for record yield");
+        };
+        let ExecExpr::RecordRegion(region) = value else {
+            panic!("expected record region expression");
+        };
+        assert_eq!(
+            region.copied_fields,
+            vec!["count".to_string(), "title".to_string()],
+            "resolved lowering should copy omitted same-type fields from construct bases",
         );
     }
 

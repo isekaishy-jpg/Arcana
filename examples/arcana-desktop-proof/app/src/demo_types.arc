@@ -1,9 +1,16 @@
+import arcana_text.raster
 import std.collections.list
+import std.option
+use std.option.Option
 
 record Demo:
     smoke_mode: Bool
     ui_smoke_mode: Bool
     exercise_second_window: Bool
+    probe_mode: Bool
+    probe_measure_count: Int
+    probe_label_count: Int
+    text_renderer: arcana_text.raster.TextRenderer
     dirty: Bool
     title_dirty: Bool
     smoke_printed: Bool
@@ -48,3 +55,8 @@ record Demo:
     body_page_index: Int
     body_wrap_width: Int
     body_lines: List[Str]
+    body_stream_ready: Bool
+    body_stream_page_index: Int
+    body_stream_layout: (Int, Int)
+    body_stream_color: Int
+    body_stream: Option[arcana_text.raster.GlyphDrawStream]

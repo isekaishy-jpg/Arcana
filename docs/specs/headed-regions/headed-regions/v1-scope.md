@@ -8,7 +8,7 @@ Implementation note:
 - Parser/frontend/HIR/IR/runtime support is now landed for the current rewrite.
 - `conformance/selfhost_language_matrix.toml` now includes `headed_regions_v1`.
 - The implementation keeps headed regions first-class through executable IR/runtime instead of desugaring them away.
-- Native/AOT support is backend-stable in v1: `Memory`, bool-only `recycle`, and `bind require` participate in the current direct subset, while general `construct`, payload-bearing headed-region lines, and named owner exits fall back to runtime dispatch inside native bundles.
+- Native/AOT support is backend-stable in v1: `Memory`, bool-only `recycle`, and `bind require` participate in the current direct subset, while general `construct`, general `record`, payload-bearing headed-region lines, and named owner exits fall back to runtime dispatch inside native bundles.
 
 ## Core Contract
 
@@ -18,6 +18,7 @@ Implementation note:
 - The current approved heads are:
   - `recycle`
   - `construct`
+  - `record`
   - `bind`
   - `Memory`
 - User-defined heads are not part of v1.
@@ -56,7 +57,7 @@ Placement rules:
 
 - Headed regions are inner indented blocks only.
 - `Memory` is also legal at module scope as a memory-spec declaration.
-- `construct yield` is the only expression-form headed region in v1.
+- `construct yield` and `record yield` are the expression-form headed regions in v1.
 - They are not top-level attachments.
 - This scope does not define any generic `-name` footer family.
 - Cleanup footers remain governed by `docs/specs/page-rollups/page-rollups/v1-scope.md`.
@@ -108,6 +109,47 @@ construct <completion_clause> -<default_modifier>
 - Participating lines are named contributions:
   - `field = expr` for records
   - `payload = expr` for single-payload enum variants
+
+### `record`
+
+- `record` is a record-specific structural region.
+- Ride:
+  - each participating top-level line contributes explicit field values to a record result, optionally refining or lifting from a compatible base record value
+- Shape:
+
+```arcana
+record <completion_clause> -<default_modifier>
+    <record_field_line>
+    <record_field_line> -<override_modifier>
+```
+
+Compatible base form:
+
+```arcana
+record <completion_clause> from <base_expr> -<default_modifier>
+    <record_field_line>
+    <record_field_line> -<override_modifier>
+```
+
+- Success:
+  - the record ride is satisfied
+  - the record result is completed by the declared completion clause
+- Current completion-clause family includes:
+  - `yield <record_path>`
+  - `deliver <record_path> -> <name>`
+  - `place <record_path> -> <target>`
+- Default/per-line modifier class:
+  - failed contribution or sanctioned acquisition behavior
+- Participating lines are record field contributions only:
+  - `field = expr`
+- Base-copy contract in v1:
+  - explicit field lines override base-provided values
+  - omitted target fields copy from `from <base_expr>` only when the base exposes a same-named field with exactly the same type
+  - copy is shallow and exact-field only
+  - no recursive merge, nested field assignment, inferred renames, or implicit conversions
+- Target restriction:
+  - `record` targets must resolve to records only
+  - enum payload construction remains under `construct`
 
 ### `bind`
 
@@ -233,11 +275,13 @@ Memory relationship note:
 - The headed-region family shares a modifier slot, not one universal modifier meaning.
 - `recycle` uses exit-routing modifiers.
 - `construct` uses construction-failure modifiers.
+- `record` uses the same construction-failure modifier family as `construct`.
 - `bind` uses establishment modifiers.
 - `Memory` uses memory-strategy / pressure-behavior modifiers.
 - Completion/target slot meaning is head-specific:
   - `recycle`: usually omitted because success is ordinary fallthrough
   - `construct`: explicit completion clause
+  - `record`: explicit completion clause for a record target, optionally with `from <base_expr>`
   - `bind`: none in v1
   - `Memory`: required memory-spec identity
 
@@ -274,7 +318,7 @@ Compilation may also reject or warn on:
 
 ## Explicit Boundaries
 
-- This scope approves all four heads as language contract now.
+- This scope approves all five heads as language contract now.
 - It does not claim current implementation support.
 - It does not define user-defined heads.
 - It does not define generalized nesting beyond the current conservative rules.

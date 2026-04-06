@@ -282,5 +282,5 @@ These guarantees are public contract because compiler caches, diagnostics, and s
 - No public `stack` or `heap` family names are approved.
 - No implicit coercion or autoderef growth is implied by view support.
 - Views are contiguous-only in this window.
-- Descriptor views at the native/provider boundary must stay typed and explicit; no raw refs or erased value carriers are approved.
+- Descriptor views at the native boundary must stay typed and explicit; no raw refs or erased value carriers are approved.
 - `docs/specs/memory/memory/generic-memory-spec.md` remains historical reference context, not rewrite authority.

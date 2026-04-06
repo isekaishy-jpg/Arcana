@@ -5,9 +5,12 @@ import std.kernel.collections
 export record Set[K]:
     entries: Map[K, Bool]
 
-export fn new[K]() -> Set[K]:
-    let entries = std.collections.map.new[K, Bool] :: :: call
+export fn empty[K]() -> Set[K]:
+    let entries = std.collections.map.empty[K, Bool] :: :: call
     return std.collections.set.Set[K] :: entries = entries :: call
+
+export fn new[K]() -> Set[K]:
+    return std.collections.set.empty[K] :: :: call
 
 impl[K] Set[K]:
     fn len(read self: Set[K]) -> Int:
@@ -33,6 +36,16 @@ impl[K] Set[K]:
         self.entries = entries
         return removed
 
+    fn clear(edit self: Set[K]):
+        let items = self :: :: items
+        for item in items:
+            let _ = self :: item :: remove
+
+    fn drain(edit self: Set[K]) -> List[K]:
+        let out = self :: :: items
+        self :: :: clear
+        return out
+
     fn items(read self: Set[K]) -> List[K]:
         return std.collections.map.keys[K, Bool] :: self.entries :: call
 
@@ -53,3 +66,9 @@ export fn remove[K](edit set: Set[K], key: K) -> Bool:
 
 export fn items[K](read set: Set[K]) -> List[K]:
     return set :: :: items
+
+export fn clear[K](edit set: Set[K]):
+    set :: :: clear
+
+export fn drain[K](edit set: Set[K]) -> List[K]:
+    return set :: :: drain

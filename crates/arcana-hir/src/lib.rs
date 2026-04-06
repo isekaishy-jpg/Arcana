@@ -358,11 +358,21 @@ pub struct HirSymbol {
     pub availability: Vec<HirAvailabilityAttachment>,
     pub forewords: Vec<HirForewordApp>,
     pub intrinsic_impl: Option<String>,
+    pub native_impl: Option<String>,
     pub body: HirSymbolBody,
     pub statements: Vec<HirStatement>,
     pub cleanup_footers: Vec<HirCleanupFooter>,
     pub generated_by: Option<HirGeneratedByForeword>,
     pub generated_name_key: Option<String>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HirNativeCallbackDecl {
+    pub name: String,
+    pub params: Vec<HirParam>,
+    pub return_type: Option<HirType>,
+    pub target: Vec<String>,
     pub span: Span,
 }
 
@@ -653,6 +663,17 @@ pub struct HirConstructRegion {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HirRecordRegion {
+    pub completion: ConstructCompletionKind,
+    pub target: Box<HirExpr>,
+    pub base: Option<Box<HirExpr>>,
+    pub destination: Option<HirConstructDestination>,
+    pub default_modifier: Option<HirHeadedModifier>,
+    pub lines: Vec<HirConstructLine>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HirMemoryDetailLine {
     pub key: MemoryDetailKey,
     pub value: HirExpr,
@@ -764,6 +785,7 @@ pub enum HirExpr {
         arms: Vec<HirMatchArm>,
     },
     ConstructRegion(Box<HirConstructRegion>),
+    RecordRegion(Box<HirRecordRegion>),
     Chain {
         style: String,
         introducer: HirChainIntroducer,
@@ -911,6 +933,7 @@ pub enum HirStatementKind {
         default_modifier: Option<HirHeadedModifier>,
         lines: Vec<HirBindLine>,
     },
+    Record(HirRecordRegion),
     Construct(HirConstructRegion),
     MemorySpec(HirMemorySpecDecl),
     Expr {
@@ -993,6 +1016,7 @@ pub struct HirModuleSummary {
     pub directives: Vec<HirDirective>,
     pub lang_items: Vec<HirLangItem>,
     pub memory_specs: Vec<HirMemorySpecDecl>,
+    pub native_callbacks: Vec<HirNativeCallbackDecl>,
     pub foreword_definitions: Vec<HirForewordDefinition>,
     pub foreword_handlers: Vec<HirForewordHandler>,
     pub foreword_aliases: Vec<HirForewordAlias>,
@@ -1071,6 +1095,12 @@ impl HirModuleSummary {
                     )
                 }),
         );
+        rows.extend(self.native_callbacks.iter().map(|callback| {
+            format!(
+                "native_callback:{}",
+                render::encode_surface_text(&render::render_native_callback_fingerprint(callback))
+            )
+        }));
         rows.sort();
         rows
     }
@@ -1116,6 +1146,11 @@ impl HirModuleSummary {
             self.foreword_registrations
                 .iter()
                 .map(render::render_foreword_registration_fingerprint),
+        );
+        rows.extend(
+            self.native_callbacks
+                .iter()
+                .map(render::render_native_callback_fingerprint),
         );
         rows.extend(self.symbols.iter().map(render::render_symbol_fingerprint));
         rows.extend(self.impls.iter().map(render::render_impl_fingerprint));
@@ -2443,6 +2478,30 @@ pub fn lower_parsed_module(
             .iter()
             .map(lower_memory_spec_decl)
             .collect(),
+        native_callbacks: parsed
+            .native_callbacks
+            .iter()
+            .map(|callback| HirNativeCallbackDecl {
+                name: callback.name.clone(),
+                params: callback
+                    .params
+                    .iter()
+                    .map(|param| HirParam {
+                        mode: param.mode.as_ref().map(lower_param_mode),
+                        name: param.name.clone(),
+                        ty: type_surface::lower_surface_type(&param.ty),
+                        forewords: lower_forewords(&param.forewords),
+                        span: param.span,
+                    })
+                    .collect(),
+                return_type: callback
+                    .return_type
+                    .as_ref()
+                    .map(type_surface::lower_surface_type),
+                target: callback.target.clone(),
+                span: callback.span,
+            })
+            .collect(),
         foreword_definitions: parsed
             .foreword_definitions
             .iter()
@@ -2500,6 +2559,7 @@ pub fn lower_parsed_module(
                 availability: lower_availability_attachments(&symbol.availability),
                 forewords: lower_forewords(&symbol.forewords),
                 intrinsic_impl: symbol.intrinsic_impl.clone(),
+                native_impl: symbol.native_impl.clone(),
                 body: lower_symbol_body(&symbol.body),
                 statements: lower_statements(&symbol.statements),
                 cleanup_footers: lower_cleanup_footers(&symbol.cleanup_footers),
@@ -3283,6 +3343,7 @@ fn lower_trait_or_impl_method(method: &arcana_syntax::SymbolDecl) -> HirSymbol {
         availability: lower_availability_attachments(&method.availability),
         forewords: lower_forewords(&method.forewords),
         intrinsic_impl: method.intrinsic_impl.clone(),
+        native_impl: method.native_impl.clone(),
         body: lower_symbol_body(&method.body),
         statements: lower_statements(&method.statements),
         cleanup_footers: lower_cleanup_footers(&method.cleanup_footers),
@@ -3551,6 +3612,36 @@ fn lower_construct_region(region: &arcana_syntax::ConstructRegion) -> HirConstru
     }
 }
 
+fn lower_record_region(region: &arcana_syntax::RecordRegion) -> HirRecordRegion {
+    HirRecordRegion {
+        completion: region.completion,
+        target: Box::new(lower_expr(&region.target)),
+        base: region.base.as_ref().map(|base| Box::new(lower_expr(base))),
+        destination: region.destination.as_ref().map(|destination| match destination {
+            arcana_syntax::ConstructDestination::Deliver { name } => {
+                HirConstructDestination::Deliver { name: name.clone() }
+            }
+            arcana_syntax::ConstructDestination::Place { target } => {
+                HirConstructDestination::Place {
+                    target: lower_assign_target(target),
+                }
+            }
+        }),
+        default_modifier: region.default_modifier.as_ref().map(lower_headed_modifier),
+        lines: region
+            .lines
+            .iter()
+            .map(|line| HirConstructLine {
+                name: line.name.clone(),
+                value: lower_expr(&line.value),
+                modifier: line.modifier.as_ref().map(lower_headed_modifier),
+                span: line.span,
+            })
+            .collect(),
+        span: region.span,
+    }
+}
+
 fn lower_assign_op(op: &ParsedAssignOp) -> HirAssignOp {
     match op {
         ParsedAssignOp::Assign => HirAssignOp::Assign,
@@ -3641,6 +3732,9 @@ fn lower_expr(expr: &ParsedExpr) -> HirExpr {
         },
         ParsedExpr::ConstructRegion(region) => {
             HirExpr::ConstructRegion(Box::new(lower_construct_region(region)))
+        }
+        ParsedExpr::RecordRegion(region) => {
+            HirExpr::RecordRegion(Box::new(lower_record_region(region)))
         }
         ParsedExpr::Chain {
             style,
@@ -3976,6 +4070,9 @@ fn lower_statement(statement: &arcana_syntax::Statement) -> HirStatement {
             },
             ParsedStatementKind::Construct(region) => {
                 HirStatementKind::Construct(lower_construct_region(region))
+            }
+            ParsedStatementKind::Record(region) => {
+                HirStatementKind::Record(lower_record_region(region))
             }
             ParsedStatementKind::MemorySpec(spec) => {
                 HirStatementKind::MemorySpec(lower_memory_spec_decl(spec))
@@ -4607,6 +4704,7 @@ mod tests {
                     args,
                     qualifier,
                     attached,
+                    ..
                 } => {
                     assert_eq!(qualifier, "call");
                     assert!(attached.is_empty());
@@ -4722,6 +4820,7 @@ mod tests {
                         args,
                         qualifier,
                         attached,
+                        ..
                     } => {
                         assert_eq!(qualifier, "call");
                         assert!(attached.is_empty());
@@ -4751,6 +4850,7 @@ mod tests {
                         args,
                         qualifier,
                         attached,
+                        ..
                     } => {
                         assert_eq!(qualifier, "call");
                         assert!(attached.is_empty());

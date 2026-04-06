@@ -1,28 +1,24 @@
-import arcana_desktop.app
-import arcana_desktop.types
-import arcana_desktop.window
-import arcana_graphics.canvas
-import arcana_graphics.paint
-import arcana_text.builder
+import arcana_text.buffer
+import arcana_text.cache
+import arcana_text.editor
 import arcana_text.fonts
+import arcana_text.layout
 import arcana_text.monaspace
-import arcana_text.paragraphs
+import arcana_text.queries
+import arcana_text.raster
 import std.args
+import std.bytes
+import std.collections.list
 import std.fs
-import std.option
-use std.option.Option
+import std.io
+import std.text
 
-record Demo:
-    drawn: Bool
-    smoke_mode: Bool
-    first: arcana_text.types.Paragraph
-    second: arcana_text.types.Paragraph
-    focus_box: Option[arcana_text.types.TextBox]
-
-record DemoState:
-    first: arcana_text.types.Paragraph
-    second: arcana_text.types.Paragraph
-    focus_box: Option[arcana_text.types.TextBox]
+record SnapshotSpec:
+    text: Str
+    width: Int
+    color: Int
+    size: Int
+    align: arcana_text.types.TextAlign
 
 fn has_flag(flag: Str) -> Bool:
     let total = std.args.count :: :: call
@@ -33,125 +29,128 @@ fn has_flag(flag: Str) -> Bool:
         index += 1
     return false
 
-fn trace(text: Str):
-    let _ = std.fs.write_text :: "trace.txt", text :: call
+fn probe_enabled() -> Bool:
+    return has_flag :: "--probe" :: call
 
-fn demo_placeholder() -> arcana_text.types.PlaceholderStyle:
-    let mut placeholder = arcana_text.types.PlaceholderStyle :: size = (28, 14), alignment = (arcana_text.types.PlaceholderAlignment.Middle :: :: call), baseline = (arcana_text.types.TextBaseline.Alphabetic :: :: call) :: call
-    placeholder.baseline_offset = 0
-    return placeholder
+fn rgb(r: Int, g: Int, b: Int) -> Int:
+    return (r * 65536) + (g * 256) + b
 
-fn demo_paragraph(text: Str, width: Int, color: Int) -> arcana_text.types.Paragraph:
-    trace :: "demo_paragraph:0" :: call
-    let mut collection = arcana_text.fonts.new_collection :: :: call
-    trace :: "demo_paragraph:1" :: call
-    let _ = arcana_text.fonts.add_monaspace :: collection, (arcana_text.monaspace.MonaspaceFamily.Neon :: :: call), (arcana_text.monaspace.MonaspaceForm.Frozen :: :: call) :: call
-    trace :: "demo_paragraph:2" :: call
-    let mut paragraph_style = arcana_text.types.default_paragraph_style :: :: call
-    paragraph_style.max_lines = 2
-    paragraph_style.ellipsis = "..."
+fn monaspace_style(color: Int, size: Int) -> arcana_text.types.TextStyle:
     let mut style = arcana_text.types.default_text_style :: color :: call
-    trace :: "demo_paragraph:3" :: call
-    style.families = std.collections.list.new[Str] :: :: call
-    style.families :: (arcana_text.monaspace.family_name :: (arcana_text.monaspace.MonaspaceFamily.Neon :: :: call), (arcana_text.monaspace.MonaspaceForm.Frozen :: :: call) :: call) :: push
+    style.size = size
     style.background_enabled = true
-    style.background = arcana_graphics.paint.solid :: (arcana_graphics.canvas.rgb :: 16, 28, 42 :: call) :: call
-    let mut builder = arcana_text.builder.open :: collection, paragraph_style :: call
-    trace :: "demo_paragraph:4" :: call
-    arcana_text.builder.push_style :: builder, style :: call
-    arcana_text.builder.add_text :: builder, text :: call
-    arcana_text.builder.add_placeholder :: builder, (demo_placeholder :: :: call) :: call
-    trace :: "demo_paragraph:5" :: call
-    let mut paragraph = arcana_text.builder.build :: builder :: call
-    trace :: "demo_paragraph:6" :: call
-    arcana_text.paragraphs.layout :: paragraph, width :: call
-    trace :: "demo_paragraph:7" :: call
-    return paragraph
+    style.background_color = rgb :: 16, 28, 42 :: call
+    style.families :: (arcana_text.monaspace.family_name :: (arcana_text.monaspace.default_family :: :: call) :: call) :: push
+    return style
 
-fn demo_focus_box(read paragraph: arcana_text.types.Paragraph) -> Option[arcana_text.types.TextBox]:
-    let boxes = arcana_text.paragraphs.range_boxes :: paragraph, (arcana_text.types.TextRange :: start = 0, end = 5 :: call) :: call
-    if (boxes :: :: len) > 0:
-        return Option.Some[arcana_text.types.TextBox] :: boxes[0] :: call
-    return Option.None[arcana_text.types.TextBox] :: :: call
+fn build_snapshot(edit fonts: arcana_text.fonts.FontSystem, read spec: SnapshotSpec) -> arcana_text.layout.LayoutSnapshot:
+    let style = monaspace_style :: spec.color, spec.size :: call
+    let mut paragraph = arcana_text.types.default_paragraph_style :: :: call
+    paragraph.align = spec.align
+    paragraph.max_lines = 2
+    let buffer = arcana_text.buffer.open :: spec.text, style, paragraph :: call
+    let config = arcana_text.types.default_layout_config :: spec.width, paragraph :: call
+    return arcana_text.layout.snapshot :: fonts, buffer, config :: call
 
-fn empty_text_box() -> arcana_text.types.TextBox:
-    let mut out = arcana_text.types.TextBox :: position = (0, 0), size = (0, 0), range = (arcana_text.types.TextRange :: start = 0, end = 0 :: call) :: call
-    out.direction = arcana_text.types.TextDirection.LeftToRight :: :: call
-    return out
+fn build_mutated_snapshot(edit fonts: arcana_text.fonts.FontSystem, width: Int, color: Int) -> arcana_text.layout.LayoutSnapshot:
+    let mut style = monaspace_style :: color, 22 :: call
+    style.background_color = rgb :: 18, 35, 49 :: call
+    let mut paragraph = arcana_text.types.default_paragraph_style :: :: call
+    paragraph.align = arcana_text.types.TextAlign.Center :: :: call
+    paragraph.max_lines = 2
+    let mut buffer = arcana_text.buffer.open :: "Mutable update path centered after first layout.", style, paragraph :: call
+    let mut editor = arcana_text.editor.open :: buffer :: call
+    editor :: buffer, 0, 7 :: select_range
+    editor :: buffer, "Updated" :: apply_committed_text
+    let config = arcana_text.types.default_layout_config :: width, paragraph :: call
+    return arcana_text.layout.snapshot :: fonts, buffer, config :: call
 
-fn demo_state() -> DemoState:
-    trace :: "demo_state:start" :: call
-    let first = demo_paragraph :: "Styled paragraph proof with placeholder and ellipsis support.", 260, (arcana_graphics.canvas.rgb :: 226, 232, 240 :: call) :: call
-    let mut second = demo_paragraph :: "Mutable update path centered after first layout.", 260, (arcana_graphics.canvas.rgb :: 226, 232, 240 :: call) :: call
-    arcana_text.paragraphs.update_text :: second, "Mutable update path centered after first layout." :: call
-    arcana_text.paragraphs.update_align :: second, (arcana_text.types.TextAlign.Center :: :: call) :: call
-    arcana_text.paragraphs.update_font_size :: second, 24 :: call
-    arcana_text.paragraphs.update_foreground :: second, (arcana_graphics.paint.solid :: (arcana_graphics.canvas.rgb :: 113, 214, 225 :: call) :: call) :: call
-    arcana_text.paragraphs.update_background :: second, true, (arcana_graphics.paint.solid :: (arcana_graphics.canvas.rgb :: 18, 35, 49 :: call) :: call) :: call
-    let mut state = DemoState :: first = first, second = second :: call
-    state.focus_box = demo_focus_box :: second :: call
-    trace :: "demo_state:done" :: call
-    return state
+fn print_metric(label: Str, value: Int):
+    std.io.print[Str] :: (label + ": " + (std.text.from_int :: value :: call) + "\n") :: call
 
-impl arcana_desktop.app.Application[Demo] for Demo:
-    fn resumed(edit self: Demo, edit cx: arcana_desktop.types.AppContext):
-        trace :: "resumed" :: call
-        let mut main_window = (arcana_desktop.app.main_window_or_cached :: cx :: call)
-        arcana_desktop.window.set_title :: main_window, "Arcana Text Proof" :: call
-        arcana_desktop.app.request_window_redraw :: cx, main_window :: call
-        arcana_desktop.app.set_control_flow :: cx, (arcana_desktop.types.ControlFlow.Wait :: :: call) :: call
+fn print_text_metric(label: Str, value: Str):
+    std.io.print[Str] :: (label + ": " + value + "\n") :: call
 
-    fn suspended(edit self: Demo, edit cx: arcana_desktop.types.AppContext):
+fn probe(label: Str):
+    if not (probe_enabled :: :: call):
         return
+    let _ = std.fs.mkdir_all :: "scratch" :: call
+    let opened = std.fs.stream_open_write :: "scratch/text_proof_probe.log", true :: call
+    match opened:
+        std.result.Result.Ok(value) => probe_ready :: value, label :: call
+        std.result.Result.Err(_) => 0
 
-    fn window_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read target: arcana_desktop.types.TargetedEvent) -> arcana_desktop.types.ControlFlow:
-        return match target.event:
-            arcana_desktop.types.WindowEvent.WindowRedrawRequested(id) => on_redraw :: self, cx, id :: call
-            _ => cx.control.control_flow
+fn probe_ready(take value: std.fs.FileStream, label: Str):
+    let mut stream = value
+    let bytes = std.bytes.from_str_utf8 :: (label + "\n") :: call
+    let _ = std.fs.stream_write :: stream, bytes :: call
+    let _ = std.fs.stream_close :: stream :: call
 
-    fn device_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read event: arcana_desktop.types.DeviceEvent) -> arcana_desktop.types.ControlFlow:
-        return cx.control.control_flow
-
-    fn about_to_wait(edit self: Demo, edit cx: arcana_desktop.types.AppContext) -> arcana_desktop.types.ControlFlow:
-        return cx.control.control_flow
-
-    fn wake(edit self: Demo, edit cx: arcana_desktop.types.AppContext) -> arcana_desktop.types.ControlFlow:
-        return cx.control.control_flow
-
-    fn exiting(edit self: Demo, edit cx: arcana_desktop.types.AppContext):
-        return
-
-fn on_redraw(edit self: Demo, edit cx: arcana_desktop.types.AppContext, id: Int) -> arcana_desktop.types.ControlFlow:
-    let _ = id
-    trace :: "on_redraw:start" :: call
-    if self.drawn:
-        if self.smoke_mode:
-            arcana_desktop.app.request_exit :: cx, 0 :: call
-        return arcana_desktop.types.ControlFlow.Wait :: :: call
-    let mut main_window = (arcana_desktop.app.main_window_or_cached :: cx :: call)
-    arcana_graphics.canvas.fill :: main_window, (arcana_graphics.canvas.rgb :: 8, 14, 21 :: call) :: call
-
-    arcana_text.paragraphs.paint :: main_window, self.first, (24, 26) :: call
-    arcana_text.paragraphs.paint :: main_window, self.second, (24, 96) :: call
-
-    if self.focus_box :: :: is_some:
-        let first = self.focus_box :: (empty_text_box :: :: call) :: unwrap_or
-        let color = arcana_graphics.canvas.rgb :: 36, 77, 90 :: call
-        let spec = arcana_graphics.types.RectSpec :: pos = first.position, size = first.size, color = color :: call
-        arcana_graphics.canvas.rect :: main_window, spec :: call
-
-    arcana_graphics.canvas.present :: main_window :: call
-    self.drawn = true
-    trace :: "on_redraw:done" :: call
-    if self.smoke_mode:
-        arcana_desktop.app.request_exit :: cx, 0 :: call
-    return arcana_desktop.types.ControlFlow.Wait :: :: call
+fn first_font_name(read snapshot: arcana_text.layout.LayoutSnapshot) -> Str:
+    let used = arcana_text.queries.fonts_used :: snapshot :: call
+    if used :: :: is_empty:
+        return ""
+    return arcana_text.fonts.family_or_label :: used[0].source :: call
 
 fn main() -> Int:
-    trace :: "main:start" :: call
-    let state = demo_state :: :: call
-    trace :: "main:state_ready" :: call
-    let mut app = Demo :: drawn = false, smoke_mode = (has_flag :: "--smoke" :: call), first = state.first :: call
-    app.second = state.second
-    app.focus_box = state.focus_box
-    return arcana_desktop.app.run :: app, (arcana_desktop.app.default_app_config :: :: call) :: call
+    probe :: "entry" :: call
+    std.io.print[Str] :: "stage:entry\n" :: call
+    std.io.flush_stdout :: :: call
+    let smoke_mode = has_flag :: "--smoke" :: call
+    let use_system_fonts = has_flag :: "--system-fonts" :: call
+    let mut fonts = arcana_text.fonts.default_system :: :: call
+    probe :: "after_default_system" :: call
+    std.io.print[Str] :: "stage:fonts\n" :: call
+    std.io.flush_stdout :: :: call
+    if use_system_fonts:
+        let discovered = fonts :: :: discover_installed
+        if not smoke_mode:
+            print_metric :: "discovered_fonts", discovered :: call
+    probe :: "before_primary_snapshot" :: call
+
+    let mut snapshot_spec = SnapshotSpec :: text = "Styled engine rebuild proof using Monaspace defaults and explicit Arcana objects.", width = 260, color = (rgb :: 226, 232, 240 :: call) :: call
+    snapshot_spec.size = 18
+    snapshot_spec.align = arcana_text.types.TextAlign.Left :: :: call
+    let snapshot = build_snapshot :: fonts, snapshot_spec :: call
+    probe :: "after_primary_snapshot" :: call
+    let mutated = build_mutated_snapshot :: fonts, 280, (rgb :: 129, 230, 217 :: call) :: call
+    probe :: "after_mutated_snapshot" :: call
+    let metrics = arcana_text.queries.line_metrics :: snapshot :: call
+    let unresolved = arcana_text.queries.unresolved_glyphs :: snapshot :: call
+    let hit = arcana_text.queries.hit_test :: snapshot, (24, 12) :: call
+    let caret = arcana_text.queries.caret_box :: snapshot, 6 :: call
+    let range = arcana_text.queries.range_boxes :: snapshot, (arcana_text.types.TextRange :: start = 0, end = 12 :: call) :: call
+    let mut cache = arcana_text.cache.open :: :: call
+    let raster_cfg = arcana_text.types.default_raster_config :: :: call
+    probe :: "before_raster" :: call
+    let stream = arcana_text.raster.draw_stream :: fonts, cache, (snapshot, raster_cfg) :: call
+    let stream_again = arcana_text.raster.draw_stream :: fonts, cache, (snapshot, raster_cfg) :: call
+    let mutated_stream = arcana_text.raster.draw_stream :: fonts, cache, (mutated, raster_cfg) :: call
+    probe :: "after_raster" :: call
+    if smoke_mode:
+        print_metric :: "font_sources", (fonts :: :: count) :: call
+        print_metric :: "lines", (metrics :: :: len) :: call
+        print_metric :: "glyphs", (snapshot.glyphs :: :: len) :: call
+        print_metric :: "unresolved", (unresolved :: :: len) :: call
+        print_metric :: "hit_index", hit.index :: call
+        print_metric :: "caret_y", caret.position.1 :: call
+        print_metric :: "range_boxes", (range :: :: len) :: call
+        print_metric :: "stream_width", stream.size.0 :: call
+        print_metric :: "stream_height", stream.size.1 :: call
+        print_metric :: "cached_width", stream_again.size.0 :: call
+        print_metric :: "mutated_width", mutated_stream.size.0 :: call
+        print_text_metric :: "primary_font", (first_font_name :: snapshot :: call) :: call
+        return 0
+    print_metric :: "font_sources", (fonts :: :: count) :: call
+    print_metric :: "snapshot_width", (snapshot :: :: longest_line) :: call
+    print_metric :: "snapshot_height", (snapshot :: :: height) :: call
+    print_metric :: "lines", (metrics :: :: len) :: call
+    print_metric :: "glyphs", (snapshot.glyphs :: :: len) :: call
+    print_metric :: "unresolved", (unresolved :: :: len) :: call
+    print_metric :: "range_boxes", (range :: :: len) :: call
+    print_metric :: "mutated_width", (mutated :: :: longest_line) :: call
+    print_metric :: "mutated_height", (mutated :: :: height) :: call
+    print_metric :: "image_width", stream.size.0 :: call
+    print_metric :: "image_height", stream.size.1 :: call
+    print_text_metric :: "primary_font", (first_font_name :: snapshot :: call) :: call
+    return 0

@@ -12,23 +12,21 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use arcana_aot::{
     ARCANA_NATIVE_PRODUCT_TEMP_PROBES_ENV, AotEmissionFile, AotInstanceProductSpec,
-    AotPackageEmission, compile_instance_product,
+    AotPackageEmission, compile_instance_product, default_instance_product_cargo_target_dir,
 };
 use arcana_cabi::ArcanaCabiProductRole;
 #[cfg(windows)]
 use arcana_cabi::{
-    ARCANA_CABI_CONTRACT_VERSION_V1, ARCANA_CABI_GET_PRODUCT_API_V1_SYMBOL, ArcanaCabiChildOpsV1,
-    ArcanaCabiExportOpsV1, ArcanaCabiInstanceOpsV1, ArcanaCabiPluginOpsV1, ArcanaCabiProductApiV1,
-    ArcanaCabiProviderOpsV1,
+    ARCANA_CABI_CONTRACT_VERSION_V1, ARCANA_CABI_GET_PRODUCT_API_V1_SYMBOL, ArcanaCabiBindingOpsV1,
+    ArcanaCabiChildOpsV1, ArcanaCabiExportOpsV1, ArcanaCabiInstanceOpsV1, ArcanaCabiPluginOpsV1,
+    ArcanaCabiProductApiV1,
 };
+use fs2::FileExt;
 #[cfg(windows)]
 use libloading::Library;
 use sha2::{Digest, Sha256};
 
-use crate::build::{
-    BuildStatus, package_asset_bundle_dir, render_member_internal_package_image,
-    selected_native_product_for_build,
-};
+use crate::build::{BuildStatus, package_asset_bundle_dir, selected_native_product_for_build};
 use crate::build_identity::read_cached_output_metadata;
 use crate::{
     BuildOutputKey, BuildTarget, NativeProductProducer, PackageResult, WorkspaceGraph,
@@ -126,16 +124,6 @@ struct DistributionChildBinding {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct DistributionProviderBinding {
-    consumer_member: String,
-    dependency_alias: String,
-    consumer_package_id: String,
-    package_id: String,
-    package_name: String,
-    product_name: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 struct DistributionPackageAsset {
     package_id: String,
     package_name: String,
@@ -147,7 +135,6 @@ struct StagedNativeDependencyProducts {
     files: Vec<NativeBundleFile>,
     products: Vec<DistributionNativeProduct>,
     child_bindings: Vec<DistributionChildBinding>,
-    provider_bindings: Vec<DistributionProviderBinding>,
     runtime_child_binding: Option<DistributionChildBinding>,
     root_native_product: Option<DistributionNativeProduct>,
 }
@@ -156,7 +143,6 @@ struct StagedNativeDependencyProducts {
 struct NativeSelectionPlan {
     products: Vec<DistributionNativeProduct>,
     child_bindings: Vec<DistributionChildBinding>,
-    provider_bindings: Vec<DistributionProviderBinding>,
     runtime_child_binding: Option<DistributionChildBinding>,
 }
 
@@ -237,10 +223,7 @@ pub(crate) fn append_internal_native_bundle_support(
     let staged =
         stage_native_dependency_products(graph, &root_member.package_id, build_key, &temp_root)?;
     let cleanup = NativeBundleCleanupGuard::from_files(&staged.files);
-    if staged.products.is_empty()
-        && staged.child_bindings.is_empty()
-        && staged.provider_bindings.is_empty()
-    {
+    if staged.products.is_empty() && staged.child_bindings.is_empty() {
         drop(cleanup);
         return Ok(());
     }
@@ -259,7 +242,7 @@ pub(crate) fn append_internal_native_bundle_support(
             .any(|existing| existing == &file.relative_path)
         {
             return Err(format!(
-                "duplicate internal support file path `{}` while staging native provider support",
+                "duplicate internal support file path `{}` while staging native product support",
                 file.relative_path
             ));
         }
@@ -281,7 +264,7 @@ pub(crate) fn append_internal_native_bundle_support(
         .any(|existing| existing == &manifest_name)
     {
         return Err(format!(
-            "duplicate internal support file path `{manifest_name}` while staging native provider support"
+            "duplicate internal support file path `{manifest_name}` while staging native product support"
         ));
     }
     support_paths.push(manifest_name.clone());
@@ -301,7 +284,6 @@ pub(crate) fn append_internal_native_bundle_support(
         &staged.products,
         staged.runtime_child_binding.as_ref(),
         &staged.child_bindings,
-        &staged.provider_bindings,
         &package_assets,
     );
     emission.support_files.push(AotEmissionFile {
@@ -356,6 +338,10 @@ fn unique_native_build_dir(base_dir: &Path, label: &str) -> PathBuf {
         std::process::id(),
         unique
     ))
+}
+
+fn stable_native_build_dir(base_dir: &Path, label: &str) -> PathBuf {
+    base_dir.join(sanitize_distribution_component(label))
 }
 
 pub fn stage_distribution_bundle(
@@ -482,7 +468,6 @@ pub fn stage_distribution_bundle_for_build(
         &staged_native_products.products,
         staged_native_products.runtime_child_binding.as_ref(),
         &staged_native_products.child_bindings,
-        &staged_native_products.provider_bindings,
         &package_assets,
     );
     let root_artifact_path = bundle_dir.join(&root_file_name);
@@ -635,7 +620,6 @@ fn stage_native_dependency_products(
         files: staged,
         products: staged_products,
         child_bindings: selections.child_bindings,
-        provider_bindings: selections.provider_bindings,
         runtime_child_binding: selections.runtime_child_binding,
         root_native_product: None,
     })
@@ -713,10 +697,7 @@ pub(crate) fn native_product_closure_digest(
         return Ok(None);
     }
     let selections = collect_native_dependency_product_selections(graph, root_member)?;
-    if selections.products.is_empty()
-        && selections.child_bindings.is_empty()
-        && selections.provider_bindings.is_empty()
-    {
+    if selections.products.is_empty() && selections.child_bindings.is_empty() {
         return Ok(None);
     }
     let mut hasher = Sha256::new();
@@ -760,20 +741,6 @@ pub(crate) fn native_product_closure_digest(
         hasher.update(b"\n");
         hasher.update(binding.product_name.as_bytes());
     }
-    for binding in &selections.provider_bindings {
-        hasher.update(b"\nprovider_binding\n");
-        hasher.update(binding.consumer_member.as_bytes());
-        hasher.update(b"\n");
-        hasher.update(binding.consumer_package_id.as_bytes());
-        hasher.update(b"\n");
-        hasher.update(binding.dependency_alias.as_bytes());
-        hasher.update(b"\n");
-        hasher.update(binding.package_id.as_bytes());
-        hasher.update(b"\n");
-        hasher.update(binding.package_name.as_bytes());
-        hasher.update(b"\n");
-        hasher.update(binding.product_name.as_bytes());
-    }
     if let Some(binding) = &selections.runtime_child_binding {
         hasher.update(b"\nruntime_child_binding\n");
         hasher.update(binding.consumer_member.as_bytes());
@@ -802,7 +769,6 @@ fn collect_native_dependency_product_selections(
     let mut selected_product_keys = BTreeSet::new();
     let mut products = Vec::new();
     let mut child_bindings = Vec::new();
-    let mut provider_bindings = Vec::new();
 
     while let Some(member_name) = pending.pop_front() {
         if !visited.insert(member_name.clone()) {
@@ -811,6 +777,24 @@ fn collect_native_dependency_product_selections(
         let member = graph
             .member(&member_name)
             .ok_or_else(|| format!("missing workspace member `{member_name}`"))?;
+        if let Some(binding_product) = select_default_binding_product(member)? {
+            if selected_product_keys
+                .insert((member.package_id.clone(), binding_product.name.clone()))
+            {
+                products.push(DistributionNativeProduct {
+                    package_id: member.package_id.clone(),
+                    package_name: member.name.clone(),
+                    product_name: binding_product.name.clone(),
+                    role: ArcanaCabiProductRole::Binding,
+                    contract_id: binding_product.contract.clone(),
+                    contract_version: 1,
+                    producer: binding_product.producer.as_str().to_string(),
+                    sidecars: binding_product.sidecars.clone(),
+                    file: binding_product.file.clone(),
+                    file_hash: String::new(),
+                });
+            }
+        }
         for dep in &member.deps {
             pending.push_back(dep.clone());
         }
@@ -867,46 +851,6 @@ fn collect_native_dependency_product_selections(
                     product_name: child.to_string(),
                 });
             }
-            if let Some(provider) = spec.selected_native_provider() {
-                require_selected_native_product(
-                    dependency_member,
-                    provider,
-                    ArcanaCabiProductRole::Provider,
-                    alias,
-                    &member.name,
-                )?;
-                let provider_product =
-                    dependency_member.native_products.get(provider).ok_or_else(|| {
-                        format!(
-                            "dependency `{alias}` in `{}` selects native product `{provider}`, but `{}` does not define it",
-                            member.name, dependency_member.name
-                        )
-                    })?;
-                if selected_product_keys
-                    .insert((dependency_member.package_id.clone(), provider.to_string()))
-                {
-                    products.push(DistributionNativeProduct {
-                        package_id: dependency_member.package_id.clone(),
-                        package_name: dependency_member.name.clone(),
-                        product_name: provider.to_string(),
-                        role: ArcanaCabiProductRole::Provider,
-                        contract_id: provider_product.contract.clone(),
-                        contract_version: 1,
-                        producer: provider_product.producer.as_str().to_string(),
-                        sidecars: provider_product.sidecars.clone(),
-                        file: provider_product.file.clone(),
-                        file_hash: String::new(),
-                    });
-                }
-                provider_bindings.push(DistributionProviderBinding {
-                    consumer_member: member.name.clone(),
-                    dependency_alias: alias.clone(),
-                    consumer_package_id: member.package_id.clone(),
-                    package_id: dependency_member.package_id.clone(),
-                    package_name: dependency_member.name.clone(),
-                    product_name: provider.to_string(),
-                });
-            }
             for plugin in &spec.native_plugins {
                 require_selected_native_product(
                     dependency_member,
@@ -949,15 +893,6 @@ fn collect_native_dependency_product_selections(
             .then_with(|| left.product_name.cmp(&right.product_name))
     });
     child_bindings.sort_by(|left, right| {
-        left.consumer_member
-            .cmp(&right.consumer_member)
-            .then_with(|| left.consumer_package_id.cmp(&right.consumer_package_id))
-            .then_with(|| left.dependency_alias.cmp(&right.dependency_alias))
-            .then_with(|| left.package_id.cmp(&right.package_id))
-            .then_with(|| left.package_name.cmp(&right.package_name))
-            .then_with(|| left.product_name.cmp(&right.product_name))
-    });
-    provider_bindings.sort_by(|left, right| {
         left.consumer_member
             .cmp(&right.consumer_member)
             .then_with(|| left.consumer_package_id.cmp(&right.consumer_package_id))
@@ -1013,9 +948,33 @@ fn collect_native_dependency_product_selections(
     Ok(NativeSelectionPlan {
         products,
         child_bindings,
-        provider_bindings,
         runtime_child_binding,
     })
+}
+
+fn select_default_binding_product(
+    member: &WorkspaceMember,
+) -> PackageResult<Option<&crate::NativeProductSpec>> {
+    let binding_products = member
+        .native_products
+        .values()
+        .filter(|product| product.role == ArcanaCabiProductRole::Binding)
+        .collect::<Vec<_>>();
+    match binding_products.as_slice() {
+        [] => Ok(None),
+        [product] => Ok(Some(*product)),
+        products => products
+            .iter()
+            .find(|product| product.name == "default")
+            .copied()
+            .map(Some)
+            .ok_or_else(|| {
+                format!(
+                    "workspace member `{}` declares multiple binding native products; add a `default` binding product or keep exactly one",
+                    member.name
+                )
+            }),
+    }
 }
 
 fn require_selected_native_product(
@@ -1064,7 +1023,7 @@ pub(crate) fn resolve_native_product_files(
 }
 
 fn build_rust_cdylib_product(
-    graph: &WorkspaceGraph,
+    _graph: &WorkspaceGraph,
     member: &WorkspaceMember,
     product: &crate::NativeProductSpec,
 ) -> PackageResult<Vec<NativeBundleFile>> {
@@ -1085,16 +1044,19 @@ fn build_rust_cdylib_product(
         ));
     }
 
-    let target_parent_dir = repo_root()
+    let artifact_parent_dir = repo_root()
         .join("target")
-        .join("native-products")
-        .join(short_path_fingerprint(&graph.root_dir))
+        .join("native-product-artifacts")
         .join(short_path_fingerprint(&member.abs_dir));
-    let target_dir = unique_native_build_dir(&target_parent_dir, &product.name);
-    fs::create_dir_all(&target_dir).map_err(|e| {
+    let artifact_dir = stable_native_build_dir(&artifact_parent_dir, &product.name);
+    let shared_target_dir = shared_rust_cdylib_target_dir();
+    let output_path = artifact_dir.join("debug").join(&product.file);
+    let cargo_output_path = shared_target_dir.join("debug").join(&product.file);
+    let fingerprint = rust_cdylib_inputs_fingerprint(&crate_dir)?;
+    fs::create_dir_all(&artifact_dir).map_err(|e| {
         format!(
-            "failed to create native product target directory `{}`: {e}",
-            target_dir.display()
+            "failed to create native product artifact directory `{}`: {e}",
+            artifact_dir.display()
         )
     })?;
     native_product_probe(
@@ -1104,12 +1066,52 @@ fn build_rust_cdylib_product(
             member.name,
             product.name,
             manifest_path.display(),
-            target_dir.display()
+            shared_target_dir.display()
         ),
     );
-    run_cargo_build(&manifest_path, &target_dir, &product.name)?;
+    if output_path.is_file()
+        && read_native_inputs_stamp(&native_inputs_stamp_path(&artifact_dir))
+            .is_some_and(|existing| existing == fingerprint)
+    {
+        native_product_probe(
+            "rust_cdylib_build_cache_hit",
+            format!(
+                "member={} product={} output={}",
+                member.name,
+                product.name,
+                output_path.display()
+            ),
+        );
+    } else {
+        run_cargo_build(&manifest_path, &shared_target_dir, &product.name)?;
+        if !cargo_output_path.is_file() {
+            return Err(format!(
+                "native product `{}` on `{}` did not produce `{}` under `{}`",
+                product.name,
+                member.name,
+                product.file,
+                shared_target_dir.join("debug").display()
+            ));
+        }
+        if let Some(parent) = output_path.parent() {
+            fs::create_dir_all(parent).map_err(|e| {
+                format!(
+                    "failed to create staged native product output directory `{}`: {e}",
+                    parent.display()
+                )
+            })?;
+        }
+        fs::copy(&cargo_output_path, &output_path).map_err(|e| {
+            format!(
+                "failed to stage native product `{}` from `{}` to `{}`: {e}",
+                product.name,
+                cargo_output_path.display(),
+                output_path.display()
+            )
+        })?;
+        write_native_inputs_stamp(&native_inputs_stamp_path(&artifact_dir), &fingerprint)?;
+    }
 
-    let output_path = target_dir.join("debug").join(&product.file);
     if !output_path.is_file() {
         native_product_probe(
             "rust_cdylib_missing_output",
@@ -1125,14 +1127,14 @@ fn build_rust_cdylib_product(
             product.name,
             member.name,
             product.file,
-            target_dir.join("debug").display()
+            artifact_dir.join("debug").display()
         ));
     }
 
     let mut files = vec![NativeBundleFile {
         relative_path: product.file.clone(),
         source_path: output_path,
-        cleanup_roots: vec![target_dir],
+        cleanup_roots: Vec::new(),
     }];
     for sidecar in &product.sidecars {
         validate_support_file_relative_path(sidecar)?;
@@ -1163,9 +1165,7 @@ fn build_generated_cabi_product(
 ) -> PackageResult<Vec<NativeBundleFile>> {
     if !matches!(
         product.role,
-        ArcanaCabiProductRole::Child
-            | ArcanaCabiProductRole::Plugin
-            | ArcanaCabiProductRole::Provider
+        ArcanaCabiProductRole::Child | ArcanaCabiProductRole::Plugin
     ) {
         native_product_probe(
             "generated_product_rejected_role",
@@ -1178,36 +1178,31 @@ fn build_generated_cabi_product(
             ),
         );
         return Err(format!(
-            "native product `{}` on `{}` uses producer `{}`, but generated cabi products currently support only `child`, `plugin`, and `provider` roles",
+            "native product `{}` on `{}` uses producer `{}`, but generated cabi products currently support only `child` and `plugin` roles",
             product.name,
             member.name,
             product.producer.as_str()
         ));
     }
-
-    let package_image_text = if product.role == ArcanaCabiProductRole::Provider {
-        Some(load_member_provider_package_text(graph, member)?)
-    } else {
-        None
-    };
+    let package_image_text = None;
 
     let project_parent_dir = repo_root()
         .join("target")
         .join("native-product-projects")
         .join(short_path_fingerprint(&graph.root_dir))
         .join(short_path_fingerprint(&member.abs_dir));
-    let project_dir = unique_native_build_dir(&project_parent_dir, &product.name);
+    let project_dir = stable_native_build_dir(&project_parent_dir, &product.name);
 
-    let target_parent_dir = repo_root()
+    let artifact_parent_dir = repo_root()
         .join("target")
-        .join("native-products")
-        .join(short_path_fingerprint(&graph.root_dir))
+        .join("native-product-artifacts")
         .join(short_path_fingerprint(&member.abs_dir));
-    let target_dir = unique_native_build_dir(&target_parent_dir, &product.name);
-    fs::create_dir_all(&target_dir).map_err(|e| {
+    let artifact_dir = stable_native_build_dir(&artifact_parent_dir, &product.name);
+    let cargo_target_dir = default_instance_product_cargo_target_dir(product.role);
+    fs::create_dir_all(&artifact_dir).map_err(|e| {
         format!(
-            "failed to create generated native product target directory `{}`: {e}",
-            target_dir.display()
+            "failed to create generated native product artifact directory `{}`: {e}",
+            artifact_dir.display()
         )
     })?;
     let compiled = compile_instance_product(
@@ -1219,19 +1214,16 @@ fn build_generated_cabi_product(
             contract_id: product.contract.clone(),
             output_file_name: product.file.clone(),
             package_image_text,
-            provider_dir: product
-                .provider_dir
-                .as_ref()
-                .map(|dir| member.abs_dir.join(dir)),
         },
         &project_dir,
-        &target_dir,
+        &artifact_dir,
+        &cargo_target_dir,
     )?;
 
     let mut files = vec![NativeBundleFile {
         relative_path: product.file.clone(),
         source_path: compiled.output_path,
-        cleanup_roots: vec![project_dir, target_dir],
+        cleanup_roots: Vec::new(),
     }];
     for sidecar in &product.sidecars {
         validate_support_file_relative_path(sidecar)?;
@@ -1253,13 +1245,6 @@ fn build_generated_cabi_product(
     validate_native_product_dependency_closure(member, product, &files)?;
     validate_native_product_cabi_contract(member, product, &files)?;
     Ok(files)
-}
-
-fn load_member_provider_package_text(
-    graph: &WorkspaceGraph,
-    member: &WorkspaceMember,
-) -> PackageResult<String> {
-    render_member_internal_package_image(graph, &member.package_id)
 }
 
 fn distribution_root_native_product(
@@ -1379,9 +1364,11 @@ fn run_cargo_build(
     target_dir: &Path,
     product_name: &str,
 ) -> PackageResult<()> {
+    let _build_lock = acquire_cargo_target_lock(target_dir)?;
     let status = Command::new("cargo")
         .arg("build")
-        .arg("-q")
+        .arg("--message-format")
+        .arg("short")
         .arg("--manifest-path")
         .arg(manifest_path)
         .arg("--target-dir")
@@ -1400,6 +1387,120 @@ fn run_cargo_build(
         ));
     }
     Ok(())
+}
+
+fn native_inputs_stamp_path(target_dir: &Path) -> PathBuf {
+    target_dir.join(".arcana-native-product.inputs")
+}
+
+fn read_native_inputs_stamp(path: &Path) -> Option<String> {
+    fs::read_to_string(path).ok()
+}
+
+fn write_native_inputs_stamp(path: &Path, fingerprint: &str) -> PackageResult<()> {
+    fs::write(path, fingerprint).map_err(|e| {
+        format!(
+            "failed to write native product inputs stamp `{}`: {e}",
+            path.display()
+        )
+    })
+}
+
+fn rust_cdylib_inputs_fingerprint(crate_dir: &Path) -> PackageResult<String> {
+    let root = repo_root();
+    let mut hasher = Sha256::new();
+    hasher.update(b"arcana_rust_cdylib_inputs_v1\n");
+    fingerprint_tree_contents(crate_dir, &mut hasher)?;
+    fingerprint_tree_contents(&root.join("crates").join("arcana-cabi"), &mut hasher)?;
+    fingerprint_path_contents(&root.join("Cargo.toml"), &mut hasher)?;
+    fingerprint_path_contents(&root.join("Cargo.lock"), &mut hasher)?;
+    Ok(format!("sha256:{:x}", hasher.finalize()))
+}
+
+fn fingerprint_tree_contents(path: &Path, hasher: &mut Sha256) -> PackageResult<()> {
+    if !path.exists() {
+        hasher.update(format!("missing:{}\n", path.display()).as_bytes());
+        return Ok(());
+    }
+    let mut entries = fs::read_dir(path)
+        .map_err(|e| {
+            format!(
+                "failed to read `{}` for native fingerprinting: {e}",
+                path.display()
+            )
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| {
+            format!(
+                "failed to enumerate `{}` for native fingerprinting: {e}",
+                path.display()
+            )
+        })?;
+    entries.sort_by_key(|entry| entry.path());
+    for entry in entries {
+        let entry_path = entry.path();
+        let metadata = entry.metadata().map_err(|e| {
+            format!(
+                "failed to read metadata for `{}`: {e}",
+                entry_path.display()
+            )
+        })?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name == "target" || name == ".git" {
+            continue;
+        }
+        if metadata.is_dir() {
+            hasher.update(format!("dir:{}\n", entry_path.display()).as_bytes());
+            fingerprint_tree_contents(&entry_path, hasher)?;
+        } else if metadata.is_file() {
+            fingerprint_path_contents(&entry_path, hasher)?;
+        }
+    }
+    Ok(())
+}
+
+fn fingerprint_path_contents(path: &Path, hasher: &mut Sha256) -> PackageResult<()> {
+    let bytes = fs::read(path)
+        .map_err(|e| format!("failed to read `{}` for hashing: {e}", path.display()))?;
+    hasher.update(format!("file:{}:{}\n", path.display(), bytes.len()).as_bytes());
+    hasher.update(&bytes);
+    Ok(())
+}
+
+fn acquire_cargo_target_lock(target_dir: &Path) -> PackageResult<std::fs::File> {
+    fs::create_dir_all(target_dir).map_err(|e| {
+        format!(
+            "failed to create shared cargo target directory `{}`: {e}",
+            target_dir.display()
+        )
+    })?;
+    let lock_path = target_dir.join(".arcana-cargo-build.lock");
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|e| {
+            format!(
+                "failed to open shared cargo lock `{}`: {e}",
+                lock_path.display()
+            )
+        })?;
+    file.lock_exclusive().map_err(|e| {
+        format!(
+            "failed to lock shared cargo target directory `{}`: {e}",
+            target_dir.display()
+        )
+    })?;
+    Ok(file)
+}
+
+fn shared_rust_cdylib_target_dir() -> PathBuf {
+    repo_root()
+        .join("target")
+        .join("arcana-cargo-targets")
+        .join("rust-cdylib")
 }
 
 fn validate_native_product_dependency_closure(
@@ -1534,6 +1635,7 @@ fn windows_system_dll_allowed(name: &str) -> bool {
                 | "comctl32.dll"
                 | "comdlg32.dll"
                 | "crypt32.dll"
+                | "dwrite.dll"
                 | "dwmapi.dll"
                 | "gdi32.dll"
                 | "hid.dll"
@@ -1714,7 +1816,6 @@ fn render_distribution_manifest(
     native_products: &[DistributionNativeProduct],
     runtime_child_binding: Option<&DistributionChildBinding>,
     child_bindings: &[DistributionChildBinding],
-    provider_bindings: &[DistributionProviderBinding],
     package_assets: &[DistributionPackageAsset],
 ) -> String {
     let support_files = support_files
@@ -1793,33 +1894,6 @@ fn render_distribution_manifest(
     }
     if let Some(binding) = runtime_child_binding {
         rendered.push_str("\n[runtime_child_binding]\n");
-        rendered.push_str(&format!(
-            "consumer_member = \"{}\"\n",
-            escape_toml(&binding.consumer_member)
-        ));
-        rendered.push_str(&format!(
-            "consumer_package_id = \"{}\"\n",
-            escape_toml(&binding.consumer_package_id)
-        ));
-        rendered.push_str(&format!(
-            "dependency_alias = \"{}\"\n",
-            escape_toml(&binding.dependency_alias)
-        ));
-        rendered.push_str(&format!(
-            "package_id = \"{}\"\n",
-            escape_toml(&binding.package_id)
-        ));
-        rendered.push_str(&format!(
-            "package_name = \"{}\"\n",
-            escape_toml(&binding.package_name)
-        ));
-        rendered.push_str(&format!(
-            "product_name = \"{}\"\n",
-            escape_toml(&binding.product_name)
-        ));
-    }
-    for binding in provider_bindings {
-        rendered.push_str("\n[[provider_bindings]]\n");
         rendered.push_str(&format!(
             "consumer_member = \"{}\"\n",
             escape_toml(&binding.consumer_member)
@@ -2195,14 +2269,14 @@ fn validate_native_product_descriptor_from_staged_root(
                 ));
             }
         }
-        ArcanaCabiProductRole::Provider => {
-            let provider_ops = unsafe { &*(api.role_ops as *const ArcanaCabiProviderOpsV1) };
-            if provider_ops.base.ops_size < std::mem::size_of::<ArcanaCabiInstanceOpsV1>() {
+        ArcanaCabiProductRole::Binding => {
+            let binding_ops = unsafe { &*(api.role_ops as *const ArcanaCabiBindingOpsV1) };
+            if binding_ops.base.ops_size < std::mem::size_of::<ArcanaCabiInstanceOpsV1>() {
                 return Err(format!(
-                    "native provider product `{}` on `{}` reported instance ops size {} smaller than expected {}",
+                    "native binding product `{}` on `{}` reported instance ops size {} smaller than expected {}",
                     product.name,
                     member.name,
-                    provider_ops.base.ops_size,
+                    binding_ops.base.ops_size,
                     std::mem::size_of::<ArcanaCabiInstanceOpsV1>()
                 ));
             }
@@ -2266,6 +2340,17 @@ mod tests {
             second.parent(),
             Some(parent.as_path()),
             "unique native build dir should stay under the requested parent"
+        );
+    }
+
+    #[test]
+    fn shared_rust_cdylib_target_dir_is_stable() {
+        let first = shared_rust_cdylib_target_dir();
+        let second = shared_rust_cdylib_target_dir();
+        assert_eq!(first, second);
+        assert!(
+            first.ends_with(PathBuf::from("arcana-cargo-targets").join("rust-cdylib")),
+            "shared rust-cdylib target dir should stay under target/arcana-cargo-targets"
         );
     }
 

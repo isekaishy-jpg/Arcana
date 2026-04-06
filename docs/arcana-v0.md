@@ -442,6 +442,8 @@ Collections are now de-builtinized through an internal intrinsic bridge.
 - Direct calls to legacy collection builtins are hard errors by default.
 - Legacy collection call names are removed; use shelf-first APIs.
 - `intrinsic fn` is internal: restricted to trusted `std.kernel.*` modules.
+- `native fn` is the package-scoped host-binding surface for binding-owning libraries such as `arcana_winapi`.
+- `native callback` is the package-scoped explicit callback registration surface paired with `native fn`.
 - `std.kernel.*` is internal-only and cannot be imported/reexported by user/app modules.
 
 ## Memory Phrase + Typed Allocators (v0.35)
@@ -804,7 +806,7 @@ Where a domain scope exists under `docs/specs/**/v1-scope.md`, that domain scope
 
 ## Opaque Types (v0.17)
 
-Arcana now has source-level opaque type declarations for trusted std-owned runtime/resource handles:
+Arcana now has source-level opaque type declarations for trusted std-owned runtime/resource handles and package-owned binding handles:
 
 - syntax: `export opaque type Window as move, boundary_unsafe`
 - required inline policy atoms:
@@ -816,9 +818,32 @@ Arcana now has source-level opaque type declarations for trusted std-owned runti
   - no implied fields or payload access
   - no record/enum behavior by default
 - v1 restriction:
-  - opaque type declarations are currently restricted to package `std`
+  - opaque type declarations are currently allowed in package `std` and in packages that own an approved `binding` native product
 
 Current std-owned runtime handles such as `Window`, `Image`, `FileStream`, `AudioDevice`, `AudioBuffer`, `AudioPlayback`, and `AppFrame` now live as source-declared opaque std types rather than Rust-only reserved builtin names.
+Binding-owning libraries such as `arcana_winapi` may also expose source-declared opaque handle types such as module handles, font catalogs, and hidden windows.
+
+## Native Bindings (v0.18)
+
+Arcana now distinguishes two native-facing declaration families:
+
+- `intrinsic fn`
+  - trusted std/kernel-only surface
+- `native fn`
+  - package-scoped host-binding import surface for binding-owning libraries
+- `native callback`
+  - package-scoped explicit callback registration surface paired with `native fn`
+
+Binding examples:
+
+- `export native fn current_module() -> arcana_winapi.types.ModuleHandle = foundation.current_module`
+- `native callback window_proc(read window: arcana_winapi.types.HiddenWindow, message: Int, wparam: Int, lparam: Int) -> Int = arcana_winapi.callbacks.handle_window_proc`
+
+Rules:
+
+- `native fn` / `native callback` belong to packages that own an approved `binding` native product.
+- They are not a replacement for `intrinsic fn`.
+- They are the generic library/native seam for OS binding grimoires such as `arcana_winapi`.
 
 ## Canvas/Window/Input (v0.16 shelf-first)
 

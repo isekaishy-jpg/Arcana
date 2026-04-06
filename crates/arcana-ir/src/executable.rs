@@ -18,6 +18,7 @@ pub enum ExecExpr {
         arms: Vec<ExecMatchArm>,
     },
     ConstructRegion(Box<ExecConstructRegion>),
+    RecordRegion(Box<ExecRecordRegion>),
     Chain {
         style: String,
         introducer: ExecChainIntroducer,
@@ -240,6 +241,21 @@ pub struct ExecConstructRegion {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecRecordRegion {
+    pub completion: String,
+    pub target: Box<ExecExpr>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<Box<ExecExpr>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination: Option<ExecConstructDestination>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_modifier: Option<ExecHeadedModifier>,
+    pub lines: Vec<ExecConstructLine>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub copied_fields: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecMemoryDetailLine {
     pub key: String,
     pub value: ExecExpr,
@@ -347,6 +363,7 @@ pub enum ExecStmt {
         default_modifier: Option<ExecHeadedModifier>,
         lines: Vec<ExecBindLine>,
     },
+    Record(ExecRecordRegion),
     Construct(ExecConstructRegion),
     MemorySpec(ExecMemorySpecDecl),
 }

@@ -12,10 +12,8 @@ use arcana_package::{
 };
 
 mod build_context;
-mod launcher;
 mod package_cmd;
-mod runner;
-mod runtime_exec;
+mod runtime_delegate;
 
 type ParsedPackageArgs = (BuildTarget, Option<String>, Option<String>, Option<PathBuf>);
 
@@ -37,7 +35,7 @@ fn main() {
 }
 
 fn real_main() -> Result<i32, String> {
-    if let Some(code) = launcher::maybe_run_launch_bundle()? {
+    if let Some(code) = runtime_delegate::maybe_run_launch_bundle_via_runner()? {
         return Ok(code);
     }
     let mut args = env::args().skip(1);
@@ -124,7 +122,12 @@ fn real_main() -> Result<i32, String> {
             };
             let rest = args.collect::<Vec<_>>();
             let (target, member, run_args) = parse_run_args(&rest)?;
-            runner::run_workspace(PathBuf::from(path), target, member, run_args)
+            runtime_delegate::run_workspace_via_runner(
+                PathBuf::from(path),
+                target,
+                member,
+                run_args,
+            )
         }
         "package" => {
             let Some(path) = args.next() else {

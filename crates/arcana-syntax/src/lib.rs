@@ -644,6 +644,17 @@ pub struct ConstructRegion {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecordRegion {
+    pub completion: ConstructCompletionKind,
+    pub target: Box<Expr>,
+    pub base: Option<Box<Expr>>,
+    pub destination: Option<ConstructDestination>,
+    pub default_modifier: Option<HeadedModifier>,
+    pub lines: Vec<ConstructLine>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryDetailLine {
     pub key: MemoryDetailKey,
     pub value: Expr,
@@ -740,6 +751,7 @@ pub enum Expr {
         arms: Vec<MatchArm>,
     },
     ConstructRegion(Box<ConstructRegion>),
+    RecordRegion(Box<RecordRegion>),
     Chain {
         style: String,
         introducer: ChainIntroducer,
@@ -887,6 +899,7 @@ pub enum StatementKind {
         default_modifier: Option<HeadedModifier>,
         lines: Vec<BindLine>,
     },
+    Record(RecordRegion),
     Construct(ConstructRegion),
     MemorySpec(MemorySpecDecl),
     Expr {
@@ -942,10 +955,20 @@ pub struct SymbolDecl {
     pub availability: Vec<AvailabilityAttachment>,
     pub forewords: Vec<ForewordApp>,
     pub intrinsic_impl: Option<String>,
+    pub native_impl: Option<String>,
     pub body: SymbolBody,
     pub statements: Vec<Statement>,
     pub cleanup_footers: Vec<CleanupFooter>,
     pub surface_text: String,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeCallbackDecl {
+    pub name: String,
+    pub params: Vec<ParamDecl>,
+    pub return_type: Option<SurfaceType>,
+    pub target: Vec<String>,
     pub span: Span,
 }
 
@@ -975,6 +998,7 @@ pub struct ParsedModule {
     pub directives: Vec<ModuleDirective>,
     pub lang_items: Vec<LangItemDecl>,
     pub memory_specs: Vec<MemorySpecDecl>,
+    pub native_callbacks: Vec<NativeCallbackDecl>,
     pub foreword_definitions: Vec<ForewordDefinitionDecl>,
     pub foreword_handlers: Vec<ForewordHandlerDecl>,
     pub foreword_aliases: Vec<ForewordAliasDecl>,
@@ -1007,6 +1031,7 @@ pub fn parse_module(source: &str) -> Result<ParsedModule, String> {
     let mut directives = Vec::new();
     let mut lang_items = Vec::new();
     let mut memory_specs = Vec::new();
+    let mut native_callbacks = Vec::new();
     let mut foreword_definitions = Vec::new();
     let mut foreword_handlers = Vec::new();
     let mut foreword_aliases = Vec::new();
@@ -1133,6 +1158,26 @@ pub fn parse_module(source: &str) -> Result<ParsedModule, String> {
             continue;
         }
 
+        if let Some(callback) = parse_native_callback_decl(&entry.text, entry.span)? {
+            if !pending_availability.is_empty() {
+                let span = pending_availability[0].span;
+                return Err(format!(
+                    "{}:{}: availability attachments cannot target native callbacks",
+                    span.line, span.column
+                ));
+            }
+            if !pending_forewords.is_empty() {
+                let foreword = &pending_forewords[0];
+                return Err(format!(
+                    "{}:{}: forewords cannot target native callbacks in v1",
+                    foreword.span.line, foreword.span.column
+                ));
+            }
+            native_callbacks.push(callback);
+            index += 1;
+            continue;
+        }
+
         if let Some(impl_decl) = parse_impl_decl(entry)? {
             if !pending_availability.is_empty() {
                 let span = pending_availability[0].span;
@@ -1213,6 +1258,7 @@ pub fn parse_module(source: &str) -> Result<ParsedModule, String> {
         directives,
         lang_items,
         memory_specs,
+        native_callbacks,
         foreword_definitions,
         foreword_handlers,
         foreword_aliases,
@@ -2076,6 +2122,12 @@ fn parse_symbol_entry(entry: &RawBlockEntry) -> Result<Option<SymbolDecl>, Strin
                 entry.span.line, entry.span.column
             ));
         }
+        if rest.starts_with("native fn ") || rest.starts_with("native callback ") {
+            return Err(format!(
+                "{}:{}: malformed native binding declaration",
+                entry.span.line, entry.span.column
+            ));
+        }
         if rest.starts_with("opaque type ") {
             return Err(format!(
                 "{}:{}: malformed opaque type declaration",
@@ -2084,9 +2136,9 @@ fn parse_symbol_entry(entry: &RawBlockEntry) -> Result<Option<SymbolDecl>, Strin
         }
         return Ok(None);
     };
-    if symbol.intrinsic_impl.is_some() && !entry.children.is_empty() {
+    if (symbol.intrinsic_impl.is_some() || symbol.native_impl.is_some()) && !entry.children.is_empty() {
         return Err(format!(
-            "{}:{}: intrinsic functions cannot own nested blocks",
+            "{}:{}: intrinsic/native functions cannot own nested blocks",
             entry.span.line, entry.span.column
         ));
     }
@@ -2111,7 +2163,13 @@ fn parse_symbol_entry(entry: &RawBlockEntry) -> Result<Option<SymbolDecl>, Strin
 fn parse_symbol_header(trimmed: &str, span: Span) -> Option<SymbolDecl> {
     let exported = trimmed.starts_with("export ");
     let rest = trimmed.strip_prefix("export ").unwrap_or(trimmed);
+    if rest.starts_with("native callback ") {
+        return None;
+    }
     if let Some(symbol) = parse_intrinsic_symbol(rest, exported, span) {
+        return Some(symbol);
+    }
+    if let Some(symbol) = parse_native_symbol(rest, exported, span) {
         return Some(symbol);
     }
     if let Some(symbol) = parse_behavior_symbol(rest, exported, span) {
@@ -2162,6 +2220,7 @@ fn parse_symbol_header(trimmed: &str, span: Span) -> Option<SymbolDecl> {
             availability: Vec::new(),
             forewords: Vec::new(),
             intrinsic_impl: None,
+            native_impl: None,
             body: SymbolBody::None,
             statements: Vec::new(),
             cleanup_footers: Vec::new(),
@@ -2189,6 +2248,7 @@ fn parse_owner_symbol(rest: &str, exported: bool, span: Span) -> Option<SymbolDe
         availability: Vec::new(),
         forewords: Vec::new(),
         intrinsic_impl: None,
+        native_impl: None,
         body: SymbolBody::Owner {
             objects,
             context_type,
@@ -2225,6 +2285,7 @@ fn parse_behavior_symbol(rest: &str, exported: bool, span: Span) -> Option<Symbo
         availability: Vec::new(),
         forewords: Vec::new(),
         intrinsic_impl: None,
+        native_impl: None,
         body: SymbolBody::None,
         statements: Vec::new(),
         cleanup_footers: Vec::new(),
@@ -2261,6 +2322,7 @@ fn parse_system_symbol(rest: &str, exported: bool, span: Span) -> Option<SymbolD
         availability: Vec::new(),
         forewords: Vec::new(),
         intrinsic_impl: None,
+        native_impl: None,
         body: SymbolBody::None,
         statements: Vec::new(),
         cleanup_footers: Vec::new(),
@@ -2291,12 +2353,90 @@ fn parse_intrinsic_symbol(rest: &str, exported: bool, span: Span) -> Option<Symb
         availability: Vec::new(),
         forewords: Vec::new(),
         intrinsic_impl: Some(binding.to_string()),
+        native_impl: None,
         body: SymbolBody::None,
         statements: Vec::new(),
         cleanup_footers: Vec::new(),
         surface_text: format!("intrinsic fn {} = {}", signature_text.trim(), binding),
         span,
     })
+}
+
+fn parse_native_symbol(rest: &str, exported: bool, span: Span) -> Option<SymbolDecl> {
+    let rest = rest.strip_prefix("native fn ")?;
+    let (signature_text, binding_text) = rest.split_once('=')?;
+    let binding = binding_text.trim();
+    if binding.is_empty() || !is_path_like(binding) {
+        return None;
+    }
+    let signature = parse_symbol_signature(SymbolKind::Fn, signature_text.trim(), span)?;
+    Some(SymbolDecl {
+        name: signature.name,
+        kind: SymbolKind::Fn,
+        exported,
+        is_async: false,
+        type_params: signature.type_params,
+        where_clause: signature.where_clause,
+        params: signature.params,
+        return_type: signature.return_type,
+        behavior_attrs: Vec::new(),
+        opaque_policy: None,
+        availability: Vec::new(),
+        forewords: Vec::new(),
+        intrinsic_impl: None,
+        native_impl: Some(binding.to_string()),
+        body: SymbolBody::None,
+        statements: Vec::new(),
+        cleanup_footers: Vec::new(),
+        surface_text: format!("native fn {} = {}", signature_text.trim(), binding),
+        span,
+    })
+}
+
+fn parse_native_callback_decl(
+    trimmed: &str,
+    span: Span,
+) -> Result<Option<NativeCallbackDecl>, String> {
+    let Some(rest) = trimmed.strip_prefix("native callback ").map(str::trim) else {
+        return Ok(None);
+    };
+    let (signature_text, target_text) = rest.split_once('=').ok_or_else(|| {
+        format!(
+            "{}:{}: malformed native callback declaration",
+            span.line, span.column
+        )
+    })?;
+    let signature =
+        parse_symbol_signature(SymbolKind::Fn, signature_text.trim(), span).ok_or_else(|| {
+            format!(
+                "{}:{}: malformed native callback declaration",
+                span.line, span.column
+            )
+        })?;
+    if !signature.type_params.is_empty() {
+        return Err(format!(
+            "{}:{}: native callbacks do not support type parameters",
+            span.line, span.column
+        ));
+    }
+    if signature.where_clause.is_some() {
+        return Err(format!(
+            "{}:{}: native callbacks do not support where clauses",
+            span.line, span.column
+        ));
+    }
+    Ok(Some(NativeCallbackDecl {
+        name: signature.name,
+        params: signature.params,
+        return_type: signature.return_type,
+        target: parse_path(target_text.trim()).map_err(|_| {
+            format!(
+                "{}:{}: malformed native callback target",
+                span.line, span.column
+            )
+        })?,
+        span,
+    }))
 }
 
 fn parse_opaque_symbol(rest: &str, exported: bool, span: Span) -> Option<SymbolDecl> {
@@ -2321,6 +2461,7 @@ fn parse_opaque_symbol(rest: &str, exported: bool, span: Span) -> Option<SymbolD
         availability: Vec::new(),
         forewords: Vec::new(),
         intrinsic_impl: None,
+        native_impl: None,
         body: SymbolBody::None,
         statements: Vec::new(),
         cleanup_footers: Vec::new(),
@@ -3454,6 +3595,23 @@ fn parse_headed_region_statement(
         }));
     }
 
+    if entry.text.starts_with("record ") {
+        let region = parse_record_region(&entry.text, &entry.children, entry.span)?;
+        if matches!(region.completion, ConstructCompletionKind::Yield) {
+            return Err(format!(
+                "{}:{}: `record yield` is expression-form only",
+                entry.span.line, entry.span.column
+            ));
+        }
+        return Ok(Some(Statement {
+            kind: StatementKind::Record(region),
+            availability: Vec::new(),
+            forewords: Vec::new(),
+            cleanup_footers: Vec::new(),
+            span: entry.span,
+        }));
+    }
+
     if entry.text.starts_with("construct ") {
         let region = parse_construct_region(&entry.text, &entry.children, entry.span)?;
         if matches!(region.completion, ConstructCompletionKind::Yield) {
@@ -3503,6 +3661,27 @@ fn parse_construct_yield_expression(
         ));
     }
     Ok(Some(Expr::ConstructRegion(Box::new(region))))
+}
+
+fn parse_record_yield_expression(
+    text: &str,
+    attached: &[RawBlockEntry],
+    span: Span,
+) -> Result<Option<Expr>, String> {
+    if !text.starts_with("record ") {
+        return Ok(None);
+    }
+    if attached.is_empty() {
+        return Ok(None);
+    }
+    let region = parse_record_region(text, attached, span)?;
+    if !matches!(region.completion, ConstructCompletionKind::Yield) {
+        return Err(format!(
+            "{}:{}: only `record yield` is valid in expression position",
+            span.line, span.column
+        ));
+    }
+    Ok(Some(Expr::RecordRegion(Box::new(region))))
 }
 
 fn parse_recycle_line(entry: &RawBlockEntry, loop_depth: usize) -> Result<RecycleLine, String> {
@@ -3763,6 +3942,133 @@ fn parse_construct_region(
     })
 }
 
+fn parse_record_region(
+    text: &str,
+    children: &[RawBlockEntry],
+    span: Span,
+) -> Result<RecordRegion, String> {
+    if children.is_empty() {
+        return Err(format!(
+            "{}:{}: `record` requires an indented region body",
+            span.line, span.column
+        ));
+    }
+    let Some(rest) = text.strip_prefix("record ") else {
+        return Err(format!(
+            "{}:{}: malformed `record` header",
+            span.line, span.column
+        ));
+    };
+    let (header, default_modifier) =
+        parse_headed_modifier_suffix(rest, HeadedModifierMode::Construct, span)?;
+    let Some((completion_text, remainder)) = split_first_token(&header) else {
+        return Err(format!(
+            "{}:{}: malformed `record` header",
+            span.line, span.column
+        ));
+    };
+    let completion = match completion_text {
+        "yield" => ConstructCompletionKind::Yield,
+        "deliver" => ConstructCompletionKind::Deliver,
+        "place" => ConstructCompletionKind::Place,
+        _ => {
+            return Err(format!(
+                "{}:{}: malformed `record` completion clause",
+                span.line, span.column
+            ));
+        }
+    };
+    let remainder = remainder.trim();
+    let (target_clause, destination) = match completion {
+        ConstructCompletionKind::Yield => {
+            if remainder.is_empty() {
+                return Err(format!(
+                    "{}:{}: `record yield` requires a record target",
+                    span.line, span.column
+                ));
+            }
+            (remainder, None)
+        }
+        ConstructCompletionKind::Deliver => {
+            let arrow = find_top_level_token(remainder, "->").ok_or_else(|| {
+                format!(
+                    "{}:{}: `record deliver` requires `-> <name>`",
+                    span.line, span.column
+                )
+            })?;
+            let target = remainder[..arrow].trim();
+            let destination = remainder[arrow + 2..].trim();
+            if target.is_empty() || !is_identifier(destination) {
+                return Err(format!(
+                    "{}:{}: malformed `record deliver` clause",
+                    span.line, span.column
+                ));
+            }
+            (
+                target,
+                Some(ConstructDestination::Deliver {
+                    name: destination.to_string(),
+                }),
+            )
+        }
+        ConstructCompletionKind::Place => {
+            let arrow = find_top_level_token(remainder, "->").ok_or_else(|| {
+                format!(
+                    "{}:{}: `record place` requires `-> <target>`",
+                    span.line, span.column
+                )
+            })?;
+            let target = remainder[..arrow].trim();
+            let destination = remainder[arrow + 2..].trim();
+            if target.is_empty() || destination.is_empty() {
+                return Err(format!(
+                    "{}:{}: malformed `record place` clause",
+                    span.line, span.column
+                ));
+            }
+            (
+                target,
+                Some(ConstructDestination::Place {
+                    target: parse_assign_target(destination)?,
+                }),
+            )
+        }
+    };
+    let (target_text, base_text) = split_record_target_base_clause(target_clause);
+    if target_text.is_empty() {
+        return Err(format!(
+            "{}:{}: malformed `record` target clause",
+            span.line, span.column
+        ));
+    }
+    Ok(RecordRegion {
+        completion,
+        target: Box::new(parse_expression(target_text, &[], span)?),
+        base: base_text
+            .map(|base| parse_expression(base, &[], span))
+            .transpose()?
+            .map(Box::new),
+        destination,
+        default_modifier,
+        lines: children
+            .iter()
+            .map(parse_record_line)
+            .collect::<Result<Vec<_>, _>>()?,
+        span,
+    })
+}
+
+fn split_record_target_base_clause(text: &str) -> (&str, Option<&str>) {
+    if let Some(index) = find_top_level_keyword(text, "from") {
+        let target = text[..index].trim();
+        let base = text[index + "from".len()..].trim();
+        if !target.is_empty() && !base.is_empty() {
+            return (target, Some(base));
+        }
+    }
+    (text.trim(), None)
+}
+
 fn parse_construct_line(entry: &RawBlockEntry) -> Result<ConstructLine, String> {
     let (text, modifier) =
         parse_headed_modifier_suffix(&entry.text, HeadedModifierMode::Construct, entry.span)?;
@@ -3786,6 +4092,17 @@ fn parse_construct_line(entry: &RawBlockEntry) -> Result<ConstructLine, String> 
         modifier,
         span: entry.span,
     })
+}
+
+fn parse_record_line(entry: &RawBlockEntry) -> Result<ConstructLine, String> {
+    let line = parse_construct_line(entry)?;
+    if line.name == "payload" {
+        return Err(format!(
+            "{}:{}: `record` does not accept `payload = ...` contributions",
+            entry.span.line, entry.span.column
+        ));
+    }
+    Ok(line)
 }
 
 fn parse_memory_spec_decl(
@@ -3944,6 +4261,9 @@ fn parse_expression(text: &str, attached: &[RawBlockEntry], span: Span) -> Resul
         ));
     }
     if let Some(expr) = parse_construct_yield_expression(trimmed, attached, span)? {
+        return Ok(expr);
+    }
+    if let Some(expr) = parse_record_yield_expression(trimmed, attached, span)? {
         return Ok(expr);
     }
     if let Some(rest) = trimmed.strip_prefix("match ") {
@@ -6863,6 +7183,23 @@ fn validate_statement_phrase_contract(statements: &[Statement]) -> Result<(), St
                     validate_headed_modifier_phrase_contract(line.modifier.as_ref(), line.span)?;
                 }
             }
+            StatementKind::Record(region) => {
+                validate_expr_phrase_contract(&region.target, region.span, false)?;
+                if let Some(base) = &region.base {
+                    validate_expr_phrase_contract(base, region.span, false)?;
+                }
+                validate_headed_modifier_phrase_contract(
+                    region.default_modifier.as_ref(),
+                    region.span,
+                )?;
+                if let Some(ConstructDestination::Place { target }) = &region.destination {
+                    validate_assign_target_tuple_contract(target, region.span)?;
+                }
+                for line in &region.lines {
+                    validate_expr_phrase_contract(&line.value, line.span, false)?;
+                    validate_headed_modifier_phrase_contract(line.modifier.as_ref(), line.span)?;
+                }
+            }
             StatementKind::Construct(region) => {
                 validate_expr_phrase_contract(&region.target, region.span, false)?;
                 validate_headed_modifier_phrase_contract(
@@ -6922,6 +7259,20 @@ fn validate_expr_phrase_contract(
             validate_expr_phrase_contract(subject, span, false)?;
             for arm in arms {
                 validate_expr_phrase_contract(&arm.value, arm.span, false)?;
+            }
+        }
+        Expr::RecordRegion(region) => {
+            validate_expr_phrase_contract(&region.target, region.span, false)?;
+            if let Some(base) = &region.base {
+                validate_expr_phrase_contract(base, region.span, false)?;
+            }
+            validate_headed_modifier_phrase_contract(
+                region.default_modifier.as_ref(),
+                region.span,
+            )?;
+            for line in &region.lines {
+                validate_expr_phrase_contract(&line.value, line.span, false)?;
+                validate_headed_modifier_phrase_contract(line.modifier.as_ref(), line.span)?;
             }
         }
         Expr::ConstructRegion(region) => {
@@ -7360,6 +7711,23 @@ fn validate_statement_block_tuple_contract(statements: &[Statement]) -> Result<(
                     validate_headed_modifier_tuple_contract(line.modifier.as_ref(), line.span)?;
                 }
             }
+            StatementKind::Record(region) => {
+                validate_expr_tuple_contract(&region.target, region.span)?;
+                if let Some(base) = &region.base {
+                    validate_expr_tuple_contract(base, region.span)?;
+                }
+                validate_headed_modifier_tuple_contract(
+                    region.default_modifier.as_ref(),
+                    region.span,
+                )?;
+                if let Some(ConstructDestination::Place { target }) = &region.destination {
+                    validate_assign_target_tuple_contract(target, region.span)?;
+                }
+                for line in &region.lines {
+                    validate_expr_tuple_contract(&line.value, line.span)?;
+                    validate_headed_modifier_tuple_contract(line.modifier.as_ref(), line.span)?;
+                }
+            }
             StatementKind::Construct(region) => {
                 validate_expr_tuple_contract(&region.target, region.span)?;
                 validate_headed_modifier_tuple_contract(
@@ -7407,6 +7775,18 @@ fn validate_expr_tuple_contract(expr: &Expr, span: Span) -> Result<(), String> {
             validate_expr_tuple_contract(subject, span)?;
             for arm in arms {
                 validate_expr_tuple_contract(&arm.value, arm.span)?;
+            }
+            Ok(())
+        }
+        Expr::RecordRegion(region) => {
+            validate_expr_tuple_contract(&region.target, region.span)?;
+            if let Some(base) = &region.base {
+                validate_expr_tuple_contract(base, region.span)?;
+            }
+            validate_headed_modifier_tuple_contract(region.default_modifier.as_ref(), region.span)?;
+            for line in &region.lines {
+                validate_expr_tuple_contract(&line.value, line.span)?;
+                validate_headed_modifier_tuple_contract(line.modifier.as_ref(), line.span)?;
             }
             Ok(())
         }
@@ -8754,6 +9134,45 @@ mod tests {
     }
 
     #[test]
+    fn parse_module_handles_native_binding_declarations() {
+        let parsed = parse_module(concat!(
+            "export opaque type HiddenWindow as move, boundary_unsafe\n",
+            "export native fn create_hidden_window() -> arcana_winapi.types.HiddenWindow = windows.create_hidden_window\n",
+            "native callback window_proc(read window: arcana_winapi.types.HiddenWindow, message: Int, wparam: Int, lparam: Int) -> Int = arcana_winapi.callbacks.handle_window_proc\n",
+            "fn handle_window_proc(read window: arcana_winapi.types.HiddenWindow, message: Int, wparam: Int, lparam: Int) -> Int:\n",
+            "    return wparam\n",
+        ))
+        .expect("native binding declarations should parse");
+
+        assert_eq!(parsed.symbols.len(), 3);
+        assert_eq!(parsed.symbols[0].kind, SymbolKind::OpaqueType);
+        assert_eq!(parsed.symbols[0].name, "HiddenWindow");
+        assert_eq!(
+            parsed.symbols[0].opaque_policy.expect("opaque policy"),
+            OpaqueTypePolicy {
+                ownership: OpaqueOwnershipPolicy::Move,
+                boundary: OpaqueBoundaryPolicy::Unsafe,
+            }
+        );
+        assert_eq!(parsed.symbols[1].kind, SymbolKind::Fn);
+        assert_eq!(parsed.symbols[1].name, "create_hidden_window");
+        assert_eq!(
+            parsed.symbols[1].native_impl.as_deref(),
+            Some("windows.create_hidden_window")
+        );
+        assert_eq!(parsed.native_callbacks.len(), 1);
+        assert_eq!(parsed.native_callbacks[0].name, "window_proc");
+        assert_eq!(
+            parsed.native_callbacks[0].target,
+            vec![
+                "arcana_winapi".to_string(),
+                "callbacks".to_string(),
+                "handle_window_proc".to_string()
+            ]
+        );
+    }
+
+    #[test]
     fn parse_module_rejects_tuple_field_access_outside_pair_contract() {
         let err = parse_module("fn main() -> Int:\n    return pair.2\n")
             .expect_err("tuple field access should fail");
@@ -9842,9 +10261,15 @@ mod tests {
             "        true\n",
             "    let built = construct yield Widget -return 0\n",
             "        value = value\n",
+            "    let copied = record yield Widget from built -return 0\n",
+            "        value = value\n",
+            "    record deliver Widget from copied -> mirrored -return 0\n",
+            "        value = value\n",
             "    construct deliver Widget -> delivered -return 0\n",
             "        value = value\n",
             "    let mut placed = Widget :: value = 0 :: call\n",
+            "    record place Widget from copied -> placed -return 0\n",
+            "        value = value\n",
             "    construct place Widget -> placed -return 0\n",
             "        value = value\n",
             "    return built.value\n",
@@ -9881,10 +10306,25 @@ mod tests {
         ));
         assert!(matches!(
             main.statements[4].kind,
-            StatementKind::Construct(_)
+            StatementKind::Let {
+                value: Expr::RecordRegion(_),
+                ..
+            }
+        ));
+        assert!(matches!(
+            main.statements[5].kind,
+            StatementKind::Record(_)
         ));
         assert!(matches!(
             main.statements[6].kind,
+            StatementKind::Construct(_)
+        ));
+        assert!(matches!(
+            main.statements[8].kind,
+            StatementKind::Record(_)
+        ));
+        assert!(matches!(
+            main.statements[9].kind,
             StatementKind::Construct(_)
         ));
     }

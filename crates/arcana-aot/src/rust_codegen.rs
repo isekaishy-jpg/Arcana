@@ -24,6 +24,7 @@ use arcana_cabi::{
 pub struct RustNativeProject {
     pub project_dir: PathBuf,
     pub output_name: String,
+    pub cargo_output_name: String,
     pub artifact_text: String,
     pub support_files: Vec<(String, Vec<u8>)>,
     pub cargo_toml: String,
@@ -38,6 +39,8 @@ pub fn generate_windows_exe_project(
     lowering: &NativeLoweringPlan,
 ) -> Result<RustNativeProject, String> {
     let output_stem = native_output_stem(&plan.root_artifact_file_name);
+    let cargo_output_name =
+        unique_native_output_name(&plan.artifact.package_id, &output_stem, "exe");
     let NativeLaunchPlan::Executable { main_routine_key } = &plan.launch else {
         panic!("windows exe project generation requires an executable native plan");
     };
@@ -58,16 +61,13 @@ pub fn generate_windows_exe_project(
     Ok(RustNativeProject {
         project_dir: project_dir.to_path_buf(),
         output_name: plan.root_artifact_file_name.clone(),
+        cargo_output_name: cargo_output_name.clone(),
         artifact_text: plan.artifact_text.clone(),
         support_files: vec![(
             native_bundle_manifest_file_name(&plan.root_artifact_file_name),
             render_native_bundle_manifest(plan)?.into_bytes(),
         )],
-        cargo_toml: render_exe_cargo_toml(
-            plan.artifact.package_name.as_str(),
-            &output_stem,
-            plan.runtime_binding,
-        ),
+        cargo_toml: render_exe_cargo_toml(&cargo_output_name, plan.runtime_binding),
         build_rs: Some(render_native_build_rs(None)),
         lib_rs: None,
         main_rs: Some(render_exe_main_rs(
@@ -105,10 +105,13 @@ pub fn generate_windows_dll_project(
     }
     let layout = NativeLayoutCatalog::from_exports(exports);
     let output_stem = native_output_stem(&plan.root_artifact_file_name);
+    let cargo_output_name =
+        unique_native_output_name(&plan.artifact.package_id, &output_stem, "dll");
     let definition_text = render_windows_dll_definition_file(plan)?;
     Ok(RustNativeProject {
         project_dir: project_dir.to_path_buf(),
         output_name: plan.root_artifact_file_name.clone(),
+        cargo_output_name: cargo_output_name.clone(),
         artifact_text: plan.artifact_text.clone(),
         support_files: vec![
             (
@@ -124,22 +127,14 @@ pub fn generate_windows_dll_project(
                 render_native_bundle_manifest(plan)?.into_bytes(),
             ),
         ],
-        cargo_toml: render_dll_cargo_toml(
-            plan.artifact.package_name.as_str(),
-            &output_stem,
-            plan.runtime_binding,
-        ),
+        cargo_toml: render_dll_cargo_toml(&cargo_output_name, plan.runtime_binding),
         build_rs: Some(render_native_build_rs(Some(&definition_text))),
         lib_rs: Some(render_dll_lib_rs(plan, lowered_exports, &layout, lowering)),
         main_rs: None,
     })
 }
 
-fn render_exe_cargo_toml(
-    crate_name: &str,
-    output_stem: &str,
-    runtime_binding: AotRuntimeBinding,
-) -> String {
+fn render_exe_cargo_toml(cargo_output_name: &str, runtime_binding: AotRuntimeBinding) -> String {
     let repo_root = repo_root();
     let runtime_dependency = render_runtime_dependency(runtime_binding, &repo_root);
     let cabi_dependency = escape_toml(
@@ -166,8 +161,8 @@ fn render_exe_cargo_toml(
             "arcana_runtime = {{ {} }}\n",
             "\n[workspace]\n",
         ),
-        sanitize_crate_name(crate_name),
-        escape_toml(output_stem),
+        escape_toml(cargo_output_name),
+        escape_toml(cargo_output_name),
         cabi_dependency,
         runtime_dependency,
         escape_toml(
@@ -181,11 +176,7 @@ fn render_exe_cargo_toml(
     )
 }
 
-fn render_dll_cargo_toml(
-    crate_name: &str,
-    output_stem: &str,
-    runtime_binding: AotRuntimeBinding,
-) -> String {
+fn render_dll_cargo_toml(cargo_output_name: &str, runtime_binding: AotRuntimeBinding) -> String {
     let repo_root = repo_root();
     let runtime_dependency = render_runtime_dependency(runtime_binding, &repo_root);
     let cabi_dependency = escape_toml(
@@ -212,8 +203,8 @@ fn render_dll_cargo_toml(
             "arcana_runtime = {{ {} }}\n",
             "\n[workspace]\n",
         ),
-        sanitize_crate_name(crate_name),
-        escape_toml(output_stem),
+        escape_toml(cargo_output_name),
+        escape_toml(cargo_output_name),
         cabi_dependency,
         runtime_dependency,
         escape_toml(
@@ -853,6 +844,11 @@ fn render_runtime_abi_expr_from_native(ty: &NativeAbiType, expr: &str, context: 
         NativeAbiType::Bytes => {
             format!("bytes_from_view({expr}, {context:?}).map(RuntimeAbiValue::Bytes)")
         }
+        NativeAbiType::Opaque(type_name) => {
+            format!(
+                "Ok(RuntimeAbiValue::Opaque {{ type_name: {type_name:?}.to_string(), handle: {expr} }})"
+            )
+        }
         NativeAbiType::Pair(left, right) => format!(
             concat!(
                 "{{\n",
@@ -1445,6 +1441,14 @@ fn render_store_runtime_abi_value(
             ),
             value_expr, target_expr
         ),
+        NativeAbiType::Opaque(type_name) => format!(
+            concat!(
+                "    let RuntimeAbiValue::Opaque {{ type_name, handle }} = {} else {{ set_last_error(\"abi return type mismatch\".to_string()); return 0; }};\n",
+                "    if type_name != {:?} {{ set_last_error(\"abi opaque return type mismatch\".to_string()); return 0; }};\n",
+                "    {} = handle;\n"
+            ),
+            value_expr, type_name, target_expr
+        ),
         NativeAbiType::Pair(left, right) => {
             let pair_ty = layout.rust_type_ref(ty, NativeAbiRole::Return);
             format!(
@@ -1501,6 +1505,10 @@ fn sanitize_crate_name(name: &str) -> String {
         out.insert(0, '_');
     }
     out
+}
+
+fn unique_native_output_name(package_id: &str, output_stem: &str, kind: &str) -> String {
+    sanitize_crate_name(&format!("arcana_{kind}_{}_{}", package_id, output_stem))
 }
 
 fn direct_routine_fn_name(routine_key: &str) -> String {

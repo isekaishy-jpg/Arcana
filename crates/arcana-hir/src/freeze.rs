@@ -19,6 +19,7 @@ pub const FROZEN_HIR_NODE_KINDS: &[&str] = &[
     "HeadedModifier",
     "RecycleLine",
     "BindLine",
+    "RecordRegion",
     "ConstructRegion",
     "ConstructLine",
     "MemorySpecDecl",

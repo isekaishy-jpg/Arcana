@@ -283,6 +283,28 @@ fn collect_stmt_callees(
                 }
             }
         }
+        ExecStmt::Record(region) => {
+            collect_expr_callees(package, current_module_id, &region.target, out);
+            if let Some(base) = &region.base {
+                collect_expr_callees(package, current_module_id, base, out);
+            }
+            if let Some(modifier) = &region.default_modifier
+                && let Some(payload) = &modifier.payload
+            {
+                collect_expr_callees(package, current_module_id, payload, out);
+            }
+            if let Some(crate::ExecConstructDestination::Place { target }) = &region.destination {
+                collect_assign_target_callees(package, current_module_id, target, out);
+            }
+            for line in &region.lines {
+                collect_expr_callees(package, current_module_id, &line.value, out);
+                if let Some(modifier) = &line.modifier
+                    && let Some(payload) = &modifier.payload
+                {
+                    collect_expr_callees(package, current_module_id, payload, out);
+                }
+            }
+        }
         ExecStmt::MemorySpec(spec) => {
             if let Some(modifier) = &spec.default_modifier
                 && let Some(payload) = &modifier.payload
@@ -344,6 +366,28 @@ fn collect_expr_callees(
         }
         ExecExpr::ConstructRegion(region) => {
             collect_expr_callees(package, current_module_id, &region.target, out);
+            if let Some(modifier) = &region.default_modifier
+                && let Some(payload) = &modifier.payload
+            {
+                collect_expr_callees(package, current_module_id, payload, out);
+            }
+            if let Some(crate::ExecConstructDestination::Place { target }) = &region.destination {
+                collect_assign_target_callees(package, current_module_id, target, out);
+            }
+            for line in &region.lines {
+                collect_expr_callees(package, current_module_id, &line.value, out);
+                if let Some(modifier) = &line.modifier
+                    && let Some(payload) = &modifier.payload
+                {
+                    collect_expr_callees(package, current_module_id, payload, out);
+                }
+            }
+        }
+        ExecExpr::RecordRegion(region) => {
+            collect_expr_callees(package, current_module_id, &region.target, out);
+            if let Some(base) = &region.base {
+                collect_expr_callees(package, current_module_id, base, out);
+            }
             if let Some(modifier) = &region.default_modifier
                 && let Some(payload) = &modifier.payload
             {
@@ -598,6 +642,7 @@ mod tests {
             params: Vec::new(),
             return_type: Some(ty("Int")),
             intrinsic_impl: intrinsic_impl.map(ToString::to_string),
+            native_impl: None,
             impl_target_type: None,
             impl_trait_path: None,
             availability: Vec::new(),
@@ -617,6 +662,7 @@ mod tests {
                 args: Vec::new(),
                 qualifier_kind: ExecPhraseQualifierKind::Call,
                 qualifier: "call".to_string(),
+                qualifier_type_args: Vec::new(),
                 resolved_callable: Some(
                     callable.iter().map(|segment| segment.to_string()).collect(),
                 ),
@@ -635,6 +681,7 @@ mod tests {
             args: Vec::new(),
             qualifier_kind: ExecPhraseQualifierKind::Call,
             qualifier: "call".to_string(),
+            qualifier_type_args: Vec::new(),
             resolved_callable: Some(callable.iter().map(|segment| segment.to_string()).collect()),
             resolved_routine: Some(routine_key.to_string()),
             dynamic_dispatch: None,
@@ -892,6 +939,7 @@ mod tests {
                     Vec::new(),
                 ),
             ],
+            native_callbacks: Vec::new(),
             owners: Vec::new(),
         };
 
@@ -1027,6 +1075,7 @@ mod tests {
                     Vec::new(),
                 ),
             ],
+            native_callbacks: Vec::new(),
             owners: Vec::new(),
         };
 
@@ -1107,6 +1156,7 @@ mod tests {
                     Vec::new(),
                 ),
             ],
+            native_callbacks: Vec::new(),
             owners: Vec::new(),
         };
 
@@ -1190,6 +1240,7 @@ mod tests {
                     Vec::new(),
                 ),
             ],
+            native_callbacks: Vec::new(),
             owners: Vec::new(),
         };
 
@@ -1252,6 +1303,7 @@ mod tests {
                     Vec::new(),
                 ),
             ],
+            native_callbacks: Vec::new(),
             owners: Vec::new(),
         };
 
@@ -1324,6 +1376,7 @@ mod tests {
                     Vec::new(),
                 ),
             ],
+            native_callbacks: Vec::new(),
             owners: Vec::new(),
         };
 
@@ -1407,6 +1460,7 @@ mod tests {
                     params: Vec::new(),
                     return_type: Some(ty("Int")),
                     intrinsic_impl: None,
+                    native_impl: None,
                     impl_target_type: None,
                     impl_trait_path: None,
                     availability: Vec::new(),
@@ -1441,6 +1495,7 @@ mod tests {
                     }],
                     return_type: Some(ty("Int")),
                     intrinsic_impl: Some("IoPrint".to_string()),
+                    native_impl: None,
                     impl_target_type: None,
                     impl_trait_path: None,
                     availability: Vec::new(),
@@ -1450,6 +1505,7 @@ mod tests {
                     statements: Vec::new(),
                 },
             ],
+            native_callbacks: Vec::new(),
             owners: Vec::new(),
         };
 

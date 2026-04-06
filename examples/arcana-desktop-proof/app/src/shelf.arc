@@ -7,12 +7,15 @@ import arcana_desktop.monitor
 import arcana_desktop.text_input
 import arcana_desktop.types
 import arcana_desktop.window
+import arcana_text.raster
 import demo_types
 import layout
 import pages
 import render
 import std.args
 import std.bytes
+import std.collections.list
+import std.fs
 import std.io
 import std.option
 import std.result
@@ -20,6 +23,39 @@ import std.text
 import std.time
 use std.option.Option
 use std.result.Result
+
+fn probe_enabled(read self: demo_types.Demo) -> Bool:
+    return self.probe_mode
+
+fn probe_log_path() -> Str:
+    return "scratch/desktop_probe.log"
+
+fn probe_log_append(line: Str):
+    let _ = std.fs.mkdir_all :: "scratch" :: call
+    let opened = std.fs.stream_open_write :: (probe_log_path :: :: call), true :: call
+    return match opened:
+        Result.Ok(value) => probe_log_append_ready :: value, line :: call
+        Result.Err(_) => 0
+
+fn probe_log_append_ready(take value: std.fs.FileStream, line: Str):
+    let mut stream = value
+    let bytes = std.bytes.from_str_utf8 :: (line + "\n") :: call
+    let _ = std.fs.stream_write :: stream, bytes :: call
+    let _ = std.fs.stream_close :: stream :: call
+
+fn reset_probe_log():
+    let _ = std.fs.mkdir_all :: "scratch" :: call
+    let _ = std.fs.write_text :: (probe_log_path :: :: call), "" :: call
+
+fn probe_line(read self: demo_types.Demo, head: Str, tail: Str):
+    if not (probe_enabled :: self :: call):
+        return
+    probe_log_append :: ("[desktop-proof] " + head + " :: " + tail) :: call
+
+fn bool_code(value: Bool) -> Int:
+    if value:
+        return 1
+    return 0
 
 fn has_flag(flag: Str) -> Bool:
     let total = std.args.count :: :: call
@@ -32,6 +68,10 @@ fn has_flag(flag: Str) -> Bool:
 
 fn default_demo(smoke_mode: Bool) -> demo_types.Demo:
     let mut demo = demo_types.Demo :: smoke_mode = smoke_mode, ui_smoke_mode = false, exercise_second_window = false :: call
+    demo.probe_mode = false
+    demo.probe_measure_count = 0
+    demo.probe_label_count = 0
+    demo.text_renderer = arcana_text.raster.default_renderer :: :: call
     demo.dirty = true
     demo.title_dirty = false
     demo.smoke_printed = false
@@ -76,6 +116,11 @@ fn default_demo(smoke_mode: Bool) -> demo_types.Demo:
     demo.body_page_index = -1
     demo.body_wrap_width = 0
     demo.body_lines = std.collections.list.new[Str] :: :: call
+    demo.body_stream_ready = false
+    demo.body_stream_page_index = -1
+    demo.body_stream_layout = (0, 0)
+    demo.body_stream_color = 0
+    demo.body_stream = Option.None[arcana_text.raster.GlyphDrawStream] :: :: call
     return demo
 
 fn current_title(read self: demo_types.Demo) -> Str:
@@ -110,9 +155,12 @@ fn sync_body_lines(edit self: demo_types.Demo, read win: arcana_desktop.types.Wi
     let wrap_width = view.center_panel.size.0 - 68
     if self.body_page_index == self.page_index and self.body_wrap_width == wrap_width:
         return
+    probe_line :: self, "sync_body_lines", ("page=" + (std.text.from_int :: self.page_index :: call) + " width=" + (std.text.from_int :: wrap_width :: call)) :: call
     self.body_page_index = self.page_index
     self.body_wrap_width = wrap_width
-    self.body_lines = render.wrapped_lines :: (pages.body :: self.page_index :: call), wrap_width :: call
+    self.body_lines = render.wrapped_lines :: self, (pages.body :: self.page_index :: call), wrap_width :: call
+    self.body_stream_ready = false
+    probe_line :: self, "sync_body_lines_done", ("lines=" + (std.text.from_int :: (self.body_lines :: :: len) :: call)) :: call
 
 fn device_policy_code(read value: arcana_desktop.types.DeviceEvents) -> Int:
     return match value:
@@ -876,15 +924,19 @@ fn on_main_redraw(edit self: demo_types.Demo, edit cx: arcana_desktop.types.AppC
     self.redraw_count += 1
     self.last_event = "WindowRedrawRequested"
     self.last_window = "main"
+    probe_line :: self, "main_redraw_start", ("count=" + (std.text.from_int :: self.redraw_count :: call)) :: call
     if not self.dirty and self.controls_dirty:
         render.draw_controls_only :: self, win :: call
         self.controls_dirty = false
+        probe_line :: self, "main_redraw_controls_only", "done" :: call
         return arcana_desktop.types.ControlFlow.Wait :: :: call
     refresh_main_monitor :: self, cx :: call
     refresh_second_window_state :: self, cx :: call
     sync_device_policy :: self, cx :: call
     sync_body_lines :: self, win :: call
+    probe_line :: self, "main_redraw_before_render", self.status_tail :: call
     render.draw_main :: self, win :: call
+    probe_line :: self, "main_redraw_after_render", "done" :: call
     self.dirty = false
     self.controls_dirty = false
     return arcana_desktop.types.ControlFlow.Wait :: :: call
@@ -1029,6 +1081,7 @@ fn on_second_mouse_up(edit self: demo_types.Demo, edit cx: arcana_desktop.types.
 
 impl arcana_desktop.app.Application[demo_types.Demo] for demo_types.Demo:
     fn resumed(edit self: demo_types.Demo, edit cx: arcana_desktop.types.AppContext):
+        probe_line :: self, "resumed", "enter" :: call
         self.last_monitor = (arcana_desktop.monitor.primary :: :: call).name
         sync_device_policy :: self, cx :: call
         refresh_second_window_state :: self, cx :: call
@@ -1043,6 +1096,7 @@ impl arcana_desktop.app.Application[demo_types.Demo] for demo_types.Demo:
             open_second_window :: self, cx :: call
             return
         set_status :: self, "ready", "interactive showcase ready" :: call
+        probe_line :: self, "resumed", "ready" :: call
 
     fn suspended(edit self: demo_types.Demo, edit cx: arcana_desktop.types.AppContext):
         let _ = cx
@@ -1050,6 +1104,20 @@ impl arcana_desktop.app.Application[demo_types.Demo] for demo_types.Demo:
         self.status_tail = "application suspended"
 
     fn window_event(edit self: demo_types.Demo, edit cx: arcana_desktop.types.AppContext, read target: arcana_desktop.types.TargetedEvent) -> arcana_desktop.types.ControlFlow:
+        if self.probe_mode:
+            let mut event_name = "window"
+            event_name = match target.event:
+                arcana_desktop.types.WindowEvent.WindowRedrawRequested(_) => "redraw"
+                arcana_desktop.types.WindowEvent.WindowCloseRequested(_) => "close"
+                arcana_desktop.types.WindowEvent.MouseMove(_) => "mouse_move"
+                arcana_desktop.types.WindowEvent.MouseUp(_) => "mouse_up"
+                arcana_desktop.types.WindowEvent.MouseDown(_) => "mouse_down"
+                arcana_desktop.types.WindowEvent.KeyDown(_) => "key_down"
+                arcana_desktop.types.WindowEvent.KeyUp(_) => "key_up"
+                arcana_desktop.types.WindowEvent.TextInput(_) => "text_input"
+                arcana_desktop.types.WindowEvent.WindowResized(_) => "resize"
+                _ => event_name
+            probe_line :: self, "window_event", event_name :: call
         if target_is_second_window :: self, target :: call:
             return match target.event:
                 arcana_desktop.types.WindowEvent.WindowRedrawRequested(_) => on_second_redraw_current :: self, cx :: call
@@ -1090,6 +1158,9 @@ impl arcana_desktop.app.Application[demo_types.Demo] for demo_types.Demo:
             _ => arcana_desktop.types.ControlFlow.Wait :: :: call
 
     fn about_to_wait(edit self: demo_types.Demo, edit cx: arcana_desktop.types.AppContext) -> arcana_desktop.types.ControlFlow:
+        let dirty_code = bool_code :: self.dirty :: call
+        let controls_code = bool_code :: self.controls_dirty :: call
+        probe_line :: self, "about_to_wait", ("dirty=" + (std.text.from_int :: dirty_code :: call) + " controls=" + (std.text.from_int :: controls_code :: call)) :: call
         flush_main_title :: self, cx :: call
         maybe_schedule_telemetry_redraw :: self :: call
         if self.dirty or self.controls_dirty:
@@ -1269,6 +1340,7 @@ fn on_raw_key_device(edit self: demo_types.Demo, read ev: arcana_desktop.types.R
 fn main() -> Int:
     let smoke_mode = has_flag :: "--smoke" :: call
     let ui_smoke_mode = has_flag :: "--ui-smoke" :: call
+    let probe_mode = has_flag :: "--probe" :: call
     let second_window_mode = has_flag :: "--exercise-second-window" :: call
     let mut cfg = arcana_desktop.app.default_app_config :: :: call
     cfg.window.title = "Arcana Desktop Proof :: " + (pages.title :: 0 :: call)
@@ -1277,5 +1349,8 @@ fn main() -> Int:
     cfg.window.bounds.min_size = (960, 640)
     let mut app = default_demo :: smoke_mode :: call
     app.ui_smoke_mode = ui_smoke_mode
+    app.probe_mode = probe_mode
     app.exercise_second_window = second_window_mode
+    if probe_mode:
+        reset_probe_log :: :: call
     return arcana_desktop.app.run :: app, cfg :: call

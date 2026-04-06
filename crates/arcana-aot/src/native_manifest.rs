@@ -213,6 +213,7 @@ fn native_type_name(ty: &NativeAbiType) -> String {
         NativeAbiType::Bool => "Bool".to_string(),
         NativeAbiType::Str => "Str".to_string(),
         NativeAbiType::Bytes => "Array[Int]".to_string(),
+        NativeAbiType::Opaque(name) => name.clone(),
         NativeAbiType::Unit => "Unit".to_string(),
         NativeAbiType::Pair(left, right) => {
             format!(

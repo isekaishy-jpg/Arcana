@@ -160,6 +160,7 @@ mod tests {
                 params: Vec::new(),
                 return_type: Some(parse_routine_type_text("Int").expect("type should parse")),
                 intrinsic_impl: None,
+                native_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -168,6 +169,7 @@ mod tests {
                     value: ExecExpr::Int(7),
                 }],
             }],
+            native_callbacks: Vec::new(),
             owners: Vec::new(),
             modules: vec![AotPackageModuleArtifact {
                 package_id: "app".to_string(),

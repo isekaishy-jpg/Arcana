@@ -3,10 +3,10 @@ use super::{
     HirChainConnector, HirChainIntroducer, HirChainStep, HirCleanupFooter, HirConstructDestination,
     HirConstructRegion, HirDirective, HirEnumVariant, HirExpr, HirForewordApp, HirForewordArg,
     HirHeadedModifier, HirHeadedModifierKind, HirHeaderAttachment, HirImplAssocTypeBinding,
-    HirImplDecl, HirLangItem, HirMatchArm, HirMatchPattern, HirMemorySpecDecl, HirModuleDependency,
-    HirOwnerExit, HirOwnerObject, HirPhraseArg, HirRecycleLineKind, HirStatement, HirStatementKind,
-    HirSymbol, HirSymbolBody, HirUnaryOp, signature::render_symbol_signature,
-    HirType,
+    HirImplDecl, HirLangItem, HirMatchArm, HirMatchPattern, HirMemorySpecDecl,
+    HirModuleDependency, HirOwnerExit, HirOwnerObject, HirPhraseArg, HirRecordRegion,
+    HirRecycleLineKind, HirStatement, HirStatementKind, HirSymbol, HirSymbolBody, HirType,
+    HirUnaryOp, signature::render_symbol_signature,
 };
 
 pub(crate) fn encode_surface_text(text: &str) -> String {
@@ -209,7 +209,7 @@ pub fn render_symbol_fingerprint(symbol: &HirSymbol) -> String {
         concat!(
             "symbol(",
             "kind={}|name={}|exported={}|async={}|signature={}|type_params=[{}]|params=[{}]|",
-            "where_clause={}|behavior_attrs=[{}]|availability=[{}]|forewords=[{}]|intrinsic={}|body={}|",
+            "where_clause={}|behavior_attrs=[{}]|availability=[{}]|forewords=[{}]|intrinsic={}|native={}|body={}|",
             "statements=[{}]|cleanup_footers=[{}]|generated_by={}|generated_name_key={})"
         ),
         symbol.kind.as_str(),
@@ -257,6 +257,11 @@ pub fn render_symbol_fingerprint(symbol: &HirSymbol) -> String {
             .as_ref()
             .map(quote_fingerprint_text)
             .unwrap_or_else(|| "none".to_string()),
+        symbol
+            .native_impl
+            .as_ref()
+            .map(quote_fingerprint_text)
+            .unwrap_or_else(|| "none".to_string()),
         render_symbol_body_fingerprint(&symbol.body),
         symbol
             .statements
@@ -280,6 +285,41 @@ pub fn render_symbol_fingerprint(symbol: &HirSymbol) -> String {
             .as_ref()
             .map(quote_fingerprint_text)
             .unwrap_or_else(|| "none".to_string())
+    )
+}
+
+pub(crate) fn render_native_callback_fingerprint(
+    callback: &super::HirNativeCallbackDecl,
+) -> String {
+    format!(
+        "native_callback(name={}|params=[{}]|return_type={}|target=[{}])",
+        quote_fingerprint_text(&callback.name),
+        callback
+            .params
+            .iter()
+            .map(|param| {
+                format!(
+                    "param(mode={}|name={}|ty={})",
+                    param.mode
+                        .map(|mode| quote_fingerprint_text(mode.as_str()))
+                        .unwrap_or_else(|| "none".to_string()),
+                    quote_fingerprint_text(&param.name),
+                    quote_fingerprint_text(param.ty.render())
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(","),
+        callback
+            .return_type
+            .as_ref()
+            .map(|ty| quote_fingerprint_text(ty.render()))
+            .unwrap_or_else(|| "Unit".to_string()),
+        callback
+            .target
+            .iter()
+            .map(quote_fingerprint_text)
+            .collect::<Vec<_>>()
+            .join(",")
     )
 }
 
@@ -754,6 +794,9 @@ fn render_statement_kind_fingerprint(kind: &HirStatementKind) -> String {
         HirStatementKind::Construct(region) => {
             format!("construct({})", render_construct_region_fingerprint(region))
         }
+        HirStatementKind::Record(region) => {
+            format!("record({})", render_record_region_fingerprint(region))
+        }
         HirStatementKind::MemorySpec(spec) => {
             format!("memory_spec({})", render_memory_spec_fingerprint(spec))
         }
@@ -820,6 +863,9 @@ pub fn render_expr_fingerprint(expr: &HirExpr) -> String {
         ),
         HirExpr::ConstructRegion(region) => {
             format!("construct({})", render_construct_region_fingerprint(region))
+        }
+        HirExpr::RecordRegion(region) => {
+            format!("record({})", render_record_region_fingerprint(region))
         }
         HirExpr::MemoryPhrase {
             family,
@@ -964,6 +1010,52 @@ fn render_construct_region_fingerprint(region: &HirConstructRegion) -> String {
         "completion={}|target={}|destination={}|default_modifier={}|lines=[{}]",
         region.completion.as_str(),
         render_expr_fingerprint(&region.target),
+        region
+            .destination
+            .as_ref()
+            .map(|destination| match destination {
+                HirConstructDestination::Deliver { name } => {
+                    format!("deliver({})", quote_fingerprint_text(name))
+                }
+                HirConstructDestination::Place { target } => {
+                    format!("place({})", render_assign_target_fingerprint(target))
+                }
+            })
+            .unwrap_or_else(|| "none".to_string()),
+        region
+            .default_modifier
+            .as_ref()
+            .map(render_headed_modifier_fingerprint)
+            .unwrap_or_else(|| "none".to_string()),
+        region
+            .lines
+            .iter()
+            .map(|line| {
+                format!(
+                    "contrib(name={}|value={}|modifier={})",
+                    quote_fingerprint_text(&line.name),
+                    render_expr_fingerprint(&line.value),
+                    line.modifier
+                        .as_ref()
+                        .map(render_headed_modifier_fingerprint)
+                        .unwrap_or_else(|| "none".to_string())
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
+fn render_record_region_fingerprint(region: &HirRecordRegion) -> String {
+    format!(
+        "completion={}|target={}|base={}|destination={}|default_modifier={}|lines=[{}]",
+        region.completion.as_str(),
+        render_expr_fingerprint(&region.target),
+        region
+            .base
+            .as_ref()
+            .map(|base| render_expr_fingerprint(base))
+            .unwrap_or_else(|| "none".to_string()),
         region
             .destination
             .as_ref()

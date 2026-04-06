@@ -6,9 +6,9 @@ use super::{
     RuntimeCallArg, RuntimeEntrypointPlan, RuntimeExecutionState, RuntimeFrameArenaHandle,
     RuntimeFrameArenaPolicy, RuntimeFrameArenaState, RuntimeFrameRecyclePolicy, RuntimeHost,
     RuntimeIntrinsic, RuntimeMemoryHandlePolicy, RuntimeMemoryPressurePolicy, RuntimeOpaqueValue,
-    RuntimePackagePlan, RuntimeParamPlan, RuntimePoolIdValue, RuntimeProviderHostContext,
-    RuntimeReferenceTarget, RuntimeReferenceValue, RuntimeResetOnPolicy, RuntimeRingIdValue,
-    RuntimeRoutinePlan, RuntimeScope, RuntimeSessionIdValue, RuntimeSlabIdValue, RuntimeSlabPolicy,
+    RuntimePackagePlan, RuntimeParamPlan, RuntimePoolIdValue, RuntimeReferenceTarget,
+    RuntimeReferenceValue, RuntimeResetOnPolicy, RuntimeRingIdValue, RuntimeRoutinePlan,
+    RuntimeScope, RuntimeSessionIdValue, RuntimeSlabIdValue, RuntimeSlabPolicy,
     RuntimeSlabState, RuntimeTempArenaHandle, RuntimeValue, arcana_desktop_session_record,
     arcana_desktop_wake_record, arcana_desktop_window_value, arcana_window_id_record,
     default_runtime_pool_policy, default_runtime_ring_policy, default_runtime_session_policy,
@@ -22,9 +22,10 @@ use super::{
     lookup_runtime_owner_plan, none_variant, ok_variant, owner_state_key, parse_cleanup_footer_row,
     parse_runtime_package_image, parse_stmt, plan_from_artifact, pool_id_is_live,
     render_exported_json_abi_manifest, render_runtime_package_image, resolve_routine_index,
-    resolve_routine_index_for_call, runtime_descriptor_view_value, runtime_read_view_snapshot,
-    runtime_release_exported_descriptor_targets, runtime_reset_owner_exit_memory_specs_in_scopes,
-    runtime_validate_split_value, some_variant, try_execute_arcana_owned_api_call,
+    resolve_routine_index_for_call, runtime_read_view_snapshot,
+    runtime_reset_owner_exit_memory_specs_in_scopes, runtime_validate_split_value,
+    reset_runtime_native_products_cache, some_variant, try_execute_arcana_owned_api_call,
+    ARCANA_NATIVE_BUNDLE_DIR_ENV,
 };
 use arcana_aot::{
     AOT_INTERNAL_FORMAT, AotEntrypointArtifact, AotOwnerArtifact, AotPackageArtifact,
@@ -35,7 +36,11 @@ use arcana_ir::{
     ExecMemorySpecDecl, IrForewordArg, IrForewordMetadata, IrForewordRetention, IrRoutineType,
     IrRoutineTypeKind, parse_routine_type_text,
 };
-use arcana_package::{execute_build, load_workspace_graph, plan_workspace, prepare_build};
+use arcana_package::{
+    BuildExecutionContext, BuildTarget, default_distribution_dir,
+    execute_build_with_context_and_progress, load_workspace_graph, plan_build_for_target_with_context,
+    plan_workspace, prepare_build, stage_distribution_bundle,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -113,6 +118,7 @@ fn empty_runtime_plan(package_id: &str) -> RuntimePackagePlan {
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
         routines: Vec::new(),
+        native_callbacks: Vec::new(),
         owners: Vec::new(),
     }
 }
@@ -196,6 +202,10 @@ fn repo_root() -> PathBuf {
 }
 
 fn owned_grimoire_root() -> PathBuf {
+    let libs = repo_root().join("grimoires").join("libs");
+    if libs.is_dir() {
+        return libs;
+    }
     let libs = repo_root().join("grimoires").join("owned").join("libs");
     if libs.is_dir() {
         libs
@@ -334,7 +344,23 @@ fn execute_workspace_build(
     statuses: &[arcana_package::BuildStatus],
 ) {
     let prepared = prepare_build(graph).expect("prepare build");
-    execute_build(graph, &prepared, statuses).expect("build should execute");
+    execute_build_with_context_and_progress(
+        graph,
+        &prepared,
+        statuses,
+        &BuildExecutionContext::default(),
+        |progress| {
+            eprintln!(
+                "[workspace-build] {}/{} member={} target={} disposition={:?}",
+                progress.index,
+                progress.total,
+                progress.status.member(),
+                progress.status.target(),
+                progress.status.disposition()
+            );
+        },
+    )
+    .expect("build should execute");
 }
 
 fn plan_build(
@@ -362,14 +388,21 @@ fn build_workspace_plan_and_artifact_dir_for_member(
     dir: &Path,
     member: &str,
 ) -> (RuntimePackagePlan, PathBuf) {
+    eprintln!("[workspace-helper] load graph");
     let graph = load_workspace_graph(dir).expect("workspace graph should load");
+    eprintln!("[workspace-helper] check graph");
     let checked = check_workspace_graph(&graph).expect("workspace should check");
+    eprintln!("[workspace-helper] fingerprints");
     let fingerprints = compute_member_fingerprints_for_checked_workspace(&graph, &checked)
         .expect("fingerprints should compute");
+    eprintln!("[workspace-helper] plan order");
     let order = plan_workspace(&graph).expect("workspace order should plan");
+    eprintln!("[workspace-helper] plan build");
     let statuses =
         plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
+    eprintln!("[workspace-helper] execute build");
     execute_workspace_build(&graph, &fingerprints, &statuses);
+    eprintln!("[workspace-helper] locate artifact");
 
     let artifact_path = graph.root_dir.join(
         statuses
@@ -387,12 +420,208 @@ fn build_workspace_plan_and_artifact_dir_for_member(
     )
 }
 
+#[cfg(windows)]
+fn build_workspace_plan_and_bundle_dir_for_member(
+    dir: &Path,
+    member: &str,
+) -> (RuntimePackagePlan, PathBuf) {
+    eprintln!("[workspace-helper] load graph for windows bundle");
+    let graph = load_workspace_graph(dir).expect("workspace graph should load");
+    let order = plan_workspace(&graph).expect("workspace order should plan");
+    let prepared = prepare_build(&graph).expect("prepare build");
+    let statuses = plan_build_for_target_with_context(
+        &graph,
+        &order,
+        &prepared,
+        None,
+        BuildTarget::windows_exe(),
+        &BuildExecutionContext::default(),
+    )
+    .expect("windows exe build plan should compute");
+    execute_build_with_context_and_progress(
+        &graph,
+        &prepared,
+        &statuses,
+        &BuildExecutionContext::default(),
+        |progress| {
+            eprintln!(
+                "[workspace-build/windows] {}/{} member={} target={} disposition={:?}",
+                progress.index,
+                progress.total,
+                progress.status.member(),
+                progress.status.target(),
+                progress.status.disposition()
+            );
+        },
+    )
+    .expect("windows exe build should execute");
+    let bundle_dir = default_distribution_dir(&graph, member, &BuildTarget::windows_exe());
+    let bundle = stage_distribution_bundle(
+        &graph,
+        &statuses,
+        member,
+        &BuildTarget::windows_exe(),
+        &bundle_dir,
+    )
+    .expect("distribution staging should succeed");
+    let (plan, _artifact_dir) = build_workspace_plan_and_artifact_dir_for_member(dir, member);
+    (plan, bundle.bundle_dir)
+}
+
+fn path_text(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+#[cfg(windows)]
+#[test]
+fn execute_main_runs_arcana_winapi_binding_smoke() {
+    let dir = temp_workspace_dir("runtime_arcana_winapi_binding_smoke");
+    let winapi_path = path_text(&repo_root().join("grimoires").join("arcana").join("winapi"));
+    write_file(
+        &dir.join("book.toml"),
+        &format!(
+            concat!(
+                "name = \"app\"\n",
+                "kind = \"app\"\n",
+                "[deps]\n",
+                "arcana_winapi = {{ path = \"{winapi_path}\" }}\n",
+            ),
+            winapi_path = winapi_path,
+        ),
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "use arcana_winapi.foundation as foundation\n",
+            "use arcana_winapi.fonts as fonts\n",
+            "use arcana_winapi.windows as windows\n",
+            "fn main() -> Int:\n",
+            "    let module = foundation.current_module :: :: call\n",
+            "    if foundation.module_is_null :: module :: call:\n",
+            "        return 1\n",
+            "    let module_path = foundation.module_path :: module :: call\n",
+            "    if foundation.utf16_len :: module_path :: call <= 0:\n",
+            "        return 2\n",
+            "    let catalog = fonts.system_font_catalog :: :: call\n",
+            "    let count = fonts.catalog_count :: catalog :: call\n",
+            "    if count <= 0:\n",
+            "        return 3\n",
+            "    let family = fonts.catalog_family_name :: catalog, 0 :: call\n",
+            "    if foundation.utf16_len :: family :: call <= 0:\n",
+            "        return 4\n",
+            "    let full_name = fonts.catalog_full_name :: catalog, 0 :: call\n",
+            "    if foundation.utf16_len :: full_name :: call <= 0:\n",
+            "        return 5\n",
+            "    fonts.catalog_destroy :: catalog :: call\n",
+            "    let window = windows.create_hidden_window :: :: call\n",
+            "    windows.post_ping :: window, 41 :: call\n",
+            "    let pumped = windows.pump_messages :: :: call\n",
+            "    if pumped <= 0:\n",
+            "        return 6\n",
+            "    let callback_code = windows.take_last_callback_code :: :: call\n",
+            "    windows.destroy_hidden_window :: window :: call\n",
+            "    if callback_code != 42:\n",
+            "        return 7\n",
+            "    return 0\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let (plan, bundle_dir) = build_workspace_plan_and_bundle_dir_for_member(&dir, "app");
+    let mut host = BufferedHost {
+        cwd: path_text(&dir),
+        env: BTreeMap::from([(
+            ARCANA_NATIVE_BUNDLE_DIR_ENV.to_string(),
+            path_text(&bundle_dir),
+        )]),
+        ..BufferedHost::default()
+    };
+
+    reset_runtime_native_products_cache();
+    let code = execute_main(&plan, &mut host).expect("runtime should execute native bindings");
+    reset_runtime_native_products_cache();
+
+    assert_eq!(code, 0);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[cfg(windows)]
+#[test]
+fn execute_main_reports_arcana_winapi_binding_errors() {
+    let dir = temp_workspace_dir("runtime_arcana_winapi_binding_error");
+    let winapi_path = path_text(&repo_root().join("grimoires").join("arcana").join("winapi"));
+    write_file(
+        &dir.join("book.toml"),
+        &format!(
+            concat!(
+                "name = \"app\"\n",
+                "kind = \"app\"\n",
+                "[deps]\n",
+                "arcana_winapi = {{ path = \"{winapi_path}\" }}\n",
+            ),
+            winapi_path = winapi_path,
+        ),
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "use arcana_winapi.foundation as foundation\n",
+            "fn main() -> Int:\n",
+            "    return foundation.fail_sample :: \"boom\" :: call\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let (plan, bundle_dir) = build_workspace_plan_and_bundle_dir_for_member(&dir, "app");
+    let mut host = BufferedHost {
+        cwd: path_text(&dir),
+        env: BTreeMap::from([(
+            ARCANA_NATIVE_BUNDLE_DIR_ENV.to_string(),
+            path_text(&bundle_dir),
+        )]),
+        ..BufferedHost::default()
+    };
+
+    reset_runtime_native_products_cache();
+    let err = execute_main(&plan, &mut host).expect_err("native binding failure should surface");
+    reset_runtime_native_products_cache();
+
+    assert!(err.contains("boom"), "{err}");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
 fn runtime_call_arg(value: RuntimeValue, name: &str) -> RuntimeCallArg {
     RuntimeCallArg {
         name: None,
         value,
         source_expr: ParsedExpr::Path(vec![name.to_string()]),
     }
+}
+
+fn try_execute_arcana_owned_api_call_for_test(
+    callable: &[String],
+    call_args: &[RuntimeCallArg],
+    host: &mut dyn RuntimeHost,
+) -> Result<Option<RuntimeValue>, String> {
+    let mut scopes = vec![RuntimeScope::default()];
+    let mut state = RuntimeExecutionState::default();
+    let aliases = BTreeMap::new();
+    let type_bindings = BTreeMap::new();
+    let plan = empty_runtime_plan("test");
+    try_execute_arcana_owned_api_call(
+        callable,
+        call_args,
+        &mut scopes,
+        &plan,
+        "test",
+        "test",
+        &aliases,
+        &type_bindings,
+        &mut state,
+        host,
+    )
 }
 
 fn arcana_desktop_app_context_value(
@@ -645,6 +874,7 @@ fn sample_return_artifact() -> AotPackageArtifact {
             params: Vec::new(),
             return_type: test_return_type("fn main() -> Int:"),
             intrinsic_impl: None,
+            native_impl: None,
             impl_target_type: None,
             impl_trait_path: None,
             availability: Vec::new(),
@@ -654,6 +884,7 @@ fn sample_return_artifact() -> AotPackageArtifact {
                     .expect("statement should parse"),
             ],
         }],
+        native_callbacks: Vec::new(),
         owners: Vec::new(),
         modules: vec![AotPackageModuleArtifact {
             package_id: test_package_id_for_module("hello"),
@@ -710,6 +941,7 @@ fn sample_print_artifact() -> AotPackageArtifact {
                 params: Vec::new(),
                 return_type: test_return_type("fn main():"),
                 intrinsic_impl: None,
+            native_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -717,7 +949,8 @@ fn sample_print_artifact() -> AotPackageArtifact {
                 statements: vec![parse_stmt("stmt(core=expr(phrase(subject=generic(expr=member(path(io), print),types=[Str]),args=[str(\"\\\"hello, arcana\\\"\")],qualifier=call,attached=[])),forewords=[],cleanup_footers=[])")
                     .expect("statement should parse")],
             }],
-            owners: Vec::new(),
+            native_callbacks: Vec::new(),
+        owners: Vec::new(),
             modules: vec![AotPackageModuleArtifact {
                 package_id: test_package_id_for_module("hello"),
                 module_id: "hello".to_string(),
@@ -774,6 +1007,7 @@ fn sample_stmt_metadata_artifact() -> AotPackageArtifact {
                     params: Vec::new(),
                     return_type: test_return_type("fn main() -> Int:"),
                     intrinsic_impl: None,
+            native_impl: None,
                     impl_target_type: None,
                     impl_trait_path: None,
                     availability: Vec::new(),
@@ -797,6 +1031,7 @@ fn sample_stmt_metadata_artifact() -> AotPackageArtifact {
                     params: test_params(&["mode=take:name=scope:ty=Int".to_string()]),
                     return_type: test_return_type("fn cleanup(take scope: Int) -> Result[Unit, Str]:"),
                     intrinsic_impl: None,
+            native_impl: None,
                     impl_target_type: None,
                     impl_trait_path: None,
                     availability: Vec::new(),
@@ -805,7 +1040,8 @@ fn sample_stmt_metadata_artifact() -> AotPackageArtifact {
                         .expect("statement should parse")],
                 },
             ],
-            owners: Vec::new(),
+            native_callbacks: Vec::new(),
+        owners: Vec::new(),
             modules: vec![AotPackageModuleArtifact {
                 package_id: test_package_id_for_module("metadata"),
                 module_id: "metadata".to_string(),
@@ -860,6 +1096,7 @@ fn sample_attachment_foreword_artifact() -> AotPackageArtifact {
                 params: Vec::new(),
                 return_type: test_return_type("fn main() -> Int:"),
                 intrinsic_impl: None,
+            native_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -881,7 +1118,8 @@ fn sample_attachment_foreword_artifact() -> AotPackageArtifact {
                         .expect("statement should parse"),
                 ],
             }],
-            owners: Vec::new(),
+            native_callbacks: Vec::new(),
+        owners: Vec::new(),
             modules: vec![AotPackageModuleArtifact {
                 package_id: test_package_id_for_module("attachment"),
                 module_id: "attachment".to_string(),
@@ -1137,6 +1375,7 @@ fn resolve_routine_index_for_call_prefers_lowered_routine_identity() {
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
+        native_callbacks: Vec::new(),
         owners: Vec::new(),
         routines: vec![
             RuntimeRoutinePlan {
@@ -1157,6 +1396,7 @@ fn resolve_routine_index_for_call_prefers_lowered_routine_identity() {
                 }],
                 return_type: test_return_type("fn load(read self: AtomicInt) -> Int:"),
                 intrinsic_impl: None,
+            native_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -1181,6 +1421,7 @@ fn resolve_routine_index_for_call_prefers_lowered_routine_identity() {
                 }],
                 return_type: test_return_type("fn load(read self: AtomicBool) -> Bool:"),
                 intrinsic_impl: None,
+            native_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -1236,6 +1477,7 @@ fn runtime_dynamic_bare_method_fallback_matches_receiver_type_args() {
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
+        native_callbacks: Vec::new(),
         owners: Vec::new(),
         routines: vec![
             RuntimeRoutinePlan {
@@ -1258,6 +1500,7 @@ fn runtime_dynamic_bare_method_fallback_matches_receiver_type_args() {
                     "fn send(read self: std.concurrent.Channel[T]) -> Int:",
                 ),
                 intrinsic_impl: None,
+            native_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -1284,6 +1527,7 @@ fn runtime_dynamic_bare_method_fallback_matches_receiver_type_args() {
                     "fn send(read self: std.concurrent.Channel[Bool]) -> Int:",
                 ),
                 intrinsic_impl: None,
+            native_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -1344,6 +1588,7 @@ fn runtime_dynamic_bare_method_fallback_matches_opaque_family_receiver() {
             vec!["desktop.types.Window".to_string()],
         )]),
         entrypoints: Vec::new(),
+        native_callbacks: Vec::new(),
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
             package_id: test_package_id_for_module("desktop"),
@@ -1363,6 +1608,7 @@ fn runtime_dynamic_bare_method_fallback_matches_opaque_family_receiver() {
             }],
             return_type: test_return_type("fn alive(read self: desktop.types.Window) -> Bool:"),
             intrinsic_impl: None,
+            native_impl: None,
             impl_target_type: None,
             impl_trait_path: None,
             availability: Vec::new(),
@@ -1432,6 +1678,7 @@ fn runtime_dynamic_bare_method_fallback_keeps_owner_identity() {
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
+        native_callbacks: Vec::new(),
         owners: Vec::new(),
         routines: vec![
             RuntimeRoutinePlan {
@@ -1452,6 +1699,7 @@ fn runtime_dynamic_bare_method_fallback_keeps_owner_identity() {
                 }],
                 return_type: Some(parse_routine_type_text("Int").expect("type")),
                 intrinsic_impl: None,
+            native_impl: None,
                 impl_target_type: Some(owner_counter),
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -1476,6 +1724,7 @@ fn runtime_dynamic_bare_method_fallback_keeps_owner_identity() {
                 }],
                 return_type: Some(parse_routine_type_text("Int").expect("type")),
                 intrinsic_impl: None,
+            native_impl: None,
                 impl_target_type: Some(owner_timer),
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -1533,6 +1782,7 @@ fn runtime_dynamic_bare_method_fallback_rejects_wrong_sole_candidate() {
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
+        native_callbacks: Vec::new(),
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
             package_id: test_package_id_for_module("ops"),
@@ -1552,6 +1802,7 @@ fn runtime_dynamic_bare_method_fallback_rejects_wrong_sole_candidate() {
             }],
             return_type: test_return_type("fn tick(read self: AtomicInt) -> Int:"),
             intrinsic_impl: None,
+            native_impl: None,
             impl_target_type: Some(self_type),
             impl_trait_path: None,
             availability: Vec::new(),
@@ -1613,6 +1864,7 @@ fn runtime_dynamic_bare_method_fallback_rejects_qualified_leaf_collision() {
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
+        native_callbacks: Vec::new(),
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
             package_id: test_package_id_for_module("app"),
@@ -1632,6 +1884,7 @@ fn runtime_dynamic_bare_method_fallback_rejects_qualified_leaf_collision() {
             }],
             return_type: test_return_type("fn tick(read self: pkg_a.Counter) -> Int:"),
             intrinsic_impl: None,
+            native_impl: None,
             impl_target_type: Some(self_type),
             impl_trait_path: None,
             availability: Vec::new(),
@@ -1723,6 +1976,7 @@ fn runtime_json_abi_executes_exported_routine() {
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
+        native_callbacks: Vec::new(),
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
             package_id: test_package_id_for_module("tool"),
@@ -1742,6 +1996,7 @@ fn runtime_json_abi_executes_exported_routine() {
             }],
             return_type: test_return_type("fn answer(value: Int) -> Int:"),
             intrinsic_impl: None,
+            native_impl: None,
             impl_target_type: None,
             impl_trait_path: None,
             availability: Vec::new(),
@@ -1790,6 +2045,7 @@ fn runtime_json_abi_manifest_records_cabi_param_metadata() {
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
+        native_callbacks: Vec::new(),
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
             package_id: test_package_id_for_module("tool"),
@@ -1809,6 +2065,7 @@ fn runtime_json_abi_manifest_records_cabi_param_metadata() {
             }],
             return_type: test_return_type("fn bump(edit value: Int) -> Int:"),
             intrinsic_impl: None,
+            native_impl: None,
             impl_target_type: None,
             impl_trait_path: None,
             availability: Vec::new(),
@@ -1861,6 +2118,7 @@ fn runtime_json_abi_manifest_projects_default_read_source_mode() {
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
+        native_callbacks: Vec::new(),
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
             package_id: test_package_id_for_module("tool"),
@@ -1880,6 +2138,7 @@ fn runtime_json_abi_manifest_projects_default_read_source_mode() {
             }],
             return_type: test_return_type("fn answer(value: Int) -> Int:"),
             intrinsic_impl: None,
+            native_impl: None,
             impl_target_type: None,
             impl_trait_path: None,
             availability: Vec::new(),
@@ -1928,6 +2187,7 @@ fn runtime_json_abi_writes_back_edit_arguments() {
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
+        native_callbacks: Vec::new(),
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
             package_id: test_package_id_for_module("tool"),
@@ -1947,6 +2207,7 @@ fn runtime_json_abi_writes_back_edit_arguments() {
             }],
             return_type: test_return_type("fn bump(edit value: Int) -> Int:"),
             intrinsic_impl: None,
+            native_impl: None,
             impl_target_type: None,
             impl_trait_path: None,
             availability: Vec::new(),
@@ -2004,6 +2265,7 @@ fn runtime_json_abi_manifest_omits_unsupported_owner_reference_and_opaque_routin
             vec!["desktop.types.Window".to_string()],
         )]),
         entrypoints: Vec::new(),
+        native_callbacks: Vec::new(),
         owners: Vec::new(),
         routines: vec![
             RuntimeRoutinePlan {
@@ -2024,6 +2286,7 @@ fn runtime_json_abi_manifest_omits_unsupported_owner_reference_and_opaque_routin
                 }],
                 return_type: test_return_type("fn answer(value: Int) -> Int:"),
                 intrinsic_impl: None,
+            native_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -2050,6 +2313,7 @@ fn runtime_json_abi_manifest_omits_unsupported_owner_reference_and_opaque_routin
                 }],
                 return_type: test_return_type("fn borrowed(read value: &Int) -> Int:"),
                 intrinsic_impl: None,
+            native_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -2076,6 +2340,7 @@ fn runtime_json_abi_manifest_omits_unsupported_owner_reference_and_opaque_routin
                     "fn window_title(read window: desktop.types.Window) -> Int:",
                 ),
                 intrinsic_impl: None,
+            native_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -2100,6 +2365,7 @@ fn runtime_json_abi_manifest_omits_unsupported_owner_reference_and_opaque_routin
                 }],
                 return_type: test_return_type("fn owner_only(read owner: Owner) -> Int:"),
                 intrinsic_impl: None,
+            native_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -2146,6 +2412,7 @@ fn runtime_json_abi_rejects_executing_unsupported_exported_routine() {
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
+        native_callbacks: Vec::new(),
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
             package_id: test_package_id_for_module("tool"),
@@ -2165,6 +2432,7 @@ fn runtime_json_abi_rejects_executing_unsupported_exported_routine() {
             }],
             return_type: test_return_type("fn borrowed(read value: &Int) -> Int:"),
             intrinsic_impl: None,
+            native_impl: None,
             impl_target_type: None,
             impl_trait_path: None,
             availability: Vec::new(),
@@ -2205,6 +2473,7 @@ fn runtime_native_abi_executes_exported_routine() {
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
+        native_callbacks: Vec::new(),
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
             package_id: test_package_id_for_module("tool"),
@@ -2224,6 +2493,7 @@ fn runtime_native_abi_executes_exported_routine() {
             }],
             return_type: test_return_type("fn answer(value: Int) -> Int:"),
             intrinsic_impl: None,
+            native_impl: None,
             impl_target_type: None,
             impl_trait_path: None,
             availability: Vec::new(),
@@ -2274,6 +2544,7 @@ fn runtime_native_abi_supports_string_and_byte_values() {
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
+        native_callbacks: Vec::new(),
         owners: Vec::new(),
         routines: vec![
             RuntimeRoutinePlan {
@@ -2294,6 +2565,7 @@ fn runtime_native_abi_supports_string_and_byte_values() {
                 }],
                 return_type: test_return_type("fn greet(read name: Str) -> Str:"),
                 intrinsic_impl: None,
+            native_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -2324,6 +2596,7 @@ fn runtime_native_abi_supports_string_and_byte_values() {
                 }],
                 return_type: test_return_type("fn tail(read bytes: Array[Int]) -> Array[Int]:"),
                 intrinsic_impl: None,
+            native_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -2357,6 +2630,7 @@ fn runtime_native_abi_supports_string_and_byte_values() {
                     "fn echo_pair(read pair: Pair[Str, Int]) -> Pair[Str, Int]:",
                 ),
                 intrinsic_impl: None,
+            native_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -2436,6 +2710,7 @@ fn runtime_native_abi_writes_back_edit_arguments() {
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
+        native_callbacks: Vec::new(),
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
             package_id: test_package_id_for_module("tool"),
@@ -2455,6 +2730,7 @@ fn runtime_native_abi_writes_back_edit_arguments() {
             }],
             return_type: test_return_type("fn bump(edit value: Int) -> Int:"),
             intrinsic_impl: None,
+            native_impl: None,
             impl_target_type: None,
             impl_trait_path: None,
             availability: Vec::new(),
@@ -3088,6 +3364,7 @@ fn execute_main_manual_routine_cleanup_footers_run_after_defers() {
             exported: true,
             routine_index: 1,
         }],
+        native_callbacks: Vec::new(),
         owners: Vec::new(),
         routines: vec![
             RuntimeRoutinePlan {
@@ -3108,6 +3385,7 @@ fn execute_main_manual_routine_cleanup_footers_run_after_defers() {
                 }],
                 return_type: test_return_type("fn run(read seed: Int) -> Result[Int, Str]:"),
                 intrinsic_impl: None,
+            native_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -3182,6 +3460,7 @@ fn execute_main_manual_routine_cleanup_footers_run_after_defers() {
                 params: Vec::new(),
                 return_type: test_return_type("fn main() -> Int:"),
                 intrinsic_impl: None,
+            native_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -3227,6 +3506,7 @@ fn execute_main_manual_routine_cleanup_footers_run_after_defers() {
                 }],
                 return_type: test_return_type("fn print[T](read value: T):"),
                 intrinsic_impl: Some("IoPrint".to_string()),
+                native_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -4883,206 +5163,6 @@ fn runtime_memory_spec_materialization_uses_descriptor_hook_registry() {
 }
 
 #[test]
-fn descriptor_export_rejects_unsealed_session_read_views() {
-    let mut state = RuntimeExecutionState::default();
-    let handle = insert_runtime_session_arena(
-        &mut state,
-        &["Int".to_string()],
-        default_runtime_session_policy(4),
-    );
-    let id = RuntimeSessionIdValue {
-        arena: handle,
-        slot: 0,
-        generation: 0,
-    };
-    let arena = state
-        .session_arenas
-        .get_mut(&handle)
-        .expect("session arena should exist");
-    arena.slots.insert(
-        0,
-        RuntimeValue::Array(vec![1, 2, 3].into_iter().map(RuntimeValue::Int).collect()),
-    );
-    arena.next_slot = 1;
-
-    let read_view = insert_runtime_read_view_from_reference(
-        &mut state,
-        &["Int".to_string()],
-        RuntimeReferenceValue {
-            mutable: false,
-            target: RuntimeReferenceTarget::SessionSlot {
-                id,
-                members: Vec::new(),
-            },
-        },
-        0,
-        3,
-    );
-
-    let err = runtime_descriptor_view_value(
-        &RuntimeOpaqueValue::ReadView(read_view),
-        &mut state,
-        "demo",
-        &mut Vec::new(),
-    )
-    .expect_err("unsealed session views should not export");
-    assert!(
-        err.contains("sealed SessionArena/Slab-backed ReadView"),
-        "{err}"
-    );
-}
-
-#[test]
-fn descriptor_export_materializes_sealed_session_read_views() {
-    let mut state = RuntimeExecutionState::default();
-    let handle = insert_runtime_session_arena(
-        &mut state,
-        &["Int".to_string()],
-        default_runtime_session_policy(4),
-    );
-    let id = RuntimeSessionIdValue {
-        arena: handle,
-        slot: 0,
-        generation: 0,
-    };
-    let arena = state
-        .session_arenas
-        .get_mut(&handle)
-        .expect("session arena should exist");
-    arena.slots.insert(
-        0,
-        RuntimeValue::Array(vec![1, 2, 3].into_iter().map(RuntimeValue::Int).collect()),
-    );
-    arena.next_slot = 1;
-    arena.sealed = true;
-
-    let read_view = insert_runtime_read_view_from_reference(
-        &mut state,
-        &["Int".to_string()],
-        RuntimeReferenceValue {
-            mutable: false,
-            target: RuntimeReferenceTarget::SessionSlot {
-                id,
-                members: Vec::new(),
-            },
-        },
-        1,
-        2,
-    );
-
-    let mut exports = Vec::new();
-    let descriptor = runtime_descriptor_view_value(
-        &RuntimeOpaqueValue::ReadView(read_view),
-        &mut state,
-        "demo",
-        &mut exports,
-    )
-    .expect("sealed session views should export")
-    .expect("read view should transport as descriptor");
-    let arcana_cabi::ArcanaCabiProviderValue::DescriptorView(descriptor) = descriptor else {
-        panic!("expected descriptor view export");
-    };
-    assert_eq!(descriptor.family, "std.memory.ReadView");
-    assert_eq!(descriptor.element_layout, "Int");
-    assert_eq!(descriptor.len, 2);
-
-    let mut host = BufferedHost::default();
-    let mut context = RuntimeProviderHostContext {
-        host: &mut host,
-        state: &mut state,
-        current_package_id: "demo".to_string(),
-        bundle_dir: PathBuf::new(),
-        package_asset_roots: BTreeMap::new(),
-        exported_descriptors: Vec::new(),
-        last_error: None,
-    };
-    let values = context
-        .descriptor_view_values("std.memory.ReadView", read_view.0, 0, 2)
-        .expect("sealed session descriptor should materialize");
-    assert_eq!(
-        values,
-        vec![
-            arcana_cabi::ArcanaCabiProviderValue::Int(2),
-            arcana_cabi::ArcanaCabiProviderValue::Int(3),
-        ]
-    );
-}
-
-#[test]
-fn descriptor_export_materializes_sealed_slab_read_views() {
-    let mut state = RuntimeExecutionState::default();
-    let handle = insert_runtime_slab(
-        &mut state,
-        &["Int".to_string()],
-        default_runtime_slab_policy(4),
-    );
-    let id = RuntimeSlabIdValue {
-        arena: handle,
-        slot: 0,
-        generation: 0,
-    };
-    let arena = state.slabs.get_mut(&handle).expect("slab should exist");
-    arena.slots.insert(
-        0,
-        RuntimeValue::Array(vec![4, 5, 6].into_iter().map(RuntimeValue::Int).collect()),
-    );
-    arena.generations.insert(0, 0);
-    arena.next_slot = 1;
-    arena.sealed = true;
-
-    let read_view = insert_runtime_read_view_from_reference(
-        &mut state,
-        &["Int".to_string()],
-        RuntimeReferenceValue {
-            mutable: false,
-            target: RuntimeReferenceTarget::SlabSlot {
-                id,
-                members: Vec::new(),
-            },
-        },
-        0,
-        2,
-    );
-
-    let mut exports = Vec::new();
-    let descriptor = runtime_descriptor_view_value(
-        &RuntimeOpaqueValue::ReadView(read_view),
-        &mut state,
-        "demo",
-        &mut exports,
-    )
-    .expect("sealed slab views should export")
-    .expect("read view should transport as descriptor");
-    let arcana_cabi::ArcanaCabiProviderValue::DescriptorView(descriptor) = descriptor else {
-        panic!("expected descriptor view export");
-    };
-    assert_eq!(descriptor.family, "std.memory.ReadView");
-    assert_eq!(descriptor.element_layout, "Int");
-    assert_eq!(descriptor.len, 2);
-
-    let mut host = BufferedHost::default();
-    let mut context = RuntimeProviderHostContext {
-        host: &mut host,
-        state: &mut state,
-        current_package_id: "demo".to_string(),
-        bundle_dir: PathBuf::new(),
-        package_asset_roots: BTreeMap::new(),
-        exported_descriptors: Vec::new(),
-        last_error: None,
-    };
-    let values = context
-        .descriptor_view_values("std.memory.ReadView", read_view.0, 0, 2)
-        .expect("sealed slab descriptor should materialize");
-    assert_eq!(
-        values,
-        vec![
-            arcana_cabi::ArcanaCabiProviderValue::Int(4),
-            arcana_cabi::ArcanaCabiProviderValue::Int(5),
-        ]
-    );
-}
-
-#[test]
 fn session_unseal_rejects_live_reference_views() {
     let plan = empty_runtime_plan("demo");
     let mut state = RuntimeExecutionState::default();
@@ -5531,138 +5611,6 @@ fn edit_view_subview_edit_allows_source_reborrow_without_other_aliases() {
         ),
         "expected nested edit view, got {nested:?}"
     );
-}
-
-#[test]
-fn slab_unseal_rejects_exported_descriptor_views() {
-    let plan = empty_runtime_plan("demo");
-    let mut state = RuntimeExecutionState::default();
-    let handle = insert_runtime_slab(
-        &mut state,
-        &["Int".to_string()],
-        default_runtime_slab_policy(4),
-    );
-    let id = RuntimeSlabIdValue {
-        arena: handle,
-        slot: 0,
-        generation: 0,
-    };
-    let arena = state.slabs.get_mut(&handle).expect("slab should exist");
-    arena
-        .slots
-        .insert(0, RuntimeValue::Array(vec![RuntimeValue::Int(1)]));
-    arena.generations.insert(0, 0);
-    arena.next_slot = 1;
-    arena.sealed = true;
-    let read_view = insert_runtime_read_view_from_reference(
-        &mut state,
-        &["Int".to_string()],
-        RuntimeReferenceValue {
-            mutable: false,
-            target: RuntimeReferenceTarget::SlabSlot {
-                id,
-                members: Vec::new(),
-            },
-        },
-        0,
-        1,
-    );
-    let mut exports = Vec::new();
-    let _ = runtime_descriptor_view_value(
-        &RuntimeOpaqueValue::ReadView(read_view),
-        &mut state,
-        "demo",
-        &mut exports,
-    )
-    .expect("sealed slab views should export");
-    state.read_views.remove(&read_view);
-
-    let mut host = BufferedHost::default();
-    let err = execute_runtime_intrinsic(
-        RuntimeIntrinsic::MemorySlabUnseal,
-        &[],
-        &mut vec![RuntimeValue::Opaque(RuntimeOpaqueValue::Slab(handle))],
-        &plan,
-        None,
-        None,
-        None,
-        None,
-        None,
-        &mut state,
-        &mut host,
-    )
-    .expect_err("slab unseal should reject while exported descriptors are live");
-    assert!(err.contains("exported descriptor views"), "{err}");
-
-    runtime_release_exported_descriptor_targets(&mut state, &mut exports);
-}
-
-#[test]
-fn session_unseal_rejects_exported_descriptor_views() {
-    let plan = empty_runtime_plan("demo");
-    let mut state = RuntimeExecutionState::default();
-    let handle = insert_runtime_session_arena(
-        &mut state,
-        &["Int".to_string()],
-        default_runtime_session_policy(4),
-    );
-    let id = RuntimeSessionIdValue {
-        arena: handle,
-        slot: 0,
-        generation: 0,
-    };
-    let arena = state
-        .session_arenas
-        .get_mut(&handle)
-        .expect("session arena should exist");
-    arena
-        .slots
-        .insert(0, RuntimeValue::Array(vec![RuntimeValue::Int(1)]));
-    arena.next_slot = 1;
-    arena.sealed = true;
-    let read_view = insert_runtime_read_view_from_reference(
-        &mut state,
-        &["Int".to_string()],
-        RuntimeReferenceValue {
-            mutable: false,
-            target: RuntimeReferenceTarget::SessionSlot {
-                id,
-                members: Vec::new(),
-            },
-        },
-        0,
-        1,
-    );
-    let mut exports = Vec::new();
-    let _ = runtime_descriptor_view_value(
-        &RuntimeOpaqueValue::ReadView(read_view),
-        &mut state,
-        "demo",
-        &mut exports,
-    )
-    .expect("sealed session views should export");
-    state.read_views.remove(&read_view);
-
-    let mut host = BufferedHost::default();
-    let err = execute_runtime_intrinsic(
-        RuntimeIntrinsic::MemorySessionUnseal,
-        &[],
-        &mut vec![RuntimeValue::Opaque(RuntimeOpaqueValue::SessionArena(
-            handle,
-        ))],
-        &plan,
-        None,
-        None,
-        None,
-        None,
-        None,
-        &mut state,
-        &mut host,
-    )
-    .expect_err("session unseal should reject while exported descriptors are live");
-    assert!(err.contains("exported descriptor views"), "{err}");
-
-    runtime_release_exported_descriptor_targets(&mut state, &mut exports);
 }
 
 #[test]
@@ -6178,32 +6126,6 @@ fn ring_window_read_rejects_split_capture() {
     )
     .expect_err("split should reject RingBuffer-backed ReadView values");
     assert!(err.contains("move-only"), "{err}");
-}
-
-#[test]
-fn ring_window_read_rejects_provider_descriptor_export() {
-    let mut state = RuntimeExecutionState::default();
-    let handle = insert_runtime_ring_buffer(
-        &mut state,
-        &["Int".to_string()],
-        default_runtime_ring_policy(2),
-    );
-    let read_view = insert_runtime_read_view_from_ring_window(
-        &mut state,
-        &["Int".to_string()],
-        handle,
-        vec![0, 1],
-        0,
-        2,
-    );
-    let err = runtime_descriptor_view_value(
-        &RuntimeOpaqueValue::ReadView(read_view),
-        &mut state,
-        "demo",
-        &mut Vec::new(),
-    )
-    .expect_err("provider export should reject RingBuffer-backed ReadView values");
-    assert!(err.contains("RingBuffer-backed ReadView"), "{err}");
 }
 
 #[test]
@@ -6817,6 +6739,134 @@ fn execute_main_runs_local_borrow_and_deref_routines() {
 
     assert_eq!(code, 0);
     assert_eq!(host.stdout, vec!["3".to_string()]);
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn execute_main_runs_record_headed_regions_with_base_copy() {
+    let dir = temp_workspace_dir("record_headed_regions");
+    write_file(
+        &dir.join("book.toml"),
+        "name = \"runtime_record_headed_regions\"\nkind = \"app\"\n",
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "use std.option.Option\n",
+            "use std.result.Result\n",
+            "record Widget:\n",
+            "    ready: Bool\n",
+            "    maybe: Option[Int]\n",
+            "    outcome: Result[Int, Str]\n",
+            "fn main() -> Int:\n",
+            "    let base = construct yield Widget -return 99\n",
+            "        ready = false\n",
+            "        maybe = Option.None[Int] :: :: call\n",
+            "        outcome = Result.Err[Int, Str] :: \"bad\" :: call\n",
+            "    let built = record yield Widget from base -return 99\n",
+            "        ready = true\n",
+            "    record deliver Widget from built -> mirrored -return 98\n",
+            "        maybe = Option.Some[Int] :: 7 :: call\n",
+            "    let mut placed = construct yield Widget -return 97\n",
+            "        ready = false\n",
+            "        maybe = Option.None[Int] :: :: call\n",
+            "        outcome = Result.Ok[Int, Str] :: 0 :: call\n",
+            "    record place Widget from mirrored -> placed -return 97\n",
+            "        ready = mirrored.ready\n",
+            "    if not placed.ready:\n",
+            "        return 1\n",
+            "    let maybe_value = match placed.maybe:\n",
+            "        Option.Some(value) => value\n",
+            "        Option.None => 0\n",
+            "    let outcome_ok = match placed.outcome:\n",
+            "        Result.Ok(_) => false\n",
+            "        Result.Err(message) => message == \"bad\"\n",
+            "    if not outcome_ok:\n",
+            "        return 2\n",
+            "    return maybe_value\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let graph = load_workspace_graph(&dir).expect("workspace graph should load");
+    let checked = check_workspace_graph(&graph).expect("workspace should check");
+    let fingerprints = compute_member_fingerprints_for_checked_workspace(&graph, &checked)
+        .expect("fingerprints should compute");
+    let order = plan_workspace(&graph).expect("workspace order should plan");
+    let statuses =
+        plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
+    execute_workspace_build(&graph, &fingerprints, &statuses);
+
+    let artifact_path = graph.root_dir.join(
+        statuses
+            .iter()
+            .find(|status| status.member_name() == "runtime_record_headed_regions")
+            .expect("app artifact status should exist")
+            .artifact_rel_path(),
+    );
+    let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
+    let mut host = BufferedHost::default();
+    let code = execute_main(&plan, &mut host).expect("runtime should execute");
+
+    assert_eq!(code, 7);
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn execute_main_runs_record_headed_regions_with_cross_record_lift() {
+    let dir = temp_workspace_dir("runtime_record_headed_regions_cross_record");
+    write_file(
+        &dir.join("book.toml"),
+        "name = \"runtime_record_headed_regions_cross_record\"\nkind = \"app\"\n",
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "record Seed:\n",
+            "    title: Str\n",
+            "    count: Int\n",
+            "record Widget:\n",
+            "    title: Str\n",
+            "    count: Int\n",
+            "    ready: Bool\n",
+            "fn main() -> Int:\n",
+            "    let base = Seed :: title = \"seed\", count = 4 :: call\n",
+            "    let built = record yield Widget from base -return 77\n",
+            "        ready = true\n",
+            "    if built.title != \"seed\":\n",
+            "        return 1\n",
+            "    if built.count != 4:\n",
+            "        return 2\n",
+            "    if not built.ready:\n",
+            "        return 3\n",
+            "    return built.count\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let graph = load_workspace_graph(&dir).expect("workspace graph should load");
+    let checked = check_workspace_graph(&graph).expect("workspace should check");
+    let fingerprints = compute_member_fingerprints_for_checked_workspace(&graph, &checked)
+        .expect("fingerprints should compute");
+    let order = plan_workspace(&graph).expect("workspace order should plan");
+    let statuses =
+        plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
+    execute_workspace_build(&graph, &fingerprints, &statuses);
+
+    let artifact_path = graph.root_dir.join(
+        statuses
+            .iter()
+            .find(|status| status.member_name() == "runtime_record_headed_regions_cross_record")
+            .expect("app artifact status should exist")
+            .artifact_rel_path(),
+    );
+    let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
+    let mut host = BufferedHost::default();
+    let code = execute_main(&plan, &mut host).expect("runtime should execute");
+
+    assert_eq!(code, 4);
 
     let _ = fs::remove_dir_all(dir);
 }
@@ -8646,6 +8696,7 @@ fn execute_main_rejects_try_qualifier_arguments() {
             exported: true,
             routine_index: 0,
         }],
+        native_callbacks: Vec::new(),
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
             package_id: test_package_id_for_module("try_args_runtime"),
@@ -8660,6 +8711,7 @@ fn execute_main_rejects_try_qualifier_arguments() {
             params: Vec::new(),
             return_type: test_return_type("fn main() -> Int:"),
             intrinsic_impl: None,
+            native_impl: None,
             impl_target_type: None,
             impl_trait_path: None,
             availability: Vec::new(),
@@ -8730,6 +8782,7 @@ fn execute_main_runs_linked_std_collection_method_routines() {
             "import std.collections.array\n",
             "import std.collections.list\n",
             "import std.collections.map\n",
+            "import std.collections.set\n",
             "import std.io\n",
             "fn main() -> Int:\n",
             "    let mut xs = std.collections.list.new[Int] :: :: call\n",
@@ -8745,9 +8798,27 @@ fn execute_main_runs_linked_std_collection_method_routines() {
             "    std.io.print[Int] :: fallback.1 :: call\n",
             "    let arr = std.collections.array.new[Int] :: 2, 5 :: call\n",
             "    std.io.print[Int] :: ((arr :: :: to_list) :: :: len) :: call\n",
+            "    let empty_arr = std.collections.array.empty[Int] :: :: call\n",
+            "    std.io.print[Int] :: (empty_arr :: :: len) :: call\n",
+            "    let mut drained_list_source = std.collections.list.empty[Int] :: :: call\n",
+            "    drained_list_source :: 3 :: push\n",
+            "    drained_list_source :: 5 :: push\n",
+            "    let drained_list = drained_list_source :: :: drain\n",
+            "    std.io.print[Int] :: (drained_list :: :: len) :: call\n",
+            "    std.io.print[Int] :: (drained_list_source :: :: len) :: call\n",
             "    let mut mapping = std.collections.map.new[Str, Int] :: :: call\n",
             "    mapping :: \"a\", 1 :: set\n",
+            "    mapping :: \"b\", 2 :: set\n",
             "    std.io.print[Int] :: (mapping :: :: len) :: call\n",
+            "    let drained_map = mapping :: :: drain\n",
+            "    std.io.print[Int] :: (drained_map :: :: len) :: call\n",
+            "    std.io.print[Int] :: (mapping :: :: len) :: call\n",
+            "    let mut seen = std.collections.set.empty[Str] :: :: call\n",
+            "    let _ = seen :: \"x\" :: insert\n",
+            "    let _ = seen :: \"y\" :: insert\n",
+            "    let drained_set = seen :: :: drain\n",
+            "    std.io.print[Int] :: (drained_set :: :: len) :: call\n",
+            "    std.io.print[Int] :: (seen :: :: len) :: call\n",
             "    return 0\n",
         ),
     );
@@ -8784,7 +8855,14 @@ fn execute_main_runs_linked_std_collection_method_routines() {
             "false".to_string(),
             "11".to_string(),
             "2".to_string(),
-            "1".to_string(),
+            "0".to_string(),
+            "2".to_string(),
+            "0".to_string(),
+            "2".to_string(),
+            "2".to_string(),
+            "0".to_string(),
+            "2".to_string(),
+            "0".to_string(),
         ]
     );
 
@@ -8985,6 +9063,7 @@ fn execute_main_rejects_use_after_take_move() {
             exported: true,
             routine_index: 2,
         }],
+        native_callbacks: Vec::new(),
         owners: Vec::new(),
         routines: vec![
             RuntimeRoutinePlan {
@@ -9005,6 +9084,7 @@ fn execute_main_rejects_use_after_take_move() {
                 }],
                 return_type: test_return_type("fn consume(take value: Str) -> Int:"),
                 intrinsic_impl: None,
+            native_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -9031,6 +9111,7 @@ fn execute_main_rejects_use_after_take_move() {
                 }],
                 return_type: test_return_type("fn reuse(read value: Str) -> Int:"),
                 intrinsic_impl: None,
+            native_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -9052,6 +9133,7 @@ fn execute_main_rejects_use_after_take_move() {
                 params: Vec::new(),
                 return_type: test_return_type("fn main() -> Int:"),
                 intrinsic_impl: None,
+            native_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -9139,6 +9221,7 @@ fn execute_main_rejects_direct_intrinsic_take_fallback_reuse() {
             exported: true,
             routine_index: 0,
         }],
+        native_callbacks: Vec::new(),
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
             package_id: test_package_id_for_module("take_intrinsic_runtime"),
@@ -9153,6 +9236,7 @@ fn execute_main_rejects_direct_intrinsic_take_fallback_reuse() {
             params: Vec::new(),
             return_type: test_return_type("fn main() -> Int:"),
             intrinsic_impl: None,
+            native_impl: None,
             impl_target_type: None,
             impl_trait_path: None,
             availability: Vec::new(),
@@ -9251,6 +9335,7 @@ fn execute_main_binds_named_args_for_direct_intrinsic_fallback() {
             exported: true,
             routine_index: 0,
         }],
+        native_callbacks: Vec::new(),
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
             package_id: test_package_id_for_module("named_intrinsic_runtime"),
@@ -9265,6 +9350,7 @@ fn execute_main_binds_named_args_for_direct_intrinsic_fallback() {
             params: Vec::new(),
             return_type: test_return_type("fn main() -> Int:"),
             intrinsic_impl: None,
+            native_impl: None,
             impl_target_type: None,
             impl_trait_path: None,
             availability: Vec::new(),
@@ -9332,6 +9418,37 @@ fn execute_main_binds_named_args_for_direct_intrinsic_fallback() {
     let code = execute_main(&plan, &mut host).expect("runtime should bind direct intrinsic args");
 
     assert_eq!(code, 7);
+}
+
+#[test]
+fn execute_main_allows_zero_arg_result_ok_direct_intrinsic_fallback() {
+    let dir = temp_workspace_dir("result_ok_unit_direct_intrinsic");
+    write_file(
+        &dir.join("book.toml"),
+        "name = \"result_ok_unit_direct_intrinsic\"\nkind = \"app\"\n",
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "import std.result\n",
+            "use std.result.Result\n",
+            "fn main() -> Int:\n",
+            "    let ok = Result.Ok[Unit, Str] :: :: call\n",
+            "    return match ok:\n",
+            "        Result.Ok(_) => 0\n",
+            "        Result.Err(_) => 1\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let plan = build_workspace_plan_for_member(&dir, "result_ok_unit_direct_intrinsic");
+    let mut host = BufferedHost::default();
+    let code = execute_main(&plan, &mut host)
+        .expect("runtime should allow zero-arg Result.Ok direct intrinsic fallback");
+
+    assert_eq!(code, 0);
+
+    let _ = fs::remove_dir_all(dir);
 }
 
 #[test]
@@ -10254,6 +10371,7 @@ fn resolve_routine_index_uses_current_package_dep_id_when_display_names_collide(
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
+        native_callbacks: Vec::new(),
         owners: Vec::new(),
         routines: vec![
             RuntimeRoutinePlan {
@@ -10269,6 +10387,7 @@ fn resolve_routine_index_uses_current_package_dep_id_when_display_names_collide(
                 params: Vec::new(),
                 return_type: test_return_type("fn value() -> Int:"),
                 intrinsic_impl: None,
+            native_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -10288,6 +10407,7 @@ fn resolve_routine_index_uses_current_package_dep_id_when_display_names_collide(
                 params: Vec::new(),
                 return_type: test_return_type("fn value() -> Int:"),
                 intrinsic_impl: None,
+            native_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -10337,6 +10457,7 @@ fn resolve_routine_index_rejects_globally_unique_package_name_without_direct_dep
         module_aliases: BTreeMap::new(),
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
+        native_callbacks: Vec::new(),
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
             package_id: core,
@@ -10351,6 +10472,7 @@ fn resolve_routine_index_rejects_globally_unique_package_name_without_direct_dep
             params: Vec::new(),
             return_type: test_return_type("fn value() -> Int:"),
             intrinsic_impl: None,
+            native_impl: None,
             impl_target_type: None,
             impl_trait_path: None,
             availability: Vec::new(),
@@ -11230,7 +11352,7 @@ fn arcana_owned_desktop_app_current_window_helpers_resolve_live_window() {
     let context =
         arcana_desktop_app_context_value(session, wake, window_id, window, Some(window_id), true);
 
-    let current = try_execute_arcana_owned_api_call(
+    let current = try_execute_arcana_owned_api_call_for_test(
         &[
             "arcana_desktop".to_string(),
             "app".to_string(),
@@ -11243,7 +11365,7 @@ fn arcana_owned_desktop_app_current_window_helpers_resolve_live_window() {
     .expect("current_window should be handled");
     assert_eq!(current, some_variant(arcana_desktop_window_value(window)));
 
-    let required = try_execute_arcana_owned_api_call(
+    let required = try_execute_arcana_owned_api_call_for_test(
         &[
             "arcana_desktop".to_string(),
             "app".to_string(),
@@ -11256,7 +11378,7 @@ fn arcana_owned_desktop_app_current_window_helpers_resolve_live_window() {
     .expect("require_current_window should be handled");
     assert_eq!(required, ok_variant(arcana_desktop_window_value(window)));
 
-    let main_window = try_execute_arcana_owned_api_call(
+    let main_window = try_execute_arcana_owned_api_call_for_test(
         &[
             "arcana_desktop".to_string(),
             "app".to_string(),
@@ -11285,7 +11407,7 @@ fn arcana_owned_desktop_app_current_window_helpers_report_missing_window() {
     let context =
         arcana_desktop_app_context_value(session, wake, window_id, window, Some(window_id), true);
 
-    let current = try_execute_arcana_owned_api_call(
+    let current = try_execute_arcana_owned_api_call_for_test(
         &[
             "arcana_desktop".to_string(),
             "app".to_string(),
@@ -11298,7 +11420,7 @@ fn arcana_owned_desktop_app_current_window_helpers_report_missing_window() {
     .expect("current_window should be handled");
     assert_eq!(current, none_variant());
 
-    let required = try_execute_arcana_owned_api_call(
+    let required = try_execute_arcana_owned_api_call_for_test(
         &[
             "arcana_desktop".to_string(),
             "app".to_string(),
@@ -11329,7 +11451,7 @@ fn arcana_owned_desktop_app_current_window_helpers_follow_main_window_path() {
     let context =
         arcana_desktop_app_context_value(session, wake, window_id, window, Some(window_id), false);
 
-    let current = try_execute_arcana_owned_api_call(
+    let current = try_execute_arcana_owned_api_call_for_test(
         &[
             "arcana_desktop".to_string(),
             "app".to_string(),
@@ -11342,7 +11464,7 @@ fn arcana_owned_desktop_app_current_window_helpers_follow_main_window_path() {
     .expect("current_window should be handled");
     assert_eq!(current, some_variant(arcana_desktop_window_value(window)));
 
-    let required = try_execute_arcana_owned_api_call(
+    let required = try_execute_arcana_owned_api_call_for_test(
         &[
             "arcana_desktop".to_string(),
             "app".to_string(),
@@ -11376,7 +11498,7 @@ fn arcana_owned_desktop_app_current_window_helpers_ignore_closed_native_window_b
     let context =
         arcana_desktop_app_context_value(session, wake, window_id, window, Some(window_id), true);
 
-    let current = try_execute_arcana_owned_api_call(
+    let current = try_execute_arcana_owned_api_call_for_test(
         &[
             "arcana_desktop".to_string(),
             "app".to_string(),
@@ -11389,7 +11511,7 @@ fn arcana_owned_desktop_app_current_window_helpers_ignore_closed_native_window_b
     .expect("current_window should be handled");
     assert_eq!(current, none_variant());
 
-    let required = try_execute_arcana_owned_api_call(
+    let required = try_execute_arcana_owned_api_call_for_test(
         &[
             "arcana_desktop".to_string(),
             "app".to_string(),
@@ -11405,7 +11527,7 @@ fn arcana_owned_desktop_app_current_window_helpers_ignore_closed_native_window_b
         err_variant("missing current event window".to_string())
     );
 
-    let main = try_execute_arcana_owned_api_call(
+    let main = try_execute_arcana_owned_api_call_for_test(
         &[
             "arcana_desktop".to_string(),
             "app".to_string(),
@@ -12192,6 +12314,94 @@ fn execute_main_runs_arcana_desktop_app_runner_workspace() {
 }
 
 #[test]
+fn execute_main_runs_arcana_desktop_app_context_helper_workspace() {
+    let dir = temp_workspace_dir("desktop_app_context_helpers");
+    let desktop_dep = owned_grimoire_root()
+        .join("arcana-desktop")
+        .to_string_lossy()
+        .replace('\\', "/");
+    write_file(
+        &dir.join("book.toml"),
+        &format!(
+            concat!(
+                "name = \"runtime_desktop_app_context_helpers\"\n",
+                "kind = \"app\"\n",
+                "[deps]\n",
+                "arcana_desktop = {desktop_dep:?}\n",
+            ),
+            desktop_dep = desktop_dep,
+        ),
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "import arcana_desktop.app\n",
+            "import arcana_desktop.events\n",
+            "import arcana_desktop.types\n",
+            "import arcana_desktop.window\n",
+            "import std.io\n",
+            "\n",
+            "record Demo:\n",
+            "    resumed_once: Bool\n",
+            "\n",
+            "impl arcana_desktop.app.Application[Demo] for Demo:\n",
+            "    fn resumed(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
+            "        if self.resumed_once:\n",
+            "            return\n",
+            "        self.resumed_once = true\n",
+            "        let wake = arcana_desktop.app.wake_handle :: cx :: call\n",
+            "        arcana_desktop.events.wake :: wake :: call\n",
+            "        let main_id = arcana_desktop.app.main_window_id :: cx :: call\n",
+            "        let found = arcana_desktop.app.window_for_id :: cx, main_id :: call\n",
+            "        return match found:\n",
+            "            std.option.Option.Some(win) => on_found :: cx, win :: call\n",
+            "            std.option.Option.None => on_missing :: cx :: call\n",
+            "\n",
+            "    fn suspended(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
+            "        return\n",
+            "\n",
+            "    fn window_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read target: arcana_desktop.types.TargetedEvent) -> arcana_desktop.types.ControlFlow:\n",
+            "        return cx.control.control_flow\n",
+            "\n",
+            "    fn device_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read event: arcana_desktop.types.DeviceEvent) -> arcana_desktop.types.ControlFlow:\n",
+            "        return cx.control.control_flow\n",
+            "\n",
+            "    fn about_to_wait(edit self: Demo, edit cx: arcana_desktop.types.AppContext) -> arcana_desktop.types.ControlFlow:\n",
+            "        return cx.control.control_flow\n",
+            "\n",
+            "    fn wake(edit self: Demo, edit cx: arcana_desktop.types.AppContext) -> arcana_desktop.types.ControlFlow:\n",
+            "        return cx.control.control_flow\n",
+            "\n",
+            "    fn exiting(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
+            "        return\n",
+            "\n",
+            "fn on_found(edit cx: arcana_desktop.types.AppContext, take win: arcana_desktop.types.Window):\n",
+            "    std.io.print[Int] :: ((arcana_desktop.window.id :: win :: call).value) :: call\n",
+            "    arcana_desktop.app.request_exit :: cx, 0 :: call\n",
+            "\n",
+            "fn on_missing(edit cx: arcana_desktop.types.AppContext):\n",
+            "    arcana_desktop.app.request_exit :: cx, 1 :: call\n",
+            "\n",
+            "fn main() -> Int:\n",
+            "    let mut app = Demo :: resumed_once = false :: call\n",
+            "    return arcana_desktop.app.run :: app, (arcana_desktop.app.default_app_config :: :: call) :: call\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let plan = build_workspace_plan_for_member(&dir, "runtime_desktop_app_context_helpers");
+    let fixture_root = dir.join("fixture");
+    fs::create_dir_all(&fixture_root).expect("fixture root should exist");
+    let mut host = synthetic_window_canvas_host(&fixture_root);
+    let code = execute_main(&plan, &mut host).expect("runtime should execute");
+
+    assert_eq!(code, 0);
+    assert_eq!(host.stdout, vec!["0".to_string()]);
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn execute_main_runs_arcana_desktop_exiting_with_live_context_workspace() {
     let dir = temp_workspace_dir("desktop_app_runner_exiting_live_context");
     let desktop_dep = owned_grimoire_root()
@@ -12370,6 +12580,28 @@ fn execute_main_runs_arcana_desktop_proof_native_close_request_workspace() {
     let mut host = NativeProcessHost::current().expect("native host should construct");
     let code = execute_main(&plan, &mut host).expect("runtime should execute proof workspace");
     sender.join().expect("close thread should finish");
+
+    assert_eq!(code, 0);
+}
+
+#[test]
+#[cfg(windows)]
+fn execute_main_runs_arcana_text_proof_smoke_workspace() {
+    let workspace_dir = repo_root().join("examples").join("arcana-text-proof");
+    let (plan, bundle_dir) = build_workspace_plan_and_bundle_dir_for_member(&workspace_dir, "app");
+    let mut host = BufferedHost {
+        cwd: path_text(&workspace_dir),
+        args: vec!["app".to_string(), "--smoke".to_string()],
+        env: BTreeMap::from([(
+            ARCANA_NATIVE_BUNDLE_DIR_ENV.to_string(),
+            path_text(&bundle_dir),
+        )]),
+        ..BufferedHost::default()
+    };
+
+    reset_runtime_native_products_cache();
+    let code = execute_main(&plan, &mut host).expect("runtime should execute arcana_text smoke workspace");
+    reset_runtime_native_products_cache();
 
     assert_eq!(code, 0);
 }
@@ -12996,426 +13228,6 @@ fn execute_main_runs_arcana_desktop_ecs_adapter_workspace() {
 }
 
 #[test]
-fn execute_main_runs_arcana_text_paragraph_metrics_and_updates_workspace() {
-    let dir = temp_workspace_dir("arcana_text_paragraph_updates");
-    let text_dep = owned_grimoire_root()
-        .join("arcana-text")
-        .to_string_lossy()
-        .replace('\\', "/");
-    let graphics_dep = owned_grimoire_root()
-        .join("arcana-graphics")
-        .to_string_lossy()
-        .replace('\\', "/");
-    write_file(
-        &dir.join("book.toml"),
-        &format!(
-            concat!(
-                "name = \"runtime_arcana_text_paragraph_updates\"\n",
-                "kind = \"app\"\n",
-                "[deps]\n",
-                "arcana_graphics = {graphics_dep:?}\n",
-                "arcana_text = {{ path = {text_dep:?}, native_provider = \"default\" }}\n",
-            ),
-            graphics_dep = graphics_dep,
-            text_dep = text_dep,
-        ),
-    );
-    write_file(
-        &dir.join("src").join("shelf.arc"),
-        concat!(
-            "import arcana_graphics.paint\n",
-            "import arcana_text.builder\n",
-            "import arcana_text.fonts\n",
-            "import arcana_text.paragraphs\n",
-            "import arcana_text.types\n",
-            "import std.collections.list\n",
-            "import std.io\n",
-            "\n",
-            "fn rtl_code(read dir: arcana_text.types.TextDirection) -> Int:\n",
-            "    if dir == (arcana_text.types.TextDirection.RightToLeft :: :: call):\n",
-            "        return 1\n",
-            "    return 0\n",
-            "\n",
-            "fn demo_placeholder() -> arcana_text.types.PlaceholderStyle:\n",
-            "    let mut placeholder = arcana_text.types.PlaceholderStyle :: size = (9, 11), alignment = (arcana_text.types.PlaceholderAlignment.Middle :: :: call), baseline = (arcana_text.types.TextBaseline.Alphabetic :: :: call) :: call\n",
-            "    placeholder.baseline_offset = 0\n",
-            "    return placeholder\n",
-            "\n",
-            "fn main() -> Int:\n",
-            "    let mut collection = arcana_text.fonts.default_collection :: :: call\n",
-            "    arcana_text.fonts.add_source :: collection, \"assets/demo.font\" :: call\n",
-            "    arcana_text.fonts.set_host_fallback :: collection, true :: call\n",
-            "    let mut style = arcana_text.types.default_text_style :: 255 :: call\n",
-            "    let mut families = std.collections.list.new[Str] :: :: call\n",
-            "    families :: \"Demo Family\" :: push\n",
-            "    style.families = families\n",
-            "    let mut paragraph_style = arcana_text.types.default_paragraph_style :: :: call\n",
-            "    paragraph_style.align = arcana_text.types.TextAlign.Right :: :: call\n",
-            "    paragraph_style.direction = arcana_text.types.TextDirection.RightToLeft :: :: call\n",
-            "    let mut builder = arcana_text.builder.open :: collection, paragraph_style :: call\n",
-            "    arcana_text.builder.push_style :: builder, style :: call\n",
-            "    arcana_text.builder.add_text :: builder, \"ab cd\" :: call\n",
-            "    arcana_text.builder.add_placeholder :: builder, (demo_placeholder :: :: call) :: call\n",
-            "    arcana_text.builder.add_text :: builder, \" \u{03A9}\" :: call\n",
-            "    let mut paragraph = arcana_text.builder.build :: builder :: call\n",
-            "    arcana_text.paragraphs.layout :: paragraph, 40 :: call\n",
-            "    let lines = arcana_text.paragraphs.line_metrics :: paragraph :: call\n",
-            "    let range = arcana_text.types.TextRange :: start = 0, end = 2 :: call\n",
-            "    let boxes = arcana_text.paragraphs.range_boxes :: paragraph, range :: call\n",
-            "    let placeholders = arcana_text.paragraphs.placeholder_boxes :: paragraph :: call\n",
-            "    let boundary = arcana_text.paragraphs.word_boundary :: paragraph, 1 :: call\n",
-            "    let unresolved = arcana_text.paragraphs.unresolved_glyphs :: paragraph :: call\n",
-            "    let used = arcana_text.paragraphs.fonts_used :: paragraph :: call\n",
-            "    std.io.print[Int] :: (lines :: :: len) :: call\n",
-            "    std.io.print[Int] :: (placeholders :: :: len) :: call\n",
-            "    std.io.print[Int] :: (rtl_code :: boxes[0].direction :: call) :: call\n",
-            "    std.io.print[Bool] :: (boxes[0].position.0 > 0) :: call\n",
-            "    std.io.print[Int] :: boundary.start :: call\n",
-            "    std.io.print[Int] :: boundary.end :: call\n",
-            "    std.io.print[Int] :: (unresolved :: :: len) :: call\n",
-            "    std.io.print[Str] :: used[0] :: call\n",
-            "    arcana_text.paragraphs.update_text :: paragraph, \"xy\" :: call\n",
-            "    arcana_text.paragraphs.update_align :: paragraph, (arcana_text.types.TextAlign.Center :: :: call) :: call\n",
-            "    arcana_text.paragraphs.update_font_size :: paragraph, 24 :: call\n",
-            "    arcana_text.paragraphs.update_foreground :: paragraph, (arcana_graphics.paint.solid :: 77 :: call) :: call\n",
-            "    arcana_text.paragraphs.update_background :: paragraph, true, (arcana_graphics.paint.solid :: 88 :: call) :: call\n",
-            "    let boxes_after = arcana_text.paragraphs.range_boxes :: paragraph, (arcana_text.types.TextRange :: start = 0, end = 2 :: call) :: call\n",
-            "    let used_after = arcana_text.paragraphs.fonts_used :: paragraph :: call\n",
-            "    std.io.print[Bool] :: (boxes_after[0].size.1 > boxes[0].size.1) :: call\n",
-            "    std.io.print[Bool] :: (boxes_after[0].position.0 > 0) :: call\n",
-            "    std.io.print[Str] :: used_after[0] :: call\n",
-            "    return 0\n",
-        ),
-    );
-    write_file(&dir.join("src").join("types.arc"), "// test types\n");
-
-    let (plan, artifact_dir) = build_workspace_plan_and_artifact_dir_for_member(
-        &dir,
-        "runtime_arcana_text_paragraph_updates",
-    );
-    let cwd = artifact_dir.to_string_lossy().replace('\\', "/");
-    let mut host = BufferedHost {
-        cwd: cwd.clone(),
-        sandbox_root: cwd,
-        ..BufferedHost::default()
-    };
-    let code = execute_main(&plan, &mut host).expect("runtime should execute");
-
-    assert_eq!(code, 0);
-    assert_eq!(
-        host.stdout,
-        vec![
-            "2".to_string(),
-            "1".to_string(),
-            "1".to_string(),
-            "true".to_string(),
-            "0".to_string(),
-            "2".to_string(),
-            "1".to_string(),
-            "Demo Family".to_string(),
-            "true".to_string(),
-            "true".to_string(),
-            "Demo Family".to_string(),
-        ]
-    );
-
-    let _ = fs::remove_dir_all(dir);
-}
-
-#[test]
-fn execute_main_loads_arcana_text_monaspace_collection_workspace() {
-    let dir = temp_workspace_dir("arcana_text_monaspace_collection");
-    let text_dep = owned_grimoire_root()
-        .join("arcana-text")
-        .to_string_lossy()
-        .replace('\\', "/");
-    write_file(
-        &dir.join("book.toml"),
-        &format!(
-            concat!(
-                "name = \"runtime_arcana_text_monaspace_collection\"\n",
-                "kind = \"app\"\n",
-                "[deps]\n",
-                "arcana_text = {{ path = {text_dep:?}, native_provider = \"default\" }}\n",
-            ),
-            text_dep = text_dep,
-        ),
-    );
-    write_file(
-        &dir.join("src").join("shelf.arc"),
-        concat!(
-            "import arcana_text.builder\n",
-            "import arcana_text.fonts\n",
-            "import arcana_text.monaspace\n",
-            "import std.io\n",
-            "import std.result\n",
-            "use std.result.Result\n",
-            "\n",
-            "fn result_text(read value: Result[Unit, Str]) -> Str:\n",
-            "    return match value:\n",
-            "        Result.Ok(_) => \"ok\"\n",
-            "        Result.Err(err) => err\n",
-            "\n",
-            "fn main() -> Int:\n",
-            "    let mut collection = arcana_text.fonts.new_collection :: :: call\n",
-            "    let add_variable = arcana_text.fonts.add_monaspace :: collection, (arcana_text.monaspace.MonaspaceFamily.Neon :: :: call), (arcana_text.monaspace.MonaspaceForm.Variable :: :: call) :: call\n",
-            "    std.io.print[Bool] :: (add_variable :: :: is_ok) :: call\n",
-            "    std.io.print[Str] :: (result_text :: add_variable :: call) :: call\n",
-            "    return 0\n",
-        ),
-    );
-    write_file(&dir.join("src").join("types.arc"), "// test types\n");
-
-    let (plan, artifact_dir) = build_workspace_plan_and_artifact_dir_for_member(
-        &dir,
-        "runtime_arcana_text_monaspace_collection",
-    );
-    let cwd = artifact_dir.to_string_lossy().replace('\\', "/");
-    let mut host = BufferedHost {
-        cwd: cwd.clone(),
-        sandbox_root: cwd,
-        ..BufferedHost::default()
-    };
-    let code = execute_main(&plan, &mut host).expect("runtime should execute");
-    assert_eq!(code, 0);
-    assert_eq!(host.stdout, vec!["true".to_string(), "ok".to_string(),]);
-
-    let _ = fs::remove_dir_all(dir);
-}
-
-#[test]
-fn execute_main_rasterizes_arcana_text_paragraph_pixels_via_desktop_app() {
-    let dir = temp_workspace_dir("arcana_text_desktop_pixels");
-    let desktop_dep = owned_grimoire_root()
-        .join("arcana-desktop")
-        .to_string_lossy()
-        .replace('\\', "/");
-    let graphics_dep = owned_grimoire_root()
-        .join("arcana-graphics")
-        .to_string_lossy()
-        .replace('\\', "/");
-    let text_dep = owned_grimoire_root()
-        .join("arcana-text")
-        .to_string_lossy()
-        .replace('\\', "/");
-    write_file(
-        &dir.join("book.toml"),
-        &format!(
-            concat!(
-                "name = \"runtime_arcana_text_desktop_pixels\"\n",
-                "kind = \"app\"\n",
-                "[deps]\n",
-                "arcana_desktop = {{ path = {desktop_dep:?}, native_child = \"default\" }}\n",
-                "arcana_graphics = {graphics_dep:?}\n",
-                "arcana_text = {{ path = {text_dep:?}, native_provider = \"default\" }}\n",
-            ),
-            desktop_dep = desktop_dep,
-            graphics_dep = graphics_dep,
-            text_dep = text_dep,
-        ),
-    );
-    write_file(
-        &dir.join("src").join("shelf.arc"),
-        concat!(
-            "import arcana_desktop.app\n",
-            "import arcana_graphics.canvas\n",
-            "import arcana_text.builder\n",
-            "import arcana_text.fonts\n",
-            "import arcana_text.paragraphs\n",
-            "\n",
-            "record Demo:\n",
-            "    drawn: Bool\n",
-            "\n",
-            "impl arcana_desktop.app.Application[Demo] for Demo:\n",
-            "    fn resumed(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
-            "        let mut main_window = (arcana_desktop.app.main_window_or_cached :: cx :: call)\n",
-            "        arcana_desktop.app.request_window_redraw :: cx, main_window :: call\n",
-            "        return\n",
-            "\n",
-            "    fn suspended(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
-            "        return\n",
-            "\n",
-            "    fn window_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read target: arcana_desktop.types.TargetedEvent) -> arcana_desktop.types.ControlFlow:\n",
-            "        return match target.event:\n",
-            "            arcana_desktop.types.WindowEvent.WindowRedrawRequested(id) => on_redraw :: self, cx, id :: call\n",
-            "            _ => cx.control.control_flow\n",
-            "\n",
-            "    fn device_event(edit self: Demo, edit cx: arcana_desktop.types.AppContext, read event: arcana_desktop.types.DeviceEvent) -> arcana_desktop.types.ControlFlow:\n",
-            "        return cx.control.control_flow\n",
-            "\n",
-            "    fn about_to_wait(edit self: Demo, edit cx: arcana_desktop.types.AppContext) -> arcana_desktop.types.ControlFlow:\n",
-            "        return cx.control.control_flow\n",
-            "\n",
-            "    fn wake(edit self: Demo, edit cx: arcana_desktop.types.AppContext) -> arcana_desktop.types.ControlFlow:\n",
-            "        return cx.control.control_flow\n",
-            "\n",
-            "    fn exiting(edit self: Demo, edit cx: arcana_desktop.types.AppContext):\n",
-            "        return\n",
-            "\n",
-            "fn demo_paragraph() -> arcana_text.types.Paragraph:\n",
-            "    let collection = arcana_text.fonts.default_collection :: :: call\n",
-            "    let paragraph_style = arcana_text.types.default_paragraph_style :: :: call\n",
-            "    let mut style = arcana_text.types.default_text_style :: (arcana_graphics.canvas.rgb :: 255, 255, 255 :: call) :: call\n",
-            "    style.background_enabled = false\n",
-            "    let mut builder = arcana_text.builder.open :: collection, paragraph_style :: call\n",
-            "    arcana_text.builder.push_style :: builder, style :: call\n",
-            "    arcana_text.builder.add_text :: builder, \"Arcana Text\" :: call\n",
-            "    let mut paragraph = arcana_text.builder.build :: builder :: call\n",
-            "    arcana_text.paragraphs.layout :: paragraph, 220 :: call\n",
-            "    return paragraph\n",
-            "\n",
-            "fn on_redraw(edit self: Demo, edit cx: arcana_desktop.types.AppContext, id: Int) -> arcana_desktop.types.ControlFlow:\n",
-            "    let _ = id\n",
-            "    let mut main_window = (arcana_desktop.app.main_window_or_cached :: cx :: call)\n",
-            "    arcana_graphics.canvas.fill :: main_window, (arcana_graphics.canvas.rgb :: 0, 0, 0 :: call) :: call\n",
-            "    let paragraph = demo_paragraph :: :: call\n",
-            "    arcana_text.paragraphs.paint :: main_window, paragraph, (8, 8) :: call\n",
-            "    arcana_graphics.canvas.present :: main_window :: call\n",
-            "    self.drawn = true\n",
-            "    arcana_desktop.app.request_exit :: cx, 0 :: call\n",
-            "    return arcana_desktop.types.ControlFlow.Wait :: :: call\n",
-            "\n",
-            "fn main() -> Int:\n",
-            "    let mut app = Demo :: drawn = false :: call\n",
-            "    return arcana_desktop.app.run :: app, (arcana_desktop.app.default_app_config :: :: call) :: call\n",
-        ),
-    );
-    write_file(&dir.join("src").join("types.arc"), "// test types\n");
-
-    let (plan, artifact_dir) = build_workspace_plan_and_artifact_dir_for_member(
-        &dir,
-        "runtime_arcana_text_desktop_pixels",
-    );
-    let cwd = artifact_dir.to_string_lossy().replace('\\', "/");
-    let mut host = synthetic_window_canvas_host(&artifact_dir);
-    host.cwd = cwd.clone();
-    host.sandbox_root = cwd;
-    let code = execute_main(&plan, &mut host).expect("runtime should execute");
-
-    assert_eq!(code, 0);
-    assert!(
-        host.canvas_log
-            .iter()
-            .any(|entry| entry.starts_with("blit:<generated:")),
-        "paragraph paint should upload a generated image, log was {:?}",
-        host.canvas_log
-    );
-    let generated = host
-        .images
-        .values()
-        .find(|image| image.path.starts_with("<generated:"))
-        .expect("generated text image should exist");
-    assert!(generated.width > 0, "generated image should have width");
-    assert!(generated.height > 0, "generated image should have height");
-    assert!(
-        generated.pixels.iter().any(|pixel| *pixel == 0x00FF_FFFF),
-        "generated image should contain white foreground pixels, image was {:?}",
-        generated
-    );
-    assert!(
-        generated.pixels.iter().any(|pixel| *pixel == 0),
-        "generated image should also contain empty background pixels"
-    );
-
-    let _ = fs::remove_dir_all(dir);
-}
-
-#[test]
-fn execute_main_runs_arcana_text_asset_resolution_workspace() {
-    let dir = temp_workspace_dir("arcana_text_assets");
-    let text_dep = owned_grimoire_root()
-        .join("arcana-text")
-        .to_string_lossy()
-        .replace('\\', "/");
-    write_file(
-        &dir.join("book.toml"),
-        &format!(
-            concat!(
-                "name = \"runtime_arcana_text_assets\"\n",
-                "kind = \"app\"\n",
-                "[deps]\n",
-                "arcana_text = {{ path = {text_dep:?}, native_provider = \"default\" }}\n",
-            ),
-            text_dep = text_dep,
-        ),
-    );
-    write_file(
-        &dir.join("src").join("shelf.arc"),
-        concat!(
-            "import arcana_text.assets\n",
-            "import arcana_text.monaspace\n",
-            "import std.io\n",
-            "import std.path\n",
-            "import std.result\n",
-            "use std.result.Result\n",
-            "\n",
-            "fn unwrap(read result: Result[Str, Str]) -> Str:\n",
-            "    return match result:\n",
-            "        Result.Ok(value) => value\n",
-            "        Result.Err(err) => err\n",
-            "\n",
-            "fn main() -> Int:\n",
-            "    let root = unwrap :: (arcana_text.assets.package_root :: :: call) :: call\n",
-            "    let license = unwrap :: (arcana_text.assets.resolve :: \"LICENSE\" :: call) :: call\n",
-            "    let text = unwrap :: (arcana_text.assets.load_utf8 :: license :: call) :: call\n",
-            "    let neon = unwrap :: (arcana_text.assets.monaspace_source_path :: (arcana_text.monaspace.MonaspaceFamily.Neon :: :: call), (arcana_text.monaspace.MonaspaceForm.Variable :: :: call) :: call) :: call\n",
-            "    std.io.print[Str] :: (std.path.file_name :: neon :: call) :: call\n",
-            "    std.io.print[Bool] :: ((std.path.parent :: license :: call) == root) :: call\n",
-            "    std.io.print[Bool] :: ((std.path.file_name :: license :: call) == \"LICENSE\") :: call\n",
-            "    std.io.print[Bool] :: ((std.path.file_name :: neon :: call) == \"Monaspace Neon Var.ttf\") :: call\n",
-            "    std.io.print[Bool] :: ((std.path.parent :: neon :: call) != root) :: call\n",
-            "    std.io.print[Bool] :: (text != \"\") :: call\n",
-            "    return 0\n",
-        ),
-    );
-    write_file(&dir.join("src").join("types.arc"), "// test types\n");
-
-    let graph = load_workspace_graph(&dir).expect("workspace graph should load");
-    let checked = check_workspace_graph(&graph).expect("workspace should check");
-    let fingerprints = compute_member_fingerprints_for_checked_workspace(&graph, &checked)
-        .expect("fingerprints should compute");
-    let order = plan_workspace(&graph).expect("workspace order should plan");
-    let statuses =
-        plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
-    execute_workspace_build(&graph, &fingerprints, &statuses);
-
-    let artifact_path = graph.root_dir.join(
-        statuses
-            .iter()
-            .find(|status| status.member_name() == "runtime_arcana_text_assets")
-            .expect("app artifact status should exist")
-            .artifact_rel_path(),
-    );
-    let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
-    let cwd = artifact_path
-        .parent()
-        .expect("artifact parent should exist")
-        .to_string_lossy()
-        .replace('\\', "/");
-    let mut host = BufferedHost {
-        cwd: cwd.clone(),
-        sandbox_root: cwd,
-        ..BufferedHost::default()
-    };
-    let code = execute_main(&plan, &mut host).expect("runtime should execute");
-
-    assert_eq!(code, 0);
-    assert_eq!(
-        host.stdout,
-        vec![
-            "Monaspace Neon Var.ttf".to_string(),
-            "true".to_string(),
-            "true".to_string(),
-            "true".to_string(),
-            "true".to_string(),
-            "true".to_string(),
-        ]
-    );
-
-    let _ = fs::remove_dir_all(dir);
-}
-
-#[test]
 fn runtime_arcana_owned_fast_path_is_desktop_only() {
     let lib = include_str!("lib.rs");
     assert!(
@@ -13454,142 +13266,4 @@ fn native_host_does_not_expose_text_grimoire_methods() {
     }
 }
 
-#[test]
-fn execute_main_runs_external_provider_backed_library_workspace() {
-    let dir = temp_workspace_dir("external_provider_library");
-    let dep_dir = dir.join("demo-counter");
-    write_file(
-        &dir.join("book.toml"),
-        concat!(
-            "name = \"runtime_external_provider_app\"\n",
-            "kind = \"app\"\n",
-            "[deps]\n",
-            "demo_counter = { path = \"./demo-counter\", native_provider = \"default\" }\n",
-        ),
-    );
-    write_file(
-        &dir.join("src").join("shelf.arc"),
-        concat!(
-            "import demo_counter.counter\n",
-            "import std.collections.array\n",
-            "import std.io\n",
-            "import std.memory\n",
-            "\n",
-            "fn main() -> Int:\n",
-            "    let mut counter = demo_counter.counter.new :: 7 :: call\n",
-            "    demo_counter.counter.add :: counter, 5 :: call\n",
-            "    let snapshot = demo_counter.counter.snapshot :: counter :: call\n",
-            "    let mut bytes = std.collections.array.new[Int] :: 3, 0 :: call\n",
-            "    bytes[0] = 10\n",
-            "    bytes[1] = 20\n",
-            "    bytes[2] = 30\n",
-            "    let view = std.memory.bytes_view :: bytes, 0, 3 :: call\n",
-            "    std.io.print[Int] :: (demo_counter.counter.value :: counter :: call) :: call\n",
-            "    std.io.print[Int] :: snapshot.value :: call\n",
-            "    std.io.print[Int] :: (demo_counter.counter.sum_bytes :: view :: call) :: call\n",
-            "    return 0\n",
-        ),
-    );
-    write_file(&dir.join("src").join("types.arc"), "// test types\n");
 
-    write_file(
-        &dep_dir.join("book.toml"),
-        concat!(
-            "name = \"demo_counter\"\n",
-            "kind = \"lib\"\n",
-            "\n",
-            "[native.products.default]\n",
-            "kind = \"dll\"\n",
-            "role = \"provider\"\n",
-            "producer = \"arcana-source\"\n",
-            "file = \"demo_counter_provider.dll\"\n",
-            "contract = \"arcana.cabi.provider.v1\"\n",
-            "sidecars = []\n",
-        ),
-    );
-    write_file(
-        &dep_dir.join("src").join("book.arc"),
-        concat!(
-            "reexport demo_counter.types\n",
-            "reexport demo_counter.counter\n",
-        ),
-    );
-    write_file(
-        &dep_dir.join("src").join("types.arc"),
-        concat!(
-            "export opaque type Counter as move, boundary_unsafe\n",
-            "\n",
-            "export record CounterSnapshot:\n",
-            "    value: Int\n",
-        ),
-    );
-    write_file(
-        &dep_dir.join("src").join("counter.arc"),
-        concat!(
-            "import demo_counter.types\n",
-            "\n",
-            "export fn new(seed: Int) -> demo_counter.types.Counter:\n",
-            "    return demo_counter.counter.new :: seed :: call\n",
-            "\n",
-            "export fn add(edit counter: demo_counter.types.Counter, amount: Int):\n",
-            "    demo_counter.counter.add :: counter, amount :: call\n",
-            "\n",
-            "export fn value(read counter: demo_counter.types.Counter) -> Int:\n",
-            "    return demo_counter.counter.value :: counter :: call\n",
-            "\n",
-            "export fn snapshot(read counter: demo_counter.types.Counter) -> demo_counter.types.CounterSnapshot:\n",
-            "    return demo_counter.counter.snapshot :: counter :: call\n",
-            "\n",
-            "export fn sum_bytes(read view: std.memory.ByteView) -> Int:\n",
-            "    return demo_counter.counter.sum_bytes :: view :: call\n",
-        ),
-    );
-    write_file(
-        &dep_dir.join("src").join("provider_impl").join("engine.arc"),
-        concat!("export record CounterState:\n", "    value: Int\n",),
-    );
-    write_file(
-        &dep_dir
-            .join("src")
-            .join("provider_impl")
-            .join("counter.arc"),
-        concat!(
-            "import demo_counter.provider_impl.engine\n",
-            "import std.memory\n",
-            "import demo_counter.types\n",
-            "\n",
-            "fn new(seed: Int) -> demo_counter.provider_impl.engine.CounterState:\n",
-            "    return demo_counter.provider_impl.engine.CounterState :: value = seed :: call\n",
-            "\n",
-            "fn add(edit counter: demo_counter.provider_impl.engine.CounterState, amount: Int):\n",
-            "    counter.value = counter.value + amount\n",
-            "\n",
-            "fn value(read counter: demo_counter.provider_impl.engine.CounterState) -> Int:\n",
-            "    return counter.value\n",
-            "\n",
-            "fn snapshot(read counter: demo_counter.provider_impl.engine.CounterState) -> demo_counter.types.CounterSnapshot:\n",
-            "    return demo_counter.types.CounterSnapshot :: value = counter.value :: call\n",
-            "\n",
-            "fn sum_bytes(read view: std.memory.ByteView) -> Int:\n",
-            "    return (view :: 0 :: at) + (view :: 1 :: at) + (view :: 2 :: at)\n",
-        ),
-    );
-
-    let (plan, artifact_dir) =
-        build_workspace_plan_and_artifact_dir_for_member(&dir, "runtime_external_provider_app");
-    let cwd = artifact_dir.to_string_lossy().replace('\\', "/");
-    let mut host = BufferedHost {
-        cwd: cwd.clone(),
-        sandbox_root: cwd,
-        ..BufferedHost::default()
-    };
-    let code = execute_main(&plan, &mut host).expect("runtime should execute");
-
-    assert_eq!(code, 0);
-    assert_eq!(
-        host.stdout,
-        vec!["12".to_string(), "12".to_string(), "60".to_string()]
-    );
-
-    let _ = fs::remove_dir_all(dir);
-}

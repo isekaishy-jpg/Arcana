@@ -5,7 +5,7 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::ffi::{CStr, c_char, c_void};
+use std::ffi::c_void;
 use std::fs;
 use std::io::{Read, Seek, Write};
 use std::path::{Component, Path, PathBuf};
@@ -15,10 +15,10 @@ use arcana_aot::{
     AotOwnerArtifact, AotPackageArtifact, parse_package_artifact, validate_package_artifact,
 };
 use arcana_cabi::{
-    ArcanaCabiProviderDescriptorView, ArcanaCabiProviderDescriptorViewBackingKind,
-    ArcanaCabiProviderDescriptorViewOwner, ArcanaCabiProviderHostOpsV1, ArcanaCabiProviderValue,
-    ArcanaOwnedStr, encode_provider_values,
+    ArcanaBytesView, ArcanaCabiBindingPayloadV1, ArcanaCabiBindingValueTag,
+    ArcanaCabiBindingValueV1, ArcanaOwnedBytes, ArcanaOwnedStr, ArcanaStrView,
 };
+
 use arcana_ir::{
     ExecAssignOp as ParsedAssignOp, ExecAssignTarget as ParsedAssignTarget,
     ExecAvailabilityAttachment as ParsedAvailabilityAttachment,
@@ -34,6 +34,7 @@ use arcana_ir::{
     ExecMatchPattern as ParsedMatchPattern, ExecMemorySpecDecl as ParsedMemorySpecDecl,
     ExecNamedBindingId as ParsedNamedBindingId, ExecPhraseArg as ParsedPhraseArg,
     ExecPhraseQualifierKind as ParsedPhraseQualifierKind,
+    ExecRecordRegion as ParsedRecordRegion,
     ExecRecycleLineKind as ParsedRecycleLineKind, ExecStmt as ParsedStmt,
     ExecUnaryOp as ParsedUnaryOp, IrRoutineType, IrRoutineTypeKind, parse_memory_spec_surface_row,
     parse_routine_type_text, validate_runtime_main_entry_contract,
@@ -54,7 +55,6 @@ mod native_host;
 mod native_product_loader;
 mod package_image;
 mod routine_plan;
-mod source_provider;
 mod text_engine;
 pub use arcana_ir::{
     IrForewordArg, IrForewordEntryKind, IrForewordGeneratedBy, IrForewordMetadata,
@@ -71,16 +71,18 @@ pub use native_abi::{
 pub use native_host::NativeProcessHost;
 pub use native_product_loader::{
     RuntimeChildBindingInfo, RuntimeNativePluginHandle, RuntimeNativeProductCatalog,
-    RuntimeNativeProductInfo, RuntimeProviderBindingInfo, activate_current_bundle_native_products,
+    RuntimeNativeProductInfo, activate_current_bundle_native_products,
     load_bundle_native_products, load_bundle_native_products_from_manifest_path,
     load_current_bundle_native_products,
 };
 pub use package_image::{
     RUNTIME_PACKAGE_IMAGE_FORMAT, parse_runtime_package_image, render_runtime_package_image,
 };
-pub use routine_plan::{RuntimeEntrypointPlan, RuntimeParamPlan, RuntimeRoutinePlan};
-use routine_plan::{lower_entrypoint, lower_routine};
-pub use source_provider::{ArcanaSourceProvider, RuntimeSourceProviderCallbacks};
+pub use routine_plan::{
+    RuntimeEntrypointPlan, RuntimeNativeCallbackPlan, RuntimeParamPlan, RuntimeRoutinePlan,
+};
+use native_product_loader::{RuntimeBindingCallbackRegistrationSpec, RuntimeBindingImportOutcome};
+use routine_plan::{lower_entrypoint, lower_native_callback, lower_routine};
 
 const MODULE_MEMORY_SPEC_ALIAS_PREFIX: &str = "@memory_spec:";
 pub const ARCANA_NATIVE_BUNDLE_DIR_ENV: &str = "ARCANA_NATIVE_BUNDLE_DIR";
@@ -88,6 +90,25 @@ pub const ARCANA_NATIVE_BUNDLE_MANIFEST_ENV: &str = "ARCANA_NATIVE_BUNDLE_MANIFE
 
 thread_local! {
     static ACTIVE_RUNTIME_NATIVE_PRODUCTS: RefCell<Option<RuntimeNativeProductCatalog>> = const { RefCell::new(None) };
+    static ACTIVE_RUNTIME_BINDING_CALLBACK_CONTEXT: RefCell<Option<RuntimeBindingCallbackContext>> = const { RefCell::new(None) };
+}
+
+#[derive(Clone, Copy)]
+struct RuntimeBindingCallbackContext {
+    plan: *const RuntimePackagePlan,
+    host_data: *mut (),
+    host_vtable: *mut (),
+}
+
+#[derive(Clone)]
+struct RuntimeBindingCallbackThunkData {
+    callback: RuntimeNativeCallbackPlan,
+}
+
+#[derive(Default)]
+struct RuntimeBindingArgStorage {
+    strings: Vec<String>,
+    bytes: Vec<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -137,6 +158,8 @@ pub struct RuntimePackagePlan {
     pub opaque_family_types: BTreeMap<String, Vec<String>>,
     pub entrypoints: Vec<RuntimeEntrypointPlan>,
     pub routines: Vec<RuntimeRoutinePlan>,
+    #[serde(default)]
+    pub native_callbacks: Vec<RuntimeNativeCallbackPlan>,
     pub owners: Vec<RuntimeOwnerPlan>,
 }
 
@@ -381,9 +404,6 @@ pub struct RuntimeThreadHandle(u64);
 pub struct RuntimeLazyHandle(u64);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct RuntimeProviderOpaqueHandle(u64);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct RuntimeLocalHandle(u64);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -489,6 +509,13 @@ struct RuntimeResolvedPlace {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RuntimeBindingOpaqueValue {
+    package_id: &'static str,
+    type_name: &'static str,
+    handle: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RuntimeOpaqueValue {
     FileStream(RuntimeFileStreamHandle),
     Window(RuntimeWindowHandle),
@@ -524,8 +551,8 @@ enum RuntimeOpaqueValue {
     StrView(RuntimeStrViewHandle),
     Task(RuntimeTaskHandle),
     Thread(RuntimeThreadHandle),
+    Binding(RuntimeBindingOpaqueValue),
     Lazy(RuntimeLazyHandle),
-    Provider(RuntimeProviderOpaqueHandle),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -758,8 +785,8 @@ impl RuntimeOpaqueFamily {
             RuntimeOpaqueValue::StrView(_) => Self::StrView,
             RuntimeOpaqueValue::Task(_) => Self::Task,
             RuntimeOpaqueValue::Thread(_) => Self::Thread,
+            RuntimeOpaqueValue::Binding(_) => panic!("binding opaques are package-defined"),
             RuntimeOpaqueValue::Lazy(_) => panic!("lazy opaques are internal"),
-            RuntimeOpaqueValue::Provider(_) => panic!("provider opaques are dynamic"),
         }
     }
 }
@@ -4628,8 +4655,6 @@ pub struct RuntimeExecutionState {
     atomic_ints: BTreeMap<RuntimeAtomicIntHandle, i64>,
     next_atomic_bool_handle: u64,
     atomic_bools: BTreeMap<RuntimeAtomicBoolHandle, bool>,
-    next_provider_opaque_handle: u64,
-    provider_opaques: BTreeMap<RuntimeProviderOpaqueHandle, RuntimeProviderOpaqueState>,
     exported_descriptor_counts: BTreeMap<RuntimeExportedDescriptorTarget, usize>,
 }
 
@@ -4806,15 +4831,6 @@ struct RuntimeStrViewState {
     backing: RuntimeStrViewBacking,
     start: usize,
     len: usize,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct RuntimeProviderOpaqueState {
-    consumer_package_id: String,
-    dependency_alias: String,
-    family_key: String,
-    type_path: String,
-    opaque_id: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -5429,6 +5445,11 @@ pub fn plan_from_artifact(artifact: &AotPackageArtifact) -> Result<RuntimePackag
         opaque_family_types: build_opaque_family_types(artifact)?,
         entrypoints,
         routines,
+        native_callbacks: artifact
+            .native_callbacks
+            .iter()
+            .map(lower_native_callback)
+            .collect(),
         owners: artifact.owners.iter().map(lower_owner).collect(),
     };
     validate_runtime_cleanup_footer_handlers(&plan)?;
@@ -5548,6 +5569,7 @@ fn validate_runtime_cleanup_footer_handlers_in_statements(
             | ParsedStmt::Assign { .. }
             | ParsedStmt::Recycle { .. }
             | ParsedStmt::Bind { .. }
+            | ParsedStmt::Record(_)
             | ParsedStmt::Construct(_)
             | ParsedStmt::MemorySpec(_) => {}
         }
@@ -6871,6 +6893,10 @@ fn runtime_value_to_string(value: &RuntimeValue) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+        RuntimeValue::Opaque(RuntimeOpaqueValue::Binding(binding)) => format!(
+            "{}#{}",
+            binding.type_name, binding.handle
+        ),
         RuntimeValue::Map(entries) => format!(
             "{{{}}}",
             entries
@@ -7117,9 +7143,6 @@ fn runtime_value_to_string(value: &RuntimeValue) -> String {
         }
         RuntimeValue::Opaque(RuntimeOpaqueValue::Lazy(handle)) => {
             format!("<Lazy:{}>", handle.0)
-        }
-        RuntimeValue::Opaque(RuntimeOpaqueValue::Provider(handle)) => {
-            format!("<ProviderOpaque:{}>", handle.0)
         }
         RuntimeValue::Record { name, fields } => format!(
             "{}{{{}}}",
@@ -8398,6 +8421,227 @@ fn runtime_reference_with_member(
     }
 }
 
+fn runtime_local_value_ref<'a>(
+    scopes: &'a [RuntimeScope],
+    state: &'a RuntimeExecutionState,
+    handle: RuntimeLocalHandle,
+) -> Option<(&'a str, &'a RuntimeValue, bool)> {
+    if let Some((name, runtime_local)) = lookup_local_with_name_by_handle(scopes, handle) {
+        if let Some(captured) = state.captured_local_values.get(&handle) {
+            return Some((name, captured, runtime_local.moved));
+        }
+        return Some((name, &runtime_local.value, runtime_local.moved));
+    }
+    state
+        .captured_local_values
+        .get(&handle)
+        .map(|value| ("<captured>", value, false))
+}
+
+fn runtime_member_value_ref<'a>(
+    value: &'a RuntimeValue,
+    member: &str,
+) -> Result<Option<&'a RuntimeValue>, String> {
+    match value {
+        RuntimeValue::Pair(left, right) => match member {
+            "0" => Ok(Some(left.as_ref())),
+            "1" => Ok(Some(right.as_ref())),
+            _ => Err(format!("pair has no member `.{member}`")),
+        },
+        RuntimeValue::Record { name, fields } => fields
+            .get(member)
+            .map(Some)
+            .ok_or_else(|| format!("record `{name}` has no field `.{member}`")),
+        RuntimeValue::Variant { .. } | RuntimeValue::OwnerHandle(_) => Ok(None),
+        other => Err(format!(
+            "unsupported runtime member access `.{member}` on `{other:?}`"
+        )),
+    }
+}
+
+fn runtime_reference_root_value_ref<'a>(
+    scopes: &'a [RuntimeScope],
+    state: &'a RuntimeExecutionState,
+    target: &RuntimeReferenceTarget,
+) -> Result<Option<&'a RuntimeValue>, String> {
+    match target {
+        RuntimeReferenceTarget::Local { local, .. } => {
+            let Some((name, value, moved)) = runtime_local_value_ref(scopes, state, *local) else {
+                return Err(format!(
+                    "runtime reference local `{}` is unresolved; visible locals: {}",
+                    local.0,
+                    runtime_scope_local_summary(scopes)
+                ));
+            };
+            if moved {
+                return Err(format!("use of moved local `{name}`"));
+            }
+            Ok(Some(value))
+        }
+        RuntimeReferenceTarget::OwnerObject { .. } => Ok(None),
+        RuntimeReferenceTarget::ArenaSlot { id, .. } => {
+            let arena = state
+                .arenas
+                .get(&id.arena)
+                .ok_or_else(|| format!("invalid Arena handle `{}`", id.arena.0))?;
+            if !arena_id_is_live(id.arena, arena, *id) {
+                return Err(format!(
+                    "stale or invalid ArenaId `{}` for Arena `{}`",
+                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::ArenaId(
+                        *id
+                    ))),
+                    id.arena.0
+                ));
+            }
+            Ok(arena.slots.get(&id.slot))
+        }
+        RuntimeReferenceTarget::FrameSlot { id, .. } => {
+            let arena = state
+                .frame_arenas
+                .get(&id.arena)
+                .ok_or_else(|| format!("invalid FrameArena handle `{}`", id.arena.0))?;
+            if !frame_id_is_live(id.arena, arena, *id) {
+                return Err(format!(
+                    "stale or invalid FrameId `{}` for FrameArena `{}`",
+                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::FrameId(
+                        *id
+                    ))),
+                    id.arena.0
+                ));
+            }
+            Ok(arena.slots.get(&id.slot))
+        }
+        RuntimeReferenceTarget::PoolSlot { id, .. } => {
+            let arena = state
+                .pool_arenas
+                .get(&id.arena)
+                .ok_or_else(|| format!("invalid PoolArena handle `{}`", id.arena.0))?;
+            if !pool_id_is_live(id.arena, arena, *id) {
+                return Err(format!(
+                    "stale or invalid PoolId `{}` for PoolArena `{}`",
+                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::PoolId(*id))),
+                    id.arena.0
+                ));
+            }
+            Ok(arena.slots.get(&id.slot))
+        }
+        RuntimeReferenceTarget::TempSlot { id, .. } => {
+            let arena = state
+                .temp_arenas
+                .get(&id.arena)
+                .ok_or_else(|| format!("invalid TempArena handle `{}`", id.arena.0))?;
+            if !temp_id_is_live(id.arena, arena, *id) {
+                return Err(format!(
+                    "stale or invalid TempId `{}` for TempArena `{}`",
+                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::TempId(*id))),
+                    id.arena.0
+                ));
+            }
+            Ok(arena.slots.get(&id.slot))
+        }
+        RuntimeReferenceTarget::SessionSlot { id, .. } => {
+            let arena = state
+                .session_arenas
+                .get(&id.arena)
+                .ok_or_else(|| format!("invalid SessionArena handle `{}`", id.arena.0))?;
+            if !session_id_is_live(id.arena, arena, *id) {
+                return Err(format!(
+                    "stale or invalid SessionId `{}` for SessionArena `{}`",
+                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::SessionId(
+                        *id
+                    ))),
+                    id.arena.0
+                ));
+            }
+            Ok(arena.slots.get(&id.slot))
+        }
+        RuntimeReferenceTarget::RingSlot { id, .. } => {
+            let arena = state
+                .ring_buffers
+                .get(&id.arena)
+                .ok_or_else(|| format!("invalid RingBuffer handle `{}`", id.arena.0))?;
+            if !ring_id_is_live(id.arena, arena, *id) {
+                return Err(format!(
+                    "stale or invalid RingId `{}` for RingBuffer `{}`",
+                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::RingId(*id))),
+                    id.arena.0
+                ));
+            }
+            Ok(arena.slots.get(&id.slot))
+        }
+        RuntimeReferenceTarget::SlabSlot { id, .. } => {
+            let arena = state
+                .slabs
+                .get(&id.arena)
+                .ok_or_else(|| format!("invalid Slab handle `{}`", id.arena.0))?;
+            if !slab_id_is_live(id.arena, arena, *id) {
+                return Err(format!(
+                    "stale or invalid SlabId `{}` for Slab `{}`",
+                    runtime_value_to_string(&RuntimeValue::Opaque(RuntimeOpaqueValue::SlabId(*id))),
+                    id.arena.0
+                ));
+            }
+            Ok(arena.slots.get(&id.slot))
+        }
+    }
+}
+
+fn runtime_reference_value_ref<'a>(
+    scopes: &'a [RuntimeScope],
+    state: &'a RuntimeExecutionState,
+    reference: &RuntimeReferenceValue,
+) -> Result<Option<&'a RuntimeValue>, String> {
+    let Some(mut value) = runtime_reference_root_value_ref(scopes, state, &reference.target)? else {
+        return Ok(None);
+    };
+    for member in runtime_reference_members(&reference.target) {
+        let Some(next) = runtime_member_value_ref(value, member)? else {
+            return Ok(None);
+        };
+        value = next;
+    }
+    Ok(Some(value))
+}
+
+fn runtime_reference_array_len(
+    scopes: &[RuntimeScope],
+    state: &RuntimeExecutionState,
+    reference: &RuntimeReferenceValue,
+    context: &str,
+) -> Result<Option<usize>, String> {
+    let Some(value) = runtime_reference_value_ref(scopes, state, reference)? else {
+        return Ok(None);
+    };
+    let RuntimeValue::Array(values) = value else {
+        return Err(format!("{context} expected Array[Int]"));
+    };
+    Ok(Some(values.len()))
+}
+
+fn runtime_reference_array_byte_at(
+    scopes: &[RuntimeScope],
+    state: &RuntimeExecutionState,
+    reference: &RuntimeReferenceValue,
+    index: usize,
+    context: &str,
+) -> Result<Option<u8>, String> {
+    let Some(value) = runtime_reference_value_ref(scopes, state, reference)? else {
+        return Ok(None);
+    };
+    let RuntimeValue::Array(values) = value else {
+        return Err(format!("{context} expected Array[Int]"));
+    };
+    let value = values
+        .get(index)
+        .cloned()
+        .ok_or_else(|| format!("{context} index `{index}` is out of bounds"))?;
+    let value = expect_int(value, context)?;
+    if !(0..=255).contains(&value) {
+        return Err(format!("{context} byte `{value}` is out of range `0..=255`"));
+    }
+    Ok(Some(value as u8))
+}
+
 fn runtime_reference_members(target: &RuntimeReferenceTarget) -> &[String] {
     match target {
         RuntimeReferenceTarget::Local { members, .. }
@@ -9300,6 +9544,9 @@ fn read_runtime_reference(
     reference: &RuntimeReferenceValue,
     host: &mut dyn RuntimeHost,
 ) -> Result<RuntimeValue, String> {
+    if let Some(value) = runtime_reference_value_ref(scopes.as_slice(), state, reference)? {
+        return Ok(value.clone());
+    }
     let mut value = runtime_reference_root_value(
         scopes,
         plan,
@@ -9654,7 +9901,9 @@ fn expect_named_record(
     context: &str,
 ) -> Result<BTreeMap<String, RuntimeValue>, String> {
     let RuntimeValue::Record { name, fields } = value else {
-        return Err(format!("{context} expected {record_name}"));
+        return Err(format!(
+            "{context} expected {record_name}, got `{value:?}`"
+        ));
     };
     if name != record_name {
         return Err(format!("{context} expected {record_name}, got `{name}`"));
@@ -10869,556 +11118,6 @@ fn with_runtime_native_products<R>(
     })
 }
 
-struct RuntimeProviderHostContext {
-    host: *mut (dyn RuntimeHost + 'static),
-    state: *mut RuntimeExecutionState,
-    current_package_id: String,
-    bundle_dir: PathBuf,
-    package_asset_roots: BTreeMap<String, String>,
-    exported_descriptors: Vec<RuntimeExportedDescriptorTarget>,
-    last_error: Option<Vec<u8>>,
-}
-
-impl RuntimeProviderHostContext {
-    unsafe fn host_mut(&mut self) -> &mut dyn RuntimeHost {
-        unsafe { &mut *self.host }
-    }
-
-    unsafe fn state_ref(&self) -> &RuntimeExecutionState {
-        unsafe { &*self.state }
-    }
-
-    fn set_last_error(&mut self, message: String) {
-        self.last_error = Some(message.into_bytes());
-    }
-
-    fn clear_last_error(&mut self) {
-        self.last_error = None;
-    }
-
-    fn clear_last_error_with_default<T>(&mut self, value: T) -> T {
-        self.clear_last_error();
-        value
-    }
-
-    fn resolve_package_asset_root(&mut self, package_id: &str) -> Result<PathBuf, String> {
-        if let Some(root) = self.package_asset_roots.get(package_id) {
-            let path = normalize_lexical_path(&self.bundle_dir.join(root));
-            if path.exists() {
-                return Ok(path);
-            }
-        }
-        let fallback_bundle = normalize_lexical_path(
-            &self
-                .bundle_dir
-                .join(runtime_default_package_asset_root(package_id)),
-        );
-        if fallback_bundle.exists() {
-            return Ok(fallback_bundle);
-        }
-        let cwd = PathBuf::from(unsafe { self.host_mut().cwd()? });
-        let fallback =
-            normalize_lexical_path(&cwd.join(runtime_default_package_asset_root(package_id)));
-        if fallback.exists() {
-            return Ok(fallback);
-        }
-        Err(format!(
-            "package assets for `{package_id}` are not staged under `{}`",
-            fallback.display()
-        ))
-    }
-
-    fn descriptor_view_values(
-        &mut self,
-        family: &str,
-        view_id: u64,
-        start: u64,
-        len: u64,
-    ) -> Result<Vec<ArcanaCabiProviderValue>, String> {
-        match family {
-            "std.memory.ReadView" => {
-                let handle = RuntimeReadViewHandle(view_id);
-                let start = usize::try_from(start).map_err(|_| {
-                    format!("descriptor view start `{start}` does not fit in usize")
-                })?;
-                let len = usize::try_from(len)
-                    .map_err(|_| format!("descriptor view len `{len}` does not fit in usize"))?;
-                let values = {
-                    let state = unsafe { self.state_ref() };
-                    let view = state
-                        .read_views
-                        .get(&handle)
-                        .ok_or_else(|| format!("invalid ReadView handle `{view_id}`"))?;
-                    match &view.backing {
-                        RuntimeElementViewBacking::Buffer(buffer) => {
-                            let backing =
-                                state.element_view_buffers.get(buffer).ok_or_else(|| {
-                                    format!("invalid element view buffer `{}`", buffer.0)
-                                })?;
-                            let (base_start, base_end) = runtime_view_range(
-                                view.start,
-                                view.len,
-                                backing.values.len(),
-                                "descriptor view",
-                            )?;
-                            let absolute_start = base_start
-                                .checked_add(start)
-                                .ok_or_else(|| "descriptor view range overflowed".to_string())?;
-                            let absolute_end = absolute_start
-                                .checked_add(len)
-                                .ok_or_else(|| "descriptor view range overflowed".to_string())?;
-                            if absolute_end > base_end {
-                                return Err(format!(
-                                    "descriptor view `{start}..{}` is out of bounds for length `{}`",
-                                    start + len,
-                                    view.len
-                                ));
-                            }
-                            backing.values[absolute_start..absolute_end].to_vec()
-                        }
-                        RuntimeElementViewBacking::Reference(reference) => {
-                            runtime_reference_backed_descriptor_view_values(
-                                reference,
-                                state,
-                                view.start,
-                                view.len,
-                                start,
-                                len,
-                                "descriptor view",
-                            )?
-                        }
-                        RuntimeElementViewBacking::RingWindow { .. } => {
-                            return Err(
-                                "descriptor value materialization does not support RingBuffer-backed ReadView"
-                                    .to_string(),
-                            )
-                        }
-                    }
-                };
-                let current_package_id = self.current_package_id.clone();
-                let state_ptr = self.state;
-                let exported_descriptors = &mut self.exported_descriptors;
-                let state = unsafe { &mut *state_ptr };
-                let mut encoded = Vec::with_capacity(values.len());
-                for value in &values {
-                    encoded.push(runtime_value_to_provider_value(
-                        value,
-                        state,
-                        &current_package_id,
-                        exported_descriptors,
-                    )?);
-                }
-                Ok(encoded)
-            }
-            other => Err(format!(
-                "descriptor value materialization does not support family `{other}`"
-            )),
-        }
-    }
-
-    fn descriptor_view_bytes(
-        &self,
-        family: &str,
-        view_id: u64,
-        start: u64,
-        len: u64,
-    ) -> Result<Vec<u8>, String> {
-        let start = usize::try_from(start)
-            .map_err(|_| format!("descriptor view start `{start}` does not fit in usize"))?;
-        let len = usize::try_from(len)
-            .map_err(|_| format!("descriptor view len `{len}` does not fit in usize"))?;
-        let state = unsafe { self.state_ref() };
-        match family {
-            "std.memory.ByteView" => {
-                let handle = RuntimeByteViewHandle(view_id);
-                let view = state
-                    .byte_views
-                    .get(&handle)
-                    .ok_or_else(|| format!("invalid ByteView handle `{view_id}`"))?;
-                match &view.backing {
-                    RuntimeByteViewBacking::Buffer(buffer) => {
-                        let values = state
-                            .byte_view_buffers
-                            .get(buffer)
-                            .ok_or_else(|| format!("invalid byte view buffer `{}`", buffer.0))?;
-                        let (base_start, base_end) = runtime_view_range(
-                            view.start,
-                            view.len,
-                            values.values.len(),
-                            "descriptor view",
-                        )?;
-                        let absolute_start = base_start
-                            .checked_add(start)
-                            .ok_or_else(|| "descriptor view range overflowed".to_string())?;
-                        let absolute_end = absolute_start
-                            .checked_add(len)
-                            .ok_or_else(|| "descriptor view range overflowed".to_string())?;
-                        if absolute_end > base_end {
-                            return Err(format!(
-                                "descriptor view `{start}..{}` is out of bounds for length `{}`",
-                                start + len,
-                                view.len
-                            ));
-                        }
-                        Ok(values.values[absolute_start..absolute_end].to_vec())
-                    }
-                    RuntimeByteViewBacking::Reference(reference) => {
-                        runtime_reference_backed_descriptor_byte_values(
-                            reference,
-                            state,
-                            view.start,
-                            view.len,
-                            start,
-                            len,
-                            "descriptor view",
-                        )
-                    }
-                }
-            }
-            "std.memory.StrView" => {
-                let handle = RuntimeStrViewHandle(view_id);
-                let view = state
-                    .str_views
-                    .get(&handle)
-                    .ok_or_else(|| format!("invalid StrView handle `{view_id}`"))?;
-                match &view.backing {
-                    RuntimeStrViewBacking::Buffer(buffer) => {
-                        let text = state
-                            .str_view_buffers
-                            .get(buffer)
-                            .ok_or_else(|| format!("invalid str view buffer `{}`", buffer.0))?;
-                        let bytes = text.text.as_bytes();
-                        let (base_start, base_end) = runtime_view_range(
-                            view.start,
-                            view.len,
-                            bytes.len(),
-                            "descriptor view",
-                        )?;
-                        let absolute_start = base_start
-                            .checked_add(start)
-                            .ok_or_else(|| "descriptor view range overflowed".to_string())?;
-                        let absolute_end = absolute_start
-                            .checked_add(len)
-                            .ok_or_else(|| "descriptor view range overflowed".to_string())?;
-                        if absolute_end > base_end {
-                            return Err(format!(
-                                "descriptor view `{start}..{}` is out of bounds for length `{}`",
-                                start + len,
-                                view.len
-                            ));
-                        }
-                        Ok(bytes[absolute_start..absolute_end].to_vec())
-                    }
-                    RuntimeStrViewBacking::Reference(reference) => {
-                        runtime_reference_backed_descriptor_str_bytes(
-                            reference,
-                            state,
-                            view.start,
-                            view.len,
-                            start,
-                            len,
-                            "descriptor view",
-                        )
-                    }
-                }
-            }
-            other => Err(format!(
-                "descriptor byte materialization does not support family `{other}`"
-            )),
-        }
-    }
-}
-
-fn runtime_owned_str(text: String) -> ArcanaOwnedStr {
-    let mut bytes = text.into_bytes().into_boxed_slice();
-    let len = bytes.len();
-    let ptr = bytes.as_mut_ptr();
-    std::mem::forget(bytes);
-    ArcanaOwnedStr { ptr, len }
-}
-
-unsafe extern "system" fn runtime_provider_host_owned_str_free(ptr: *mut u8, len: usize) {
-    if ptr.is_null() {
-        return;
-    }
-    unsafe {
-        drop(Vec::from_raw_parts(ptr, len, len));
-    }
-}
-
-unsafe extern "system" fn runtime_provider_host_last_error_alloc(
-    host_context: *mut c_void,
-    out_len: *mut usize,
-) -> *mut u8 {
-    if host_context.is_null() {
-        if !out_len.is_null() {
-            unsafe {
-                *out_len = 0;
-            }
-        }
-        return std::ptr::null_mut();
-    }
-    let context = unsafe { &mut *(host_context as *mut RuntimeProviderHostContext) };
-    let Some(mut bytes) = context.last_error.take() else {
-        if !out_len.is_null() {
-            unsafe {
-                *out_len = 0;
-            }
-        }
-        return std::ptr::null_mut();
-    };
-    let len = bytes.len();
-    let ptr = bytes.as_mut_ptr();
-    std::mem::forget(bytes);
-    if !out_len.is_null() {
-        unsafe {
-            *out_len = len;
-        }
-    }
-    ptr
-}
-
-unsafe extern "system" fn runtime_provider_host_resolve_package_asset_root(
-    host_context: *mut c_void,
-    package_id: *const c_char,
-) -> ArcanaOwnedStr {
-    if host_context.is_null() || package_id.is_null() {
-        return ArcanaOwnedStr::default();
-    }
-    let context = unsafe { &mut *(host_context as *mut RuntimeProviderHostContext) };
-    let package_id = match unsafe { CStr::from_ptr(package_id) }.to_str() {
-        Ok(value) => value,
-        Err(err) => {
-            context.set_last_error(format!(
-                "provider host package id is not valid utf-8: {err}"
-            ));
-            return ArcanaOwnedStr::default();
-        }
-    };
-    match context.resolve_package_asset_root(package_id) {
-        Ok(path) => {
-            context.clear_last_error_with_default(runtime_owned_str(runtime_path_string(&path)))
-        }
-        Err(err) => {
-            context.set_last_error(err);
-            ArcanaOwnedStr::default()
-        }
-    }
-}
-
-unsafe extern "system" fn runtime_provider_host_canvas_image_create(
-    host_context: *mut c_void,
-    width: i64,
-    height: i64,
-    out_image_id: *mut u64,
-) -> i32 {
-    if host_context.is_null() || out_image_id.is_null() {
-        return 0;
-    }
-    let context = unsafe { &mut *(host_context as *mut RuntimeProviderHostContext) };
-    match unsafe { context.host_mut() }.canvas_image_create(width, height) {
-        Ok(image) => {
-            unsafe {
-                *out_image_id = image.0;
-            }
-            context.clear_last_error();
-            1
-        }
-        Err(err) => {
-            context.set_last_error(err);
-            0
-        }
-    }
-}
-
-unsafe extern "system" fn runtime_provider_host_read_descriptor_values(
-    host_context: *mut c_void,
-    family: *const c_char,
-    view_id: u64,
-    start: u64,
-    len: u64,
-    out_len: *mut usize,
-) -> *mut u8 {
-    if host_context.is_null() || family.is_null() {
-        if !out_len.is_null() {
-            unsafe {
-                *out_len = 0;
-            }
-        }
-        return std::ptr::null_mut();
-    }
-    let context = unsafe { &mut *(host_context as *mut RuntimeProviderHostContext) };
-    let family = match unsafe { CStr::from_ptr(family) }.to_str() {
-        Ok(value) => value,
-        Err(err) => {
-            context.set_last_error(format!(
-                "provider host descriptor family is not valid utf-8: {err}"
-            ));
-            if !out_len.is_null() {
-                unsafe {
-                    *out_len = 0;
-                }
-            }
-            return std::ptr::null_mut();
-        }
-    };
-    match context
-        .descriptor_view_values(family, view_id, start, len)
-        .and_then(|values| encode_provider_values(&values))
-    {
-        Ok(mut bytes) => {
-            let len = bytes.len();
-            let ptr = bytes.as_mut_ptr();
-            std::mem::forget(bytes);
-            if !out_len.is_null() {
-                unsafe {
-                    *out_len = len;
-                }
-            }
-            context.clear_last_error();
-            ptr
-        }
-        Err(err) => {
-            context.set_last_error(err);
-            if !out_len.is_null() {
-                unsafe {
-                    *out_len = 0;
-                }
-            }
-            std::ptr::null_mut()
-        }
-    }
-}
-
-unsafe extern "system" fn runtime_provider_host_read_descriptor_bytes(
-    host_context: *mut c_void,
-    family: *const c_char,
-    view_id: u64,
-    start: u64,
-    len: u64,
-    out_len: *mut usize,
-) -> *mut u8 {
-    if host_context.is_null() || family.is_null() {
-        if !out_len.is_null() {
-            unsafe {
-                *out_len = 0;
-            }
-        }
-        return std::ptr::null_mut();
-    }
-    let context = unsafe { &mut *(host_context as *mut RuntimeProviderHostContext) };
-    let family = match unsafe { CStr::from_ptr(family) }.to_str() {
-        Ok(value) => value,
-        Err(err) => {
-            context.set_last_error(format!(
-                "provider host descriptor family is not valid utf-8: {err}"
-            ));
-            if !out_len.is_null() {
-                unsafe {
-                    *out_len = 0;
-                }
-            }
-            return std::ptr::null_mut();
-        }
-    };
-    match context.descriptor_view_bytes(family, view_id, start, len) {
-        Ok(mut bytes) => {
-            let len = bytes.len();
-            let ptr = bytes.as_mut_ptr();
-            std::mem::forget(bytes);
-            if !out_len.is_null() {
-                unsafe {
-                    *out_len = len;
-                }
-            }
-            context.clear_last_error();
-            ptr
-        }
-        Err(err) => {
-            context.set_last_error(err);
-            if !out_len.is_null() {
-                unsafe {
-                    *out_len = 0;
-                }
-            }
-            std::ptr::null_mut()
-        }
-    }
-}
-
-unsafe extern "system" fn runtime_provider_host_canvas_image_replace_rgba(
-    host_context: *mut c_void,
-    image_id: u64,
-    rgba_ptr: *const u8,
-    rgba_len: usize,
-) -> i32 {
-    if host_context.is_null() || (rgba_ptr.is_null() && rgba_len != 0) {
-        return 0;
-    }
-    let context = unsafe { &mut *(host_context as *mut RuntimeProviderHostContext) };
-    let rgba = if rgba_len == 0 {
-        &[]
-    } else {
-        unsafe { std::slice::from_raw_parts(rgba_ptr, rgba_len) }
-    };
-    match unsafe { context.host_mut() }
-        .canvas_image_replace_rgba(RuntimeImageHandle(image_id), rgba)
-    {
-        Ok(()) => {
-            context.clear_last_error();
-            1
-        }
-        Err(err) => {
-            context.set_last_error(err);
-            0
-        }
-    }
-}
-
-unsafe extern "system" fn runtime_provider_host_canvas_blit(
-    host_context: *mut c_void,
-    window_id: u64,
-    image_id: u64,
-    x: i64,
-    y: i64,
-) -> i32 {
-    if host_context.is_null() {
-        return 0;
-    }
-    let context = unsafe { &mut *(host_context as *mut RuntimeProviderHostContext) };
-    match unsafe { context.host_mut() }.canvas_blit(
-        RuntimeWindowHandle(window_id),
-        RuntimeImageHandle(image_id),
-        x,
-        y,
-    ) {
-        Ok(()) => {
-            context.clear_last_error();
-            1
-        }
-        Err(err) => {
-            context.set_last_error(err);
-            0
-        }
-    }
-}
-
-fn runtime_provider_host_ops_v1() -> ArcanaCabiProviderHostOpsV1 {
-    ArcanaCabiProviderHostOpsV1 {
-        ops_size: std::mem::size_of::<ArcanaCabiProviderHostOpsV1>(),
-        resolve_package_asset_root: runtime_provider_host_resolve_package_asset_root,
-        host_owned_str_free: runtime_provider_host_owned_str_free,
-        read_descriptor_values: runtime_provider_host_read_descriptor_values,
-        read_descriptor_bytes: runtime_provider_host_read_descriptor_bytes,
-        canvas_image_create: runtime_provider_host_canvas_image_create,
-        canvas_image_replace_rgba: runtime_provider_host_canvas_image_replace_rgba,
-        canvas_blit: runtime_provider_host_canvas_blit,
-        last_error_alloc: runtime_provider_host_last_error_alloc,
-        reserved0: std::ptr::null(),
-        reserved1: std::ptr::null(),
-    }
-}
-
 fn runtime_short_package_id_hash(package_id: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"arcana_package_id_v1\n");
@@ -11473,15 +11172,535 @@ fn runtime_current_package_asset_root(
     ))
 }
 
+fn with_runtime_binding_callback_context<R>(
+    plan: &RuntimePackagePlan,
+    host_data: *mut (),
+    host_vtable: *mut (),
+    action: impl FnOnce() -> Result<R, String>,
+) -> Result<R, String> {
+    ACTIVE_RUNTIME_BINDING_CALLBACK_CONTEXT.with(|slot| {
+        let previous = slot.replace(Some(RuntimeBindingCallbackContext {
+            plan: plan as *const RuntimePackagePlan,
+            host_data,
+            host_vtable,
+        }));
+        let result = action();
+        let _ = slot.replace(previous);
+        result
+    })
+}
+
+fn leak_runtime_binding_text(text: &str) -> &'static str {
+    Box::leak(text.to_string().into_boxed_str())
+}
+
+unsafe fn free_runtime_binding_callback_user_data(user_data: *mut c_void) {
+    if !user_data.is_null() {
+        unsafe {
+            drop(Box::from_raw(
+                user_data as *mut RuntimeBindingCallbackThunkData,
+            ));
+        }
+    }
+}
+
+fn runtime_binding_callback_specs_for_package(
+    plan: &RuntimePackagePlan,
+    package_id: &str,
+) -> Vec<RuntimeBindingCallbackRegistrationSpec> {
+    plan.native_callbacks
+        .iter()
+        .filter(|callback| callback.package_id == package_id)
+        .map(|callback| RuntimeBindingCallbackRegistrationSpec {
+            name: leak_runtime_binding_text(&callback.name),
+            callback: runtime_binding_callback_trampoline,
+            user_data: Box::into_raw(Box::new(RuntimeBindingCallbackThunkData {
+                callback: callback.clone(),
+            })) as *mut c_void,
+            cleanup_user_data: free_runtime_binding_callback_user_data,
+        })
+        .collect()
+}
+
+unsafe extern "system" fn runtime_binding_callback_trampoline(
+    user_data: *mut c_void,
+    args: *const ArcanaCabiBindingValueV1,
+    arg_count: usize,
+    out_result: *mut ArcanaCabiBindingValueV1,
+) -> i32 {
+    let Some(thunk_data) = (unsafe { (user_data as *mut RuntimeBindingCallbackThunkData).as_ref() }) else {
+        return 0;
+    };
+    let callback_args = if arg_count == 0 {
+        &[]
+    } else if args.is_null() {
+        return 0;
+    } else {
+        unsafe { std::slice::from_raw_parts(args, arg_count) }
+    };
+    let result = ACTIVE_RUNTIME_BINDING_CALLBACK_CONTEXT.with(|slot| {
+        let borrow = slot.borrow();
+        let Some(context) = *borrow else {
+            return Err("native binding callback invoked without an active runtime context".to_string());
+        };
+        let plan = unsafe { context.plan.as_ref() }
+            .ok_or_else(|| "native binding callback lost runtime package plan".to_string())?;
+        let host_ptr: *mut dyn RuntimeHost =
+            unsafe { std::mem::transmute((context.host_data, context.host_vtable)) };
+        let host = unsafe { host_ptr.as_mut() }
+            .ok_or_else(|| "native binding callback lost runtime host".to_string())?;
+        execute_runtime_binding_callback(plan, host, &thunk_data.callback, callback_args)
+    });
+    match result {
+        Ok(value) => {
+            if !out_result.is_null() {
+                unsafe {
+                    *out_result = value;
+                }
+            }
+            1
+        }
+        Err(_) => {
+            if !out_result.is_null() {
+                unsafe {
+                    *out_result = ArcanaCabiBindingValueV1::default();
+                }
+            }
+            0
+        }
+    }
+}
+
+fn execute_runtime_binding_callback(
+    plan: &RuntimePackagePlan,
+    host: &mut dyn RuntimeHost,
+    callback: &RuntimeNativeCallbackPlan,
+    args: &[ArcanaCabiBindingValueV1],
+) -> Result<ArcanaCabiBindingValueV1, String> {
+    if callback.params.len() != args.len() {
+        return Err(format!(
+            "native callback `{}` expected {} arguments, got {}",
+            callback.name,
+            callback.params.len(),
+            args.len()
+        ));
+    }
+    let routine_key = callback.target_routine_key.as_deref().ok_or_else(|| {
+        format!(
+            "native callback `{}` does not resolve to a runtime routine",
+            callback.name
+        )
+    })?;
+    let routine_index = plan
+        .routines
+        .iter()
+        .enumerate()
+        .find(|(_, routine)| routine.routine_key == routine_key)
+        .map(|(index, _)| index)
+        .ok_or_else(|| {
+            format!(
+                "native callback `{}` targets missing routine `{}`",
+                callback.name, routine_key
+            )
+        })?;
+    let runtime_args = callback
+        .params
+        .iter()
+        .zip(args.iter())
+        .map(|(param, value)| {
+            runtime_value_from_binding_input(&callback.package_id, &param.ty.render(), value)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut state = RuntimeExecutionState::default();
+    let outcome = execute_routine_call_with_state(
+        plan,
+        routine_index,
+        Vec::new(),
+        runtime_args,
+        &[],
+        None,
+        None,
+        None,
+        None,
+        None,
+        &mut state,
+        host,
+        false,
+    )
+    .map_err(runtime_eval_message)?;
+    if let Some(control) = outcome.control {
+        return Err(runtime_eval_message(match control {
+            FlowSignal::OwnerExit {
+                owner_key,
+                exit_name,
+            } => RuntimeEvalSignal::OwnerExit {
+                owner_key,
+                exit_name,
+            },
+            other => RuntimeEvalSignal::Message(format!(
+                "unsupported native binding callback control flow `{other:?}`"
+            )),
+        }));
+    }
+    runtime_binding_output_from_runtime_value(
+        &callback.package_id,
+        callback
+            .return_type
+            .as_ref()
+            .map(IrRoutineType::render)
+            .unwrap_or_else(|| "Unit".to_string())
+            .as_str(),
+        outcome.value,
+    )
+}
+
+fn execute_runtime_native_binding_import(
+    plan: &RuntimePackagePlan,
+    routine: &RuntimeRoutinePlan,
+    binding_name: &str,
+    args: &[RuntimeValue],
+    host: &mut dyn RuntimeHost,
+) -> Result<RuntimeValue, String> {
+    let (host_data, host_vtable): (*mut (), *mut ()) =
+        unsafe { std::mem::transmute::<&mut dyn RuntimeHost, (*mut (), *mut ())>(host) };
+    let mut storage = RuntimeBindingArgStorage::default();
+    let cabi_args = routine
+        .params
+        .iter()
+        .zip(args.iter())
+        .map(|(param, value)| {
+            runtime_binding_input_from_runtime_value(
+                &routine.package_id,
+                &param.ty.render(),
+                value,
+                &mut storage,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let callback_specs = runtime_binding_callback_specs_for_package(plan, &routine.package_id);
+    let outcome = with_runtime_binding_callback_context(plan, host_data, host_vtable, || {
+        let host_ptr: *mut dyn RuntimeHost =
+            unsafe { std::mem::transmute((host_data, host_vtable)) };
+        let host = unsafe { host_ptr.as_mut() }
+            .ok_or_else(|| "native binding import lost runtime host".to_string())?;
+        with_runtime_native_products(host, |catalog| {
+            catalog.invoke_binding_import(
+                &routine.package_id,
+                binding_name,
+                &callback_specs,
+                &cabi_args,
+            )
+        })
+    })?;
+    runtime_value_from_binding_output(
+        &routine.package_id,
+        routine
+            .return_type
+            .as_ref()
+            .map(IrRoutineType::render)
+            .unwrap_or_else(|| "Unit".to_string())
+            .as_str(),
+        &outcome,
+    )
+}
+
+fn runtime_binding_tag(value: &ArcanaCabiBindingValueV1) -> Result<ArcanaCabiBindingValueTag, String> {
+    match value.tag {
+        tag if tag == ArcanaCabiBindingValueTag::Int as u32 => Ok(ArcanaCabiBindingValueTag::Int),
+        tag if tag == ArcanaCabiBindingValueTag::Bool as u32 => Ok(ArcanaCabiBindingValueTag::Bool),
+        tag if tag == ArcanaCabiBindingValueTag::Str as u32 => Ok(ArcanaCabiBindingValueTag::Str),
+        tag if tag == ArcanaCabiBindingValueTag::Bytes as u32 => Ok(ArcanaCabiBindingValueTag::Bytes),
+        tag if tag == ArcanaCabiBindingValueTag::Opaque as u32 => Ok(ArcanaCabiBindingValueTag::Opaque),
+        tag if tag == ArcanaCabiBindingValueTag::Unit as u32 => Ok(ArcanaCabiBindingValueTag::Unit),
+        other => Err(format!("unsupported native binding value tag `{other}`")),
+    }
+}
+
+fn runtime_binding_input_from_runtime_value(
+    package_id: &str,
+    expected_type: &str,
+    value: &RuntimeValue,
+    storage: &mut RuntimeBindingArgStorage,
+) -> Result<ArcanaCabiBindingValueV1, String> {
+    match (expected_type, value) {
+        ("Int", RuntimeValue::Int(value)) => Ok(ArcanaCabiBindingValueV1 {
+            tag: ArcanaCabiBindingValueTag::Int as u32,
+            reserved0: 0,
+            reserved1: 0,
+            payload: ArcanaCabiBindingPayloadV1 { int_value: *value },
+        }),
+        ("Bool", RuntimeValue::Bool(value)) => Ok(ArcanaCabiBindingValueV1 {
+            tag: ArcanaCabiBindingValueTag::Bool as u32,
+            reserved0: 0,
+            reserved1: 0,
+            payload: ArcanaCabiBindingPayloadV1 {
+                bool_value: if *value { 1 } else { 0 },
+            },
+        }),
+        ("Str", RuntimeValue::Str(value)) => {
+            storage.strings.push(value.clone());
+            let stored = storage
+                .strings
+                .last()
+                .ok_or_else(|| "binding arg storage lost string value".to_string())?;
+            Ok(ArcanaCabiBindingValueV1 {
+                tag: ArcanaCabiBindingValueTag::Str as u32,
+                reserved0: 0,
+                reserved1: 0,
+                payload: ArcanaCabiBindingPayloadV1 {
+                    str_value: ArcanaStrView {
+                        ptr: stored.as_bytes().as_ptr(),
+                        len: stored.len(),
+                    },
+                },
+            })
+        }
+        ("Array[Int]", RuntimeValue::Array(values)) => {
+            let bytes = values
+                .iter()
+                .enumerate()
+                .map(|(index, value)| match value {
+                    RuntimeValue::Int(value) => u8::try_from(*value).map_err(|_| {
+                        format!(
+                            "binding byte argument index `{index}` is out of range 0..255: `{value}`"
+                        )
+                    }),
+                    other => Err(format!(
+                        "binding bytes argument expected Array[Int], found `{other:?}` at index `{index}`"
+                    )),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            storage.bytes.push(bytes);
+            let stored = storage
+                .bytes
+                .last()
+                .ok_or_else(|| "binding arg storage lost bytes value".to_string())?;
+            Ok(ArcanaCabiBindingValueV1 {
+                tag: ArcanaCabiBindingValueTag::Bytes as u32,
+                reserved0: 0,
+                reserved1: 0,
+                payload: ArcanaCabiBindingPayloadV1 {
+                    bytes_value: ArcanaBytesView {
+                        ptr: stored.as_ptr(),
+                        len: stored.len(),
+                    },
+                },
+            })
+        }
+        ("Unit", RuntimeValue::Unit) => Ok(ArcanaCabiBindingValueV1::default()),
+        (_, RuntimeValue::Opaque(RuntimeOpaqueValue::Binding(binding)))
+            if binding.package_id == package_id && binding.type_name == expected_type =>
+        {
+            Ok(ArcanaCabiBindingValueV1 {
+                tag: ArcanaCabiBindingValueTag::Opaque as u32,
+                reserved0: 0,
+                reserved1: 0,
+                payload: ArcanaCabiBindingPayloadV1 {
+                    opaque_value: binding.handle,
+                },
+            })
+        }
+        _ => Err(format!(
+            "native binding argument expected `{expected_type}`, got `{}`",
+            runtime_value_type_root(value).unwrap_or_else(|| format!("{value:?}"))
+        )),
+    }
+}
+
+fn runtime_value_from_binding_input(
+    package_id: &str,
+    expected_type: &str,
+    value: &ArcanaCabiBindingValueV1,
+) -> Result<RuntimeValue, String> {
+    match (expected_type, runtime_binding_tag(value)?) {
+        ("Int", ArcanaCabiBindingValueTag::Int) => Ok(RuntimeValue::Int(unsafe {
+            value.payload.int_value
+        })),
+        ("Bool", ArcanaCabiBindingValueTag::Bool) => Ok(RuntimeValue::Bool(unsafe {
+            value.payload.bool_value != 0
+        })),
+        ("Str", ArcanaCabiBindingValueTag::Str) => {
+            let view = unsafe { value.payload.str_value };
+            let bytes = unsafe { std::slice::from_raw_parts(view.ptr, view.len) };
+            Ok(RuntimeValue::Str(
+                std::str::from_utf8(bytes)
+                    .map_err(|err| format!("native binding string arg is not utf-8: {err}"))?
+                    .to_string(),
+            ))
+        }
+        ("Array[Int]", ArcanaCabiBindingValueTag::Bytes) => {
+            let view = unsafe { value.payload.bytes_value };
+            let bytes = unsafe { std::slice::from_raw_parts(view.ptr, view.len) };
+            Ok(RuntimeValue::Array(
+                bytes
+                    .iter()
+                    .map(|byte| RuntimeValue::Int(i64::from(*byte)))
+                    .collect(),
+            ))
+        }
+        ("Unit", ArcanaCabiBindingValueTag::Unit) => Ok(RuntimeValue::Unit),
+        (_, ArcanaCabiBindingValueTag::Opaque) => Ok(RuntimeValue::Opaque(
+            RuntimeOpaqueValue::Binding(RuntimeBindingOpaqueValue {
+                package_id: leak_runtime_binding_text(package_id),
+                type_name: leak_runtime_binding_text(expected_type),
+                handle: unsafe { value.payload.opaque_value },
+            }),
+        )),
+        (_, actual) => Err(format!(
+            "native binding callback expected `{expected_type}`, got tag `{actual:?}`"
+        )),
+    }
+}
+
+fn runtime_value_from_binding_output(
+    package_id: &str,
+    expected_type: &str,
+    outcome: &RuntimeBindingImportOutcome,
+) -> Result<RuntimeValue, String> {
+    match (expected_type, runtime_binding_tag(&outcome.result)?) {
+        ("Int", ArcanaCabiBindingValueTag::Int) => Ok(RuntimeValue::Int(unsafe {
+            outcome.result.payload.int_value
+        })),
+        ("Bool", ArcanaCabiBindingValueTag::Bool) => Ok(RuntimeValue::Bool(unsafe {
+            outcome.result.payload.bool_value != 0
+        })),
+        ("Str", ArcanaCabiBindingValueTag::Str) => {
+            let owned = unsafe { outcome.result.payload.owned_str_value };
+            let text = clone_owned_binding_str(owned, outcome.owned_str_free)?;
+            Ok(RuntimeValue::Str(text))
+        }
+        ("Array[Int]", ArcanaCabiBindingValueTag::Bytes) => {
+            let owned = unsafe { outcome.result.payload.owned_bytes_value };
+            let bytes = clone_owned_binding_bytes(owned, outcome.owned_bytes_free)?;
+            Ok(RuntimeValue::Array(
+                bytes
+                    .into_iter()
+                    .map(|byte| RuntimeValue::Int(i64::from(byte)))
+                    .collect(),
+            ))
+        }
+        ("Unit", ArcanaCabiBindingValueTag::Unit) => Ok(RuntimeValue::Unit),
+        (_, ArcanaCabiBindingValueTag::Opaque) => Ok(RuntimeValue::Opaque(
+            RuntimeOpaqueValue::Binding(RuntimeBindingOpaqueValue {
+                package_id: leak_runtime_binding_text(package_id),
+                type_name: leak_runtime_binding_text(expected_type),
+                handle: unsafe { outcome.result.payload.opaque_value },
+            }),
+        )),
+        (_, actual) => Err(format!(
+            "native binding import expected `{expected_type}`, got tag `{actual:?}`"
+        )),
+    }
+}
+
+fn runtime_binding_output_from_runtime_value(
+    package_id: &str,
+    expected_type: &str,
+    value: RuntimeValue,
+) -> Result<ArcanaCabiBindingValueV1, String> {
+    let _ = package_id;
+    match (expected_type, value) {
+        ("Int", RuntimeValue::Int(value)) => Ok(ArcanaCabiBindingValueV1 {
+            tag: ArcanaCabiBindingValueTag::Int as u32,
+            reserved0: 0,
+            reserved1: 0,
+            payload: ArcanaCabiBindingPayloadV1 { int_value: value },
+        }),
+        ("Bool", RuntimeValue::Bool(value)) => Ok(ArcanaCabiBindingValueV1 {
+            tag: ArcanaCabiBindingValueTag::Bool as u32,
+            reserved0: 0,
+            reserved1: 0,
+            payload: ArcanaCabiBindingPayloadV1 {
+                bool_value: if value { 1 } else { 0 },
+            },
+        }),
+        ("Unit", RuntimeValue::Unit) => Ok(ArcanaCabiBindingValueV1::default()),
+        (_, RuntimeValue::Opaque(RuntimeOpaqueValue::Binding(binding)))
+            if binding.type_name == expected_type =>
+        {
+            Ok(ArcanaCabiBindingValueV1 {
+                tag: ArcanaCabiBindingValueTag::Opaque as u32,
+                reserved0: 0,
+                reserved1: 0,
+                payload: ArcanaCabiBindingPayloadV1 {
+                    opaque_value: binding.handle,
+                },
+            })
+        }
+        _ => Err(format!(
+            "native binding callbacks currently return only Int, Bool, opaque handles, or Unit; `{expected_type}` is not supported"
+        )),
+    }
+}
+
+fn clone_owned_binding_bytes(
+    owned: ArcanaOwnedBytes,
+    free: unsafe extern "system" fn(*mut u8, usize),
+) -> Result<Vec<u8>, String> {
+    if owned.ptr.is_null() {
+        if owned.len == 0 {
+            return Ok(Vec::new());
+        }
+        return Err(format!(
+            "native binding returned null owned bytes with non-zero length {}",
+            owned.len
+        ));
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(owned.ptr, owned.len) }.to_vec();
+    unsafe {
+        free(owned.ptr, owned.len);
+    }
+    Ok(bytes)
+}
+
+fn clone_owned_binding_str(
+    owned: ArcanaOwnedStr,
+    free: unsafe extern "system" fn(*mut u8, usize),
+) -> Result<String, String> {
+    if owned.ptr.is_null() {
+        if owned.len == 0 {
+            return Ok(String::new());
+        }
+        return Err(format!(
+            "native binding returned null owned string with non-zero length {}",
+            owned.len
+        ));
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(owned.ptr, owned.len) }.to_vec();
+    unsafe {
+        free(owned.ptr, owned.len);
+    }
+    String::from_utf8(bytes).map_err(|err| format!("native binding string is not utf-8: {err}"))
+}
+
 fn try_execute_arcana_owned_api_call(
     callable: &[String],
     call_args: &[RuntimeCallArg],
+    scopes: &mut Vec<RuntimeScope>,
+    plan: &RuntimePackagePlan,
+    current_package_id: &str,
+    current_module_id: &str,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
     host: &mut dyn RuntimeHost,
 ) -> Result<Option<RuntimeValue>, String> {
     let values = call_args
         .iter()
-        .map(|arg| arg.value.clone())
-        .collect::<Vec<_>>();
+        .map(|arg| {
+            read_runtime_value_if_ref(
+                arg.value.clone(),
+                scopes,
+                plan,
+                current_package_id,
+                current_module_id,
+                aliases,
+                type_bindings,
+                state,
+                host,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     match callable {
         [a, b, c] if a == "arcana_desktop" && b == "events" && c == "poll" => {
             if values.len() != 1 {
@@ -14259,6 +14478,16 @@ fn bind_call_args_for_intrinsic(
         .filter_map(|(name, value)| value.is_none().then_some(name.clone()))
         .collect::<Vec<_>>();
     if !missing.is_empty() {
+        let unit_ok_omission = missing.len() == 1
+            && missing[0] == "value"
+            && param_names.len() == 1
+            && matches!(
+                callable_key.as_str(),
+                "Result.Ok" | "std.result.Result.Ok"
+            );
+        if unit_ok_omission {
+            return Ok(Vec::new());
+        }
         return Err(format!(
             "runtime intrinsic `{callable_key}` is missing arguments for {}",
             missing.join(", ")
@@ -14432,746 +14661,9 @@ fn variant_name_matches(name: &str, expected: &str) -> bool {
         || expected.ends_with(&format!(".{name}"))
 }
 
-fn provider_opaque_state(
-    state: &RuntimeExecutionState,
-    handle: RuntimeProviderOpaqueHandle,
-) -> Option<&RuntimeProviderOpaqueState> {
-    state.provider_opaques.get(&handle)
-}
-
-fn runtime_opaque_id(value: &RuntimeOpaqueValue) -> Option<u64> {
-    match value {
-        RuntimeOpaqueValue::FileStream(handle) => Some(handle.0),
-        RuntimeOpaqueValue::Window(handle) => Some(handle.0),
-        RuntimeOpaqueValue::Image(handle) => Some(handle.0),
-        RuntimeOpaqueValue::AppFrame(handle) => Some(handle.0),
-        RuntimeOpaqueValue::AppSession(handle) => Some(handle.0),
-        RuntimeOpaqueValue::Wake(handle) => Some(handle.0),
-        RuntimeOpaqueValue::AudioDevice(handle) => Some(handle.0),
-        RuntimeOpaqueValue::AudioBuffer(handle) => Some(handle.0),
-        RuntimeOpaqueValue::AudioPlayback(handle) => Some(handle.0),
-        RuntimeOpaqueValue::Channel(handle) => Some(handle.0),
-        RuntimeOpaqueValue::Mutex(handle) => Some(handle.0),
-        RuntimeOpaqueValue::AtomicInt(handle) => Some(handle.0),
-        RuntimeOpaqueValue::AtomicBool(handle) => Some(handle.0),
-        RuntimeOpaqueValue::Arena(handle) => Some(handle.0),
-        RuntimeOpaqueValue::FrameArena(handle) => Some(handle.0),
-        RuntimeOpaqueValue::PoolArena(handle) => Some(handle.0),
-        RuntimeOpaqueValue::TempArena(handle) => Some(handle.0),
-        RuntimeOpaqueValue::SessionArena(handle) => Some(handle.0),
-        RuntimeOpaqueValue::RingBuffer(handle) => Some(handle.0),
-        RuntimeOpaqueValue::Slab(handle) => Some(handle.0),
-        RuntimeOpaqueValue::ReadView(handle) => Some(handle.0),
-        RuntimeOpaqueValue::EditView(handle) => Some(handle.0),
-        RuntimeOpaqueValue::ByteView(handle) => Some(handle.0),
-        RuntimeOpaqueValue::ByteEditView(handle) => Some(handle.0),
-        RuntimeOpaqueValue::StrView(handle) => Some(handle.0),
-        RuntimeOpaqueValue::Task(handle) => Some(handle.0),
-        RuntimeOpaqueValue::Thread(handle) => Some(handle.0),
-        RuntimeOpaqueValue::Lazy(_)
-        | RuntimeOpaqueValue::Provider(_)
-        | RuntimeOpaqueValue::ArenaId(_)
-        | RuntimeOpaqueValue::FrameId(_)
-        | RuntimeOpaqueValue::PoolId(_)
-        | RuntimeOpaqueValue::TempId(_)
-        | RuntimeOpaqueValue::SessionId(_)
-        | RuntimeOpaqueValue::RingId(_)
-        | RuntimeOpaqueValue::SlabId(_) => None,
-    }
-}
-
-fn runtime_substrate_opaque_from_family(
-    family: &str,
-    id: u64,
-) -> Result<RuntimeOpaqueValue, String> {
-    match family {
-        "std.fs.FileStream" => Ok(RuntimeOpaqueValue::FileStream(RuntimeFileStreamHandle(id))),
-        "std.window.Window" => Ok(RuntimeOpaqueValue::Window(RuntimeWindowHandle(id))),
-        "std.canvas.Image" => Ok(RuntimeOpaqueValue::Image(RuntimeImageHandle(id))),
-        "std.events.AppFrame" => Ok(RuntimeOpaqueValue::AppFrame(RuntimeAppFrameHandle(id))),
-        "std.events.AppSession" => Ok(RuntimeOpaqueValue::AppSession(RuntimeAppSessionHandle(id))),
-        "std.events.WakeHandle" => Ok(RuntimeOpaqueValue::Wake(RuntimeWakeHandle(id))),
-        "std.audio.AudioDevice" => Ok(RuntimeOpaqueValue::AudioDevice(RuntimeAudioDeviceHandle(
-            id,
-        ))),
-        "std.audio.AudioBuffer" => Ok(RuntimeOpaqueValue::AudioBuffer(RuntimeAudioBufferHandle(
-            id,
-        ))),
-        "std.audio.AudioPlayback" => Ok(RuntimeOpaqueValue::AudioPlayback(
-            RuntimeAudioPlaybackHandle(id),
-        )),
-        "std.concurrent.Channel" => Ok(RuntimeOpaqueValue::Channel(RuntimeChannelHandle(id))),
-        "std.concurrent.Mutex" => Ok(RuntimeOpaqueValue::Mutex(RuntimeMutexHandle(id))),
-        "std.concurrent.AtomicInt" => Ok(RuntimeOpaqueValue::AtomicInt(RuntimeAtomicIntHandle(id))),
-        "std.concurrent.AtomicBool" => {
-            Ok(RuntimeOpaqueValue::AtomicBool(RuntimeAtomicBoolHandle(id)))
-        }
-        "std.memory.Arena" => Ok(RuntimeOpaqueValue::Arena(RuntimeArenaHandle(id))),
-        "std.memory.FrameArena" => Ok(RuntimeOpaqueValue::FrameArena(RuntimeFrameArenaHandle(id))),
-        "std.memory.PoolArena" => Ok(RuntimeOpaqueValue::PoolArena(RuntimePoolArenaHandle(id))),
-        "std.memory.TempArena" => Ok(RuntimeOpaqueValue::TempArena(RuntimeTempArenaHandle(id))),
-        "std.memory.SessionArena" => Ok(RuntimeOpaqueValue::SessionArena(
-            RuntimeSessionArenaHandle(id),
-        )),
-        "std.memory.RingBuffer" => Ok(RuntimeOpaqueValue::RingBuffer(RuntimeRingBufferHandle(id))),
-        "std.memory.Slab" => Ok(RuntimeOpaqueValue::Slab(RuntimeSlabHandle(id))),
-        "std.memory.ReadView" => Ok(RuntimeOpaqueValue::ReadView(RuntimeReadViewHandle(id))),
-        "std.memory.EditView" => Ok(RuntimeOpaqueValue::EditView(RuntimeEditViewHandle(id))),
-        "std.memory.ByteView" => Ok(RuntimeOpaqueValue::ByteView(RuntimeByteViewHandle(id))),
-        "std.memory.ByteEditView" => Ok(RuntimeOpaqueValue::ByteEditView(
-            RuntimeByteEditViewHandle(id),
-        )),
-        "std.memory.StrView" => Ok(RuntimeOpaqueValue::StrView(RuntimeStrViewHandle(id))),
-        "std.concurrent.Task" => Ok(RuntimeOpaqueValue::Task(RuntimeTaskHandle(id))),
-        "std.concurrent.Thread" => Ok(RuntimeOpaqueValue::Thread(RuntimeThreadHandle(id))),
-        _ => Err(format!(
-            "unsupported substrate opaque family `{family}` in provider value transport"
-        )),
-    }
-}
-
-fn runtime_descriptor_view_value(
-    value: &RuntimeOpaqueValue,
-    state: &mut RuntimeExecutionState,
-    current_package_id: &str,
-    exported_descriptors: &mut Vec<RuntimeExportedDescriptorTarget>,
-) -> Result<Option<ArcanaCabiProviderValue>, String> {
-    let owner = ArcanaCabiProviderDescriptorViewOwner::Runtime {
-        package_id: current_package_id.to_string(),
-    };
-    let descriptor = match value {
-        RuntimeOpaqueValue::ReadView(handle) => {
-            let (element_type, view_len, export_target) = {
-                let view = state
-                    .read_views
-                    .get(handle)
-                    .ok_or_else(|| format!("invalid ReadView handle `{}`", handle.0))?;
-                let export_target = match &view.backing {
-                    RuntimeElementViewBacking::Reference(reference) => {
-                        let Some(target) =
-                            runtime_reference_descriptor_export_target(reference, state)?
-                        else {
-                            return Err(
-                                "provider value transport only allows sealed SessionArena/Slab-backed ReadView across the provider boundary"
-                                    .to_string(),
-                            );
-                        };
-                        Some(target)
-                    }
-                    RuntimeElementViewBacking::Buffer(_) => None,
-                    RuntimeElementViewBacking::RingWindow { .. } => {
-                        return Err(
-                            "provider value transport does not allow RingBuffer-backed ReadView across the provider boundary"
-                                .to_string(),
-                        )
-                    }
-                };
-                (
-                    view.type_args
-                        .first()
-                        .cloned()
-                        .unwrap_or_else(|| "Unknown".to_string()),
-                    view.len,
-                    export_target,
-                )
-            };
-            if let Some(target) = export_target {
-                runtime_track_exported_descriptor_target(state, target, exported_descriptors);
-            }
-            let element_layout = element_type.clone();
-            Some(ArcanaCabiProviderDescriptorView {
-                owner: owner.clone(),
-                backing_kind: ArcanaCabiProviderDescriptorViewBackingKind::ReadElements,
-                family: "std.memory.ReadView".to_string(),
-                id: handle.0,
-                element_type,
-                element_layout,
-                start: 0,
-                len: view_len as u64,
-                mutable: false,
-            })
-        }
-        RuntimeOpaqueValue::ByteView(handle) => {
-            let view = state
-                .byte_views
-                .get(handle)
-                .ok_or_else(|| format!("invalid ByteView handle `{}`", handle.0))?
-                .clone();
-            if let RuntimeByteViewBacking::Reference(reference) = &view.backing {
-                let Some(target) = runtime_reference_descriptor_export_target(reference, state)?
-                else {
-                    return Err(
-                        "provider value transport only allows sealed SessionArena/Slab-backed ByteView across the provider boundary"
-                            .to_string(),
-                    );
-                };
-                runtime_track_exported_descriptor_target(state, target, exported_descriptors);
-            }
-            Some(ArcanaCabiProviderDescriptorView {
-                owner: owner.clone(),
-                backing_kind: ArcanaCabiProviderDescriptorViewBackingKind::ReadBytes,
-                family: "std.memory.ByteView".to_string(),
-                id: handle.0,
-                element_type: "Int".to_string(),
-                element_layout: "Int".to_string(),
-                start: 0,
-                len: view.len as u64,
-                mutable: false,
-            })
-        }
-        RuntimeOpaqueValue::StrView(handle) => {
-            let view = state
-                .str_views
-                .get(handle)
-                .ok_or_else(|| format!("invalid StrView handle `{}`", handle.0))?
-                .clone();
-            if let RuntimeStrViewBacking::Reference(reference) = &view.backing {
-                let Some(target) = runtime_reference_descriptor_export_target(reference, state)?
-                else {
-                    return Err(
-                        "provider value transport only allows sealed SessionArena/Slab-backed StrView across the provider boundary"
-                            .to_string(),
-                    );
-                };
-                runtime_track_exported_descriptor_target(state, target, exported_descriptors);
-            }
-            Some(ArcanaCabiProviderDescriptorView {
-                owner: owner.clone(),
-                backing_kind: ArcanaCabiProviderDescriptorViewBackingKind::ReadUtf8,
-                family: "std.memory.StrView".to_string(),
-                id: handle.0,
-                element_type: "Utf8Byte".to_string(),
-                element_layout: "Utf8Byte".to_string(),
-                start: 0,
-                len: view.len as u64,
-                mutable: false,
-            })
-        }
-        RuntimeOpaqueValue::EditView(_) | RuntimeOpaqueValue::ByteEditView(_) => {
-            return Err(
-                "provider value transport does not allow editable views across the provider boundary"
-                    .to_string(),
-            );
-        }
-        _ => None,
-    };
-    Ok(descriptor.map(ArcanaCabiProviderValue::DescriptorView))
-}
-
-fn runtime_value_to_provider_value(
-    value: &RuntimeValue,
-    state: &mut RuntimeExecutionState,
-    current_package_id: &str,
-    exported_descriptors: &mut Vec<RuntimeExportedDescriptorTarget>,
-) -> Result<ArcanaCabiProviderValue, String> {
-    match value {
-        RuntimeValue::Int(value) => Ok(ArcanaCabiProviderValue::Int(*value)),
-        RuntimeValue::Bool(value) => Ok(ArcanaCabiProviderValue::Bool(*value)),
-        RuntimeValue::Str(value) => Ok(ArcanaCabiProviderValue::Str(value.clone())),
-        RuntimeValue::Pair(left, right) => Ok(ArcanaCabiProviderValue::Pair(
-            Box::new(runtime_value_to_provider_value(
-                left,
-                state,
-                current_package_id,
-                exported_descriptors,
-            )?),
-            Box::new(runtime_value_to_provider_value(
-                right,
-                state,
-                current_package_id,
-                exported_descriptors,
-            )?),
-        )),
-        RuntimeValue::Array(values) => {
-            let mut bytes = Vec::with_capacity(values.len());
-            for value in values {
-                let RuntimeValue::Int(byte) = value else {
-                    return Err(
-                        "provider value transport only supports Array[Int] as bytes".to_string()
-                    );
-                };
-                bytes.push(u8::try_from(*byte).map_err(|_| {
-                    format!("provider bytes array element `{byte}` does not fit in u8")
-                })?);
-            }
-            Ok(ArcanaCabiProviderValue::Bytes(bytes))
-        }
-        RuntimeValue::List(values) => Ok(ArcanaCabiProviderValue::List(
-            values
-                .iter()
-                .map(|value| {
-                    runtime_value_to_provider_value(
-                        value,
-                        state,
-                        current_package_id,
-                        exported_descriptors,
-                    )
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-        )),
-        RuntimeValue::Map(entries) => Ok(ArcanaCabiProviderValue::Map(
-            entries
-                .iter()
-                .map(|(key, value)| {
-                    Ok((
-                        runtime_value_to_provider_value(
-                            key,
-                            state,
-                            current_package_id,
-                            exported_descriptors,
-                        )?,
-                        runtime_value_to_provider_value(
-                            value,
-                            state,
-                            current_package_id,
-                            exported_descriptors,
-                        )?,
-                    ))
-                })
-                .collect::<Result<Vec<_>, String>>()?,
-        )),
-        RuntimeValue::Range {
-            start,
-            end,
-            inclusive_end,
-        } => Ok(ArcanaCabiProviderValue::Range {
-            start: *start,
-            end: *end,
-            inclusive_end: *inclusive_end,
-        }),
-        RuntimeValue::Opaque(RuntimeOpaqueValue::Provider(handle)) => {
-            let provider = provider_opaque_state(state, *handle)
-                .ok_or_else(|| format!("invalid provider opaque handle `{}`", handle.0))?;
-            Ok(ArcanaCabiProviderValue::ProviderOpaque {
-                family: provider.family_key.clone(),
-                id: provider.opaque_id,
-            })
-        }
-        RuntimeValue::Opaque(value) => {
-            if let Some(view) = runtime_descriptor_view_value(
-                value,
-                state,
-                current_package_id,
-                exported_descriptors,
-            )? {
-                return Ok(view);
-            }
-            Ok(ArcanaCabiProviderValue::SubstrateOpaque {
-                family: opaque_type_name(value).to_string(),
-                id: runtime_opaque_id(value).ok_or_else(|| {
-                    format!(
-                        "runtime opaque `{}` is not transportable across the provider boundary",
-                        opaque_type_name(value)
-                    )
-                })?,
-            })
-        }
-        RuntimeValue::Record { name, fields } => Ok(ArcanaCabiProviderValue::Record {
-            name: name.clone(),
-            fields: fields
-                .iter()
-                .map(|(name, value)| {
-                    Ok((
-                        name.clone(),
-                        runtime_value_to_provider_value(
-                            value,
-                            state,
-                            current_package_id,
-                            exported_descriptors,
-                        )?,
-                    ))
-                })
-                .collect::<Result<Vec<_>, String>>()?,
-        }),
-        RuntimeValue::Variant { name, payload } => Ok(ArcanaCabiProviderValue::Variant {
-            name: name.clone(),
-            payload: payload
-                .iter()
-                .map(|value| {
-                    runtime_value_to_provider_value(
-                        value,
-                        state,
-                        current_package_id,
-                        exported_descriptors,
-                    )
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-        }),
-        RuntimeValue::Unit => Ok(ArcanaCabiProviderValue::Unit),
-        RuntimeValue::OwnerHandle(_) | RuntimeValue::Ref(_) => {
-            Err("provider value transport does not allow Owner or Ref values".to_string())
-        }
-    }
-}
-
-fn runtime_value_from_provider_value(
-    value: ArcanaCabiProviderValue,
-    state: &mut RuntimeExecutionState,
-    catalog: &mut RuntimeNativeProductCatalog,
-    consumer_package_id: &str,
-    dependency_alias: &str,
-) -> Result<RuntimeValue, String> {
-    match value {
-        ArcanaCabiProviderValue::Int(value) => Ok(RuntimeValue::Int(value)),
-        ArcanaCabiProviderValue::Bool(value) => Ok(RuntimeValue::Bool(value)),
-        ArcanaCabiProviderValue::Str(value) => Ok(RuntimeValue::Str(value)),
-        ArcanaCabiProviderValue::Bytes(bytes) => Ok(RuntimeValue::Array(
-            bytes
-                .into_iter()
-                .map(|byte| RuntimeValue::Int(i64::from(byte)))
-                .collect(),
-        )),
-        ArcanaCabiProviderValue::Pair(left, right) => Ok(make_pair(
-            runtime_value_from_provider_value(
-                *left,
-                state,
-                catalog,
-                consumer_package_id,
-                dependency_alias,
-            )?,
-            runtime_value_from_provider_value(
-                *right,
-                state,
-                catalog,
-                consumer_package_id,
-                dependency_alias,
-            )?,
-        )),
-        ArcanaCabiProviderValue::List(values) => Ok(RuntimeValue::List(
-            values
-                .into_iter()
-                .map(|value| {
-                    runtime_value_from_provider_value(
-                        value,
-                        state,
-                        catalog,
-                        consumer_package_id,
-                        dependency_alias,
-                    )
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-        )),
-        ArcanaCabiProviderValue::Map(entries) => Ok(RuntimeValue::Map(
-            entries
-                .into_iter()
-                .map(|(key, value)| {
-                    Ok((
-                        runtime_value_from_provider_value(
-                            key,
-                            state,
-                            catalog,
-                            consumer_package_id,
-                            dependency_alias,
-                        )?,
-                        runtime_value_from_provider_value(
-                            value,
-                            state,
-                            catalog,
-                            consumer_package_id,
-                            dependency_alias,
-                        )?,
-                    ))
-                })
-                .collect::<Result<Vec<_>, String>>()?,
-        )),
-        ArcanaCabiProviderValue::Range {
-            start,
-            end,
-            inclusive_end,
-        } => Ok(RuntimeValue::Range {
-            start,
-            end,
-            inclusive_end,
-        }),
-        ArcanaCabiProviderValue::Record { name, fields } => Ok(RuntimeValue::Record {
-            name,
-            fields: fields
-                .into_iter()
-                .map(|(field, value)| {
-                    Ok((
-                        field,
-                        runtime_value_from_provider_value(
-                            value,
-                            state,
-                            catalog,
-                            consumer_package_id,
-                            dependency_alias,
-                        )?,
-                    ))
-                })
-                .collect::<Result<BTreeMap<_, _>, String>>()?,
-        }),
-        ArcanaCabiProviderValue::Variant { name, payload } => Ok(RuntimeValue::Variant {
-            name,
-            payload: payload
-                .into_iter()
-                .map(|value| {
-                    runtime_value_from_provider_value(
-                        value,
-                        state,
-                        catalog,
-                        consumer_package_id,
-                        dependency_alias,
-                    )
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-        }),
-        ArcanaCabiProviderValue::DescriptorView(view) => match view.owner {
-            ArcanaCabiProviderDescriptorViewOwner::Runtime { .. } => Ok(RuntimeValue::Opaque(
-                runtime_substrate_opaque_from_family(&view.family, view.id)?,
-            )),
-            ArcanaCabiProviderDescriptorViewOwner::ProviderBinding { .. } => Err(format!(
-                "provider-owned descriptor view `{}` is not materializable in runtime value transport",
-                view.family
-            )),
-        },
-        ArcanaCabiProviderValue::SubstrateOpaque { family, id } => Ok(RuntimeValue::Opaque(
-            runtime_substrate_opaque_from_family(&family, id)?,
-        )),
-        ArcanaCabiProviderValue::ProviderOpaque { family, id } => {
-            let type_path = catalog
-                .provider_binding_opaque_type_path(consumer_package_id, dependency_alias, &family)?
-                .ok_or_else(|| {
-                    format!(
-                        "provider binding `{consumer_package_id}` -> `{dependency_alias}` returned undeclared opaque family `{family}`"
-                    )
-                })?;
-            let handle = RuntimeProviderOpaqueHandle(state.next_provider_opaque_handle.max(1));
-            state.next_provider_opaque_handle = handle.0 + 1;
-            state.provider_opaques.insert(
-                handle,
-                RuntimeProviderOpaqueState {
-                    consumer_package_id: consumer_package_id.to_string(),
-                    dependency_alias: dependency_alias.to_string(),
-                    family_key: family,
-                    type_path,
-                    opaque_id: id,
-                },
-            );
-            Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::Provider(handle)))
-        }
-        ArcanaCabiProviderValue::Unit => Ok(RuntimeValue::Unit),
-    }
-}
-
-fn try_execute_provider_call(
-    callable: &[String],
-    call_args: &[RuntimeCallArg],
-    current_package_id: &str,
-    state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
-) -> Result<Option<RuntimeProviderCallResult>, String> {
-    let Some(root) = callable.first() else {
-        return Ok(None);
-    };
-    let callable_key = callable.join(".");
-    let host_ptr = unsafe {
-        std::mem::transmute::<*mut dyn RuntimeHost, *mut (dyn RuntimeHost + 'static)>(
-            host as *mut dyn RuntimeHost,
-        )
-    };
-    with_runtime_native_products(host, move |catalog| {
-        let Some(binding) = catalog
-            .provider_binding_for(current_package_id, root)
-            .cloned()
-        else {
-            return Ok(None);
-        };
-        if !catalog.provider_binding_declares_callable(
-            current_package_id,
-            &binding.dependency_alias,
-            &callable_key,
-        )? {
-            return Ok(None);
-        }
-        let mut host_context = RuntimeProviderHostContext {
-            host: host_ptr,
-            state: state as *mut RuntimeExecutionState,
-            current_package_id: current_package_id.to_string(),
-            bundle_dir: catalog.bundle_dir().to_path_buf(),
-            package_asset_roots: catalog.package_asset_roots().clone(),
-            exported_descriptors: Vec::new(),
-            last_error: None,
-        };
-        let args = match call_args
-            .iter()
-            .map(|arg| {
-                runtime_value_to_provider_value(
-                    &arg.value,
-                    state,
-                    current_package_id,
-                    &mut host_context.exported_descriptors,
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()
-        {
-            Ok(args) => args,
-            Err(err) => {
-                runtime_release_exported_descriptor_targets(
-                    state,
-                    &mut host_context.exported_descriptors,
-                );
-                return Err(err);
-            }
-        };
-        let host_ops = runtime_provider_host_ops_v1();
-        let outcome = unsafe {
-            catalog.invoke_provider_binding(
-                current_package_id,
-                &binding.dependency_alias,
-                &callable_key,
-                &args,
-                &host_ops,
-                &mut host_context as *mut RuntimeProviderHostContext as *mut c_void,
-            )
-        };
-        let result = match outcome {
-            Ok(outcome) => (|| -> Result<Option<RuntimeProviderCallResult>, String> {
-                let value = runtime_value_from_provider_value(
-                    outcome.result,
-                    state,
-                    catalog,
-                    current_package_id,
-                    &binding.dependency_alias,
-                )?;
-                let mut final_args = call_args
-                    .iter()
-                    .map(|arg| arg.value.clone())
-                    .collect::<Vec<_>>();
-                let mut edit_arg_indices = Vec::new();
-                for write_back in outcome.write_backs {
-                    let Some(existing) = final_args.get(write_back.index).cloned() else {
-                        return Err(format!(
-                            "provider callable `{callable_key}` returned write-back index {} outside arg count {}",
-                            write_back.index,
-                            final_args.len()
-                        ));
-                    };
-                    let updated = runtime_value_from_provider_write_back(
-                        write_back.value,
-                        &existing,
-                        state,
-                        catalog,
-                        current_package_id,
-                        &binding.dependency_alias,
-                    )?;
-                    final_args[write_back.index] = updated;
-                    if !edit_arg_indices.contains(&write_back.index) {
-                        edit_arg_indices.push(write_back.index);
-                    }
-                }
-                Ok(Some(RuntimeProviderCallResult {
-                    value,
-                    final_args,
-                    edit_arg_indices,
-                }))
-            })(),
-            Err(err) => Err(err),
-        };
-        runtime_release_exported_descriptor_targets(state, &mut host_context.exported_descriptors);
-        result
-    })
-}
-
-struct RuntimeProviderCallResult {
-    value: RuntimeValue,
-    final_args: Vec<RuntimeValue>,
-    edit_arg_indices: Vec<usize>,
-}
-
-fn runtime_provider_opaque_value(
-    state: &mut RuntimeExecutionState,
-    consumer_package_id: &str,
-    dependency_alias: &str,
-    family: String,
-    type_path: String,
-    opaque_id: u64,
-) -> RuntimeValue {
-    let handle = RuntimeProviderOpaqueHandle(state.next_provider_opaque_handle.max(1));
-    state.next_provider_opaque_handle = handle.0 + 1;
-    state.provider_opaques.insert(
-        handle,
-        RuntimeProviderOpaqueState {
-            consumer_package_id: consumer_package_id.to_string(),
-            dependency_alias: dependency_alias.to_string(),
-            family_key: family,
-            type_path,
-            opaque_id,
-        },
-    );
-    RuntimeValue::Opaque(RuntimeOpaqueValue::Provider(handle))
-}
-
-fn runtime_value_from_provider_write_back(
-    value: ArcanaCabiProviderValue,
-    existing: &RuntimeValue,
-    state: &mut RuntimeExecutionState,
-    catalog: &mut RuntimeNativeProductCatalog,
-    consumer_package_id: &str,
-    dependency_alias: &str,
-) -> Result<RuntimeValue, String> {
-    let ArcanaCabiProviderValue::ProviderOpaque { family, id } = &value else {
-        return runtime_value_from_provider_value(
-            value,
-            state,
-            catalog,
-            consumer_package_id,
-            dependency_alias,
-        );
-    };
-    if let RuntimeValue::Opaque(RuntimeOpaqueValue::Provider(handle)) = existing
-        && let Some(existing_state) = provider_opaque_state(state, *handle)
-        && existing_state.consumer_package_id == consumer_package_id
-        && existing_state.dependency_alias == dependency_alias
-        && existing_state.family_key == *family
-        && existing_state.opaque_id == *id
-    {
-        return Ok(existing.clone());
-    }
-    let type_path = catalog
-        .provider_binding_opaque_type_path(consumer_package_id, dependency_alias, family)?
-        .ok_or_else(|| {
-            format!(
-                "provider binding `{consumer_package_id}` -> `{dependency_alias}` returned undeclared opaque family `{family}`"
-            )
-        })?;
-    catalog.retain_provider_opaque(consumer_package_id, dependency_alias, family, *id)?;
-    Ok(runtime_provider_opaque_value(
-        state,
-        consumer_package_id,
-        dependency_alias,
-        family.clone(),
-        type_path,
-        *id,
-    ))
-}
-
-fn release_runtime_provider_opaques(
-    state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
-) -> Result<(), String> {
-    let opaques = state.provider_opaques.values().cloned().collect::<Vec<_>>();
-    if opaques.is_empty() {
-        return Ok(());
-    }
-    with_runtime_native_products(host, |catalog| {
-        for opaque in &opaques {
-            catalog.release_provider_opaque(
-                &opaque.consumer_package_id,
-                &opaque.dependency_alias,
-                &opaque.family_key,
-                opaque.opaque_id,
-            )?;
-        }
-        Ok(())
-    })?;
-    state.provider_opaques.clear();
-    Ok(())
-}
-
 fn opaque_type_name(value: &RuntimeOpaqueValue) -> &'static str {
     match value {
-        RuntimeOpaqueValue::Provider(_) => "<provider-opaque>",
+        RuntimeOpaqueValue::Binding(value) => value.type_name,
         _ => RuntimeOpaqueFamily::from_opaque_value(value).canonical_type_name(),
     }
 }
@@ -15365,9 +14857,6 @@ fn runtime_value_type_from_state(
                     .or_else(|| runtime_simple_type("Map"))
             }
         }
-        RuntimeValue::Opaque(RuntimeOpaqueValue::Provider(handle)) => state.and_then(|state| {
-            runtime_simple_type(&provider_opaque_state(state, *handle)?.type_path)
-        }),
         RuntimeValue::Opaque(
             RuntimeOpaqueValue::Channel(_)
             | RuntimeOpaqueValue::Mutex(_)
@@ -15407,7 +14896,6 @@ fn runtime_value_type_from_state(
 fn runtime_value_type_without_state(receiver: &RuntimeValue) -> Option<IrRoutineType> {
     match receiver {
         RuntimeValue::OwnerHandle(owner_key) => Some(runtime_synthetic_owner_type(owner_key)),
-        RuntimeValue::Opaque(RuntimeOpaqueValue::Provider(_)) => None,
         RuntimeValue::Opaque(value) => runtime_simple_type(opaque_type_name(value)),
         _ => runtime_value_type_from_state(receiver, None),
     }
@@ -15518,7 +15006,6 @@ fn runtime_value_type_root(receiver: &RuntimeValue) -> Option<String> {
         RuntimeValue::Range { .. } => Some("RangeInt".to_string()),
         RuntimeValue::OwnerHandle(_) => Some("Owner".to_string()),
         RuntimeValue::Ref(_) => Some("Ref".to_string()),
-        RuntimeValue::Opaque(RuntimeOpaqueValue::Provider(_)) => Some("Opaque".to_string()),
         RuntimeValue::Opaque(value) => Some(runtime_type_root_name(opaque_type_name(value))),
         RuntimeValue::Record { name, .. } => Some(runtime_type_root_name(name)),
         RuntimeValue::Variant { name, .. } => {
@@ -15744,6 +15231,7 @@ fn runtime_validate_split_value_with_ring_move(
         }
         RuntimeValue::Opaque(RuntimeOpaqueValue::Task(_))
         | RuntimeValue::Opaque(RuntimeOpaqueValue::Thread(_))
+        | RuntimeValue::Opaque(RuntimeOpaqueValue::Binding(_))
         | RuntimeValue::Opaque(RuntimeOpaqueValue::Window(_))
         | RuntimeValue::Opaque(RuntimeOpaqueValue::Image(_))
         | RuntimeValue::Opaque(RuntimeOpaqueValue::FileStream(_))
@@ -15756,8 +15244,7 @@ fn runtime_validate_split_value_with_ring_move(
         | RuntimeValue::Opaque(RuntimeOpaqueValue::Channel(_))
         | RuntimeValue::Opaque(RuntimeOpaqueValue::Mutex(_))
         | RuntimeValue::Opaque(RuntimeOpaqueValue::AtomicInt(_))
-        | RuntimeValue::Opaque(RuntimeOpaqueValue::AtomicBool(_))
-        | RuntimeValue::Opaque(RuntimeOpaqueValue::Provider(_)) => Ok(()),
+        | RuntimeValue::Opaque(RuntimeOpaqueValue::AtomicBool(_)) => Ok(()),
     }
 }
 
@@ -16447,20 +15934,10 @@ fn eval_runtime_member_value(
     host: &mut dyn RuntimeHost,
 ) -> Result<RuntimeValue, String> {
     match base {
-        RuntimeValue::Ref(reference) => {
-            let value = read_runtime_reference(
-                scopes,
-                plan,
-                current_package_id,
-                current_module_id,
-                aliases,
-                type_bindings,
-                state,
-                &reference,
-                host,
-            )?;
-            eval_member_value(value, member)
-        }
+        RuntimeValue::Ref(reference) => Ok(RuntimeValue::Ref(RuntimeReferenceValue {
+            mutable: reference.mutable,
+            target: runtime_reference_with_member(&reference.target, member.to_string()),
+        })),
         other => eval_member_value(other, member),
     }
 }
@@ -17944,26 +17421,18 @@ fn execute_call_by_path(
     host: &mut dyn RuntimeHost,
     allow_async: bool,
 ) -> RuntimeEvalResult<RuntimeValue> {
-    if !source_provider::source_provider_dispatch_active()
-        && let Some(outcome) =
-            try_execute_provider_call(callable, &call_args, current_package_id, state, host)?
-    {
-        write_back_call_args(
-            scopes,
-            plan,
-            current_package_id,
-            current_module_id,
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            state,
-            outcome.edit_arg_indices.as_slice(),
-            &call_args,
-            &outcome.final_args,
-            host,
-        )?;
-        return Ok(outcome.value);
-    }
-    if let Some(value) = try_execute_arcana_owned_api_call(callable, &call_args, host)? {
+    if let Some(value) = try_execute_arcana_owned_api_call(
+        callable,
+        &call_args,
+        scopes,
+        plan,
+        current_package_id,
+        current_module_id,
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        state,
+        host,
+    )? {
         return Ok(value);
     }
     if let Some(routine_index) = resolve_routine_index_for_call(
@@ -18014,6 +17483,16 @@ fn execute_call_by_path(
                 state,
                 host,
             )?;
+            RoutineExecutionOutcome {
+                value,
+                final_args,
+                control: None,
+            }
+        } else if let Some(native_impl) = &routine.native_impl {
+            let final_args = values;
+            let value =
+                execute_runtime_native_binding_import(plan, routine, native_impl, &final_args, host)
+                    .map_err(RuntimeEvalSignal::from)?;
             RoutineExecutionOutcome {
                 value,
                 final_args,
@@ -19231,16 +18710,11 @@ fn execute_runtime_core_intrinsic(
             if !args.is_empty() {
                 return Err("package_asset_root expects zero arguments".to_string());
             }
-            Ok(
-                match source_provider::active_source_provider_package_asset_root(&plan.package_id)?
-                {
-                    Some(root) => ok_variant(RuntimeValue::Str(root)),
-                    None => match runtime_current_package_asset_root(&plan.package_id, host) {
-                        Ok(path) => ok_variant(RuntimeValue::Str(runtime_path_string(&path))),
-                        Err(err) => err_variant(err),
-                    },
-                },
-            )
+            let package_id = current_package_id.unwrap_or(&plan.package_id);
+            Ok(match runtime_current_package_asset_root(package_id, host) {
+                Ok(path) => ok_variant(RuntimeValue::Str(runtime_path_string(&path))),
+                Err(err) => err_variant(err),
+            })
         }
         RuntimeIntrinsic::PathCwd => {
             if !args.is_empty() {
@@ -19668,12 +19142,6 @@ fn execute_runtime_core_intrinsic(
             if args.len() != 2 {
                 return Err("canvas_image_create expects two arguments".to_string());
             }
-            if let Some(image) = source_provider::active_source_provider_canvas_image_create(
-                expect_int(args[0].clone(), "canvas_image_create")?,
-                expect_int(args[1].clone(), "canvas_image_create")?,
-            )? {
-                return Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::Image(image)));
-            }
             Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::Image(
                 host.canvas_image_create(
                     expect_int(args[0].clone(), "canvas_image_create")?,
@@ -19687,11 +19155,6 @@ fn execute_runtime_core_intrinsic(
             }
             let image = expect_image(args[0].clone(), "canvas_image_replace_rgba")?;
             let rgba = expect_byte_array(args[1].clone(), "canvas_image_replace_rgba")?;
-            if source_provider::active_source_provider_canvas_image_replace_rgba(image, &rgba)?
-                .is_some()
-            {
-                return Ok(RuntimeValue::Unit);
-            }
             host.canvas_image_replace_rgba(image, &rgba)?;
             Ok(RuntimeValue::Unit)
         }
@@ -19711,11 +19174,6 @@ fn execute_runtime_core_intrinsic(
             let image = expect_image(args[1].clone(), "canvas_blit")?;
             let x = expect_int(args[2].clone(), "canvas_blit")?;
             let y = expect_int(args[3].clone(), "canvas_blit")?;
-            if source_provider::active_source_provider_canvas_blit(window.0, image.0, x, y)?
-                .is_some()
-            {
-                return Ok(RuntimeValue::Unit);
-            }
             host.canvas_blit(window, image, x, y)?;
             Ok(RuntimeValue::Unit)
         }
@@ -23016,25 +22474,17 @@ fn execute_runtime_core_intrinsic(
                 .get(&handle)
                 .ok_or_else(|| format!("invalid ByteView handle `{}`", handle.0))?
                 .clone();
-            let scopes = scopes.as_deref_mut().ok_or_else(|| {
-                "byte_view_len on borrowed ByteView requires runtime call context".to_string()
-            })?;
-            let _ = runtime_byte_view_values(
-                scopes,
-                plan,
-                current_package_id.ok_or_else(|| {
-                    "byte_view_len is missing current package context".to_string()
-                })?,
-                current_module_id
-                    .ok_or_else(|| "byte_view_len is missing current module context".to_string())?,
-                aliases.ok_or_else(|| "byte_view_len is missing alias context".to_string())?,
-                type_bindings
-                    .ok_or_else(|| "byte_view_len is missing type binding context".to_string())?,
-                state,
-                &view,
-                host,
-                "byte_view_len",
-            )?;
+            if let RuntimeByteViewBacking::Reference(reference) = &view.backing {
+                let scopes = scopes.as_deref_mut().ok_or_else(|| {
+                    "byte_view_len on borrowed ByteView requires runtime call context".to_string()
+                })?;
+                let _ = runtime_reference_array_len(
+                    scopes.as_slice(),
+                    state,
+                    reference,
+                    "byte_view_len",
+                )?;
+            }
             Ok(RuntimeValue::Int(view.len as i64))
         }
         RuntimeIntrinsic::MemoryByteViewAt => {
@@ -23052,29 +22502,36 @@ fn execute_runtime_core_intrinsic(
                 view.len,
                 "byte_view_at",
             )?;
-            let scopes = scopes.as_deref_mut().ok_or_else(|| {
-                "byte_view_at on borrowed ByteView requires runtime call context".to_string()
-            })?;
-            Ok(RuntimeValue::Int(i64::from(
-                runtime_byte_view_values(
-                    scopes,
-                    plan,
-                    current_package_id.ok_or_else(|| {
-                        "byte_view_at is missing current package context".to_string()
-                    })?,
-                    current_module_id.ok_or_else(|| {
-                        "byte_view_at is missing current module context".to_string()
-                    })?,
-                    aliases.ok_or_else(|| "byte_view_at is missing alias context".to_string())?,
-                    type_bindings.ok_or_else(|| {
-                        "byte_view_at is missing type binding context".to_string()
-                    })?,
-                    state,
-                    &view,
-                    host,
-                    "byte_view_at",
-                )?[index],
-            )))
+            let value = match &view.backing {
+                RuntimeByteViewBacking::Buffer(buffer) => {
+                    let values = &state
+                        .byte_view_buffers
+                        .get(buffer)
+                        .ok_or_else(|| format!("invalid byte view buffer `{}`", buffer.0))?
+                        .values;
+                    values
+                        .get(view.start + index)
+                        .copied()
+                        .ok_or_else(|| format!("byte_view_at index `{index}` is out of bounds"))?
+                }
+                RuntimeByteViewBacking::Reference(reference) => {
+                    let scopes = scopes.as_deref_mut().ok_or_else(|| {
+                        "byte_view_at on borrowed ByteView requires runtime call context"
+                            .to_string()
+                    })?;
+                    runtime_reference_array_byte_at(
+                        scopes.as_slice(),
+                        state,
+                        reference,
+                        view.start + index,
+                        "byte_view_at",
+                    )?
+                    .ok_or_else(|| {
+                        "byte_view_at could not resolve borrowed ByteView backing".to_string()
+                    })?
+                }
+            };
+            Ok(RuntimeValue::Int(i64::from(value)))
         }
         RuntimeIntrinsic::MemoryByteViewSubview => {
             if args.len() != 3 {
@@ -26694,6 +26151,7 @@ fn resolve_runtime_memory_phrase_instance(
 fn eval_construct_contribution_value(
     line: &ParsedConstructLine,
     default_modifier: Option<&ParsedHeadedModifier>,
+    context: &str,
     plan: &RuntimePackagePlan,
     current_package_id: &str,
     current_module_id: &str,
@@ -26719,13 +26177,9 @@ fn eval_construct_contribution_value(
     }
     let modifier = line.modifier.as_ref().or(default_modifier);
     let Some(modifier) = modifier else {
-        return Err(
-            "construct acquisition failure requires an explicit modifier"
-                .to_string()
-                .into(),
-        );
+        return Err(format!("{context} acquisition failure requires an explicit modifier").into());
     };
-    match runtime_construct_contribution_outcome(value, line.mode)? {
+    match runtime_construct_contribution_outcome(value, line.mode, context)? {
         Ok(payload) => Ok(Some(payload)),
         Err(failure) => match modifier.kind.as_str() {
             "return" => {
@@ -26746,14 +26200,10 @@ fn eval_construct_contribution_value(
                     if variant_name_matches(name, "Result.Err") {
                         Err(RuntimeEvalSignal::Return(failure))
                     } else {
-                        Err("bare `-return` on construct requires Result failure"
-                            .to_string()
-                            .into())
+                        Err(format!("bare `-return` on {context} requires Result failure").into())
                     }
                 } else {
-                    Err("bare `-return` on construct requires Result failure"
-                        .to_string()
-                        .into())
+                    Err(format!("bare `-return` on {context} requires Result failure").into())
                 }
             }
             "default" => Ok(eval_headed_modifier_payload(
@@ -26768,7 +26218,7 @@ fn eval_construct_contribution_value(
                 host,
             )?),
             "skip" => Ok(Some(none_variant())),
-            other => Err(format!("unsupported construct modifier `{other}`").into()),
+            other => Err(format!("unsupported {context} modifier `{other}`").into()),
         },
     }
 }
@@ -26776,6 +26226,7 @@ fn eval_construct_contribution_value(
 fn runtime_construct_contribution_outcome(
     value: RuntimeValue,
     mode: ParsedConstructContributionMode,
+    context: &str,
 ) -> Result<Result<RuntimeValue, RuntimeValue>, String> {
     match mode {
         ParsedConstructContributionMode::Direct => Ok(Ok(value)),
@@ -26791,7 +26242,7 @@ fn runtime_construct_contribution_outcome(
                 Ok(Err(none_variant()))
             }
             other => Err(format!(
-                "construct acquisition expects Option payload, found {other:?}"
+                "{context} acquisition expects Option payload, found {other:?}"
             )),
         },
         ParsedConstructContributionMode::ResultPayload => match value {
@@ -26806,10 +26257,70 @@ fn runtime_construct_contribution_outcome(
                 Ok(Err(RuntimeValue::Variant { name, payload }))
             }
             other => Err(format!(
-                "construct acquisition expects Result payload, found {other:?}"
+                "{context} acquisition expects Result payload, found {other:?}"
             )),
         },
     }
+}
+
+fn eval_record_region_value(
+    region: &ParsedRecordRegion,
+    plan: &RuntimePackagePlan,
+    current_package_id: &str,
+    current_module_id: &str,
+    scopes: &mut Vec<RuntimeScope>,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
+) -> RuntimeEvalResult<RuntimeValue> {
+    let target_name = runtime_expr_path_name(&region.target)
+        .ok_or_else(|| "record target must be a path-like record reference".to_string())?;
+    let mut fields = BTreeMap::new();
+    if let Some(base_expr) = &region.base {
+        let base_value = eval_expr(
+            base_expr,
+            plan,
+            current_package_id,
+            current_module_id,
+            scopes,
+            aliases,
+            type_bindings,
+            state,
+            host,
+        )?;
+        let RuntimeValue::Record { fields: base_fields, .. } = base_value
+        else {
+            return Err("record base must evaluate to a record value".to_string().into());
+        };
+        for field_name in &region.copied_fields {
+            let value = base_fields.get(field_name).cloned().ok_or_else(|| {
+                format!("record base is missing copied field `{field_name}`")
+            })?;
+            fields.insert(field_name.clone(), value);
+        }
+    }
+    for line in &region.lines {
+        if let Some(value) = eval_construct_contribution_value(
+            line,
+            region.default_modifier.as_ref(),
+            "record",
+            plan,
+            current_package_id,
+            current_module_id,
+            scopes,
+            aliases,
+            type_bindings,
+            state,
+            host,
+        )? {
+            fields.insert(line.name.clone(), value);
+        }
+    }
+    Ok(RuntimeValue::Record {
+        name: target_name,
+        fields,
+    })
 }
 
 fn eval_expr(
@@ -26891,6 +26402,7 @@ fn eval_expr(
                 if let Some(value) = eval_construct_contribution_value(
                     line,
                     region.default_modifier.as_ref(),
+                    "construct",
                     plan,
                     current_package_id,
                     current_module_id,
@@ -26919,6 +26431,17 @@ fn eval_expr(
                 })
             }
         }
+        ParsedExpr::RecordRegion(region) => eval_record_region_value(
+            region,
+            plan,
+            current_package_id,
+            current_module_id,
+            scopes,
+            aliases,
+            type_bindings,
+            state,
+            host,
+        ),
         ParsedExpr::Chain {
             style,
             introducer,
@@ -26936,14 +26459,18 @@ fn eval_expr(
             state,
             host,
         ),
-        ParsedExpr::Path(segments) if segments.len() == 1 => {
-            Ok(force_runtime_value(
-                read_runtime_local_value(scopes, state, &segments[0])?,
-                plan,
-                state,
-                host,
-            )?)
-        }
+        ParsedExpr::Path(segments) if segments.len() == 1 => read_runtime_value_if_ref(
+            read_runtime_local_value(scopes, state, &segments[0])?,
+            scopes,
+            plan,
+            current_package_id,
+            current_module_id,
+            aliases,
+            type_bindings,
+            state,
+            host,
+        )
+        .map_err(Into::into),
         ParsedExpr::Path(segments) => {
             Err(format!("unsupported runtime value path `{}`", segments.join(".")).into())
         }
@@ -28828,6 +28355,53 @@ fn execute_statements(
                 }
                 FlowSignal::Next
             }
+            ParsedStmt::Record(region) => {
+                let value = eval_expr(
+                    &ParsedExpr::RecordRegion(Box::new(region.clone())),
+                    plan,
+                    current_package_id,
+                    current_module_id,
+                    scopes,
+                    aliases,
+                    type_bindings,
+                    state,
+                    host,
+                )?;
+                match &region.destination {
+                    Some(ParsedConstructDestination::Deliver { name }) => {
+                        let current_scope_depth = scopes.len().saturating_sub(1);
+                        let current_scope = scopes
+                            .last_mut()
+                            .ok_or_else(|| "runtime scope stack is empty".to_string())?;
+                        insert_runtime_local(
+                            state,
+                            current_scope_depth,
+                            current_scope,
+                            0,
+                            name.clone(),
+                            false,
+                            value,
+                        );
+                    }
+                    Some(ParsedConstructDestination::Place { target }) => {
+                        apply_assign(
+                            target,
+                            ParsedAssignOp::Assign,
+                            value,
+                            plan,
+                            current_package_id,
+                            current_module_id,
+                            scopes,
+                            aliases,
+                            type_bindings,
+                            state,
+                            host,
+                        )?;
+                    }
+                    None => {}
+                }
+                FlowSignal::Next
+            }
             ParsedStmt::MemorySpec(spec) => {
                 let owner_keys = collect_active_owner_keys_from_scopes(scopes);
                 let current_scope = scopes
@@ -28924,6 +28498,21 @@ fn execute_routine_call_with_state(
                     state,
                     host,
                 )?;
+                return Ok(RoutineExecutionOutcome {
+                    value,
+                    final_args: args,
+                    control: None,
+                });
+            }
+            if let Some(native_impl) = &routine.native_impl {
+                let value = execute_runtime_native_binding_import(
+                    plan,
+                    routine,
+                    native_impl,
+                    &args,
+                    host,
+                )
+                .map_err(RuntimeEvalSignal::from)?;
                 return Ok(RoutineExecutionOutcome {
                     value,
                     final_args: args,
@@ -29316,9 +28905,7 @@ fn execute_routine(
     let mut state = RuntimeExecutionState::default();
     let result =
         execute_routine_with_state(plan, routine_index, Vec::new(), args, &mut state, host);
-    let cleanup = release_runtime_provider_opaques(&mut state, host);
     reset_runtime_native_products_cache();
-    cleanup?;
     result
 }
 
@@ -29384,13 +28971,10 @@ pub fn execute_entrypoint_routine(
     let value = match value {
         Ok(value) => value,
         Err(err) => {
-            let cleanup = release_runtime_provider_opaques(&mut state, host);
             reset_runtime_native_products_cache();
-            cleanup?;
             return Err(runtime_eval_message(err));
         }
     };
-    release_runtime_provider_opaques(&mut state, host)?;
     reset_runtime_native_products_cache();
     if let Some(FlowSignal::OwnerExit {
         owner_key,

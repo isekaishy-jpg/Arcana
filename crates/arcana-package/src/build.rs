@@ -435,6 +435,7 @@ where
             total,
             status,
         });
+        let debug_build = std::env::var_os("ARCANA_DEBUG_BUILD").is_some();
         if status.disposition == BuildDisposition::CacheHit {
             continue;
         }
@@ -458,6 +459,14 @@ where
                     .ok_or_else(|| format!("missing lowered linked package `{name}`"))
             })
             .collect::<PackageResult<Vec<_>>>()?;
+        if debug_build {
+            eprintln!(
+                "[build-loop] emitting member={} target={} linked={}",
+                status.member,
+                status.target,
+                linked_packages.len()
+            );
+        }
         let emission = emit_artifact_for_target(
             graph,
             member,
@@ -473,6 +482,14 @@ where
                 status.member, status.target
             )
         })?;
+        if debug_build {
+            eprintln!(
+                "[build-loop] emitted member={} target={} support_files={}",
+                status.member,
+                status.target,
+                emission.support_files.len()
+            );
+        }
         let artifact = &emission.artifact;
         if status.format != emission.target.format() {
             return Err(format!(
@@ -491,8 +508,17 @@ where
                 )
             })?;
         }
+        if debug_build {
+            eprintln!("[build-loop] writing artifact {}", artifact_path.display());
+        }
         write_root_emission_artifact(&artifact_path, &emission)?;
+        if debug_build {
+            eprintln!("[build-loop] writing support {}", artifact_path.display());
+        }
         write_emission_support_files(&artifact_path, &emission)?;
+        if debug_build {
+            eprintln!("[build-loop] hashing {}", artifact_path.display());
+        }
         let artifact_hash = cached_emission_hash(
             &status.build_key.storage_key(),
             &status.format,
@@ -501,6 +527,9 @@ where
             &emission.support_files,
         );
         let metadata_path = cache_metadata_path_for_output(&artifact_path, &status.target);
+        if debug_build {
+            eprintln!("[build-loop] metadata {}", metadata_path.display());
+        }
         fs::write(
             &metadata_path,
             render_cached_artifact(
@@ -523,6 +552,9 @@ where
             )
         })?;
         let index_path = cache_index_path_for_output(&artifact_path);
+        if debug_build {
+            eprintln!("[build-loop] index {}", index_path.display());
+        }
         fs::write(
             &index_path,
             render_cached_artifact_index(
@@ -701,9 +733,6 @@ pub fn render_lockfile(
             if let Some(path) = &entry.rust_cdylib_crate {
                 out.push_str(&format!("rust_cdylib_crate = \"{}\"\n", escape_toml(path)));
             }
-            if let Some(path) = &entry.provider_dir {
-                out.push_str(&format!("provider_dir = \"{}\"\n", escape_toml(path)));
-            }
             out.push_str(&format!(
                 "sidecars = {}\n\n",
                 format_string_array(&entry.sidecars)
@@ -832,7 +861,6 @@ fn lock_native_product_entries(
                     file: product.file.clone(),
                     contract: product.contract.clone(),
                     rust_cdylib_crate: product.rust_cdylib_crate.clone(),
-                    provider_dir: product.provider_dir.clone(),
                     sidecars: product.sidecars.clone(),
                 },
             )
@@ -881,38 +909,6 @@ fn collect_linked_package_names(
         names.insert(std_package.package_id.clone());
     }
     Ok(names.into_iter().collect())
-}
-
-pub(crate) fn render_member_internal_package_image(
-    graph: &WorkspaceGraph,
-    member_package_id: &str,
-) -> PackageResult<String> {
-    let prepared = prepare_build(graph)?;
-    let member = graph
-        .member_by_id(member_package_id)
-        .ok_or_else(|| format!("missing workspace member `{member_package_id}`"))?;
-    let lowered_packages = prepared_lowered_packages(&prepared)?;
-    let root = lowered_packages
-        .get(member_package_id)
-        .cloned()
-        .ok_or_else(|| format!("missing lowered package `{member_package_id}`"))?;
-    let linked_package_names =
-        collect_linked_package_names(graph, &prepared.workspace, member_package_id)?;
-    let linked_packages = linked_package_names
-        .into_iter()
-        .filter(|package_id| package_id != member_package_id)
-        .map(|package_id| {
-            lowered_packages
-                .get(&package_id)
-                .cloned()
-                .ok_or_else(|| format!("missing lowered package `{package_id}`"))
-        })
-        .collect::<PackageResult<Vec<_>>>()?;
-    let linked_package = link_ir_packages(&member.kind, root, linked_packages);
-    let artifact = compile_package(&linked_package);
-    validate_package_artifact(&artifact)
-        .map_err(|e| format!("provider package artifact validation failed: {e}"))?;
-    Ok(render_package_artifact(&artifact))
 }
 
 fn prepared_lowered_packages(
@@ -1008,6 +1004,7 @@ fn link_ir_packages(
     let mut package_display_names = root.package_display_names.clone();
     let mut package_direct_dep_ids = root.package_direct_dep_ids.clone();
     let mut routines = root.routines.clone();
+    let mut native_callbacks = root.native_callbacks.clone();
     let mut owners = root.owners.clone();
 
     for package in linked {
@@ -1016,6 +1013,7 @@ fn link_ir_packages(
         modules.extend(package.modules);
         dependency_rows.extend(package.dependency_rows);
         routines.extend(package.routines);
+        native_callbacks.extend(package.native_callbacks);
         owners.extend(package.owners);
     }
 
@@ -1066,6 +1064,7 @@ fn link_ir_packages(
         foreword_registrations: Vec::new(),
         entrypoints: root.entrypoints,
         routines,
+        native_callbacks,
         owners,
     };
     disambiguate_package_routine_keys(&mut linked_package)
@@ -1086,7 +1085,24 @@ fn emit_artifact_for_target(
     linked_packages: Vec<IrPackage>,
     build_context: &BuildExecutionContext,
 ) -> PackageResult<AotPackageEmission> {
+    let debug_build = std::env::var_os("ARCANA_DEBUG_BUILD").is_some();
+    if debug_build {
+        eprintln!(
+            "[emit-artifact] start member={} target={} linked={}",
+            root_member.package_id,
+            build_key.target_ref(),
+            linked_packages.len()
+        );
+    }
     let linked_package = link_ir_packages(root_kind, root, linked_packages);
+    if debug_build {
+        eprintln!(
+            "[emit-artifact] linked member={} routines={} modules={}",
+            root_member.package_id,
+            linked_package.routines.len(),
+            linked_package.modules.len()
+        );
+    }
     if let BuildTarget::WindowsDll = build_key.target_ref()
         && let Some(selected_product) = selected_native_product_for_build(
             root_member,
@@ -1103,6 +1119,13 @@ fn emit_artifact_for_target(
         );
     }
     let context = emit_context_for_target(graph, root_member, build_key, root_kind, build_context)?;
+    if debug_build {
+        eprintln!(
+            "[emit-artifact] context member={} target={}",
+            root_member.package_id,
+            build_key.target_ref()
+        );
+    }
     let mut emission = match build_key.target_ref() {
         BuildTarget::InternalAot => {
             emit_package_with_context(AotEmitTarget::InternalArtifact, &linked_package, &context)
@@ -1118,8 +1141,29 @@ fn emit_artifact_for_target(
             build_key.target_ref()
         )),
     }?;
+    if debug_build {
+        eprintln!(
+            "[emit-artifact] emitted member={} target={}",
+            root_member.package_id,
+            build_key.target_ref()
+        );
+    }
     append_package_asset_support_files(graph, root_member, &mut emission)?;
+    if debug_build {
+        eprintln!(
+            "[emit-artifact] assets appended member={} support_files={}",
+            root_member.package_id,
+            emission.support_files.len()
+        );
+    }
     append_internal_native_bundle_support(graph, root_member, build_key, &mut emission)?;
+    if debug_build {
+        eprintln!(
+            "[emit-artifact] native support appended member={} support_files={}",
+            root_member.package_id,
+            emission.support_files.len()
+        );
+    }
     Ok(emission)
 }
 
@@ -1480,7 +1524,6 @@ fn select_root_windows_dll_product_spec(
                 .to_string(),
             contract: ARCANA_CABI_EXPORT_CONTRACT_ID.to_string(),
             rust_cdylib_crate: None,
-            provider_dir: None,
             sidecars: Vec::new(),
         });
     }
@@ -1720,6 +1763,7 @@ mod tests {
                 foreword_registrations: Vec::new(),
                 entrypoints: Vec::new(),
                 routines: Vec::new(),
+                native_callbacks: Vec::new(),
                 owners: Vec::new(),
                 modules: Vec::new(),
             },

@@ -9,6 +9,7 @@ arcana-cabi.workspace = true
 arcana-hir.workspace = true
 arcana-ir.workspace = true
 arcana-syntax.workspace = true
+fs2.workspace = true
 goblin = "0.9"
 pathdiff.workspace = true
 sha2.workspace = true

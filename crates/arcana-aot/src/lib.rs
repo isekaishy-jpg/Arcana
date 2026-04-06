@@ -16,9 +16,9 @@ mod windows_bundle;
 mod windows_dll;
 
 pub use artifact::{
-    AOT_INTERNAL_FORMAT, AotArtifact, AotEntrypointArtifact, AotOwnerArtifact,
-    AotOwnerExitArtifact, AotOwnerObjectArtifact, AotPackageArtifact, AotPackageModuleArtifact,
-    AotRoutineArtifact, AotRoutineParamArtifact,
+    AOT_INTERNAL_FORMAT, AotArtifact, AotEntrypointArtifact, AotNativeCallbackArtifact,
+    AotOwnerArtifact, AotOwnerExitArtifact, AotOwnerObjectArtifact, AotPackageArtifact,
+    AotPackageModuleArtifact, AotRoutineArtifact, AotRoutineParamArtifact,
 };
 pub use codec::{parse_package_artifact, render_package_artifact};
 pub use compile::{compile_module, compile_package};
@@ -29,7 +29,7 @@ pub use emit::{
 };
 pub use instance_product::{
     ARCANA_NATIVE_PRODUCT_TEMP_PROBES_ENV, AotCompiledInstanceProduct, AotInstanceProductSpec,
-    compile_instance_product,
+    compile_instance_product, default_instance_product_cargo_target_dir,
 };
 pub use native_manifest::{
     NATIVE_BUNDLE_MANIFEST_FORMAT, NativeBundleLaunchManifest, NativeBundleManifest,
@@ -214,12 +214,14 @@ mod tests {
                 params: Vec::new(),
                 return_type: test_return_type("fn main() -> Int:"),
                 intrinsic_impl: None,
+                native_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
                 cleanup_footers: Vec::new(),
                 statements: Vec::new(),
             }],
+            native_callbacks: Vec::new(),
             owners: Vec::new(),
             modules: vec![AotPackageModuleArtifact {
                 package_id: test_package_id_for_module("tool"),
@@ -317,6 +319,7 @@ mod tests {
                 params: Vec::new(),
                 return_type: test_return_type("fn main() -> Int:"),
                 intrinsic_impl: None,
+                native_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -327,6 +330,7 @@ mod tests {
                     value: ExecExpr::Int(0),
                 }],
             }],
+            native_callbacks: Vec::new(),
             owners: Vec::new(),
         });
         assert_eq!(artifact.format, AOT_INTERNAL_FORMAT);
@@ -384,6 +388,7 @@ mod tests {
                 params: Vec::new(),
                 return_type: test_return_type("fn main() -> Int:"),
                 intrinsic_impl: None,
+                native_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -394,6 +399,7 @@ mod tests {
                     value: ExecExpr::Int(0),
                 }],
             }],
+            native_callbacks: Vec::new(),
             owners: Vec::new(),
         };
 
@@ -468,6 +474,7 @@ mod tests {
                 params: Vec::new(),
                 return_type: test_return_type("fn main() -> Int:"),
                 intrinsic_impl: None,
+                native_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -478,6 +485,7 @@ mod tests {
                     value: ExecExpr::Int(0),
                 }],
             }],
+            native_callbacks: Vec::new(),
             owners: Vec::new(),
         };
 
@@ -617,6 +625,7 @@ mod tests {
                 params: Vec::new(),
                 return_type: test_return_type("fn main() -> Int:"),
                 intrinsic_impl: None,
+                native_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -627,6 +636,7 @@ mod tests {
                     value: ExecExpr::Int(0),
                 }],
             }],
+            native_callbacks: Vec::new(),
             owners: Vec::new(),
         };
 
@@ -684,6 +694,7 @@ mod tests {
             foreword_registrations: Vec::new(),
             entrypoints: Vec::new(),
             routines: Vec::new(),
+            native_callbacks: Vec::new(),
             owners: Vec::new(),
         };
 
@@ -749,6 +760,7 @@ mod tests {
                 params: test_params(&["mode=:name=value:ty=Int".to_string()]),
                 return_type: test_return_type("fn answer(value: Int) -> Bool:"),
                 intrinsic_impl: None,
+                native_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -759,6 +771,7 @@ mod tests {
                     value: ExecExpr::Bool(true),
                 }],
             }],
+            native_callbacks: Vec::new(),
             owners: Vec::new(),
         };
 
@@ -866,6 +879,7 @@ mod tests {
                     params: test_params(&["mode=read:name=name:ty=Str".to_string()]),
                     return_type: test_return_type("fn greet(read name: Str) -> Str:"),
                     intrinsic_impl: None,
+                    native_impl: None,
                     impl_target_type: None,
                     impl_trait_path: None,
                     availability: Vec::new(),
@@ -891,6 +905,7 @@ mod tests {
                         "fn prefix(read bytes: Array[Int]) -> Array[Int]:",
                     ),
                     intrinsic_impl: None,
+                    native_impl: None,
                     impl_target_type: None,
                     impl_trait_path: None,
                     availability: Vec::new(),
@@ -902,6 +917,7 @@ mod tests {
                     }],
                 },
             ],
+            native_callbacks: Vec::new(),
             owners: Vec::new(),
         };
 
@@ -975,6 +991,7 @@ mod tests {
                     params: Vec::new(),
                     return_type: test_return_type("fn answer() -> Int:"),
                     intrinsic_impl: None,
+                    native_impl: None,
                     impl_target_type: None,
                     impl_trait_path: None,
                     availability: Vec::new(),
@@ -996,6 +1013,7 @@ mod tests {
                     params: test_params(&["mode=read:name=values:ty=Array[T]".to_string()]),
                     return_type: test_return_type("fn len[T](read values: Array[T]) -> Int:"),
                     intrinsic_impl: None,
+                    native_impl: None,
                     impl_target_type: None,
                     impl_trait_path: None,
                     availability: Vec::new(),
@@ -1005,6 +1023,7 @@ mod tests {
                     }],
                 },
             ],
+            native_callbacks: Vec::new(),
             owners: Vec::new(),
             modules: vec![
                 AotPackageModuleArtifact {
@@ -1093,6 +1112,7 @@ mod tests {
                     "fn echo_pair(read pair: Pair[Str, Int]) -> Pair[Str, Int]:",
                 ),
                 intrinsic_impl: None,
+                native_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -1103,6 +1123,7 @@ mod tests {
                     value: ExecExpr::Path(vec!["pair".to_string()]),
                 }],
             }],
+            native_callbacks: Vec::new(),
             owners: Vec::new(),
         };
 
@@ -1179,6 +1200,7 @@ mod tests {
                 params: test_params(&["mode=:name=x:ty=Int".to_string()]),
                 return_type: test_return_type("fn main(x: Int) -> Int:"),
                 intrinsic_impl: None,
+                native_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -1195,6 +1217,7 @@ mod tests {
                         args: Vec::new(),
                         qualifier_kind: ExecPhraseQualifierKind::BareMethod,
                         qualifier: "is_ok".to_string(),
+                        qualifier_type_args: Vec::new(),
                         resolved_callable: Some(vec![
                             "std".to_string(),
                             "result".to_string(),
@@ -1207,6 +1230,7 @@ mod tests {
                     cleanup_footers: Vec::new(),
                 }],
             }],
+            native_callbacks: Vec::new(),
             owners: Vec::new(),
             modules: vec![AotPackageModuleArtifact {
                 package_id: test_package_id_for_module("tool"),
@@ -1275,6 +1299,7 @@ mod tests {
                 params: Vec::new(),
                 return_type: test_return_type("fn helper() -> Int:"),
                 intrinsic_impl: None,
+                native_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -1285,6 +1310,7 @@ mod tests {
                     value: ExecExpr::Int(0),
                 }],
             }],
+            native_callbacks: Vec::new(),
             owners: Vec::new(),
         });
         artifact.module_count = 2;
@@ -1349,6 +1375,7 @@ mod tests {
                     params: Vec::new(),
                     return_type: test_return_type("fn main() -> Int:"),
                     intrinsic_impl: None,
+                    native_impl: None,
                     impl_target_type: None,
                     impl_trait_path: None,
                     availability: Vec::new(),
@@ -1368,6 +1395,7 @@ mod tests {
                     params: test_params(&["mode=:name=x:ty=Int".to_string()]),
                     return_type: test_return_type("fn main(x: Int) -> Int:"),
                     intrinsic_impl: None,
+                    native_impl: None,
                     impl_target_type: None,
                     impl_trait_path: None,
                     availability: Vec::new(),
@@ -1375,6 +1403,7 @@ mod tests {
                     statements: Vec::new(),
                 },
             ],
+            native_callbacks: Vec::new(),
             owners: Vec::new(),
             modules: vec![AotPackageModuleArtifact {
                 package_id: test_package_id_for_module("tool"),
@@ -1450,6 +1479,7 @@ mod tests {
                 params: test_params(&["mode=read:name=value:ty=Int".to_string()]),
                 return_type: test_return_type("fn helper(read value: Int) -> Int:"),
                 intrinsic_impl: None,
+                native_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -1460,6 +1490,7 @@ mod tests {
                     value: ExecExpr::Int(0),
                 }],
             }],
+            native_callbacks: Vec::new(),
             owners: Vec::new(),
         });
         artifact.routines[0].params = vec![AotRoutineParamArtifact {
@@ -1515,12 +1546,14 @@ mod tests {
                 params: Vec::new(),
                 return_type: test_return_type("fn helper() -> Int:"),
                 intrinsic_impl: None,
+                native_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
                 cleanup_footers: Vec::new(),
                 statements: Vec::new(),
             }],
+            native_callbacks: Vec::new(),
             owners: Vec::new(),
             modules: vec![AotPackageModuleArtifact {
                 package_id: test_package_id_for_module("tool"),
@@ -1650,6 +1683,7 @@ mod tests {
             params: Vec::new(),
             return_type: test_return_type("fn answer() -> Int:"),
             intrinsic_impl: None,
+            native_impl: None,
             impl_target_type: None,
             impl_trait_path: None,
             availability: Vec::new(),

@@ -886,6 +886,7 @@ mod tests {
             foreword_registrations: Vec::new(),
             entrypoints: Vec::new(),
             routines: Vec::new(),
+            native_callbacks: Vec::new(),
             owners: Vec::new(),
             modules: vec![AotPackageModuleArtifact {
                 package_id: test_package_id_for_module("tool"),

@@ -4,9 +4,9 @@ use arcana_ir::{
 };
 
 use crate::artifact::{
-    AOT_INTERNAL_FORMAT, AotArtifact, AotEntrypointArtifact, AotOwnerArtifact,
-    AotOwnerExitArtifact, AotOwnerObjectArtifact, AotPackageArtifact, AotPackageModuleArtifact,
-    AotRoutineArtifact,
+    AOT_INTERNAL_FORMAT, AotArtifact, AotEntrypointArtifact, AotNativeCallbackArtifact,
+    AotOwnerArtifact, AotOwnerExitArtifact, AotOwnerObjectArtifact, AotPackageArtifact,
+    AotPackageModuleArtifact, AotRoutineArtifact,
 };
 
 pub fn compile_module(module: &IrModule) -> AotArtifact {
@@ -60,11 +60,26 @@ fn compile_routine(routine: &IrRoutine) -> AotRoutineArtifact {
         params: routine.params.clone(),
         return_type: routine.return_type.clone(),
         intrinsic_impl: routine.intrinsic_impl.clone(),
+        native_impl: routine.native_impl.clone(),
         impl_target_type: routine.impl_target_type.clone(),
         impl_trait_path: routine.impl_trait_path.clone(),
         availability: routine.availability.clone(),
         cleanup_footers: routine.cleanup_footers.clone(),
         statements: routine.statements.clone(),
+    }
+}
+
+fn compile_native_callback(
+    callback: &arcana_ir::IrNativeCallbackDecl,
+) -> AotNativeCallbackArtifact {
+    AotNativeCallbackArtifact {
+        package_id: callback.package_id.clone(),
+        module_id: callback.module_id.clone(),
+        name: callback.name.clone(),
+        params: callback.params.clone(),
+        return_type: callback.return_type.clone(),
+        target: callback.target.clone(),
+        target_routine_key: callback.target_routine_key.clone(),
     }
 }
 
@@ -118,6 +133,11 @@ pub fn compile_package(package: &IrPackage) -> AotPackageArtifact {
         foreword_registrations: package.foreword_registrations.clone(),
         entrypoints: package.entrypoints.iter().map(compile_entrypoint).collect(),
         routines: package.routines.iter().map(compile_routine).collect(),
+        native_callbacks: package
+            .native_callbacks
+            .iter()
+            .map(compile_native_callback)
+            .collect(),
         owners: package.owners.iter().map(compile_owner).collect(),
         modules: package
             .modules

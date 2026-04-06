@@ -351,16 +351,19 @@ Headed regions are parsed by `parse_headed_region_statement`. They are region-fo
   - `recycle`
   - `bind`
   - `construct`
+  - `record`
   - statement-form `Memory`
-- `construct yield` is expression-form.
+- `construct yield` and `record yield` are expression-form.
 - `construct deliver` and `construct place` are statement-form region heads.
+- `record deliver` and `record place` are statement-form region heads.
 - Statement-form `Memory` uses `parse_memory_spec_decl`, not `parse_memory_phrase`.
 
 ### Hard limits / rejections
 
 - `recycle` and `bind` require indented region bodies.
 - `construct yield` is rejected in statement position.
-- Expression position only allows `construct yield`; `parse_construct_yield_expression` rejects other construct completions there.
+- `record yield` is rejected in statement position.
+- Expression position only allows `construct yield` and `record yield`; `parse_construct_yield_expression` and `parse_record_yield_expression` reject other completions there.
 - Nested headed regions are rejected in v1; frontend tracks headed-region depth and rejects a headed region that appears inside another headed region.
 - Frontend headed-region validation is extensive. Representative constraints:
   - `recycle -break` and `recycle -continue` only make sense inside loops
@@ -368,6 +371,9 @@ Headed regions are parsed by `parse_headed_region_statement`. They are region-fo
   - `bind -default`, `bind -preserve`, and `bind -replace` are restricted to the appropriate gate forms
   - `bind -break` and `bind -continue` are restricted to `require <expr>` lines
   - `construct place` target type must match constructor result type
+  - `record` targets must resolve to records
+  - `record place` target type must match record result type
+  - `record ... from ...` only copies same-name, exact-type fields from the base
 
 ### Rust lookup
 
@@ -378,6 +384,8 @@ Headed regions are parsed by `parse_headed_region_statement`. They are region-fo
   - `parse_bind_line`
   - `parse_construct_region`
   - `parse_construct_yield_expression`
+  - `parse_record_region`
+  - `parse_record_yield_expression`
   - `parse_memory_spec_decl`
 - Frontend:
   - `crates/arcana-frontend/src/lib.rs`
@@ -388,27 +396,39 @@ Headed regions are parsed by `parse_headed_region_statement`. They are region-fo
   - `validate_construct_modifier_semantics`
   - `validate_construct_contribution_semantics`
   - `validate_construct_region_semantics`
+  - `validate_record_region_semantics`
 - Runtime:
   - `crates/arcana-runtime/src/lib.rs`
   - `resolve_named_owner_exit_target`
   - `apply_explicit_owner_exit`
+  - `eval_record_region_value`
 - Representative tests:
   - `crates/arcana-syntax/src/lib.rs`
   - `parse_module_collects_headed_regions_v1_shapes`
   - `crates/arcana-frontend/src/lib.rs`
   - `check_sources_rejects_headed_region_semantic_violations`
   - `check_path_accepts_same_region_headed_bindings_and_matching_construct_place`
+  - `check_path_accepts_record_headed_regions_with_base_copy`
+  - `crates/arcana-ir/src/lib.rs`
+  - `lower_workspace_package_with_resolution_collects_record_copied_fields`
   - `crates/arcana-runtime/src/tests.rs`
   - `execute_main_consumes_named_recycle_owner_exits`
   - `execute_main_runs_bind_recovery_regions`
   - `execute_main_runs_bind_require_loop_exits`
   - `execute_main_construct_regions_preserve_direct_values_and_payload_acquisition`
+  - `execute_main_runs_record_headed_regions_with_base_copy`
+  - `execute_main_runs_record_headed_regions_with_cross_record_lift`
 
 ### Minimal example
 
 ```arc
 bind -return 0
     let value = Result.Ok[Int, Str] :: 1 :: call
+```
+
+```arc
+let next = record yield Widget from base -return 0
+    ready = true
 ```
 
 ## Cleanup Footers

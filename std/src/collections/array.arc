@@ -1,5 +1,8 @@
 import std.kernel.collections
 
+export fn empty[T]() -> Array[T]:
+    return std.kernel.collections.array_from_list[T] :: (std.collections.list.new[T] :: :: call) :: call
+
 export fn new[T](len: Int, fill: T) -> Array[T]:
     return std.kernel.collections.array_new[T] :: len, fill :: call
 

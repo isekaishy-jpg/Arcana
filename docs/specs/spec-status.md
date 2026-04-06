@@ -61,6 +61,7 @@ This document defines how Arcana spec files are interpreted during the rewrite.
 - `docs/specs/grimoires/grimoires/v1-status.md`
 - `docs/specs/grimoires/arcana-text/v1-scope.md`
 - `docs/specs/grimoires/arcana-text/v1-status.md`
+- `docs/specs/os-bindings/os-bindings/v1-scope.md`
 - `docs/specs/headed-regions/headed-regions/v1-scope.md`
 - `docs/specs/selfhost-host/selfhost-host/v1-scope.md`
 - `docs/specs/selfhost-host/selfhost-host/app-substrate-v1-scope.md`
@@ -128,4 +129,5 @@ This document defines how Arcana spec files are interpreted during the rewrite.
 - `std.app` fixed-step helpers and `std.tooling` planner helpers are carried convenience layers, not rewrite-approved first-party architecture unless a scope doc explicitly ratifies them.
 - Every std or Arcana-owned grimoire surface change must update the corresponding scope or status ledger in the same patch.
 - Public native ABI/product work should treat `crates/arcana-cabi` as the contract owner; generated headers, runtime JSON ABI, and native bundle manifests are projections of that contract rather than independent ABI authorities.
+- Package-owned native OS seams now use the approved `binding` native-product role plus `native fn` / `native callback`; keep that work generic and route higher-level grimoires through binding packages such as `arcana_winapi` instead of reviving provider-style package hacks or runtime special cases.
 - Generated direct-emit snapshot files and similar carried artifacts are migration corpus, not primary rewrite authority; do not let them outweigh approved docs or `crates/*` during review.

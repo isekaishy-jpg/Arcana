@@ -1,0 +1,32 @@
+[package]
+name = "arcana-winapi"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[lib]
+name = "arcwinapi"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+arcana-cabi.workspace = true
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_WindowsAndMessaging",
+] }
+winapi = { version = "0.3", features = [
+    "basetsd",
+    "dcommon",
+    "dwrite",
+    "guiddef",
+    "minwindef",
+    "unknwnbase",
+    "windef",
+    "wingdi",
+    "winerror",
+    "winnt",
+] }

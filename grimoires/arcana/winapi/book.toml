@@ -1,0 +1,11 @@
+name = "arcana_winapi"
+kind = "lib"
+
+[native.products.default]
+kind = "dll"
+role = "binding"
+producer = "rust-cdylib"
+file = "arcwinapi.dll"
+contract = "arcana.cabi.binding.v1"
+rust_cdylib_crate = "../../../crates/arcana-winapi"
+sidecars = []

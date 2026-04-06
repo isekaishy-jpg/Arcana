@@ -99,16 +99,16 @@ record ParsedBuildSection:
     target: Str
 
 fn empty_name_values() -> List[std.manifest.NameValue]:
-    return std.collections.list.new[std.manifest.NameValue] :: :: call
+    return std.collections.list.empty[std.manifest.NameValue] :: :: call
 
 fn empty_name_lists() -> List[std.manifest.NameList]:
-    return std.collections.list.new[std.manifest.NameList] :: :: call
+    return std.collections.list.empty[std.manifest.NameList] :: :: call
 
 fn empty_build_entries() -> List[std.manifest.LockBuildEntry]:
-    return std.collections.list.new[std.manifest.LockBuildEntry] :: :: call
+    return std.collections.list.empty[std.manifest.LockBuildEntry] :: :: call
 
 fn empty_strings() -> List[Str]:
-    return std.collections.list.new[Str] :: :: call
+    return std.collections.list.empty[Str] :: :: call
 
 fn empty_config_doc() -> std.config.ConfigDoc:
     return std.config.empty_document :: :: call

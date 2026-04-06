@@ -1491,6 +1491,16 @@ fn infer_expr_value_type(
     {
         return Some(ty.clone());
     }
+    if let HirExpr::ConstructRegion(region) = expr
+        && let Some(path) = flatten_callable_expr_path(&region.target)
+    {
+        return resolve_construct_result_type(workspace, resolved_module, &path);
+    }
+    if let HirExpr::RecordRegion(region) = expr
+        && let Some(path) = flatten_callable_expr_path(&region.target)
+    {
+        return resolve_record_result_type(workspace, resolved_module, &path);
+    }
     infer_receiver_expr_type(workspace, resolved_module, scope, expr)
         .or_else(|| infer_expr_type(expr).and_then(builtin_scalar_expr_type))
 }
@@ -2433,6 +2443,80 @@ fn validate_expr_borrow_flow_inner(
                 }
             }
         }
+        HirExpr::RecordRegion(region) => {
+            validate_expr_borrow_flow_inner(
+                workspace,
+                resolved_module,
+                type_scope,
+                module_path,
+                scope,
+                &region.target,
+                span,
+                state,
+                false,
+                diagnostics,
+            );
+            if let Some(base) = &region.base {
+                validate_expr_borrow_flow_inner(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    module_path,
+                    scope,
+                    base,
+                    span,
+                    state,
+                    false,
+                    diagnostics,
+                );
+            }
+            if let Some(modifier) = &region.default_modifier
+                && let Some(payload) = &modifier.payload
+            {
+                validate_expr_borrow_flow_inner(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    module_path,
+                    scope,
+                    payload,
+                    span,
+                    state,
+                    false,
+                    diagnostics,
+                );
+            }
+            for line in &region.lines {
+                validate_expr_borrow_flow_inner(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    module_path,
+                    scope,
+                    &line.value,
+                    line.span,
+                    state,
+                    false,
+                    diagnostics,
+                );
+                if let Some(modifier) = &line.modifier
+                    && let Some(payload) = &modifier.payload
+                {
+                    validate_expr_borrow_flow_inner(
+                        workspace,
+                        resolved_module,
+                        type_scope,
+                        module_path,
+                        scope,
+                        payload,
+                        line.span,
+                        state,
+                        false,
+                        diagnostics,
+                    );
+                }
+            }
+        }
         HirExpr::Chain { steps, .. } => {
             for step in steps {
                 validate_expr_borrow_flow_inner(
@@ -2898,6 +2982,25 @@ fn collect_expr_local_borrows(
                 }
             }
         }
+        HirExpr::RecordRegion(region) => {
+            collect_expr_local_borrows(&region.target, scope, borrows);
+            if let Some(base) = &region.base {
+                collect_expr_local_borrows(base, scope, borrows);
+            }
+            if let Some(modifier) = &region.default_modifier
+                && let Some(payload) = &modifier.payload
+            {
+                collect_expr_local_borrows(payload, scope, borrows);
+            }
+            for line in &region.lines {
+                collect_expr_local_borrows(&line.value, scope, borrows);
+                if let Some(modifier) = &line.modifier
+                    && let Some(payload) = &modifier.payload
+                {
+                    collect_expr_local_borrows(payload, scope, borrows);
+                }
+            }
+        }
         HirExpr::Chain { steps, .. } => {
             for step in steps {
                 collect_expr_local_borrows(&step.stage, scope, borrows);
@@ -3126,6 +3229,53 @@ fn note_expr_moves(
                 }
             }
         }
+        HirExpr::RecordRegion(region) => {
+            note_expr_moves(
+                workspace,
+                resolved_module,
+                type_scope,
+                scope,
+                &region.target,
+                state,
+            );
+            if let Some(base) = &region.base {
+                note_expr_moves(workspace, resolved_module, type_scope, scope, base, state);
+            }
+            if let Some(modifier) = &region.default_modifier
+                && let Some(payload) = &modifier.payload
+            {
+                note_expr_moves(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    scope,
+                    payload,
+                    state,
+                );
+            }
+            for line in &region.lines {
+                note_expr_moves(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    scope,
+                    &line.value,
+                    state,
+                );
+                if let Some(modifier) = &line.modifier
+                    && let Some(payload) = &modifier.payload
+                {
+                    note_expr_moves(
+                        workspace,
+                        resolved_module,
+                        type_scope,
+                        scope,
+                        payload,
+                        state,
+                    );
+                }
+            }
+        }
         HirExpr::Chain { steps, .. } => {
             for step in steps {
                 note_expr_moves(
@@ -3242,6 +3392,25 @@ fn collect_returned_local_borrows(
         }
         HirExpr::ConstructRegion(region) => {
             collect_returned_local_borrows(&region.target, scope, roots);
+            if let Some(modifier) = &region.default_modifier
+                && let Some(payload) = &modifier.payload
+            {
+                collect_returned_local_borrows(payload, scope, roots);
+            }
+            for line in &region.lines {
+                collect_returned_local_borrows(&line.value, scope, roots);
+                if let Some(modifier) = &line.modifier
+                    && let Some(payload) = &modifier.payload
+                {
+                    collect_returned_local_borrows(payload, scope, roots);
+                }
+            }
+        }
+        HirExpr::RecordRegion(region) => {
+            collect_returned_local_borrows(&region.target, scope, roots);
+            if let Some(base) = &region.base {
+                collect_returned_local_borrows(base, scope, roots);
+            }
             if let Some(modifier) = &region.default_modifier
                 && let Some(payload) = &modifier.payload
             {
@@ -7747,6 +7916,64 @@ fn collect_deprecated_call_warnings_in_expr(
                 );
             }
         }
+        HirExpr::RecordRegion(region) => {
+            collect_deprecated_call_warnings_in_expr(
+                workspace,
+                resolved_module,
+                module_path,
+                type_scope,
+                scope,
+                &region.target,
+                span,
+                policy,
+                warnings,
+                diagnostics,
+            );
+            if let Some(base) = &region.base {
+                collect_deprecated_call_warnings_in_expr(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    scope,
+                    base,
+                    span,
+                    policy,
+                    warnings,
+                    diagnostics,
+                );
+            }
+            for line in &region.lines {
+                collect_deprecated_call_warnings_in_expr(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    scope,
+                    &line.value,
+                    span,
+                    policy,
+                    warnings,
+                    diagnostics,
+                );
+            }
+            if let Some(arcana_hir::HirConstructDestination::Place { target }) = &region.destination
+            {
+                let expr = assign_target_to_expr(target);
+                collect_deprecated_call_warnings_in_expr(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    scope,
+                    &expr,
+                    span,
+                    policy,
+                    warnings,
+                    diagnostics,
+                );
+            }
+        }
         HirExpr::Chain { steps, .. } => {
             for step in steps {
                 collect_deprecated_call_warnings_in_expr(
@@ -8184,6 +8411,7 @@ fn collect_deprecated_call_warnings_in_statements(
             ),
             HirStatementKind::Recycle { .. }
             | HirStatementKind::Bind { .. }
+            | HirStatementKind::Record(_)
             | HirStatementKind::Construct(_)
             | HirStatementKind::MemorySpec(_)
             | HirStatementKind::Break
@@ -9212,6 +9440,206 @@ fn validate_construct_region_semantics(
                     });
                 }
             }
+        }
+    }
+}
+
+fn validate_record_region_semantics(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    module_path: &Path,
+    type_scope: &TypeScope,
+    scope: &ValueScope,
+    expected_return_type: Option<&HirType>,
+    region: &arcana_hir::HirRecordRegion,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if region.default_modifier.is_none() {
+        diagnostics.push(Diagnostic {
+            path: module_path.to_path_buf(),
+            line: region.span.line,
+            column: region.span.column,
+            message: "record requires a default modifier in v1".to_string(),
+        });
+    }
+    let Some(target_path) = flatten_callable_expr_path(&region.target) else {
+        diagnostics.push(Diagnostic {
+            path: module_path.to_path_buf(),
+            line: region.span.line,
+            column: region.span.column,
+            message: "record target must be a path-like record reference".to_string(),
+        });
+        return;
+    };
+    let Some(fields) = resolve_record_target_fields(workspace, resolved_module, &target_path) else {
+        diagnostics.push(Diagnostic {
+            path: module_path.to_path_buf(),
+            line: region.span.line,
+            column: region.span.column,
+            message: format!(
+                "record target `{}` must resolve to a record",
+                target_path.join(".")
+            ),
+        });
+        return;
+    };
+    if let Some(arcana_hir::HirConstructDestination::Place { target }) = &region.destination {
+        let expected_ty = resolve_record_result_type(workspace, resolved_module, &target_path);
+        let actual_ty =
+            infer_assign_target_value_type(workspace, resolved_module, type_scope, scope, target)
+                .and_then(|ty| canonicalize_local_hir_type(workspace, resolved_module, &ty));
+        match (expected_ty, actual_ty) {
+            (Some(expected_ty), Some(actual_ty))
+                if canonical_hir_type_key(workspace, resolved_module, &expected_ty)
+                    != canonical_hir_type_key(workspace, resolved_module, &actual_ty) =>
+            {
+                diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: region.span.line,
+                    column: region.span.column,
+                    message: format!(
+                        "record place target type `{}` does not match record result type `{}`",
+                        actual_ty.render(),
+                        expected_ty.render()
+                    ),
+                });
+            }
+            (Some(_), None) => {
+                diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: region.span.line,
+                    column: region.span.column,
+                    message: "record place target must have a known type in v1".to_string(),
+                });
+            }
+            _ => {}
+        }
+    }
+    if let Some(arcana_hir::HirConstructDestination::Deliver { name }) = &region.destination
+        && scope.contains(name)
+    {
+        diagnostics.push(Diagnostic {
+            path: module_path.to_path_buf(),
+            line: region.span.line,
+            column: region.span.column,
+            message: format!("record deliver binding `{name}` already exists in this scope"),
+        });
+    }
+
+    let base_fields = region
+        .base
+        .as_ref()
+        .and_then(|base| infer_expr_value_type(workspace, resolved_module, type_scope, scope, base))
+        .and_then(|ty| canonicalize_local_hir_type(workspace, resolved_module, &ty))
+        .and_then(|ty| resolve_record_fields_for_type(workspace, resolved_module, &ty));
+
+    if region.base.is_some() && base_fields.is_none() {
+        diagnostics.push(Diagnostic {
+            path: module_path.to_path_buf(),
+            line: region.span.line,
+            column: region.span.column,
+            message: "record base must have a known record type in v1".to_string(),
+        });
+    }
+
+    let mut seen = BTreeSet::new();
+    for line in &region.lines {
+        if !seen.insert(line.name.clone()) {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: line.span.line,
+                column: line.span.column,
+                message: format!("record field `{}` is provided more than once", line.name),
+            });
+        }
+        let Some(field_ty) = fields.get(&line.name) else {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: line.span.line,
+                column: line.span.column,
+                message: format!(
+                    "record field `{}` does not exist on `{}`",
+                    line.name,
+                    target_path.join(".")
+                ),
+            });
+            continue;
+        };
+        let modifier = line.modifier.as_ref().or(region.default_modifier.as_ref());
+        validate_construct_contribution_semantics(
+            workspace,
+            resolved_module,
+            module_path,
+            type_scope,
+            scope,
+            expected_return_type,
+            line,
+            &format!("{}.{}", target_path.join("."), line.name),
+            field_ty,
+            modifier,
+            diagnostics,
+        );
+        if let Some(modifier) = modifier
+            && matches!(
+                modifier.kind,
+                arcana_hir::HirHeadedModifierKind::Keyword(HeadedModifierKeyword::Skip)
+            )
+            && type_option_payload(field_ty).is_none()
+        {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: modifier.span.line,
+                column: modifier.span.column,
+                message: format!(
+                    "record `-skip` is only valid for Option fields; `{}` is `{}`",
+                    line.name,
+                    field_ty.render()
+                ),
+            });
+        }
+    }
+
+    for (field_name, field_ty) in &fields {
+        if seen.contains(field_name) {
+            continue;
+        }
+        let exact_base_match = base_fields.as_ref().and_then(|base_fields| {
+            base_fields.get(field_name).filter(|base_ty| {
+                canonical_hir_type_key(workspace, resolved_module, base_ty)
+                    == canonical_hir_type_key(workspace, resolved_module, field_ty)
+            })
+        });
+        if exact_base_match.is_some() {
+            continue;
+        }
+        if let Some(base_ty) = base_fields.as_ref().and_then(|base_fields| base_fields.get(field_name))
+            && canonical_hir_type_key(workspace, resolved_module, base_ty)
+                != canonical_hir_type_key(workspace, resolved_module, field_ty)
+            && type_option_payload(field_ty).is_none()
+        {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: region.span.line,
+                column: region.span.column,
+                message: format!(
+                    "record base field `{field_name}` has incompatible type `{}` for target `{}` field `{}`",
+                    base_ty.render(),
+                    target_path.join("."),
+                    field_ty.render()
+                ),
+            });
+            continue;
+        }
+        if type_option_payload(field_ty).is_none() {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: region.span.line,
+                column: region.span.column,
+                message: format!(
+                    "record target `{}` is missing required field `{field_name}`",
+                    target_path.join(".")
+                ),
+            });
         }
     }
 }
@@ -10814,6 +11242,23 @@ fn resolve_construct_target_shape(
     })
 }
 
+fn resolve_record_target_fields(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    path: &[String],
+) -> Option<BTreeMap<String, HirType>> {
+    let resolved = lookup_symbol_path(workspace, resolved_module, path)?;
+    let HirSymbolBody::Record { fields } = &resolved.symbol.body else {
+        return None;
+    };
+    Some(
+        fields
+            .iter()
+            .map(|field| (field.name.clone(), field.ty.clone()))
+            .collect(),
+    )
+}
+
 fn resolve_construct_result_type(
     workspace: &HirWorkspaceSummary,
     resolved_module: &HirResolvedModule,
@@ -10831,6 +11276,34 @@ fn resolve_construct_result_type(
         &canonical_path,
         Span::default(),
     ))
+}
+
+fn resolve_record_result_type(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    path: &[String],
+) -> Option<HirType> {
+    resolve_record_target_fields(workspace, resolved_module, path)?;
+    Some(canonical_type_from_path(
+        workspace,
+        resolved_module,
+        path,
+        Span::default(),
+    ))
+}
+
+fn resolve_record_fields_for_type(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    ty: &HirType,
+) -> Option<BTreeMap<String, HirType>> {
+    let path = match &ty.kind {
+        arcana_hir::HirTypeKind::Path(path) | arcana_hir::HirTypeKind::Apply { base: path, .. } => {
+            &path.segments
+        }
+        _ => return None,
+    };
+    resolve_record_target_fields(workspace, resolved_module, path)
 }
 
 fn canonicalize_local_hir_type(
@@ -13227,6 +13700,157 @@ fn validate_statement_block_semantics(
                     borrow_state.clear_local(name);
                 }
             }
+            HirStatementKind::Record(region) => {
+                let mut region_scope = scope.clone();
+                region_scope.headed_region_depth += 1;
+                validate_expr_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    &region_scope,
+                    &region.target,
+                    region.span,
+                    diagnostics,
+                );
+                if let Some(base) = &region.base {
+                    validate_expr_semantics(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        type_scope,
+                        &region_scope,
+                        base,
+                        region.span,
+                        diagnostics,
+                    );
+                }
+                if let Some(arcana_hir::HirConstructDestination::Place { target }) =
+                    &region.destination
+                {
+                    validate_assign_target_semantics(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        type_scope,
+                        scope,
+                        target,
+                        region.span,
+                        diagnostics,
+                    );
+                    validate_assign_target_borrow_flow(
+                        workspace,
+                        resolved_module,
+                        type_scope,
+                        module_path,
+                        scope,
+                        target,
+                        region.span,
+                        borrow_state,
+                        diagnostics,
+                    );
+                }
+                if let Some(modifier) = &region.default_modifier
+                    && let Some(payload) = &modifier.payload
+                {
+                    validate_expr_semantics(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        type_scope,
+                        &region_scope,
+                        payload,
+                        region.span,
+                        diagnostics,
+                    );
+                    validate_return_modifier_payload_type(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        type_scope,
+                        &region_scope,
+                        modifier,
+                        expected_return_type,
+                        "`record -return` payload",
+                        diagnostics,
+                    );
+                }
+                for line in &region.lines {
+                    validate_expr_semantics(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        type_scope,
+                        &region_scope,
+                        &line.value,
+                        line.span,
+                        diagnostics,
+                    );
+                    if let Some(modifier) = &line.modifier
+                        && let Some(payload) = &modifier.payload
+                    {
+                        validate_expr_semantics(
+                            workspace,
+                            resolved_module,
+                            module_path,
+                            type_scope,
+                            &region_scope,
+                            payload,
+                            line.span,
+                            diagnostics,
+                        );
+                        validate_return_modifier_payload_type(
+                            workspace,
+                            resolved_module,
+                            module_path,
+                            type_scope,
+                            &region_scope,
+                            modifier,
+                            expected_return_type,
+                            "`record -return` payload",
+                            diagnostics,
+                        );
+                    }
+                }
+                validate_record_region_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    &region_scope,
+                    expected_return_type,
+                    region,
+                    diagnostics,
+                );
+                if let Some(arcana_hir::HirConstructDestination::Deliver { name }) =
+                    &region.destination
+                {
+                    let delivered_ty =
+                        flatten_callable_expr_path(&region.target).and_then(|path| {
+                            resolve_record_result_type(workspace, resolved_module, &path)
+                        });
+                    let ownership = delivered_ty
+                        .as_ref()
+                        .map(|ty| infer_type_ownership(workspace, resolved_module, type_scope, ty))
+                        .unwrap_or_default();
+                    borrow_state.clear_local(name);
+                    scope.insert_typed(name, false, ownership, delivered_ty);
+                    activate_current_cleanup_binding(
+                        workspace,
+                        resolved_module,
+                        borrow_state,
+                        scope,
+                        current_block_cleanup_policy,
+                        name,
+                    );
+                }
+                if let Some(arcana_hir::HirConstructDestination::Place { target }) =
+                    &region.destination
+                    && let Some(name) = assign_target_root_local(target, scope)
+                {
+                    borrow_state.clear_local(name);
+                }
+            }
             HirStatementKind::MemorySpec(spec) => {
                 let mut region_scope = scope.clone();
                 region_scope.headed_region_depth += 1;
@@ -13631,6 +14255,126 @@ fn validate_expr_semantics(
                 }
             }
             validate_construct_region_semantics(
+                workspace,
+                resolved_module,
+                module_path,
+                type_scope,
+                &region_scope,
+                scope.enclosing_return_type.as_ref(),
+                region,
+                diagnostics,
+            );
+        }
+        HirExpr::RecordRegion(region) => {
+            if scope.headed_region_depth > 0 {
+                diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: span.line,
+                    column: span.column,
+                    message: "headed regions cannot nest inside another headed region in v1"
+                        .to_string(),
+                });
+            }
+            let mut region_scope = scope.clone();
+            region_scope.headed_region_depth += 1;
+            validate_expr_semantics(
+                workspace,
+                resolved_module,
+                module_path,
+                type_scope,
+                &region_scope,
+                &region.target,
+                span,
+                diagnostics,
+            );
+            if let Some(base) = &region.base {
+                validate_expr_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    &region_scope,
+                    base,
+                    span,
+                    diagnostics,
+                );
+            }
+            if let Some(arcana_hir::HirConstructDestination::Place { target }) = &region.destination
+            {
+                validate_assign_target_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    scope,
+                    target,
+                    span,
+                    diagnostics,
+                );
+            }
+            if let Some(modifier) = &region.default_modifier
+                && let Some(payload) = &modifier.payload
+            {
+                validate_expr_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    &region_scope,
+                    payload,
+                    span,
+                    diagnostics,
+                );
+                validate_return_modifier_payload_type(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    &region_scope,
+                    modifier,
+                    scope.enclosing_return_type.as_ref(),
+                    "`record -return` payload",
+                    diagnostics,
+                );
+            }
+            for line in &region.lines {
+                validate_expr_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    &region_scope,
+                    &line.value,
+                    line.span,
+                    diagnostics,
+                );
+                if let Some(modifier) = &line.modifier
+                    && let Some(payload) = &modifier.payload
+                {
+                    validate_expr_semantics(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        type_scope,
+                        &region_scope,
+                        payload,
+                        line.span,
+                        diagnostics,
+                    );
+                    validate_return_modifier_payload_type(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        type_scope,
+                        &region_scope,
+                        modifier,
+                        scope.enclosing_return_type.as_ref(),
+                        "`record -return` payload",
+                        diagnostics,
+                    );
+                }
+            }
+            validate_record_region_semantics(
                 workspace,
                 resolved_module,
                 module_path,
@@ -19666,6 +20410,51 @@ mod tests {
             ),
             (
                 concat!(
+                    "record Widget:\n",
+                    "    value: Int\n",
+                    "    maybe: Option[Int]\n",
+                    "enum Option[T]:\n",
+                    "    Some(T)\n",
+                    "    None\n",
+                    "record Other:\n",
+                    "    value: Str\n",
+                    "fn main() -> Int:\n",
+                    "    let base = Other :: value = \"x\" :: call\n",
+                    "    let built = record yield Widget from base -return 0\n",
+                    "        maybe = Option.None[Int] :: :: call\n",
+                    "    return 0\n",
+                ),
+                "record base field `value` has incompatible type `Str` for target `Widget` field `Int`",
+            ),
+            (
+                concat!(
+                    "record Widget:\n",
+                    "    value: Int\n",
+                    "fn main() -> Int:\n",
+                    "    let base = 1\n",
+                    "    let built = record yield Widget from base -return 0\n",
+                    "        value = 1\n",
+                    "    return 0\n",
+                ),
+                "record base must have a known record type in v1",
+            ),
+            (
+                concat!(
+                    "record Widget:\n",
+                    "    value: Int\n",
+                    "    maybe: Option[Int]\n",
+                    "enum Option[T]:\n",
+                    "    Some(T)\n",
+                    "    None\n",
+                    "fn main() -> Int:\n",
+                    "    let built = record yield Widget -return 0\n",
+                    "        payload = 1\n",
+                    "    return 0\n",
+                ),
+                "`record` does not accept `payload = ...` contributions",
+            ),
+            (
+                concat!(
                     "enum Result[T, E]:\n",
                     "    Ok(T)\n",
                     "    Err(E)\n",
@@ -19794,6 +20583,20 @@ mod tests {
                     "    return 0\n",
                 ),
                 "construct place target type `headed_region_semantic_violation.Other` does not match constructor result type `headed_region_semantic_violation.Widget`",
+            ),
+            (
+                concat!(
+                    "record Widget:\n",
+                    "    value: Int\n",
+                    "record Other:\n",
+                    "    value: Int\n",
+                    "fn main() -> Int:\n",
+                    "    let target = Other :: value = 0 :: call\n",
+                    "    record place Widget -> target -return 0\n",
+                    "        value = 1\n",
+                    "    return 0\n",
+                ),
+                "record place target type `headed_region_semantic_violation.Other` does not match record result type `headed_region_semantic_violation.Widget`",
             ),
             (
                 concat!(
@@ -19982,6 +20785,42 @@ mod tests {
             ],
         );
         check_path(&root).expect("same-region headed bindings should check");
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_accepts_record_headed_regions_with_base_copy() {
+        let root = make_temp_package(
+            "record_headed_region_positive",
+            "app",
+            &[],
+            &[(
+                "src/shelf.arc",
+                concat!(
+                    "record Widget:\n",
+                    "    value: Int\n",
+                    "    maybe: Option[Int]\n",
+                    "enum Option[T]:\n",
+                    "    Some(T)\n",
+                    "    None\n",
+                    "fn main() -> Int:\n",
+                    "    let base = construct yield Widget -return 0\n",
+                    "        value = 1\n",
+                    "        maybe = Option.None[Int] :: :: call\n",
+                    "    let built = record yield Widget from base -return 0\n",
+                    "        value = 2\n",
+                    "    record deliver Widget from built -> mirrored -return 0\n",
+                    "        maybe = Option.Some[Int] :: 9 :: call\n",
+                    "    let mut placed = construct yield Widget -return 0\n",
+                    "        value = 0\n",
+                    "        maybe = Option.None[Int] :: :: call\n",
+                    "    record place Widget from mirrored -> placed -return 0\n",
+                    "        value = mirrored.value\n",
+                    "    return placed.value\n",
+                ),
+            ), ("src/types.arc", "")],
+        );
+        check_path(&root).expect("record headed regions should check");
         fs::remove_dir_all(root).expect("cleanup should succeed");
     }
 

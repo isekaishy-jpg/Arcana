@@ -280,12 +280,11 @@ fn render_member_dependency_setting_rows(member: &WorkspaceMember) -> Vec<String
             let mut native_plugins = spec.native_plugins.clone();
             native_plugins.sort();
             format!(
-                "dep_setting:alias={alias}|package={package_name}|package_id={package_id}|source={:?}|source_label={}|native_delivery={}|native_child={}|native_provider={}|native_plugins={}|executable_forewords={}",
+                "dep_setting:alias={alias}|package={package_name}|package_id={package_id}|source={:?}|source_label={}|native_delivery={}|native_child={}|native_plugins={}|executable_forewords={}",
                 spec.source.kind(),
                 spec.source.location_label(),
                 spec.native_delivery.as_str(),
                 spec.native_child.as_deref().unwrap_or(""),
-                spec.native_provider.as_deref().unwrap_or(""),
                 native_plugins.join(","),
                 spec.executable_forewords
             )
@@ -503,14 +502,13 @@ fn render_member_native_product_rows(member: &WorkspaceMember) -> PackageResult<
     let mut rows = Vec::new();
     for (name, product) in &member.native_products {
         rows.push(format!(
-            "native_product:name={name}|kind={}|role={}|producer={}|file={}|contract={}|rust_cdylib_crate={}|provider_dir={}",
+            "native_product:name={name}|kind={}|role={}|producer={}|file={}|contract={}|rust_cdylib_crate={}",
             product.kind,
             product.role.as_str(),
             product.producer.as_str(),
             product.file,
             product.contract,
-            product.rust_cdylib_crate.as_deref().unwrap_or(""),
-            product.provider_dir.as_deref().unwrap_or("")
+            product.rust_cdylib_crate.as_deref().unwrap_or("")
         ));
         for sidecar in &product.sidecars {
             rows.push(format!(

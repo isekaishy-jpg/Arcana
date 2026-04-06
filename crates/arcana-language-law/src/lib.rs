@@ -1,6 +1,7 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum HeadedRegionHead {
     Recycle,
+    Record,
     Construct,
     Bind,
     Memory,
@@ -10,6 +11,7 @@ impl HeadedRegionHead {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Recycle => "recycle",
+            Self::Record => "record",
             Self::Construct => "construct",
             Self::Bind => "bind",
             Self::Memory => "Memory",
@@ -19,6 +21,7 @@ impl HeadedRegionHead {
     pub fn parse(text: &str) -> Option<Self> {
         match text {
             "recycle" => Some(Self::Recycle),
+            "record" => Some(Self::Record),
             "construct" => Some(Self::Construct),
             "bind" => Some(Self::Bind),
             "Memory" => Some(Self::Memory),

@@ -296,6 +296,7 @@ fn canonical_native_type_name(ty: &NativeAbiType) -> String {
         NativeAbiType::Bool => "Bool".to_string(),
         NativeAbiType::Str => "Str".to_string(),
         NativeAbiType::Bytes => "Array[Int]".to_string(),
+        NativeAbiType::Opaque(name) => name.clone(),
         NativeAbiType::Unit => "Unit".to_string(),
         NativeAbiType::Pair(left, right) => {
             format!(
@@ -366,7 +367,7 @@ fn parse_native_type(ty: &IrRoutineType) -> Result<NativeAbiType, String> {
             Some("Bool") => Ok(NativeAbiType::Bool),
             Some("Str") => Ok(NativeAbiType::Str),
             Some("Unit") => Ok(NativeAbiType::Unit),
-            _ => Err(format!("unsupported native abi type `{}`", ty.render())),
+            _ => Ok(NativeAbiType::Opaque(ty.render())),
         },
         IrRoutineTypeKind::Apply { base, args } => match base.root_name() {
             Some("Pair") if args.len() == 2 => Ok(NativeAbiType::Pair(

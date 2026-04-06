@@ -131,6 +131,7 @@ pub const FROZEN_AST_NODE_KINDS: &[&str] = &[
     "HeadedModifier",
     "RecycleLine",
     "BindLine",
+    "RecordRegion",
     "ConstructRegion",
     "ConstructLine",
     "MemorySpecDecl",

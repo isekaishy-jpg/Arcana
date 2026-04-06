@@ -256,6 +256,15 @@ fn validate_surface_row_payload(row: &str) -> Result<(), String> {
         }
         return Ok(());
     }
+    if let Some(signature) = row.strip_prefix("native_callback:") {
+        if signature.is_empty() {
+            return Err(format!(
+                "native callback surface row `{row}` is missing a signature"
+            ));
+        }
+        validate_surface_text_encoding(signature)?;
+        return Ok(());
+    }
     Err(format!("unsupported exported surface row `{row}`"))
 }
 
