@@ -8,8 +8,9 @@ use arcana_aot::{
 };
 use arcana_cabi::ArcanaCabiProductRole;
 use arcana_hir::{
-    HirForewordAdapterProduct, HirWorkspacePackage, HirWorkspaceSummary, build_package_layout,
-    build_package_summary, build_workspace_summary, derive_source_module_path, lower_module_text,
+    HirForewordAdapterProduct, HirNativeProductSummary, HirWorkspacePackage, HirWorkspaceSummary,
+    build_package_layout, build_package_summary, build_workspace_summary,
+    derive_source_module_path, lower_module_text,
 };
 use pathdiff::diff_paths;
 
@@ -384,7 +385,6 @@ impl DependencySpec {
             NativeDependencyDelivery::Baked => None,
         })
     }
-
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1526,6 +1526,7 @@ pub fn load_workspace_hir_from_graph(
             resolve_manifest_dependency_ids(&root_dir, &root_manifest)?,
         )?;
         package.executable_foreword_deps = executable_foreword_aliases(&root_manifest.deps);
+        package.native_products = lower_native_products(&root_manifest.native_products);
         package.foreword_products = lower_foreword_products(&root_manifest.foreword_products);
         attach_implicit_std_dependency(&mut package, implicit_std.as_ref());
         packages.push(package);
@@ -1541,6 +1542,7 @@ pub fn load_workspace_hir_from_graph(
             member.direct_dep_ids.clone(),
         )?;
         package.executable_foreword_deps = executable_foreword_aliases(&member.direct_dep_specs);
+        package.native_products = lower_native_products(&member.native_products);
         package.foreword_products = lower_foreword_products(&member.foreword_products);
         attach_implicit_std_dependency(&mut package, implicit_std.as_ref());
         packages.push(package);
@@ -1558,6 +1560,7 @@ pub fn load_workspace_hir_from_graph(
                 &manifest.kind,
                 BTreeSet::new(),
             )?;
+            package.native_products = lower_native_products(&manifest.native_products);
             package.foreword_products = lower_foreword_products(&manifest.foreword_products);
             packages.push(package);
         }
@@ -1621,6 +1624,24 @@ fn lower_foreword_products(
         .collect()
 }
 
+fn lower_native_products(
+    products: &BTreeMap<String, NativeProductSpec>,
+) -> BTreeMap<String, HirNativeProductSummary> {
+    products
+        .iter()
+        .map(|(name, product)| {
+            (
+                name.clone(),
+                HirNativeProductSummary {
+                    name: product.name.clone(),
+                    role: product.role.as_str().to_string(),
+                    producer: product.producer.as_str().to_string(),
+                },
+            )
+        })
+        .collect()
+}
+
 pub fn load_member_hir_package(member: &WorkspaceMember) -> PackageResult<HirWorkspacePackage> {
     let mut package = load_package_hir_with_dep_packages(
         &member.package_id,
@@ -1631,6 +1652,7 @@ pub fn load_member_hir_package(member: &WorkspaceMember) -> PackageResult<HirWor
         member.direct_dep_ids.clone(),
     )?;
     package.executable_foreword_deps = executable_foreword_aliases(&member.direct_dep_specs);
+    package.native_products = lower_native_products(&member.native_products);
     package.foreword_products = lower_foreword_products(&member.foreword_products);
     Ok(package)
 }
@@ -2798,6 +2820,12 @@ fn parse_native_products(
                 manifest_path.display()
             ));
         }
+        if product.contains_key("binding_support_crate") {
+            return Err(format!(
+                "native product `{name}` in `{}` cannot set `binding_support_crate`; arcana-source binding products are now self-hosted from package source",
+                manifest_path.display()
+            ));
+        }
         parsed.insert(
             name.clone(),
             NativeProductSpec {
@@ -3750,10 +3778,107 @@ mod tests {
         assert!(manifest_text.contains("role = \"binding\""));
         assert!(manifest_text.contains("contract_id = \"arcana.cabi.binding.v1\""));
         assert!(manifest_text.contains("contract_version = 1"));
-        assert!(manifest_text.contains("producer = \"rust-cdylib\""));
+        assert!(manifest_text.contains("producer = \"arcana-source\""));
         assert!(manifest_text.contains("sidecars = []"));
         assert!(manifest_text.contains("file_hash = \"sha256:"));
         assert!(manifest_text.contains("file = \"arcwinapi.dll\""));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stage_distribution_bundle_records_generated_binding_native_products() {
+        let dir = temp_dir("dist_windows_exe_generated_binding_product");
+        write_file(
+            &dir.join("book.toml"),
+            concat!(
+                "name = \"app\"\n",
+                "kind = \"app\"\n",
+                "[deps]\n",
+                "hostapi = { path = \"hostapi\" }\n",
+            ),
+        );
+        write_file(
+            &dir.join("src").join("shelf.arc"),
+            "fn main() -> Int:\n    return 0\n",
+        );
+        write_file(&dir.join("src").join("types.arc"), "// app types\n");
+
+        write_file(
+            &dir.join("hostapi").join("book.toml"),
+            concat!(
+                "name = \"hostapi\"\n",
+                "kind = \"lib\"\n",
+                "[native.products.default]\n",
+                "kind = \"dll\"\n",
+                "role = \"binding\"\n",
+                "producer = \"arcana-source\"\n",
+                "file = \"hostapi_binding.dll\"\n",
+                "contract = \"arcana.cabi.binding.v1\"\n",
+            ),
+        );
+        write_file(
+            &dir.join("hostapi").join("src").join("book.arc"),
+            concat!(
+                "export native fn fail_sample(read message: Str) -> Int = host.fail_sample\n",
+                "native callback report(read code: Int) -> Int = hostapi.callbacks.handle_report\n",
+                "shackle fn fail_sample_impl(read message: Str) -> Int = host.fail_sample:\n",
+                "    let _message = message;\n",
+                "    Err(\"sample failure\".to_string())\n",
+            ),
+        );
+        write_file(
+            &dir.join("hostapi").join("src").join("callbacks.arc"),
+            "fn handle_report(read code: Int) -> Int:\n    return code\n",
+        );
+        write_file(
+            &dir.join("hostapi").join("src").join("types.arc"),
+            "// host types\n",
+        );
+
+        let graph = load_workspace_graph(&dir).expect("load graph");
+        let order = plan_workspace(&graph).expect("plan");
+        let prepared = prepare_test_build(&graph);
+        let statuses = plan_build_for_target_with_context(
+            &graph,
+            &order,
+            &prepared,
+            None,
+            BuildTarget::windows_exe(),
+            &BuildExecutionContext::default(),
+        )
+        .expect("windows exe plan should build");
+        execute_build_with_context(
+            &graph,
+            &prepared,
+            &statuses,
+            &BuildExecutionContext::default(),
+        )
+        .expect("windows exe build should succeed");
+
+        let bundle_dir = default_distribution_dir(&graph, "app", &BuildTarget::windows_exe());
+        let bundle = stage_distribution_bundle(
+            &graph,
+            &statuses,
+            "app",
+            &BuildTarget::windows_exe(),
+            &bundle_dir,
+        )
+        .expect("distribution staging should succeed");
+        let manifest_text = &bundle.manifest_text;
+
+        assert!(bundle.bundle_dir.join("hostapi_binding.dll").is_file());
+        assert!(manifest_text.contains("[[native_products]]"));
+        assert!(manifest_text.contains("package_name = \"hostapi\""));
+        assert!(manifest_text.contains("product_name = \"default\""));
+        assert!(manifest_text.contains("role = \"binding\""));
+        assert!(manifest_text.contains("contract_id = \"arcana.cabi.binding.v1\""));
+        assert!(manifest_text.contains("contract_version = 1"));
+        assert!(manifest_text.contains("producer = \"arcana-source\""));
+        assert!(manifest_text.contains("sidecars = []"));
+        assert!(manifest_text.contains("file_hash = \"sha256:"));
+        assert!(manifest_text.contains("file = \"hostapi_binding.dll\""));
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -4296,6 +4421,58 @@ mod tests {
         assert_eq!(product.path, "forewords/adapter.cmd");
         assert_eq!(product.runner.as_deref(), Some("cmd"));
         assert_eq!(product.args, vec!["/c"]);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_manifest_accepts_arcana_source_binding_without_support_crate() {
+        let dir = temp_dir("manifest_binding_without_support_crate");
+        write_file(
+            &dir.join("book.toml"),
+            concat!(
+                "name = \"hostapi\"\n",
+                "kind = \"lib\"\n",
+                "[native.products.default]\n",
+                "kind = \"dll\"\n",
+                "role = \"binding\"\n",
+                "producer = \"arcana-source\"\n",
+                "file = \"hostapi.dll\"\n",
+                "contract = \"arcana.cabi.binding.v1\"\n",
+            ),
+        );
+
+        let manifest = parse_manifest(&dir.join("book.toml")).expect("manifest should parse");
+        let product = manifest
+            .native_products
+            .get("default")
+            .expect("binding product should exist");
+        assert_eq!(product.producer, NativeProductProducer::ArcanaSource);
+        assert_eq!(product.role, ArcanaCabiProductRole::Binding);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_manifest_rejects_binding_support_crate_field() {
+        let dir = temp_dir("manifest_binding_support_crate_rejected");
+        write_file(
+            &dir.join("book.toml"),
+            concat!(
+                "name = \"hostapi\"\n",
+                "kind = \"lib\"\n",
+                "[native.products.default]\n",
+                "kind = \"dll\"\n",
+                "role = \"binding\"\n",
+                "producer = \"arcana-source\"\n",
+                "file = \"hostapi.dll\"\n",
+                "contract = \"arcana.cabi.binding.v1\"\n",
+                "binding_support_crate = \"support\"\n",
+            ),
+        );
+
+        let err = parse_manifest(&dir.join("book.toml")).expect_err("manifest should reject");
+        assert!(err.contains("cannot set `binding_support_crate`"), "{err}");
 
         let _ = fs::remove_dir_all(&dir);
     }

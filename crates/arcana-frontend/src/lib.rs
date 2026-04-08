@@ -25,7 +25,7 @@ use arcana_hir::{
     HirSymbol, HirSymbolBody, HirSymbolKind, HirType, HirTypeKind, HirUnaryOp, HirWorkspacePackage,
     HirWorkspaceSummary, canonicalize_hir_type_in_module, collect_hir_type_refs,
     current_workspace_package_for_module, infer_receiver_expr_type,
-    lookup_method_candidates_for_hir_type, lower_module_text,
+    lookup_method_candidates_for_hir_type, lookup_shackle_decl_path, lower_module_text,
     match_name_resolves_to_zero_payload_variant, render_symbol_fingerprint,
     render_symbol_signature, resolve_workspace, visible_package_root_for_module,
 };
@@ -1433,6 +1433,90 @@ fn validate_package_lang_item_semantics(
     }
 }
 
+fn package_has_arcana_source_binding_product(package: &HirWorkspacePackage) -> bool {
+    package
+        .native_products
+        .values()
+        .any(|product| product.role == "binding" && product.producer == "arcana-source")
+}
+
+fn validate_module_shackle_semantics(
+    package: &HirWorkspacePackage,
+    module: &HirModuleSummary,
+    module_path: &Path,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if module.shackle_decls.is_empty() {
+        return;
+    }
+    if package_has_arcana_source_binding_product(package) {
+        return;
+    }
+    for decl in &module.shackle_decls {
+        diagnostics.push(Diagnostic {
+            path: module_path.to_path_buf(),
+            line: decl.span.line,
+            column: decl.span.column,
+            message: format!(
+                "shackle declaration `{}` requires package `{}` to declare an `arcana-source` binding native product",
+                decl.name, package.summary.package_name
+            ),
+        });
+    }
+}
+
+fn validate_module_native_callback_semantics(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    module: &HirModuleSummary,
+    module_path: &Path,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    for callback in &module.native_callbacks {
+        let Some(callback_type) = &callback.callback_type else {
+            continue;
+        };
+        let HirTypeKind::Path(path) = &callback_type.kind else {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: callback.span.line,
+                column: callback.span.column,
+                message: format!(
+                    "native callback `{}` callback type must be a shackle callback path",
+                    callback.name
+                ),
+            });
+            continue;
+        };
+        let Some(decl_ref) = lookup_shackle_decl_path(workspace, resolved_module, &path.segments)
+        else {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: callback.span.line,
+                column: callback.span.column,
+                message: format!(
+                    "native callback `{}` callback type `{}` does not resolve to a visible shackle callback",
+                    callback.name,
+                    callback_type.render()
+                ),
+            });
+            continue;
+        };
+        if decl_ref.decl.kind.as_str() != "callback" {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: callback.span.line,
+                column: callback.span.column,
+                message: format!(
+                    "native callback `{}` callback type `{}` must resolve to a shackle callback",
+                    callback.name,
+                    callback_type.render()
+                ),
+            });
+        }
+    }
+}
+
 fn infer_type_ownership(
     workspace: &HirWorkspaceSummary,
     resolved_module: &HirResolvedModule,
@@ -1667,7 +1751,10 @@ fn resolve_owner_activation_expr<'a>(
     }
     let owner =
         resolve_available_owner_binding(workspace, resolved_workspace, resolved_module, &path)?;
-    let invalid = if args.iter().any(|arg| matches!(arg, HirPhraseArg::Named { .. })) {
+    let invalid = if args
+        .iter()
+        .any(|arg| matches!(arg, HirPhraseArg::Named { .. }))
+    {
         Some("owner activation does not support named arguments".to_string())
     } else if args.len() > 1 {
         Some("owner activation accepts at most one context argument".to_string())
@@ -1759,8 +1846,7 @@ fn collect_qualified_phrase_param_exprs<'a>(
         arcana_hir::HirQualifiedPhraseQualifierKind::Call
             | arcana_hir::HirQualifiedPhraseQualifierKind::Weave
             | arcana_hir::HirQualifiedPhraseQualifierKind::Split
-    )
-        && let Some(param) = symbol.params.first()
+    ) && let Some(param) = symbol.params.first()
     {
         bindings.push((param, subject));
         next_positional = 1;
@@ -2094,8 +2180,7 @@ fn validate_call_param_mode_flow(
         return;
     };
 
-    for (param, expr) in
-        collect_qualified_phrase_param_exprs(symbol, subject, args, qualifier_kind)
+    for (param, expr) in collect_qualified_phrase_param_exprs(symbol, subject, args, qualifier_kind)
     {
         match param.mode {
             Some(arcana_hir::HirParamMode::Read) | None => {
@@ -2241,8 +2326,7 @@ fn note_qualified_phrase_moves(
         return;
     };
 
-    for (param, expr) in
-        collect_qualified_phrase_param_exprs(symbol, subject, args, qualifier_kind)
+    for (param, expr) in collect_qualified_phrase_param_exprs(symbol, subject, args, qualifier_kind)
     {
         if !matches!(param.mode, Some(arcana_hir::HirParamMode::Take)) {
             continue;
@@ -3564,10 +3648,10 @@ fn validate_opaque_constructor_semantics(
                     message: "`:: must` does not accept arguments".to_string(),
                 });
             }
-            if let Some(subject_ty) = infer_expr_value_type(workspace, resolved_module, type_scope, scope, subject)
+            if let Some(subject_ty) =
+                infer_expr_value_type(workspace, resolved_module, type_scope, scope, subject)
                 && type_option_payload(&subject_ty).is_none()
-                && type_result_payloads(&subject_ty)
-                    .is_none_or(|(_, err)| err.render() != "Str")
+                && type_result_payloads(&subject_ty).is_none_or(|(_, err)| err.render() != "Str")
             {
                 diagnostics.push(Diagnostic {
                     path: module_path.to_path_buf(),
@@ -3591,15 +3675,14 @@ fn validate_opaque_constructor_semantics(
                     path: module_path.to_path_buf(),
                     line: span.line,
                     column: span.column,
-                    message:
-                        "`:: fallback` expects exactly one positional fallback argument"
-                            .to_string(),
+                    message: "`:: fallback` expects exactly one positional fallback argument"
+                        .to_string(),
                 });
             }
-            if let Some(subject_ty) = infer_expr_value_type(workspace, resolved_module, type_scope, scope, subject)
+            if let Some(subject_ty) =
+                infer_expr_value_type(workspace, resolved_module, type_scope, scope, subject)
                 && type_option_payload(&subject_ty).is_none()
-                && type_result_payloads(&subject_ty)
-                    .is_none_or(|(_, err)| err.render() != "Str")
+                && type_result_payloads(&subject_ty).is_none_or(|(_, err)| err.render() != "Str")
             {
                 diagnostics.push(Diagnostic {
                     path: module_path.to_path_buf(),
@@ -9471,7 +9554,8 @@ fn validate_record_region_semantics(
         });
         return;
     };
-    let Some(fields) = resolve_record_target_fields(workspace, resolved_module, &target_path) else {
+    let Some(fields) = resolve_record_target_fields(workspace, resolved_module, &target_path)
+    else {
         diagnostics.push(Diagnostic {
             path: module_path.to_path_buf(),
             line: region.span.line,
@@ -9612,7 +9696,9 @@ fn validate_record_region_semantics(
         if exact_base_match.is_some() {
             continue;
         }
-        if let Some(base_ty) = base_fields.as_ref().and_then(|base_fields| base_fields.get(field_name))
+        if let Some(base_ty) = base_fields
+            .as_ref()
+            .and_then(|base_fields| base_fields.get(field_name))
             && canonical_hir_type_key(workspace, resolved_module, base_ty)
                 != canonical_hir_type_key(workspace, resolved_module, field_ty)
             && type_option_payload(field_ty).is_none()
@@ -9815,6 +9901,15 @@ fn validate_module_semantics(
         .module_path(&module.module_id)
         .cloned()
         .unwrap_or_else(|| package.root_dir.join("src").join("unknown.arc"));
+
+    validate_module_shackle_semantics(package, module, &module_path, diagnostics);
+    validate_module_native_callback_semantics(
+        workspace,
+        resolved_module,
+        module,
+        &module_path,
+        diagnostics,
+    );
 
     for lang_item in &module.lang_items {
         let Some(symbol_ref) =
@@ -11865,22 +11960,13 @@ fn collect_cleanup_footer_candidates_recursive(
                         collect_binding_pattern_names(&pattern, &mut names);
                     }
                     for binding_name in &names {
-                        body_scope.insert_typed(
-                            binding_name,
-                            *mutable,
-                            ownership,
-                            None,
-                        );
+                        body_scope.insert_typed(binding_name, *mutable, ownership, None);
                     }
                     names
                 });
                 if collect_bindings {
                     for inserted_name in inserted {
-                        push_cleanup_footer_candidate(
-                            &mut candidates,
-                            &body_scope,
-                            &inserted_name,
-                        );
+                        push_cleanup_footer_candidate(&mut candidates, &body_scope, &inserted_name);
                     }
                 }
             }
@@ -12045,7 +12131,11 @@ fn collect_cleanup_footer_candidates_recursive(
                 });
                 if nested_collect {
                     for binding_name in inserted {
-                        push_cleanup_footer_candidate(&mut candidates, &nested_scope, &binding_name);
+                        push_cleanup_footer_candidate(
+                            &mut candidates,
+                            &nested_scope,
+                            &binding_name,
+                        );
                     }
                 }
                 let mut ignored = Vec::new();
@@ -15415,7 +15505,10 @@ fn parse_binding_pattern(text: &str) -> Option<BindingPattern> {
 }
 
 fn binding_pattern_is_destructuring(text: &str) -> bool {
-    matches!(parse_binding_pattern(text), Some(BindingPattern::Pair(_, _)))
+    matches!(
+        parse_binding_pattern(text),
+        Some(BindingPattern::Pair(_, _))
+    )
 }
 
 fn collect_binding_pattern_names(pattern: &BindingPattern, names: &mut Vec<String>) {
@@ -17271,6 +17364,7 @@ mod tests {
             direct_deps: BTreeSet::new(),
             direct_dep_packages: BTreeMap::new(),
             direct_dep_ids: BTreeMap::new(),
+            native_products: BTreeMap::new(),
             executable_foreword_deps: BTreeSet::new(),
             foreword_products: BTreeMap::new(),
             summary: arcana_hir::HirPackageSummary {
@@ -17584,6 +17678,7 @@ mod tests {
             direct_deps: BTreeSet::new(),
             direct_dep_packages: BTreeMap::new(),
             direct_dep_ids: BTreeMap::new(),
+            native_products: BTreeMap::new(),
             executable_foreword_deps: BTreeSet::new(),
             foreword_products: BTreeMap::from([(
                 "tool-forewords".to_string(),
@@ -17611,6 +17706,7 @@ mod tests {
             direct_deps: BTreeSet::from(["tool.pkg".to_string()]),
             direct_dep_packages: BTreeMap::from([("tool".to_string(), "tool".to_string())]),
             direct_dep_ids: BTreeMap::from([("tool".to_string(), "tool.pkg".to_string())]),
+            native_products: BTreeMap::new(),
             executable_foreword_deps: BTreeSet::from(["tool".to_string()]),
             foreword_products: BTreeMap::new(),
             summary: arcana_hir::HirPackageSummary {
@@ -20794,31 +20890,34 @@ mod tests {
             "record_headed_region_positive",
             "app",
             &[],
-            &[(
-                "src/shelf.arc",
-                concat!(
-                    "record Widget:\n",
-                    "    value: Int\n",
-                    "    maybe: Option[Int]\n",
-                    "enum Option[T]:\n",
-                    "    Some(T)\n",
-                    "    None\n",
-                    "fn main() -> Int:\n",
-                    "    let base = construct yield Widget -return 0\n",
-                    "        value = 1\n",
-                    "        maybe = Option.None[Int] :: :: call\n",
-                    "    let built = record yield Widget from base -return 0\n",
-                    "        value = 2\n",
-                    "    record deliver Widget from built -> mirrored -return 0\n",
-                    "        maybe = Option.Some[Int] :: 9 :: call\n",
-                    "    let mut placed = construct yield Widget -return 0\n",
-                    "        value = 0\n",
-                    "        maybe = Option.None[Int] :: :: call\n",
-                    "    record place Widget from mirrored -> placed -return 0\n",
-                    "        value = mirrored.value\n",
-                    "    return placed.value\n",
+            &[
+                (
+                    "src/shelf.arc",
+                    concat!(
+                        "record Widget:\n",
+                        "    value: Int\n",
+                        "    maybe: Option[Int]\n",
+                        "enum Option[T]:\n",
+                        "    Some(T)\n",
+                        "    None\n",
+                        "fn main() -> Int:\n",
+                        "    let base = construct yield Widget -return 0\n",
+                        "        value = 1\n",
+                        "        maybe = Option.None[Int] :: :: call\n",
+                        "    let built = record yield Widget from base -return 0\n",
+                        "        value = 2\n",
+                        "    record deliver Widget from built -> mirrored -return 0\n",
+                        "        maybe = Option.Some[Int] :: 9 :: call\n",
+                        "    let mut placed = construct yield Widget -return 0\n",
+                        "        value = 0\n",
+                        "        maybe = Option.None[Int] :: :: call\n",
+                        "    record place Widget from mirrored -> placed -return 0\n",
+                        "        value = mirrored.value\n",
+                        "    return placed.value\n",
+                    ),
                 ),
-            ), ("src/types.arc", "")],
+                ("src/types.arc", ""),
+            ],
         );
         check_path(&root).expect("record headed regions should check");
         fs::remove_dir_all(root).expect("cleanup should succeed");
@@ -20850,6 +20949,193 @@ mod tests {
             assert!(err.contains(expected), "{expected}: {err}");
             fs::remove_dir_all(root).expect("cleanup should succeed");
         }
+    }
+
+    #[test]
+    fn check_path_rejects_shackle_without_binding_product() {
+        let root = make_temp_package(
+            "shackle_requires_binding_product",
+            "lib",
+            &[],
+            &[
+                (
+                    "src/book.arc",
+                    "export shackle callback WNDPROC(read code: Int) -> Int\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+        let err = check_path(&root).expect_err("shackle without binding product should fail");
+        assert!(
+            err.contains(
+                "requires package `shackle_requires_binding_product` to declare an `arcana-source` binding native product"
+            ),
+            "{err}"
+        );
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_accepts_typed_native_callback_from_dependency_shackle_callback() {
+        let root = make_temp_workspace(
+            "typed_native_callback_dependency_shackle",
+            &["app", "hostapi"],
+            &[
+                (
+                    "app/book.toml",
+                    concat!(
+                        "name = \"app\"\n",
+                        "kind = \"app\"\n",
+                        "[deps]\n",
+                        "hostapi = { path = \"../hostapi\" }\n",
+                    ),
+                ),
+                (
+                    "app/src/shelf.arc",
+                    concat!(
+                        "native callback proc: hostapi.raw.WNDPROC = app.callbacks.handle_proc\n",
+                        "fn main() -> Int:\n",
+                        "    return 0\n",
+                    ),
+                ),
+                (
+                    "app/src/callbacks.arc",
+                    "fn handle_proc(read code: Int) -> Int:\n    return code\n",
+                ),
+                ("app/src/types.arc", ""),
+                (
+                    "hostapi/book.toml",
+                    concat!(
+                        "name = \"hostapi\"\n",
+                        "kind = \"lib\"\n",
+                        "[native.products.default]\n",
+                        "kind = \"dll\"\n",
+                        "role = \"binding\"\n",
+                        "producer = \"arcana-source\"\n",
+                        "file = \"hostapi_binding.dll\"\n",
+                        "contract = \"arcana.cabi.binding.v1\"\n",
+                    ),
+                ),
+                ("hostapi/src/book.arc", "// hostapi root\n"),
+                (
+                    "hostapi/src/raw.arc",
+                    "export shackle callback WNDPROC(read code: Int) -> Int\n",
+                ),
+                ("hostapi/src/types.arc", ""),
+            ],
+        );
+        check_path(&root.join("app")).expect("typed dependency shackle callback should check");
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_accepts_dependency_shackle_types_in_type_surface() {
+        let root = make_temp_workspace(
+            "dependency_shackle_type_surface",
+            &["app", "hostapi"],
+            &[
+                (
+                    "app/book.toml",
+                    concat!(
+                        "name = \"app\"\n",
+                        "kind = \"app\"\n",
+                        "[deps]\n",
+                        "hostapi = { path = \"../hostapi\" }\n",
+                    ),
+                ),
+                (
+                    "app/src/shelf.arc",
+                    concat!(
+                        "fn takes_window(read window: hostapi.raw.types.HWND) -> Int:\n",
+                        "    return 0\n",
+                        "fn main() -> Int:\n",
+                        "    return 0\n",
+                    ),
+                ),
+                ("app/src/types.arc", ""),
+                (
+                    "hostapi/book.toml",
+                    concat!(
+                        "name = \"hostapi\"\n",
+                        "kind = \"lib\"\n",
+                        "[native.products.default]\n",
+                        "kind = \"dll\"\n",
+                        "role = \"binding\"\n",
+                        "producer = \"arcana-source\"\n",
+                        "file = \"hostapi_binding.dll\"\n",
+                        "contract = \"arcana.cabi.binding.v1\"\n",
+                    ),
+                ),
+                ("hostapi/src/book.arc", "// hostapi root\n"),
+                ("hostapi/src/raw.arc", "reexport hostapi.raw.types\n"),
+                (
+                    "hostapi/src/raw/types.arc",
+                    "export shackle type HWND = *mut c_void\n",
+                ),
+                ("hostapi/src/types.arc", ""),
+            ],
+        );
+        check_path(&root.join("app")).expect("dependency shackle type should check");
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_accepts_dependency_shackle_import_fns_and_consts() {
+        let root = make_temp_workspace(
+            "dependency_shackle_callable_surface",
+            &["app", "hostapi"],
+            &[
+                (
+                    "app/book.toml",
+                    concat!(
+                        "name = \"app\"\n",
+                        "kind = \"app\"\n",
+                        "[deps]\n",
+                        "hostapi = { path = \"../hostapi\" }\n",
+                    ),
+                ),
+                (
+                    "app/src/shelf.arc",
+                    concat!(
+                        "fn main() -> Int:\n",
+                        "    let pid = hostapi.raw.kernel32.GetCurrentProcessId :: :: call\n",
+                        "    if pid >= 0:\n",
+                        "        return hostapi.raw.constants.MAGIC\n",
+                        "    return 0\n",
+                    ),
+                ),
+                ("app/src/types.arc", ""),
+                (
+                    "hostapi/book.toml",
+                    concat!(
+                        "name = \"hostapi\"\n",
+                        "kind = \"lib\"\n",
+                        "[native.products.default]\n",
+                        "kind = \"dll\"\n",
+                        "role = \"binding\"\n",
+                        "producer = \"arcana-source\"\n",
+                        "file = \"hostapi_binding.dll\"\n",
+                        "contract = \"arcana.cabi.binding.v1\"\n",
+                    ),
+                ),
+                ("hostapi/src/book.arc", "// hostapi root\n"),
+                (
+                    "hostapi/src/raw.arc",
+                    "reexport hostapi.raw.kernel32\nreexport hostapi.raw.constants\n",
+                ),
+                (
+                    "hostapi/src/raw/kernel32.arc",
+                    "export shackle import fn GetCurrentProcessId() -> Int = kernel32.GetCurrentProcessId\n",
+                ),
+                (
+                    "hostapi/src/raw/constants.arc",
+                    "export shackle const MAGIC: Int = 7\n",
+                ),
+                ("hostapi/src/types.arc", ""),
+            ],
+        );
+        check_path(&root.join("app")).expect("dependency shackle import fn and const should check");
+        fs::remove_dir_all(root).expect("cleanup should succeed");
     }
 
     fn make_temp_package(
@@ -20970,6 +21256,7 @@ mod tests {
             direct_deps: BTreeSet::new(),
             direct_dep_packages: BTreeMap::new(),
             direct_dep_ids: BTreeMap::new(),
+            native_products: BTreeMap::new(),
             executable_foreword_deps: BTreeSet::new(),
             foreword_products: BTreeMap::new(),
             summary: arcana_hir::HirPackageSummary {

@@ -6,7 +6,7 @@ use arcana_ir::{
 use crate::artifact::{
     AOT_INTERNAL_FORMAT, AotArtifact, AotEntrypointArtifact, AotNativeCallbackArtifact,
     AotOwnerArtifact, AotOwnerExitArtifact, AotOwnerObjectArtifact, AotPackageArtifact,
-    AotPackageModuleArtifact, AotRoutineArtifact,
+    AotPackageModuleArtifact, AotRoutineArtifact, AotShackleDeclArtifact,
 };
 
 pub fn compile_module(module: &IrModule) -> AotArtifact {
@@ -78,8 +78,25 @@ fn compile_native_callback(
         name: callback.name.clone(),
         params: callback.params.clone(),
         return_type: callback.return_type.clone(),
+        callback_type: callback.callback_type.clone(),
         target: callback.target.clone(),
         target_routine_key: callback.target_routine_key.clone(),
+    }
+}
+
+fn compile_shackle_decl(decl: &arcana_ir::IrShackleDecl) -> AotShackleDeclArtifact {
+    AotShackleDeclArtifact {
+        package_id: decl.package_id.clone(),
+        module_id: decl.module_id.clone(),
+        exported: decl.exported,
+        kind: decl.kind.clone(),
+        name: decl.name.clone(),
+        params: decl.params.clone(),
+        return_type: decl.return_type.clone(),
+        callback_type: decl.callback_type.clone(),
+        binding: decl.binding.clone(),
+        body_entries: decl.body_entries.clone(),
+        surface_text: decl.surface_text.clone(),
     }
 }
 
@@ -137,6 +154,11 @@ pub fn compile_package(package: &IrPackage) -> AotPackageArtifact {
             .native_callbacks
             .iter()
             .map(compile_native_callback)
+            .collect(),
+        shackle_decls: package
+            .shackle_decls
+            .iter()
+            .map(compile_shackle_decl)
             .collect(),
         owners: package.owners.iter().map(compile_owner).collect(),
         modules: package

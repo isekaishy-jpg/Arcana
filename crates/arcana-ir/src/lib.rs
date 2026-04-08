@@ -21,7 +21,7 @@ use arcana_hir::{
     HirUnaryOp, HirWhereClause, HirWorkspacePackage, HirWorkspaceSummary,
     canonicalize_hir_type_in_module, current_workspace_package_for_module, hir_type_matches,
     impl_target_is_public_from_package, infer_receiver_expr_type,
-    lookup_method_candidates_for_hir_type, lookup_symbol_path,
+    lookup_method_candidates_for_hir_type, lookup_shackle_decl_path, lookup_symbol_path,
     match_name_resolves_to_zero_payload_variant, render_symbol_signature,
     routine_key_for_impl_method, routine_key_for_object_method, routine_key_for_symbol,
 };
@@ -39,8 +39,8 @@ pub use executable::{
     ExecCleanupFooter, ExecConstructContributionMode, ExecConstructDestination, ExecConstructLine,
     ExecConstructRegion, ExecDynamicDispatch, ExecExpr, ExecHeadedModifier, ExecHeaderAttachment,
     ExecMatchArm, ExecMatchPattern, ExecMemoryDetailLine, ExecMemorySpecDecl, ExecNamedBindingId,
-    ExecPhraseArg, ExecPhraseQualifierKind, ExecRecordRegion, ExecRecycleLine,
-    ExecRecycleLineKind, ExecStmt, ExecUnaryOp,
+    ExecPhraseArg, ExecPhraseQualifierKind, ExecRecordRegion, ExecRecycleLine, ExecRecycleLineKind,
+    ExecStmt, ExecUnaryOp,
 };
 pub use routine_signature::{
     IrRoutineParam, IrRoutineProvenance, IrRoutineType, IrRoutineTypeKind, parse_routine_type_text,
@@ -223,8 +223,27 @@ pub struct IrNativeCallbackDecl {
     pub name: String,
     pub params: Vec<IrRoutineParam>,
     pub return_type: Option<IrRoutineType>,
+    pub callback_type: Option<IrRoutineType>,
     pub target: Vec<String>,
     pub target_routine_key: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IrShackleDecl {
+    pub package_id: String,
+    pub module_id: String,
+    pub exported: bool,
+    pub kind: String,
+    pub name: String,
+    pub params: Vec<IrRoutineParam>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_type: Option<IrRoutineType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callback_type: Option<IrRoutineType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding: Option<String>,
+    pub body_entries: Vec<String>,
+    pub surface_text: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -274,6 +293,7 @@ pub struct IrPackage {
     pub entrypoints: Vec<IrEntrypoint>,
     pub routines: Vec<IrRoutine>,
     pub native_callbacks: Vec<IrNativeCallbackDecl>,
+    pub shackle_decls: Vec<IrShackleDecl>,
     pub owners: Vec<IrOwnerDecl>,
 }
 
@@ -2301,7 +2321,10 @@ fn parse_binding_pattern(text: &str) -> Option<BindingPattern> {
 }
 
 fn binding_pattern_is_destructuring(text: &str) -> bool {
-    matches!(parse_binding_pattern(text), Some(BindingPattern::Pair(_, _)))
+    matches!(
+        parse_binding_pattern(text),
+        Some(BindingPattern::Pair(_, _))
+    )
 }
 
 fn collect_binding_pattern_names(pattern: &BindingPattern, names: &mut Vec<String>) {
@@ -2381,24 +2404,12 @@ fn collect_typed_binding_pattern_exec_lets(
             };
             path.push("0");
             collect_typed_binding_pattern_exec_lets(
-                left,
-                left_ty,
-                base_expr,
-                path,
-                lets,
-                mutable,
-                scope,
+                left, left_ty, base_expr, path, lets, mutable, scope,
             )?;
             path.pop();
             path.push("1");
             collect_typed_binding_pattern_exec_lets(
-                right,
-                right_ty,
-                base_expr,
-                path,
-                lets,
-                mutable,
-                scope,
+                right, right_ty, base_expr, path, lets, mutable, scope,
             )?;
             path.pop();
             Ok(())
@@ -2586,6 +2597,73 @@ fn lower_resolved_routine_type(
             ))
         })
         .unwrap_or_else(|| IrRoutineType::from_hir(ty))
+}
+
+fn lower_resolved_routine_params(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    params: &[arcana_hir::HirParam],
+) -> Vec<IrRoutineParam> {
+    params
+        .iter()
+        .map(|param| IrRoutineParam {
+            binding_id: 0,
+            mode: param.mode.map(|mode| mode.as_str().to_string()),
+            name: param.name.clone(),
+            ty: lower_resolved_routine_type(workspace, resolved_module, &param.ty),
+        })
+        .collect()
+}
+
+fn lower_native_callback_signature(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    callback: &arcana_hir::HirNativeCallbackDecl,
+) -> Result<(Vec<IrRoutineParam>, Option<IrRoutineType>), String> {
+    let explicit_params =
+        lower_resolved_routine_params(workspace, resolved_module, &callback.params);
+    let explicit_return = callback
+        .return_type
+        .as_ref()
+        .map(|ty| lower_resolved_routine_type(workspace, resolved_module, ty));
+    let Some(callback_type) = &callback.callback_type else {
+        return Ok((explicit_params, explicit_return));
+    };
+    let HirTypeKind::Path(path) = &callback_type.kind else {
+        return Err(format!(
+            "native callback `{}` callback type `{}` must be a path",
+            callback.name,
+            callback_type.render()
+        ));
+    };
+    let Some(decl_ref) = lookup_shackle_decl_path(workspace, resolved_module, &path.segments)
+    else {
+        return Err(format!(
+            "native callback `{}` callback type `{}` does not resolve to a visible shackle callback",
+            callback.name,
+            callback_type.render()
+        ));
+    };
+    if decl_ref.decl.kind.as_str() != "callback" {
+        return Err(format!(
+            "native callback `{}` callback type `{}` must resolve to a shackle callback",
+            callback.name,
+            callback_type.render()
+        ));
+    }
+    let params = if explicit_params.is_empty() {
+        lower_resolved_routine_params(workspace, resolved_module, &decl_ref.decl.params)
+    } else {
+        explicit_params
+    };
+    let return_type = explicit_return.or_else(|| {
+        decl_ref
+            .decl
+            .return_type
+            .as_ref()
+            .map(|ty| lower_resolved_routine_type(workspace, resolved_module, ty))
+    });
+    Ok((params, return_type))
 }
 
 fn lower_routine_params(symbol: &HirSymbol) -> Vec<IrRoutineParam> {
@@ -2938,7 +3016,9 @@ fn collect_record_copied_fields(
     let Some(base) = &region.base else {
         return Vec::new();
     };
-    let Some(base_ty) = infer_expr_hir_type(scope, base).and_then(|ty| canonicalize_scope_hir_type(scope, &ty)) else {
+    let Some(base_ty) =
+        infer_expr_hir_type(scope, base).and_then(|ty| canonicalize_scope_hir_type(scope, &ty))
+    else {
         return Vec::new();
     };
     let Some(base_fields) = resolve_record_fields_for_hir_type(scope, &base_ty) else {
@@ -3008,10 +3088,8 @@ fn infer_record_contribution_mode(
     let Some(target_path) = flatten_callable_expr_path(&region.target) else {
         return ExecConstructContributionMode::Direct;
     };
-    let Some(expected_ty) =
-        resolve_record_target_fields_for_scope(scope, &target_path).and_then(|fields| {
-            fields.get(&line.name).cloned()
-        })
+    let Some(expected_ty) = resolve_record_target_fields_for_scope(scope, &target_path)
+        .and_then(|fields| fields.get(&line.name).cloned())
     else {
         return ExecConstructContributionMode::Direct;
     };
@@ -3061,9 +3139,7 @@ fn lower_phrase_qualifier_kind(
         arcana_hir::HirQualifiedPhraseQualifierKind::Weave => ExecPhraseQualifierKind::Weave,
         arcana_hir::HirQualifiedPhraseQualifierKind::Split => ExecPhraseQualifierKind::Split,
         arcana_hir::HirQualifiedPhraseQualifierKind::Must => ExecPhraseQualifierKind::Must,
-        arcana_hir::HirQualifiedPhraseQualifierKind::Fallback => {
-            ExecPhraseQualifierKind::Fallback
-        }
+        arcana_hir::HirQualifiedPhraseQualifierKind::Fallback => ExecPhraseQualifierKind::Fallback,
         arcana_hir::HirQualifiedPhraseQualifierKind::BareMethod => {
             ExecPhraseQualifierKind::BareMethod
         }
@@ -3915,7 +3991,10 @@ fn lower_record_region_exec(region: &arcana_hir::HirRecordRegion) -> ExecRecordR
     ExecRecordRegion {
         completion: region.completion.as_str().to_string(),
         target: Box::new(lower_exec_expr(&region.target)),
-        base: region.base.as_ref().map(|base| Box::new(lower_exec_expr(base))),
+        base: region
+            .base
+            .as_ref()
+            .map(|base| Box::new(lower_exec_expr(base))),
         destination: region
             .destination
             .as_ref()
@@ -4190,9 +4269,9 @@ fn lower_exec_expr_resolved(expr: &HirExpr, scope: &ResolvedRenderScope<'_>) -> 
         HirExpr::ConstructRegion(region) => ExecExpr::ConstructRegion(Box::new(
             lower_construct_region_exec_resolved(region, scope),
         )),
-        HirExpr::RecordRegion(region) => ExecExpr::RecordRegion(Box::new(
-            lower_record_region_exec_resolved(region, scope),
-        )),
+        HirExpr::RecordRegion(region) => {
+            ExecExpr::RecordRegion(Box::new(lower_record_region_exec_resolved(region, scope)))
+        }
         HirExpr::Chain {
             style,
             introducer,
@@ -4242,14 +4321,12 @@ fn lower_exec_expr_resolved(expr: &HirExpr, scope: &ResolvedRenderScope<'_>) -> 
                 ExecPhraseQualifierKind::Call
                 | ExecPhraseQualifierKind::Weave
                 | ExecPhraseQualifierKind::Split
-                | ExecPhraseQualifierKind::NamedPath => {
-                    resolve_qualified_phrase_target_path(
-                        scope,
-                        subject,
-                        hir_qualifier_kind,
-                        qualifier,
-                    )
-                }
+                | ExecPhraseQualifierKind::NamedPath => resolve_qualified_phrase_target_path(
+                    scope,
+                    subject,
+                    hir_qualifier_kind,
+                    qualifier,
+                ),
                 ExecPhraseQualifierKind::BareMethod => {
                     resolve_bare_method_target(scope, subject, qualifier)
                 }
@@ -4633,7 +4710,9 @@ fn lower_exec_stmt_resolved(
                             "tuple destructuring requires a known pair type".to_string()
                         })?;
                         let temp_name = scope.value_scope.fresh_temp_name("tuple_let");
-                        scope.value_scope.insert(temp_name.clone(), value_ty.clone());
+                        scope
+                            .value_scope
+                            .insert(temp_name.clone(), value_ty.clone());
                         let base_expr = ExecExpr::Path(vec![temp_name.clone()]);
                         let mut statements = vec![ExecStmt::Let {
                             binding_id: 0,
@@ -4827,56 +4906,61 @@ fn lower_exec_stmt_resolved(
             let mut body_scope = scope.clone();
             let mut rollup_bindings = Vec::new();
             let iterable_binding_ty = infer_iterable_binding_type(scope, iterable);
-            let (binding_id, binding_name, prefix_statements) = if binding_pattern_is_destructuring(binding)
-            {
-                let pattern = parse_binding_pattern(binding)
-                    .ok_or_else(|| format!("invalid binding pattern `{binding}`"))?;
-                let value_ty = iterable_binding_ty
-                    .clone()
-                    .ok_or_else(|| "tuple destructuring requires a known pair type".to_string())?;
-                let temp_name = body_scope.value_scope.fresh_temp_name("tuple_for");
-                body_scope.value_scope.insert(temp_name.clone(), value_ty.clone());
-                let base_expr = ExecExpr::Path(vec![temp_name.clone()]);
-                let mut lowered = Vec::new();
-                collect_typed_binding_pattern_exec_lets(
-                    &pattern,
-                    &value_ty,
-                    &base_expr,
-                    &mut Vec::new(),
-                    &mut lowered,
-                    false,
-                    &mut body_scope,
-                )?;
-                let mut binding_names = Vec::new();
-                collect_binding_pattern_names(&pattern, &mut binding_names);
-                for binding_name in binding_names {
-                    let Some(binding_id) = body_scope.value_scope.binding_id_of(&binding_name) else {
-                        continue;
-                    };
-                    let Some(binding_ty) = body_scope.value_scope.type_of(&binding_name).cloned() else {
-                        continue;
-                    };
-                    push_cleanup_binding_candidate(
-                        &mut rollup_bindings,
-                        binding_name,
-                        binding_id,
-                        binding_ty,
-                    );
-                }
-                (0, temp_name, lowered)
-            } else {
-                let mut binding_id = 0;
-                if let Some(ty) = iterable_binding_ty {
-                    binding_id = body_scope.value_scope.insert(binding.clone(), ty.clone());
-                    push_cleanup_binding_candidate(
-                        &mut rollup_bindings,
-                        binding.clone(),
-                        binding_id,
-                        ty,
-                    );
-                }
-                (binding_id, binding.clone(), Vec::new())
-            };
+            let (binding_id, binding_name, prefix_statements) =
+                if binding_pattern_is_destructuring(binding) {
+                    let pattern = parse_binding_pattern(binding)
+                        .ok_or_else(|| format!("invalid binding pattern `{binding}`"))?;
+                    let value_ty = iterable_binding_ty.clone().ok_or_else(|| {
+                        "tuple destructuring requires a known pair type".to_string()
+                    })?;
+                    let temp_name = body_scope.value_scope.fresh_temp_name("tuple_for");
+                    body_scope
+                        .value_scope
+                        .insert(temp_name.clone(), value_ty.clone());
+                    let base_expr = ExecExpr::Path(vec![temp_name.clone()]);
+                    let mut lowered = Vec::new();
+                    collect_typed_binding_pattern_exec_lets(
+                        &pattern,
+                        &value_ty,
+                        &base_expr,
+                        &mut Vec::new(),
+                        &mut lowered,
+                        false,
+                        &mut body_scope,
+                    )?;
+                    let mut binding_names = Vec::new();
+                    collect_binding_pattern_names(&pattern, &mut binding_names);
+                    for binding_name in binding_names {
+                        let Some(binding_id) = body_scope.value_scope.binding_id_of(&binding_name)
+                        else {
+                            continue;
+                        };
+                        let Some(binding_ty) =
+                            body_scope.value_scope.type_of(&binding_name).cloned()
+                        else {
+                            continue;
+                        };
+                        push_cleanup_binding_candidate(
+                            &mut rollup_bindings,
+                            binding_name,
+                            binding_id,
+                            binding_ty,
+                        );
+                    }
+                    (0, temp_name, lowered)
+                } else {
+                    let mut binding_id = 0;
+                    if let Some(ty) = iterable_binding_ty {
+                        binding_id = body_scope.value_scope.insert(binding.clone(), ty.clone());
+                        push_cleanup_binding_candidate(
+                            &mut rollup_bindings,
+                            binding.clone(),
+                            binding_id,
+                            ty,
+                        );
+                    }
+                    (binding_id, binding.clone(), Vec::new())
+                };
             let body_block = lower_exec_stmt_block_resolved_with_cleanup_candidates(
                 body,
                 &mut body_scope,
@@ -5611,11 +5695,44 @@ fn lower_package(package: &HirPackageSummary) -> IrPackage {
         .modules
         .iter()
         .flat_map(|module| {
-            module.native_callbacks.iter().map(|callback| IrNativeCallbackDecl {
+            module
+                .native_callbacks
+                .iter()
+                .map(|callback| IrNativeCallbackDecl {
+                    package_id: package.package_name.clone(),
+                    module_id: module.module_id.clone(),
+                    name: callback.name.clone(),
+                    params: callback
+                        .params
+                        .iter()
+                        .map(|param| IrRoutineParam {
+                            binding_id: 0,
+                            mode: param.mode.as_ref().map(|mode| mode.as_str().to_string()),
+                            name: param.name.clone(),
+                            ty: lower_symbol_routine_type(&param.ty),
+                        })
+                        .collect(),
+                    return_type: callback.return_type.as_ref().map(lower_symbol_routine_type),
+                    callback_type: callback
+                        .callback_type
+                        .as_ref()
+                        .map(lower_symbol_routine_type),
+                    target: callback.target.clone(),
+                    target_routine_key: None,
+                })
+        })
+        .collect::<Vec<_>>();
+    let shackle_decls = package
+        .modules
+        .iter()
+        .flat_map(|module| {
+            module.shackle_decls.iter().map(|decl| IrShackleDecl {
                 package_id: package.package_name.clone(),
                 module_id: module.module_id.clone(),
-                name: callback.name.clone(),
-                params: callback
+                exported: decl.exported,
+                kind: decl.kind.as_str().to_string(),
+                name: decl.name.clone(),
+                params: decl
                     .params
                     .iter()
                     .map(|param| IrRoutineParam {
@@ -5625,9 +5742,11 @@ fn lower_package(package: &HirPackageSummary) -> IrPackage {
                         ty: lower_symbol_routine_type(&param.ty),
                     })
                     .collect(),
-                return_type: callback.return_type.as_ref().map(lower_symbol_routine_type),
-                target: callback.target.clone(),
-                target_routine_key: None,
+                return_type: decl.return_type.as_ref().map(lower_symbol_routine_type),
+                callback_type: decl.callback_type.as_ref().map(lower_symbol_routine_type),
+                binding: decl.binding.clone(),
+                body_entries: decl.body_entries.clone(),
+                surface_text: decl.surface_text.clone(),
             })
         })
         .collect::<Vec<_>>();
@@ -5653,6 +5772,7 @@ fn lower_package(package: &HirPackageSummary) -> IrPackage {
         entrypoints,
         routines,
         native_callbacks,
+        shackle_decls,
         owners,
     };
     lowered.runtime_requirements = derive_runtime_requirements(&lowered);
@@ -5683,6 +5803,9 @@ fn retarget_package_identity(package: &mut IrPackage, package_id: &str) {
     }
     for callback in &mut package.native_callbacks {
         callback.package_id = package_id.to_string();
+    }
+    for decl in &mut package.shackle_decls {
+        decl.package_id = package_id.to_string();
     }
     for owner in &mut package.owners {
         owner.package_id = package_id.to_string();
@@ -5835,25 +5958,15 @@ pub fn lower_workspace_package_with_resolution(
                             callback.name, module.module_id, callback.target.join(".")
                         ));
                     }
+                    let (params, return_type) =
+                        lower_native_callback_signature(workspace, resolved_module, callback)?;
                     Ok(IrNativeCallbackDecl {
                         package_id: package.package_id.clone(),
                         module_id: module.module_id.clone(),
                         name: callback.name.clone(),
-                        params: callback
-                            .params
-                            .iter()
-                            .map(|param| IrRoutineParam {
-                                binding_id: 0,
-                                mode: param.mode.map(|mode| mode.as_str().to_string()),
-                                name: param.name.clone(),
-                                ty: lower_resolved_routine_type(
-                                    workspace,
-                                    resolved_module,
-                                    &param.ty,
-                                ),
-                            })
-                            .collect(),
-                        return_type: callback.return_type.as_ref().map(|ty| {
+                        params,
+                        return_type,
+                        callback_type: callback.callback_type.as_ref().map(|ty| {
                             lower_resolved_routine_type(workspace, resolved_module, ty)
                         }),
                         target: callback.target.clone(),
@@ -5864,6 +5977,51 @@ pub fn lower_workspace_package_with_resolution(
                     })
                 })
                 .collect::<Result<Vec<_>, String>>()
+        })
+        .collect::<Result<Vec<_>, String>>()?
+        .into_iter()
+        .flatten()
+        .collect();
+    lowered.shackle_decls = package
+        .summary
+        .modules
+        .iter()
+        .map(|module| {
+            let Some(resolved_module) = resolved_package.module(&module.module_id) else {
+                return Ok(Vec::new());
+            };
+            Ok(module
+                .shackle_decls
+                .iter()
+                .map(|decl| IrShackleDecl {
+                    package_id: package.package_id.clone(),
+                    module_id: module.module_id.clone(),
+                    exported: decl.exported,
+                    kind: decl.kind.as_str().to_string(),
+                    name: decl.name.clone(),
+                    params: decl
+                        .params
+                        .iter()
+                        .map(|param| IrRoutineParam {
+                            binding_id: 0,
+                            mode: param.mode.map(|mode| mode.as_str().to_string()),
+                            name: param.name.clone(),
+                            ty: lower_resolved_routine_type(workspace, resolved_module, &param.ty),
+                        })
+                        .collect(),
+                    return_type: decl
+                        .return_type
+                        .as_ref()
+                        .map(|ty| lower_resolved_routine_type(workspace, resolved_module, ty)),
+                    callback_type: decl
+                        .callback_type
+                        .as_ref()
+                        .map(|ty| lower_resolved_routine_type(workspace, resolved_module, ty)),
+                    binding: decl.binding.clone(),
+                    body_entries: decl.body_entries.clone(),
+                    surface_text: decl.surface_text.clone(),
+                })
+                .collect::<Vec<_>>())
         })
         .collect::<Result<Vec<_>, String>>()?
         .into_iter()
@@ -6646,8 +6804,7 @@ mod tests {
     }
 
     #[test]
-    fn lower_workspace_package_with_resolution_collects_record_copied_fields_from_construct_base()
-    {
+    fn lower_workspace_package_with_resolution_collects_record_copied_fields_from_construct_base() {
         let app_summary = build_package_summary(
             "app",
             vec![
@@ -7061,5 +7218,90 @@ mod tests {
             .expect("impl method should lower");
 
         assert!(announce.exported);
+    }
+
+    #[test]
+    fn lower_workspace_package_with_resolution_carries_shackle_decls_and_typed_callbacks() {
+        let app_summary = build_package_summary(
+            "app",
+            vec![
+                lower_module_text(
+                    "app",
+                    "native callback proc: app.raw.WNDPROC = app.callbacks.handle_proc\n",
+                )
+                .expect("app module should lower"),
+                lower_module_text(
+                    "app.raw",
+                    "export shackle callback WNDPROC(read hwnd: Int, message: Int) -> Int\n",
+                )
+                .expect("raw module should lower"),
+                lower_module_text(
+                    "app.callbacks",
+                    "fn handle_proc(read code: Int) -> Int:\n    return code\n",
+                )
+                .expect("callbacks module should lower"),
+            ],
+        );
+        let app_layout = build_package_layout(
+            &app_summary,
+            BTreeMap::from([
+                (
+                    "app".to_string(),
+                    Path::new("C:/repo/app/src/book.arc").to_path_buf(),
+                ),
+                (
+                    "app.raw".to_string(),
+                    Path::new("C:/repo/app/src/raw.arc").to_path_buf(),
+                ),
+                (
+                    "app.callbacks".to_string(),
+                    Path::new("C:/repo/app/src/callbacks.arc").to_path_buf(),
+                ),
+            ]),
+            BTreeMap::from([
+                ("raw".to_string(), "app.raw".to_string()),
+                ("callbacks".to_string(), "app.callbacks".to_string()),
+            ]),
+        )
+        .expect("app layout should build");
+        let app_workspace = build_workspace_package(
+            "app".to_string(),
+            Path::new("C:/repo/app").to_path_buf(),
+            BTreeSet::new(),
+            app_summary,
+            app_layout,
+        )
+        .expect("app workspace should build");
+
+        let workspace =
+            build_workspace_summary(vec![app_workspace]).expect("workspace should build");
+        let resolved = resolve_workspace(&workspace).expect("workspace should resolve");
+        let package = workspace.package("app").expect("app package should exist");
+
+        let ir = lower_workspace_package_with_resolution(&workspace, &resolved, package)
+            .expect("workspace lowering should succeed");
+        assert_eq!(ir.shackle_decls.len(), 1);
+        assert_eq!(ir.shackle_decls[0].kind, "callback");
+        assert_eq!(ir.shackle_decls[0].name, "WNDPROC");
+        assert_eq!(ir.native_callbacks.len(), 1);
+        assert_eq!(ir.native_callbacks[0].params.len(), 2);
+        assert_eq!(ir.native_callbacks[0].params[0].name, "hwnd");
+        assert_eq!(ir.native_callbacks[0].params[1].name, "message");
+        assert_eq!(
+            ir.native_callbacks[0]
+                .return_type
+                .as_ref()
+                .expect("typed callback return type")
+                .render(),
+            "Int"
+        );
+        assert_eq!(
+            ir.native_callbacks[0]
+                .callback_type
+                .as_ref()
+                .expect("typed callback ref")
+                .render(),
+            "app.raw.WNDPROC"
+        );
     }
 }

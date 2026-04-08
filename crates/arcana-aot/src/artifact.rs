@@ -73,9 +73,30 @@ pub struct AotNativeCallbackArtifact {
     pub params: Vec<IrRoutineParam>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub return_type: Option<IrRoutineType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callback_type: Option<IrRoutineType>,
     pub target: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_routine_key: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AotShackleDeclArtifact {
+    pub package_id: String,
+    pub module_id: String,
+    pub exported: bool,
+    pub kind: String,
+    pub name: String,
+    pub params: Vec<IrRoutineParam>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_type: Option<IrRoutineType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callback_type: Option<IrRoutineType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub body_entries: Vec<String>,
+    pub surface_text: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -136,6 +157,8 @@ pub struct AotPackageArtifact {
     pub routines: Vec<AotRoutineArtifact>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub native_callbacks: Vec<AotNativeCallbackArtifact>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shackle_decls: Vec<AotShackleDeclArtifact>,
     pub owners: Vec<AotOwnerArtifact>,
     pub modules: Vec<AotPackageModuleArtifact>,
 }

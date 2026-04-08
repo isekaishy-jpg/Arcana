@@ -1065,6 +1065,7 @@ fn link_ir_packages(
         entrypoints: root.entrypoints,
         routines,
         native_callbacks,
+        shackle_decls: Vec::new(),
         owners,
     };
     disambiguate_package_routine_keys(&mut linked_package)
@@ -1764,6 +1765,7 @@ mod tests {
                 entrypoints: Vec::new(),
                 routines: Vec::new(),
                 native_callbacks: Vec::new(),
+                shackle_decls: Vec::new(),
                 owners: Vec::new(),
                 modules: Vec::new(),
             },

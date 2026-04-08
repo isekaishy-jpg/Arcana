@@ -1,7 +1,7 @@
-use crate::artifact::{AotPackageArtifact, AotRoutineArtifact};
+use crate::artifact::{AotNativeCallbackArtifact, AotPackageArtifact, AotRoutineArtifact};
 use arcana_cabi::{
-    ArcanaCabiExport, ArcanaCabiExportParam, ArcanaCabiParamSourceMode, ArcanaCabiPassMode,
-    ArcanaCabiType,
+    ArcanaCabiBindingCallback, ArcanaCabiBindingImport, ArcanaCabiExport, ArcanaCabiExportParam,
+    ArcanaCabiType, validate_binding_callbacks, validate_binding_imports,
 };
 use arcana_ir::{IrRoutineParam, IrRoutineType, IrRoutineTypeKind, parse_routine_type_text};
 use std::collections::BTreeSet;
@@ -9,6 +9,8 @@ use std::collections::BTreeSet;
 pub type NativeAbiType = ArcanaCabiType;
 pub type NativeAbiParam = ArcanaCabiExportParam;
 pub type NativeExport = ArcanaCabiExport;
+pub type NativeBindingImport = ArcanaCabiBindingImport;
+pub type NativeBindingCallback = ArcanaCabiBindingCallback;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NativeRoutineSignature {
@@ -81,6 +83,69 @@ pub fn collect_native_exports(artifact: &AotPackageArtifact) -> Result<Vec<Nativ
     }
 
     Ok(exports)
+}
+
+pub fn collect_native_binding_imports(
+    artifact: &AotPackageArtifact,
+) -> Result<Vec<NativeBindingImport>, String> {
+    let imports = artifact
+        .routines
+        .iter()
+        .filter(|routine| routine.package_id == artifact.package_id)
+        .filter_map(|routine| {
+            routine
+                .native_impl
+                .as_ref()
+                .map(|binding_name| (routine, binding_name))
+        })
+        .map(|(routine, binding_name)| {
+            let NativeRoutineSignature {
+                params,
+                return_type,
+            } = native_routine_signature(routine).map_err(|err| {
+                format!(
+                    "binding import `{}` cannot lower routine `{}`: {err}",
+                    binding_name, routine.routine_key
+                )
+            })?;
+            Ok(NativeBindingImport {
+                name: binding_name.clone(),
+                symbol_name: default_binding_import_symbol_name(&artifact.package_id, binding_name),
+                return_type,
+                params,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    validate_binding_imports(&imports)?;
+    Ok(imports)
+}
+
+pub fn collect_native_binding_callbacks(
+    artifact: &AotPackageArtifact,
+) -> Result<Vec<NativeBindingCallback>, String> {
+    let callbacks = artifact
+        .native_callbacks
+        .iter()
+        .filter(|callback| callback.package_id == artifact.package_id)
+        .map(|callback| {
+            let NativeRoutineSignature {
+                params,
+                return_type,
+            } = native_callback_signature(callback).map_err(|err| {
+                format!(
+                    "binding callback `{}` cannot lower callback target metadata: {err}",
+                    callback.name
+                )
+            })?;
+            Ok(NativeBindingCallback {
+                name: callback.name.clone(),
+                return_type,
+                params,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    validate_binding_callbacks(&callbacks)?;
+    Ok(callbacks)
 }
 
 fn parse_package_function_export_row(row: &str) -> Option<(&str, &str, &str)> {
@@ -321,34 +386,26 @@ pub fn native_routine_signature(
     })
 }
 
+pub fn native_callback_signature(
+    callback: &AotNativeCallbackArtifact,
+) -> Result<NativeRoutineSignature, String> {
+    Ok(NativeRoutineSignature {
+        params: callback
+            .params
+            .iter()
+            .map(parse_native_param)
+            .collect::<Result<Vec<_>, _>>()?,
+        return_type: parse_native_return_type(callback.return_type.as_ref())?,
+    })
+}
+
 pub fn parse_native_param(param: &IrRoutineParam) -> Result<NativeAbiParam, String> {
     let ty = parse_native_type(&param.ty)?;
-    let source_mode = match param.mode.as_deref() {
-        None | Some("read") => ArcanaCabiParamSourceMode::Read,
-        Some("take") => ArcanaCabiParamSourceMode::Take,
-        Some("edit") => ArcanaCabiParamSourceMode::Edit,
-        Some(other) => {
-            return Err(format!(
-                "unsupported native abi parameter mode `{other}` for `{}`",
-                param.name
-            ));
-        }
-    };
-    Ok(NativeAbiParam {
-        name: sanitize_name(&param.name),
-        input_type: ty.clone(),
-        source_mode,
-        pass_mode: match source_mode {
-            ArcanaCabiParamSourceMode::Edit => ArcanaCabiPassMode::InWithWriteBack,
-            ArcanaCabiParamSourceMode::Read | ArcanaCabiParamSourceMode::Take => {
-                ArcanaCabiPassMode::In
-            }
-        },
-        write_back_type: match source_mode {
-            ArcanaCabiParamSourceMode::Edit => Some(ty),
-            ArcanaCabiParamSourceMode::Read | ArcanaCabiParamSourceMode::Take => None,
-        },
-    })
+    Ok(ArcanaCabiExportParam::binding(
+        sanitize_name(&param.name),
+        arcana_cabi::ArcanaCabiParamSourceMode::from_param_mode_text(param.mode.as_deref())?,
+        ty,
+    ))
 }
 
 pub fn parse_native_return_type(
@@ -426,4 +483,12 @@ fn sanitize_name(text: &str) -> String {
     } else {
         out
     }
+}
+
+fn default_binding_import_symbol_name(package_id: &str, binding_name: &str) -> String {
+    format!(
+        "arcana_binding_import_{}_{}",
+        sanitize_name(package_id),
+        sanitize_name(binding_name)
+    )
 }

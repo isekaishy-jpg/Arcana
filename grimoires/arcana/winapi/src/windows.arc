@@ -1,4 +1,4 @@
-native callback window_proc(read window: arcana_winapi.types.HiddenWindow, message: Int, wparam: Int, lparam: Int) -> Int = arcana_winapi.callbacks.handle_window_proc
+native callback window_proc: arcana_winapi.raw.user32.WNDPROC = arcana_winapi.callbacks.handle_window_proc
 
 export native fn create_hidden_window() -> arcana_winapi.types.HiddenWindow = windows.create_hidden_window
 export native fn post_ping(read window: arcana_winapi.types.HiddenWindow, code: Int) = windows.post_ping

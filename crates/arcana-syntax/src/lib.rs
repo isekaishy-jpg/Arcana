@@ -968,7 +968,51 @@ pub struct NativeCallbackDecl {
     pub name: String,
     pub params: Vec<ParamDecl>,
     pub return_type: Option<SurfaceType>,
+    pub callback_type: Option<SurfaceType>,
     pub target: Vec<String>,
+    pub span: Span,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShackleDeclKind {
+    Type,
+    Struct,
+    Union,
+    Flags,
+    Const,
+    ImportFn,
+    Callback,
+    Fn,
+    Thunk,
+}
+
+impl ShackleDeclKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Type => "type",
+            Self::Struct => "struct",
+            Self::Union => "union",
+            Self::Flags => "flags",
+            Self::Const => "const",
+            Self::ImportFn => "import_fn",
+            Self::Callback => "callback",
+            Self::Fn => "fn",
+            Self::Thunk => "thunk",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShackleDecl {
+    pub exported: bool,
+    pub kind: ShackleDeclKind,
+    pub name: String,
+    pub params: Vec<ParamDecl>,
+    pub return_type: Option<SurfaceType>,
+    pub callback_type: Option<SurfaceType>,
+    pub binding: Option<String>,
+    pub body_entries: Vec<String>,
+    pub surface_text: String,
     pub span: Span,
 }
 
@@ -999,6 +1043,7 @@ pub struct ParsedModule {
     pub lang_items: Vec<LangItemDecl>,
     pub memory_specs: Vec<MemorySpecDecl>,
     pub native_callbacks: Vec<NativeCallbackDecl>,
+    pub shackle_decls: Vec<ShackleDecl>,
     pub foreword_definitions: Vec<ForewordDefinitionDecl>,
     pub foreword_handlers: Vec<ForewordHandlerDecl>,
     pub foreword_aliases: Vec<ForewordAliasDecl>,
@@ -1032,6 +1077,7 @@ pub fn parse_module(source: &str) -> Result<ParsedModule, String> {
     let mut lang_items = Vec::new();
     let mut memory_specs = Vec::new();
     let mut native_callbacks = Vec::new();
+    let mut shackle_decls = Vec::new();
     let mut foreword_definitions = Vec::new();
     let mut foreword_handlers = Vec::new();
     let mut foreword_aliases = Vec::new();
@@ -1178,6 +1224,26 @@ pub fn parse_module(source: &str) -> Result<ParsedModule, String> {
             continue;
         }
 
+        if let Some(shackle_decl) = parse_shackle_decl(entry)? {
+            if !pending_availability.is_empty() {
+                let span = pending_availability[0].span;
+                return Err(format!(
+                    "{}:{}: availability attachments cannot target shackle declarations",
+                    span.line, span.column
+                ));
+            }
+            if !pending_forewords.is_empty() {
+                let foreword = &pending_forewords[0];
+                return Err(format!(
+                    "{}:{}: forewords cannot target shackle declarations in v1",
+                    foreword.span.line, foreword.span.column
+                ));
+            }
+            shackle_decls.push(shackle_decl);
+            index += 1;
+            continue;
+        }
+
         if let Some(impl_decl) = parse_impl_decl(entry)? {
             if !pending_availability.is_empty() {
                 let span = pending_availability[0].span;
@@ -1259,6 +1325,7 @@ pub fn parse_module(source: &str) -> Result<ParsedModule, String> {
         lang_items,
         memory_specs,
         native_callbacks,
+        shackle_decls,
         foreword_definitions,
         foreword_handlers,
         foreword_aliases,
@@ -2128,6 +2195,12 @@ fn parse_symbol_entry(entry: &RawBlockEntry) -> Result<Option<SymbolDecl>, Strin
                 entry.span.line, entry.span.column
             ));
         }
+        if rest.starts_with("shackle ") {
+            return Err(format!(
+                "{}:{}: malformed shackle declaration",
+                entry.span.line, entry.span.column
+            ));
+        }
         if rest.starts_with("opaque type ") {
             return Err(format!(
                 "{}:{}: malformed opaque type declaration",
@@ -2136,7 +2209,9 @@ fn parse_symbol_entry(entry: &RawBlockEntry) -> Result<Option<SymbolDecl>, Strin
         }
         return Ok(None);
     };
-    if (symbol.intrinsic_impl.is_some() || symbol.native_impl.is_some()) && !entry.children.is_empty() {
+    if (symbol.intrinsic_impl.is_some() || symbol.native_impl.is_some())
+        && !entry.children.is_empty()
+    {
         return Err(format!(
             "{}:{}: intrinsic/native functions cannot own nested blocks",
             entry.span.line, entry.span.column
@@ -2406,8 +2481,25 @@ fn parse_native_callback_decl(
             span.line, span.column
         )
     })?;
-    let signature =
-        parse_symbol_signature(SymbolKind::Fn, signature_text.trim(), span).ok_or_else(|| {
+    if let Some((name, callback_type)) =
+        parse_native_callback_type_ref(signature_text.trim(), span)?
+    {
+        return Ok(Some(NativeCallbackDecl {
+            name,
+            params: Vec::new(),
+            return_type: None,
+            callback_type: Some(callback_type),
+            target: parse_path(target_text.trim()).map_err(|_| {
+                format!(
+                    "{}:{}: malformed native callback target",
+                    span.line, span.column
+                )
+            })?,
+            span,
+        }));
+    }
+    let signature = parse_symbol_signature(SymbolKind::Fn, signature_text.trim(), span)
+        .ok_or_else(|| {
             format!(
                 "{}:{}: malformed native callback declaration",
                 span.line, span.column
@@ -2429,6 +2521,7 @@ fn parse_native_callback_decl(
         name: signature.name,
         params: signature.params,
         return_type: signature.return_type,
+        callback_type: None,
         target: parse_path(target_text.trim()).map_err(|_| {
             format!(
                 "{}:{}: malformed native callback target",
@@ -2437,6 +2530,259 @@ fn parse_native_callback_decl(
         })?,
         span,
     }))
+}
+
+fn parse_native_callback_type_ref(
+    header: &str,
+    span: Span,
+) -> Result<Option<(String, SurfaceType)>, String> {
+    let Some((name_text, ty_text)) = header.split_once(':') else {
+        return Ok(None);
+    };
+    let name = parse_symbol_name(name_text.trim()).ok_or_else(|| {
+        format!(
+            "{}:{}: malformed native callback declaration",
+            span.line, span.column
+        )
+    })?;
+    if name_text.trim() != name {
+        return Ok(None);
+    }
+    let callback_type = parse_surface_type(ty_text.trim()).map_err(|_| {
+        format!(
+            "{}:{}: malformed native callback type reference",
+            span.line, span.column
+        )
+    })?;
+    Ok(Some((name, callback_type)))
+}
+
+fn parse_shackle_decl(entry: &RawBlockEntry) -> Result<Option<ShackleDecl>, String> {
+    let trimmed = entry.text.trim();
+    let exported = trimmed.starts_with("export ");
+    let rest = trimmed.strip_prefix("export ").unwrap_or(trimmed);
+    let Some(rest) = rest.strip_prefix("shackle ").map(str::trim) else {
+        return Ok(None);
+    };
+
+    let body_entries = collect_raw_block_body_entries(&entry.children);
+    let surface_text = collect_shackle_surface(trimmed, &entry.children);
+
+    let parse_name_only = |kind: ShackleDeclKind, rest: &str| -> Result<ShackleDecl, String> {
+        let (header_text, binding) = split_optional_binding(rest);
+        let name = parse_symbol_name(header_text.trim()).ok_or_else(|| {
+            format!(
+                "{}:{}: malformed shackle declaration",
+                entry.span.line, entry.span.column
+            )
+        })?;
+        Ok(ShackleDecl {
+            exported,
+            kind,
+            name,
+            params: Vec::new(),
+            return_type: None,
+            callback_type: None,
+            binding,
+            body_entries: body_entries.clone(),
+            surface_text: surface_text.clone(),
+            span: entry.span,
+        })
+    };
+
+    if let Some(rest) = rest.strip_prefix("import fn ") {
+        return parse_shackle_function_decl(
+            exported,
+            ShackleDeclKind::ImportFn,
+            rest,
+            entry.span,
+            body_entries,
+            surface_text,
+            true,
+        )
+        .map(Some);
+    }
+    if let Some(rest) = rest.strip_prefix("fn ") {
+        return parse_shackle_function_decl(
+            exported,
+            ShackleDeclKind::Fn,
+            rest,
+            entry.span,
+            body_entries,
+            surface_text,
+            false,
+        )
+        .map(Some);
+    }
+    if let Some(rest) = rest.strip_prefix("thunk ") {
+        return parse_shackle_function_decl(
+            exported,
+            ShackleDeclKind::Thunk,
+            rest,
+            entry.span,
+            body_entries,
+            surface_text,
+            true,
+        )
+        .map(Some);
+    }
+    if let Some(rest) = rest.strip_prefix("callback ") {
+        let signature = parse_symbol_signature(SymbolKind::Fn, rest.trim(), entry.span)
+            .ok_or_else(|| {
+                format!(
+                    "{}:{}: malformed shackle callback declaration",
+                    entry.span.line, entry.span.column
+                )
+            })?;
+        if !signature.type_params.is_empty() || signature.where_clause.is_some() {
+            return Err(format!(
+                "{}:{}: shackle callbacks do not support type parameters or where clauses",
+                entry.span.line, entry.span.column
+            ));
+        }
+        return Ok(Some(ShackleDecl {
+            exported,
+            kind: ShackleDeclKind::Callback,
+            name: signature.name,
+            params: signature.params,
+            return_type: signature.return_type,
+            callback_type: None,
+            binding: None,
+            body_entries,
+            surface_text,
+            span: entry.span,
+        }));
+    }
+    if let Some(rest) = rest.strip_prefix("const ") {
+        let (signature_text, binding) = split_required_binding(rest, entry.span)?;
+        let signature =
+            parse_symbol_signature(SymbolKind::Const, signature_text.trim(), entry.span)
+                .ok_or_else(|| {
+                    format!(
+                        "{}:{}: malformed shackle const declaration",
+                        entry.span.line, entry.span.column
+                    )
+                })?;
+        return Ok(Some(ShackleDecl {
+            exported,
+            kind: ShackleDeclKind::Const,
+            name: signature.name,
+            params: Vec::new(),
+            return_type: signature.return_type,
+            callback_type: None,
+            binding: Some(binding),
+            body_entries,
+            surface_text,
+            span: entry.span,
+        }));
+    }
+    if let Some(rest) = rest.strip_prefix("type ") {
+        return parse_name_only(ShackleDeclKind::Type, rest).map(Some);
+    }
+    if let Some(rest) = rest.strip_prefix("struct ") {
+        return parse_name_only(ShackleDeclKind::Struct, rest).map(Some);
+    }
+    if let Some(rest) = rest.strip_prefix("union ") {
+        return parse_name_only(ShackleDeclKind::Union, rest).map(Some);
+    }
+    if let Some(rest) = rest.strip_prefix("flags ") {
+        return parse_name_only(ShackleDeclKind::Flags, rest).map(Some);
+    }
+
+    Err(format!(
+        "{}:{}: malformed shackle declaration",
+        entry.span.line, entry.span.column
+    ))
+}
+
+fn split_optional_binding(source: &str) -> (&str, Option<String>) {
+    match source.split_once('=') {
+        Some((head, tail)) => (
+            head.trim(),
+            Some(tail.trim().trim_end_matches(':').trim().to_string()),
+        ),
+        None => (source.trim(), None),
+    }
+}
+
+fn split_required_binding(source: &str, span: Span) -> Result<(&str, String), String> {
+    source
+        .split_once('=')
+        .map(|(head, tail)| {
+            (
+                head.trim(),
+                tail.trim().trim_end_matches(':').trim().to_string(),
+            )
+        })
+        .ok_or_else(|| {
+            format!(
+                "{}:{}: shackle declaration is missing a required binding target",
+                span.line, span.column
+            )
+        })
+}
+
+fn parse_shackle_function_decl(
+    exported: bool,
+    kind: ShackleDeclKind,
+    source: &str,
+    span: Span,
+    body_entries: Vec<String>,
+    surface_text: String,
+    requires_binding: bool,
+) -> Result<ShackleDecl, String> {
+    let (signature_text, binding) = if requires_binding {
+        let (head, target) = split_required_binding(source, span)?;
+        (head, Some(target))
+    } else {
+        let (head, target) = split_optional_binding(source);
+        (head, target)
+    };
+    let signature = parse_symbol_signature(SymbolKind::Fn, signature_text.trim(), span)
+        .ok_or_else(|| {
+            format!(
+                "{}:{}: malformed shackle function declaration",
+                span.line, span.column
+            )
+        })?;
+    if !signature.type_params.is_empty() || signature.where_clause.is_some() {
+        return Err(format!(
+            "{}:{}: shackle functions do not support type parameters or where clauses",
+            span.line, span.column
+        ));
+    }
+    Ok(ShackleDecl {
+        exported,
+        kind,
+        name: signature.name,
+        params: signature.params,
+        return_type: signature.return_type,
+        callback_type: None,
+        binding,
+        body_entries,
+        surface_text,
+        span,
+    })
+}
+
+fn collect_raw_block_body_entries(entries: &[RawBlockEntry]) -> Vec<String> {
+    let mut out = Vec::new();
+    for entry in entries {
+        out.push(entry.text.clone());
+        out.extend(collect_raw_block_body_entries(&entry.children));
+    }
+    out
+}
+
+fn collect_shackle_surface(trimmed: &str, entries: &[RawBlockEntry]) -> String {
+    let mut surface_lines = vec![
+        trimmed
+            .strip_prefix("export ")
+            .unwrap_or(trimmed)
+            .to_string(),
+    ];
+    surface_lines.extend(collect_raw_block_body_entries(entries));
+    surface_lines.join("\n")
 }
 
 fn parse_opaque_symbol(rest: &str, exported: bool, span: Span) -> Option<SymbolDecl> {
@@ -8268,9 +8614,9 @@ mod tests {
         AssignTarget, BUILTIN_TYPE_INFOS, BinaryOp, ChainConnector, ChainIntroducer, ChainStep,
         DirectiveKind, Expr, ForewordAliasKind, ForewordApp, ForewordArg, ForewordDefinitionTarget,
         HeaderAttachment, MatchPattern, OpaqueBoundaryPolicy, OpaqueOwnershipPolicy,
-        OpaqueTypePolicy, ParamMode, PhraseArg, QualifiedPhraseQualifierKind, Statement,
-        StatementKind, SurfaceTraitRef, SurfaceType, SurfaceWhereClause, SymbolBody, SymbolKind,
-        UnaryOp, builtin_type_info, parse_module,
+        OpaqueTypePolicy, ParamMode, PhraseArg, QualifiedPhraseQualifierKind, ShackleDeclKind,
+        Statement, StatementKind, SurfaceTraitRef, SurfaceType, SurfaceWhereClause, SymbolBody,
+        SymbolKind, UnaryOp, builtin_type_info, parse_module,
     };
 
     fn expr_is_path(expr: &Expr, name: &str) -> bool {
@@ -9173,6 +9519,43 @@ mod tests {
     }
 
     #[test]
+    fn parse_module_handles_typed_native_callbacks_and_shackle_declarations() {
+        let parsed = parse_module(concat!(
+            "export shackle callback WNDPROC(read hwnd: Int, message: Int) -> Int\n",
+            "export shackle import fn CreateWindowExW() -> Int = user32.CreateWindowExW\n",
+            "shackle fn helper(read code: Int) -> Int:\n",
+            "    return code\n",
+            "native callback proc: arcana_winapi.raw.user32.WNDPROC = app.callbacks.handle_proc\n",
+            "fn handle_proc(read code: Int) -> Int:\n",
+            "    return code\n",
+        ))
+        .expect("typed native callbacks and shackle declarations should parse");
+
+        assert_eq!(parsed.shackle_decls.len(), 3);
+        assert_eq!(parsed.shackle_decls[0].kind, ShackleDeclKind::Callback);
+        assert_eq!(parsed.shackle_decls[0].name, "WNDPROC");
+        assert_eq!(parsed.shackle_decls[1].kind, ShackleDeclKind::ImportFn);
+        assert_eq!(
+            parsed.shackle_decls[1].binding.as_deref(),
+            Some("user32.CreateWindowExW")
+        );
+        assert_eq!(parsed.shackle_decls[2].kind, ShackleDeclKind::Fn);
+        assert_eq!(parsed.shackle_decls[2].body_entries, vec!["return code"]);
+        assert_eq!(parsed.native_callbacks.len(), 1);
+        assert_eq!(parsed.native_callbacks[0].name, "proc");
+        assert!(parsed.native_callbacks[0].params.is_empty());
+        assert!(parsed.native_callbacks[0].return_type.is_none());
+        assert_eq!(
+            parsed.native_callbacks[0]
+                .callback_type
+                .as_ref()
+                .expect("typed callback ref")
+                .render(),
+            "arcana_winapi.raw.user32.WNDPROC"
+        );
+    }
+
+    #[test]
     fn parse_module_rejects_tuple_field_access_outside_pair_contract() {
         let err = parse_module("fn main() -> Int:\n    return pair.2\n")
             .expect_err("tuple field access should fail");
@@ -9791,28 +10174,34 @@ mod tests {
 
     #[test]
     fn parse_module_collects_extended_phrase_qualifier_kinds() {
-        let parsed = parse_module(
-            concat!(
-                "fn main() -> Int:\n",
-                "    let called = target :: :: call[Int]\n",
-                "    let awaited = task :: :: await\n",
-                "    let woven = worker :: 1 :: weave\n",
-                "    let split_out = helper :: 2 :: split\n",
-                "    let required = maybe :: :: must\n",
-                "    let fallback_value = maybe :: 7 :: fallback\n",
-                "    return 0\n",
-            ),
-        )
+        let parsed = parse_module(concat!(
+            "fn main() -> Int:\n",
+            "    let called = target :: :: call[Int]\n",
+            "    let awaited = task :: :: await\n",
+            "    let woven = worker :: 1 :: weave\n",
+            "    let split_out = helper :: 2 :: split\n",
+            "    let required = maybe :: :: must\n",
+            "    let fallback_value = maybe :: 7 :: fallback\n",
+            "    return 0\n",
+        ))
         .expect("extended qualifier forms should parse");
 
         let statements = &parsed.symbols[0].statements;
         let expected = [
-            (QualifiedPhraseQualifierKind::Call, "call", vec!["Int".to_string()]),
+            (
+                QualifiedPhraseQualifierKind::Call,
+                "call",
+                vec!["Int".to_string()],
+            ),
             (QualifiedPhraseQualifierKind::Await, "await", Vec::new()),
             (QualifiedPhraseQualifierKind::Weave, "weave", Vec::new()),
             (QualifiedPhraseQualifierKind::Split, "split", Vec::new()),
             (QualifiedPhraseQualifierKind::Must, "must", Vec::new()),
-            (QualifiedPhraseQualifierKind::Fallback, "fallback", Vec::new()),
+            (
+                QualifiedPhraseQualifierKind::Fallback,
+                "fallback",
+                Vec::new(),
+            ),
         ];
         for (statement, (expected_kind, expected_qualifier, expected_type_args)) in
             statements.iter().take(6).zip(expected.iter())
@@ -9828,7 +10217,10 @@ mod tests {
                 ..
             } = &statement.kind
             else {
-                panic!("expected qualified phrase let statement, got {:?}", statement.kind);
+                panic!(
+                    "expected qualified phrase let statement, got {:?}",
+                    statement.kind
+                );
             };
             assert_eq!(qualifier_kind, expected_kind);
             assert_eq!(qualifier, expected_qualifier);
@@ -9844,21 +10236,19 @@ mod tests {
 
     #[test]
     fn parse_module_collects_owner_context_clause() {
-        let parsed = parse_module(
-            concat!(
-                "obj SessionCtx:\n",
-                "    base: Int\n",
-                "\n",
-                "obj Counter:\n",
-                "    value: Int\n",
-                "\n",
-                "create Session [Counter] context: SessionCtx scope-exit:\n",
-                "    done: when false hold [Counter]\n",
-                "\n",
-                "fn main() -> Int:\n",
-                "    return 0\n",
-            ),
-        )
+        let parsed = parse_module(concat!(
+            "obj SessionCtx:\n",
+            "    base: Int\n",
+            "\n",
+            "obj Counter:\n",
+            "    value: Int\n",
+            "\n",
+            "create Session [Counter] context: SessionCtx scope-exit:\n",
+            "    done: when false hold [Counter]\n",
+            "\n",
+            "fn main() -> Int:\n",
+            "    return 0\n",
+        ))
         .expect("owner context clause should parse");
 
         let owner = parsed
@@ -9870,10 +10260,7 @@ mod tests {
             panic!("expected owner symbol body");
         };
         assert_eq!(
-            context_type
-                .as_ref()
-                .map(SurfaceType::render)
-                .as_deref(),
+            context_type.as_ref().map(SurfaceType::render).as_deref(),
             Some("SessionCtx")
         );
     }
@@ -10311,18 +10698,12 @@ mod tests {
                 ..
             }
         ));
-        assert!(matches!(
-            main.statements[5].kind,
-            StatementKind::Record(_)
-        ));
+        assert!(matches!(main.statements[5].kind, StatementKind::Record(_)));
         assert!(matches!(
             main.statements[6].kind,
             StatementKind::Construct(_)
         ));
-        assert!(matches!(
-            main.statements[8].kind,
-            StatementKind::Record(_)
-        ));
+        assert!(matches!(main.statements[8].kind, StatementKind::Record(_)));
         assert!(matches!(
             main.statements[9].kind,
             StatementKind::Construct(_)

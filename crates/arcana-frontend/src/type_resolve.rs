@@ -1,4 +1,6 @@
-use arcana_hir::{HirPath, HirResolvedModule, HirType, HirTypeKind, HirWorkspaceSummary};
+use arcana_hir::{
+    HirPath, HirResolvedModule, HirType, HirTypeKind, HirWorkspaceSummary, lookup_shackle_decl_path,
+};
 use arcana_syntax::Span;
 
 use crate::surface::lookup_symbol_path;
@@ -17,6 +19,10 @@ pub(crate) fn canonical_type_from_path(
 ) -> HirType {
     let segments = lookup_symbol_path(workspace, resolved_module, path)
         .map(|resolved| canonical_symbol_path(resolved.module_id, &resolved.symbol.name))
+        .or_else(|| {
+            lookup_shackle_decl_path(workspace, resolved_module, path)
+                .map(|resolved| canonical_symbol_path(resolved.module_id, &resolved.decl.name))
+        })
         .unwrap_or_else(|| path.to_vec());
     HirType {
         kind: HirTypeKind::Path(HirPath { segments, span }),

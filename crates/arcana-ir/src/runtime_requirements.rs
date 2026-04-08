@@ -940,6 +940,7 @@ mod tests {
                 ),
             ],
             native_callbacks: Vec::new(),
+            shackle_decls: Vec::new(),
             owners: Vec::new(),
         };
 
@@ -1076,6 +1077,7 @@ mod tests {
                 ),
             ],
             native_callbacks: Vec::new(),
+            shackle_decls: Vec::new(),
             owners: Vec::new(),
         };
 
@@ -1157,6 +1159,7 @@ mod tests {
                 ),
             ],
             native_callbacks: Vec::new(),
+            shackle_decls: Vec::new(),
             owners: Vec::new(),
         };
 
@@ -1241,6 +1244,7 @@ mod tests {
                 ),
             ],
             native_callbacks: Vec::new(),
+            shackle_decls: Vec::new(),
             owners: Vec::new(),
         };
 
@@ -1304,6 +1308,7 @@ mod tests {
                 ),
             ],
             native_callbacks: Vec::new(),
+            shackle_decls: Vec::new(),
             owners: Vec::new(),
         };
 
@@ -1377,6 +1382,7 @@ mod tests {
                 ),
             ],
             native_callbacks: Vec::new(),
+            shackle_decls: Vec::new(),
             owners: Vec::new(),
         };
 
@@ -1506,6 +1512,7 @@ mod tests {
                 },
             ],
             native_callbacks: Vec::new(),
+            shackle_decls: Vec::new(),
             owners: Vec::new(),
         };
 

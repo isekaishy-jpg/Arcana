@@ -127,15 +127,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "arcana-winapi"
-version = "0.1.0"
-dependencies = [
- "arcana-cabi",
- "winapi",
- "windows-sys",
-]
-
-[[package]]
 name = "block-buffer"
 version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

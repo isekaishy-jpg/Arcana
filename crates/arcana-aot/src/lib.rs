@@ -18,7 +18,7 @@ mod windows_dll;
 pub use artifact::{
     AOT_INTERNAL_FORMAT, AotArtifact, AotEntrypointArtifact, AotNativeCallbackArtifact,
     AotOwnerArtifact, AotOwnerExitArtifact, AotOwnerObjectArtifact, AotPackageArtifact,
-    AotPackageModuleArtifact, AotRoutineArtifact, AotRoutineParamArtifact,
+    AotPackageModuleArtifact, AotRoutineArtifact, AotRoutineParamArtifact, AotShackleDeclArtifact,
 };
 pub use codec::{parse_package_artifact, render_package_artifact};
 pub use compile::{compile_module, compile_package};
@@ -30,6 +30,10 @@ pub use emit::{
 pub use instance_product::{
     ARCANA_NATIVE_PRODUCT_TEMP_PROBES_ENV, AotCompiledInstanceProduct, AotInstanceProductSpec,
     compile_instance_product, default_instance_product_cargo_target_dir,
+};
+pub use native_abi::{
+    NativeBindingCallback, NativeBindingImport, collect_native_binding_callbacks,
+    collect_native_binding_imports,
 };
 pub use native_manifest::{
     NATIVE_BUNDLE_MANIFEST_FORMAT, NativeBundleLaunchManifest, NativeBundleManifest,
@@ -222,6 +226,7 @@ mod tests {
                 statements: Vec::new(),
             }],
             native_callbacks: Vec::new(),
+            shackle_decls: Vec::new(),
             owners: Vec::new(),
             modules: vec![AotPackageModuleArtifact {
                 package_id: test_package_id_for_module("tool"),
@@ -331,6 +336,7 @@ mod tests {
                 }],
             }],
             native_callbacks: Vec::new(),
+            shackle_decls: Vec::new(),
             owners: Vec::new(),
         });
         assert_eq!(artifact.format, AOT_INTERNAL_FORMAT);
@@ -400,6 +406,7 @@ mod tests {
                 }],
             }],
             native_callbacks: Vec::new(),
+            shackle_decls: Vec::new(),
             owners: Vec::new(),
         };
 
@@ -486,6 +493,7 @@ mod tests {
                 }],
             }],
             native_callbacks: Vec::new(),
+            shackle_decls: Vec::new(),
             owners: Vec::new(),
         };
 
@@ -637,6 +645,7 @@ mod tests {
                 }],
             }],
             native_callbacks: Vec::new(),
+            shackle_decls: Vec::new(),
             owners: Vec::new(),
         };
 
@@ -695,6 +704,7 @@ mod tests {
             entrypoints: Vec::new(),
             routines: Vec::new(),
             native_callbacks: Vec::new(),
+            shackle_decls: Vec::new(),
             owners: Vec::new(),
         };
 
@@ -772,6 +782,7 @@ mod tests {
                 }],
             }],
             native_callbacks: Vec::new(),
+            shackle_decls: Vec::new(),
             owners: Vec::new(),
         };
 
@@ -918,6 +929,7 @@ mod tests {
                 },
             ],
             native_callbacks: Vec::new(),
+            shackle_decls: Vec::new(),
             owners: Vec::new(),
         };
 
@@ -1024,6 +1036,7 @@ mod tests {
                 },
             ],
             native_callbacks: Vec::new(),
+            shackle_decls: Vec::new(),
             owners: Vec::new(),
             modules: vec![
                 AotPackageModuleArtifact {
@@ -1124,6 +1137,7 @@ mod tests {
                 }],
             }],
             native_callbacks: Vec::new(),
+            shackle_decls: Vec::new(),
             owners: Vec::new(),
         };
 
@@ -1231,6 +1245,7 @@ mod tests {
                 }],
             }],
             native_callbacks: Vec::new(),
+            shackle_decls: Vec::new(),
             owners: Vec::new(),
             modules: vec![AotPackageModuleArtifact {
                 package_id: test_package_id_for_module("tool"),
@@ -1311,6 +1326,7 @@ mod tests {
                 }],
             }],
             native_callbacks: Vec::new(),
+            shackle_decls: Vec::new(),
             owners: Vec::new(),
         });
         artifact.module_count = 2;
@@ -1404,6 +1420,7 @@ mod tests {
                 },
             ],
             native_callbacks: Vec::new(),
+            shackle_decls: Vec::new(),
             owners: Vec::new(),
             modules: vec![AotPackageModuleArtifact {
                 package_id: test_package_id_for_module("tool"),
@@ -1491,6 +1508,7 @@ mod tests {
                 }],
             }],
             native_callbacks: Vec::new(),
+            shackle_decls: Vec::new(),
             owners: Vec::new(),
         });
         artifact.routines[0].params = vec![AotRoutineParamArtifact {
@@ -1554,6 +1572,7 @@ mod tests {
                 statements: Vec::new(),
             }],
             native_callbacks: Vec::new(),
+            shackle_decls: Vec::new(),
             owners: Vec::new(),
             modules: vec![AotPackageModuleArtifact {
                 package_id: test_package_id_for_module("tool"),

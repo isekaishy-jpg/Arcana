@@ -3,10 +3,10 @@ use super::{
     HirChainConnector, HirChainIntroducer, HirChainStep, HirCleanupFooter, HirConstructDestination,
     HirConstructRegion, HirDirective, HirEnumVariant, HirExpr, HirForewordApp, HirForewordArg,
     HirHeadedModifier, HirHeadedModifierKind, HirHeaderAttachment, HirImplAssocTypeBinding,
-    HirImplDecl, HirLangItem, HirMatchArm, HirMatchPattern, HirMemorySpecDecl,
-    HirModuleDependency, HirOwnerExit, HirOwnerObject, HirPhraseArg, HirRecordRegion,
-    HirRecycleLineKind, HirStatement, HirStatementKind, HirSymbol, HirSymbolBody, HirType,
-    HirUnaryOp, signature::render_symbol_signature,
+    HirImplDecl, HirLangItem, HirMatchArm, HirMatchPattern, HirMemorySpecDecl, HirModuleDependency,
+    HirOwnerExit, HirOwnerObject, HirPhraseArg, HirRecordRegion, HirRecycleLineKind, HirStatement,
+    HirStatementKind, HirSymbol, HirSymbolBody, HirType, HirUnaryOp,
+    signature::render_symbol_signature,
 };
 
 pub(crate) fn encode_surface_text(text: &str) -> String {
@@ -292,7 +292,7 @@ pub(crate) fn render_native_callback_fingerprint(
     callback: &super::HirNativeCallbackDecl,
 ) -> String {
     format!(
-        "native_callback(name={}|params=[{}]|return_type={}|target=[{}])",
+        "native_callback(name={}|params=[{}]|return_type={}|callback_type={}|target=[{}])",
         quote_fingerprint_text(&callback.name),
         callback
             .params
@@ -300,7 +300,8 @@ pub(crate) fn render_native_callback_fingerprint(
             .map(|param| {
                 format!(
                     "param(mode={}|name={}|ty={})",
-                    param.mode
+                    param
+                        .mode
                         .map(|mode| quote_fingerprint_text(mode.as_str()))
                         .unwrap_or_else(|| "none".to_string()),
                     quote_fingerprint_text(&param.name),
@@ -315,11 +316,52 @@ pub(crate) fn render_native_callback_fingerprint(
             .map(|ty| quote_fingerprint_text(ty.render()))
             .unwrap_or_else(|| "Unit".to_string()),
         callback
+            .callback_type
+            .as_ref()
+            .map(|ty| quote_fingerprint_text(ty.render()))
+            .unwrap_or_else(|| "none".to_string()),
+        callback
             .target
             .iter()
             .map(quote_fingerprint_text)
             .collect::<Vec<_>>()
             .join(",")
+    )
+}
+
+pub(crate) fn render_shackle_fingerprint(decl: &super::HirShackleDecl) -> String {
+    format!(
+        concat!(
+            "shackle(",
+            "exported={}|kind={}|name={}|params=[{}]|return_type={}|callback_type={}|",
+            "binding={}|body_entries=[{}]|surface={})"
+        ),
+        decl.exported,
+        decl.kind.as_str(),
+        quote_fingerprint_text(&decl.name),
+        decl.params
+            .iter()
+            .map(render_param_fingerprint)
+            .collect::<Vec<_>>()
+            .join(","),
+        decl.return_type
+            .as_ref()
+            .map(|ty| quote_fingerprint_text(ty.render()))
+            .unwrap_or_else(|| "Unit".to_string()),
+        decl.callback_type
+            .as_ref()
+            .map(|ty| quote_fingerprint_text(ty.render()))
+            .unwrap_or_else(|| "none".to_string()),
+        decl.binding
+            .as_ref()
+            .map(quote_fingerprint_text)
+            .unwrap_or_else(|| "none".to_string()),
+        decl.body_entries
+            .iter()
+            .map(quote_fingerprint_text)
+            .collect::<Vec<_>>()
+            .join(","),
+        quote_fingerprint_text(&decl.surface_text)
     )
 }
 

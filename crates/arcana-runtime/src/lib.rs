@@ -15,8 +15,12 @@ use arcana_aot::{
     AotOwnerArtifact, AotPackageArtifact, parse_package_artifact, validate_package_artifact,
 };
 use arcana_cabi::{
-    ArcanaBytesView, ArcanaCabiBindingPayloadV1, ArcanaCabiBindingValueTag,
-    ArcanaCabiBindingValueV1, ArcanaOwnedBytes, ArcanaOwnedStr, ArcanaStrView,
+    ArcanaBytesView, ArcanaCabiBindingPayloadV1, ArcanaCabiBindingSignature,
+    ArcanaCabiBindingValueTag, ArcanaCabiBindingValueV1, ArcanaCabiExportParam,
+    ArcanaCabiOwnedBytesFreeFn, ArcanaCabiOwnedStrFreeFn, ArcanaCabiParamSourceMode,
+    ArcanaCabiType, ArcanaStrView, binding_write_back_slots, clone_owned_binding_bytes,
+    clone_owned_binding_str, into_owned_bytes, into_owned_str, release_binding_output_value,
+    validate_binding_transport_type,
 };
 
 use arcana_ir::{
@@ -33,8 +37,7 @@ use arcana_ir::{
     ExecHeaderAttachment as ParsedHeaderAttachment, ExecMatchArm as ParsedMatchArm,
     ExecMatchPattern as ParsedMatchPattern, ExecMemorySpecDecl as ParsedMemorySpecDecl,
     ExecNamedBindingId as ParsedNamedBindingId, ExecPhraseArg as ParsedPhraseArg,
-    ExecPhraseQualifierKind as ParsedPhraseQualifierKind,
-    ExecRecordRegion as ParsedRecordRegion,
+    ExecPhraseQualifierKind as ParsedPhraseQualifierKind, ExecRecordRegion as ParsedRecordRegion,
     ExecRecycleLineKind as ParsedRecycleLineKind, ExecStmt as ParsedStmt,
     ExecUnaryOp as ParsedUnaryOp, IrRoutineType, IrRoutineTypeKind, parse_memory_spec_surface_row,
     parse_routine_type_text, validate_runtime_main_entry_contract,
@@ -69,11 +72,11 @@ pub use native_abi::{
 };
 #[cfg(windows)]
 pub use native_host::NativeProcessHost;
+use native_product_loader::{RuntimeBindingCallbackRegistrationSpec, RuntimeBindingImportOutcome};
 pub use native_product_loader::{
     RuntimeChildBindingInfo, RuntimeNativePluginHandle, RuntimeNativeProductCatalog,
-    RuntimeNativeProductInfo, activate_current_bundle_native_products,
-    load_bundle_native_products, load_bundle_native_products_from_manifest_path,
-    load_current_bundle_native_products,
+    RuntimeNativeProductInfo, activate_current_bundle_native_products, load_bundle_native_products,
+    load_bundle_native_products_from_manifest_path, load_current_bundle_native_products,
 };
 pub use package_image::{
     RUNTIME_PACKAGE_IMAGE_FORMAT, parse_runtime_package_image, render_runtime_package_image,
@@ -81,7 +84,6 @@ pub use package_image::{
 pub use routine_plan::{
     RuntimeEntrypointPlan, RuntimeNativeCallbackPlan, RuntimeParamPlan, RuntimeRoutinePlan,
 };
-use native_product_loader::{RuntimeBindingCallbackRegistrationSpec, RuntimeBindingImportOutcome};
 use routine_plan::{lower_entrypoint, lower_native_callback, lower_routine};
 
 const MODULE_MEMORY_SPEC_ALIAS_PREFIX: &str = "@memory_spec:";
@@ -109,6 +111,11 @@ struct RuntimeBindingCallbackThunkData {
 struct RuntimeBindingArgStorage {
     strings: Vec<String>,
     bytes: Vec<Vec<u8>>,
+}
+
+struct RuntimeBindingCallbackOutcome {
+    result: ArcanaCabiBindingValueV1,
+    write_backs: Vec<ArcanaCabiBindingValueV1>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,6 +167,8 @@ pub struct RuntimePackagePlan {
     pub routines: Vec<RuntimeRoutinePlan>,
     #[serde(default)]
     pub native_callbacks: Vec<RuntimeNativeCallbackPlan>,
+    #[serde(default)]
+    pub shackle_decls: Vec<String>,
     pub owners: Vec<RuntimeOwnerPlan>,
 }
 
@@ -5450,6 +5459,11 @@ pub fn plan_from_artifact(artifact: &AotPackageArtifact) -> Result<RuntimePackag
             .iter()
             .map(lower_native_callback)
             .collect(),
+        shackle_decls: artifact
+            .shackle_decls
+            .iter()
+            .map(|decl| decl.surface_text.clone())
+            .collect(),
         owners: artifact.owners.iter().map(lower_owner).collect(),
     };
     validate_runtime_cleanup_footer_handlers(&plan)?;
@@ -6893,10 +6907,9 @@ fn runtime_value_to_string(value: &RuntimeValue) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
-        RuntimeValue::Opaque(RuntimeOpaqueValue::Binding(binding)) => format!(
-            "{}#{}",
-            binding.type_name, binding.handle
-        ),
+        RuntimeValue::Opaque(RuntimeOpaqueValue::Binding(binding)) => {
+            format!("{}#{}", binding.type_name, binding.handle)
+        }
         RuntimeValue::Map(entries) => format!(
             "{{{}}}",
             entries
@@ -8241,7 +8254,10 @@ fn evaluate_owner_exit_checkpoints(
                 host,
             )
             .map_err(runtime_eval_message)?;
-            if expect_bool(force_runtime_value(condition, plan, state, host)?, "owner exit condition")? {
+            if expect_bool(
+                force_runtime_value(condition, plan, state, host)?,
+                "owner exit condition",
+            )? {
                 selected_exit = Some(owner_exit.clone());
                 break;
             }
@@ -8591,7 +8607,8 @@ fn runtime_reference_value_ref<'a>(
     state: &'a RuntimeExecutionState,
     reference: &RuntimeReferenceValue,
 ) -> Result<Option<&'a RuntimeValue>, String> {
-    let Some(mut value) = runtime_reference_root_value_ref(scopes, state, &reference.target)? else {
+    let Some(mut value) = runtime_reference_root_value_ref(scopes, state, &reference.target)?
+    else {
         return Ok(None);
     };
     for member in runtime_reference_members(&reference.target) {
@@ -8637,7 +8654,9 @@ fn runtime_reference_array_byte_at(
         .ok_or_else(|| format!("{context} index `{index}` is out of bounds"))?;
     let value = expect_int(value, context)?;
     if !(0..=255).contains(&value) {
-        return Err(format!("{context} byte `{value}` is out of range `0..=255`"));
+        return Err(format!(
+            "{context} byte `{value}` is out of range `0..=255`"
+        ));
     }
     Ok(Some(value as u8))
 }
@@ -9095,8 +9114,8 @@ fn runtime_reject_live_reference_or_opaque_conflict(
     fallback_conflict: impl Fn(&RuntimeExecutionState) -> bool,
     message: String,
 ) -> Result<(), String> {
-    if let Some(scopes) = scopes {
-        if runtime_scopes_contain_reference_or_opaque_conflict(
+    if let Some(scopes) = scopes
+        && runtime_scopes_contain_reference_or_opaque_conflict(
             scopes,
             state,
             &reference_predicate,
@@ -9104,42 +9123,14 @@ fn runtime_reject_live_reference_or_opaque_conflict(
             ignored_reference,
             ignored_opaque,
             final_args,
-        ) {
-            return Err(message);
-        }
+        )
+    {
+        return Err(message);
     }
     if fallback_conflict(state) {
         return Err(message);
     }
     Ok(())
-}
-
-fn runtime_track_exported_descriptor_target(
-    state: &mut RuntimeExecutionState,
-    target: RuntimeExportedDescriptorTarget,
-    exports: &mut Vec<RuntimeExportedDescriptorTarget>,
-) {
-    *state.exported_descriptor_counts.entry(target).or_insert(0) += 1;
-    exports.push(target);
-}
-
-fn runtime_release_exported_descriptor_targets(
-    state: &mut RuntimeExecutionState,
-    exports: &mut Vec<RuntimeExportedDescriptorTarget>,
-) {
-    for target in exports.drain(..) {
-        let should_remove = match state.exported_descriptor_counts.get_mut(&target) {
-            Some(count) if *count > 1 => {
-                *count -= 1;
-                false
-            }
-            Some(_) => true,
-            None => false,
-        };
-        if should_remove {
-            state.exported_descriptor_counts.remove(&target);
-        }
-    }
 }
 
 fn runtime_reference_descriptor_export_target(
@@ -9190,145 +9181,6 @@ fn runtime_reference_backed_descriptor_view_allowed(
     state: &RuntimeExecutionState,
 ) -> Result<bool, String> {
     Ok(runtime_reference_descriptor_export_target(reference, state)?.is_some())
-}
-
-fn runtime_reference_backed_descriptor_view_values(
-    reference: &RuntimeReferenceValue,
-    state: &RuntimeExecutionState,
-    view_start: usize,
-    view_len: usize,
-    start: usize,
-    len: usize,
-    context: &str,
-) -> Result<Vec<RuntimeValue>, String> {
-    if !runtime_reference_backed_descriptor_view_allowed(reference, state)? {
-        return Err(
-            "descriptor value materialization only supports sealed SessionArena/Slab-backed ReadView references"
-                .to_string(),
-        );
-    }
-    let mut value = match &reference.target {
-        RuntimeReferenceTarget::SessionSlot { id, .. } => state
-            .session_arenas
-            .get(&id.arena)
-            .and_then(|arena| arena.slots.get(&id.slot))
-            .cloned()
-            .ok_or_else(|| format!("SessionArena slot `{}` is missing", id.slot))?,
-        RuntimeReferenceTarget::SlabSlot { id, .. } => state
-            .slabs
-            .get(&id.arena)
-            .and_then(|arena| arena.slots.get(&id.slot))
-            .cloned()
-            .ok_or_else(|| format!("Slab slot `{}` is missing", id.slot))?,
-        _ => {
-            return Err(
-                "descriptor value materialization does not support this reference-backed ReadView"
-                    .to_string(),
-            );
-        }
-    };
-    for member in runtime_reference_members(&reference.target) {
-        value = eval_member_value(value, member)?;
-    }
-    let values = expect_runtime_array(value, context)?;
-    let (base_start, base_end) = runtime_view_range(view_start, view_len, values.len(), context)?;
-    let absolute_start = base_start
-        .checked_add(start)
-        .ok_or_else(|| "descriptor view range overflowed".to_string())?;
-    let absolute_end = absolute_start
-        .checked_add(len)
-        .ok_or_else(|| "descriptor view range overflowed".to_string())?;
-    if absolute_end > base_end {
-        return Err(format!(
-            "descriptor view `{start}..{}` is out of bounds for length `{}`",
-            start + len,
-            view_len
-        ));
-    }
-    Ok(values[absolute_start..absolute_end].to_vec())
-}
-
-fn runtime_reference_backed_descriptor_byte_values(
-    reference: &RuntimeReferenceValue,
-    state: &RuntimeExecutionState,
-    view_start: usize,
-    view_len: usize,
-    start: usize,
-    len: usize,
-    context: &str,
-) -> Result<Vec<u8>, String> {
-    let values = runtime_reference_backed_descriptor_view_values(
-        reference, state, view_start, view_len, start, len, context,
-    )?;
-    values
-        .into_iter()
-        .map(|value| {
-            let value = expect_int(value, context)?;
-            if !(0..=255).contains(&value) {
-                return Err(format!(
-                    "{context} byte `{value}` is out of range `0..=255`"
-                ));
-            }
-            Ok(value as u8)
-        })
-        .collect()
-}
-
-fn runtime_reference_backed_descriptor_str_bytes(
-    reference: &RuntimeReferenceValue,
-    state: &RuntimeExecutionState,
-    view_start: usize,
-    view_len: usize,
-    start: usize,
-    len: usize,
-    context: &str,
-) -> Result<Vec<u8>, String> {
-    if !runtime_reference_backed_descriptor_view_allowed(reference, state)? {
-        return Err(
-            "descriptor byte materialization only supports sealed SessionArena/Slab-backed StrView references"
-                .to_string(),
-        );
-    }
-    let mut value = match &reference.target {
-        RuntimeReferenceTarget::SessionSlot { id, .. } => state
-            .session_arenas
-            .get(&id.arena)
-            .and_then(|arena| arena.slots.get(&id.slot))
-            .cloned()
-            .ok_or_else(|| format!("SessionArena slot `{}` is missing", id.slot))?,
-        RuntimeReferenceTarget::SlabSlot { id, .. } => state
-            .slabs
-            .get(&id.arena)
-            .and_then(|arena| arena.slots.get(&id.slot))
-            .cloned()
-            .ok_or_else(|| format!("Slab slot `{}` is missing", id.slot))?,
-        _ => {
-            return Err(
-                "descriptor byte materialization does not support this reference-backed StrView"
-                    .to_string(),
-            );
-        }
-    };
-    for member in runtime_reference_members(&reference.target) {
-        value = eval_member_value(value, member)?;
-    }
-    let text = expect_str(value, context)?;
-    let bytes = text.as_bytes();
-    let (base_start, base_end) = runtime_view_range(view_start, view_len, bytes.len(), context)?;
-    let absolute_start = base_start
-        .checked_add(start)
-        .ok_or_else(|| "descriptor view range overflowed".to_string())?;
-    let absolute_end = absolute_start
-        .checked_add(len)
-        .ok_or_else(|| "descriptor view range overflowed".to_string())?;
-    if absolute_end > base_end {
-        return Err(format!(
-            "descriptor view `{start}..{}` is out of bounds for length `{}`",
-            start + len,
-            view_len
-        ));
-    }
-    Ok(bytes[absolute_start..absolute_end].to_vec())
 }
 
 fn runtime_reference_root_value(
@@ -9901,9 +9753,7 @@ fn expect_named_record(
     context: &str,
 ) -> Result<BTreeMap<String, RuntimeValue>, String> {
     let RuntimeValue::Record { name, fields } = value else {
-        return Err(format!(
-            "{context} expected {record_name}, got `{value:?}`"
-        ));
+        return Err(format!("{context} expected {record_name}, got `{value:?}`"));
     };
     if name != record_name {
         return Err(format!("{context} expected {record_name}, got `{name}`"));
@@ -11194,6 +11044,18 @@ fn leak_runtime_binding_text(text: &str) -> &'static str {
     Box::leak(text.to_string().into_boxed_str())
 }
 
+unsafe extern "system" fn runtime_binding_owned_bytes_free(ptr: *mut u8, len: usize) {
+    unsafe {
+        arcana_cabi::free_owned_bytes(ptr, len);
+    }
+}
+
+unsafe extern "system" fn runtime_binding_owned_str_free(ptr: *mut u8, len: usize) {
+    unsafe {
+        arcana_cabi::free_owned_str(ptr, len);
+    }
+}
+
 unsafe fn free_runtime_binding_callback_user_data(user_data: *mut c_void) {
     if !user_data.is_null() {
         unsafe {
@@ -11214,6 +11076,8 @@ fn runtime_binding_callback_specs_for_package(
         .map(|callback| RuntimeBindingCallbackRegistrationSpec {
             name: leak_runtime_binding_text(&callback.name),
             callback: runtime_binding_callback_trampoline,
+            owned_bytes_free: runtime_binding_owned_bytes_free,
+            owned_str_free: runtime_binding_owned_str_free,
             user_data: Box::into_raw(Box::new(RuntimeBindingCallbackThunkData {
                 callback: callback.clone(),
             })) as *mut c_void,
@@ -11222,13 +11086,85 @@ fn runtime_binding_callback_specs_for_package(
         .collect()
 }
 
+fn runtime_binding_param_metadata(
+    param: &RuntimeParamPlan,
+) -> Result<ArcanaCabiExportParam, String> {
+    let source_mode = ArcanaCabiParamSourceMode::from_param_mode_text(param.mode.as_deref())?;
+    let input_type = ArcanaCabiType::parse(&param.ty.render())?;
+    validate_binding_transport_type(&input_type)?;
+    Ok(ArcanaCabiExportParam::binding(
+        param.name.clone(),
+        source_mode,
+        input_type,
+    ))
+}
+
+fn runtime_binding_params_metadata(
+    params: &[RuntimeParamPlan],
+) -> Result<Vec<ArcanaCabiExportParam>, String> {
+    params
+        .iter()
+        .map(runtime_binding_param_metadata)
+        .collect::<Result<Vec<_>, _>>()
+}
+
+fn runtime_binding_return_type(
+    return_type: Option<&IrRoutineType>,
+) -> Result<ArcanaCabiType, String> {
+    let ty = ArcanaCabiType::parse(
+        &return_type
+            .map(IrRoutineType::render)
+            .unwrap_or_else(|| "Unit".to_string()),
+    )?;
+    validate_binding_transport_type(&ty)?;
+    Ok(ty)
+}
+
+fn runtime_binding_import_signatures_for_package(
+    plan: &RuntimePackagePlan,
+    package_id: &str,
+) -> Result<Vec<ArcanaCabiBindingSignature>, String> {
+    plan.routines
+        .iter()
+        .filter(|routine| routine.package_id == package_id)
+        .filter_map(|routine| routine.native_impl.as_ref().map(|name| (routine, name)))
+        .map(|(routine, name)| {
+            Ok(ArcanaCabiBindingSignature {
+                name: name.clone(),
+                return_type: runtime_binding_return_type(routine.return_type.as_ref())?,
+                params: runtime_binding_params_metadata(&routine.params)?,
+            })
+        })
+        .collect()
+}
+
+fn runtime_binding_callback_signatures_for_package(
+    plan: &RuntimePackagePlan,
+    package_id: &str,
+) -> Result<Vec<ArcanaCabiBindingSignature>, String> {
+    plan.native_callbacks
+        .iter()
+        .filter(|callback| callback.package_id == package_id)
+        .map(|callback| {
+            Ok(ArcanaCabiBindingSignature {
+                name: callback.name.clone(),
+                return_type: runtime_binding_return_type(callback.return_type.as_ref())?,
+                params: runtime_binding_params_metadata(&callback.params)?,
+            })
+        })
+        .collect()
+}
+
 unsafe extern "system" fn runtime_binding_callback_trampoline(
     user_data: *mut c_void,
     args: *const ArcanaCabiBindingValueV1,
     arg_count: usize,
+    out_write_backs: *mut ArcanaCabiBindingValueV1,
     out_result: *mut ArcanaCabiBindingValueV1,
 ) -> i32 {
-    let Some(thunk_data) = (unsafe { (user_data as *mut RuntimeBindingCallbackThunkData).as_ref() }) else {
+    let Some(thunk_data) =
+        (unsafe { (user_data as *mut RuntimeBindingCallbackThunkData).as_ref() })
+    else {
         return 0;
     };
     let callback_args = if arg_count == 0 {
@@ -11238,10 +11174,15 @@ unsafe extern "system" fn runtime_binding_callback_trampoline(
     } else {
         unsafe { std::slice::from_raw_parts(args, arg_count) }
     };
+    if arg_count != 0 && out_write_backs.is_null() {
+        return 0;
+    }
     let result = ACTIVE_RUNTIME_BINDING_CALLBACK_CONTEXT.with(|slot| {
         let borrow = slot.borrow();
         let Some(context) = *borrow else {
-            return Err("native binding callback invoked without an active runtime context".to_string());
+            return Err(
+                "native binding callback invoked without an active runtime context".to_string(),
+            );
         };
         let plan = unsafe { context.plan.as_ref() }
             .ok_or_else(|| "native binding callback lost runtime package plan".to_string())?;
@@ -11252,15 +11193,25 @@ unsafe extern "system" fn runtime_binding_callback_trampoline(
         execute_runtime_binding_callback(plan, host, &thunk_data.callback, callback_args)
     });
     match result {
-        Ok(value) => {
+        Ok(outcome) => {
+            if !out_write_backs.is_null() {
+                let slots = unsafe { std::slice::from_raw_parts_mut(out_write_backs, arg_count) };
+                slots.copy_from_slice(&outcome.write_backs);
+            }
             if !out_result.is_null() {
                 unsafe {
-                    *out_result = value;
+                    *out_result = outcome.result;
                 }
             }
             1
         }
         Err(_) => {
+            if !out_write_backs.is_null() {
+                let slots = unsafe { std::slice::from_raw_parts_mut(out_write_backs, arg_count) };
+                for slot in slots {
+                    *slot = ArcanaCabiBindingValueV1::default();
+                }
+            }
             if !out_result.is_null() {
                 unsafe {
                     *out_result = ArcanaCabiBindingValueV1::default();
@@ -11276,7 +11227,7 @@ fn execute_runtime_binding_callback(
     host: &mut dyn RuntimeHost,
     callback: &RuntimeNativeCallbackPlan,
     args: &[ArcanaCabiBindingValueV1],
-) -> Result<ArcanaCabiBindingValueV1, String> {
+) -> Result<RuntimeBindingCallbackOutcome, String> {
     if callback.params.len() != args.len() {
         return Err(format!(
             "native callback `{}` expected {} arguments, got {}",
@@ -11342,7 +11293,8 @@ fn execute_runtime_binding_callback(
             )),
         }));
     }
-    runtime_binding_output_from_runtime_value(
+    let write_backs = runtime_binding_callback_write_backs(callback, &outcome.final_args)?;
+    let result = runtime_binding_output_from_runtime_value(
         &callback.package_id,
         callback
             .return_type
@@ -11352,6 +11304,13 @@ fn execute_runtime_binding_callback(
             .as_str(),
         outcome.value,
     )
+    .inspect_err(|_err| {
+        runtime_release_binding_values(write_backs.iter().copied());
+    })?;
+    Ok(RuntimeBindingCallbackOutcome {
+        result,
+        write_backs,
+    })
 }
 
 fn execute_runtime_native_binding_import(
@@ -11360,7 +11319,7 @@ fn execute_runtime_native_binding_import(
     binding_name: &str,
     args: &[RuntimeValue],
     host: &mut dyn RuntimeHost,
-) -> Result<RuntimeValue, String> {
+) -> Result<RoutineExecutionOutcome, String> {
     let (host_data, host_vtable): (*mut (), *mut ()) =
         unsafe { std::mem::transmute::<&mut dyn RuntimeHost, (*mut (), *mut ())>(host) };
     let mut storage = RuntimeBindingArgStorage::default();
@@ -11378,6 +11337,10 @@ fn execute_runtime_native_binding_import(
         })
         .collect::<Result<Vec<_>, _>>()?;
     let callback_specs = runtime_binding_callback_specs_for_package(plan, &routine.package_id);
+    let expected_imports =
+        runtime_binding_import_signatures_for_package(plan, &routine.package_id)?;
+    let expected_callbacks =
+        runtime_binding_callback_signatures_for_package(plan, &routine.package_id)?;
     let outcome = with_runtime_binding_callback_context(plan, host_data, host_vtable, || {
         let host_ptr: *mut dyn RuntimeHost =
             unsafe { std::mem::transmute((host_data, host_vtable)) };
@@ -11388,11 +11351,26 @@ fn execute_runtime_native_binding_import(
                 &routine.package_id,
                 binding_name,
                 &callback_specs,
+                &expected_imports,
+                &expected_callbacks,
                 &cabi_args,
             )
         })
     })?;
-    runtime_value_from_binding_output(
+    let final_args = runtime_final_args_from_binding_import(
+        &routine.package_id,
+        &routine.params,
+        args,
+        &outcome,
+    )
+    .inspect_err(|_err| {
+        let _ = release_binding_output_value(
+            outcome.result,
+            outcome.owned_bytes_free,
+            outcome.owned_str_free,
+        );
+    })?;
+    let value = runtime_value_from_binding_cabi_output(
         &routine.package_id,
         routine
             .return_type
@@ -11400,20 +11378,16 @@ fn execute_runtime_native_binding_import(
             .map(IrRoutineType::render)
             .unwrap_or_else(|| "Unit".to_string())
             .as_str(),
-        &outcome,
-    )
-}
-
-fn runtime_binding_tag(value: &ArcanaCabiBindingValueV1) -> Result<ArcanaCabiBindingValueTag, String> {
-    match value.tag {
-        tag if tag == ArcanaCabiBindingValueTag::Int as u32 => Ok(ArcanaCabiBindingValueTag::Int),
-        tag if tag == ArcanaCabiBindingValueTag::Bool as u32 => Ok(ArcanaCabiBindingValueTag::Bool),
-        tag if tag == ArcanaCabiBindingValueTag::Str as u32 => Ok(ArcanaCabiBindingValueTag::Str),
-        tag if tag == ArcanaCabiBindingValueTag::Bytes as u32 => Ok(ArcanaCabiBindingValueTag::Bytes),
-        tag if tag == ArcanaCabiBindingValueTag::Opaque as u32 => Ok(ArcanaCabiBindingValueTag::Opaque),
-        tag if tag == ArcanaCabiBindingValueTag::Unit as u32 => Ok(ArcanaCabiBindingValueTag::Unit),
-        other => Err(format!("unsupported native binding value tag `{other}`")),
-    }
+        &outcome.result,
+        outcome.owned_bytes_free,
+        outcome.owned_str_free,
+        "native binding import result",
+    )?;
+    Ok(RoutineExecutionOutcome {
+        value,
+        final_args,
+        control: None,
+    })
 }
 
 fn runtime_binding_input_from_runtime_value(
@@ -11512,13 +11486,13 @@ fn runtime_value_from_binding_input(
     expected_type: &str,
     value: &ArcanaCabiBindingValueV1,
 ) -> Result<RuntimeValue, String> {
-    match (expected_type, runtime_binding_tag(value)?) {
-        ("Int", ArcanaCabiBindingValueTag::Int) => Ok(RuntimeValue::Int(unsafe {
-            value.payload.int_value
-        })),
-        ("Bool", ArcanaCabiBindingValueTag::Bool) => Ok(RuntimeValue::Bool(unsafe {
-            value.payload.bool_value != 0
-        })),
+    match (expected_type, value.tag()?) {
+        ("Int", ArcanaCabiBindingValueTag::Int) => {
+            Ok(RuntimeValue::Int(unsafe { value.payload.int_value }))
+        }
+        ("Bool", ArcanaCabiBindingValueTag::Bool) => {
+            Ok(RuntimeValue::Bool(unsafe { value.payload.bool_value != 0 }))
+        }
         ("Str", ArcanaCabiBindingValueTag::Str) => {
             let view = unsafe { value.payload.str_value };
             let bytes = unsafe { std::slice::from_raw_parts(view.ptr, view.len) };
@@ -11552,26 +11526,30 @@ fn runtime_value_from_binding_input(
     }
 }
 
-fn runtime_value_from_binding_output(
+fn runtime_value_from_binding_cabi_output(
     package_id: &str,
     expected_type: &str,
-    outcome: &RuntimeBindingImportOutcome,
+    value: &ArcanaCabiBindingValueV1,
+    owned_bytes_free: ArcanaCabiOwnedBytesFreeFn,
+    owned_str_free: ArcanaCabiOwnedStrFreeFn,
+    label: &str,
 ) -> Result<RuntimeValue, String> {
-    match (expected_type, runtime_binding_tag(&outcome.result)?) {
-        ("Int", ArcanaCabiBindingValueTag::Int) => Ok(RuntimeValue::Int(unsafe {
-            outcome.result.payload.int_value
-        })),
-        ("Bool", ArcanaCabiBindingValueTag::Bool) => Ok(RuntimeValue::Bool(unsafe {
-            outcome.result.payload.bool_value != 0
-        })),
+    let actual = value.tag()?;
+    match (expected_type, actual) {
+        ("Int", ArcanaCabiBindingValueTag::Int) => {
+            Ok(RuntimeValue::Int(unsafe { value.payload.int_value }))
+        }
+        ("Bool", ArcanaCabiBindingValueTag::Bool) => {
+            Ok(RuntimeValue::Bool(unsafe { value.payload.bool_value != 0 }))
+        }
         ("Str", ArcanaCabiBindingValueTag::Str) => {
-            let owned = unsafe { outcome.result.payload.owned_str_value };
-            let text = clone_owned_binding_str(owned, outcome.owned_str_free)?;
+            let owned = unsafe { value.payload.owned_str_value };
+            let text = clone_owned_binding_str(owned, owned_str_free)?;
             Ok(RuntimeValue::Str(text))
         }
         ("Array[Int]", ArcanaCabiBindingValueTag::Bytes) => {
-            let owned = unsafe { outcome.result.payload.owned_bytes_value };
-            let bytes = clone_owned_binding_bytes(owned, outcome.owned_bytes_free)?;
+            let owned = unsafe { value.payload.owned_bytes_value };
+            let bytes = clone_owned_binding_bytes(owned, owned_bytes_free)?;
             Ok(RuntimeValue::Array(
                 bytes
                     .into_iter()
@@ -11584,13 +11562,92 @@ fn runtime_value_from_binding_output(
             RuntimeOpaqueValue::Binding(RuntimeBindingOpaqueValue {
                 package_id: leak_runtime_binding_text(package_id),
                 type_name: leak_runtime_binding_text(expected_type),
-                handle: unsafe { outcome.result.payload.opaque_value },
+                handle: unsafe { value.payload.opaque_value },
             }),
         )),
+        (_, ArcanaCabiBindingValueTag::Str) => {
+            let _ = release_binding_output_value(*value, owned_bytes_free, owned_str_free);
+            Err(format!("{label} expected `{expected_type}`, got tag `Str`"))
+        }
+        (_, ArcanaCabiBindingValueTag::Bytes) => {
+            let _ = release_binding_output_value(*value, owned_bytes_free, owned_str_free);
+            Err(format!(
+                "{label} expected `{expected_type}`, got tag `Bytes`"
+            ))
+        }
         (_, actual) => Err(format!(
-            "native binding import expected `{expected_type}`, got tag `{actual:?}`"
+            "{label} expected `{expected_type}`, got tag `{actual:?}`"
         )),
     }
+}
+
+fn runtime_binding_callback_write_backs(
+    callback: &RuntimeNativeCallbackPlan,
+    final_args: &[RuntimeValue],
+) -> Result<Vec<ArcanaCabiBindingValueV1>, String> {
+    if callback.params.len() != final_args.len() {
+        return Err(format!(
+            "native callback `{}` final arg count mismatch: expected {}, got {}",
+            callback.name,
+            callback.params.len(),
+            final_args.len()
+        ));
+    }
+    let metadata = runtime_binding_params_metadata(&callback.params)?;
+    let mut write_backs = binding_write_back_slots(&metadata);
+    for (index, (param, value)) in callback.params.iter().zip(final_args.iter()).enumerate() {
+        if param.mode.as_deref() != Some("edit") {
+            continue;
+        }
+        match runtime_binding_output_from_runtime_value(
+            &callback.package_id,
+            &param.ty.render(),
+            value.clone(),
+        ) {
+            Ok(write_back) => write_backs[index] = write_back,
+            Err(err) => {
+                runtime_release_binding_values(write_backs.iter().copied());
+                return Err(err);
+            }
+        }
+    }
+    Ok(write_backs)
+}
+
+fn runtime_final_args_from_binding_import(
+    package_id: &str,
+    params: &[RuntimeParamPlan],
+    args: &[RuntimeValue],
+    outcome: &RuntimeBindingImportOutcome,
+) -> Result<Vec<RuntimeValue>, String> {
+    if params.len() != args.len() {
+        return Err(format!(
+            "native binding import arg count mismatch: expected {}, got {}",
+            params.len(),
+            args.len()
+        ));
+    }
+    let mut final_args = args.to_vec();
+    for (index, param) in params.iter().enumerate() {
+        if param.mode.as_deref() != Some("edit") {
+            continue;
+        }
+        match runtime_value_from_binding_cabi_output(
+            package_id,
+            &param.ty.render(),
+            &outcome.write_backs[index],
+            outcome.owned_bytes_free,
+            outcome.owned_str_free,
+            "native binding import write-back",
+        ) {
+            Ok(value) => final_args[index] = value,
+            Err(err) => {
+                runtime_release_binding_values(outcome.write_backs[index..].iter().copied());
+                return Err(err);
+            }
+        }
+    }
+    Ok(final_args)
 }
 
 fn runtime_binding_output_from_runtime_value(
@@ -11598,7 +11655,7 @@ fn runtime_binding_output_from_runtime_value(
     expected_type: &str,
     value: RuntimeValue,
 ) -> Result<ArcanaCabiBindingValueV1, String> {
-    let _ = package_id;
+    let actual_type = runtime_value_type_root(&value).unwrap_or_else(|| format!("{value:?}"));
     match (expected_type, value) {
         ("Int", RuntimeValue::Int(value)) => Ok(ArcanaCabiBindingValueV1 {
             tag: ArcanaCabiBindingValueTag::Int as u32,
@@ -11614,9 +11671,40 @@ fn runtime_binding_output_from_runtime_value(
                 bool_value: if value { 1 } else { 0 },
             },
         }),
+        ("Str", RuntimeValue::Str(value)) => Ok(ArcanaCabiBindingValueV1 {
+            tag: ArcanaCabiBindingValueTag::Str as u32,
+            reserved0: 0,
+            reserved1: 0,
+            payload: ArcanaCabiBindingPayloadV1 {
+                owned_str_value: into_owned_str(value),
+            },
+        }),
+        ("Array[Int]", RuntimeValue::Array(values)) => Ok(ArcanaCabiBindingValueV1 {
+            tag: ArcanaCabiBindingValueTag::Bytes as u32,
+            reserved0: 0,
+            reserved1: 0,
+            payload: ArcanaCabiBindingPayloadV1 {
+                owned_bytes_value: into_owned_bytes(
+                    values
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, value)| match value {
+                            RuntimeValue::Int(value) => u8::try_from(value).map_err(|_| {
+                                format!(
+                                    "binding byte output index `{index}` is out of range 0..255: `{value}`"
+                                )
+                            }),
+                            other => Err(format!(
+                                "binding bytes output expected Array[Int], found `{other:?}` at index `{index}`"
+                            )),
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                ),
+            },
+        }),
         ("Unit", RuntimeValue::Unit) => Ok(ArcanaCabiBindingValueV1::default()),
         (_, RuntimeValue::Opaque(RuntimeOpaqueValue::Binding(binding)))
-            if binding.type_name == expected_type =>
+            if binding.package_id == package_id && binding.type_name == expected_type =>
         {
             Ok(ArcanaCabiBindingValueV1 {
                 tag: ArcanaCabiBindingValueTag::Opaque as u32,
@@ -11628,49 +11716,20 @@ fn runtime_binding_output_from_runtime_value(
             })
         }
         _ => Err(format!(
-            "native binding callbacks currently return only Int, Bool, opaque handles, or Unit; `{expected_type}` is not supported"
+            "native binding output expected `{expected_type}`, got `{}`",
+            actual_type
         )),
     }
 }
 
-fn clone_owned_binding_bytes(
-    owned: ArcanaOwnedBytes,
-    free: unsafe extern "system" fn(*mut u8, usize),
-) -> Result<Vec<u8>, String> {
-    if owned.ptr.is_null() {
-        if owned.len == 0 {
-            return Ok(Vec::new());
-        }
-        return Err(format!(
-            "native binding returned null owned bytes with non-zero length {}",
-            owned.len
-        ));
+fn runtime_release_binding_values(values: impl IntoIterator<Item = ArcanaCabiBindingValueV1>) {
+    for value in values {
+        let _ = release_binding_output_value(
+            value,
+            runtime_binding_owned_bytes_free,
+            runtime_binding_owned_str_free,
+        );
     }
-    let bytes = unsafe { std::slice::from_raw_parts(owned.ptr, owned.len) }.to_vec();
-    unsafe {
-        free(owned.ptr, owned.len);
-    }
-    Ok(bytes)
-}
-
-fn clone_owned_binding_str(
-    owned: ArcanaOwnedStr,
-    free: unsafe extern "system" fn(*mut u8, usize),
-) -> Result<String, String> {
-    if owned.ptr.is_null() {
-        if owned.len == 0 {
-            return Ok(String::new());
-        }
-        return Err(format!(
-            "native binding returned null owned string with non-zero length {}",
-            owned.len
-        ));
-    }
-    let bytes = unsafe { std::slice::from_raw_parts(owned.ptr, owned.len) }.to_vec();
-    unsafe {
-        free(owned.ptr, owned.len);
-    }
-    String::from_utf8(bytes).map_err(|err| format!("native binding string is not utf-8: {err}"))
 }
 
 fn try_execute_arcana_owned_api_call(
@@ -13327,15 +13386,6 @@ fn insert_runtime_byte_edit_view_from_reference(
     handle
 }
 
-pub(crate) fn insert_runtime_byte_view(
-    state: &mut RuntimeExecutionState,
-    values: Vec<u8>,
-) -> RuntimeByteViewHandle {
-    let len = values.len();
-    let backing = insert_runtime_byte_view_buffer(state, values);
-    insert_runtime_byte_view_from_buffer(state, backing, 0, len)
-}
-
 #[allow(dead_code)]
 pub(crate) fn insert_runtime_byte_edit_view(
     state: &mut RuntimeExecutionState,
@@ -13396,15 +13446,6 @@ fn insert_runtime_str_view_from_reference(
     handle
 }
 
-pub(crate) fn insert_runtime_str_view(
-    state: &mut RuntimeExecutionState,
-    text: String,
-) -> RuntimeStrViewHandle {
-    let len = text.len();
-    let backing = insert_runtime_str_view_buffer(state, text);
-    insert_runtime_str_view_from_buffer(state, backing, 0, len)
-}
-
 #[cfg(test)]
 pub(crate) fn runtime_read_view_snapshot(
     state: &RuntimeExecutionState,
@@ -13427,23 +13468,6 @@ pub(crate) fn runtime_read_view_snapshot(
                 .map(|slot| ring.slots.get(slot).cloned())
                 .collect()
         }
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn runtime_byte_view_snapshot(
-    state: &RuntimeExecutionState,
-    handle: RuntimeByteViewHandle,
-) -> Option<Vec<u8>> {
-    let view = state.byte_views.get(&handle)?;
-    match &view.backing {
-        RuntimeByteViewBacking::Buffer(buffer) => state
-            .byte_view_buffers
-            .get(buffer)?
-            .values
-            .get(view.start..view.start + view.len)
-            .map(|slice| slice.to_vec()),
-        RuntimeByteViewBacking::Reference(_) => None,
     }
 }
 
@@ -13613,12 +13637,12 @@ fn ensure_runtime_ring_capacity(arena: &mut RuntimeRingBufferState) -> Result<()
     {
         return Ok(());
     }
-    if matches!(arena.policy.overwrite, RuntimeRingOverwritePolicy::Oldest) {
-        if let Some(oldest_slot) = arena.order.pop_front() {
-            arena.slots.remove(&oldest_slot);
-            *arena.generations.entry(oldest_slot).or_insert(0) += 1;
-            return Ok(());
-        }
+    if matches!(arena.policy.overwrite, RuntimeRingOverwritePolicy::Oldest)
+        && let Some(oldest_slot) = arena.order.pop_front()
+    {
+        arena.slots.remove(&oldest_slot);
+        *arena.generations.entry(oldest_slot).or_insert(0) += 1;
+        return Ok(());
     }
     Err(format!(
         "ring capacity exhausted at {}; growth={} pressure={:?} overwrite={:?}",
@@ -14111,11 +14135,20 @@ fn expect_single_arg(mut args: Vec<RuntimeValue>, name: &str) -> Result<RuntimeV
 const RUNTIME_DIRECT_CALLABLE_SIGNATURE_SOURCES: &[(&str, &str)] = &[
     ("std.args", include_str!("../../../std/src/args.arc")),
     ("std.audio", include_str!("../../../std/src/audio.arc")),
-    ("std.behaviors", include_str!("../../../std/src/behaviors.arc")),
+    (
+        "std.behaviors",
+        include_str!("../../../std/src/behaviors.arc"),
+    ),
     ("std.bytes", include_str!("../../../std/src/bytes.arc")),
     ("std.canvas", include_str!("../../../std/src/canvas.arc")),
-    ("std.clipboard", include_str!("../../../std/src/clipboard.arc")),
-    ("std.concurrent", include_str!("../../../std/src/concurrent.arc")),
+    (
+        "std.clipboard",
+        include_str!("../../../std/src/clipboard.arc"),
+    ),
+    (
+        "std.concurrent",
+        include_str!("../../../std/src/concurrent.arc"),
+    ),
     ("std.ecs", include_str!("../../../std/src/ecs.arc")),
     ("std.env", include_str!("../../../std/src/env.arc")),
     ("std.events", include_str!("../../../std/src/events.arc")),
@@ -14127,7 +14160,10 @@ const RUNTIME_DIRECT_CALLABLE_SIGNATURE_SOURCES: &[(&str, &str)] = &[
     ("std.path", include_str!("../../../std/src/path.arc")),
     ("std.process", include_str!("../../../std/src/process.arc")),
     ("std.text", include_str!("../../../std/src/text.arc")),
-    ("std.text_input", include_str!("../../../std/src/text_input.arc")),
+    (
+        "std.text_input",
+        include_str!("../../../std/src/text_input.arc"),
+    ),
     ("std.time", include_str!("../../../std/src/time.arc")),
     ("std.window", include_str!("../../../std/src/window.arc")),
     (
@@ -14146,8 +14182,14 @@ const RUNTIME_DIRECT_CALLABLE_SIGNATURE_SOURCES: &[(&str, &str)] = &[
         "std.collections.set",
         include_str!("../../../std/src/collections/set.arc"),
     ),
-    ("std.kernel.args", include_str!("../../../std/src/kernel/args.arc")),
-    ("std.kernel.audio", include_str!("../../../std/src/kernel/audio.arc")),
+    (
+        "std.kernel.args",
+        include_str!("../../../std/src/kernel/args.arc"),
+    ),
+    (
+        "std.kernel.audio",
+        include_str!("../../../std/src/kernel/audio.arc"),
+    ),
     (
         "std.kernel.clipboard",
         include_str!("../../../std/src/kernel/clipboard.arc"),
@@ -14160,12 +14202,30 @@ const RUNTIME_DIRECT_CALLABLE_SIGNATURE_SOURCES: &[(&str, &str)] = &[
         "std.kernel.concurrency",
         include_str!("../../../std/src/kernel/concurrency.arc"),
     ),
-    ("std.kernel.ecs", include_str!("../../../std/src/kernel/ecs.arc")),
-    ("std.kernel.env", include_str!("../../../std/src/kernel/env.arc")),
-    ("std.kernel.events", include_str!("../../../std/src/kernel/events.arc")),
-    ("std.kernel.fs", include_str!("../../../std/src/kernel/fs.arc")),
-    ("std.kernel.gfx", include_str!("../../../std/src/kernel/gfx.arc")),
-    ("std.kernel.io", include_str!("../../../std/src/kernel/io.arc")),
+    (
+        "std.kernel.ecs",
+        include_str!("../../../std/src/kernel/ecs.arc"),
+    ),
+    (
+        "std.kernel.env",
+        include_str!("../../../std/src/kernel/env.arc"),
+    ),
+    (
+        "std.kernel.events",
+        include_str!("../../../std/src/kernel/events.arc"),
+    ),
+    (
+        "std.kernel.fs",
+        include_str!("../../../std/src/kernel/fs.arc"),
+    ),
+    (
+        "std.kernel.gfx",
+        include_str!("../../../std/src/kernel/gfx.arc"),
+    ),
+    (
+        "std.kernel.io",
+        include_str!("../../../std/src/kernel/io.arc"),
+    ),
     (
         "std.kernel.memory",
         include_str!("../../../std/src/kernel/memory.arc"),
@@ -14174,17 +14234,26 @@ const RUNTIME_DIRECT_CALLABLE_SIGNATURE_SOURCES: &[(&str, &str)] = &[
         "std.kernel.package",
         include_str!("../../../std/src/kernel/package.arc"),
     ),
-    ("std.kernel.path", include_str!("../../../std/src/kernel/path.arc")),
+    (
+        "std.kernel.path",
+        include_str!("../../../std/src/kernel/path.arc"),
+    ),
     (
         "std.kernel.process",
         include_str!("../../../std/src/kernel/process.arc"),
     ),
-    ("std.kernel.text", include_str!("../../../std/src/kernel/text.arc")),
+    (
+        "std.kernel.text",
+        include_str!("../../../std/src/kernel/text.arc"),
+    ),
     (
         "std.kernel.text_input",
         include_str!("../../../std/src/kernel/text_input.arc"),
     ),
-    ("std.kernel.time", include_str!("../../../std/src/kernel/time.arc")),
+    (
+        "std.kernel.time",
+        include_str!("../../../std/src/kernel/time.arc"),
+    ),
 ];
 
 fn runtime_direct_callable_param_names() -> &'static BTreeMap<String, Vec<String>> {
@@ -14237,7 +14306,10 @@ fn collect_runtime_direct_callable_signatures(
 }
 
 fn parse_runtime_direct_callable_signature(line: &str) -> Option<(String, Vec<String>)> {
-    let mut rest = line.strip_prefix("export ").map(str::trim_start).unwrap_or(line);
+    let mut rest = line
+        .strip_prefix("export ")
+        .map(str::trim_start)
+        .unwrap_or(line);
     rest = if let Some(next) = rest.strip_prefix("intrinsic fn ") {
         next
     } else if let Some(next) = rest.strip_prefix("async fn ") {
@@ -14481,10 +14553,7 @@ fn bind_call_args_for_intrinsic(
         let unit_ok_omission = missing.len() == 1
             && missing[0] == "value"
             && param_names.len() == 1
-            && matches!(
-                callable_key.as_str(),
-                "Result.Ok" | "std.result.Result.Ok"
-            );
+            && matches!(callable_key.as_str(), "Result.Ok" | "std.result.Result.Ok");
         if unit_ok_omission {
             return Ok(Vec::new());
         }
@@ -15921,18 +15990,7 @@ fn eval_member_value(base: RuntimeValue, member: &str) -> Result<RuntimeValue, S
     }
 }
 
-fn eval_runtime_member_value(
-    base: RuntimeValue,
-    member: &str,
-    scopes: &mut Vec<RuntimeScope>,
-    plan: &RuntimePackagePlan,
-    current_package_id: &str,
-    current_module_id: &str,
-    aliases: &BTreeMap<String, Vec<String>>,
-    type_bindings: &RuntimeTypeBindings,
-    state: &mut RuntimeExecutionState,
-    host: &mut dyn RuntimeHost,
-) -> Result<RuntimeValue, String> {
+fn eval_runtime_member_value(base: RuntimeValue, member: &str) -> Result<RuntimeValue, String> {
     match base {
         RuntimeValue::Ref(reference) => Ok(RuntimeValue::Ref(RuntimeReferenceValue {
             mutable: reference.mutable,
@@ -17489,15 +17547,8 @@ fn execute_call_by_path(
                 control: None,
             }
         } else if let Some(native_impl) = &routine.native_impl {
-            let final_args = values;
-            let value =
-                execute_runtime_native_binding_import(plan, routine, native_impl, &final_args, host)
-                    .map_err(RuntimeEvalSignal::from)?;
-            RoutineExecutionOutcome {
-                value,
-                final_args,
-                control: None,
-            }
+            execute_runtime_native_binding_import(plan, routine, native_impl, &values, host)
+                .map_err(RuntimeEvalSignal::from)?
         } else {
             execute_routine_call_with_state(
                 plan,
@@ -21748,12 +21799,12 @@ fn execute_runtime_core_intrinsic(
                     "ring_window_edit rejects exclusive view acquisition while conflicting borrows or views are live".to_string(),
                 )?;
                 let view = insert_runtime_edit_view_from_ring_window(
-                    state, &type_args, handle, slots, 0, count,
+                    state, type_args, handle, slots, 0, count,
                 );
                 Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::EditView(view)))
             } else {
                 let view = insert_runtime_read_view_from_ring_window(
-                    state, &type_args, handle, slots, 0, count,
+                    state, type_args, handle, slots, 0, count,
                 );
                 Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::ReadView(view)))
             }
@@ -21817,7 +21868,7 @@ fn execute_runtime_core_intrinsic(
                     )?;
                     let view = insert_runtime_edit_view_from_reference(
                         state,
-                        &type_args,
+                        type_args,
                         reference,
                         start,
                         end - start,
@@ -21826,7 +21877,7 @@ fn execute_runtime_core_intrinsic(
                 } else {
                     let view = insert_runtime_read_view_from_reference(
                         state,
-                        &type_args,
+                        type_args,
                         reference,
                         start,
                         end - start,
@@ -21834,11 +21885,11 @@ fn execute_runtime_core_intrinsic(
                     Ok(RuntimeValue::Opaque(RuntimeOpaqueValue::ReadView(view)))
                 }
             } else {
-                let backing = insert_runtime_element_view_buffer(state, &type_args, values);
+                let backing = insert_runtime_element_view_buffer(state, type_args, values);
                 if matches!(intrinsic, RuntimeIntrinsic::MemoryArrayViewEdit) {
                     let view = insert_runtime_edit_view_from_buffer(
                         state,
-                        &type_args,
+                        type_args,
                         backing,
                         start,
                         end - start,
@@ -21847,7 +21898,7 @@ fn execute_runtime_core_intrinsic(
                 } else {
                     let view = insert_runtime_read_view_from_buffer(
                         state,
-                        &type_args,
+                        type_args,
                         backing,
                         start,
                         end - start,
@@ -22577,28 +22628,24 @@ fn execute_runtime_core_intrinsic(
             let scopes = scopes.as_deref_mut().ok_or_else(|| {
                 "byte_view_to_array on borrowed ByteView requires runtime call context".to_string()
             })?;
-            Ok(bytes_to_runtime_array(
-                runtime_byte_view_values(
-                    scopes,
-                    plan,
-                    current_package_id.ok_or_else(|| {
-                        "byte_view_to_array is missing current package context".to_string()
-                    })?,
-                    current_module_id.ok_or_else(|| {
-                        "byte_view_to_array is missing current module context".to_string()
-                    })?,
-                    aliases
-                        .ok_or_else(|| "byte_view_to_array is missing alias context".to_string())?,
-                    type_bindings.ok_or_else(|| {
-                        "byte_view_to_array is missing type binding context".to_string()
-                    })?,
-                    state,
-                    &view,
-                    host,
-                    "byte_view_to_array",
-                )?
-                .into_iter(),
-            ))
+            Ok(bytes_to_runtime_array(runtime_byte_view_values(
+                scopes,
+                plan,
+                current_package_id.ok_or_else(|| {
+                    "byte_view_to_array is missing current package context".to_string()
+                })?,
+                current_module_id.ok_or_else(|| {
+                    "byte_view_to_array is missing current module context".to_string()
+                })?,
+                aliases.ok_or_else(|| "byte_view_to_array is missing alias context".to_string())?,
+                type_bindings.ok_or_else(|| {
+                    "byte_view_to_array is missing type binding context".to_string()
+                })?,
+                state,
+                &view,
+                host,
+                "byte_view_to_array",
+            )?))
         }
         RuntimeIntrinsic::MemoryByteEditViewLen => {
             let handle = expect_byte_edit_view(
@@ -22871,29 +22918,26 @@ fn execute_runtime_core_intrinsic(
                 "byte_edit_view_to_array on borrowed ByteEditView requires runtime call context"
                     .to_string()
             })?;
-            Ok(bytes_to_runtime_array(
-                runtime_byte_edit_view_values(
-                    scopes,
-                    plan,
-                    current_package_id.ok_or_else(|| {
-                        "byte_edit_view_to_array is missing current package context".to_string()
-                    })?,
-                    current_module_id.ok_or_else(|| {
-                        "byte_edit_view_to_array is missing current module context".to_string()
-                    })?,
-                    aliases.ok_or_else(|| {
-                        "byte_edit_view_to_array is missing alias context".to_string()
-                    })?,
-                    type_bindings.ok_or_else(|| {
-                        "byte_edit_view_to_array is missing type binding context".to_string()
-                    })?,
-                    state,
-                    &view,
-                    host,
-                    "byte_edit_view_to_array",
-                )?
-                .into_iter(),
-            ))
+            Ok(bytes_to_runtime_array(runtime_byte_edit_view_values(
+                scopes,
+                plan,
+                current_package_id.ok_or_else(|| {
+                    "byte_edit_view_to_array is missing current package context".to_string()
+                })?,
+                current_module_id.ok_or_else(|| {
+                    "byte_edit_view_to_array is missing current module context".to_string()
+                })?,
+                aliases.ok_or_else(|| {
+                    "byte_edit_view_to_array is missing alias context".to_string()
+                })?,
+                type_bindings.ok_or_else(|| {
+                    "byte_edit_view_to_array is missing type binding context".to_string()
+                })?,
+                state,
+                &view,
+                host,
+                "byte_edit_view_to_array",
+            )?))
         }
         RuntimeIntrinsic::MemoryStrViewLenBytes => {
             let handle = expect_str_view(
@@ -23692,7 +23736,6 @@ fn execute_runtime_core_intrinsic(
             }
             if let Some(RuntimeValue::Ref(reference)) = final_args.first().cloned() {
                 let scopes = scopes
-                    .as_deref_mut()
                     .ok_or_else(|| "list_try_pop_or on refs requires runtime scopes".to_string())?;
                 let current_package_id = current_package_id.ok_or_else(|| {
                     "list_try_pop_or on refs requires package context".to_string()
@@ -24295,7 +24338,6 @@ fn spawn_runtime_chain_stage(
     if matches!(op, ParsedUnaryOp::Split) {
         runtime_validate_split_scope_capture(scopes, &call_args, state, "split capture")?;
     }
-    let mut call_args = call_args;
     if matches!(op, ParsedUnaryOp::Split) {
         detach_moved_split_call_args(scopes, &mut call_args);
     }
@@ -24965,144 +25007,146 @@ fn capture_spawned_phrase_call(
     host: &mut dyn RuntimeHost,
 ) -> RuntimeEvalResult<Option<RuntimeValue>> {
     let (callable, type_args, mut call_args, call_routine, call_dynamic_dispatch) =
-        match qualifier_kind
-    {
-        ParsedPhraseQualifierKind::Call
-        | ParsedPhraseQualifierKind::Apply
-        | ParsedPhraseQualifierKind::Weave
-        | ParsedPhraseQualifierKind::Split => {
-            if !matches!(
-                qualifier_kind,
-                ParsedPhraseQualifierKind::Apply
-                    | ParsedPhraseQualifierKind::Weave
-                    | ParsedPhraseQualifierKind::Split
-            ) && qualifier != "call"
-            {
-                return Ok(None);
+        match qualifier_kind {
+            ParsedPhraseQualifierKind::Call
+            | ParsedPhraseQualifierKind::Apply
+            | ParsedPhraseQualifierKind::Weave
+            | ParsedPhraseQualifierKind::Split => {
+                if !matches!(
+                    qualifier_kind,
+                    ParsedPhraseQualifierKind::Apply
+                        | ParsedPhraseQualifierKind::Weave
+                        | ParsedPhraseQualifierKind::Split
+                ) && qualifier != "call"
+                {
+                    return Ok(None);
+                }
+                let callable = resolved_callable
+                    .map(|path| path.to_vec())
+                    .or_else(|| resolve_callable_path(subject, aliases))
+                    .ok_or_else(|| format!("unsupported runtime callable `{subject:?}`"))?;
+                let type_args = if matches!(qualifier_kind, ParsedPhraseQualifierKind::Apply)
+                    || qualifier_type_args.is_empty()
+                {
+                    resolve_runtime_type_args(&extract_generic_type_args(subject), type_bindings)
+                } else {
+                    qualifier_type_args.to_vec()
+                };
+                let call_args = collect_call_args(
+                    args,
+                    attached,
+                    plan,
+                    current_package_id,
+                    current_module_id,
+                    scopes,
+                    aliases,
+                    type_bindings,
+                    state,
+                    host,
+                )?;
+                (
+                    callable,
+                    type_args,
+                    call_args,
+                    resolved_routine.map(ToString::to_string),
+                    None,
+                )
             }
-            let callable = resolved_callable
-                .map(|path| path.to_vec())
-                .or_else(|| resolve_callable_path(subject, aliases))
-                .ok_or_else(|| format!("unsupported runtime callable `{subject:?}`"))?;
-            let type_args = if matches!(qualifier_kind, ParsedPhraseQualifierKind::Apply)
-                || qualifier_type_args.is_empty()
-            {
-                resolve_runtime_type_args(&extract_generic_type_args(subject), type_bindings)
-            } else {
-                qualifier_type_args.to_vec()
-            };
-            let call_args = collect_call_args(
-                args,
-                attached,
-                plan,
-                current_package_id,
-                current_module_id,
-                scopes,
-                aliases,
-                type_bindings,
-                state,
-                host,
-            )?;
-            (
-                callable,
-                type_args,
-                call_args,
-                resolved_routine.map(ToString::to_string),
-                None,
-            )
-        }
-        ParsedPhraseQualifierKind::NamedPath => {
-            let receiver = eval_expr(
-                subject,
-                plan,
-                current_package_id,
-                current_module_id,
-                scopes,
-                aliases,
-                type_bindings,
-                state,
-                host,
-            )?;
-            let callable_expr = parse_runtime_callable_expr(qualifier);
-            let callable = resolve_named_qualifier_callable_path(&callable_expr, aliases)
-                .ok_or_else(|| {
-                    format!("unsupported runtime named qualifier callable `{qualifier}`")
-                })?;
-            let type_args = if qualifier_type_args.is_empty() {
-                resolve_runtime_type_args(&extract_generic_type_args(&callable_expr), type_bindings)
-            } else {
-                qualifier_type_args.to_vec()
-            };
-            let mut call_args = vec![RuntimeCallArg {
-                name: None,
-                value: receiver,
-                source_expr: subject.clone(),
-            }];
-            call_args.extend(collect_call_args(
-                args,
-                attached,
-                plan,
-                current_package_id,
-                current_module_id,
-                scopes,
-                aliases,
-                type_bindings,
-                state,
-                host,
-            )?);
-            (callable, type_args, call_args, None, None)
-        }
-        ParsedPhraseQualifierKind::BareMethod => {
-            let receiver = eval_expr(
-                subject,
-                plan,
-                current_package_id,
-                current_module_id,
-                scopes,
-                aliases,
-                type_bindings,
-                state,
-                host,
-            )?;
-            let callable = resolved_callable
-                .map(|callable| callable.to_vec())
-                .unwrap_or_else(|| vec![qualifier.to_string()]);
-            let type_args = if qualifier_type_args.is_empty() {
-                runtime_receiver_type_args(&receiver, state)
-            } else {
-                qualifier_type_args.to_vec()
-            };
-            let mut call_args = vec![RuntimeCallArg {
-                name: None,
-                value: receiver,
-                source_expr: subject.clone(),
-            }];
-            call_args.extend(collect_call_args(
-                args,
-                attached,
-                plan,
-                current_package_id,
-                current_module_id,
-                scopes,
-                aliases,
-                type_bindings,
-                state,
-                host,
-            )?);
-            (
-                callable,
-                type_args,
-                call_args,
-                resolved_routine.map(ToString::to_string),
-                dynamic_dispatch.cloned(),
-            )
-        }
-        ParsedPhraseQualifierKind::Try
-        | ParsedPhraseQualifierKind::AwaitApply
-        | ParsedPhraseQualifierKind::Await
-        | ParsedPhraseQualifierKind::Must
-        | ParsedPhraseQualifierKind::Fallback => return Ok(None),
-    };
+            ParsedPhraseQualifierKind::NamedPath => {
+                let receiver = eval_expr(
+                    subject,
+                    plan,
+                    current_package_id,
+                    current_module_id,
+                    scopes,
+                    aliases,
+                    type_bindings,
+                    state,
+                    host,
+                )?;
+                let callable_expr = parse_runtime_callable_expr(qualifier);
+                let callable = resolve_named_qualifier_callable_path(&callable_expr, aliases)
+                    .ok_or_else(|| {
+                        format!("unsupported runtime named qualifier callable `{qualifier}`")
+                    })?;
+                let type_args = if qualifier_type_args.is_empty() {
+                    resolve_runtime_type_args(
+                        &extract_generic_type_args(&callable_expr),
+                        type_bindings,
+                    )
+                } else {
+                    qualifier_type_args.to_vec()
+                };
+                let mut call_args = vec![RuntimeCallArg {
+                    name: None,
+                    value: receiver,
+                    source_expr: subject.clone(),
+                }];
+                call_args.extend(collect_call_args(
+                    args,
+                    attached,
+                    plan,
+                    current_package_id,
+                    current_module_id,
+                    scopes,
+                    aliases,
+                    type_bindings,
+                    state,
+                    host,
+                )?);
+                (callable, type_args, call_args, None, None)
+            }
+            ParsedPhraseQualifierKind::BareMethod => {
+                let receiver = eval_expr(
+                    subject,
+                    plan,
+                    current_package_id,
+                    current_module_id,
+                    scopes,
+                    aliases,
+                    type_bindings,
+                    state,
+                    host,
+                )?;
+                let callable = resolved_callable
+                    .map(|callable| callable.to_vec())
+                    .unwrap_or_else(|| vec![qualifier.to_string()]);
+                let type_args = if qualifier_type_args.is_empty() {
+                    runtime_receiver_type_args(&receiver, state)
+                } else {
+                    qualifier_type_args.to_vec()
+                };
+                let mut call_args = vec![RuntimeCallArg {
+                    name: None,
+                    value: receiver,
+                    source_expr: subject.clone(),
+                }];
+                call_args.extend(collect_call_args(
+                    args,
+                    attached,
+                    plan,
+                    current_package_id,
+                    current_module_id,
+                    scopes,
+                    aliases,
+                    type_bindings,
+                    state,
+                    host,
+                )?);
+                (
+                    callable,
+                    type_args,
+                    call_args,
+                    resolved_routine.map(ToString::to_string),
+                    dynamic_dispatch.cloned(),
+                )
+            }
+            ParsedPhraseQualifierKind::Try
+            | ParsedPhraseQualifierKind::AwaitApply
+            | ParsedPhraseQualifierKind::Await
+            | ParsedPhraseQualifierKind::Must
+            | ParsedPhraseQualifierKind::Fallback => return Ok(None),
+        };
 
     if let Some(routine_index) = resolve_routine_index_for_call(
         plan,
@@ -25154,7 +25198,6 @@ fn capture_spawned_phrase_call(
     if matches!(op, ParsedUnaryOp::Split) {
         runtime_validate_split_scope_capture(scopes, &call_args, state, "split capture")?;
     }
-    let mut call_args = call_args;
     if matches!(op, ParsedUnaryOp::Split) {
         detach_moved_split_call_args(scopes, &mut call_args);
     }
@@ -26289,14 +26332,20 @@ fn eval_record_region_value(
             state,
             host,
         )?;
-        let RuntimeValue::Record { fields: base_fields, .. } = base_value
+        let RuntimeValue::Record {
+            fields: base_fields,
+            ..
+        } = base_value
         else {
-            return Err("record base must evaluate to a record value".to_string().into());
+            return Err("record base must evaluate to a record value"
+                .to_string()
+                .into());
         };
         for field_name in &region.copied_fields {
-            let value = base_fields.get(field_name).cloned().ok_or_else(|| {
-                format!("record base is missing copied field `{field_name}`")
-            })?;
+            let value = base_fields
+                .get(field_name)
+                .cloned()
+                .ok_or_else(|| format!("record base is missing copied field `{field_name}`"))?;
             fields.insert(field_name.clone(), value);
         }
     }
@@ -26459,22 +26508,52 @@ fn eval_expr(
             state,
             host,
         ),
-        ParsedExpr::Path(segments) if segments.len() == 1 => read_runtime_value_if_ref(
-            read_runtime_local_value(scopes, state, &segments[0])?,
-            scopes,
-            plan,
-            current_package_id,
-            current_module_id,
-            aliases,
-            type_bindings,
-            state,
-            host,
-        )
-        .map_err(Into::into),
         ParsedExpr::Path(segments) => {
+            if segments.len() == 1 && lookup_local(scopes, &segments[0]).is_some() {
+                return read_runtime_value_if_ref(
+                    read_runtime_local_value(scopes, state, &segments[0])?,
+                    scopes,
+                    plan,
+                    current_package_id,
+                    current_module_id,
+                    aliases,
+                    type_bindings,
+                    state,
+                    host,
+                )
+                .map_err(Into::into);
+            }
+            if let Some(value) = try_eval_runtime_const_value_expr(
+                expr,
+                plan,
+                current_package_id,
+                current_module_id,
+                scopes,
+                aliases,
+                state,
+                host,
+            )? {
+                return Ok(value);
+            }
             Err(format!("unsupported runtime value path `{}`", segments.join(".")).into())
         }
         ParsedExpr::Member { expr, member } => {
+            let full_expr = ParsedExpr::Member {
+                expr: expr.clone(),
+                member: member.clone(),
+            };
+            if let Some(value) = try_eval_runtime_const_value_expr(
+                &full_expr,
+                plan,
+                current_package_id,
+                current_module_id,
+                scopes,
+                aliases,
+                state,
+                host,
+            )? {
+                return Ok(value);
+            }
             let base = eval_expr(
                 expr,
                 plan,
@@ -26486,18 +26565,7 @@ fn eval_expr(
                 state,
                 host,
             )?;
-            Ok(eval_runtime_member_value(
-                base,
-                member,
-                scopes,
-                plan,
-                current_package_id,
-                current_module_id,
-                aliases,
-                type_bindings,
-                state,
-                host,
-            )?)
+            Ok(eval_runtime_member_value(base, member)?)
         }
         ParsedExpr::Index { expr, index } => Ok(eval_runtime_index_value(
             eval_expr(
@@ -27051,9 +27119,7 @@ fn eval_expr(
             }
             ParsedPhraseQualifierKind::Await => {
                 if !args.is_empty() {
-                    return Err("`:: await` does not accept arguments"
-                        .to_string()
-                        .into());
+                    return Err("`:: await` does not accept arguments".to_string().into());
                 }
                 if !attached.is_empty() {
                     return Err("`:: await` does not support an attached block"
@@ -27135,9 +27201,7 @@ fn eval_expr(
             }
             ParsedPhraseQualifierKind::Must => {
                 if !args.is_empty() {
-                    return Err("`:: must` does not accept arguments"
-                        .to_string()
-                        .into());
+                    return Err("`:: must` does not accept arguments".to_string().into());
                 }
                 if !attached.is_empty() {
                     return Err("`:: must` does not support an attached block"
@@ -27266,6 +27330,63 @@ fn eval_expr(
             )?)
         }
     }
+}
+
+fn try_eval_runtime_const_value_expr(
+    expr: &ParsedExpr,
+    plan: &RuntimePackagePlan,
+    current_package_id: &str,
+    current_module_id: &str,
+    scopes: &mut Vec<RuntimeScope>,
+    aliases: &BTreeMap<String, Vec<String>>,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
+) -> RuntimeEvalResult<Option<RuntimeValue>> {
+    let Some(callable) = resolve_named_qualifier_callable_path(expr, aliases) else {
+        return Ok(None);
+    };
+    let Some(routine_index) =
+        resolve_routine_index(plan, current_package_id, current_module_id, &callable)
+    else {
+        return Ok(None);
+    };
+    let Some(routine) = plan.routines.get(routine_index) else {
+        return Err(format!("invalid routine index `{routine_index}`").into());
+    };
+    if routine.symbol_kind != "const" {
+        return Ok(None);
+    }
+    let label = runtime_expr_path_name(expr).unwrap_or_else(|| callable.join("."));
+    if routine.is_async {
+        return Err(format!(
+            "runtime const path `{}` cannot target async routine `{}`",
+            label, routine.symbol_name
+        )
+        .into());
+    }
+    if !routine.params.is_empty() {
+        return Err(format!(
+            "runtime const path `{}` cannot target non-zero-arg const `{}`",
+            label, routine.symbol_name
+        )
+        .into());
+    }
+    execute_call_by_path(
+        &callable,
+        Some(&routine.routine_key),
+        None,
+        current_package_id,
+        current_module_id,
+        Vec::new(),
+        Vec::new(),
+        false,
+        plan,
+        scopes,
+        state,
+        host,
+        false,
+    )
+    .map(Some)
 }
 
 fn apply_assign(
@@ -28505,19 +28626,14 @@ fn execute_routine_call_with_state(
                 });
             }
             if let Some(native_impl) = &routine.native_impl {
-                let value = execute_runtime_native_binding_import(
+                return execute_runtime_native_binding_import(
                     plan,
                     routine,
                     native_impl,
                     &args,
                     host,
                 )
-                .map_err(RuntimeEvalSignal::from)?;
-                return Ok(RoutineExecutionOutcome {
-                    value,
-                    final_args: args,
-                    control: None,
-                });
+                .map_err(RuntimeEvalSignal::from);
             }
             if routine.is_async && !allow_async {
                 return Err(format!(

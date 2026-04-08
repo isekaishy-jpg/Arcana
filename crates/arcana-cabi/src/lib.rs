@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::ffi::{c_char, c_void};
 
 use serde::{Deserialize, Serialize};
@@ -70,6 +71,15 @@ impl ArcanaCabiParamSourceMode {
             other => Err(format!("unsupported native param source mode `{other}`")),
         }
     }
+
+    pub fn from_param_mode_text(mode: Option<&str>) -> Result<Self, String> {
+        match mode {
+            None | Some("read") => Ok(Self::Read),
+            Some("take") => Ok(Self::Take),
+            Some("edit") => Ok(Self::Edit),
+            Some(other) => Err(format!("unsupported native param source mode `{other}`")),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -119,6 +129,32 @@ impl ArcanaCabiType {
             Self::Pair(left, right) => format!("Pair[{}, {}]", left.render(), right.render()),
         }
     }
+
+    pub fn parse(text: &str) -> Result<Self, String> {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return Err("cabi type cannot be empty".to_string());
+        }
+        match trimmed {
+            "Int" => Ok(Self::Int),
+            "Bool" => Ok(Self::Bool),
+            "Str" => Ok(Self::Str),
+            "Array[Int]" => Ok(Self::Bytes),
+            "Unit" => Ok(Self::Unit),
+            _ if trimmed.starts_with("Pair[") && trimmed.ends_with(']') => {
+                let inner = &trimmed["Pair[".len()..trimmed.len() - 1];
+                let (left, right) = split_top_level_pair_args(inner)?;
+                Ok(Self::Pair(
+                    Box::new(Self::parse(left)?),
+                    Box::new(Self::parse(right)?),
+                ))
+            }
+            _ if trimmed.contains(['[', ']', ',']) => {
+                Err(format!("unsupported cabi type syntax `{trimmed}`"))
+            }
+            _ => Ok(Self::Opaque(trimmed.to_string())),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,6 +164,33 @@ pub struct ArcanaCabiExportParam {
     pub pass_mode: ArcanaCabiPassMode,
     pub input_type: ArcanaCabiType,
     pub write_back_type: Option<ArcanaCabiType>,
+}
+
+impl ArcanaCabiExportParam {
+    pub fn binding(
+        name: impl Into<String>,
+        source_mode: ArcanaCabiParamSourceMode,
+        input_type: ArcanaCabiType,
+    ) -> Self {
+        let write_back_type =
+            matches!(source_mode, ArcanaCabiParamSourceMode::Edit).then(|| input_type.clone());
+        Self {
+            name: name.into(),
+            source_mode,
+            pass_mode: match source_mode {
+                ArcanaCabiParamSourceMode::Edit => ArcanaCabiPassMode::InWithWriteBack,
+                ArcanaCabiParamSourceMode::Read | ArcanaCabiParamSourceMode::Take => {
+                    ArcanaCabiPassMode::In
+                }
+            },
+            input_type,
+            write_back_type,
+        }
+    }
+
+    pub fn requires_write_back(&self) -> bool {
+        self.write_back_type.is_some()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -152,6 +215,48 @@ pub struct ArcanaCabiBindingCallback {
     pub name: String,
     pub return_type: ArcanaCabiType,
     pub params: Vec<ArcanaCabiExportParam>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArcanaCabiBindingSignatureKind {
+    Import,
+    Callback,
+}
+
+impl ArcanaCabiBindingSignatureKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Import => "binding import",
+            Self::Callback => "binding callback",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArcanaCabiBindingSignature {
+    pub name: String,
+    pub return_type: ArcanaCabiType,
+    pub params: Vec<ArcanaCabiExportParam>,
+}
+
+impl ArcanaCabiBindingImport {
+    pub fn signature(&self) -> ArcanaCabiBindingSignature {
+        ArcanaCabiBindingSignature {
+            name: self.name.clone(),
+            return_type: self.return_type.clone(),
+            params: self.params.clone(),
+        }
+    }
+}
+
+impl ArcanaCabiBindingCallback {
+    pub fn signature(&self) -> ArcanaCabiBindingSignature {
+        ArcanaCabiBindingSignature {
+            name: self.name.clone(),
+            return_type: self.return_type.clone(),
+            params: self.params.clone(),
+        }
+    }
 }
 
 #[repr(C)]
@@ -180,6 +285,46 @@ pub struct ArcanaOwnedBytes {
 pub struct ArcanaOwnedStr {
     pub ptr: *mut u8,
     pub len: usize,
+}
+
+pub fn into_owned_bytes(mut bytes: Vec<u8>) -> ArcanaOwnedBytes {
+    let owned = ArcanaOwnedBytes {
+        ptr: bytes.as_mut_ptr(),
+        len: bytes.len(),
+    };
+    std::mem::forget(bytes);
+    owned
+}
+
+pub fn into_owned_str(text: String) -> ArcanaOwnedStr {
+    let mut bytes = text.into_bytes();
+    let owned = ArcanaOwnedStr {
+        ptr: bytes.as_mut_ptr(),
+        len: bytes.len(),
+    };
+    std::mem::forget(bytes);
+    owned
+}
+
+/// # Safety
+///
+/// `ptr` and `len` must come from `into_owned_bytes` in the same binary.
+pub unsafe fn free_owned_bytes(ptr: *mut u8, len: usize) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        drop(Vec::from_raw_parts(ptr, len, len));
+    }
+}
+
+/// # Safety
+///
+/// `ptr` and `len` must come from `into_owned_str` in the same binary.
+pub unsafe fn free_owned_str(ptr: *mut u8, len: usize) {
+    unsafe {
+        free_owned_bytes(ptr, len);
+    }
 }
 
 pub type ArcanaCabiLastErrorAllocFn = unsafe extern "system" fn(out_len: *mut usize) -> *mut u8;
@@ -211,17 +356,29 @@ pub type ArcanaCabiBindingCallbackFn = unsafe extern "system" fn(
     user_data: *mut c_void,
     args: *const ArcanaCabiBindingValueV1,
     arg_count: usize,
+    out_write_backs: *mut ArcanaCabiBindingValueV1,
     out_result: *mut ArcanaCabiBindingValueV1,
 ) -> i32;
 pub type ArcanaCabiBindingRegisterCallbackFn = unsafe extern "system" fn(
     instance: *mut c_void,
     callback_name: *const c_char,
     callback: ArcanaCabiBindingCallbackFn,
+    callback_owned_bytes_free: ArcanaCabiOwnedBytesFreeFn,
+    callback_owned_str_free: ArcanaCabiOwnedStrFreeFn,
     user_data: *mut c_void,
     out_handle: *mut u64,
 ) -> i32;
 pub type ArcanaCabiBindingUnregisterCallbackFn =
     unsafe extern "system" fn(instance: *mut c_void, handle: u64) -> i32;
+pub type ArcanaCabiBindingInvokeImportFn = unsafe extern "system" fn(
+    import_name: *const c_char,
+    instance: *mut c_void,
+    args: *const ArcanaCabiBindingValueV1,
+    arg_count: usize,
+    out_write_backs: *mut ArcanaCabiBindingValueV1,
+    out_result: *mut ArcanaCabiBindingValueV1,
+) -> i32;
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct ArcanaCabiProductApiV1 {
@@ -324,6 +481,22 @@ pub enum ArcanaCabiBindingValueTag {
     Unit = 6,
 }
 
+impl TryFrom<u32> for ArcanaCabiBindingValueTag {
+    type Error = String;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        match value {
+            tag if tag == Self::Int as u32 => Ok(Self::Int),
+            tag if tag == Self::Bool as u32 => Ok(Self::Bool),
+            tag if tag == Self::Str as u32 => Ok(Self::Str),
+            tag if tag == Self::Bytes as u32 => Ok(Self::Bytes),
+            tag if tag == Self::Opaque as u32 => Ok(Self::Opaque),
+            tag if tag == Self::Unit as u32 => Ok(Self::Unit),
+            other => Err(format!("unsupported native binding value tag `{other}`")),
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub union ArcanaCabiBindingPayloadV1 {
@@ -353,6 +526,12 @@ impl Default for ArcanaCabiBindingValueV1 {
             reserved1: 0,
             payload: ArcanaCabiBindingPayloadV1 { int_value: 0 },
         }
+    }
+}
+
+impl ArcanaCabiBindingValueV1 {
+    pub fn tag(&self) -> Result<ArcanaCabiBindingValueTag, String> {
+        self.tag.try_into()
     }
 }
 
@@ -394,6 +573,276 @@ pub struct ArcanaCabiBindingOpsV1 {
     pub reserved1: *const c_void,
 }
 unsafe impl Sync for ArcanaCabiBindingOpsV1 {}
+
+pub fn validate_binding_transport_type(ty: &ArcanaCabiType) -> Result<(), String> {
+    match ty {
+        ArcanaCabiType::Int
+        | ArcanaCabiType::Bool
+        | ArcanaCabiType::Str
+        | ArcanaCabiType::Bytes
+        | ArcanaCabiType::Unit => Ok(()),
+        ArcanaCabiType::Opaque(name) if !name.trim().is_empty() => Ok(()),
+        ArcanaCabiType::Opaque(_) => Err("binding opaque type name cannot be empty".to_string()),
+        ArcanaCabiType::Pair(_, _) => Err(format!(
+            "binding transport does not support `{}`; only Int, Bool, Str, Bytes, Opaque, and Unit are valid v1 binding types",
+            ty.render()
+        )),
+    }
+}
+
+pub fn validate_binding_param(param: &ArcanaCabiExportParam) -> Result<(), String> {
+    if param.name.trim().is_empty() {
+        return Err("binding param name cannot be empty".to_string());
+    }
+    validate_binding_transport_type(&param.input_type)?;
+    match param.source_mode {
+        ArcanaCabiParamSourceMode::Edit => {
+            if param.pass_mode != ArcanaCabiPassMode::InWithWriteBack {
+                return Err(format!(
+                    "binding param `{}` uses source_mode `edit` but pass_mode is `{}` instead of `in_with_write_back`",
+                    param.name,
+                    param.pass_mode.as_str()
+                ));
+            }
+            if param.write_back_type.as_ref() != Some(&param.input_type) {
+                return Err(format!(
+                    "binding param `{}` uses source_mode `edit` but write_back_type does not match input_type `{}`",
+                    param.name,
+                    param.input_type.render()
+                ));
+            }
+        }
+        ArcanaCabiParamSourceMode::Read | ArcanaCabiParamSourceMode::Take => {
+            if param.pass_mode != ArcanaCabiPassMode::In {
+                return Err(format!(
+                    "binding param `{}` uses source_mode `{}` but pass_mode is `{}` instead of `in`",
+                    param.name,
+                    param.source_mode.as_str(),
+                    param.pass_mode.as_str()
+                ));
+            }
+            if param.write_back_type.is_some() {
+                return Err(format!(
+                    "binding param `{}` uses source_mode `{}` but still declares write_back_type",
+                    param.name,
+                    param.source_mode.as_str()
+                ));
+            }
+        }
+    }
+    if let Some(write_back_type) = &param.write_back_type {
+        validate_binding_transport_type(write_back_type)?;
+    }
+    Ok(())
+}
+
+pub fn validate_binding_imports(imports: &[ArcanaCabiBindingImport]) -> Result<(), String> {
+    validate_binding_named_entries(
+        ArcanaCabiBindingSignatureKind::Import,
+        imports
+            .iter()
+            .map(|import| {
+                if import.symbol_name.trim().is_empty() {
+                    return Err(format!(
+                        "binding import `{}` symbol_name cannot be empty",
+                        import.name
+                    ));
+                }
+                Ok(import.signature())
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+    )
+}
+
+pub fn validate_binding_callbacks(callbacks: &[ArcanaCabiBindingCallback]) -> Result<(), String> {
+    validate_binding_named_entries(
+        ArcanaCabiBindingSignatureKind::Callback,
+        callbacks
+            .iter()
+            .map(ArcanaCabiBindingCallback::signature)
+            .collect(),
+    )
+}
+
+pub fn compare_binding_signatures(
+    kind: ArcanaCabiBindingSignatureKind,
+    expected: &[ArcanaCabiBindingSignature],
+    actual: &[ArcanaCabiBindingSignature],
+) -> Result<(), String> {
+    let expected_by_name = binding_signatures_by_name(kind, expected)?;
+    let actual_by_name = binding_signatures_by_name(kind, actual)?;
+    for name in expected_by_name.keys() {
+        if !actual_by_name.contains_key(name) {
+            return Err(format!(
+                "{} `{}` is missing from the loaded metadata",
+                kind.label(),
+                name
+            ));
+        }
+    }
+    for name in actual_by_name.keys() {
+        if !expected_by_name.contains_key(name) {
+            return Err(format!(
+                "loaded metadata declares unexpected {} `{}`",
+                kind.label(),
+                name
+            ));
+        }
+    }
+    for (name, expected_signature) in expected_by_name {
+        let actual_signature = actual_by_name.get(name).ok_or_else(|| {
+            format!(
+                "{} `{name}` is missing from the loaded metadata",
+                kind.label()
+            )
+        })?;
+        if expected_signature.return_type != actual_signature.return_type {
+            return Err(format!(
+                "{} `{}` return type mismatch: expected `{}`, got `{}`",
+                kind.label(),
+                name,
+                expected_signature.return_type.render(),
+                actual_signature.return_type.render()
+            ));
+        }
+        if expected_signature.params.len() != actual_signature.params.len() {
+            return Err(format!(
+                "{} `{}` param count mismatch: expected {}, got {}",
+                kind.label(),
+                name,
+                expected_signature.params.len(),
+                actual_signature.params.len()
+            ));
+        }
+        for (index, (expected_param, actual_param)) in expected_signature
+            .params
+            .iter()
+            .zip(actual_signature.params.iter())
+            .enumerate()
+        {
+            if expected_param != actual_param {
+                return Err(format!(
+                    "{} `{}` param {} mismatch: expected `{} {}: {} / {} / {}`, got `{} {}: {} / {} / {}`",
+                    kind.label(),
+                    name,
+                    index,
+                    expected_param.source_mode.as_str(),
+                    expected_param.name,
+                    expected_param.input_type.render(),
+                    expected_param.pass_mode.as_str(),
+                    expected_param
+                        .write_back_type
+                        .as_ref()
+                        .map(ArcanaCabiType::render)
+                        .unwrap_or_else(|| "none".to_string()),
+                    actual_param.source_mode.as_str(),
+                    actual_param.name,
+                    actual_param.input_type.render(),
+                    actual_param.pass_mode.as_str(),
+                    actual_param
+                        .write_back_type
+                        .as_ref()
+                        .map(ArcanaCabiType::render)
+                        .unwrap_or_else(|| "none".to_string()),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn binding_write_back_slots(params: &[ArcanaCabiExportParam]) -> Vec<ArcanaCabiBindingValueV1> {
+    params
+        .iter()
+        .map(|_| ArcanaCabiBindingValueV1::default())
+        .collect()
+}
+
+pub fn validate_binding_write_backs(
+    params: &[ArcanaCabiExportParam],
+    write_backs: &[ArcanaCabiBindingValueV1],
+) -> Result<(), String> {
+    if params.len() != write_backs.len() {
+        return Err(format!(
+            "binding write-back slot count mismatch: expected {}, got {}",
+            params.len(),
+            write_backs.len()
+        ));
+    }
+    for (index, (param, value)) in params.iter().zip(write_backs.iter()).enumerate() {
+        if param.requires_write_back() {
+            continue;
+        }
+        if value.tag()? != ArcanaCabiBindingValueTag::Unit {
+            return Err(format!(
+                "binding write-back slot {} for param `{}` must be Unit because the param does not declare write-back semantics",
+                index, param.name
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub fn clone_owned_binding_bytes(
+    owned: ArcanaOwnedBytes,
+    free: ArcanaCabiOwnedBytesFreeFn,
+) -> Result<Vec<u8>, String> {
+    if owned.ptr.is_null() {
+        if owned.len == 0 {
+            return Ok(Vec::new());
+        }
+        return Err(format!(
+            "native binding returned null owned bytes with non-zero length {}",
+            owned.len
+        ));
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(owned.ptr, owned.len) }.to_vec();
+    unsafe {
+        free(owned.ptr, owned.len);
+    }
+    Ok(bytes)
+}
+
+pub fn clone_owned_binding_str(
+    owned: ArcanaOwnedStr,
+    free: ArcanaCabiOwnedStrFreeFn,
+) -> Result<String, String> {
+    let bytes = clone_owned_binding_bytes(
+        ArcanaOwnedBytes {
+            ptr: owned.ptr,
+            len: owned.len,
+        },
+        free as ArcanaCabiOwnedBytesFreeFn,
+    )?;
+    String::from_utf8(bytes).map_err(|err| format!("native binding string is not utf-8: {err}"))
+}
+
+pub fn release_binding_output_value(
+    value: ArcanaCabiBindingValueV1,
+    owned_bytes_free: ArcanaCabiOwnedBytesFreeFn,
+    owned_str_free: ArcanaCabiOwnedStrFreeFn,
+) -> Result<(), String> {
+    match value.tag()? {
+        ArcanaCabiBindingValueTag::Bytes => {
+            let owned = unsafe { value.payload.owned_bytes_value };
+            unsafe {
+                owned_bytes_free(owned.ptr, owned.len);
+            }
+            Ok(())
+        }
+        ArcanaCabiBindingValueTag::Str => {
+            let owned = unsafe { value.payload.owned_str_value };
+            unsafe {
+                owned_str_free(owned.ptr, owned.len);
+            }
+            Ok(())
+        }
+        ArcanaCabiBindingValueTag::Int
+        | ArcanaCabiBindingValueTag::Bool
+        | ArcanaCabiBindingValueTag::Opaque
+        | ArcanaCabiBindingValueTag::Unit => Ok(()),
+    }
+}
 
 pub fn render_c_value_type_defs() -> String {
     concat!(
@@ -513,7 +962,7 @@ pub fn render_c_descriptor_type_defs() -> String {
         "    size_t import_count;\n",
         "    const ArcanaCabiBindingCallbackEntryV1* callbacks;\n",
         "    size_t callback_count;\n",
-        "    int32_t (*register_callback)(void* instance, const char* callback_name, int32_t (*callback)(void* user_data, const ArcanaCabiBindingValueV1* args, size_t arg_count, ArcanaCabiBindingValueV1* out_result), void* user_data, uint64_t* out_handle);\n",
+        "    int32_t (*register_callback)(void* instance, const char* callback_name, int32_t (*callback)(void* user_data, const ArcanaCabiBindingValueV1* args, size_t arg_count, ArcanaCabiBindingValueV1* out_write_backs, ArcanaCabiBindingValueV1* out_result), void (*callback_owned_bytes_free)(uint8_t* ptr, size_t len), void (*callback_owned_str_free)(uint8_t* ptr, size_t len), void* user_data, uint64_t* out_handle);\n",
         "    int32_t (*unregister_callback)(void* instance, uint64_t handle);\n",
         "    uint8_t* (*last_error_alloc)(size_t* out_len);\n",
         "    void (*owned_bytes_free)(uint8_t* ptr, size_t len);\n",
@@ -525,9 +974,166 @@ pub fn render_c_descriptor_type_defs() -> String {
     .to_string()
 }
 
+fn split_top_level_pair_args(text: &str) -> Result<(&str, &str), String> {
+    let mut depth = 0usize;
+    let mut split = None;
+    let mut extra_split = None;
+    for (index, ch) in text.char_indices() {
+        match ch {
+            '[' => depth += 1,
+            ']' => {
+                if depth == 0 {
+                    return Err(format!("invalid cabi type syntax `Pair[{text}]`"));
+                }
+                depth -= 1;
+            }
+            ',' if depth == 0 => {
+                if split.is_none() {
+                    split = Some(index);
+                } else {
+                    extra_split = Some(index);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some(split_index) = split else {
+        return Err(format!("invalid cabi type syntax `Pair[{text}]`"));
+    };
+    if extra_split.is_some() {
+        return Err(format!("invalid cabi type syntax `Pair[{text}]`"));
+    }
+    let left = text[..split_index].trim();
+    let right = text[split_index + 1..].trim();
+    if left.is_empty() || right.is_empty() {
+        return Err(format!("invalid cabi type syntax `Pair[{text}]`"));
+    }
+    Ok((left, right))
+}
+
+fn validate_binding_named_entries(
+    kind: ArcanaCabiBindingSignatureKind,
+    entries: Vec<ArcanaCabiBindingSignature>,
+) -> Result<(), String> {
+    let by_name = binding_signatures_by_name(kind, &entries)?;
+    for (name, signature) in by_name {
+        if name.trim().is_empty() {
+            return Err(format!("{} name cannot be empty", kind.label()));
+        }
+        validate_binding_transport_type(&signature.return_type)?;
+        let mut seen_param_names = BTreeMap::<&str, usize>::new();
+        for (index, param) in signature.params.iter().enumerate() {
+            validate_binding_param(param)?;
+            if let Some(previous) = seen_param_names.insert(param.name.as_str(), index) {
+                return Err(format!(
+                    "{} `{}` declares duplicate param `{}` at indices {} and {}",
+                    kind.label(),
+                    signature.name,
+                    param.name,
+                    previous,
+                    index
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn binding_signatures_by_name(
+    kind: ArcanaCabiBindingSignatureKind,
+    entries: &[ArcanaCabiBindingSignature],
+) -> Result<BTreeMap<&str, &ArcanaCabiBindingSignature>, String> {
+    let mut by_name = BTreeMap::new();
+    for entry in entries {
+        if let Some(existing) = by_name.insert(entry.name.as_str(), entry) {
+            return Err(format!(
+                "{} `{}` is declared more than once",
+                kind.label(),
+                existing.name
+            ));
+        }
+    }
+    Ok(by_name)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{render_c_descriptor_type_defs, render_c_value_type_defs};
+    use super::{
+        ArcanaCabiBindingCallback, ArcanaCabiBindingSignature, ArcanaCabiBindingSignatureKind,
+        ArcanaCabiBindingValueTag, ArcanaCabiBindingValueV1, ArcanaCabiExportParam,
+        ArcanaCabiParamSourceMode, ArcanaCabiType, ArcanaStrView, binding_write_back_slots,
+        clone_owned_binding_bytes, clone_owned_binding_str, compare_binding_signatures,
+        free_owned_bytes, free_owned_str, into_owned_bytes, into_owned_str,
+        release_binding_output_value, render_c_descriptor_type_defs, render_c_value_type_defs,
+        validate_binding_callbacks, validate_binding_write_backs,
+    };
+
+    unsafe extern "system" fn test_free_owned_bytes(ptr: *mut u8, len: usize) {
+        unsafe {
+            free_owned_bytes(ptr, len);
+        }
+    }
+
+    unsafe extern "system" fn test_free_owned_str(ptr: *mut u8, len: usize) {
+        unsafe {
+            free_owned_str(ptr, len);
+        }
+    }
+
+    fn binding_int(value: i64) -> ArcanaCabiBindingValueV1 {
+        ArcanaCabiBindingValueV1 {
+            tag: ArcanaCabiBindingValueTag::Int as u32,
+            reserved0: 0,
+            reserved1: 0,
+            payload: super::ArcanaCabiBindingPayloadV1 { int_value: value },
+        }
+    }
+
+    fn binding_owned_bytes(bytes: &[u8]) -> ArcanaCabiBindingValueV1 {
+        ArcanaCabiBindingValueV1 {
+            tag: ArcanaCabiBindingValueTag::Bytes as u32,
+            reserved0: 0,
+            reserved1: 0,
+            payload: super::ArcanaCabiBindingPayloadV1 {
+                owned_bytes_value: into_owned_bytes(bytes.to_vec()),
+            },
+        }
+    }
+
+    fn binding_owned_str(text: &str) -> ArcanaCabiBindingValueV1 {
+        ArcanaCabiBindingValueV1 {
+            tag: ArcanaCabiBindingValueTag::Str as u32,
+            reserved0: 0,
+            reserved1: 0,
+            payload: super::ArcanaCabiBindingPayloadV1 {
+                owned_str_value: into_owned_str(text.to_string()),
+            },
+        }
+    }
+
+    unsafe extern "system" fn fixture_callback(
+        _user_data: *mut std::ffi::c_void,
+        args: *const ArcanaCabiBindingValueV1,
+        arg_count: usize,
+        out_write_backs: *mut ArcanaCabiBindingValueV1,
+        out_result: *mut ArcanaCabiBindingValueV1,
+    ) -> i32 {
+        if args.is_null() || out_write_backs.is_null() || out_result.is_null() || arg_count != 2 {
+            return 0;
+        }
+        let args = unsafe { std::slice::from_raw_parts(args, arg_count) };
+        let slots = unsafe { std::slice::from_raw_parts_mut(out_write_backs, arg_count) };
+        slots[0] = ArcanaCabiBindingValueV1::default();
+        slots[1] = binding_owned_str("edited");
+        unsafe {
+            *out_result = binding_owned_bytes(match args[0].tag() {
+                Ok(ArcanaCabiBindingValueTag::Str) => b"callback",
+                _ => b"unexpected",
+            });
+        }
+        1
+    }
 
     #[test]
     fn render_c_value_type_defs_includes_owned_and_view_buffers() {
@@ -548,6 +1154,163 @@ mod tests {
         assert!(text.contains("typedef struct ArcanaCabiBindingOpsV1"));
         assert!(text.contains("use_instance"));
         assert!(text.contains("owned_str_free"));
+        assert!(text.contains("ArcanaCabiBindingValueV1* out_write_backs"));
+        assert!(text.contains("callback_owned_bytes_free"));
         assert!(!text.contains("typedef struct ArcanaCabiProviderOpsV1"));
+    }
+
+    #[test]
+    fn binding_write_back_slots_default_to_unit_and_validate_non_edit_rows() {
+        let params = vec![
+            ArcanaCabiExportParam::binding(
+                "source",
+                ArcanaCabiParamSourceMode::Read,
+                ArcanaCabiType::Str,
+            ),
+            ArcanaCabiExportParam::binding(
+                "target",
+                ArcanaCabiParamSourceMode::Edit,
+                ArcanaCabiType::Str,
+            ),
+        ];
+        let mut slots = binding_write_back_slots(&params);
+        assert_eq!(slots.len(), 2);
+        assert_eq!(
+            slots[0].tag().expect("tag should parse"),
+            ArcanaCabiBindingValueTag::Unit
+        );
+        assert_eq!(
+            slots[1].tag().expect("tag should parse"),
+            ArcanaCabiBindingValueTag::Unit
+        );
+
+        slots[1] = binding_owned_str("mutated");
+        validate_binding_write_backs(&params, &slots).expect("edit write-back should validate");
+
+        slots[0] = binding_int(9);
+        let err = validate_binding_write_backs(&params, &slots)
+            .expect_err("non-edit write-back must fail");
+        assert!(err.contains("must be Unit"), "{err}");
+
+        release_binding_output_value(slots[1], test_free_owned_bytes, test_free_owned_str)
+            .expect("owned slot should release");
+    }
+
+    #[test]
+    fn owned_buffer_helpers_round_trip_strings_and_bytes() {
+        let bytes = into_owned_bytes(vec![1, 2, 3]);
+        assert_eq!(
+            clone_owned_binding_bytes(bytes, test_free_owned_bytes).expect("bytes should clone"),
+            vec![1, 2, 3]
+        );
+
+        let text = into_owned_str("arcana".to_string());
+        assert_eq!(
+            clone_owned_binding_str(text, test_free_owned_str).expect("str should clone"),
+            "arcana"
+        );
+
+        let bytes = into_owned_bytes(vec![4, 5, 6]);
+        unsafe {
+            test_free_owned_bytes(bytes.ptr, bytes.len);
+        }
+        let text = into_owned_str("free".to_string());
+        unsafe {
+            test_free_owned_str(text.ptr, text.len);
+        }
+    }
+
+    #[test]
+    fn generic_callback_fixture_round_trips_owned_result_and_edit_write_back() {
+        let params = [
+            ArcanaCabiBindingValueV1 {
+                tag: ArcanaCabiBindingValueTag::Str as u32,
+                reserved0: 0,
+                reserved1: 0,
+                payload: super::ArcanaCabiBindingPayloadV1 {
+                    str_value: ArcanaStrView {
+                        ptr: b"arcana".as_ptr(),
+                        len: "arcana".len(),
+                    },
+                },
+            },
+            ArcanaCabiBindingValueV1::default(),
+        ];
+        let mut write_backs = [
+            ArcanaCabiBindingValueV1::default(),
+            ArcanaCabiBindingValueV1::default(),
+        ];
+        let mut result = ArcanaCabiBindingValueV1::default();
+        let ok = unsafe {
+            fixture_callback(
+                std::ptr::null_mut(),
+                params.as_ptr(),
+                params.len(),
+                write_backs.as_mut_ptr(),
+                &mut result,
+            )
+        };
+        assert_eq!(ok, 1);
+        assert_eq!(
+            clone_owned_binding_bytes(
+                unsafe { result.payload.owned_bytes_value },
+                test_free_owned_bytes,
+            )
+            .expect("result bytes should clone"),
+            b"callback"
+        );
+        assert_eq!(
+            clone_owned_binding_str(
+                unsafe { write_backs[1].payload.owned_str_value },
+                test_free_owned_str,
+            )
+            .expect("write-back str should clone"),
+            "edited"
+        );
+    }
+
+    #[test]
+    fn binding_signature_validation_rejects_pair_types_and_mismatches() {
+        let callbacks = vec![ArcanaCabiBindingCallback {
+            name: "cb".to_string(),
+            return_type: ArcanaCabiType::Unit,
+            params: vec![ArcanaCabiExportParam::binding(
+                "pair",
+                ArcanaCabiParamSourceMode::Read,
+                ArcanaCabiType::Pair(
+                    Box::new(ArcanaCabiType::Int),
+                    Box::new(ArcanaCabiType::Bool),
+                ),
+            )],
+        }];
+        let err = validate_binding_callbacks(&callbacks)
+            .expect_err("pair binding transport should be rejected");
+        assert!(err.contains("does not support"), "{err}");
+
+        let expected = vec![ArcanaCabiBindingSignature {
+            name: "cb".to_string(),
+            return_type: ArcanaCabiType::Int,
+            params: vec![ArcanaCabiExportParam::binding(
+                "value",
+                ArcanaCabiParamSourceMode::Edit,
+                ArcanaCabiType::Str,
+            )],
+        }];
+        let actual = vec![ArcanaCabiBindingSignature {
+            name: "cb".to_string(),
+            return_type: ArcanaCabiType::Bool,
+            params: vec![ArcanaCabiExportParam::binding(
+                "value",
+                ArcanaCabiParamSourceMode::Edit,
+                ArcanaCabiType::Str,
+            )],
+        }];
+        let err = compare_binding_signatures(
+            ArcanaCabiBindingSignatureKind::Callback,
+            &expected,
+            &actual,
+        )
+        .expect_err("return mismatch should fail");
+        assert!(err.contains("return type mismatch"), "{err}");
     }
 }

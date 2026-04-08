@@ -4,8 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use arcana_hir::{
-    HirForewordApp, HirResolvedModule, HirResolvedWorkspace, HirSymbol, HirSymbolBody,
-    HirSymbolKind, HirType, HirWorkspaceSummary,
+    HirForewordApp, HirResolvedModule, HirResolvedWorkspace, HirShackleDeclKind, HirSymbol,
+    HirSymbolBody, HirSymbolKind, HirType, HirWorkspaceSummary, lookup_shackle_decl_path,
 };
 use arcana_syntax::{Span, builtin_type_info, is_builtin_boundary_unsafe_type_name};
 
@@ -371,6 +371,23 @@ fn is_boundary_unsafe_builtin_name(name: &str) -> bool {
     is_builtin_boundary_unsafe_type_name(name)
 }
 
+fn shackle_decl_matches_surface_use(
+    kind: HirShackleDeclKind,
+    expected_use: SurfaceSymbolUse,
+) -> bool {
+    match expected_use {
+        SurfaceSymbolUse::TypeLike => matches!(
+            kind,
+            HirShackleDeclKind::Type
+                | HirShackleDeclKind::Struct
+                | HirShackleDeclKind::Union
+                | HirShackleDeclKind::Flags
+                | HirShackleDeclKind::Callback
+        ),
+        SurfaceSymbolUse::Trait => false,
+    }
+}
+
 fn validate_surface_refs(
     workspace: &HirWorkspaceSummary,
     resolved_module: &HirResolvedModule,
@@ -432,26 +449,40 @@ pub(crate) fn validate_surface_path_kind(
     if path.len() == 1 && crate::is_builtin_type_name(&path[0]) {
         return;
     }
-    let Some(symbol_ref) = lookup_symbol_path(workspace, resolved_module, path) else {
-        diagnostics.push(Diagnostic {
-            path: module_path.to_path_buf(),
-            line: span.line,
-            column: span.column,
-            message: format!("unresolved type reference `{path_key}` in {context}"),
-        });
+    if let Some(symbol_ref) = lookup_symbol_path(workspace, resolved_module, path) {
+        if !symbol_matches_surface_use(symbol_ref.symbol.kind, expected_use) {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: span.line,
+                column: span.column,
+                message: format!(
+                    "`{path_key}` does not resolve to a valid {} in {context}",
+                    surface_use_name(expected_use)
+                ),
+            });
+        }
         return;
-    };
-    if !symbol_matches_surface_use(symbol_ref.symbol.kind, expected_use) {
-        diagnostics.push(Diagnostic {
-            path: module_path.to_path_buf(),
-            line: span.line,
-            column: span.column,
-            message: format!(
-                "`{path_key}` does not resolve to a valid {} in {context}",
-                surface_use_name(expected_use)
-            ),
-        });
     }
+    if let Some(decl_ref) = lookup_shackle_decl_path(workspace, resolved_module, path) {
+        if !shackle_decl_matches_surface_use(decl_ref.decl.kind, expected_use) {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: span.line,
+                column: span.column,
+                message: format!(
+                    "`{path_key}` does not resolve to a valid {} in {context}",
+                    surface_use_name(expected_use)
+                ),
+            });
+        }
+        return;
+    }
+    diagnostics.push(Diagnostic {
+        path: module_path.to_path_buf(),
+        line: span.line,
+        column: span.column,
+        message: format!("unresolved type reference `{path_key}` in {context}"),
+    });
 }
 
 fn parse_symbol_or_string_literal(value: &str) -> Option<String> {

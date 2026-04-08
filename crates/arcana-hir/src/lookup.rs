@@ -137,6 +137,106 @@ fn lookup_package_symbol_path_filtered<'a>(
     )
 }
 
+fn shackle_decl_visible_from_package_boundary(
+    current_package_name: &str,
+    target_package_name: &str,
+    decl: &HirShackleDecl,
+) -> bool {
+    current_package_name == target_package_name || decl.exported
+}
+
+fn first_visible_shackle_decl_in_module_for_package<'a>(
+    workspace: &'a HirWorkspaceSummary,
+    current_package_name: &str,
+    package_id: &str,
+    module_id: &str,
+    decl_name: &str,
+) -> Option<HirResolvedShackleDeclRef<'a>> {
+    let package = workspace.package_by_id(package_id)?;
+    let module = package.module(module_id)?;
+    module
+        .shackle_decls
+        .iter()
+        .enumerate()
+        .find(|(_, decl)| {
+            decl.name == decl_name
+                && shackle_decl_visible_from_package_boundary(
+                    current_package_name,
+                    &package.summary.package_name,
+                    decl,
+                )
+        })
+        .map(|(decl_index, decl)| HirResolvedShackleDeclRef {
+            package_id: &package.package_id,
+            package_name: &package.summary.package_name,
+            module_id: &module.module_id,
+            decl_index,
+            decl,
+        })
+}
+
+fn lookup_package_shackle_decl_path_filtered<'a>(
+    workspace: &'a HirWorkspaceSummary,
+    current_package_name: &str,
+    package: &'a HirWorkspacePackage,
+    path: &[String],
+) -> Option<HirResolvedShackleDeclRef<'a>> {
+    if path.is_empty() {
+        return None;
+    }
+    let (decl_name, module_path) = path.split_last()?;
+    let module = if module_path.is_empty() {
+        package.module(&package.summary.package_name)
+    } else {
+        package.resolve_relative_module(module_path)
+    }?;
+    first_visible_shackle_decl_in_module_for_package(
+        workspace,
+        current_package_name,
+        &package.package_id,
+        &module.module_id,
+        decl_name,
+    )
+}
+
+fn lookup_module_shackle_decl_path_filtered<'a>(
+    workspace: &'a HirWorkspaceSummary,
+    current_package_name: &str,
+    package: &'a HirWorkspacePackage,
+    module: &'a HirModuleSummary,
+    path: &[String],
+) -> Option<HirResolvedShackleDeclRef<'a>> {
+    if path.is_empty() {
+        return None;
+    }
+    if path.len() == 1 {
+        return first_visible_shackle_decl_in_module_for_package(
+            workspace,
+            current_package_name,
+            &package.package_id,
+            &module.module_id,
+            &path[0],
+        );
+    }
+    let (decl_name, module_tail) = path.split_last()?;
+    let base_relative = module
+        .module_id
+        .split('.')
+        .skip(1)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let mut target_relative = base_relative;
+    target_relative.extend_from_slice(module_tail);
+    let target_module = package.resolve_relative_module(&target_relative)?;
+    first_visible_shackle_decl_in_module_for_package(
+        workspace,
+        current_package_name,
+        &package.package_id,
+        &target_module.module_id,
+        decl_name,
+    )
+}
+
 fn lookup_module_symbol_path_filtered<'a>(
     workspace: &'a HirWorkspaceSummary,
     current_package_name: &str,
@@ -408,6 +508,46 @@ pub fn lookup_symbol_path<'a>(
     )
     .or_else(|| {
         lookup_package_symbol_path_filtered(workspace, current_package_name, current_package, path)
+    })
+}
+
+pub fn lookup_shackle_decl_path<'a>(
+    workspace: &'a HirWorkspaceSummary,
+    resolved_module: &'a HirResolvedModule,
+    path: &[String],
+) -> Option<HirResolvedShackleDeclRef<'a>> {
+    if path.is_empty() {
+        return None;
+    }
+    let current_package = current_workspace_package_for_module(workspace, resolved_module)?;
+    let current_package_name = current_package.summary.package_name.as_str();
+    let current_module = current_package.module(&resolved_module.module_id)?;
+
+    if path.len() >= 2
+        && let Some(package) = visible_package_root_for_module(workspace, resolved_module, &path[0])
+    {
+        return lookup_package_shackle_decl_path_filtered(
+            workspace,
+            current_package_name,
+            package,
+            &path[1..],
+        );
+    }
+
+    lookup_module_shackle_decl_path_filtered(
+        workspace,
+        current_package_name,
+        current_package,
+        current_module,
+        path,
+    )
+    .or_else(|| {
+        lookup_package_shackle_decl_path_filtered(
+            workspace,
+            current_package_name,
+            current_package,
+            path,
+        )
     })
 }
 

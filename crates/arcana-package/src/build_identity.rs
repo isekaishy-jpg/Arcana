@@ -887,6 +887,7 @@ mod tests {
             entrypoints: Vec::new(),
             routines: Vec::new(),
             native_callbacks: Vec::new(),
+            shackle_decls: Vec::new(),
             owners: Vec::new(),
             modules: vec![AotPackageModuleArtifact {
                 package_id: test_package_id_for_module("tool"),

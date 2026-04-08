@@ -12,7 +12,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use arcana_aot::{
     ARCANA_NATIVE_PRODUCT_TEMP_PROBES_ENV, AotEmissionFile, AotInstanceProductSpec,
-    AotPackageEmission, compile_instance_product, default_instance_product_cargo_target_dir,
+    AotPackageEmission, AotShackleDeclArtifact, collect_native_binding_callbacks,
+    collect_native_binding_imports, compile_instance_product, compile_package,
+    default_instance_product_cargo_target_dir,
 };
 use arcana_cabi::ArcanaCabiProductRole;
 #[cfg(windows)]
@@ -21,6 +23,8 @@ use arcana_cabi::{
     ArcanaCabiChildOpsV1, ArcanaCabiExportOpsV1, ArcanaCabiInstanceOpsV1, ArcanaCabiPluginOpsV1,
     ArcanaCabiProductApiV1,
 };
+use arcana_hir::resolve_workspace;
+use arcana_ir::lower_workspace_package_with_resolution;
 use fs2::FileExt;
 #[cfg(windows)]
 use libloading::Library;
@@ -144,6 +148,12 @@ struct NativeSelectionPlan {
     products: Vec<DistributionNativeProduct>,
     child_bindings: Vec<DistributionChildBinding>,
     runtime_child_binding: Option<DistributionChildBinding>,
+}
+
+struct GeneratedBindingSurface {
+    binding_imports: Vec<arcana_aot::NativeBindingImport>,
+    binding_callbacks: Vec<arcana_aot::NativeBindingCallback>,
+    binding_shackle_decls: Vec<AotShackleDeclArtifact>,
 }
 
 struct NativeBundleCleanupGuard {
@@ -777,23 +787,22 @@ fn collect_native_dependency_product_selections(
         let member = graph
             .member(&member_name)
             .ok_or_else(|| format!("missing workspace member `{member_name}`"))?;
-        if let Some(binding_product) = select_default_binding_product(member)? {
-            if selected_product_keys
+        if let Some(binding_product) = select_default_binding_product(member)?
+            && selected_product_keys
                 .insert((member.package_id.clone(), binding_product.name.clone()))
-            {
-                products.push(DistributionNativeProduct {
-                    package_id: member.package_id.clone(),
-                    package_name: member.name.clone(),
-                    product_name: binding_product.name.clone(),
-                    role: ArcanaCabiProductRole::Binding,
-                    contract_id: binding_product.contract.clone(),
-                    contract_version: 1,
-                    producer: binding_product.producer.as_str().to_string(),
-                    sidecars: binding_product.sidecars.clone(),
-                    file: binding_product.file.clone(),
-                    file_hash: String::new(),
-                });
-            }
+        {
+            products.push(DistributionNativeProduct {
+                package_id: member.package_id.clone(),
+                package_name: member.name.clone(),
+                product_name: binding_product.name.clone(),
+                role: ArcanaCabiProductRole::Binding,
+                contract_id: binding_product.contract.clone(),
+                contract_version: 1,
+                producer: binding_product.producer.as_str().to_string(),
+                sidecars: binding_product.sidecars.clone(),
+                file: binding_product.file.clone(),
+                file_hash: String::new(),
+            });
         }
         for dep in &member.deps {
             pending.push_back(dep.clone());
@@ -1165,7 +1174,9 @@ fn build_generated_cabi_product(
 ) -> PackageResult<Vec<NativeBundleFile>> {
     if !matches!(
         product.role,
-        ArcanaCabiProductRole::Child | ArcanaCabiProductRole::Plugin
+        ArcanaCabiProductRole::Child
+            | ArcanaCabiProductRole::Plugin
+            | ArcanaCabiProductRole::Binding
     ) {
         native_product_probe(
             "generated_product_rejected_role",
@@ -1178,13 +1189,24 @@ fn build_generated_cabi_product(
             ),
         );
         return Err(format!(
-            "native product `{}` on `{}` uses producer `{}`, but generated cabi products currently support only `child` and `plugin` roles",
+            "native product `{}` on `{}` uses producer `{}`, but generated cabi products currently support only `child`, `plugin`, and `binding` roles",
             product.name,
             member.name,
             product.producer.as_str()
         ));
     }
     let package_image_text = None;
+    let (binding_imports, binding_callbacks, binding_shackle_decls) =
+        if product.role == ArcanaCabiProductRole::Binding {
+            let surface = collect_generated_binding_surface(graph, member)?;
+            (
+                surface.binding_imports,
+                surface.binding_callbacks,
+                surface.binding_shackle_decls,
+            )
+        } else {
+            (Vec::new(), Vec::new(), Vec::new())
+        };
 
     let project_parent_dir = repo_root()
         .join("target")
@@ -1214,6 +1236,9 @@ fn build_generated_cabi_product(
             contract_id: product.contract.clone(),
             output_file_name: product.file.clone(),
             package_image_text,
+            binding_imports,
+            binding_callbacks,
+            binding_shackle_decls,
         },
         &project_dir,
         &artifact_dir,
@@ -1245,6 +1270,39 @@ fn build_generated_cabi_product(
     validate_native_product_dependency_closure(member, product, &files)?;
     validate_native_product_cabi_contract(member, product, &files)?;
     Ok(files)
+}
+
+fn collect_generated_binding_surface(
+    graph: &WorkspaceGraph,
+    member: &WorkspaceMember,
+) -> PackageResult<GeneratedBindingSurface> {
+    let workspace = crate::load_workspace_hir_from_graph(&graph.root_dir, graph)?;
+    let resolved_workspace = resolve_workspace(&workspace).map_err(|errors| {
+        errors
+            .into_iter()
+            .map(|error| {
+                format!(
+                    "{}:{}:{}: {}",
+                    error.source_module_id, error.span.line, error.span.column, error.message
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    })?;
+    let package = workspace.package_by_id(&member.package_id).ok_or_else(|| {
+        format!(
+            "workspace graph is missing resolved hir package `{}` for generated binding product",
+            member.package_id
+        )
+    })?;
+    let lowered =
+        lower_workspace_package_with_resolution(&workspace, &resolved_workspace, package)?;
+    let artifact = compile_package(&lowered);
+    Ok(GeneratedBindingSurface {
+        binding_imports: collect_native_binding_imports(&artifact)?,
+        binding_callbacks: collect_native_binding_callbacks(&artifact)?,
+        binding_shackle_decls: artifact.shackle_decls.clone(),
+    })
 }
 
 fn distribution_root_native_product(

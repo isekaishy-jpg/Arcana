@@ -62,7 +62,7 @@ It defines:
 - Binding products are activated per package id, not by dependency-edge aliases.
 - Binding products are the generic native OS/callback seam for external libraries; they must not become a provider-style dynamic service surface or a text-only escape hatch.
 - The v1 binding contract id is `arcana.cabi.binding.v1`.
-- In the current proof lane, the dedicated Windows binding crate is the only low-level `windows-sys` leaf for library-owned OS work. Existing rewrite runtime host/native-loader calls and Windows-only test harness usage remain transitional plumbing outside that package binding boundary.
+- `arcana-cabi` owns the binding contract semantics. Runtime, packaging, AOT, manifests, and test harnesses are consumers or projections only.
 
 ## Native Product Declaration
 
@@ -72,6 +72,9 @@ It defines:
 - Current producers are:
   - `arcana-source`
   - `rust-cdylib`
+- `role = "binding"` with `producer = "arcana-source"` is self-hosted from package source.
+  - The package's `native fn`, `native callback`, and `shackle` declarations lower directly into the generated binding product.
+  - No companion Rust support crate owns binding behavior, callback dispatch, or import execution.
 
 ## Root Build Selection
 
@@ -141,6 +144,7 @@ It defines:
   - `imports`
   - `callbacks`
   - `register_callback`
+    - registration includes callback-owned `owned_bytes_free` and `owned_str_free` helpers for callback-produced `Str` and `Bytes` outputs/write-backs
   - `unregister_callback`
   - `last_error_alloc`
   - `owned_bytes_free`
@@ -180,6 +184,9 @@ It defines:
   - no event-queue-only fallback standing in for callback registration
   - no package-name-specific runtime hooks
 - Binding products use `ArcanaCabiBindingValueV1` for typed import/callback transport.
+- Binding imports and binding callbacks are symmetric operations over the same metadata model:
+  - `source_mode`, `pass_mode`, `input_type`, `write_back_type`, and `return_type` are authoritative in both directions
+  - callbacks use `out_write_backs` plus `out_result`, matching the import lane
 - Supported v1 binding value tags are:
   - `Int`
   - `Bool`
@@ -188,14 +195,16 @@ It defines:
   - `Opaque`
   - `Unit`
 - `Str` and `Bytes` inputs use views.
-- `Str` and `Bytes` outputs use owned buffers released through cabi-owned free helpers.
+- `Str` and `Bytes` outputs and write-backs use owned buffers released through cabi-owned free helpers.
 - Opaque values may cross only as package-owned opaque handle types declared in source by a binding-owning package.
-- Binding metadata carries `write_back_type` rows for parity with the generic param description shape, but the current v1 binding proof slice does not require `edit` import write-backs to be a public design center.
+- `edit` is part of the public binding contract:
+  - import and callback write-backs are one slot per declared param row, in declaration order
+  - params without write-back semantics must return `Unit` in their slot
 
 ## Value Ownership
 
 - Params use `ArcanaStrView` and `ArcanaBytesView`.
-- Returns and export `edit` write-backs use `ArcanaOwnedStr` and `ArcanaOwnedBytes`.
+- Binding returns and binding/export `edit` write-backs use `ArcanaOwnedStr` and `ArcanaOwnedBytes`.
 - Strings are UTF-8 bytes with `ptr + len`.
 - Owned buffers are released only through cabi-owned helper functions.
 

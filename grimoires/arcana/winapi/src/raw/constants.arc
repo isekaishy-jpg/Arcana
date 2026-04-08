@@ -1,0 +1,10 @@
+export shackle const ERROR_CLASS_ALREADY_EXISTS: arcana_winapi.raw.types.DWORD = 1410
+export shackle const GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT: arcana_winapi.raw.types.DWORD = 2
+export shackle const GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS: arcana_winapi.raw.types.DWORD = 4
+export shackle const GWLP_USERDATA: arcana_winapi.raw.types.LONG = -21
+export shackle const WM_CLOSE: arcana_winapi.raw.types.UINT = 16
+export shackle const WM_NCCREATE: arcana_winapi.raw.types.UINT = 129
+export shackle const WM_APP: arcana_winapi.raw.types.UINT = 32768
+export shackle const PM_REMOVE: arcana_winapi.raw.types.UINT = 1
+export shackle const WS_OVERLAPPED: arcana_winapi.raw.types.DWORD = 0
+export shackle const CW_USEDEFAULT: arcana_winapi.raw.types.LONG = -2147483648

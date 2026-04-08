@@ -4,16 +4,19 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use arcana_cabi::{
-    ARCANA_CABI_CONTRACT_VERSION_V1, ARCANA_CABI_GET_PRODUCT_API_V1_SYMBOL, ArcanaCabiChildOpsV1,
-    ArcanaCabiBindingCallbackEntryV1, ArcanaCabiBindingImportEntryV1, ArcanaCabiBindingOpsV1,
-    ArcanaCabiBindingImportFn,
-    ArcanaCabiBindingValueV1,
-    ArcanaCabiBindingRegisterCallbackFn, ArcanaCabiBindingUnregisterCallbackFn,
-    ArcanaCabiChildRunEntrypointFn, ArcanaCabiCreateInstanceFn, ArcanaCabiDestroyInstanceFn,
+    ARCANA_CABI_CONTRACT_VERSION_V1, ARCANA_CABI_GET_PRODUCT_API_V1_SYMBOL,
+    ArcanaCabiBindingCallback, ArcanaCabiBindingCallbackEntryV1, ArcanaCabiBindingImport,
+    ArcanaCabiBindingImportEntryV1, ArcanaCabiBindingImportFn, ArcanaCabiBindingOpsV1,
+    ArcanaCabiBindingRegisterCallbackFn, ArcanaCabiBindingSignature,
+    ArcanaCabiBindingSignatureKind, ArcanaCabiBindingUnregisterCallbackFn,
+    ArcanaCabiBindingValueV1, ArcanaCabiChildOpsV1, ArcanaCabiChildRunEntrypointFn,
+    ArcanaCabiCreateInstanceFn, ArcanaCabiDestroyInstanceFn, ArcanaCabiExportParam,
     ArcanaCabiInstanceOpsV1, ArcanaCabiLastErrorAllocFn, ArcanaCabiOwnedBytesFreeFn,
-    ArcanaCabiOwnedStrFreeFn,
+    ArcanaCabiOwnedStrFreeFn, ArcanaCabiParamSourceMode, ArcanaCabiPassMode,
     ArcanaCabiPluginDescribeInstanceFn, ArcanaCabiPluginOpsV1, ArcanaCabiPluginUseInstanceFn,
-    ArcanaCabiProductApiV1, ArcanaCabiProductRole,
+    ArcanaCabiProductApiV1, ArcanaCabiProductRole, ArcanaCabiType, binding_write_back_slots,
+    compare_binding_signatures, release_binding_output_value, validate_binding_callbacks,
+    validate_binding_imports, validate_binding_write_backs,
 };
 use serde::Deserialize;
 
@@ -555,11 +558,18 @@ impl RuntimeNativeProductCatalog {
         package_id: &str,
         import_name: &str,
         callback_specs: &[RuntimeBindingCallbackRegistrationSpec],
+        expected_imports: &[ArcanaCabiBindingSignature],
+        expected_callbacks: &[ArcanaCabiBindingSignature],
         args: &[ArcanaCabiBindingValueV1],
     ) -> Result<RuntimeBindingImportOutcome, String> {
         #[cfg(windows)]
         {
-            let binding = self.ensure_active_binding(package_id, callback_specs)?;
+            let binding = self.ensure_active_binding(
+                package_id,
+                callback_specs,
+                expected_imports,
+                expected_callbacks,
+            )?;
             let import = binding.imports.get(import_name).ok_or_else(|| {
                 format!(
                     "binding package `{}` has no native import `{}`",
@@ -575,24 +585,26 @@ impl RuntimeNativeProductCatalog {
                     args.len()
                 ));
             }
+            let mut out_write_backs = binding_write_back_slots(&import.metadata.params);
             let mut out_result = ArcanaCabiBindingValueV1::default();
             let ok = unsafe {
                 (import.call)(
                     binding.active.instance,
                     args.as_ptr(),
                     args.len(),
-                    std::ptr::null_mut(),
+                    out_write_backs.as_mut_ptr(),
                     &mut out_result,
                 )
             };
             if ok == 0 {
-                let err = read_library_last_error(binding.last_error_alloc, binding.owned_bytes_free)
-                    .unwrap_or_else(|| {
-                        format!(
-                            "binding import `{}:{}` failed without an error message",
-                            binding.product.package_name, import_name
-                        )
-                    });
+                let err =
+                    read_library_last_error(binding.last_error_alloc, binding.owned_bytes_free)
+                        .unwrap_or_else(|| {
+                            format!(
+                                "binding import `{}:{}` failed without an error message",
+                                binding.product.package_name, import_name
+                            )
+                        });
                 native_product_probe(
                     "binding_import_error",
                     format!(
@@ -604,6 +616,26 @@ impl RuntimeNativeProductCatalog {
                     ),
                 );
                 return Err(err);
+            }
+            if let Err(err) =
+                validate_binding_write_backs(&import.metadata.params, &out_write_backs)
+            {
+                let _ = release_binding_output_value(
+                    out_result,
+                    binding.owned_bytes_free,
+                    binding.owned_str_free,
+                );
+                for value in out_write_backs {
+                    let _ = release_binding_output_value(
+                        value,
+                        binding.owned_bytes_free,
+                        binding.owned_str_free,
+                    );
+                }
+                return Err(format!(
+                    "binding import `{}:{}` returned invalid write-backs: {err}",
+                    binding.product.package_name, import_name
+                ));
             }
             native_product_probe(
                 "binding_import_call",
@@ -617,6 +649,7 @@ impl RuntimeNativeProductCatalog {
             );
             Ok(RuntimeBindingImportOutcome {
                 result: out_result,
+                write_backs: out_write_backs,
                 owned_bytes_free: binding.owned_bytes_free,
                 owned_str_free: binding.owned_str_free,
             })
@@ -624,7 +657,14 @@ impl RuntimeNativeProductCatalog {
 
         #[cfg(not(windows))]
         {
-            let _ = (package_id, import_name, callback_specs, args);
+            let _ = (
+                package_id,
+                import_name,
+                callback_specs,
+                expected_imports,
+                expected_callbacks,
+                args,
+            );
             Err("native binding products currently require a Windows host".to_string())
         }
     }
@@ -644,6 +684,8 @@ impl RuntimeNativeProductCatalog {
         &mut self,
         package_id: &str,
         callback_specs: &[RuntimeBindingCallbackRegistrationSpec],
+        expected_imports: &[ArcanaCabiBindingSignature],
+        expected_callbacks: &[ArcanaCabiBindingSignature],
     ) -> Result<&mut ActiveBindingProduct, String> {
         let matches = self
             .products
@@ -674,6 +716,24 @@ impl RuntimeNativeProductCatalog {
         let binding_key = (product.package_id.clone(), product.product_name.clone());
         if !self.active_bindings.contains_key(&binding_key) {
             let library = LoadedNativeLibrary::load(&self.bundle_dir, &product)?;
+            compare_binding_signatures(
+                ArcanaCabiBindingSignatureKind::Import,
+                expected_imports,
+                &library
+                    .binding_imports
+                    .iter()
+                    .map(ArcanaCabiBindingImport::signature)
+                    .collect::<Vec<_>>(),
+            )?;
+            compare_binding_signatures(
+                ArcanaCabiBindingSignatureKind::Callback,
+                expected_callbacks,
+                &library
+                    .binding_callbacks
+                    .iter()
+                    .map(ArcanaCabiBindingCallback::signature)
+                    .collect::<Vec<_>>(),
+            )?;
             let instance = library.create_instance()?;
             let register_callback = library.binding_register_callback.ok_or_else(|| {
                 format!(
@@ -710,12 +770,13 @@ impl RuntimeNativeProductCatalog {
                 .binding_imports
                 .iter()
                 .map(|metadata| {
-                    let symbol_name = CString::new(metadata.symbol_name.as_str()).map_err(|_| {
-                        format!(
-                            "binding import symbol `{}` contains an interior NUL byte",
-                            metadata.symbol_name
-                        )
-                    })?;
+                    let symbol_name =
+                        CString::new(metadata.symbol_name.as_str()).map_err(|_| {
+                            format!(
+                                "binding import symbol `{}` contains an interior NUL byte",
+                                metadata.symbol_name
+                            )
+                        })?;
                     let proc = unsafe {
                         windows_sys::Win32::System::LibraryLoader::GetProcAddress(
                             library.module,
@@ -731,7 +792,12 @@ impl RuntimeNativeProductCatalog {
                             product.product_name
                         ));
                     };
-                    let call = unsafe { std::mem::transmute::<_, ArcanaCabiBindingImportFn>(proc) };
+                    let call = unsafe {
+                        std::mem::transmute::<
+                            unsafe extern "system" fn() -> isize,
+                            ArcanaCabiBindingImportFn,
+                        >(proc)
+                    };
                     Ok((
                         metadata.name.clone(),
                         ActiveBindingImport {
@@ -745,7 +811,10 @@ impl RuntimeNativeProductCatalog {
             let mut callback_registrations = Vec::new();
             for spec in callback_specs {
                 let callback_name = CString::new(spec.name).map_err(|_| {
-                    format!("binding callback name `{}` contains an interior NUL byte", spec.name)
+                    format!(
+                        "binding callback name `{}` contains an interior NUL byte",
+                        spec.name
+                    )
                 })?;
                 if !library
                     .binding_callbacks
@@ -763,6 +832,8 @@ impl RuntimeNativeProductCatalog {
                         instance,
                         callback_name.as_ptr(),
                         spec.callback,
+                        spec.owned_bytes_free,
+                        spec.owned_str_free,
                         spec.user_data,
                         &mut handle,
                     )
@@ -813,9 +884,7 @@ impl RuntimeNativeProductCatalog {
             );
         }
         self.active_bindings.get_mut(&binding_key).ok_or_else(|| {
-            format!(
-                "active binding cache entry is missing for package `{package_id}`"
-            )
+            format!("active binding cache entry is missing for package `{package_id}`")
         })
     }
 }
@@ -900,11 +969,9 @@ pub fn load_bundle_native_products(
         }
     }
     match embedded.as_slice() {
-        [(path, text)] => load_bundle_native_products_from_text(
-            bundle_dir,
-            &path.display().to_string(),
-            text,
-        ),
+        [(path, text)] => {
+            load_bundle_native_products_from_text(bundle_dir, &path.display().to_string(), text)
+        }
         [] => {
             native_product_probe(
                 "bundle_manifest_missing",
@@ -1307,6 +1374,8 @@ struct ActiveBindingProduct {
 pub(crate) struct RuntimeBindingCallbackRegistrationSpec {
     pub name: &'static str,
     pub callback: arcana_cabi::ArcanaCabiBindingCallbackFn,
+    pub owned_bytes_free: ArcanaCabiOwnedBytesFreeFn,
+    pub owned_str_free: ArcanaCabiOwnedStrFreeFn,
     pub user_data: *mut c_void,
     pub cleanup_user_data: unsafe fn(*mut c_void),
 }
@@ -1314,6 +1383,7 @@ pub(crate) struct RuntimeBindingCallbackRegistrationSpec {
 #[cfg(windows)]
 pub(crate) struct RuntimeBindingImportOutcome {
     pub result: ArcanaCabiBindingValueV1,
+    pub write_backs: Vec<ArcanaCabiBindingValueV1>,
     pub owned_bytes_free: ArcanaCabiOwnedBytesFreeFn,
     pub owned_str_free: ArcanaCabiOwnedStrFreeFn,
 }
@@ -1321,7 +1391,7 @@ pub(crate) struct RuntimeBindingImportOutcome {
 #[cfg(windows)]
 #[derive(Clone)]
 struct ActiveBindingImport {
-    metadata: LoadedBindingImport,
+    metadata: ArcanaCabiBindingImport,
     call: ArcanaCabiBindingImportFn,
 }
 
@@ -1375,40 +1445,13 @@ struct LoadedNativeLibrary {
     child_run_entrypoint: Option<ArcanaCabiChildRunEntrypointFn>,
     plugin_describe_instance: Option<ArcanaCabiPluginDescribeInstanceFn>,
     plugin_use_instance: Option<ArcanaCabiPluginUseInstanceFn>,
-    binding_imports: Vec<LoadedBindingImport>,
-    binding_callbacks: Vec<LoadedBindingCallback>,
+    binding_imports: Vec<ArcanaCabiBindingImport>,
+    binding_callbacks: Vec<ArcanaCabiBindingCallback>,
     binding_register_callback: Option<ArcanaCabiBindingRegisterCallbackFn>,
     binding_unregister_callback: Option<ArcanaCabiBindingUnregisterCallbackFn>,
     last_error_alloc: Option<ArcanaCabiLastErrorAllocFn>,
     owned_bytes_free: Option<ArcanaCabiOwnedBytesFreeFn>,
     owned_str_free: Option<ArcanaCabiOwnedStrFreeFn>,
-}
-
-#[cfg(windows)]
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct LoadedBindingImport {
-    name: String,
-    symbol_name: String,
-    return_type: String,
-    params: Vec<LoadedBindingParam>,
-}
-
-#[cfg(windows)]
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct LoadedBindingCallback {
-    name: String,
-    return_type: String,
-    params: Vec<LoadedBindingParam>,
-}
-
-#[cfg(windows)]
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct LoadedBindingParam {
-    name: String,
-    source_mode: String,
-    pass_mode: String,
-    input_type: String,
-    write_back_type: Option<String>,
 }
 
 #[cfg(windows)]
@@ -1639,12 +1682,13 @@ impl LoadedNativeLibrary {
                         std::mem::size_of::<ArcanaCabiInstanceOpsV1>()
                     ));
                 }
-                let imports = unsafe {
-                    read_binding_imports(binding_ops.imports, binding_ops.import_count)?
-                };
+                let imports =
+                    unsafe { read_binding_imports(binding_ops.imports, binding_ops.import_count)? };
                 let callbacks = unsafe {
                     read_binding_callbacks(binding_ops.callbacks, binding_ops.callback_count)?
                 };
+                validate_binding_imports(&imports)?;
+                validate_binding_callbacks(&callbacks)?;
                 (
                     binding_ops.base.create_instance,
                     binding_ops.base.destroy_instance,
@@ -1715,7 +1759,7 @@ impl LoadedNativeLibrary {
 unsafe fn read_binding_imports(
     entries: *const ArcanaCabiBindingImportEntryV1,
     count: usize,
-) -> Result<Vec<LoadedBindingImport>, String> {
+) -> Result<Vec<ArcanaCabiBindingImport>, String> {
     if count == 0 {
         return Ok(Vec::new());
     }
@@ -1723,14 +1767,14 @@ unsafe fn read_binding_imports(
     slice
         .iter()
         .map(|entry| {
-            Ok(LoadedBindingImport {
+            Ok(ArcanaCabiBindingImport {
                 name: unsafe { read_cabi_c_string(entry.name, "binding import name") }?,
                 symbol_name: unsafe {
                     read_cabi_c_string(entry.symbol_name, "binding import symbol")
                 }?,
-                return_type: unsafe {
+                return_type: ArcanaCabiType::parse(&unsafe {
                     read_cabi_c_string(entry.return_type, "binding import return type")
-                }?,
+                }?)?,
                 params: unsafe { read_binding_params(entry.params, entry.param_count) }?,
             })
         })
@@ -1741,7 +1785,7 @@ unsafe fn read_binding_imports(
 unsafe fn read_binding_callbacks(
     entries: *const ArcanaCabiBindingCallbackEntryV1,
     count: usize,
-) -> Result<Vec<LoadedBindingCallback>, String> {
+) -> Result<Vec<ArcanaCabiBindingCallback>, String> {
     if count == 0 {
         return Ok(Vec::new());
     }
@@ -1749,11 +1793,11 @@ unsafe fn read_binding_callbacks(
     slice
         .iter()
         .map(|entry| {
-            Ok(LoadedBindingCallback {
+            Ok(ArcanaCabiBindingCallback {
                 name: unsafe { read_cabi_c_string(entry.name, "binding callback name") }?,
-                return_type: unsafe {
+                return_type: ArcanaCabiType::parse(&unsafe {
                     read_cabi_c_string(entry.return_type, "binding callback return type")
-                }?,
+                }?)?,
                 params: unsafe { read_binding_params(entry.params, entry.param_count) }?,
             })
         })
@@ -1764,7 +1808,7 @@ unsafe fn read_binding_callbacks(
 unsafe fn read_binding_params(
     entries: *const arcana_cabi::ArcanaCabiExportParamV1,
     count: usize,
-) -> Result<Vec<LoadedBindingParam>, String> {
+) -> Result<Vec<ArcanaCabiExportParam>, String> {
     if count == 0 {
         return Ok(Vec::new());
     }
@@ -1775,21 +1819,21 @@ unsafe fn read_binding_params(
             let write_back_type = if entry.write_back_type.is_null() {
                 None
             } else {
-                Some(unsafe {
+                Some(ArcanaCabiType::parse(&unsafe {
                     read_cabi_c_string(entry.write_back_type, "binding param write-back type")
-                }?)
+                }?)?)
             };
-            Ok(LoadedBindingParam {
+            Ok(ArcanaCabiExportParam {
                 name: unsafe { read_cabi_c_string(entry.name, "binding param name") }?,
-                source_mode: unsafe {
+                source_mode: ArcanaCabiParamSourceMode::parse(&unsafe {
                     read_cabi_c_string(entry.source_mode, "binding param source mode")
-                }?,
-                pass_mode: unsafe {
+                }?)?,
+                pass_mode: ArcanaCabiPassMode::parse(&unsafe {
                     read_cabi_c_string(entry.pass_mode, "binding param pass mode")
-                }?,
-                input_type: unsafe {
+                }?)?,
+                input_type: ArcanaCabiType::parse(&unsafe {
                     read_cabi_c_string(entry.input_type, "binding param input type")
-                }?,
+                }?)?,
                 write_back_type,
             })
         })
@@ -2026,7 +2070,8 @@ mod tests {
         file: &str,
     ) -> PathBuf {
         let project_dir = dir.join("project").join(product_name);
-        let target_dir = dir.join("target").join(product_name);
+        let artifact_dir = dir.join("target").join(product_name);
+        let cargo_target_dir = artifact_dir.join("cargo-target");
         let compiled = compile_instance_product(
             &AotInstanceProductSpec {
                 package_id: package_name.to_string(),
@@ -2036,9 +2081,13 @@ mod tests {
                 contract_id: contract_id.to_string(),
                 output_file_name: file.to_string(),
                 package_image_text: None,
+                binding_imports: Vec::new(),
+                binding_callbacks: Vec::new(),
+                binding_shackle_decls: Vec::new(),
             },
             &project_dir,
-            &target_dir,
+            &artifact_dir,
+            &cargo_target_dir,
         )
         .expect("instance product should compile");
         let output = dir.join(file);

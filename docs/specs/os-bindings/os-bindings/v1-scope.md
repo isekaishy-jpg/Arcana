@@ -15,10 +15,11 @@ This scope freezes the pre-selfhost generic OS-binding seam for Arcana library p
 - A binding-owning library package remains a normal `kind = "lib"` package.
 - It may declare one default native product with:
   - `role = "binding"`
-  - `producer = "rust-cdylib"` in the current proof lane
+  - `producer = "arcana-source"` in the current proof lane
 - Arcana source in that same package may declare:
   - `native fn ... = host.path`
   - `native callback ... = package.path`
+  - `shackle ...` declarations for raw foreign imports, callbacks, layouts, constants, and host-side binding routines
 - Consumers depend on the library package only. They do not activate or configure the binding sidecar explicitly in their dependency edge.
 
 ## Language Surface
@@ -31,6 +32,11 @@ This scope freezes the pre-selfhost generic OS-binding seam for Arcana library p
   - package-scoped explicit callback registration surface
   - callbacks target ordinary Arcana routines by path
   - callbacks are typed and declared up front; they are not ad hoc symbol lookups
+  - callback imports and callback exports follow the same typed metadata contract as `native fn`, including `edit` write-backs
+- `shackle`
+  - binding-owning-package-only raw foreign declaration family
+  - owns raw host imports, callback signatures, native layouts, constants, and package-local host routines
+  - exported `shackle` items form the public raw layer of binding grimoires such as `arcana_winapi.raw.*`
 - `opaque type`
   - binding-owning packages may export source-declared opaque handle types for native values such as module handles, font catalogs, windows, and callback tokens
 
@@ -38,18 +44,25 @@ This scope freezes the pre-selfhost generic OS-binding seam for Arcana library p
 
 - `intrinsic fn` remains the trusted std/kernel-only surface.
 - Generic OS binding work must not be reintroduced as runtime package-name special cases.
-- Binding grimoires must own the Arcana-facing API; runtime owns only the generic loading/invocation plumbing.
+- `arcana-cabi` owns the foreign-boundary semantics; runtime owns only generic loading and invocation as a consumer of that contract.
+- Binding grimoires must own the Arcana-facing API; runtime must not invent binding-only callback, ownership, or write-back behavior locally.
 - Binding grimoires must keep host-native scope narrow:
   - host capability discovery
   - host handles
   - explicit callbacks
   - thin raw API coverage
+- Binding-owning packages must lower their own host implementation through `shackle`; runtime must not route through a handwritten support crate.
 - Higher-level policy remains in ordinary grimoires above the binding layer.
 - The first proof lane is Windows only.
 
 ## `arcana_winapi` v1 Proof Slice
 
 `arcana_winapi` is the first public OS-binding grimoire.
+
+Its public package shape is:
+- `arcana_winapi.raw.*` for raw binding-facing surface such as exported callback signatures
+- `arcana_winapi.helpers.*` for thin Win32 helper routines consumers should build on
+- compatibility wrappers like `arcana_winapi.foundation`, `arcana_winapi.fonts`, and `arcana_winapi.windows` remain available during the migration
 
 Its v1 proof slice covers:
 - foundation helpers
@@ -70,5 +83,5 @@ Its v1 proof slice covers:
 - `arcana_text` may consume `arcana_winapi` for host-installed font discovery and related metadata.
 - Future `arcana_desktop` migration may consume `arcana_winapi` for incremental Win32 ownership work.
 - `arcana_text` and `arcana_desktop` must not regain direct runtime special cases once this seam exists.
-- No library package besides the dedicated Windows binding crate should talk to `windows-sys` directly in the current proof lane.
+- No library package should talk to `windows-sys` directly in the library binding seam.
 - Existing `windows-sys` usage in rewrite runtime host code and Windows-only CLI/runtime test harnesses is transitional host debt, not part of the library binding seam.

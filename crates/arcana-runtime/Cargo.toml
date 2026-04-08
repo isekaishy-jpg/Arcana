@@ -18,8 +18,7 @@ toml.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 # Preexisting Windows host/runtime substrate and native-loader plumbing.
-# This remains transitional host debt outside the package binding seam,
-# whose library-owned low-level Windows leaf lives in `arcana-winapi`.
+# This remains transitional host debt outside the package binding seam.
 windows-sys = { workspace = true, features = [
     "Win32_Devices_HumanInterfaceDevice",
     "Win32_Graphics_Dwm",

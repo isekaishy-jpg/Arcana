@@ -6,7 +6,7 @@ pub mod type_surface;
 
 pub use lookup::{
     current_workspace_package_for_module, impl_target_is_public_from_package,
-    lookup_method_candidates_for_hir_type, lookup_symbol_path,
+    lookup_method_candidates_for_hir_type, lookup_shackle_decl_path, lookup_symbol_path,
     visible_method_package_names_for_module, visible_package_root_for_module,
 };
 pub(crate) use lookup::{
@@ -348,6 +348,7 @@ pub struct HirSymbol {
     pub kind: HirSymbolKind,
     pub name: String,
     pub exported: bool,
+    pub projected_from_shackle: bool,
     pub is_async: bool,
     pub type_params: Vec<String>,
     pub where_clause: Option<HirWhereClause>,
@@ -372,7 +373,51 @@ pub struct HirNativeCallbackDecl {
     pub name: String,
     pub params: Vec<HirParam>,
     pub return_type: Option<HirType>,
+    pub callback_type: Option<HirType>,
     pub target: Vec<String>,
+    pub span: Span,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HirShackleDeclKind {
+    Type,
+    Struct,
+    Union,
+    Flags,
+    Const,
+    ImportFn,
+    Callback,
+    Fn,
+    Thunk,
+}
+
+impl HirShackleDeclKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Type => "type",
+            Self::Struct => "struct",
+            Self::Union => "union",
+            Self::Flags => "flags",
+            Self::Const => "const",
+            Self::ImportFn => "import_fn",
+            Self::Callback => "callback",
+            Self::Fn => "fn",
+            Self::Thunk => "thunk",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HirShackleDecl {
+    pub exported: bool,
+    pub kind: HirShackleDeclKind,
+    pub name: String,
+    pub params: Vec<HirParam>,
+    pub return_type: Option<HirType>,
+    pub callback_type: Option<HirType>,
+    pub binding: Option<String>,
+    pub body_entries: Vec<String>,
+    pub surface_text: String,
     pub span: Span,
 }
 
@@ -1017,6 +1062,7 @@ pub struct HirModuleSummary {
     pub lang_items: Vec<HirLangItem>,
     pub memory_specs: Vec<HirMemorySpecDecl>,
     pub native_callbacks: Vec<HirNativeCallbackDecl>,
+    pub shackle_decls: Vec<HirShackleDecl>,
     pub foreword_definitions: Vec<HirForewordDefinition>,
     pub foreword_handlers: Vec<HirForewordHandler>,
     pub foreword_aliases: Vec<HirForewordAlias>,
@@ -1086,6 +1132,7 @@ impl HirModuleSummary {
         rows.extend(
             self.symbols
                 .iter()
+                .filter(|symbol| !symbol.projected_from_shackle)
                 .filter(|symbol| symbol.exported)
                 .map(|symbol| {
                     format!(
@@ -1101,6 +1148,18 @@ impl HirModuleSummary {
                 render::encode_surface_text(&render::render_native_callback_fingerprint(callback))
             )
         }));
+        rows.extend(
+            self.shackle_decls
+                .iter()
+                .filter(|decl| decl.exported)
+                .map(|decl| {
+                    format!(
+                        "export:shackle:{}:{}",
+                        decl.kind.as_str(),
+                        render::encode_surface_text(&render::render_shackle_fingerprint(decl))
+                    )
+                }),
+        );
         rows.sort();
         rows
     }
@@ -1152,7 +1211,17 @@ impl HirModuleSummary {
                 .iter()
                 .map(render::render_native_callback_fingerprint),
         );
-        rows.extend(self.symbols.iter().map(render::render_symbol_fingerprint));
+        rows.extend(
+            self.shackle_decls
+                .iter()
+                .map(render::render_shackle_fingerprint),
+        );
+        rows.extend(
+            self.symbols
+                .iter()
+                .filter(|symbol| !symbol.projected_from_shackle)
+                .map(render::render_symbol_fingerprint),
+        );
         rows.extend(self.impls.iter().map(render::render_impl_fingerprint));
         rows
     }
@@ -1266,6 +1335,7 @@ pub struct HirWorkspacePackage {
     pub direct_deps: BTreeSet<String>,
     pub direct_dep_packages: BTreeMap<String, String>,
     pub direct_dep_ids: BTreeMap<String, String>,
+    pub native_products: BTreeMap<String, HirNativeProductSummary>,
     pub executable_foreword_deps: BTreeSet<String>,
     pub foreword_products: BTreeMap<String, HirForewordAdapterProduct>,
     pub summary: HirPackageSummary,
@@ -1363,6 +1433,22 @@ pub enum HirResolvedTarget {
         module_id: String,
         symbol_name: String,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HirResolvedShackleDeclRef<'a> {
+    pub package_id: &'a str,
+    pub package_name: &'a str,
+    pub module_id: &'a str,
+    pub decl_index: usize,
+    pub decl: &'a HirShackleDecl,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HirNativeProductSummary {
+    pub name: String,
+    pub role: String,
+    pub producer: String,
 }
 
 impl HirResolvedTarget {
@@ -2138,7 +2224,9 @@ pub fn infer_receiver_expr_type<L: HirLocalTypeLookup>(
         HirExpr::CollectionLiteral { items } => {
             let item_ty = items
                 .iter()
-                .filter_map(|item| infer_receiver_expr_type(workspace, resolved_module, locals, item))
+                .filter_map(|item| {
+                    infer_receiver_expr_type(workspace, resolved_module, locals, item)
+                })
                 .collect::<Vec<_>>();
             let element_ty = item_ty
                 .first()
@@ -2442,15 +2530,99 @@ pub fn lower_module_text(
     source: &str,
 ) -> Result<HirModuleSummary, String> {
     let parsed = parse_module(source)?;
-    Ok(lower_parsed_module(module_id, &parsed))
+    lower_parsed_module(module_id, &parsed)
 }
 
 pub fn lower_parsed_module(
     module_id: impl Into<String>,
     parsed: &ParsedModule,
-) -> HirModuleSummary {
-    HirModuleSummary {
-        module_id: module_id.into(),
+) -> Result<HirModuleSummary, String> {
+    let module_id = module_id.into();
+    let shackle_decls = parsed
+        .shackle_decls
+        .iter()
+        .map(|decl| HirShackleDecl {
+            exported: decl.exported,
+            kind: lower_shackle_kind(decl.kind),
+            name: decl.name.clone(),
+            params: decl
+                .params
+                .iter()
+                .map(|param| HirParam {
+                    mode: param.mode.as_ref().map(lower_param_mode),
+                    name: param.name.clone(),
+                    ty: type_surface::lower_surface_type(&param.ty),
+                    forewords: lower_forewords(&param.forewords),
+                    span: param.span,
+                })
+                .collect(),
+            return_type: decl
+                .return_type
+                .as_ref()
+                .map(type_surface::lower_surface_type),
+            callback_type: decl
+                .callback_type
+                .as_ref()
+                .map(type_surface::lower_surface_type),
+            binding: decl.binding.clone(),
+            body_entries: decl.body_entries.clone(),
+            surface_text: decl.surface_text.clone(),
+            span: decl.span,
+        })
+        .collect::<Vec<_>>();
+    let mut symbols = parsed
+        .symbols
+        .iter()
+        .map(|symbol| HirSymbol {
+            kind: lower_symbol_kind(&symbol.kind),
+            name: symbol.name.clone(),
+            exported: symbol.exported,
+            projected_from_shackle: false,
+            is_async: symbol.is_async,
+            type_params: symbol.type_params.clone(),
+            where_clause: symbol
+                .where_clause
+                .as_ref()
+                .map(type_surface::lower_surface_where_clause),
+            params: symbol
+                .params
+                .iter()
+                .map(|param| HirParam {
+                    mode: param.mode.as_ref().map(lower_param_mode),
+                    name: param.name.clone(),
+                    ty: type_surface::lower_surface_type(&param.ty),
+                    forewords: lower_forewords(&param.forewords),
+                    span: param.span,
+                })
+                .collect(),
+            return_type: symbol
+                .return_type
+                .as_ref()
+                .map(type_surface::lower_surface_type),
+            behavior_attrs: symbol
+                .behavior_attrs
+                .iter()
+                .map(|attr| HirBehaviorAttr {
+                    name: attr.name.clone(),
+                    value: attr.value.clone(),
+                })
+                .collect(),
+            opaque_policy: symbol.opaque_policy.as_ref().map(lower_opaque_policy),
+            availability: lower_availability_attachments(&symbol.availability),
+            forewords: lower_forewords(&symbol.forewords),
+            intrinsic_impl: symbol.intrinsic_impl.clone(),
+            native_impl: symbol.native_impl.clone(),
+            body: lower_symbol_body(&symbol.body),
+            statements: lower_statements(&symbol.statements),
+            cleanup_footers: lower_cleanup_footers(&symbol.cleanup_footers),
+            generated_by: None,
+            generated_name_key: None,
+            span: symbol.span,
+        })
+        .collect::<Vec<_>>();
+    extend_symbols_with_exported_shackle_callables(&module_id, &shackle_decls, &mut symbols)?;
+    Ok(HirModuleSummary {
+        module_id,
         line_count: parsed.line_count,
         non_empty_line_count: parsed.non_empty_line_count,
         directives: parsed
@@ -2498,10 +2670,15 @@ pub fn lower_parsed_module(
                     .return_type
                     .as_ref()
                     .map(type_surface::lower_surface_type),
+                callback_type: callback
+                    .callback_type
+                    .as_ref()
+                    .map(type_surface::lower_surface_type),
                 target: callback.target.clone(),
                 span: callback.span,
             })
             .collect(),
+        shackle_decls,
         foreword_definitions: parsed
             .foreword_definitions
             .iter()
@@ -2519,55 +2696,7 @@ pub fn lower_parsed_module(
             .collect(),
         emitted_foreword_metadata: Vec::new(),
         foreword_registrations: Vec::new(),
-        symbols: parsed
-            .symbols
-            .iter()
-            .map(|symbol| HirSymbol {
-                kind: lower_symbol_kind(&symbol.kind),
-                name: symbol.name.clone(),
-                exported: symbol.exported,
-                is_async: symbol.is_async,
-                type_params: symbol.type_params.clone(),
-                where_clause: symbol
-                    .where_clause
-                    .as_ref()
-                    .map(type_surface::lower_surface_where_clause),
-                params: symbol
-                    .params
-                    .iter()
-                    .map(|param| HirParam {
-                        mode: param.mode.as_ref().map(lower_param_mode),
-                        name: param.name.clone(),
-                        ty: type_surface::lower_surface_type(&param.ty),
-                        forewords: lower_forewords(&param.forewords),
-                        span: param.span,
-                    })
-                    .collect(),
-                return_type: symbol
-                    .return_type
-                    .as_ref()
-                    .map(type_surface::lower_surface_type),
-                behavior_attrs: symbol
-                    .behavior_attrs
-                    .iter()
-                    .map(|attr| HirBehaviorAttr {
-                        name: attr.name.clone(),
-                        value: attr.value.clone(),
-                    })
-                    .collect(),
-                opaque_policy: symbol.opaque_policy.as_ref().map(lower_opaque_policy),
-                availability: lower_availability_attachments(&symbol.availability),
-                forewords: lower_forewords(&symbol.forewords),
-                intrinsic_impl: symbol.intrinsic_impl.clone(),
-                native_impl: symbol.native_impl.clone(),
-                body: lower_symbol_body(&symbol.body),
-                statements: lower_statements(&symbol.statements),
-                cleanup_footers: lower_cleanup_footers(&symbol.cleanup_footers),
-                generated_by: None,
-                generated_name_key: None,
-                span: symbol.span,
-            })
-            .collect(),
+        symbols,
         impls: parsed
             .impls
             .iter()
@@ -2601,7 +2730,7 @@ pub fn lower_parsed_module(
                 span: impl_decl.span,
             })
             .collect(),
-    }
+    })
 }
 
 fn resolve_module_target(
@@ -2920,6 +3049,7 @@ pub fn build_workspace_package_with_dep_packages(
         direct_deps,
         direct_dep_packages,
         direct_dep_ids,
+        native_products: BTreeMap::new(),
         executable_foreword_deps: BTreeSet::new(),
         foreword_products: BTreeMap::new(),
         summary,
@@ -3199,6 +3329,20 @@ fn lower_symbol_kind(kind: &ParsedSymbolKind) -> HirSymbolKind {
     }
 }
 
+fn lower_shackle_kind(kind: arcana_syntax::ShackleDeclKind) -> HirShackleDeclKind {
+    match kind {
+        arcana_syntax::ShackleDeclKind::Type => HirShackleDeclKind::Type,
+        arcana_syntax::ShackleDeclKind::Struct => HirShackleDeclKind::Struct,
+        arcana_syntax::ShackleDeclKind::Union => HirShackleDeclKind::Union,
+        arcana_syntax::ShackleDeclKind::Flags => HirShackleDeclKind::Flags,
+        arcana_syntax::ShackleDeclKind::Const => HirShackleDeclKind::Const,
+        arcana_syntax::ShackleDeclKind::ImportFn => HirShackleDeclKind::ImportFn,
+        arcana_syntax::ShackleDeclKind::Callback => HirShackleDeclKind::Callback,
+        arcana_syntax::ShackleDeclKind::Fn => HirShackleDeclKind::Fn,
+        arcana_syntax::ShackleDeclKind::Thunk => HirShackleDeclKind::Thunk,
+    }
+}
+
 fn lower_opaque_policy(policy: &ParsedOpaqueTypePolicy) -> HirOpaqueTypePolicy {
     HirOpaqueTypePolicy {
         ownership: match policy.ownership {
@@ -3272,9 +3416,7 @@ fn lower_symbol_body(body: &arcana_syntax::SymbolBody) -> HirSymbolBody {
                     span: object.span,
                 })
                 .collect(),
-            context_type: context_type
-                .as_ref()
-                .map(type_surface::lower_surface_type),
+            context_type: context_type.as_ref().map(type_surface::lower_surface_type),
             exits: exits
                 .iter()
                 .map(|owner_exit| HirOwnerExit {
@@ -3310,6 +3452,7 @@ fn lower_trait_or_impl_method(method: &arcana_syntax::SymbolDecl) -> HirSymbol {
         kind: lower_symbol_kind(&method.kind),
         name: method.name.clone(),
         exported: method.exported,
+        projected_from_shackle: false,
         is_async: method.is_async,
         type_params: method.type_params.clone(),
         where_clause: method
@@ -3351,6 +3494,67 @@ fn lower_trait_or_impl_method(method: &arcana_syntax::SymbolDecl) -> HirSymbol {
         generated_name_key: None,
         span: method.span,
     }
+}
+
+fn extend_symbols_with_exported_shackle_callables(
+    module_id: &str,
+    shackle_decls: &[HirShackleDecl],
+    symbols: &mut Vec<HirSymbol>,
+) -> Result<(), String> {
+    let mut used_names = symbols
+        .iter()
+        .map(|symbol| symbol.name.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    for decl in shackle_decls.iter().filter(|decl| decl.exported) {
+        let kind = match decl.kind {
+            HirShackleDeclKind::ImportFn | HirShackleDeclKind::Fn => HirSymbolKind::Fn,
+            HirShackleDeclKind::Const => HirSymbolKind::Const,
+            _ => continue,
+        };
+        if !used_names.insert(decl.name.clone()) {
+            return Err(format!(
+                "{}:{}: exported shackle `{}` collides with existing symbol `{}` in module `{module_id}`",
+                decl.span.line,
+                decl.span.column,
+                decl.kind.as_str(),
+                decl.name
+            ));
+        }
+        symbols.push(HirSymbol {
+            kind,
+            name: decl.name.clone(),
+            exported: true,
+            projected_from_shackle: true,
+            is_async: false,
+            type_params: Vec::new(),
+            where_clause: None,
+            params: decl.params.clone(),
+            return_type: decl.return_type.clone(),
+            behavior_attrs: Vec::new(),
+            opaque_policy: None,
+            availability: Vec::new(),
+            forewords: Vec::new(),
+            intrinsic_impl: None,
+            native_impl: Some(projected_shackle_binding_name(module_id, &decl.name)),
+            body: HirSymbolBody::None,
+            statements: Vec::new(),
+            cleanup_footers: Vec::new(),
+            generated_by: None,
+            generated_name_key: None,
+            span: decl.span,
+        });
+    }
+    Ok(())
+}
+
+fn projected_shackle_binding_name(module_id: &str, decl_name: &str) -> String {
+    let mut parts = module_id
+        .split('.')
+        .skip(1)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    parts.push(decl_name.to_string());
+    parts.join(".")
 }
 
 fn lower_availability_attachments(
@@ -3617,16 +3821,19 @@ fn lower_record_region(region: &arcana_syntax::RecordRegion) -> HirRecordRegion 
         completion: region.completion,
         target: Box::new(lower_expr(&region.target)),
         base: region.base.as_ref().map(|base| Box::new(lower_expr(base))),
-        destination: region.destination.as_ref().map(|destination| match destination {
-            arcana_syntax::ConstructDestination::Deliver { name } => {
-                HirConstructDestination::Deliver { name: name.clone() }
-            }
-            arcana_syntax::ConstructDestination::Place { target } => {
-                HirConstructDestination::Place {
-                    target: lower_assign_target(target),
+        destination: region
+            .destination
+            .as_ref()
+            .map(|destination| match destination {
+                arcana_syntax::ConstructDestination::Deliver { name } => {
+                    HirConstructDestination::Deliver { name: name.clone() }
                 }
-            }
-        }),
+                arcana_syntax::ConstructDestination::Place { target } => {
+                    HirConstructDestination::Place {
+                        target: lower_assign_target(target),
+                    }
+                }
+            }),
         default_modifier: region.default_modifier.as_ref().map(lower_headed_modifier),
         lines: region
             .lines
@@ -3890,9 +4097,7 @@ fn lower_phrase_qualifier_kind(
     kind: arcana_syntax::QualifiedPhraseQualifierKind,
 ) -> HirQualifiedPhraseQualifierKind {
     match kind {
-        arcana_syntax::QualifiedPhraseQualifierKind::Call => {
-            HirQualifiedPhraseQualifierKind::Call
-        }
+        arcana_syntax::QualifiedPhraseQualifierKind::Call => HirQualifiedPhraseQualifierKind::Call,
         arcana_syntax::QualifiedPhraseQualifierKind::Try => HirQualifiedPhraseQualifierKind::Try,
         arcana_syntax::QualifiedPhraseQualifierKind::Apply => {
             HirQualifiedPhraseQualifierKind::Apply
@@ -3909,9 +4114,7 @@ fn lower_phrase_qualifier_kind(
         arcana_syntax::QualifiedPhraseQualifierKind::Split => {
             HirQualifiedPhraseQualifierKind::Split
         }
-        arcana_syntax::QualifiedPhraseQualifierKind::Must => {
-            HirQualifiedPhraseQualifierKind::Must
-        }
+        arcana_syntax::QualifiedPhraseQualifierKind::Must => HirQualifiedPhraseQualifierKind::Must,
         arcana_syntax::QualifiedPhraseQualifierKind::Fallback => {
             HirQualifiedPhraseQualifierKind::Fallback
         }
@@ -4098,11 +4301,12 @@ mod tests {
         HirAssignOp, HirAssignTarget, HirBinaryOp, HirChainConnector, HirChainIntroducer,
         HirChainStep, HirDirectiveKind, HirExpr, HirForewordAliasKind, HirForewordApp,
         HirForewordArg, HirForewordRetention, HirForewordTier, HirHeaderAttachment,
-        HirMatchPattern, HirPackageLayout, HirPackageSummary, HirPhraseArg, HirStatement,
-        HirStatementKind, HirSymbolBody, HirSymbolKind, HirTraitRef, HirType, HirUnaryOp,
-        HirWhereClause, HirWorkspacePackage, build_package_layout, build_package_summary,
-        build_workspace_summary, derive_source_module_path, lookup_method_candidates_for_hir_type,
-        lookup_symbol_path, lower_module_text, parse_hir_type, resolve_workspace,
+        HirMatchPattern, HirPackageLayout, HirPackageSummary, HirPhraseArg, HirShackleDeclKind,
+        HirStatement, HirStatementKind, HirSymbolBody, HirSymbolKind, HirTraitRef, HirType,
+        HirUnaryOp, HirWhereClause, HirWorkspacePackage, build_package_layout,
+        build_package_summary, build_workspace_summary, derive_source_module_path,
+        lookup_method_candidates_for_hir_type, lookup_symbol_path, lower_module_text,
+        parse_hir_type, resolve_workspace,
     };
 
     fn expr_is_path(expr: &HirExpr, name: &str) -> bool {
@@ -5362,6 +5566,39 @@ mod tests {
                 "module=winspell:export:fn:fn open() -> Int:".to_string(),
                 "module=winspell:reexport:winspell.window".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn lower_module_text_carries_shackle_decls_and_typed_native_callbacks() {
+        let module = lower_module_text(
+            "arcana_winapi.raw.user32",
+            concat!(
+                "export shackle callback WNDPROC(read hwnd: Int, message: Int) -> Int\n",
+                "export shackle import fn DispatchMessageW() -> Int = user32.DispatchMessageW\n",
+                "native callback proc: arcana_winapi.raw.user32.WNDPROC = app.callbacks.handle_proc\n",
+                "fn handle_proc(read code: Int) -> Int:\n",
+                "    return code\n",
+            ),
+        )
+        .expect("lowering should pass");
+
+        assert_eq!(module.shackle_decls.len(), 2);
+        assert_eq!(module.shackle_decls[0].kind, HirShackleDeclKind::Callback);
+        assert_eq!(module.shackle_decls[0].name, "WNDPROC");
+        assert_eq!(module.shackle_decls[1].kind, HirShackleDeclKind::ImportFn);
+        assert_eq!(
+            module.shackle_decls[1].binding.as_deref(),
+            Some("user32.DispatchMessageW")
+        );
+        assert_eq!(module.native_callbacks.len(), 1);
+        assert_eq!(
+            module.native_callbacks[0]
+                .callback_type
+                .as_ref()
+                .expect("typed callback ref")
+                .render(),
+            "arcana_winapi.raw.user32.WNDPROC"
         );
     }
 

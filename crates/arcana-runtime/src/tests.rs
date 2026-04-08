@@ -1,15 +1,16 @@
 #[cfg(windows)]
 use super::NativeProcessHost;
 use super::{
-    BufferedEvent, BufferedFrameInput, BufferedHost, ParsedAssignOp, ParsedAssignTarget,
-    ParsedCleanupFooter, ParsedExpr, ParsedPhraseArg, ParsedPhraseQualifierKind, ParsedStmt,
-    RuntimeCallArg, RuntimeEntrypointPlan, RuntimeExecutionState, RuntimeFrameArenaHandle,
-    RuntimeFrameArenaPolicy, RuntimeFrameArenaState, RuntimeFrameRecyclePolicy, RuntimeHost,
-    RuntimeIntrinsic, RuntimeMemoryHandlePolicy, RuntimeMemoryPressurePolicy, RuntimeOpaqueValue,
-    RuntimePackagePlan, RuntimeParamPlan, RuntimePoolIdValue, RuntimeReferenceTarget,
-    RuntimeReferenceValue, RuntimeResetOnPolicy, RuntimeRingIdValue, RuntimeRoutinePlan,
-    RuntimeScope, RuntimeSessionIdValue, RuntimeSlabIdValue, RuntimeSlabPolicy,
-    RuntimeSlabState, RuntimeTempArenaHandle, RuntimeValue, arcana_desktop_session_record,
+    ARCANA_NATIVE_BUNDLE_DIR_ENV, BufferedEvent, BufferedFrameInput, BufferedHost, ParsedAssignOp,
+    ParsedAssignTarget, ParsedCleanupFooter, ParsedExpr, ParsedPhraseArg,
+    ParsedPhraseQualifierKind, ParsedStmt, RuntimeCallArg, RuntimeEntrypointPlan,
+    RuntimeExecutionState, RuntimeFrameArenaHandle, RuntimeFrameArenaPolicy,
+    RuntimeFrameArenaState, RuntimeFrameRecyclePolicy, RuntimeHost, RuntimeIntrinsic,
+    RuntimeMemoryHandlePolicy, RuntimeMemoryPressurePolicy, RuntimeOpaqueValue, RuntimePackagePlan,
+    RuntimeParamPlan, RuntimePoolIdValue, RuntimeReferenceTarget, RuntimeReferenceValue,
+    RuntimeResetOnPolicy, RuntimeRingIdValue, RuntimeRoutinePlan, RuntimeScope,
+    RuntimeSessionIdValue, RuntimeSlabIdValue, RuntimeSlabPolicy, RuntimeSlabState,
+    RuntimeTempArenaHandle, RuntimeValue, arcana_desktop_session_record,
     arcana_desktop_wake_record, arcana_desktop_window_value, arcana_window_id_record,
     default_runtime_pool_policy, default_runtime_ring_policy, default_runtime_session_policy,
     default_runtime_slab_policy, ensure_runtime_frame_capacity, ensure_runtime_slab_capacity,
@@ -21,11 +22,10 @@ use super::{
     insert_runtime_session_arena, insert_runtime_slab, load_package_plan,
     lookup_runtime_owner_plan, none_variant, ok_variant, owner_state_key, parse_cleanup_footer_row,
     parse_runtime_package_image, parse_stmt, plan_from_artifact, pool_id_is_live,
-    render_exported_json_abi_manifest, render_runtime_package_image, resolve_routine_index,
-    resolve_routine_index_for_call, runtime_read_view_snapshot,
-    runtime_reset_owner_exit_memory_specs_in_scopes, runtime_validate_split_value,
-    reset_runtime_native_products_cache, some_variant, try_execute_arcana_owned_api_call,
-    ARCANA_NATIVE_BUNDLE_DIR_ENV,
+    render_exported_json_abi_manifest, render_runtime_package_image,
+    reset_runtime_native_products_cache, resolve_routine_index, resolve_routine_index_for_call,
+    runtime_read_view_snapshot, runtime_reset_owner_exit_memory_specs_in_scopes,
+    runtime_validate_split_value, some_variant, try_execute_arcana_owned_api_call,
 };
 use arcana_aot::{
     AOT_INTERNAL_FORMAT, AotEntrypointArtifact, AotOwnerArtifact, AotPackageArtifact,
@@ -38,8 +38,8 @@ use arcana_ir::{
 };
 use arcana_package::{
     BuildExecutionContext, BuildTarget, default_distribution_dir,
-    execute_build_with_context_and_progress, load_workspace_graph, plan_build_for_target_with_context,
-    plan_workspace, prepare_build, stage_distribution_bundle,
+    execute_build_with_context_and_progress, load_workspace_graph,
+    plan_build_for_target_with_context, plan_workspace, prepare_build, stage_distribution_bundle,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -119,6 +119,7 @@ fn empty_runtime_plan(package_id: &str) -> RuntimePackagePlan {
         entrypoints: Vec::new(),
         routines: Vec::new(),
         native_callbacks: Vec::new(),
+        shackle_decls: Vec::new(),
         owners: Vec::new(),
     }
 }
@@ -592,6 +593,93 @@ fn execute_main_reports_arcana_winapi_binding_errors() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+#[cfg(windows)]
+#[test]
+fn execute_main_runs_dependency_shackle_import_fn_and_const_surface() {
+    let dir = temp_workspace_dir("runtime_dependency_shackle_callable_surface");
+    write_file(
+        &dir.join("book.toml"),
+        concat!(
+            "name = \"app\"\n",
+            "kind = \"app\"\n",
+            "[deps]\n",
+            "hostapi = { path = \"./hostapi\" }\n",
+        ),
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "fn main() -> Int:\n",
+            "    let pid = hostapi.raw.kernel32.GetCurrentProcessId :: :: call\n",
+            "    if pid >= 0:\n",
+            "        return hostapi.raw.constants.MAGIC\n",
+            "    return 0\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+    write_file(
+        &dir.join("hostapi").join("book.toml"),
+        concat!(
+            "name = \"hostapi\"\n",
+            "kind = \"lib\"\n",
+            "[native.products.default]\n",
+            "kind = \"dll\"\n",
+            "role = \"binding\"\n",
+            "producer = \"arcana-source\"\n",
+            "file = \"hostapi_binding.dll\"\n",
+            "contract = \"arcana.cabi.binding.v1\"\n",
+        ),
+    );
+    write_file(
+        &dir.join("hostapi").join("src").join("book.arc"),
+        "// hostapi root\n",
+    );
+    write_file(
+        &dir.join("hostapi").join("src").join("raw.arc"),
+        concat!(
+            "reexport hostapi.raw.kernel32\n",
+            "reexport hostapi.raw.constants\n",
+        ),
+    );
+    write_file(
+        &dir.join("hostapi")
+            .join("src")
+            .join("raw")
+            .join("kernel32.arc"),
+        "export shackle import fn GetCurrentProcessId() -> Int = kernel32.GetCurrentProcessId\n",
+    );
+    write_file(
+        &dir.join("hostapi")
+            .join("src")
+            .join("raw")
+            .join("constants.arc"),
+        "export shackle const MAGIC: Int = 7\n",
+    );
+    write_file(
+        &dir.join("hostapi").join("src").join("types.arc"),
+        "// hostapi types\n",
+    );
+
+    let (plan, bundle_dir) = build_workspace_plan_and_bundle_dir_for_member(&dir, "app");
+    let mut host = BufferedHost {
+        cwd: path_text(&dir),
+        env: BTreeMap::from([(
+            ARCANA_NATIVE_BUNDLE_DIR_ENV.to_string(),
+            path_text(&bundle_dir),
+        )]),
+        ..BufferedHost::default()
+    };
+
+    reset_runtime_native_products_cache();
+    let code = execute_main(&plan, &mut host)
+        .expect("runtime should execute dependency shackle import fn and const surface");
+    reset_runtime_native_products_cache();
+
+    assert_eq!(code, 7);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
 fn runtime_call_arg(value: RuntimeValue, name: &str) -> RuntimeCallArg {
     RuntimeCallArg {
         name: None,
@@ -885,6 +973,7 @@ fn sample_return_artifact() -> AotPackageArtifact {
             ],
         }],
         native_callbacks: Vec::new(),
+        shackle_decls: Vec::new(),
         owners: Vec::new(),
         modules: vec![AotPackageModuleArtifact {
             package_id: test_package_id_for_module("hello"),
@@ -950,6 +1039,7 @@ fn sample_print_artifact() -> AotPackageArtifact {
                     .expect("statement should parse")],
             }],
             native_callbacks: Vec::new(),
+            shackle_decls: Vec::new(),
         owners: Vec::new(),
             modules: vec![AotPackageModuleArtifact {
                 package_id: test_package_id_for_module("hello"),
@@ -1041,6 +1131,7 @@ fn sample_stmt_metadata_artifact() -> AotPackageArtifact {
                 },
             ],
             native_callbacks: Vec::new(),
+            shackle_decls: Vec::new(),
         owners: Vec::new(),
             modules: vec![AotPackageModuleArtifact {
                 package_id: test_package_id_for_module("metadata"),
@@ -1119,6 +1210,7 @@ fn sample_attachment_foreword_artifact() -> AotPackageArtifact {
                 ],
             }],
             native_callbacks: Vec::new(),
+            shackle_decls: Vec::new(),
         owners: Vec::new(),
             modules: vec![AotPackageModuleArtifact {
                 package_id: test_package_id_for_module("attachment"),
@@ -1376,6 +1468,7 @@ fn resolve_routine_index_for_call_prefers_lowered_routine_identity() {
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
+        shackle_decls: Vec::new(),
         owners: Vec::new(),
         routines: vec![
             RuntimeRoutinePlan {
@@ -1396,7 +1489,7 @@ fn resolve_routine_index_for_call_prefers_lowered_routine_identity() {
                 }],
                 return_type: test_return_type("fn load(read self: AtomicInt) -> Int:"),
                 intrinsic_impl: None,
-            native_impl: None,
+                native_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -1421,7 +1514,7 @@ fn resolve_routine_index_for_call_prefers_lowered_routine_identity() {
                 }],
                 return_type: test_return_type("fn load(read self: AtomicBool) -> Bool:"),
                 intrinsic_impl: None,
-            native_impl: None,
+                native_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -1478,6 +1571,7 @@ fn runtime_dynamic_bare_method_fallback_matches_receiver_type_args() {
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
+        shackle_decls: Vec::new(),
         owners: Vec::new(),
         routines: vec![
             RuntimeRoutinePlan {
@@ -1500,7 +1594,7 @@ fn runtime_dynamic_bare_method_fallback_matches_receiver_type_args() {
                     "fn send(read self: std.concurrent.Channel[T]) -> Int:",
                 ),
                 intrinsic_impl: None,
-            native_impl: None,
+                native_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -1527,7 +1621,7 @@ fn runtime_dynamic_bare_method_fallback_matches_receiver_type_args() {
                     "fn send(read self: std.concurrent.Channel[Bool]) -> Int:",
                 ),
                 intrinsic_impl: None,
-            native_impl: None,
+                native_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -1589,6 +1683,7 @@ fn runtime_dynamic_bare_method_fallback_matches_opaque_family_receiver() {
         )]),
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
+        shackle_decls: Vec::new(),
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
             package_id: test_package_id_for_module("desktop"),
@@ -1679,6 +1774,7 @@ fn runtime_dynamic_bare_method_fallback_keeps_owner_identity() {
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
+        shackle_decls: Vec::new(),
         owners: Vec::new(),
         routines: vec![
             RuntimeRoutinePlan {
@@ -1699,7 +1795,7 @@ fn runtime_dynamic_bare_method_fallback_keeps_owner_identity() {
                 }],
                 return_type: Some(parse_routine_type_text("Int").expect("type")),
                 intrinsic_impl: None,
-            native_impl: None,
+                native_impl: None,
                 impl_target_type: Some(owner_counter),
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -1724,7 +1820,7 @@ fn runtime_dynamic_bare_method_fallback_keeps_owner_identity() {
                 }],
                 return_type: Some(parse_routine_type_text("Int").expect("type")),
                 intrinsic_impl: None,
-            native_impl: None,
+                native_impl: None,
                 impl_target_type: Some(owner_timer),
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -1783,6 +1879,7 @@ fn runtime_dynamic_bare_method_fallback_rejects_wrong_sole_candidate() {
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
+        shackle_decls: Vec::new(),
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
             package_id: test_package_id_for_module("ops"),
@@ -1865,6 +1962,7 @@ fn runtime_dynamic_bare_method_fallback_rejects_qualified_leaf_collision() {
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
+        shackle_decls: Vec::new(),
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
             package_id: test_package_id_for_module("app"),
@@ -1977,6 +2075,7 @@ fn runtime_json_abi_executes_exported_routine() {
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
+        shackle_decls: Vec::new(),
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
             package_id: test_package_id_for_module("tool"),
@@ -2046,6 +2145,7 @@ fn runtime_json_abi_manifest_records_cabi_param_metadata() {
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
+        shackle_decls: Vec::new(),
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
             package_id: test_package_id_for_module("tool"),
@@ -2119,6 +2219,7 @@ fn runtime_json_abi_manifest_projects_default_read_source_mode() {
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
+        shackle_decls: Vec::new(),
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
             package_id: test_package_id_for_module("tool"),
@@ -2188,6 +2289,7 @@ fn runtime_json_abi_writes_back_edit_arguments() {
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
+        shackle_decls: Vec::new(),
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
             package_id: test_package_id_for_module("tool"),
@@ -2266,6 +2368,7 @@ fn runtime_json_abi_manifest_omits_unsupported_owner_reference_and_opaque_routin
         )]),
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
+        shackle_decls: Vec::new(),
         owners: Vec::new(),
         routines: vec![
             RuntimeRoutinePlan {
@@ -2286,7 +2389,7 @@ fn runtime_json_abi_manifest_omits_unsupported_owner_reference_and_opaque_routin
                 }],
                 return_type: test_return_type("fn answer(value: Int) -> Int:"),
                 intrinsic_impl: None,
-            native_impl: None,
+                native_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -2313,7 +2416,7 @@ fn runtime_json_abi_manifest_omits_unsupported_owner_reference_and_opaque_routin
                 }],
                 return_type: test_return_type("fn borrowed(read value: &Int) -> Int:"),
                 intrinsic_impl: None,
-            native_impl: None,
+                native_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -2340,7 +2443,7 @@ fn runtime_json_abi_manifest_omits_unsupported_owner_reference_and_opaque_routin
                     "fn window_title(read window: desktop.types.Window) -> Int:",
                 ),
                 intrinsic_impl: None,
-            native_impl: None,
+                native_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -2365,7 +2468,7 @@ fn runtime_json_abi_manifest_omits_unsupported_owner_reference_and_opaque_routin
                 }],
                 return_type: test_return_type("fn owner_only(read owner: Owner) -> Int:"),
                 intrinsic_impl: None,
-            native_impl: None,
+                native_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -2413,6 +2516,7 @@ fn runtime_json_abi_rejects_executing_unsupported_exported_routine() {
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
+        shackle_decls: Vec::new(),
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
             package_id: test_package_id_for_module("tool"),
@@ -2474,6 +2578,7 @@ fn runtime_native_abi_executes_exported_routine() {
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
+        shackle_decls: Vec::new(),
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
             package_id: test_package_id_for_module("tool"),
@@ -2545,6 +2650,7 @@ fn runtime_native_abi_supports_string_and_byte_values() {
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
+        shackle_decls: Vec::new(),
         owners: Vec::new(),
         routines: vec![
             RuntimeRoutinePlan {
@@ -2565,7 +2671,7 @@ fn runtime_native_abi_supports_string_and_byte_values() {
                 }],
                 return_type: test_return_type("fn greet(read name: Str) -> Str:"),
                 intrinsic_impl: None,
-            native_impl: None,
+                native_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -2596,7 +2702,7 @@ fn runtime_native_abi_supports_string_and_byte_values() {
                 }],
                 return_type: test_return_type("fn tail(read bytes: Array[Int]) -> Array[Int]:"),
                 intrinsic_impl: None,
-            native_impl: None,
+                native_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -2630,7 +2736,7 @@ fn runtime_native_abi_supports_string_and_byte_values() {
                     "fn echo_pair(read pair: Pair[Str, Int]) -> Pair[Str, Int]:",
                 ),
                 intrinsic_impl: None,
-            native_impl: None,
+                native_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -2711,6 +2817,7 @@ fn runtime_native_abi_writes_back_edit_arguments() {
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
+        shackle_decls: Vec::new(),
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
             package_id: test_package_id_for_module("tool"),
@@ -3365,6 +3472,7 @@ fn execute_main_manual_routine_cleanup_footers_run_after_defers() {
             routine_index: 1,
         }],
         native_callbacks: Vec::new(),
+        shackle_decls: Vec::new(),
         owners: Vec::new(),
         routines: vec![
             RuntimeRoutinePlan {
@@ -3385,7 +3493,7 @@ fn execute_main_manual_routine_cleanup_footers_run_after_defers() {
                 }],
                 return_type: test_return_type("fn run(read seed: Int) -> Result[Int, Str]:"),
                 intrinsic_impl: None,
-            native_impl: None,
+                native_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -3460,7 +3568,7 @@ fn execute_main_manual_routine_cleanup_footers_run_after_defers() {
                 params: Vec::new(),
                 return_type: test_return_type("fn main() -> Int:"),
                 intrinsic_impl: None,
-            native_impl: None,
+                native_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -8697,6 +8805,7 @@ fn execute_main_rejects_try_qualifier_arguments() {
             routine_index: 0,
         }],
         native_callbacks: Vec::new(),
+        shackle_decls: Vec::new(),
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
             package_id: test_package_id_for_module("try_args_runtime"),
@@ -9064,6 +9173,7 @@ fn execute_main_rejects_use_after_take_move() {
             routine_index: 2,
         }],
         native_callbacks: Vec::new(),
+        shackle_decls: Vec::new(),
         owners: Vec::new(),
         routines: vec![
             RuntimeRoutinePlan {
@@ -9084,7 +9194,7 @@ fn execute_main_rejects_use_after_take_move() {
                 }],
                 return_type: test_return_type("fn consume(take value: Str) -> Int:"),
                 intrinsic_impl: None,
-            native_impl: None,
+                native_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -9111,7 +9221,7 @@ fn execute_main_rejects_use_after_take_move() {
                 }],
                 return_type: test_return_type("fn reuse(read value: Str) -> Int:"),
                 intrinsic_impl: None,
-            native_impl: None,
+                native_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -9133,7 +9243,7 @@ fn execute_main_rejects_use_after_take_move() {
                 params: Vec::new(),
                 return_type: test_return_type("fn main() -> Int:"),
                 intrinsic_impl: None,
-            native_impl: None,
+                native_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -9222,6 +9332,7 @@ fn execute_main_rejects_direct_intrinsic_take_fallback_reuse() {
             routine_index: 0,
         }],
         native_callbacks: Vec::new(),
+        shackle_decls: Vec::new(),
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
             package_id: test_package_id_for_module("take_intrinsic_runtime"),
@@ -9336,6 +9447,7 @@ fn execute_main_binds_named_args_for_direct_intrinsic_fallback() {
             routine_index: 0,
         }],
         native_callbacks: Vec::new(),
+        shackle_decls: Vec::new(),
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
             package_id: test_package_id_for_module("named_intrinsic_runtime"),
@@ -10372,6 +10484,7 @@ fn resolve_routine_index_uses_current_package_dep_id_when_display_names_collide(
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
+        shackle_decls: Vec::new(),
         owners: Vec::new(),
         routines: vec![
             RuntimeRoutinePlan {
@@ -10387,7 +10500,7 @@ fn resolve_routine_index_uses_current_package_dep_id_when_display_names_collide(
                 params: Vec::new(),
                 return_type: test_return_type("fn value() -> Int:"),
                 intrinsic_impl: None,
-            native_impl: None,
+                native_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -10407,7 +10520,7 @@ fn resolve_routine_index_uses_current_package_dep_id_when_display_names_collide(
                 params: Vec::new(),
                 return_type: test_return_type("fn value() -> Int:"),
                 intrinsic_impl: None,
-            native_impl: None,
+                native_impl: None,
                 impl_target_type: None,
                 impl_trait_path: None,
                 availability: Vec::new(),
@@ -10458,6 +10571,7 @@ fn resolve_routine_index_rejects_globally_unique_package_name_without_direct_dep
         opaque_family_types: BTreeMap::new(),
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
+        shackle_decls: Vec::new(),
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
             package_id: core,
@@ -12600,7 +12714,8 @@ fn execute_main_runs_arcana_text_proof_smoke_workspace() {
     };
 
     reset_runtime_native_products_cache();
-    let code = execute_main(&plan, &mut host).expect("runtime should execute arcana_text smoke workspace");
+    let code =
+        execute_main(&plan, &mut host).expect("runtime should execute arcana_text smoke workspace");
     reset_runtime_native_products_cache();
 
     assert_eq!(code, 0);
@@ -13265,5 +13380,3 @@ fn native_host_does_not_expose_text_grimoire_methods() {
         );
     }
 }
-
-
