@@ -150,10 +150,22 @@ Do not confuse these with `Memory ...` specs. Memory phrases allocate values. `M
 - Attached blocks follow the same standalone-statement restriction as qualified phrases.
 - Family-specific details and defaults are runtime materialization behavior, not parser behavior. For those, inspect the runtime match over `MemoryDetailKey` in `build_runtime_memory_spec_materialization`.
 
+### Runtime materialization semantics
+
+- `Memory` detail values are parsed as expressions, not just literals; `MemoryDetailLine.value` is an `Expr`.
+- Statement-form `Memory` specs are runtime statements. Block-scope specs enter the current scope at execution time and are materialized when a matching memory phrase resolves them.
+- Integer-valued details such as `capacity`, `growth`, `page`, and `window` are evaluated through `eval_expr` during runtime materialization, so a block-scope spec can depend on locals computed earlier in the same flow.
+- Handle reuse is family- and policy-sensitive:
+  - stable handle policy reuses the same materialized allocator handle for that spec identity
+  - unstable handle policy rematerializes a fresh allocator on each resolution
+- `reset` clears allocator contents, but it does not rebuild the spec policy for an already materialized stable handle.
+- Do not assume every family supports unstable handles. Current approved surface keeps `session.handle` and `slab.handle` stable-only; dynamic rematerialization is mainly relevant for families such as `arena` and `pool`.
+
 ### Rust lookup
 
 - Syntax:
   - `crates/arcana-syntax/src/lib.rs`
+  - `MemoryDetailLine`
   - `parse_memory_phrase`
   - `parse_memory_spec_decl`
   - `parse_phrase_args`
@@ -161,6 +173,8 @@ Do not confuse these with `Memory ...` specs. Memory phrases allocate values. `M
   - `crates/arcana-runtime/src/lib.rs`
   - `memory_family_from_text`
   - `build_runtime_memory_spec_materialization`
+  - `eval_expr` in `build_runtime_memory_spec_materialization`
+  - `ParsedStmt::MemorySpec`
   - `materialize_runtime_arena_spec_hook`
   - `materialize_runtime_frame_spec_hook`
   - `materialize_runtime_pool_spec_hook`
@@ -673,6 +687,145 @@ fn main() -> Int:
     return 0
 ```
 
+## Native Bindings, Shackle, and `arcana_winapi`
+
+### What it is
+
+Binding products are the current package-owned foreign seam for library packages that need host APIs.
+
+- `crates/arcana-cabi` owns the foreign contract.
+- Binding packages declare a default native product in `book.toml` with:
+  - `role = "binding"`
+  - `producer = "arcana-source"`
+  - `contract = "arcana.cabi.binding.v1"`
+- The generated binding product is self-hosted from package source.
+- The transitional handwritten Rust bridge crate `crates/arcana-winapi` is gone. The current first-party Win32 binding lane lives under `grimoires/arcana/winapi`.
+
+### Current surface shape
+
+- Package-owned binding surface:
+  - `native fn current_module() -> arcana_winapi.types.ModuleHandle = foundation.current_module`
+  - inline callback form:
+    - `native callback report(read code: Int) -> Int = app.callbacks.handle_report`
+  - typed callback form:
+    - `native callback proc: arcana_winapi.raw.user32.WNDPROC = app.callbacks.handle_proc`
+- Binding-owning packages may declare `shackle` items:
+  - `shackle type`
+  - `shackle struct`
+  - `shackle union`
+  - `shackle flags`
+  - `shackle const`
+  - `shackle import fn`
+  - `shackle callback`
+  - `shackle fn`
+  - `shackle thunk`
+- Exported `shackle` items form the public raw dependency surface:
+  - type surface:
+    - `hostapi.raw.types.HWND`
+  - callable surface:
+    - `hostapi.raw.kernel32.GetCurrentProcessId :: :: call`
+  - const surface:
+    - `hostapi.raw.constants.MAGIC`
+  - callback-type surface:
+    - `hostapi.raw.user32.WNDPROC`
+- `arcana_winapi` currently exposes:
+  - `arcana_winapi.raw.*`
+  - `arcana_winapi.helpers.*`
+  - compatibility wrappers:
+    - `arcana_winapi.foundation`
+    - `arcana_winapi.fonts`
+    - `arcana_winapi.windows`
+- In HIR, exported `shackle import fn`, exported `shackle fn`, and exported `shackle const` are projected into visible symbol surface so dependent packages can call/read them through ordinary path resolution.
+- Current binding CABI semantics are symmetric for imports and callbacks:
+  - same param metadata model
+  - callbacks use `out_write_backs` plus `out_result`
+  - `Str`/`Bytes` outputs use owned-buffer helpers
+
+### Hard limits / rejections
+
+- `shackle` declarations are rejected unless the package declares an `arcana-source` binding native product.
+- `binding_support_crate` is no longer valid in manifests.
+- `native callback` declarations:
+  - do not support type parameters
+  - do not support where clauses
+  - typed callback refs must resolve to a visible `shackle callback` path
+- Availability attachments and forewords cannot target:
+  - `native callback`
+  - `shackle`
+- Exported `shackle` items that collide with an existing symbol name in the same module are rejected during HIR lowering.
+- The public binding transport model is still the current v1 CABI tag set:
+  - `Int`
+  - `Bool`
+  - `Str`
+  - `Bytes`
+  - `Opaque`
+  - `Unit`
+- Do not assume arbitrary raw layout transport across the runtime value model. The raw Win32 layer is carried by `shackle` declarations and generated binding code, not by inventing new runtime value tags in `arcana-runtime`.
+
+### Rust lookup
+
+- Syntax:
+  - `crates/arcana-syntax/src/lib.rs`
+  - `parse_native_fn_decl`
+  - `parse_native_callback_decl`
+  - `parse_shackle_decl`
+  - `parse_shackle_function_decl`
+  - `collect_shackle_surface`
+- Frontend:
+  - `crates/arcana-frontend/src/lib.rs`
+  - `validate_module_shackle_semantics`
+  - typed callback checks in the `native callback` validation path
+  - `crates/arcana-frontend/src/type_resolve.rs`
+  - `crates/arcana-frontend/src/type_validate.rs`
+- HIR/IR:
+  - `crates/arcana-hir/src/lib.rs`
+  - `extend_symbols_with_exported_shackle_callables`
+  - `projected_shackle_binding_name`
+  - `crates/arcana-ir/src/lib.rs`
+  - typed callback lowering and `shackle_decls` lowering
+- Packaging/AOT:
+  - `crates/arcana-package/src/lib.rs`
+  - manifest validation for binding products and `binding_support_crate` rejection
+  - `crates/arcana-package/src/distribution.rs`
+  - `crates/arcana-aot/src/instance_product.rs`
+  - self-hosted binding-product generation
+- Runtime:
+  - `crates/arcana-runtime/src/native_product_loader.rs`
+  - binding product activation and callback registration
+  - `crates/arcana-runtime/src/lib.rs`
+  - runtime callback execution and projected const-path evaluation
+- Representative tests:
+  - `crates/arcana-syntax/src/lib.rs`
+  - `parse_module_handles_typed_native_callbacks_and_shackle_declarations`
+  - `crates/arcana-frontend/src/lib.rs`
+  - `check_path_rejects_shackle_without_binding_product`
+  - `check_path_accepts_typed_native_callback_from_dependency_shackle_callback`
+  - `check_path_accepts_dependency_shackle_types_in_type_surface`
+  - `check_path_accepts_dependency_shackle_import_fns_and_consts`
+  - `crates/arcana-ir/src/lib.rs`
+  - `lower_workspace_package_with_resolution_carries_shackle_decls_and_typed_callbacks`
+  - `crates/arcana-runtime/src/tests.rs`
+  - `execute_main_runs_arcana_winapi_binding_smoke`
+  - `execute_main_reports_arcana_winapi_binding_errors`
+  - `execute_main_runs_dependency_shackle_import_fn_and_const_surface`
+
+### Minimal examples
+
+```arc
+native callback window_proc: arcana_winapi.raw.user32.WNDPROC = app.callbacks.handle_window_proc
+```
+
+```arc
+export shackle import fn GetCurrentProcessId() -> Int = kernel32.GetCurrentProcessId
+export shackle const MAGIC: Int = 7
+
+fn main() -> Int:
+    let pid = hostapi.raw.kernel32.GetCurrentProcessId :: :: call
+    if pid >= 0:
+        return hostapi.raw.constants.MAGIC
+    return 0
+```
+
 ## Common LLM Mistakes
 
 - Treating docs or Arcana-side examples as more authoritative than the Rust rewrite.
@@ -684,6 +837,9 @@ fn main() -> Int:
 - Using tuple destructuring outside `let` and `for`, or expecting tuple `match` patterns/param destructuring.
 - Emitting `-defer` as if it were a valid footer.
 - Forgetting that owner activation is a `call`-qualified phrase and that `context:` owners require exactly one positional context arg.
+- Suggesting `binding_support_crate` or `crates/arcana-winapi` as if the Win32 binding seam were still owned by a handwritten Rust bridge.
+- Forgetting that `shackle` is binding-package-only and that dependency-facing raw Win32 surface now comes from exported `shackle` items under `arcana_winapi.raw.*`.
+- Treating typed `native callback` refs as arbitrary path types instead of visible `shackle callback` paths.
 
 ## Where To Look First
 
@@ -691,6 +847,12 @@ fn main() -> Int:
   - `crates/arcana-syntax/src/lib.rs`
 - Type or semantic error:
   - `crates/arcana-frontend/src/lib.rs`
+- Binding surface or raw Win32 API issue:
+  - `crates/arcana-syntax/src/lib.rs`
+  - `crates/arcana-frontend/src/lib.rs`
+  - `crates/arcana-hir/src/lib.rs`
+  - `crates/arcana-aot/src/instance_product.rs`
+  - `crates/arcana-runtime/src/native_product_loader.rs`
 - Runtime behavior, ordering, lifecycle, or memory policy:
   - `crates/arcana-runtime/src/lib.rs`
   - `crates/arcana-runtime/src/tests.rs`

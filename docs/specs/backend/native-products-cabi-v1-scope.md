@@ -75,6 +75,7 @@ It defines:
 - `role = "binding"` with `producer = "arcana-source"` is self-hosted from package source.
   - The package's `native fn`, `native callback`, and `shackle` declarations lower directly into the generated binding product.
   - No companion Rust support crate owns binding behavior, callback dispatch, or import execution.
+  - Exported `shackle` callables and consts remain dependency-visible through ordinary package path resolution; they are not a parallel hidden-only native surface.
 
 ## Root Build Selection
 
@@ -187,6 +188,7 @@ It defines:
 - Binding imports and binding callbacks are symmetric operations over the same metadata model:
   - `source_mode`, `pass_mode`, `input_type`, `write_back_type`, and `return_type` are authoritative in both directions
   - callbacks use `out_write_backs` plus `out_result`, matching the import lane
+- Generated binding products must reject undeclared callback registrations and duplicate active registrations for the same callback name.
 - Supported v1 binding value tags are:
   - `Int`
   - `Bool`

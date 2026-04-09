@@ -21,6 +21,11 @@ This scope freezes the pre-selfhost generic OS-binding seam for Arcana library p
   - `native callback ... = package.path`
   - `shackle ...` declarations for raw foreign imports, callbacks, layouts, constants, and host-side binding routines
 - Consumers depend on the library package only. They do not activate or configure the binding sidecar explicitly in their dependency edge.
+- Consumers may use exported `shackle` dependency surface directly:
+  - exported `shackle type` in type positions
+  - exported `shackle const` as value paths
+  - exported `shackle import fn` / exported `shackle fn` as callable paths
+  - exported `shackle callback` as typed `native callback` references
 
 ## Language Surface
 
@@ -37,6 +42,7 @@ This scope freezes the pre-selfhost generic OS-binding seam for Arcana library p
   - binding-owning-package-only raw foreign declaration family
   - owns raw host imports, callback signatures, native layouts, constants, and package-local host routines
   - exported `shackle` items form the public raw layer of binding grimoires such as `arcana_winapi.raw.*`
+  - exported `shackle import fn`, exported `shackle fn`, and exported `shackle const` must be dependency-visible through ordinary path resolution; consumers must not need a parallel special binding lookup model
 - `opaque type`
   - binding-owning packages may export source-declared opaque handle types for native values such as module handles, font catalogs, windows, and callback tokens
 
@@ -54,6 +60,7 @@ This scope freezes the pre-selfhost generic OS-binding seam for Arcana library p
 - Binding-owning packages must lower their own host implementation through `shackle`; runtime must not route through a handwritten support crate.
 - Higher-level policy remains in ordinary grimoires above the binding layer.
 - The first proof lane is Windows only.
+- The transitional handwritten `crates/arcana-winapi` bridge is removed; `grimoires/arcana/winapi` owns the Win32 binding implementation directly.
 
 ## `arcana_winapi` v1 Proof Slice
 
