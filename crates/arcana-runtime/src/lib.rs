@@ -24,7 +24,8 @@ use arcana_cabi::{
 };
 
 use arcana_ir::{
-    ExecAssignOp as ParsedAssignOp, ExecAssignTarget as ParsedAssignTarget,
+    ExecArrayRegion as ParsedArrayRegion, ExecAssignOp as ParsedAssignOp,
+    ExecAssignTarget as ParsedAssignTarget,
     ExecAvailabilityAttachment as ParsedAvailabilityAttachment,
     ExecAvailabilityKind as ParsedAvailabilityKind, ExecBinaryOp as ParsedBinaryOp,
     ExecBindLineKind as ParsedBindLineKind, ExecChainConnector as ParsedChainConnector,
@@ -32,15 +33,17 @@ use arcana_ir::{
     ExecCleanupFooter as ParsedCleanupFooter,
     ExecConstructContributionMode as ParsedConstructContributionMode,
     ExecConstructDestination as ParsedConstructDestination,
-    ExecConstructLine as ParsedConstructLine, ExecDynamicDispatch as ParsedDynamicDispatch,
-    ExecExpr as ParsedExpr, ExecHeadedModifier as ParsedHeadedModifier,
+    ExecConstructLine as ParsedConstructLine, ExecDeferAction as ParsedDeferAction,
+    ExecDynamicDispatch as ParsedDynamicDispatch, ExecExpr as ParsedExpr,
+    ExecFloatKind as ParsedFloatKind, ExecHeadedModifier as ParsedHeadedModifier,
     ExecHeaderAttachment as ParsedHeaderAttachment, ExecMatchArm as ParsedMatchArm,
     ExecMatchPattern as ParsedMatchPattern, ExecMemorySpecDecl as ParsedMemorySpecDecl,
     ExecNamedBindingId as ParsedNamedBindingId, ExecPhraseArg as ParsedPhraseArg,
     ExecPhraseQualifierKind as ParsedPhraseQualifierKind, ExecRecordRegion as ParsedRecordRegion,
     ExecRecycleLineKind as ParsedRecycleLineKind, ExecStmt as ParsedStmt,
-    ExecUnaryOp as ParsedUnaryOp, IrRoutineType, IrRoutineTypeKind, parse_memory_spec_surface_row,
-    parse_routine_type_text, validate_runtime_main_entry_contract,
+    ExecStructBitfieldFieldLayout, ExecStructBitfieldLayout, ExecUnaryOp as ParsedUnaryOp,
+    IrRoutineType, IrRoutineTypeKind, parse_memory_spec_surface_row, parse_routine_type_text,
+    parse_struct_bitfield_layout_row, validate_runtime_main_entry_contract,
 };
 use arcana_language_law::{
     MemoryDetailKey, MemoryDetailValueKind, MemoryFamily, memory_detail_descriptor,
@@ -87,6 +90,8 @@ pub use routine_plan::{
 use routine_plan::{lower_entrypoint, lower_native_callback, lower_routine};
 
 const MODULE_MEMORY_SPEC_ALIAS_PREFIX: &str = "@memory_spec:";
+const MODULE_BITFIELD_LAYOUT_SCOPE: &str = "@meta.bitfield";
+const RUNTIME_STRUCT_BITFIELD_STORAGE_PREFIX: &str = "__arcana_bitfield_storage_";
 pub const ARCANA_NATIVE_BUNDLE_DIR_ENV: &str = "ARCANA_NATIVE_BUNDLE_DIR";
 pub const ARCANA_NATIVE_BUNDLE_MANIFEST_ENV: &str = "ARCANA_NATIVE_BUNDLE_MANIFEST";
 
@@ -132,7 +137,7 @@ pub struct RuntimeOwnerObjectPlan {
 pub struct RuntimeOwnerExitPlan {
     pub name: String,
     pub condition: ParsedExpr,
-    pub holds: Vec<String>,
+    pub retains: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -465,6 +470,37 @@ pub struct RuntimeSlabIdValue {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+enum RuntimeReferenceMode {
+    Read,
+    Edit,
+    Take,
+    Hold,
+}
+
+impl RuntimeReferenceMode {
+    const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Edit => "edit",
+            Self::Take => "take",
+            Self::Hold => "hold",
+        }
+    }
+
+    const fn allows_write(&self) -> bool {
+        matches!(self, Self::Edit | Self::Hold)
+    }
+}
+
+const fn runtime_reference_mode_for_place(mutable: bool) -> RuntimeReferenceMode {
+    if mutable {
+        RuntimeReferenceMode::Edit
+    } else {
+        RuntimeReferenceMode::Read
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum RuntimeReferenceTarget {
     Local {
         local: RuntimeLocalHandle,
@@ -507,14 +543,24 @@ enum RuntimeReferenceTarget {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RuntimeReferenceValue {
-    mutable: bool,
+    mode: RuntimeReferenceMode,
     target: RuntimeReferenceTarget,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RuntimeResolvedPlace {
-    mutable: bool,
+    mode: RuntimeReferenceMode,
     target: RuntimeReferenceTarget,
+}
+
+fn runtime_reference_mode_from_unary(op: ParsedUnaryOp) -> Option<RuntimeReferenceMode> {
+    match op {
+        ParsedUnaryOp::CapabilityRead => Some(RuntimeReferenceMode::Read),
+        ParsedUnaryOp::CapabilityEdit => Some(RuntimeReferenceMode::Edit),
+        ParsedUnaryOp::CapabilityTake => Some(RuntimeReferenceMode::Take),
+        ParsedUnaryOp::CapabilityHold => Some(RuntimeReferenceMode::Hold),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4189,6 +4235,10 @@ impl RuntimeHost for BufferedHost {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum RuntimeValue {
     Int(i64),
+    Float {
+        text: String,
+        kind: ParsedFloatKind,
+    },
     Bool(bool),
     Str(String),
     Pair(Box<RuntimeValue>, Box<RuntimeValue>),
@@ -4240,6 +4290,8 @@ struct RuntimeLocal {
     binding_id: u64,
     mutable: bool,
     moved: bool,
+    held: bool,
+    take_reserved: bool,
     value: RuntimeValue,
 }
 
@@ -4267,7 +4319,7 @@ struct RuntimeMemorySpecState {
 struct RuntimeScope {
     locals: BTreeMap<String, RuntimeLocal>,
     memory_specs: BTreeMap<String, RuntimeMemorySpecState>,
-    deferred: Vec<ParsedExpr>,
+    deferred: Vec<ParsedDeferAction>,
     attached_object_names: BTreeSet<String>,
     attached_objects: Vec<RuntimeAttachedObject>,
     attached_owners: Vec<RuntimeAttachedOwner>,
@@ -5307,7 +5359,7 @@ fn lower_owner(owner: &AotOwnerArtifact) -> RuntimeOwnerPlan {
             .map(|owner_exit| RuntimeOwnerExitPlan {
                 name: owner_exit.name.clone(),
                 condition: owner_exit.condition.clone(),
-                holds: owner_exit.holds.clone(),
+                retains: owner_exit.retains.clone(),
             })
             .collect(),
     }
@@ -5359,38 +5411,55 @@ fn build_module_aliases(
 ) -> Result<BTreeMap<String, BTreeMap<String, Vec<String>>>, String> {
     let mut aliases = BTreeMap::<String, BTreeMap<String, Vec<String>>>::new();
     for module in &artifact.modules {
-        let module_aliases = aliases
-            .entry(module_alias_scope_key(
-                &module.package_id,
-                &module.module_id,
-            ))
-            .or_default();
-        for row in &module.directive_rows {
-            let (module_id, kind, path, alias) = parse_module_directive_row(row)?;
-            if module_id != module.module_id {
-                return Err(format!(
-                    "module directive row `{row}` does not match containing module `{}`",
-                    module.module_id
-                ));
+        {
+            let module_aliases = aliases
+                .entry(module_alias_scope_key(
+                    &module.package_id,
+                    &module.module_id,
+                ))
+                .or_default();
+            for row in &module.directive_rows {
+                let (module_id, kind, path, alias) = parse_module_directive_row(row)?;
+                if module_id != module.module_id {
+                    return Err(format!(
+                        "module directive row `{row}` does not match containing module `{}`",
+                        module.module_id
+                    ));
+                }
+                if kind != "import" && kind != "use" {
+                    continue;
+                }
+                let local_name = alias.unwrap_or_else(|| path.last().cloned().unwrap_or_default());
+                if !local_name.is_empty() {
+                    module_aliases.insert(local_name, path);
+                }
             }
-            if kind != "import" && kind != "use" {
-                continue;
-            }
-            let local_name = alias.unwrap_or_else(|| path.last().cloned().unwrap_or_default());
-            if !local_name.is_empty() {
-                module_aliases.insert(local_name, path);
+            for row in &module.exported_surface_rows {
+                if let Some(spec) = parse_memory_spec_surface_row(row)? {
+                    let encoded = serde_json::to_string(&spec).map_err(|err| {
+                        format!(
+                            "failed to encode runtime memory spec `{}`: {err}",
+                            spec.name
+                        )
+                    })?;
+                    module_aliases.insert(memory_spec_alias_name(&spec.name), vec![encoded]);
+                }
             }
         }
-        for row in &module.exported_surface_rows {
-            if let Some(spec) = parse_memory_spec_surface_row(row)? {
-                let encoded = serde_json::to_string(&spec).map_err(|err| {
-                    format!(
-                        "failed to encode runtime memory spec `{}`: {err}",
-                        spec.name
-                    )
-                })?;
-                module_aliases.insert(memory_spec_alias_name(&spec.name), vec![encoded]);
-            }
+        for row in &module.lang_item_rows {
+            let Some(layout) = parse_struct_bitfield_layout_row(row)? else {
+                continue;
+            };
+            let encoded = serde_json::to_string(&layout).map_err(|err| {
+                format!(
+                    "failed to encode runtime struct bitfield layout `{}`: {err}",
+                    layout.type_name
+                )
+            })?;
+            aliases
+                .entry(MODULE_BITFIELD_LAYOUT_SCOPE.to_string())
+                .or_default()
+                .insert(layout.type_name, vec![encoded]);
         }
     }
     Ok(aliases)
@@ -5402,6 +5471,9 @@ fn build_opaque_family_types(
     let mut families = BTreeMap::<String, Vec<String>>::new();
     for module in &artifact.modules {
         for row in &module.lang_item_rows {
+            if parse_struct_bitfield_layout_row(row)?.is_some() {
+                continue;
+            }
             let (module_id, name, target) = parse_lang_item_row(row)?;
             if module_id != module.module_id {
                 return Err(format!(
@@ -5581,9 +5653,11 @@ fn validate_runtime_cleanup_footer_handlers_in_statements(
             | ParsedStmt::Break
             | ParsedStmt::Continue
             | ParsedStmt::Assign { .. }
+            | ParsedStmt::Reclaim(_)
             | ParsedStmt::Recycle { .. }
             | ParsedStmt::Bind { .. }
             | ParsedStmt::Record(_)
+            | ParsedStmt::Array(_)
             | ParsedStmt::Construct(_)
             | ParsedStmt::MemorySpec(_) => {}
         }
@@ -5773,6 +5847,194 @@ fn runtime_type_root_name(type_name: &str) -> String {
         .unwrap_or(type_name)
         .trim();
     base.rsplit('.').next().unwrap_or(base).to_string()
+}
+
+fn runtime_nominal_type_name(type_name: &str) -> String {
+    type_name
+        .split_once('[')
+        .map(|(head, _)| head)
+        .unwrap_or(type_name)
+        .trim()
+        .to_string()
+}
+
+fn runtime_bitfield_storage_key(storage_index: u16) -> String {
+    format!("{RUNTIME_STRUCT_BITFIELD_STORAGE_PREFIX}{storage_index}")
+}
+
+pub(crate) fn runtime_is_hidden_bitfield_storage_field(name: &str) -> bool {
+    name.starts_with(RUNTIME_STRUCT_BITFIELD_STORAGE_PREFIX)
+}
+
+fn runtime_integer_type_is_signed(name: &str) -> bool {
+    matches!(name, "I8" | "I16" | "I32" | "I64")
+}
+
+fn runtime_lookup_struct_bitfield_layout(
+    plan: &RuntimePackagePlan,
+    type_name: &str,
+) -> Result<Option<ExecStructBitfieldLayout>, String> {
+    let normalized = runtime_nominal_type_name(type_name);
+    let Some(scope) = plan.module_aliases.get(MODULE_BITFIELD_LAYOUT_SCOPE) else {
+        return Ok(None);
+    };
+    let Some(encoded_rows) = scope.get(&normalized) else {
+        return Ok(None);
+    };
+    let Some(encoded) = encoded_rows.first() else {
+        return Ok(None);
+    };
+    serde_json::from_str(encoded).map(Some).map_err(|err| {
+        format!("failed to parse runtime struct bitfield layout `{normalized}`: {err}")
+    })
+}
+
+fn runtime_bitfield_mask(width: u16) -> u128 {
+    if width >= 128 {
+        u128::MAX
+    } else {
+        (1_u128 << width) - 1
+    }
+}
+
+fn runtime_pack_bitfield_value(
+    value: &RuntimeValue,
+    field: &ExecStructBitfieldFieldLayout,
+    context: &str,
+) -> Result<u128, String> {
+    let int_value = expect_int(value.clone(), context)?;
+    let signed = runtime_integer_type_is_signed(&field.base_type);
+    let width = u32::from(field.bit_width);
+    if signed {
+        let shift = width.saturating_sub(1);
+        let min = -(1_i128 << shift);
+        let max = (1_i128 << shift) - 1;
+        let numeric = int_value as i128;
+        if numeric < min || numeric > max {
+            return Err(format!(
+                "{context} value `{int_value}` is out of range for {}-bit signed bitfield `{}`",
+                field.bit_width, field.name
+            ));
+        }
+        Ok((numeric as u128) & runtime_bitfield_mask(field.bit_width))
+    } else {
+        if int_value < 0 {
+            return Err(format!(
+                "{context} value `{int_value}` must be non-negative for unsigned bitfield `{}`",
+                field.name
+            ));
+        }
+        let numeric = int_value as u128;
+        let mask = runtime_bitfield_mask(field.bit_width);
+        if numeric > mask {
+            return Err(format!(
+                "{context} value `{int_value}` is out of range for {}-bit unsigned bitfield `{}`",
+                field.bit_width, field.name
+            ));
+        }
+        Ok(numeric)
+    }
+}
+
+fn runtime_decode_bitfield_value(
+    storage_bits: u128,
+    field: &ExecStructBitfieldFieldLayout,
+) -> Result<RuntimeValue, String> {
+    let raw = (storage_bits >> field.bit_offset) & runtime_bitfield_mask(field.bit_width);
+    if runtime_integer_type_is_signed(&field.base_type) {
+        let numeric = if field.bit_width == 64 {
+            (raw as u64) as i64
+        } else {
+            let shift = 128_u32 - u32::from(field.bit_width);
+            (((raw << shift) as i128) >> shift) as i64
+        };
+        Ok(RuntimeValue::Int(numeric))
+    } else {
+        let numeric = i64::try_from(raw as i128).map_err(|_| {
+            format!(
+                "runtime unsigned bitfield `{}` exceeds the current signed integer carrier",
+                field.name
+            )
+        })?;
+        Ok(RuntimeValue::Int(numeric))
+    }
+}
+
+fn runtime_hidden_bitfield_storage_bits(
+    fields: &BTreeMap<String, RuntimeValue>,
+    storage_index: u16,
+) -> Result<Option<u128>, String> {
+    let Some(value) = fields
+        .get(&runtime_bitfield_storage_key(storage_index))
+        .cloned()
+    else {
+        return Ok(None);
+    };
+    Ok(Some(
+        (expect_int(value, "struct bitfield storage")? as u64) as u128,
+    ))
+}
+
+fn apply_runtime_struct_bitfield_layout(
+    plan: &RuntimePackagePlan,
+    type_name: &str,
+    fields: &mut BTreeMap<String, RuntimeValue>,
+) -> Result<(), String> {
+    let Some(layout) = runtime_lookup_struct_bitfield_layout(plan, type_name)? else {
+        return Ok(());
+    };
+    if layout.fields.is_empty() {
+        return Ok(());
+    }
+    let mut storage_bits = BTreeMap::<u16, u128>::new();
+    for field in &layout.fields {
+        let value = if let Some(value) = fields.get(&field.name) {
+            value.clone()
+        } else if let Some(bits) =
+            runtime_hidden_bitfield_storage_bits(fields, field.storage_index)?
+        {
+            runtime_decode_bitfield_value(bits, field)?
+        } else {
+            return Err(format!(
+                "struct bitfield `{}` is missing field `{}` during runtime layout application",
+                layout.type_name, field.name
+            ));
+        };
+        let packed = runtime_pack_bitfield_value(
+            &value,
+            field,
+            &format!("struct bitfield `{}`", field.name),
+        )?;
+        let entry = storage_bits.entry(field.storage_index).or_insert(0);
+        let mask = runtime_bitfield_mask(field.bit_width) << field.bit_offset;
+        *entry &= !mask;
+        *entry |= packed << field.bit_offset;
+    }
+    for storage_index in layout
+        .fields
+        .iter()
+        .map(|field| field.storage_index)
+        .collect::<BTreeSet<_>>()
+    {
+        fields.remove(&runtime_bitfield_storage_key(storage_index));
+    }
+    for (storage_index, bits) in &storage_bits {
+        fields.insert(
+            runtime_bitfield_storage_key(*storage_index),
+            RuntimeValue::Int((*bits as u64) as i64),
+        );
+    }
+    for field in &layout.fields {
+        let bits = storage_bits
+            .get(&field.storage_index)
+            .copied()
+            .unwrap_or_default();
+        fields.insert(
+            field.name.clone(),
+            runtime_decode_bitfield_value(bits, field)?,
+        );
+    }
+    Ok(())
 }
 
 fn runtime_variant_enum_name(variant_name: &str) -> String {
@@ -6884,6 +7146,7 @@ fn resolve_runtime_intrinsic_impl(intrinsic_impl: &str) -> Option<RuntimeIntrins
 fn runtime_value_to_string(value: &RuntimeValue) -> String {
     match value {
         RuntimeValue::Int(value) => value.to_string(),
+        RuntimeValue::Float { text, .. } => text.clone(),
         RuntimeValue::Bool(value) => value.to_string(),
         RuntimeValue::Str(value) => value.clone(),
         RuntimeValue::Pair(left, right) => format!(
@@ -7162,6 +7425,7 @@ fn runtime_value_to_string(value: &RuntimeValue) -> String {
             name,
             fields
                 .iter()
+                .filter(|(field, _)| !runtime_is_hidden_bitfield_storage_field(field))
                 .map(|(field, value)| format!("{field}: {}", runtime_value_to_string(value)))
                 .collect::<Vec<_>>()
                 .join(", ")
@@ -7182,6 +7446,46 @@ fn runtime_value_to_string(value: &RuntimeValue) -> String {
             }
         }
         RuntimeValue::Unit => String::new(),
+    }
+}
+
+fn format_runtime_float_text(value: f64) -> String {
+    let mut text = value.to_string();
+    if !text.contains('.') && !text.contains('e') && !text.contains('E') {
+        text.push_str(".0");
+    }
+    text
+}
+
+fn parse_runtime_float_text(text: &str, kind: ParsedFloatKind) -> Result<f64, String> {
+    let normalized = text
+        .strip_suffix("f32")
+        .or_else(|| text.strip_suffix("f64"))
+        .unwrap_or(text);
+    match kind {
+        ParsedFloatKind::F32 => normalized
+            .parse::<f32>()
+            .map(f64::from)
+            .map_err(|err| format!("invalid F32 literal `{text}`: {err}")),
+        ParsedFloatKind::F64 => normalized
+            .parse::<f64>()
+            .map_err(|err| format!("invalid F64 literal `{text}`: {err}")),
+    }
+}
+
+fn make_runtime_float(kind: ParsedFloatKind, value: f64) -> RuntimeValue {
+    match kind {
+        ParsedFloatKind::F32 => {
+            let value = value as f32;
+            RuntimeValue::Float {
+                text: format_runtime_float_text(f64::from(value)),
+                kind,
+            }
+        }
+        ParsedFloatKind::F64 => RuntimeValue::Float {
+            text: format_runtime_float_text(value),
+            kind,
+        },
     }
 }
 
@@ -7218,6 +7522,16 @@ fn read_runtime_local_value(
         .ok_or_else(|| format!("unsupported runtime value path `{name}`"))?;
     if local.moved {
         return Err(format!("use of moved local `{name}`"));
+    }
+    if local.take_reserved {
+        return Err(format!(
+            "local `{name}` is reserved by an active `&take` capability"
+        ));
+    }
+    if local.held {
+        return Err(format!(
+            "local `{name}` is suspended by an active `&hold` capability"
+        ));
     }
     Ok(state
         .captured_local_values
@@ -7352,6 +7666,8 @@ fn insert_runtime_local(
             binding_id,
             mutable,
             moved: false,
+            held: false,
+            take_reserved: false,
             value,
         },
     );
@@ -7775,7 +8091,7 @@ fn inherited_attached_object_value(
 
 fn make_owner_object_reference(owner_key: &str, object_name: &str) -> RuntimeValue {
     RuntimeValue::Ref(RuntimeReferenceValue {
-        mutable: true,
+        mode: RuntimeReferenceMode::Edit,
         target: RuntimeReferenceTarget::OwnerObject {
             owner_key: owner_key.to_string(),
             object_name: object_name.to_string(),
@@ -8165,7 +8481,7 @@ fn apply_explicit_owner_exit(
         let owner_state = state.owners.entry(owner_key.to_string()).or_default();
         owner_state
             .objects
-            .retain(|name, _| owner_exit.holds.iter().any(|hold| hold == name));
+            .retain(|name, _| owner_exit.retains.iter().any(|retain| retain == name));
         owner_state.pending_init.clear();
         owner_state.pending_resume.clear();
         owner_state.activation_context = None;
@@ -8267,7 +8583,7 @@ fn evaluate_owner_exit_checkpoints(
                 let owner_state = state.owners.entry(owner_key.clone()).or_default();
                 owner_state
                     .objects
-                    .retain(|name, _| owner_exit.holds.iter().any(|hold| hold == name));
+                    .retain(|name, _| owner_exit.retains.iter().any(|retain| retain == name));
                 owner_state.pending_init.clear();
                 owner_state.pending_resume.clear();
                 owner_state.activation_context = None;
@@ -8441,17 +8757,29 @@ fn runtime_local_value_ref<'a>(
     scopes: &'a [RuntimeScope],
     state: &'a RuntimeExecutionState,
     handle: RuntimeLocalHandle,
-) -> Option<(&'a str, &'a RuntimeValue, bool)> {
+) -> Option<(&'a str, &'a RuntimeValue, bool, bool, bool)> {
     if let Some((name, runtime_local)) = lookup_local_with_name_by_handle(scopes, handle) {
         if let Some(captured) = state.captured_local_values.get(&handle) {
-            return Some((name, captured, runtime_local.moved));
+            return Some((
+                name,
+                captured,
+                runtime_local.moved,
+                runtime_local.held,
+                runtime_local.take_reserved,
+            ));
         }
-        return Some((name, &runtime_local.value, runtime_local.moved));
+        return Some((
+            name,
+            &runtime_local.value,
+            runtime_local.moved,
+            runtime_local.held,
+            runtime_local.take_reserved,
+        ));
     }
     state
         .captured_local_values
         .get(&handle)
-        .map(|value| ("<captured>", value, false))
+        .map(|value| ("<captured>", value, false, false, false))
 }
 
 fn runtime_member_value_ref<'a>(
@@ -8479,10 +8807,13 @@ fn runtime_reference_root_value_ref<'a>(
     scopes: &'a [RuntimeScope],
     state: &'a RuntimeExecutionState,
     target: &RuntimeReferenceTarget,
+    access_mode: RuntimeReferenceMode,
 ) -> Result<Option<&'a RuntimeValue>, String> {
     match target {
         RuntimeReferenceTarget::Local { local, .. } => {
-            let Some((name, value, moved)) = runtime_local_value_ref(scopes, state, *local) else {
+            let Some((name, value, moved, held, take_reserved)) =
+                runtime_local_value_ref(scopes, state, *local)
+            else {
                 return Err(format!(
                     "runtime reference local `{}` is unresolved; visible locals: {}",
                     local.0,
@@ -8491,6 +8822,16 @@ fn runtime_reference_root_value_ref<'a>(
             };
             if moved {
                 return Err(format!("use of moved local `{name}`"));
+            }
+            if take_reserved && access_mode != RuntimeReferenceMode::Take {
+                return Err(format!(
+                    "local `{name}` is reserved by an active `&take` capability"
+                ));
+            }
+            if held && access_mode != RuntimeReferenceMode::Hold {
+                return Err(format!(
+                    "local `{name}` is suspended by an active `&hold` capability"
+                ));
             }
             Ok(Some(value))
         }
@@ -8607,7 +8948,8 @@ fn runtime_reference_value_ref<'a>(
     state: &'a RuntimeExecutionState,
     reference: &RuntimeReferenceValue,
 ) -> Result<Option<&'a RuntimeValue>, String> {
-    let Some(mut value) = runtime_reference_root_value_ref(scopes, state, &reference.target)?
+    let Some(mut value) =
+        runtime_reference_root_value_ref(scopes, state, &reference.target, reference.mode.clone())?
     else {
         return Ok(None);
     };
@@ -9041,6 +9383,7 @@ fn runtime_value_contains_reference_or_opaque_conflict(
             )
         }),
         RuntimeValue::Int(_)
+        | RuntimeValue::Float { .. }
         | RuntimeValue::Bool(_)
         | RuntimeValue::Str(_)
         | RuntimeValue::OwnerHandle(_)
@@ -9193,12 +9536,23 @@ fn runtime_reference_root_value(
     state: &mut RuntimeExecutionState,
     host: &mut dyn RuntimeHost,
     target: &RuntimeReferenceTarget,
+    access_mode: RuntimeReferenceMode,
 ) -> Result<RuntimeValue, String> {
     match target {
         RuntimeReferenceTarget::Local { local, .. } => {
             if let Some((name, runtime_local)) = lookup_local_with_name_by_handle(scopes, *local) {
                 if runtime_local.moved {
                     return Err(format!("use of moved local `{name}`"));
+                }
+                if runtime_local.take_reserved && access_mode != RuntimeReferenceMode::Take {
+                    return Err(format!(
+                        "local `{name}` is reserved by an active `&take` capability"
+                    ));
+                }
+                if runtime_local.held && access_mode != RuntimeReferenceMode::Hold {
+                    return Err(format!(
+                        "local `{name}` is suspended by an active `&hold` capability"
+                    ));
                 }
                 return Ok(state
                     .captured_local_values
@@ -9370,6 +9724,7 @@ fn runtime_reference_root_value(
 }
 
 fn assign_member_chain(
+    plan: &RuntimePackagePlan,
     base: RuntimeValue,
     members: &[String],
     value: RuntimeValue,
@@ -9378,11 +9733,11 @@ fn assign_member_chain(
         return Ok(value);
     };
     if rest.is_empty() {
-        return assign_record_member(base, member, value);
+        return assign_record_member(plan, base, member, value);
     }
     let child = eval_member_value(base.clone(), member)?;
-    let updated_child = assign_member_chain(child, rest, value)?;
-    assign_record_member(base, member, updated_child)
+    let updated_child = assign_member_chain(plan, child, rest, value)?;
+    assign_record_member(plan, base, member, updated_child)
 }
 
 fn read_runtime_reference(
@@ -9409,6 +9764,7 @@ fn read_runtime_reference(
         state,
         host,
         &reference.target,
+        reference.mode.clone(),
     )?;
     for member in runtime_reference_members(&reference.target) {
         value = eval_member_value(value, member)?;
@@ -9428,8 +9784,11 @@ fn write_runtime_reference(
     value: RuntimeValue,
     host: &mut dyn RuntimeHost,
 ) -> Result<(), String> {
-    if !reference.mutable {
-        return Err("runtime reference is not mutable".to_string());
+    if !reference.mode.allows_write() {
+        return Err(format!(
+            "runtime reference mode `{}` does not allow mutation",
+            reference.mode.as_str()
+        ));
     }
     let members = runtime_reference_members(&reference.target);
     let updated_root = if members.is_empty() {
@@ -9444,6 +9803,7 @@ fn write_runtime_reference(
                 state,
                 host,
                 &reference.target,
+                reference.mode.clone(),
             )?;
         }
         value
@@ -9458,8 +9818,9 @@ fn write_runtime_reference(
             state,
             host,
             &reference.target,
+            reference.mode.clone(),
         )?;
-        assign_member_chain(root, members, value)?
+        assign_member_chain(plan, root, members, value)?
     };
     match &reference.target {
         RuntimeReferenceTarget::Local { local, .. } => {
@@ -9623,6 +9984,47 @@ fn expect_int(value: RuntimeValue, context: &str) -> Result<i64, String> {
     match value {
         RuntimeValue::Int(value) => Ok(value),
         other => Err(format!("{context} expected Int, got `{other:?}`")),
+    }
+}
+
+fn expect_float(value: RuntimeValue, context: &str) -> Result<(ParsedFloatKind, f64), String> {
+    match value {
+        RuntimeValue::Float { text, kind } => Ok((kind, parse_runtime_float_text(&text, kind)?)),
+        other => Err(format!("{context} expected float, got `{other:?}`")),
+    }
+}
+
+fn expect_same_float_operands(
+    left: RuntimeValue,
+    right: RuntimeValue,
+    context: &str,
+) -> Result<(ParsedFloatKind, f64, f64), String> {
+    let (left_kind, left_value) = expect_float(left, context)?;
+    let (right_kind, right_value) = expect_float(right, context)?;
+    if left_kind != right_kind {
+        return Err(format!(
+            "{context} expected float operands of the same type, found `{left_kind:?}` and `{right_kind:?}`"
+        ));
+    }
+    Ok((left_kind, left_value, right_value))
+}
+
+fn runtime_values_equal(left: &RuntimeValue, right: &RuntimeValue) -> bool {
+    match (left, right) {
+        (
+            RuntimeValue::Float {
+                text: left_text,
+                kind: left_kind,
+            },
+            RuntimeValue::Float {
+                text: right_text,
+                kind: right_kind,
+            },
+        ) if left_kind == right_kind => parse_runtime_float_text(left_text, *left_kind)
+            .ok()
+            .zip(parse_runtime_float_text(right_text, *right_kind).ok())
+            .is_some_and(|(left_value, right_value)| left_value == right_value),
+        _ => left == right,
     }
 }
 
@@ -14664,7 +15066,7 @@ fn runtime_execution_arg_for_bound_param(
             .or_insert_with(|| runtime_local.value.clone());
     }
     RuntimeValue::Ref(RuntimeReferenceValue {
-        mutable: place.mutable,
+        mode: place.mode,
         target: place.target,
     })
 }
@@ -15066,6 +15468,13 @@ fn runtime_receiver_matches_declared_type(
 fn runtime_value_type_root(receiver: &RuntimeValue) -> Option<String> {
     match receiver {
         RuntimeValue::Int(_) => Some("Int".to_string()),
+        RuntimeValue::Float { kind, .. } => Some(
+            match kind {
+                ParsedFloatKind::F32 => "F32",
+                ParsedFloatKind::F64 => "F64",
+            }
+            .to_string(),
+        ),
         RuntimeValue::Bool(_) => Some("Bool".to_string()),
         RuntimeValue::Str(_) => Some("Str".to_string()),
         RuntimeValue::Pair(_, _) => Some("Pair".to_string()),
@@ -15087,6 +15496,7 @@ fn runtime_value_type_root(receiver: &RuntimeValue) -> Option<String> {
 fn runtime_value_is_copy(value: &RuntimeValue) -> bool {
     match value {
         RuntimeValue::Int(_)
+        | RuntimeValue::Float { .. }
         | RuntimeValue::Bool(_)
         | RuntimeValue::Range { .. }
         | RuntimeValue::OwnerHandle(_)
@@ -15131,6 +15541,7 @@ fn runtime_validate_split_value_with_ring_move(
 ) -> Result<(), String> {
     match value {
         RuntimeValue::Int(_)
+        | RuntimeValue::Float { .. }
         | RuntimeValue::Bool(_)
         | RuntimeValue::Str(_)
         | RuntimeValue::Unit
@@ -15368,7 +15779,12 @@ fn expr_to_assign_target(expr: &ParsedExpr) -> Option<ParsedAssignTarget> {
         }),
         ParsedExpr::Generic { expr, .. } => expr_to_assign_target(expr),
         ParsedExpr::Unary {
-            op: ParsedUnaryOp::BorrowRead | ParsedUnaryOp::BorrowMut | ParsedUnaryOp::Deref,
+            op:
+                ParsedUnaryOp::CapabilityRead
+                | ParsedUnaryOp::CapabilityEdit
+                | ParsedUnaryOp::CapabilityTake
+                | ParsedUnaryOp::CapabilityHold
+                | ParsedUnaryOp::Deref,
             expr,
         } => expr_to_assign_target(expr),
         _ => None,
@@ -15407,6 +15823,217 @@ fn consume_take_arg_root_local(
     Ok(())
 }
 
+fn reserve_take_capability_root_local(
+    scopes: &mut [RuntimeScope],
+    source_expr: &ParsedExpr,
+) -> Result<(), String> {
+    let Some(name) = expr_root_local_name(source_expr) else {
+        return Ok(());
+    };
+    let Some(local) = scopes
+        .iter_mut()
+        .rev()
+        .find_map(|scope| scope.locals.get_mut(name))
+    else {
+        return Ok(());
+    };
+    if local.moved {
+        return Err(format!("use of moved local `{name}`"));
+    }
+    if local.held {
+        return Err(format!(
+            "local `{name}` is suspended by an active `&hold` capability"
+        ));
+    }
+    if local.take_reserved {
+        return Err(format!(
+            "local `{name}` is already reserved by an active `&take` capability"
+        ));
+    }
+    local.take_reserved = true;
+    Ok(())
+}
+
+fn reserve_hold_capability_root_local(
+    scopes: &mut [RuntimeScope],
+    source_expr: &ParsedExpr,
+) -> Result<(), String> {
+    let Some(name) = expr_root_local_name(source_expr) else {
+        return Ok(());
+    };
+    let Some(local) = scopes
+        .iter_mut()
+        .rev()
+        .find_map(|scope| scope.locals.get_mut(name))
+    else {
+        return Ok(());
+    };
+    if local.moved {
+        return Err(format!("use of moved local `{name}`"));
+    }
+    if local.take_reserved {
+        return Err(format!(
+            "local `{name}` is reserved by an active `&take` capability"
+        ));
+    }
+    if local.held {
+        return Err(format!(
+            "local `{name}` is already suspended by an active `&hold` capability"
+        ));
+    }
+    local.held = true;
+    Ok(())
+}
+
+fn reclaim_hold_capability_root_local(
+    scopes: &mut [RuntimeScope],
+    source_expr: &ParsedExpr,
+) -> Result<(), String> {
+    let Some(name) = expr_root_local_name(source_expr) else {
+        return Err("`reclaim` expects a local `&hold[...]` capability binding".to_string());
+    };
+    let Some(local) = scopes
+        .iter_mut()
+        .rev()
+        .find_map(|scope| scope.locals.get_mut(name))
+    else {
+        return Err(format!(
+            "`reclaim` capability binding `{name}` is unresolved at runtime"
+        ));
+    };
+    local.moved = true;
+    local.value = RuntimeValue::Unit;
+    Ok(())
+}
+
+fn reclaim_held_target_local(
+    scopes: &mut [RuntimeScope],
+    target: &RuntimeReferenceTarget,
+) -> Result<(), String> {
+    let RuntimeReferenceTarget::Local { local, .. } = target else {
+        return Err("`reclaim` requires a hold capability rooted in a local place".to_string());
+    };
+    let Some(runtime_local) = lookup_local_mut_by_handle(scopes, *local) else {
+        return Err("`reclaim` target local is unresolved".to_string());
+    };
+    if !runtime_local.held {
+        return Err("`reclaim` target is not currently held".to_string());
+    }
+    runtime_local.held = false;
+    Ok(())
+}
+
+fn reserve_hold_arg_root_local(
+    scopes: &mut [RuntimeScope],
+    source_expr: &ParsedExpr,
+) -> Result<Option<RuntimeLocalHandle>, String> {
+    let Some(name) = expr_root_local_name(source_expr) else {
+        return Ok(None);
+    };
+    let Some(local) = scopes
+        .iter_mut()
+        .rev()
+        .find_map(|scope| scope.locals.get_mut(name))
+    else {
+        return Ok(None);
+    };
+    if local.moved {
+        return Err(format!("use of moved local `{name}`"));
+    }
+    if local.take_reserved {
+        return Err(format!(
+            "local `{name}` is reserved by an active `&take` capability"
+        ));
+    }
+    if local.held {
+        return Err(format!(
+            "local `{name}` is already suspended by an active `&hold` capability"
+        ));
+    }
+    local.held = true;
+    Ok(Some(local.handle))
+}
+
+fn reserve_hold_bound_args(
+    scopes: &mut [RuntimeScope],
+    routine: &RuntimeRoutinePlan,
+    args: &[BoundRuntimeArg],
+) -> Result<Vec<RuntimeLocalHandle>, String> {
+    let mut reserved = Vec::new();
+    for (param, bound_arg) in routine.params.iter().zip(args) {
+        if param.mode.as_deref() != Some("hold") {
+            continue;
+        }
+        if let Some(handle) = reserve_hold_arg_root_local(scopes, &bound_arg.source_expr)? {
+            reserved.push(handle);
+        }
+    }
+    Ok(reserved)
+}
+
+fn release_reserved_hold_locals(scopes: &mut [RuntimeScope], handles: &[RuntimeLocalHandle]) {
+    for handle in handles {
+        if let Some(local) = lookup_local_mut_by_handle(scopes, *handle) {
+            local.held = false;
+        }
+    }
+}
+
+fn validate_scope_hold_tokens(scope: &RuntimeScope) -> Result<(), String> {
+    for (name, local) in &scope.locals {
+        if local.moved {
+            continue;
+        }
+        if let RuntimeValue::Ref(RuntimeReferenceValue {
+            mode: RuntimeReferenceMode::Hold,
+            target: RuntimeReferenceTarget::Local { local: target, .. },
+        }) = &local.value
+        {
+            if scope
+                .locals
+                .values()
+                .any(|candidate| candidate.handle == *target && !candidate.held)
+            {
+                continue;
+            }
+            return Err(format!(
+                "local `{name}` holds an unreclaimed `&hold` capability at scope exit"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn runtime_reference_root_local_handle(
+    target: &RuntimeReferenceTarget,
+) -> Option<RuntimeLocalHandle> {
+    match target {
+        RuntimeReferenceTarget::Local { local, .. } => Some(*local),
+        _ => None,
+    }
+}
+
+fn redeem_take_reference(
+    scopes: &mut [RuntimeScope],
+    reference: &RuntimeReferenceValue,
+) -> Result<(), String> {
+    let Some(local) = runtime_reference_root_local_handle(&reference.target) else {
+        return Ok(());
+    };
+    let Some(runtime_local) = lookup_local_mut_by_handle(scopes, local) else {
+        return Err("`&take` capability target is unresolved".to_string());
+    };
+    if runtime_local.moved {
+        return Err("`&take` capability was already redeemed".to_string());
+    }
+    if !runtime_local.take_reserved {
+        return Err("`&take` capability is no longer active".to_string());
+    }
+    runtime_local.take_reserved = false;
+    runtime_local.moved = true;
+    Ok(())
+}
+
 fn consume_take_bound_args(
     scopes: &mut [RuntimeScope],
     routine: &RuntimeRoutinePlan,
@@ -15433,6 +16060,7 @@ fn detach_moved_split_call_args(scopes: &[RuntimeScope], args: &mut [RuntimeCall
 }
 
 fn assign_record_member(
+    plan: &RuntimePackagePlan,
     base: RuntimeValue,
     member: &str,
     value: RuntimeValue,
@@ -15445,6 +16073,7 @@ fn assign_record_member(
         },
         RuntimeValue::Record { name, mut fields } => {
             fields.insert(member.to_string(), value);
+            apply_runtime_struct_bitfield_layout(plan, &name, &mut fields)?;
             Ok(RuntimeValue::Record { name, fields })
         }
         other => Err(format!(
@@ -15461,13 +16090,23 @@ fn resolve_assign_target_place(
         ParsedAssignTarget::Name(name) => {
             let local = lookup_local(scopes, name)
                 .ok_or_else(|| format!("runtime assignment target `{name}` is unresolved"))?;
+            if local.take_reserved {
+                return Err(format!(
+                    "local `{name}` is reserved by an active `&take` capability"
+                ));
+            }
+            if local.held {
+                return Err(format!(
+                    "local `{name}` is suspended by an active `&hold` capability"
+                ));
+            }
             match &local.value {
                 RuntimeValue::Ref(reference) => Ok(RuntimeResolvedPlace {
-                    mutable: reference.mutable,
+                    mode: reference.mode.clone(),
                     target: reference.target.clone(),
                 }),
                 _ => Ok(RuntimeResolvedPlace {
-                    mutable: local.mutable,
+                    mode: runtime_reference_mode_for_place(local.mutable),
                     target: RuntimeReferenceTarget::Local {
                         local: local.handle,
                         members: Vec::new(),
@@ -15478,7 +16117,7 @@ fn resolve_assign_target_place(
         ParsedAssignTarget::Member { target, member } => {
             let place = resolve_assign_target_place(scopes, target)?;
             Ok(RuntimeResolvedPlace {
-                mutable: place.mutable,
+                mode: place.mode,
                 target: runtime_reference_with_member(&place.target, member.clone()),
             })
         }
@@ -15509,7 +16148,7 @@ fn read_assign_target_value(
         type_bindings,
         state,
         &RuntimeReferenceValue {
-            mutable: place.mutable,
+            mode: place.mode,
             target: place.target,
         },
         host,
@@ -15529,18 +16168,24 @@ fn write_assign_target_value(
     host: &mut dyn RuntimeHost,
 ) -> Result<(), String> {
     let place = resolve_assign_target_place(scopes, target)?;
-    if !place.mutable {
+    if !place.mode.allows_write() {
         let detail = match target {
             ParsedAssignTarget::Name(name) => match lookup_local(scopes, name) {
                 Some(local) => match &local.value {
                     RuntimeValue::Ref(reference) => format!(
-                        "local `{name}` mutable={}, moved={}, value=Ref(mutable={})",
-                        local.mutable, local.moved, reference.mutable
-                    ),
-                    other => format!(
-                        "local `{name}` mutable={}, moved={}, value={}",
+                        "local `{name}` mutable={}, moved={}, held={}, take_reserved={}, value=Ref(mode={})",
                         local.mutable,
                         local.moved,
+                        local.held,
+                        local.take_reserved,
+                        reference.mode.as_str()
+                    ),
+                    other => format!(
+                        "local `{name}` mutable={}, moved={}, held={}, take_reserved={}, value={}",
+                        local.mutable,
+                        local.moved,
+                        local.held,
+                        local.take_reserved,
                         runtime_value_to_string(other)
                     ),
                 },
@@ -15566,7 +16211,7 @@ fn write_assign_target_value(
         type_bindings,
         state,
         &RuntimeReferenceValue {
-            mutable: true,
+            mode: place.mode,
             target: place.target,
         },
         value,
@@ -15762,15 +16407,27 @@ fn apply_assignment_op(
     Ok(match op {
         ParsedAssignOp::Assign => value,
         ParsedAssignOp::AddAssign => apply_runtime_add(current, value, "+=")?,
-        ParsedAssignOp::SubAssign => {
-            RuntimeValue::Int(expect_int(current, "-=")? - expect_int(value, "-=")?)
-        }
-        ParsedAssignOp::MulAssign => {
-            RuntimeValue::Int(expect_int(current, "*=")? * expect_int(value, "*=")?)
-        }
-        ParsedAssignOp::DivAssign => {
-            RuntimeValue::Int(expect_int(current, "/=")? / expect_int(value, "/=")?)
-        }
+        ParsedAssignOp::SubAssign => match (&current, &value) {
+            (RuntimeValue::Float { .. }, RuntimeValue::Float { .. }) => {
+                let (kind, left, right) = expect_same_float_operands(current, value, "-=")?;
+                make_runtime_float(kind, left - right)
+            }
+            _ => RuntimeValue::Int(expect_int(current, "-=")? - expect_int(value, "-=")?),
+        },
+        ParsedAssignOp::MulAssign => match (&current, &value) {
+            (RuntimeValue::Float { .. }, RuntimeValue::Float { .. }) => {
+                let (kind, left, right) = expect_same_float_operands(current, value, "*=")?;
+                make_runtime_float(kind, left * right)
+            }
+            _ => RuntimeValue::Int(expect_int(current, "*=")? * expect_int(value, "*=")?),
+        },
+        ParsedAssignOp::DivAssign => match (&current, &value) {
+            (RuntimeValue::Float { .. }, RuntimeValue::Float { .. }) => {
+                let (kind, left, right) = expect_same_float_operands(current, value, "/=")?;
+                make_runtime_float(kind, left / right)
+            }
+            _ => RuntimeValue::Int(expect_int(current, "/=")? / expect_int(value, "/=")?),
+        },
         ParsedAssignOp::ModAssign => {
             RuntimeValue::Int(expect_int(current, "%=")? % expect_int(value, "%=")?)
         }
@@ -15799,12 +16456,26 @@ fn apply_runtime_add(
 ) -> Result<RuntimeValue, String> {
     match (left, right) {
         (RuntimeValue::Int(left), RuntimeValue::Int(right)) => Ok(RuntimeValue::Int(left + right)),
+        (
+            RuntimeValue::Float {
+                text: left_text,
+                kind: left_kind,
+            },
+            RuntimeValue::Float {
+                text: right_text,
+                kind: right_kind,
+            },
+        ) if left_kind == right_kind => {
+            let left_value = parse_runtime_float_text(&left_text, left_kind)?;
+            let right_value = parse_runtime_float_text(&right_text, right_kind)?;
+            Ok(make_runtime_float(left_kind, left_value + right_value))
+        }
         (RuntimeValue::Str(mut left), RuntimeValue::Str(right)) => {
             left.push_str(&right);
             Ok(RuntimeValue::Str(left))
         }
         (left, right) => Err(format!(
-            "{context} expected Int or Str operands of the same type, got `{left:?}` and `{right:?}`"
+            "{context} expected Int, float, or Str operands of the same type, got `{left:?}` and `{right:?}`"
         )),
     }
 }
@@ -15993,7 +16664,7 @@ fn eval_member_value(base: RuntimeValue, member: &str) -> Result<RuntimeValue, S
 fn eval_runtime_member_value(base: RuntimeValue, member: &str) -> Result<RuntimeValue, String> {
     match base {
         RuntimeValue::Ref(reference) => Ok(RuntimeValue::Ref(RuntimeReferenceValue {
-            mutable: reference.mutable,
+            mode: reference.mode,
             target: runtime_reference_with_member(&reference.target, member.to_string()),
         })),
         other => eval_member_value(other, member),
@@ -16555,7 +17226,7 @@ fn eval_runtime_borrowed_slice_view(
         .and_then(|target| resolve_assign_target_place(scopes, &target).ok());
     if mutable
         && let Some(place) = &borrowed_place
-        && !place.mutable
+        && !place.mode.allows_write()
     {
         return Err("runtime mutable borrowed slices require writable backing".to_string());
     }
@@ -16627,7 +17298,7 @@ fn eval_runtime_borrowed_slice_view(
                         .or_insert_with(|| runtime_local.value.clone());
                 }
                 let reference = RuntimeReferenceValue {
-                    mutable: place.mutable,
+                    mode: place.mode,
                     target: place.target,
                 };
                 if mutable {
@@ -16665,7 +17336,7 @@ fn eval_runtime_borrowed_slice_view(
         RuntimeValue::Str(text) => {
             if mutable {
                 return Err(
-                    "runtime string slices are read-only; `&mut x[a..b]` is not allowed"
+                    "runtime string slices are read-only; `&edit x[a..b]` is not allowed"
                         .to_string(),
                 );
             }
@@ -16930,7 +17601,7 @@ fn eval_runtime_borrowed_slice_view(
         RuntimeValue::Opaque(RuntimeOpaqueValue::StrView(handle)) => {
             if mutable {
                 return Err(
-                    "runtime string slices are read-only; `&mut x[a..b]` is not allowed"
+                    "runtime string slices are read-only; `&edit x[a..b]` is not allowed"
                         .to_string(),
                 );
             }
@@ -17139,6 +17810,8 @@ fn try_construct_record_value(
     } else {
         format!("{}[{}]", callable.join("."), resolved_type_args.join(", "))
     };
+    apply_runtime_struct_bitfield_layout(plan, &name, &mut fields)
+        .map_err(RuntimeEvalSignal::from)?;
     Ok(Some(RuntimeValue::Record { name, fields }))
 }
 
@@ -17193,6 +17866,193 @@ fn try_construct_variant_value(
         name: callable.join("."),
         payload,
     }))
+}
+
+fn truncate_float_to_int(value: f64, context: &str) -> Result<i64, String> {
+    if !value.is_finite() {
+        return Err(format!("{context} requires a finite float value"));
+    }
+    if value < i64::MIN as f64 || value > i64::MAX as f64 {
+        return Err(format!(
+            "{context} float value `{value}` is out of i64 range"
+        ));
+    }
+    Ok(value.trunc() as i64)
+}
+
+fn validate_int_width(value: i64, bits: u32, signed: bool, context: &str) -> Result<i64, String> {
+    let valid = if signed {
+        let shift = bits.saturating_sub(1);
+        let min = -(1_i128 << shift);
+        let max = (1_i128 << shift) - 1;
+        (value as i128) >= min && (value as i128) <= max
+    } else {
+        value >= 0 && (value as u128) <= ((1_u128 << bits) - 1)
+    };
+    if valid {
+        Ok(value)
+    } else {
+        Err(format!(
+            "{context} value `{value}` is out of range for {}-bit {} integer",
+            bits,
+            if signed { "signed" } else { "unsigned" }
+        ))
+    }
+}
+
+fn convert_runtime_numeric_value(
+    target: &str,
+    value: RuntimeValue,
+) -> Result<RuntimeValue, String> {
+    match target {
+        "F32" => match value {
+            RuntimeValue::Int(value) => Ok(make_runtime_float(ParsedFloatKind::F32, value as f64)),
+            RuntimeValue::Float { text, kind } => Ok(make_runtime_float(
+                ParsedFloatKind::F32,
+                parse_runtime_float_text(&text, kind)?,
+            )),
+            other => Err(format!(
+                "F32 conversion expected numeric input, got `{other:?}`"
+            )),
+        },
+        "F64" => match value {
+            RuntimeValue::Int(value) => Ok(make_runtime_float(ParsedFloatKind::F64, value as f64)),
+            RuntimeValue::Float { text, kind } => Ok(make_runtime_float(
+                ParsedFloatKind::F64,
+                parse_runtime_float_text(&text, kind)?,
+            )),
+            other => Err(format!(
+                "F64 conversion expected numeric input, got `{other:?}`"
+            )),
+        },
+        "Int" | "I8" | "U8" | "I16" | "U16" | "I32" | "U32" | "I64" | "U64" | "ISize" | "USize" => {
+            let context = format!("{target} conversion");
+            let int_value = match value {
+                RuntimeValue::Int(value) => value,
+                RuntimeValue::Float { text, kind } => {
+                    truncate_float_to_int(parse_runtime_float_text(&text, kind)?, &context)?
+                }
+                other => {
+                    return Err(format!(
+                        "{target} conversion expected numeric input, got `{other:?}`"
+                    ));
+                }
+            };
+            let checked = match target {
+                "I8" => validate_int_width(int_value, 8, true, &context)?,
+                "U8" => validate_int_width(int_value, 8, false, &context)?,
+                "I16" => validate_int_width(int_value, 16, true, &context)?,
+                "U16" => validate_int_width(int_value, 16, false, &context)?,
+                "I32" => validate_int_width(int_value, 32, true, &context)?,
+                "U32" => validate_int_width(int_value, 32, false, &context)?,
+                "I64" | "ISize" | "Int" => int_value,
+                "U64" | "USize" => {
+                    if int_value < 0 {
+                        return Err(format!(
+                            "{context} value `{int_value}` must be non-negative"
+                        ));
+                    }
+                    int_value
+                }
+                _ => unreachable!(),
+            };
+            Ok(RuntimeValue::Int(checked))
+        }
+        _ => Err(format!("unsupported numeric conversion target `{target}`")),
+    }
+}
+
+fn try_execute_builtin_numeric_conversion(
+    callable: &[String],
+    args: &[ParsedPhraseArg],
+    attached: &[ParsedHeaderAttachment],
+    plan: &RuntimePackagePlan,
+    current_package_id: &str,
+    current_module_id: &str,
+    scopes: &mut Vec<RuntimeScope>,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
+) -> RuntimeEvalResult<Option<RuntimeValue>> {
+    let [target] = callable else {
+        return Ok(None);
+    };
+    if !matches!(
+        target.as_str(),
+        "Int"
+            | "I8"
+            | "U8"
+            | "I16"
+            | "U16"
+            | "I32"
+            | "U32"
+            | "I64"
+            | "U64"
+            | "ISize"
+            | "USize"
+            | "F32"
+            | "F64"
+    ) {
+        return Ok(None);
+    }
+    if !attached.is_empty() {
+        return Err(format!("`{target}` conversion does not support attached blocks").into());
+    }
+    if args.len() != 1 || args[0].name.is_some() {
+        return Err(
+            format!("`{target}` conversion expects exactly one positional argument").into(),
+        );
+    }
+    let value = eval_expr(
+        &args[0].value,
+        plan,
+        current_package_id,
+        current_module_id,
+        scopes,
+        aliases,
+        type_bindings,
+        state,
+        host,
+    )?;
+    Ok(Some(
+        convert_runtime_numeric_value(target, value).map_err(RuntimeEvalSignal::from)?,
+    ))
+}
+
+fn try_construct_array_value(
+    _callable: &[String],
+    args: &[ParsedPhraseArg],
+    attached: &[ParsedHeaderAttachment],
+    plan: &RuntimePackagePlan,
+    current_package_id: &str,
+    current_module_id: &str,
+    scopes: &mut Vec<RuntimeScope>,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
+) -> RuntimeEvalResult<Option<RuntimeValue>> {
+    if !attached.is_empty() || args.iter().any(|arg| arg.name.is_some()) {
+        return Ok(None);
+    }
+    let values = args
+        .iter()
+        .map(|arg| {
+            eval_expr(
+                &arg.value,
+                plan,
+                current_package_id,
+                current_module_id,
+                scopes,
+                aliases,
+                type_bindings,
+                state,
+                host,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Some(RuntimeValue::Array(values)))
 }
 
 fn into_iterable_values(value: RuntimeValue) -> Result<Vec<RuntimeValue>, String> {
@@ -17510,6 +18370,7 @@ fn execute_call_by_path(
             .ok_or_else(|| format!("invalid routine index `{routine_index}`"))?;
         let bound_args = bind_call_args_for_routine(routine, call_args)?;
         consume_take_bound_args(scopes, routine, &bound_args)?;
+        let held_locals = reserve_hold_bound_args(scopes, routine, &bound_args)?;
         let values = bound_args
             .iter()
             .map(|arg| arg.value.clone())
@@ -17520,52 +18381,57 @@ fn execute_call_by_path(
             .zip(bound_args.iter())
             .map(|(param, arg)| runtime_execution_arg_for_bound_param(scopes, state, param, arg))
             .collect::<Vec<_>>();
-        let outcome = if let Some(intrinsic_impl) = &routine.intrinsic_impl {
-            let intrinsic = resolve_runtime_intrinsic_impl(intrinsic_impl).ok_or_else(|| {
-                format!(
-                    "unsupported runtime intrinsic `{intrinsic_impl}` for `{}`",
-                    routine.symbol_name
+        let outcome = (|| -> RuntimeEvalResult<RoutineExecutionOutcome> {
+            if let Some(intrinsic_impl) = &routine.intrinsic_impl {
+                let intrinsic =
+                    resolve_runtime_intrinsic_impl(intrinsic_impl).ok_or_else(|| {
+                        format!(
+                            "unsupported runtime intrinsic `{intrinsic_impl}` for `{}`",
+                            routine.symbol_name
+                        )
+                    })?;
+                let mut final_args = values;
+                let value = execute_runtime_intrinsic(
+                    intrinsic,
+                    &type_args,
+                    &mut final_args,
+                    plan,
+                    Some(scopes),
+                    Some(current_package_id),
+                    Some(current_module_id),
+                    Some(&BTreeMap::new()),
+                    Some(&BTreeMap::new()),
+                    state,
+                    host,
+                )?;
+                Ok(RoutineExecutionOutcome {
+                    value,
+                    final_args,
+                    control: None,
+                })
+            } else if let Some(native_impl) = &routine.native_impl {
+                execute_runtime_native_binding_import(plan, routine, native_impl, &values, host)
+                    .map_err(RuntimeEvalSignal::from)
+            } else {
+                execute_routine_call_with_state(
+                    plan,
+                    routine_index,
+                    type_args,
+                    execution_args,
+                    &collect_active_owner_keys_from_scopes(scopes),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    state,
+                    host,
+                    allow_async,
                 )
-            })?;
-            let mut final_args = values;
-            let value = execute_runtime_intrinsic(
-                intrinsic,
-                &type_args,
-                &mut final_args,
-                plan,
-                Some(scopes),
-                Some(current_package_id),
-                Some(current_module_id),
-                Some(&BTreeMap::new()),
-                Some(&BTreeMap::new()),
-                state,
-                host,
-            )?;
-            RoutineExecutionOutcome {
-                value,
-                final_args,
-                control: None,
             }
-        } else if let Some(native_impl) = &routine.native_impl {
-            execute_runtime_native_binding_import(plan, routine, native_impl, &values, host)
-                .map_err(RuntimeEvalSignal::from)?
-        } else {
-            execute_routine_call_with_state(
-                plan,
-                routine_index,
-                type_args,
-                execution_args,
-                &collect_active_owner_keys_from_scopes(scopes),
-                None,
-                None,
-                None,
-                None,
-                None,
-                state,
-                host,
-                allow_async,
-            )?
-        };
+        })();
+        release_reserved_hold_locals(scopes, &held_locals);
+        let outcome = outcome?;
         write_back_bound_args(
             scopes,
             plan,
@@ -17654,6 +18520,21 @@ fn execute_runtime_apply_phrase(
     } else {
         qualifier_type_args.to_vec()
     };
+    if let Some(value) = try_execute_builtin_numeric_conversion(
+        &callable,
+        args,
+        attached,
+        plan,
+        current_package_id,
+        current_module_id,
+        scopes,
+        aliases,
+        type_bindings,
+        state,
+        host,
+    )? {
+        return Ok(value);
+    }
     if resolve_routine_index(plan, current_package_id, current_module_id, &callable).is_none()
         && resolve_runtime_intrinsic_path(&callable).is_none()
     {
@@ -17687,6 +18568,21 @@ fn execute_runtime_apply_phrase(
             host,
         )? {
             return Ok(variant);
+        }
+        if let Some(array) = try_construct_array_value(
+            &callable,
+            args,
+            attached,
+            plan,
+            current_package_id,
+            current_module_id,
+            scopes,
+            aliases,
+            type_bindings,
+            state,
+            host,
+        )? {
+            return Ok(array);
         }
         return Err(format!("unsupported runtime callable `{}`", callable.join(".")).into());
     }
@@ -20345,7 +21241,10 @@ fn execute_runtime_core_intrinsic(
                 ));
             }
             Ok(RuntimeValue::Ref(RuntimeReferenceValue {
-                mutable: matches!(intrinsic, RuntimeIntrinsic::MemoryArenaBorrowEdit),
+                mode: runtime_reference_mode_for_place(matches!(
+                    intrinsic,
+                    RuntimeIntrinsic::MemoryArenaBorrowEdit
+                )),
                 target: RuntimeReferenceTarget::ArenaSlot {
                     id,
                     members: Vec::new(),
@@ -20514,7 +21413,10 @@ fn execute_runtime_core_intrinsic(
                 ));
             }
             Ok(RuntimeValue::Ref(RuntimeReferenceValue {
-                mutable: matches!(intrinsic, RuntimeIntrinsic::MemoryFrameBorrowEdit),
+                mode: runtime_reference_mode_for_place(matches!(
+                    intrinsic,
+                    RuntimeIntrinsic::MemoryFrameBorrowEdit
+                )),
                 target: RuntimeReferenceTarget::FrameSlot {
                     id,
                     members: Vec::new(),
@@ -20666,7 +21568,10 @@ fn execute_runtime_core_intrinsic(
                 ));
             }
             Ok(RuntimeValue::Ref(RuntimeReferenceValue {
-                mutable: matches!(intrinsic, RuntimeIntrinsic::MemoryPoolBorrowEdit),
+                mode: runtime_reference_mode_for_place(matches!(
+                    intrinsic,
+                    RuntimeIntrinsic::MemoryPoolBorrowEdit
+                )),
                 target: RuntimeReferenceTarget::PoolSlot {
                     id,
                     members: Vec::new(),
@@ -20923,7 +21828,10 @@ fn execute_runtime_core_intrinsic(
                 ));
             }
             Ok(RuntimeValue::Ref(RuntimeReferenceValue {
-                mutable: matches!(intrinsic, RuntimeIntrinsic::MemoryTempBorrowEdit),
+                mode: runtime_reference_mode_for_place(matches!(
+                    intrinsic,
+                    RuntimeIntrinsic::MemoryTempBorrowEdit
+                )),
                 target: RuntimeReferenceTarget::TempSlot {
                     id,
                     members: Vec::new(),
@@ -21060,7 +21968,10 @@ fn execute_runtime_core_intrinsic(
                 return Err("session_borrow_edit rejects mutation while sealed".to_string());
             }
             Ok(RuntimeValue::Ref(RuntimeReferenceValue {
-                mutable: matches!(intrinsic, RuntimeIntrinsic::MemorySessionBorrowEdit),
+                mode: runtime_reference_mode_for_place(matches!(
+                    intrinsic,
+                    RuntimeIntrinsic::MemorySessionBorrowEdit
+                )),
                 target: RuntimeReferenceTarget::SessionSlot {
                     id,
                     members: Vec::new(),
@@ -21408,7 +22319,10 @@ fn execute_runtime_core_intrinsic(
                 ));
             }
             Ok(RuntimeValue::Ref(RuntimeReferenceValue {
-                mutable: matches!(intrinsic, RuntimeIntrinsic::MemoryRingBorrowEdit),
+                mode: runtime_reference_mode_for_place(matches!(
+                    intrinsic,
+                    RuntimeIntrinsic::MemoryRingBorrowEdit
+                )),
                 target: RuntimeReferenceTarget::RingSlot {
                     id,
                     members: Vec::new(),
@@ -21570,7 +22484,10 @@ fn execute_runtime_core_intrinsic(
                 return Err("slab_borrow_edit rejects mutation while sealed".to_string());
             }
             Ok(RuntimeValue::Ref(RuntimeReferenceValue {
-                mutable: matches!(intrinsic, RuntimeIntrinsic::MemorySlabBorrowEdit),
+                mode: runtime_reference_mode_for_place(matches!(
+                    intrinsic,
+                    RuntimeIntrinsic::MemorySlabBorrowEdit
+                )),
                 target: RuntimeReferenceTarget::SlabSlot {
                     id,
                     members: Vec::new(),
@@ -24016,6 +24933,10 @@ fn match_pattern(
         }
         ParsedMatchPattern::Literal(text) => match value {
             RuntimeValue::Int(value) => text.parse::<i64>().is_ok_and(|literal| *value == literal),
+            RuntimeValue::Float { text: value, kind } => parse_runtime_float_text(text, *kind)
+                .ok()
+                .zip(parse_runtime_float_text(value, *kind).ok())
+                .is_some_and(|(literal, actual)| literal == actual),
             RuntimeValue::Bool(value) => match text.as_str() {
                 "true" => *value,
                 "false" => !*value,
@@ -24053,20 +24974,44 @@ fn apply_binary_op(
     right: RuntimeValue,
 ) -> Result<RuntimeValue, String> {
     match op {
-        ParsedBinaryOp::EqEq => Ok(RuntimeValue::Bool(left == right)),
-        ParsedBinaryOp::NotEq => Ok(RuntimeValue::Bool(left != right)),
-        ParsedBinaryOp::Lt => Ok(RuntimeValue::Bool(
-            expect_int(left, "<")? < expect_int(right, "<")?,
-        )),
-        ParsedBinaryOp::LtEq => Ok(RuntimeValue::Bool(
-            expect_int(left, "<=")? <= expect_int(right, "<=")?,
-        )),
-        ParsedBinaryOp::Gt => Ok(RuntimeValue::Bool(
-            expect_int(left, ">")? > expect_int(right, ">")?,
-        )),
-        ParsedBinaryOp::GtEq => Ok(RuntimeValue::Bool(
-            expect_int(left, ">=")? >= expect_int(right, ">=")?,
-        )),
+        ParsedBinaryOp::EqEq => Ok(RuntimeValue::Bool(runtime_values_equal(&left, &right))),
+        ParsedBinaryOp::NotEq => Ok(RuntimeValue::Bool(!runtime_values_equal(&left, &right))),
+        ParsedBinaryOp::Lt => match (&left, &right) {
+            (RuntimeValue::Float { .. }, RuntimeValue::Float { .. }) => {
+                let (_, left, right) = expect_same_float_operands(left, right, "<")?;
+                Ok(RuntimeValue::Bool(left < right))
+            }
+            _ => Ok(RuntimeValue::Bool(
+                expect_int(left, "<")? < expect_int(right, "<")?,
+            )),
+        },
+        ParsedBinaryOp::LtEq => match (&left, &right) {
+            (RuntimeValue::Float { .. }, RuntimeValue::Float { .. }) => {
+                let (_, left, right) = expect_same_float_operands(left, right, "<=")?;
+                Ok(RuntimeValue::Bool(left <= right))
+            }
+            _ => Ok(RuntimeValue::Bool(
+                expect_int(left, "<=")? <= expect_int(right, "<=")?,
+            )),
+        },
+        ParsedBinaryOp::Gt => match (&left, &right) {
+            (RuntimeValue::Float { .. }, RuntimeValue::Float { .. }) => {
+                let (_, left, right) = expect_same_float_operands(left, right, ">")?;
+                Ok(RuntimeValue::Bool(left > right))
+            }
+            _ => Ok(RuntimeValue::Bool(
+                expect_int(left, ">")? > expect_int(right, ">")?,
+            )),
+        },
+        ParsedBinaryOp::GtEq => match (&left, &right) {
+            (RuntimeValue::Float { .. }, RuntimeValue::Float { .. }) => {
+                let (_, left, right) = expect_same_float_operands(left, right, ">=")?;
+                Ok(RuntimeValue::Bool(left >= right))
+            }
+            _ => Ok(RuntimeValue::Bool(
+                expect_int(left, ">=")? >= expect_int(right, ">=")?,
+            )),
+        },
         ParsedBinaryOp::BitOr => Ok(RuntimeValue::Int(
             expect_int(left, "|")? | expect_int(right, "|")?,
         )),
@@ -24083,15 +25028,33 @@ fn apply_binary_op(
             expect_int(left, "shr")? >> expect_int(right, "shr")?,
         )),
         ParsedBinaryOp::Add => apply_runtime_add(left, right, "+"),
-        ParsedBinaryOp::Sub => Ok(RuntimeValue::Int(
-            expect_int(left, "-")? - expect_int(right, "-")?,
-        )),
-        ParsedBinaryOp::Mul => Ok(RuntimeValue::Int(
-            expect_int(left, "*")? * expect_int(right, "*")?,
-        )),
-        ParsedBinaryOp::Div => Ok(RuntimeValue::Int(
-            expect_int(left, "/")? / expect_int(right, "/")?,
-        )),
+        ParsedBinaryOp::Sub => match (&left, &right) {
+            (RuntimeValue::Float { .. }, RuntimeValue::Float { .. }) => {
+                let (kind, left, right) = expect_same_float_operands(left, right, "-")?;
+                Ok(make_runtime_float(kind, left - right))
+            }
+            _ => Ok(RuntimeValue::Int(
+                expect_int(left, "-")? - expect_int(right, "-")?,
+            )),
+        },
+        ParsedBinaryOp::Mul => match (&left, &right) {
+            (RuntimeValue::Float { .. }, RuntimeValue::Float { .. }) => {
+                let (kind, left, right) = expect_same_float_operands(left, right, "*")?;
+                Ok(make_runtime_float(kind, left * right))
+            }
+            _ => Ok(RuntimeValue::Int(
+                expect_int(left, "*")? * expect_int(right, "*")?,
+            )),
+        },
+        ParsedBinaryOp::Div => match (&left, &right) {
+            (RuntimeValue::Float { .. }, RuntimeValue::Float { .. }) => {
+                let (kind, left, right) = expect_same_float_operands(left, right, "/")?;
+                Ok(make_runtime_float(kind, left / right))
+            }
+            _ => Ok(RuntimeValue::Int(
+                expect_int(left, "/")? / expect_int(right, "/")?,
+            )),
+        },
         ParsedBinaryOp::Mod => Ok(RuntimeValue::Int(
             expect_int(left, "%")? % expect_int(right, "%")?,
         )),
@@ -24172,7 +25135,7 @@ fn build_runtime_call_args_from_chain_stage(
     Ok((callable, type_args, call_args))
 }
 
-fn call_uses_edit_modes(
+fn call_uses_linear_mutation_modes(
     callable: &[String],
     current_package_id: &str,
     current_module_id: &str,
@@ -24197,7 +25160,7 @@ fn call_uses_edit_modes(
         return Ok(routine
             .params
             .iter()
-            .any(|param| param.mode.as_deref() == Some("edit")));
+            .any(|param| matches!(param.mode.as_deref(), Some("edit") | Some("hold"))));
     }
     let intrinsic = resolve_runtime_intrinsic_path(callable)
         .ok_or_else(|| format!("unsupported runtime callable `{}`", callable.join(".")))?;
@@ -24214,7 +25177,7 @@ fn validate_spawned_call_capabilities(
     context: &str,
 ) -> RuntimeEvalResult<()> {
     if matches!(op, ParsedUnaryOp::Split)
-        && call_uses_edit_modes(
+        && call_uses_linear_mutation_modes(
             callable,
             current_package_id,
             current_module_id,
@@ -24223,7 +25186,7 @@ fn validate_spawned_call_capabilities(
         )?
     {
         return Err(format!(
-            "{context} `{}` does not yet support `edit` parameters or intrinsic arguments across split/thread boundaries",
+            "{context} `{}` does not yet support `edit`/`hold` parameters or intrinsic arguments across split/thread boundaries",
             callable.join(".")
         )
         .into());
@@ -24454,7 +25417,7 @@ fn choose_parallel_chain_stage_op(
     .map(|routine| routine.is_async)
     .unwrap_or(false);
     if is_async_stage
-        || call_uses_edit_modes(
+        || call_uses_linear_mutation_modes(
             &callable,
             current_package_id,
             current_module_id,
@@ -26366,10 +27329,66 @@ fn eval_record_region_value(
             fields.insert(line.name.clone(), value);
         }
     }
+    apply_runtime_struct_bitfield_layout(plan, &target_name, &mut fields)
+        .map_err(RuntimeEvalSignal::from)?;
     Ok(RuntimeValue::Record {
         name: target_name,
         fields,
     })
+}
+
+fn eval_array_region_value(
+    region: &ParsedArrayRegion,
+    plan: &RuntimePackagePlan,
+    current_package_id: &str,
+    current_module_id: &str,
+    scopes: &mut Vec<RuntimeScope>,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
+) -> RuntimeEvalResult<RuntimeValue> {
+    let mut values = if let Some(base_expr) = &region.base {
+        let base_value = eval_expr(
+            base_expr,
+            plan,
+            current_package_id,
+            current_module_id,
+            scopes,
+            aliases,
+            type_bindings,
+            state,
+            host,
+        )?;
+        match base_value {
+            RuntimeValue::Array(values) => values,
+            other => {
+                return Err(
+                    format!("array base must evaluate to an array value, found {other:?}").into(),
+                );
+            }
+        }
+    } else {
+        Vec::new()
+    };
+    for line in &region.lines {
+        let value = eval_expr(
+            &line.value,
+            plan,
+            current_package_id,
+            current_module_id,
+            scopes,
+            aliases,
+            type_bindings,
+            state,
+            host,
+        )?;
+        if values.len() <= line.index {
+            values.resize(line.index + 1, RuntimeValue::Unit);
+        }
+        values[line.index] = value;
+    }
+    Ok(RuntimeValue::Array(values))
 }
 
 fn eval_expr(
@@ -26385,6 +27404,10 @@ fn eval_expr(
 ) -> RuntimeEvalResult<RuntimeValue> {
     match expr {
         ParsedExpr::Int(value) => Ok(RuntimeValue::Int(*value)),
+        ParsedExpr::Float { text, kind } => Ok(RuntimeValue::Float {
+            text: text.clone(),
+            kind: *kind,
+        }),
         ParsedExpr::Bool(value) => Ok(RuntimeValue::Bool(*value)),
         ParsedExpr::Str(value) => Ok(RuntimeValue::Str(value.clone())),
         ParsedExpr::Pair { left, right } => Ok(RuntimeValue::Pair(
@@ -26491,6 +27514,17 @@ fn eval_expr(
             state,
             host,
         ),
+        ParsedExpr::ArrayRegion(region) => eval_array_region_value(
+            region,
+            plan,
+            current_package_id,
+            current_module_id,
+            scopes,
+            aliases,
+            type_bindings,
+            state,
+            host,
+        ),
         ParsedExpr::Chain {
             style,
             introducer,
@@ -26510,14 +27544,9 @@ fn eval_expr(
         ),
         ParsedExpr::Path(segments) => {
             if segments.len() == 1 && lookup_local(scopes, &segments[0]).is_some() {
-                return read_runtime_value_if_ref(
+                return force_runtime_value(
                     read_runtime_local_value(scopes, state, &segments[0])?,
-                    scopes,
                     plan,
-                    current_package_id,
-                    current_module_id,
-                    aliases,
-                    type_bindings,
                     state,
                     host,
                 )
@@ -26553,6 +27582,67 @@ fn eval_expr(
                 host,
             )? {
                 return Ok(value);
+            }
+            if let ParsedExpr::Unary {
+                op: ParsedUnaryOp::Deref,
+                expr: capability_expr,
+            } = expr.as_ref()
+            {
+                let token_expr = capability_expr.as_ref().clone();
+                let reference = expect_reference(
+                    eval_expr(
+                        capability_expr,
+                        plan,
+                        current_package_id,
+                        current_module_id,
+                        scopes,
+                        aliases,
+                        type_bindings,
+                        state,
+                        host,
+                    )?,
+                    "deref",
+                )?;
+                return match reference.mode {
+                    RuntimeReferenceMode::Take => {
+                        let value = read_runtime_reference(
+                            scopes,
+                            plan,
+                            current_package_id,
+                            current_module_id,
+                            aliases,
+                            type_bindings,
+                            state,
+                            &reference,
+                            host,
+                        )?;
+                        redeem_take_reference(scopes, &reference)
+                            .map_err(RuntimeEvalSignal::from)?;
+                        reclaim_hold_capability_root_local(scopes, &token_expr)
+                            .map_err(RuntimeEvalSignal::from)?;
+                        Ok(eval_member_value(value, member)?)
+                    }
+                    RuntimeReferenceMode::Read
+                    | RuntimeReferenceMode::Edit
+                    | RuntimeReferenceMode::Hold => read_runtime_reference(
+                        scopes,
+                        plan,
+                        current_package_id,
+                        current_module_id,
+                        aliases,
+                        type_bindings,
+                        state,
+                        &RuntimeReferenceValue {
+                            mode: reference.mode,
+                            target: runtime_reference_with_member(
+                                &reference.target,
+                                member.clone(),
+                            ),
+                        },
+                        host,
+                    )
+                    .map_err(Into::into),
+                };
             }
             let base = eval_expr(
                 expr,
@@ -26728,7 +27818,12 @@ fn eval_expr(
                 state,
                 host,
             ),
-            ParsedUnaryOp::BorrowRead | ParsedUnaryOp::BorrowMut => {
+            ParsedUnaryOp::CapabilityRead
+            | ParsedUnaryOp::CapabilityEdit
+            | ParsedUnaryOp::CapabilityTake
+            | ParsedUnaryOp::CapabilityHold => {
+                let mode = runtime_reference_mode_from_unary(*op)
+                    .ok_or_else(|| format!("unsupported capability op `{op:?}`"))?;
                 if let ParsedExpr::Slice {
                     expr,
                     start,
@@ -26736,12 +27831,22 @@ fn eval_expr(
                     inclusive_end,
                 } = expr.as_ref()
                 {
+                    if !matches!(
+                        mode,
+                        RuntimeReferenceMode::Read | RuntimeReferenceMode::Edit
+                    ) {
+                        return Err(format!(
+                            "runtime capability `{}` does not support slice views",
+                            mode.as_str()
+                        )
+                        .into());
+                    }
                     return eval_runtime_borrowed_slice_view(
                         expr,
                         start.as_deref(),
                         end.as_deref(),
                         *inclusive_end,
-                        matches!(op, ParsedUnaryOp::BorrowMut),
+                        matches!(mode, RuntimeReferenceMode::Edit),
                         plan,
                         current_package_id,
                         current_module_id,
@@ -26755,24 +27860,33 @@ fn eval_expr(
                 }
                 let target = expr_to_assign_target(expr).ok_or_else(|| {
                     format!(
-                        "runtime borrow operand `{:?}` is not a writable place",
+                        "runtime capability operand `{:?}` is not a writable place",
                         expr
                     )
                 })?;
                 let place = resolve_assign_target_place(scopes, &target)?;
-                if matches!(op, ParsedUnaryOp::BorrowMut) && !place.mutable {
+                if mode.allows_write() && !place.mode.allows_write() {
                     return Err(format!(
-                        "runtime mutable borrow operand `{:?}` is not mutable",
+                        "runtime capability `{}` operand `{:?}` is not mutable",
+                        mode.as_str(),
                         expr
                     )
                     .into());
                 }
+                match mode {
+                    RuntimeReferenceMode::Take => reserve_take_capability_root_local(scopes, expr)
+                        .map_err(RuntimeEvalSignal::from)?,
+                    RuntimeReferenceMode::Hold => reserve_hold_capability_root_local(scopes, expr)
+                        .map_err(RuntimeEvalSignal::from)?,
+                    RuntimeReferenceMode::Read | RuntimeReferenceMode::Edit => {}
+                }
                 Ok(RuntimeValue::Ref(RuntimeReferenceValue {
-                    mutable: matches!(op, ParsedUnaryOp::BorrowMut),
+                    mode,
                     target: place.target,
                 }))
             }
             ParsedUnaryOp::Deref => {
+                let token_expr = expr.as_ref().clone();
                 let reference = expect_reference(
                     eval_expr(
                         expr,
@@ -26787,7 +27901,7 @@ fn eval_expr(
                     )?,
                     "deref",
                 )?;
-                Ok(read_runtime_reference(
+                let value = read_runtime_reference(
                     scopes,
                     plan,
                     current_package_id,
@@ -26797,10 +27911,16 @@ fn eval_expr(
                     state,
                     &reference,
                     host,
-                )?)
+                )?;
+                if reference.mode == RuntimeReferenceMode::Take {
+                    redeem_take_reference(scopes, &reference).map_err(RuntimeEvalSignal::from)?;
+                    reclaim_hold_capability_root_local(scopes, &token_expr)
+                        .map_err(RuntimeEvalSignal::from)?;
+                }
+                Ok(value)
             }
-            ParsedUnaryOp::Neg => Ok(RuntimeValue::Int(-expect_int(
-                force_runtime_value(
+            ParsedUnaryOp::Neg => {
+                let value = force_runtime_value(
                     eval_expr(
                         expr,
                         plan,
@@ -26815,9 +27935,15 @@ fn eval_expr(
                     plan,
                     state,
                     host,
-                )?,
-                "unary -",
-            )?)),
+                )?;
+                match value {
+                    RuntimeValue::Float { text, kind } => Ok(make_runtime_float(
+                        kind,
+                        -parse_runtime_float_text(&text, kind)?,
+                    )),
+                    other => Ok(RuntimeValue::Int(-expect_int(other, "unary -")?)),
+                }
+            }
             ParsedUnaryOp::Not => Ok(RuntimeValue::Bool(!expect_bool(
                 force_runtime_value(
                     eval_expr(
@@ -27432,6 +28558,42 @@ fn apply_assign(
     )?)
 }
 
+fn execute_reclaim_statement_expr(
+    expr: &ParsedExpr,
+    plan: &RuntimePackagePlan,
+    current_package_id: &str,
+    current_module_id: &str,
+    scopes: &mut Vec<RuntimeScope>,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_bindings: &RuntimeTypeBindings,
+    state: &mut RuntimeExecutionState,
+    host: &mut dyn RuntimeHost,
+) -> RuntimeEvalResult<()> {
+    let token_expr = expr.clone();
+    let reference = expect_reference(
+        eval_expr(
+            expr,
+            plan,
+            current_package_id,
+            current_module_id,
+            scopes,
+            aliases,
+            type_bindings,
+            state,
+            host,
+        )?,
+        "reclaim",
+    )?;
+    if reference.mode != RuntimeReferenceMode::Hold {
+        return Err("`reclaim` expects an `&hold[...]` capability"
+            .to_string()
+            .into());
+    }
+    reclaim_held_target_local(scopes, &reference.target).map_err(RuntimeEvalSignal::from)?;
+    reclaim_hold_capability_root_local(scopes, &token_expr).map_err(RuntimeEvalSignal::from)?;
+    Ok(())
+}
+
 fn run_scope_defers(
     plan: &RuntimePackagePlan,
     current_package_id: &str,
@@ -27449,18 +28611,35 @@ fn run_scope_defers(
         .drain(..)
         .rev()
         .collect::<Vec<_>>();
-    for expr in deferred {
-        let _ = eval_expr(
-            &expr,
-            plan,
-            current_package_id,
-            current_module_id,
-            scopes,
-            aliases,
-            type_bindings,
-            state,
-            host,
-        )?;
+    for deferred_action in deferred {
+        match deferred_action {
+            ParsedDeferAction::Expr(expr) => {
+                let _ = eval_expr(
+                    &expr,
+                    plan,
+                    current_package_id,
+                    current_module_id,
+                    scopes,
+                    aliases,
+                    type_bindings,
+                    state,
+                    host,
+                )?;
+            }
+            ParsedDeferAction::Reclaim(expr) => {
+                execute_reclaim_statement_expr(
+                    &expr,
+                    plan,
+                    current_package_id,
+                    current_module_id,
+                    scopes,
+                    aliases,
+                    type_bindings,
+                    state,
+                    host,
+                )?;
+            }
+        }
     }
     Ok(())
 }
@@ -27608,6 +28787,7 @@ fn execute_scoped_block(
     let exited_scope = scopes
         .pop()
         .ok_or_else(|| "runtime scope stack is empty".to_string())?;
+    validate_scope_hold_tokens(&exited_scope).map_err(RuntimeEvalSignal::from)?;
     let result = match defer_result {
         Ok(()) => result,
         Err(RuntimeEvalSignal::OwnerExit {
@@ -27745,6 +28925,20 @@ fn execute_statements(
                     },
                     plan,
                     scopes,
+                    state,
+                    host,
+                )?;
+                FlowSignal::Next
+            }
+            ParsedStmt::Reclaim(expr) => {
+                execute_reclaim_statement_expr(
+                    expr,
+                    plan,
+                    current_package_id,
+                    current_module_id,
+                    scopes,
+                    aliases,
+                    type_bindings,
                     state,
                     host,
                 )?;
@@ -27952,12 +29146,12 @@ fn execute_statements(
                 }
                 loop_signal
             }
-            ParsedStmt::Defer(expr) => {
+            ParsedStmt::Defer(action) => {
                 scopes
                     .last_mut()
                     .ok_or_else(|| "runtime scope stack is empty".to_string())?
                     .deferred
-                    .push(expr.clone());
+                    .push(action.clone());
                 FlowSignal::Next
             }
             ParsedStmt::ActivateOwner { .. } => {
@@ -28523,6 +29717,53 @@ fn execute_statements(
                 }
                 FlowSignal::Next
             }
+            ParsedStmt::Array(region) => {
+                let value = eval_expr(
+                    &ParsedExpr::ArrayRegion(Box::new(region.clone())),
+                    plan,
+                    current_package_id,
+                    current_module_id,
+                    scopes,
+                    aliases,
+                    type_bindings,
+                    state,
+                    host,
+                )?;
+                match &region.destination {
+                    Some(ParsedConstructDestination::Deliver { name }) => {
+                        let current_scope_depth = scopes.len().saturating_sub(1);
+                        let current_scope = scopes
+                            .last_mut()
+                            .ok_or_else(|| "runtime scope stack is empty".to_string())?;
+                        insert_runtime_local(
+                            state,
+                            current_scope_depth,
+                            current_scope,
+                            0,
+                            name.clone(),
+                            false,
+                            value,
+                        );
+                    }
+                    Some(ParsedConstructDestination::Place { target }) => {
+                        apply_assign(
+                            target,
+                            ParsedAssignOp::Assign,
+                            value,
+                            plan,
+                            current_package_id,
+                            current_module_id,
+                            scopes,
+                            aliases,
+                            type_bindings,
+                            state,
+                            host,
+                        )?;
+                    }
+                    None => {}
+                }
+                FlowSignal::Next
+            }
             ParsedStmt::MemorySpec(spec) => {
                 let owner_keys = collect_active_owner_keys_from_scopes(scopes);
                 let current_scope = scopes
@@ -28751,6 +29992,7 @@ fn execute_routine_call_with_state(
                 let final_scope = scopes
                     .pop()
                     .ok_or_else(|| "runtime scope stack is empty".to_string())?;
+                validate_scope_hold_tokens(&final_scope).map_err(RuntimeEvalSignal::from)?;
                 match defer_result {
                     Ok(()) => {}
                     Err(RuntimeEvalSignal::Message(message)) => return Err(message.into()),
@@ -29106,7 +30348,8 @@ pub fn execute_entrypoint_routine(
         RuntimeValue::Int(value) => i32::try_from(value)
             .map_err(|_| format!("main return value `{value}` does not fit in i32")),
         RuntimeValue::Unit => Ok(0),
-        RuntimeValue::Bool(_)
+        RuntimeValue::Float { .. }
+        | RuntimeValue::Bool(_)
         | RuntimeValue::Str(_)
         | RuntimeValue::Pair(_, _)
         | RuntimeValue::Array(_)

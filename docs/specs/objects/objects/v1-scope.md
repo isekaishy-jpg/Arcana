@@ -32,14 +32,14 @@ Owner declaration:
 
 ```arc
 create Session [Counter] scope-exit:
-    done: when Counter.value >= 10 hold [Counter]
+    done: when Counter.value >= 10 retain [Counter]
 ```
 
 Owner declaration with explicit activation context:
 
 ```arc
 create Session [Counter] context: SessionCtx scope-exit:
-    done: when Counter.value >= 10 hold [Counter]
+    done: when Counter.value >= 10 retain [Counter]
 ```
 
 Availability attachment:
@@ -75,13 +75,13 @@ fn main() -> Int:
 - Each listed object is owned under that owner.
 - An owner must declare at least one exit clause.
 - Exit names must be unique within the owner.
-- `hold [...]` may retain only objects declared on that owner.
+- `retain [...]` may retain only objects declared on that owner.
 
 Exit clause forms:
 
 - `exit when condition`
 - `name: when condition`
-- either form may append `hold [ObjectA, ObjectB]`
+- either form may append `retain [ObjectA, ObjectB]`
 
 ## Availability
 
@@ -127,7 +127,7 @@ If an exit condition resolves true:
 
 ## Suspend And Re-init
 
-- In current v1 terms, suspension is modeled as owner exit plus `hold [...]`.
+- In current v1 terms, suspension is modeled as owner exit plus `retain [...]`.
 - Held objects remain packaged under the owner after exit, but they are not active again until explicit re-entry.
 - Re-entry follows the same zero-arg vs one-arg rule as entry based on the owner's declared `context:` clause and may resume previously held state or realize fresh non-held objects on demand.
 - Fresh realized owned objects run `init` once on first realization for the current activation.

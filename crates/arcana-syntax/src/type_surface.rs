@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::{Span, is_builtin_boundary_unsafe_type_name};
+use crate::{ParamMode, Span, is_builtin_boundary_unsafe_type_name};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SurfaceRefs {
@@ -48,8 +48,8 @@ pub enum SurfaceTypeKind {
         args: Vec<SurfaceType>,
     },
     Ref {
+        mode: ParamMode,
         lifetime: Option<SurfaceLifetime>,
-        mutable: bool,
         inner: Box<SurfaceType>,
     },
     Tuple(Vec<SurfaceType>),
@@ -153,20 +153,15 @@ impl SurfaceType {
                     .join(", ")
             ),
             SurfaceTypeKind::Ref {
+                mode,
                 lifetime,
-                mutable,
                 inner,
             } => {
-                let mut rendered = String::from("&");
+                let mut args = vec![inner.render()];
                 if let Some(lifetime) = lifetime {
-                    rendered.push_str(&lifetime.render());
-                    rendered.push(' ');
+                    args.push(lifetime.render());
                 }
-                if *mutable {
-                    rendered.push_str("mut ");
-                }
-                rendered.push_str(&inner.render());
-                rendered
+                format!("&{}[{}]", mode.as_str(), args.join(", "))
             }
             SurfaceTypeKind::Tuple(items) => format!(
                 "({})",
@@ -217,7 +212,13 @@ impl SurfaceType {
     }
 
     pub fn is_mut_ref(&self) -> bool {
-        matches!(self.kind, SurfaceTypeKind::Ref { mutable: true, .. })
+        matches!(
+            self.kind,
+            SurfaceTypeKind::Ref {
+                mode: ParamMode::Edit | ParamMode::Hold,
+                ..
+            }
+        )
     }
 }
 
@@ -494,25 +495,31 @@ fn parse_surface_projection(text: &str) -> Result<SurfaceProjection, String> {
 
 fn parse_surface_type_inner(text: &str) -> Result<SurfaceType, String> {
     if let Some(rest) = text.strip_prefix('&') {
-        let mut rest = rest.trim_start();
-        let lifetime = if rest.starts_with('\'') {
-            let (lifetime, consumed) = parse_lifetime_prefix(rest)?;
-            rest = rest[consumed..].trim_start();
-            Some(lifetime)
-        } else {
-            None
+        let rest = rest.trim_start();
+        let Some((mode, tail)) = parse_capability_type_mode(rest) else {
+            return Err(format!("malformed capability type `{text}`"));
         };
-        let mutable = if let Some(stripped) = rest.strip_prefix("mut") {
-            rest = stripped.trim_start();
-            true
-        } else {
-            false
+        let inner_text = tail
+            .strip_prefix('[')
+            .and_then(|suffix| suffix.strip_suffix(']'))
+            .ok_or_else(|| format!("malformed capability type `{text}`"))?;
+        let items = split_top_level_surface_items(inner_text, ',');
+        let ([inner_text] | [inner_text, _]) = items.as_slice() else {
+            return Err(format!(
+                "capability type `{text}` expects `&{}[T]` or `&{}[T, 'a]`",
+                mode.as_str(),
+                mode.as_str()
+            ));
         };
-        let inner = parse_surface_type(rest)?;
+        let inner = parse_surface_type(inner_text.trim())?;
+        let lifetime = items
+            .get(1)
+            .map(|item| parse_surface_lifetime(item.trim()))
+            .transpose()?;
         return Ok(SurfaceType {
             kind: SurfaceTypeKind::Ref {
+                mode,
                 lifetime,
-                mutable,
                 inner: Box::new(inner),
             },
             span: Span::default(),
@@ -589,17 +596,19 @@ fn parse_surface_lifetime(text: &str) -> Result<SurfaceLifetime, String> {
     })
 }
 
-fn parse_lifetime_prefix(text: &str) -> Result<(SurfaceLifetime, usize), String> {
-    let chars = text.chars().collect::<Vec<_>>();
-    if chars.first().copied() != Some('\'') {
-        return Err(format!("malformed lifetime prefix `{text}`"));
-    }
-    let mut index = 1usize;
-    while index < chars.len() && is_ident_continue(chars[index]) {
-        index += 1;
-    }
-    let lifetime = chars[..index].iter().collect::<String>();
-    Ok((parse_surface_lifetime(&lifetime)?, lifetime.len()))
+fn parse_capability_type_mode(text: &str) -> Option<(ParamMode, &str)> {
+    [
+        ("read", ParamMode::Read),
+        ("edit", ParamMode::Edit),
+        ("take", ParamMode::Take),
+        ("hold", ParamMode::Hold),
+    ]
+    .into_iter()
+    .find_map(|(keyword, mode)| {
+        text.strip_prefix(keyword)
+            .filter(|rest| rest.trim_start().starts_with('['))
+            .map(|rest| (mode, rest.trim_start()))
+    })
 }
 
 fn split_simple_path(text: &str) -> Option<Vec<String>> {
@@ -781,9 +790,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_ref_projection_and_where_clause() {
-        let ty = parse_surface_type("&'a mut std.iter.Iterator[I].Item").expect("type");
-        assert_eq!(ty.render(), "&'a mut std.iter.Iterator[I].Item");
+    fn parses_capability_projection_and_where_clause() {
+        let ty = parse_surface_type("&edit[std.iter.Iterator[I].Item, 'a]").expect("type");
+        assert_eq!(ty.render(), "&edit[std.iter.Iterator[I].Item, 'a]");
         let refs = ty.refs();
         assert!(refs.paths.iter().any(|path| path
             == &[
@@ -799,6 +808,12 @@ mod tests {
             where_clause.render(),
             "Iterator[I], Iterator[I].Item = U, U: 'a"
         );
+    }
+
+    #[test]
+    fn rejects_legacy_ref_surface() {
+        let err = parse_surface_type("&'a mut Int").expect_err("legacy refs should be rejected");
+        assert!(err.contains("malformed capability type"), "{err}");
     }
 
     #[test]

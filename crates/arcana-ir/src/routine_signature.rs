@@ -1,6 +1,6 @@
 use arcana_hir::{
-    HirLifetime, HirPath, HirProjection, HirTraitRef, HirType, HirTypeBindingScope, HirTypeKind,
-    HirTypeSubstitutions, hir_type_matches, parse_hir_type,
+    HirLifetime, HirParamMode, HirPath, HirProjection, HirTraitRef, HirType, HirTypeBindingScope,
+    HirTypeKind, HirTypeSubstitutions, hir_type_matches, parse_hir_type,
 };
 use serde::{Deserialize, Serialize};
 
@@ -45,8 +45,8 @@ pub enum IrRoutineTypeKind {
         args: Vec<IrRoutineType>,
     },
     Ref {
+        mode: String,
         lifetime: Option<IrRoutineLifetime>,
-        mutable: bool,
         inner: Box<IrRoutineType>,
     },
     Tuple(Vec<IrRoutineType>),
@@ -140,20 +140,15 @@ impl IrRoutineType {
                     .join(", ")
             ),
             IrRoutineTypeKind::Ref {
+                mode,
                 lifetime,
-                mutable,
                 inner,
             } => {
-                let mut rendered = String::from("&");
+                let mut args = vec![inner.render()];
                 if let Some(lifetime) = lifetime {
-                    rendered.push_str(&lifetime.render());
-                    rendered.push(' ');
+                    args.push(lifetime.render());
                 }
-                if *mutable {
-                    rendered.push_str("mut ");
-                }
-                rendered.push_str(&inner.render());
-                rendered
+                format!("&{}[{}]", mode, args.join(", "))
             }
             IrRoutineTypeKind::Tuple(items) => format!(
                 "({})",
@@ -180,14 +175,14 @@ impl IrRoutineType {
                     args: args.iter().map(Self::from_hir).collect(),
                 },
                 HirTypeKind::Ref {
+                    mode,
                     lifetime,
-                    mutable,
                     inner,
                 } => IrRoutineTypeKind::Ref {
+                    mode: mode.as_str().to_string(),
                     lifetime: lifetime.as_ref().map(|lifetime| IrRoutineLifetime {
                         name: lifetime.name.clone(),
                     }),
-                    mutable: *mutable,
                     inner: Box::new(Self::from_hir(inner)),
                 },
                 HirTypeKind::Tuple(items) => {
@@ -283,15 +278,15 @@ impl IrRoutineType {
                 args: args.iter().map(IrRoutineType::to_hir).collect(),
             },
             IrRoutineTypeKind::Ref {
+                mode,
                 lifetime,
-                mutable,
                 inner,
             } => HirTypeKind::Ref {
+                mode: parse_hir_param_mode(mode),
                 lifetime: lifetime.as_ref().map(|lifetime| HirLifetime {
                     name: lifetime.name.clone(),
                     span: Default::default(),
                 }),
-                mutable: *mutable,
                 inner: Box::new(inner.to_hir()),
             },
             IrRoutineTypeKind::Tuple(items) => {
@@ -315,6 +310,16 @@ impl IrRoutineType {
                 span: Default::default(),
             }),
         }
+    }
+}
+
+fn parse_hir_param_mode(mode: &str) -> HirParamMode {
+    match mode {
+        "read" => HirParamMode::Read,
+        "edit" => HirParamMode::Edit,
+        "take" => HirParamMode::Take,
+        "hold" => HirParamMode::Hold,
+        other => panic!("invalid ref capability mode `{other}` in IR routine type"),
     }
 }
 

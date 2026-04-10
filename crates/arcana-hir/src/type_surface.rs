@@ -2,6 +2,8 @@ use std::{collections::BTreeMap, fmt};
 
 use arcana_syntax::{self, Span};
 
+use crate::HirParamMode;
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct HirSurfaceRefs {
     pub paths: Vec<Vec<String>>,
@@ -48,8 +50,8 @@ pub enum HirTypeKind {
         args: Vec<HirType>,
     },
     Ref {
+        mode: HirParamMode,
         lifetime: Option<HirLifetime>,
-        mutable: bool,
         inner: Box<HirType>,
     },
     Tuple(Vec<HirType>),
@@ -153,20 +155,15 @@ impl HirType {
                     .join(", ")
             ),
             HirTypeKind::Ref {
+                mode,
                 lifetime,
-                mutable,
                 inner,
             } => {
-                let mut rendered = String::from("&");
+                let mut args = vec![inner.render()];
                 if let Some(lifetime) = lifetime {
-                    rendered.push_str(&lifetime.render());
-                    rendered.push(' ');
+                    args.push(lifetime.render());
                 }
-                if *mutable {
-                    rendered.push_str("mut ");
-                }
-                rendered.push_str(&inner.render());
-                rendered
+                format!("&{}[{}]", mode.as_str(), args.join(", "))
             }
             HirTypeKind::Tuple(items) => format!(
                 "({})",
@@ -359,12 +356,12 @@ pub(crate) fn lower_surface_type(ty: &arcana_syntax::SurfaceType) -> HirType {
                 args: args.iter().map(lower_surface_type).collect(),
             },
             arcana_syntax::SurfaceTypeKind::Ref {
+                mode,
                 lifetime,
-                mutable,
                 inner,
             } => HirTypeKind::Ref {
+                mode: lower_hir_param_mode(*mode),
                 lifetime: lifetime.as_ref().map(lower_surface_lifetime),
-                mutable: *mutable,
                 inner: Box::new(lower_surface_type(inner)),
             },
             arcana_syntax::SurfaceTypeKind::Tuple(items) => {
@@ -585,13 +582,13 @@ pub fn substitute_hir_type(
             span: ty.span,
         },
         HirTypeKind::Ref {
+            mode,
             lifetime,
-            mutable,
             inner,
         } => HirType {
             kind: HirTypeKind::Ref {
+                mode: *mode,
                 lifetime: lifetime.clone(),
-                mutable: *mutable,
                 inner: Box::new(substitute_hir_type(inner, bindings, substitutions)),
             },
             span: ty.span,
@@ -622,6 +619,15 @@ pub fn substitute_hir_type(
             }),
             span: ty.span,
         },
+    }
+}
+
+fn lower_hir_param_mode(mode: arcana_syntax::ParamMode) -> HirParamMode {
+    match mode {
+        arcana_syntax::ParamMode::Read => HirParamMode::Read,
+        arcana_syntax::ParamMode::Edit => HirParamMode::Edit,
+        arcana_syntax::ParamMode::Take => HirParamMode::Take,
+        arcana_syntax::ParamMode::Hold => HirParamMode::Hold,
     }
 }
 
@@ -692,8 +698,8 @@ mod tests {
 
     #[test]
     fn parses_ref_projection_and_where_clause() {
-        let ty = parse_hir_type("&'a mut std.iter.Iterator[I].Item").expect("type");
-        assert_eq!(ty.render(), "&'a mut std.iter.Iterator[I].Item");
+        let ty = parse_hir_type("&edit[std.iter.Iterator[I].Item, 'a]").expect("type");
+        assert_eq!(ty.render(), "&edit[std.iter.Iterator[I].Item, 'a]");
         let refs = ty.refs();
         assert!(refs.paths.iter().any(|path| path
             == &[

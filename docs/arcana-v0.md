@@ -1,6 +1,6 @@
 # Arcana v0
 
-Arcana v0 is a small, typed, indentation-based language with access-mode parameters (`read`, `edit`, `take`).
+Arcana v0 is a small, typed, indentation-based language with explicit access modes (`read`, `edit`, `take`, `hold`).
 
 Scope note:
 - This document summarizes the frozen source-language, grimoire/module shape, and first-party standard surface carried toward selfhost.
@@ -23,7 +23,7 @@ Arcana v0 currently includes:
 - Collections v0.9: `List[T]`, list literals, slicing with ranges, indexed assignment, `RangeInt`, pair tuples `(A, B)`
 - Memory phrases v0.35+: `arena|frame|pool|temp|session|ring|slab: instance :> ... <: qualifier` with typed allocator storage plus explicit views/publication state
 - Headed regions v0.42: `recycle`, `construct`, `bind`, and `Memory` as structural inner blocks with head-defined rides, default modifiers, and head-specific completion/target slots
-- Ownership/lifetimes v0.32 surface: explicit refs (`&'a T`, `&'a mut T`), borrow/deref expressions (`&x`, `&mut x`, `*x`), explicit borrowed-slice forms (`&x[a..b]`, `&mut x[a..b]`), a carried lexical borrow contract, and `#boundary[target="lua|sql"]` signature contracts
+- Ownership/lifetimes v0.32 surface: explicit capability types (`&read[T, 'a]`, `&edit[T, 'a]`, `&take[T, 'a]`, `&hold[T, 'a]`), capability/deref expressions (`&read x`, `&edit x`, `&take x`, `&hold x`, `*x`), explicit borrowed-slice forms (`&read x[a..b]`, `&edit x[a..b]`), `reclaim x` for held-capability release, a carried lexical capability contract, and `#boundary[target="lua|sql"]` signature contracts
 - Trait v2: associated types, default trait methods, supertrait bounds, projection equality in `where`
 
 ## Commands
@@ -67,7 +67,7 @@ Arcana now includes an explicit object/owner lifetime model.
 - `obj Name:` declares nominal packaged state with optional nested methods.
 - `create Owner [ObjectA, ObjectB] scope-exit:` declares a managed owner lifetime domain.
 - Owners may optionally declare `context: Ctx` before `scope-exit:` to make activation payload shape explicit.
-- Owner exits use `exit when ...` or `name: when ...`, optionally with `hold [...]`.
+- Owner exits use `exit when ...` or `name: when ...`, optionally with `retain [...]`.
 - Bare path lines immediately above block-owning headers attach owner/object availability.
 - Availability does not create live state by itself.
 - Explicit owner activation uses qualified phrases:
@@ -80,7 +80,7 @@ Arcana now includes an explicit object/owner lifetime model.
 - Owners without `context:` accept zero activation args.
 - Owners with `context:` require exactly one activation arg of that type.
 - Activation context is only meaningful through those lifecycle hooks and must match the owner-declared context type for that domain.
-- Suspension is modeled as owner exit plus `hold [...]`; held state requires explicit re-entry before it becomes active again.
+- Suspension is modeled as owner exit plus `retain [...]`; retained state requires explicit re-entry before it becomes active again.
 - When multiple owner exit conditions are true at the same checkpoint, the first matching exit in source order wins.
 - Callable objects and context objects are ordinary `obj` roles inside this same model.
 - Dispatch remains static; closures, lambdas, and general function values remain outside the selfhost baseline.
@@ -578,8 +578,8 @@ Public surface:
   - `ByteEditView`
   - `StrView`
 - explicit borrowed slices:
-  - `&x[a..b]`
-  - `&mut x[a..b]`
+  - `&read x[a..b]`
+  - `&edit x[a..b]`
 - `std.binary` provides explicit reader/writer helpers over byte views
 
 Runtime semantics:
@@ -636,7 +636,7 @@ Historical note: the broader MeadowLang memory examples now live outside this re
 
 ## Ownership And Lifetimes (v0.32)
 
-Arcana now enforces lexical ownership and borrowing rules with explicit lifetimes.
+Arcana now enforces lexical ownership and capability rules with explicit lifetimes.
 
 Ownership rationale:
 
@@ -648,8 +648,9 @@ Ownership rationale:
 Core syntax:
 
 - lifetime params: `'a`, `'b`
-- reference types: `&'a T`, `&'a mut T`
-- borrow/deref expressions: `&x`, `&mut x`, `&x[a..b]`, `&mut x[a..b]`, `*x`
+- capability types: `&read[T, 'a]`, `&edit[T, 'a]`, `&take[T, 'a]`, `&hold[T, 'a]`
+- capability/deref expressions: `&read x`, `&edit x`, `&take x`, `&hold x`, `&read x[a..b]`, `&edit x[a..b]`, `*x`
+- hold release: `reclaim x`
 - where outlives predicates: `'a: 'b`, `T: 'a`
 
 Core rules:

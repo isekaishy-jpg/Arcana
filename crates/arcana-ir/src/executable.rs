@@ -3,6 +3,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExecExpr {
     Int(i64),
+    Float {
+        text: String,
+        kind: ExecFloatKind,
+    },
     Bool(bool),
     Str(String),
     Path(Vec<String>),
@@ -19,6 +23,7 @@ pub enum ExecExpr {
     },
     ConstructRegion(Box<ExecConstructRegion>),
     RecordRegion(Box<ExecRecordRegion>),
+    ArrayRegion(Box<ExecArrayRegion>),
     Chain {
         style: String,
         introducer: ExecChainIntroducer,
@@ -85,6 +90,12 @@ pub enum ExecExpr {
         op: ExecBinaryOp,
         right: Box<ExecExpr>,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExecFloatKind {
+    F32,
+    F64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -242,6 +253,7 @@ pub struct ExecConstructRegion {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecRecordRegion {
+    pub kind: String,
     pub completion: String,
     pub target: Box<ExecExpr>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -253,6 +265,27 @@ pub struct ExecRecordRegion {
     pub lines: Vec<ExecConstructLine>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub copied_fields: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecArrayLine {
+    pub index: usize,
+    pub value: ExecExpr,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modifier: Option<ExecHeadedModifier>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecArrayRegion {
+    pub completion: String,
+    pub target: Box<ExecExpr>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<Box<ExecExpr>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination: Option<ExecConstructDestination>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_modifier: Option<ExecHeadedModifier>,
+    pub lines: Vec<ExecArrayLine>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -294,6 +327,12 @@ pub enum ExecMatchPattern {
         path: String,
         args: Vec<ExecMatchPattern>,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExecDeferAction {
+    Expr(ExecExpr),
+    Reclaim(ExecExpr),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -345,7 +384,8 @@ pub enum ExecStmt {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context: Option<ExecExpr>,
     },
-    Defer(ExecExpr),
+    Defer(ExecDeferAction),
+    Reclaim(ExecExpr),
     Break,
     Continue,
     Assign {
@@ -364,6 +404,7 @@ pub enum ExecStmt {
         lines: Vec<ExecBindLine>,
     },
     Record(ExecRecordRegion),
+    Array(ExecArrayRegion),
     Construct(ExecConstructRegion),
     MemorySpec(ExecMemorySpecDecl),
 }
@@ -373,8 +414,10 @@ pub enum ExecUnaryOp {
     Neg,
     Not,
     BitNot,
-    BorrowRead,
-    BorrowMut,
+    CapabilityRead,
+    CapabilityEdit,
+    CapabilityTake,
+    CapabilityHold,
     Deref,
     Weave,
     Split,

@@ -698,6 +698,9 @@ fn render_symbol_api_fingerprint(
             &TypeScope::default(),
         ),
         HirSymbolKind::Record => render_record_api_fingerprint(workspace, resolved_module, symbol),
+        HirSymbolKind::Struct => render_struct_api_fingerprint(workspace, resolved_module, symbol),
+        HirSymbolKind::Union => render_union_api_fingerprint(workspace, resolved_module, symbol),
+        HirSymbolKind::Array => render_array_api_fingerprint(workspace, resolved_module, symbol),
         HirSymbolKind::Object => render_object_api_fingerprint(workspace, resolved_module, symbol),
         HirSymbolKind::Owner => render_owner_api_fingerprint(workspace, resolved_module, symbol),
         HirSymbolKind::Enum => render_enum_api_fingerprint(workspace, resolved_module, symbol),
@@ -1001,17 +1004,9 @@ fn render_record_api_fingerprint(
 ) -> String {
     let scope = TypeScope::default().with_params(&symbol.type_params);
     let fields = match &symbol.body {
-        HirSymbolBody::Record { fields } => fields
-            .iter()
-            .map(|field| {
-                format!(
-                    "{}:{}",
-                    field.name,
-                    canonicalize_surface_type(workspace, resolved_module, &scope, &field.ty)
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(","),
+        HirSymbolBody::Record { fields } => {
+            render_nominal_fields_api_fingerprint(workspace, resolved_module, &scope, fields)
+        }
         _ => String::new(),
     };
     let mut rendered = format!("record:{}[{}]", symbol.name, symbol.type_params.join(","));
@@ -1028,6 +1023,116 @@ fn render_record_api_fingerprint(
     rendered.push_str(&fields);
     rendered.push(']');
     rendered
+}
+
+fn render_struct_api_fingerprint(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    symbol: &HirSymbol,
+) -> String {
+    let scope = TypeScope::default().with_params(&symbol.type_params);
+    let fields = match &symbol.body {
+        HirSymbolBody::Struct { fields } => {
+            render_nominal_fields_api_fingerprint(workspace, resolved_module, &scope, fields)
+        }
+        _ => String::new(),
+    };
+    let mut rendered = format!("struct:{}[{}]", symbol.name, symbol.type_params.join(","));
+    if let Some(where_clause) = &symbol.where_clause {
+        rendered.push_str("|where=");
+        rendered.push_str(&canonicalize_where_clause(
+            workspace,
+            resolved_module,
+            &scope,
+            where_clause,
+        ));
+    }
+    rendered.push_str("|fields=[");
+    rendered.push_str(&fields);
+    rendered.push(']');
+    rendered
+}
+
+fn render_union_api_fingerprint(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    symbol: &HirSymbol,
+) -> String {
+    let scope = TypeScope::default().with_params(&symbol.type_params);
+    let fields = match &symbol.body {
+        HirSymbolBody::Union { fields } => {
+            render_nominal_fields_api_fingerprint(workspace, resolved_module, &scope, fields)
+        }
+        _ => String::new(),
+    };
+    let mut rendered = format!("union:{}[{}]", symbol.name, symbol.type_params.join(","));
+    if let Some(where_clause) = &symbol.where_clause {
+        rendered.push_str("|where=");
+        rendered.push_str(&canonicalize_where_clause(
+            workspace,
+            resolved_module,
+            &scope,
+            where_clause,
+        ));
+    }
+    rendered.push_str("|fields=[");
+    rendered.push_str(&fields);
+    rendered.push(']');
+    rendered
+}
+
+fn render_array_api_fingerprint(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    symbol: &HirSymbol,
+) -> String {
+    let scope = TypeScope::default().with_params(&symbol.type_params);
+    let mut rendered = format!("array:{}[{}]", symbol.name, symbol.type_params.join(","));
+    if let Some(where_clause) = &symbol.where_clause {
+        rendered.push_str("|where=");
+        rendered.push_str(&canonicalize_where_clause(
+            workspace,
+            resolved_module,
+            &scope,
+            where_clause,
+        ));
+    }
+    if let HirSymbolBody::Array { element_ty, len } = &symbol.body {
+        rendered.push_str("|element=");
+        rendered.push_str(&canonicalize_surface_type(
+            workspace,
+            resolved_module,
+            &scope,
+            element_ty,
+        ));
+        rendered.push_str("|len=");
+        rendered.push_str(&len.to_string());
+    }
+    rendered
+}
+
+fn render_nominal_fields_api_fingerprint(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    scope: &TypeScope,
+    fields: &[arcana_hir::HirField],
+) -> String {
+    fields
+        .iter()
+        .map(|field| {
+            let mut rendered = format!(
+                "{}:{}",
+                field.name,
+                canonicalize_surface_type(workspace, resolved_module, scope, &field.ty)
+            );
+            if let Some(bit_width) = field.bit_width {
+                rendered.push_str("|bits=");
+                rendered.push_str(&bit_width.to_string());
+            }
+            rendered
+        })
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn render_object_api_fingerprint(
@@ -1136,7 +1241,7 @@ fn render_owner_api_fingerprint(
                         "{}:{}:[{}]",
                         owner_exit.name,
                         render_expr_fingerprint(&owner_exit.condition),
-                        owner_exit.holds.join(",")
+                        owner_exit.retains.join(",")
                     )
                 })
                 .collect::<Vec<_>>()
@@ -1464,25 +1569,20 @@ fn canonicalize_surface_type(
                 .join(", ")
         ),
         HirTypeKind::Ref {
+            mode,
             lifetime,
-            mutable,
             inner,
         } => {
-            let mut rendered = String::from("&");
-            if let Some(lifetime) = lifetime {
-                rendered.push_str(&lifetime.render());
-                rendered.push(' ');
-            }
-            if *mutable {
-                rendered.push_str("mut ");
-            }
-            rendered.push_str(&canonicalize_surface_type(
+            let mut args = vec![canonicalize_surface_type(
                 workspace,
                 resolved_module,
                 scope,
                 inner,
-            ));
-            rendered
+            )];
+            if let Some(lifetime) = lifetime {
+                args.push(lifetime.render());
+            }
+            format!("&{}[{}]", mode.as_str(), args.join(", "))
         }
         HirTypeKind::Tuple(items) => format!(
             "({})",

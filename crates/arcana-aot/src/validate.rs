@@ -3,6 +3,7 @@ use std::collections::BTreeSet;
 use crate::artifact::AotPackageArtifact;
 use arcana_ir::{
     IrForewordRetention, IrRoutineType, IrRoutineTypeKind, parse_memory_spec_surface_row,
+    parse_struct_bitfield_layout_row,
 };
 
 fn strip_prefix_suffix<'a>(text: &'a str, prefix: &str, suffix: &str) -> Result<&'a str, String> {
@@ -152,6 +153,20 @@ fn validate_module_directive_row(row: &str, expected_module_id: &str) -> Result<
 }
 
 fn validate_lang_item_row(row: &str, expected_module_id: &str) -> Result<(), String> {
+    if let Some(layout) = parse_struct_bitfield_layout_row(row)? {
+        let expected_prefix = format!("{expected_module_id}.");
+        if !layout.type_name.starts_with(&expected_prefix) {
+            return Err(format!(
+                "struct bitfield layout row `{row}` does not match containing module `{expected_module_id}`"
+            ));
+        }
+        if layout.fields.is_empty() {
+            return Err(format!(
+                "struct bitfield layout row `{row}` must contain at least one field"
+            ));
+        }
+        return Ok(());
+    }
     let payload = row
         .strip_prefix("module=")
         .ok_or_else(|| format!("malformed lang item row `{row}`"))?;
@@ -303,7 +318,10 @@ fn validate_routine_param(
     ty: &IrRoutineType,
 ) -> Result<(), String> {
     if let Some(mode) = mode
-        && !matches!(mode, "read" | "edit" | "take" | "copy" | "borrow" | "move")
+        && !matches!(
+            mode,
+            "read" | "edit" | "take" | "hold" | "copy" | "borrow" | "move"
+        )
     {
         return Err(format!(
             "backend artifact routine `{routine_key}` param {index} has unsupported mode `{mode}`"

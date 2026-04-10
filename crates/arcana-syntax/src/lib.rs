@@ -265,6 +265,9 @@ pub enum SymbolKind {
     Fn,
     System,
     Record,
+    Struct,
+    Union,
+    Array,
     Object,
     Owner,
     Enum,
@@ -280,6 +283,9 @@ impl SymbolKind {
             Self::Fn => "fn",
             Self::System => "system",
             Self::Record => "record",
+            Self::Struct => "struct",
+            Self::Union => "union",
+            Self::Array => "array",
             Self::Object => "obj",
             Self::Owner => "create",
             Self::Enum => "enum",
@@ -332,6 +338,7 @@ pub enum ParamMode {
     Read,
     Edit,
     Take,
+    Hold,
 }
 
 impl ParamMode {
@@ -340,6 +347,7 @@ impl ParamMode {
             Self::Read => "read",
             Self::Edit => "edit",
             Self::Take => "take",
+            Self::Hold => "hold",
         }
     }
 }
@@ -357,6 +365,7 @@ pub struct ParamDecl {
 pub struct FieldDecl {
     pub name: String,
     pub ty: SurfaceType,
+    pub bit_width: Option<u16>,
     pub forewords: Vec<ForewordApp>,
     pub span: Span,
 }
@@ -506,7 +515,7 @@ pub enum QualifiedPhraseQualifierKind {
 pub struct OwnerExitDecl {
     pub name: String,
     pub condition: Expr,
-    pub holds: Vec<String>,
+    pub retains: Vec<String>,
     pub span: Span,
 }
 
@@ -643,14 +652,51 @@ pub struct ConstructRegion {
     pub span: Span,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NominalFieldRegionKind {
+    Record,
+    Struct,
+    Union,
+}
+
+impl NominalFieldRegionKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Record => "record",
+            Self::Struct => "struct",
+            Self::Union => "union",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecordRegion {
+    pub kind: NominalFieldRegionKind,
     pub completion: ConstructCompletionKind,
     pub target: Box<Expr>,
     pub base: Option<Box<Expr>>,
     pub destination: Option<ConstructDestination>,
     pub default_modifier: Option<HeadedModifier>,
     pub lines: Vec<ConstructLine>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArrayLine {
+    pub index: usize,
+    pub value: Expr,
+    pub modifier: Option<HeadedModifier>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArrayRegion {
+    pub completion: ConstructCompletionKind,
+    pub target: Box<Expr>,
+    pub base: Option<Box<Expr>>,
+    pub destination: Option<ConstructDestination>,
+    pub default_modifier: Option<HeadedModifier>,
+    pub lines: Vec<ArrayLine>,
     pub span: Span,
 }
 
@@ -696,8 +742,10 @@ pub enum UnaryOp {
     Neg,
     Not,
     BitNot,
-    BorrowRead,
-    BorrowMut,
+    CapabilityRead,
+    CapabilityEdit,
+    CapabilityTake,
+    CapabilityHold,
     Deref,
     Weave,
     Split,
@@ -736,6 +784,10 @@ pub enum Expr {
     IntLiteral {
         text: String,
     },
+    FloatLiteral {
+        text: String,
+        kind: FloatLiteralKind,
+    },
     StrLiteral {
         text: String,
     },
@@ -752,6 +804,7 @@ pub enum Expr {
     },
     ConstructRegion(Box<ConstructRegion>),
     RecordRegion(Box<RecordRegion>),
+    ArrayRegion(Box<ArrayRegion>),
     Chain {
         style: String,
         introducer: ChainIntroducer,
@@ -810,6 +863,21 @@ pub enum Expr {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FloatLiteralKind {
+    F32,
+    F64,
+}
+
+impl FloatLiteralKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::F32 => "F32",
+            Self::F64 => "F64",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AssignOp {
     Assign,
     AddAssign,
@@ -847,6 +915,9 @@ pub enum AssignTarget {
     Name {
         text: String,
     },
+    Deref {
+        expr: Expr,
+    },
     MemberAccess {
         target: Box<AssignTarget>,
         member: String,
@@ -855,6 +926,12 @@ pub enum AssignTarget {
         target: Box<AssignTarget>,
         index: Expr,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DeferAction {
+    Expr { expr: Expr },
+    Reclaim { expr: Expr },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -882,6 +959,9 @@ pub enum StatementKind {
         body: Vec<Statement>,
     },
     Defer {
+        action: DeferAction,
+    },
+    Reclaim {
         expr: Expr,
     },
     Break,
@@ -900,6 +980,7 @@ pub enum StatementKind {
         lines: Vec<BindLine>,
     },
     Record(RecordRegion),
+    Array(ArrayRegion),
     Construct(ConstructRegion),
     MemorySpec(MemorySpecDecl),
     Expr {
@@ -921,6 +1002,16 @@ pub enum SymbolBody {
     None,
     Record {
         fields: Vec<FieldDecl>,
+    },
+    Struct {
+        fields: Vec<FieldDecl>,
+    },
+    Union {
+        fields: Vec<FieldDecl>,
+    },
+    Array {
+        element_ty: SurfaceType,
+        len: usize,
     },
     Object {
         fields: Vec<FieldDecl>,
@@ -2228,6 +2319,14 @@ fn parse_symbol_entry(entry: &RawBlockEntry) -> Result<Option<SymbolDecl>, Strin
             _ => (Vec::new(), None),
         };
         parse_owner_body(&entry.children, objects, context_type)?
+    } else if symbol.kind == SymbolKind::Array {
+        if !entry.children.is_empty() {
+            return Err(format!(
+                "{}:{}: arrays cannot own nested blocks",
+                entry.span.line, entry.span.column
+            ));
+        }
+        symbol.body.clone()
     } else {
         parse_symbol_body(&symbol.kind, &entry.children)?
     };
@@ -2259,6 +2358,9 @@ fn parse_symbol_header(trimmed: &str, span: Span) -> Option<SymbolDecl> {
     if let Some(symbol) = parse_owner_symbol(rest, exported, span) {
         return Some(symbol);
     }
+    if let Some(symbol) = parse_array_symbol(rest, exported, span) {
+        return Some(symbol);
+    }
     let (is_async, rest) = if let Some(rest) = rest.strip_prefix("async ") {
         (true, rest)
     } else {
@@ -2268,6 +2370,8 @@ fn parse_symbol_header(trimmed: &str, span: Span) -> Option<SymbolDecl> {
         ("fn", SymbolKind::Fn),
         ("system", SymbolKind::System),
         ("record", SymbolKind::Record),
+        ("struct", SymbolKind::Struct),
+        ("union", SymbolKind::Union),
         ("obj", SymbolKind::Object),
         ("enum", SymbolKind::Enum),
         ("trait", SymbolKind::Trait),
@@ -2304,6 +2408,32 @@ fn parse_symbol_header(trimmed: &str, span: Span) -> Option<SymbolDecl> {
         });
     }
     None
+}
+
+fn parse_array_symbol(rest: &str, exported: bool, span: Span) -> Option<SymbolDecl> {
+    let rest = rest.strip_prefix("array ")?;
+    let (name, element_ty, len) = parse_array_signature(rest, span)?;
+    Some(SymbolDecl {
+        name,
+        kind: SymbolKind::Array,
+        exported,
+        is_async: false,
+        type_params: Vec::new(),
+        where_clause: None,
+        params: Vec::new(),
+        return_type: None,
+        behavior_attrs: Vec::new(),
+        opaque_policy: None,
+        availability: Vec::new(),
+        forewords: Vec::new(),
+        intrinsic_impl: None,
+        native_impl: None,
+        body: SymbolBody::Array { element_ty, len },
+        statements: Vec::new(),
+        cleanup_footers: Vec::new(),
+        surface_text: format!("array {}", rest.trim()),
+        span,
+    })
 }
 
 fn parse_owner_symbol(rest: &str, exported: bool, span: Span) -> Option<SymbolDecl> {
@@ -2887,6 +3017,31 @@ struct ParsedSymbolSignature {
     return_type: Option<SurfaceType>,
 }
 
+fn parse_array_signature(rest: &str, _span: Span) -> Option<(String, SurfaceType, usize)> {
+    let header = rest.trim().strip_suffix(':').unwrap_or(rest.trim()).trim();
+    let open_idx = header.find('[')?;
+    let close_idx = find_matching_delim(header, open_idx, '[', ']')?;
+    if close_idx != header.len().saturating_sub(1) {
+        return None;
+    }
+    let name = parse_symbol_name(header[..open_idx].trim())?;
+    if header[..open_idx].trim() != name {
+        return None;
+    }
+    let inside = &header[open_idx + 1..close_idx];
+    let mut parts = split_top_level(inside, ',').into_iter().map(str::trim);
+    let element_ty = parse_surface_type(parts.next()?).ok()?;
+    let len_text = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    let len = len_text.parse::<usize>().ok()?;
+    if len == 0 {
+        return None;
+    }
+    Some((name, element_ty, len))
+}
+
 fn parse_symbol_signature(
     kind: SymbolKind,
     rest: &str,
@@ -2899,11 +3054,14 @@ fn parse_symbol_signature(
     let (type_params, where_clause, params, return_type) = match kind {
         SymbolKind::Fn | SymbolKind::System => parse_function_signature_tail(after_name, span)?,
         SymbolKind::Record
+        | SymbolKind::Struct
+        | SymbolKind::Union
         | SymbolKind::Object
         | SymbolKind::Enum
         | SymbolKind::Trait
         | SymbolKind::Behavior
         | SymbolKind::OpaqueType => parse_named_type_tail(after_name)?,
+        SymbolKind::Array => return None,
         SymbolKind::Owner => return None,
         SymbolKind::Const => parse_const_signature_tail(after_name),
     };
@@ -3064,6 +3222,8 @@ fn parse_param_list(source: &str, span: Span) -> Result<Vec<ParamDecl>, String> 
             (Some(ParamMode::Edit), rest)
         } else if let Some(rest) = part.strip_prefix("take ") {
             (Some(ParamMode::Take), rest)
+        } else if let Some(rest) = part.strip_prefix("hold ") {
+            (Some(ParamMode::Hold), rest)
         } else {
             (None, part)
         };
@@ -3244,9 +3404,13 @@ fn parse_symbol_body(kind: &SymbolKind, entries: &[RawBlockEntry]) -> Result<Sym
         | SymbolKind::Behavior
         | SymbolKind::System
         | SymbolKind::Owner
-        | SymbolKind::OpaqueType => {
+        | SymbolKind::OpaqueType
+        | SymbolKind::Array => {
             if matches!(kind, SymbolKind::OpaqueType) && !entries.is_empty() {
                 return Err("opaque types cannot own nested blocks".to_string());
+            }
+            if matches!(kind, SymbolKind::Array) && !entries.is_empty() {
+                return Err("arrays cannot own nested blocks".to_string());
             }
             if matches!(kind, SymbolKind::Owner) {
                 let exits = entries
@@ -3262,7 +3426,7 @@ fn parse_symbol_body(kind: &SymbolKind, entries: &[RawBlockEntry]) -> Result<Sym
             }
             Ok(SymbolBody::None)
         }
-        SymbolKind::Record => {
+        SymbolKind::Record | SymbolKind::Struct | SymbolKind::Union => {
             let mut fields = Vec::new();
             let mut pending_forewords = Vec::new();
             for entry in entries {
@@ -3276,8 +3440,11 @@ fn parse_symbol_body(kind: &SymbolKind, entries: &[RawBlockEntry]) -> Result<Sym
                     std::mem::take(&mut pending_forewords),
                 ) else {
                     return Err(format!(
-                        "{}:{}: unsupported `record` item syntax: `{}`",
-                        entry.span.line, entry.span.column, entry.text
+                        "{}:{}: unsupported `{}` item syntax: `{}`",
+                        entry.span.line,
+                        entry.span.column,
+                        kind.as_str(),
+                        entry.text
                     ));
                 };
                 fields.push(field);
@@ -3288,7 +3455,12 @@ fn parse_symbol_body(kind: &SymbolKind, entries: &[RawBlockEntry]) -> Result<Sym
                     foreword.span.line, foreword.span.column
                 ));
             }
-            Ok(SymbolBody::Record { fields })
+            Ok(match kind {
+                SymbolKind::Record => SymbolBody::Record { fields },
+                SymbolKind::Struct => SymbolBody::Struct { fields },
+                SymbolKind::Union => SymbolBody::Union { fields },
+                _ => unreachable!(),
+            })
         }
         SymbolKind::Object => {
             let mut fields = Vec::new();
@@ -3434,6 +3606,9 @@ fn parse_symbol_statements(
         SymbolKind::Trait
         | SymbolKind::Object
         | SymbolKind::Record
+        | SymbolKind::Struct
+        | SymbolKind::Union
+        | SymbolKind::Array
         | SymbolKind::Enum
         | SymbolKind::Const
         | SymbolKind::Owner
@@ -3482,10 +3657,10 @@ fn parse_owner_exit_decl(entry: &RawBlockEntry) -> Result<OwnerExitDecl, String>
             entry.span.line, entry.span.column
         ));
     }
-    let (condition_text, holds) = match rest.split_once(" hold ") {
+    let (condition_text, retains) = match rest.split_once(" retain ") {
         Some((condition, hold_text)) => (
             condition.trim(),
-            parse_owner_hold_list(hold_text.trim(), entry.span)?,
+            parse_owner_retain_list(hold_text.trim(), entry.span)?,
         ),
         None => (rest.trim(), Vec::new()),
     };
@@ -3498,17 +3673,17 @@ fn parse_owner_exit_decl(entry: &RawBlockEntry) -> Result<OwnerExitDecl, String>
     Ok(OwnerExitDecl {
         name,
         condition: parse_expression(condition_text, &[], entry.span)?,
-        holds,
+        retains,
         span: entry.span,
     })
 }
 
-fn parse_owner_hold_list(text: &str, span: Span) -> Result<Vec<String>, String> {
+fn parse_owner_retain_list(text: &str, span: Span) -> Result<Vec<String>, String> {
     let open = text
         .strip_prefix('[')
         .and_then(|rest| rest.strip_suffix(']'))
-        .ok_or_else(|| format!("{}:{}: malformed owner hold list", span.line, span.column))?;
-    let mut holds = Vec::new();
+        .ok_or_else(|| format!("{}:{}: malformed owner retain list", span.line, span.column))?;
+    let mut retains = Vec::new();
     for item in split_top_level(open, ',') {
         let item = item.trim();
         if item.is_empty() {
@@ -3516,13 +3691,13 @@ fn parse_owner_hold_list(text: &str, span: Span) -> Result<Vec<String>, String> 
         }
         if !is_identifier(item) {
             return Err(format!(
-                "{}:{}: malformed owner hold target `{item}`",
+                "{}:{}: malformed owner retain target `{item}`",
                 span.line, span.column
             ));
         }
-        holds.push(item.to_string());
+        retains.push(item.to_string());
     }
-    Ok(holds)
+    Ok(retains)
 }
 
 fn parse_statement_block(
@@ -3751,8 +3926,42 @@ fn parse_statement(entry: &RawBlockEntry, loop_depth: usize) -> Result<Statement
     }
 
     if let Some(rest) = entry.text.strip_prefix("defer ") {
+        let rest = rest.trim();
+        let action = if let Some(reclaim_rest) = rest.strip_prefix("reclaim ") {
+            let reclaim_rest = reclaim_rest.trim();
+            if reclaim_rest.is_empty() {
+                return Err(format!(
+                    "{}:{}: malformed `defer reclaim` statement",
+                    entry.span.line, entry.span.column
+                ));
+            }
+            DeferAction::Reclaim {
+                expr: parse_expression(reclaim_rest, &entry.children, entry.span)?,
+            }
+        } else {
+            DeferAction::Expr {
+                expr: parse_expression(rest, &entry.children, entry.span)?,
+            }
+        };
         return Ok(Statement {
-            kind: StatementKind::Defer {
+            kind: StatementKind::Defer { action },
+            availability: Vec::new(),
+            forewords: Vec::new(),
+            cleanup_footers: Vec::new(),
+            span: entry.span,
+        });
+    }
+
+    if let Some(rest) = entry.text.strip_prefix("reclaim ") {
+        let rest = rest.trim();
+        if rest.is_empty() {
+            return Err(format!(
+                "{}:{}: malformed `reclaim` statement",
+                entry.span.line, entry.span.column
+            ));
+        }
+        return Ok(Statement {
+            kind: StatementKind::Reclaim {
                 expr: parse_expression(rest, &entry.children, entry.span)?,
             },
             availability: Vec::new(),
@@ -3852,6 +4061,10 @@ fn unknown_headed_region_error(entry: &RawBlockEntry) -> Result<Option<String>, 
                 | "recycle"
                 | "bind"
                 | "construct"
+                | "record"
+                | "struct"
+                | "union"
+                | "array"
                 | "Memory"
         )
     {
@@ -3941,16 +4154,38 @@ fn parse_headed_region_statement(
         }));
     }
 
-    if entry.text.starts_with("record ") {
+    if entry.text.starts_with("record ")
+        || entry.text.starts_with("struct ")
+        || entry.text.starts_with("union ")
+    {
         let region = parse_record_region(&entry.text, &entry.children, entry.span)?;
         if matches!(region.completion, ConstructCompletionKind::Yield) {
             return Err(format!(
-                "{}:{}: `record yield` is expression-form only",
-                entry.span.line, entry.span.column
+                "{}:{}: `{} yield` is expression-form only",
+                entry.span.line,
+                entry.span.column,
+                region.kind.as_str()
             ));
         }
         return Ok(Some(Statement {
             kind: StatementKind::Record(region),
+            availability: Vec::new(),
+            forewords: Vec::new(),
+            cleanup_footers: Vec::new(),
+            span: entry.span,
+        }));
+    }
+
+    if entry.text.starts_with("array ") {
+        let region = parse_array_region(&entry.text, &entry.children, entry.span)?;
+        if matches!(region.completion, ConstructCompletionKind::Yield) {
+            return Err(format!(
+                "{}:{}: `array yield` is expression-form only",
+                entry.span.line, entry.span.column
+            ));
+        }
+        return Ok(Some(Statement {
+            kind: StatementKind::Array(region),
             availability: Vec::new(),
             forewords: Vec::new(),
             cleanup_footers: Vec::new(),
@@ -4014,7 +4249,7 @@ fn parse_record_yield_expression(
     attached: &[RawBlockEntry],
     span: Span,
 ) -> Result<Option<Expr>, String> {
-    if !text.starts_with("record ") {
+    if !text.starts_with("record ") && !text.starts_with("struct ") && !text.starts_with("union ") {
         return Ok(None);
     }
     if attached.is_empty() {
@@ -4023,11 +4258,31 @@ fn parse_record_yield_expression(
     let region = parse_record_region(text, attached, span)?;
     if !matches!(region.completion, ConstructCompletionKind::Yield) {
         return Err(format!(
-            "{}:{}: only `record yield` is valid in expression position",
-            span.line, span.column
+            "{}:{}: only `{} yield` is valid in expression position",
+            span.line,
+            span.column,
+            region.kind.as_str()
         ));
     }
     Ok(Some(Expr::RecordRegion(Box::new(region))))
+}
+
+fn parse_array_yield_expression(
+    text: &str,
+    attached: &[RawBlockEntry],
+    span: Span,
+) -> Result<Option<Expr>, String> {
+    if !text.starts_with("array ") || attached.is_empty() {
+        return Ok(None);
+    }
+    let region = parse_array_region(text, attached, span)?;
+    if !matches!(region.completion, ConstructCompletionKind::Yield) {
+        return Err(format!(
+            "{}:{}: only `array yield` is valid in expression position",
+            span.line, span.column
+        ));
+    }
+    Ok(Some(Expr::ArrayRegion(Box::new(region))))
 }
 
 fn parse_recycle_line(entry: &RawBlockEntry, loop_depth: usize) -> Result<RecycleLine, String> {
@@ -4299,9 +4554,15 @@ fn parse_record_region(
             span.line, span.column
         ));
     }
-    let Some(rest) = text.strip_prefix("record ") else {
+    let (kind, rest) = if let Some(rest) = text.strip_prefix("record ") {
+        (NominalFieldRegionKind::Record, rest)
+    } else if let Some(rest) = text.strip_prefix("struct ") {
+        (NominalFieldRegionKind::Struct, rest)
+    } else if let Some(rest) = text.strip_prefix("union ") {
+        (NominalFieldRegionKind::Union, rest)
+    } else {
         return Err(format!(
-            "{}:{}: malformed `record` header",
+            "{}:{}: malformed nominal field region header",
             span.line, span.column
         ));
     };
@@ -4319,8 +4580,10 @@ fn parse_record_region(
         "place" => ConstructCompletionKind::Place,
         _ => {
             return Err(format!(
-                "{}:{}: malformed `record` completion clause",
-                span.line, span.column
+                "{}:{}: malformed `{}` completion clause",
+                span.line,
+                span.column,
+                kind.as_str()
             ));
         }
     };
@@ -4329,8 +4592,10 @@ fn parse_record_region(
         ConstructCompletionKind::Yield => {
             if remainder.is_empty() {
                 return Err(format!(
-                    "{}:{}: `record yield` requires a record target",
-                    span.line, span.column
+                    "{}:{}: `{} yield` requires a target",
+                    span.line,
+                    span.column,
+                    kind.as_str()
                 ));
             }
             (remainder, None)
@@ -4338,16 +4603,20 @@ fn parse_record_region(
         ConstructCompletionKind::Deliver => {
             let arrow = find_top_level_token(remainder, "->").ok_or_else(|| {
                 format!(
-                    "{}:{}: `record deliver` requires `-> <name>`",
-                    span.line, span.column
+                    "{}:{}: `{} deliver` requires `-> <name>`",
+                    span.line,
+                    span.column,
+                    kind.as_str()
                 )
             })?;
             let target = remainder[..arrow].trim();
             let destination = remainder[arrow + 2..].trim();
             if target.is_empty() || !is_identifier(destination) {
                 return Err(format!(
-                    "{}:{}: malformed `record deliver` clause",
-                    span.line, span.column
+                    "{}:{}: malformed `{}` deliver clause",
+                    span.line,
+                    span.column,
+                    kind.as_str()
                 ));
             }
             (
@@ -4360,16 +4629,20 @@ fn parse_record_region(
         ConstructCompletionKind::Place => {
             let arrow = find_top_level_token(remainder, "->").ok_or_else(|| {
                 format!(
-                    "{}:{}: `record place` requires `-> <target>`",
-                    span.line, span.column
+                    "{}:{}: `{} place` requires `-> <target>`",
+                    span.line,
+                    span.column,
+                    kind.as_str()
                 )
             })?;
             let target = remainder[..arrow].trim();
             let destination = remainder[arrow + 2..].trim();
             if target.is_empty() || destination.is_empty() {
                 return Err(format!(
-                    "{}:{}: malformed `record place` clause",
-                    span.line, span.column
+                    "{}:{}: malformed `{}` place clause",
+                    span.line,
+                    span.column,
+                    kind.as_str()
                 ));
             }
             (
@@ -4383,11 +4656,14 @@ fn parse_record_region(
     let (target_text, base_text) = split_record_target_base_clause(target_clause);
     if target_text.is_empty() {
         return Err(format!(
-            "{}:{}: malformed `record` target clause",
-            span.line, span.column
+            "{}:{}: malformed `{}` target clause",
+            span.line,
+            span.column,
+            kind.as_str()
         ));
     }
     Ok(RecordRegion {
+        kind,
         completion,
         target: Box::new(parse_expression(target_text, &[], span)?),
         base: base_text
@@ -4398,7 +4674,7 @@ fn parse_record_region(
         default_modifier,
         lines: children
             .iter()
-            .map(parse_record_line)
+            .map(|line| parse_record_line(line, kind))
             .collect::<Result<Vec<_>, _>>()?,
         span,
     })
@@ -4440,15 +4716,179 @@ fn parse_construct_line(entry: &RawBlockEntry) -> Result<ConstructLine, String> 
     })
 }
 
-fn parse_record_line(entry: &RawBlockEntry) -> Result<ConstructLine, String> {
+fn parse_record_line(
+    entry: &RawBlockEntry,
+    kind: NominalFieldRegionKind,
+) -> Result<ConstructLine, String> {
     let line = parse_construct_line(entry)?;
-    if line.name == "payload" {
+    if matches!(
+        kind,
+        NominalFieldRegionKind::Record | NominalFieldRegionKind::Struct
+    ) && line.name == "payload"
+    {
         return Err(format!(
-            "{}:{}: `record` does not accept `payload = ...` contributions",
-            entry.span.line, entry.span.column
+            "{}:{}: `{}` does not accept `payload = ...` contributions",
+            entry.span.line,
+            entry.span.column,
+            kind.as_str()
         ));
     }
     Ok(line)
+}
+
+fn parse_array_region(
+    text: &str,
+    children: &[RawBlockEntry],
+    span: Span,
+) -> Result<ArrayRegion, String> {
+    if children.is_empty() {
+        return Err(format!(
+            "{}:{}: `array` requires an indented region body",
+            span.line, span.column
+        ));
+    }
+    let Some(rest) = text.strip_prefix("array ") else {
+        return Err(format!(
+            "{}:{}: malformed `array` header",
+            span.line, span.column
+        ));
+    };
+    let (header, default_modifier) =
+        parse_headed_modifier_suffix(rest, HeadedModifierMode::Construct, span)?;
+    let Some((completion_text, remainder)) = split_first_token(&header) else {
+        return Err(format!(
+            "{}:{}: malformed `array` header",
+            span.line, span.column
+        ));
+    };
+    let completion = match completion_text {
+        "yield" => ConstructCompletionKind::Yield,
+        "deliver" => ConstructCompletionKind::Deliver,
+        "place" => ConstructCompletionKind::Place,
+        _ => {
+            return Err(format!(
+                "{}:{}: malformed `array` completion clause",
+                span.line, span.column
+            ));
+        }
+    };
+    let remainder = remainder.trim();
+    let (target_clause, destination) = match completion {
+        ConstructCompletionKind::Yield => {
+            if remainder.is_empty() {
+                return Err(format!(
+                    "{}:{}: `array yield` requires an array target",
+                    span.line, span.column
+                ));
+            }
+            (remainder, None)
+        }
+        ConstructCompletionKind::Deliver => {
+            let arrow = find_top_level_token(remainder, "->").ok_or_else(|| {
+                format!(
+                    "{}:{}: `array deliver` requires `-> <name>`",
+                    span.line, span.column
+                )
+            })?;
+            let target = remainder[..arrow].trim();
+            let destination = remainder[arrow + 2..].trim();
+            if target.is_empty() || !is_identifier(destination) {
+                return Err(format!(
+                    "{}:{}: malformed `array deliver` clause",
+                    span.line, span.column
+                ));
+            }
+            (
+                target,
+                Some(ConstructDestination::Deliver {
+                    name: destination.to_string(),
+                }),
+            )
+        }
+        ConstructCompletionKind::Place => {
+            let arrow = find_top_level_token(remainder, "->").ok_or_else(|| {
+                format!(
+                    "{}:{}: `array place` requires `-> <target>`",
+                    span.line, span.column
+                )
+            })?;
+            let target = remainder[..arrow].trim();
+            let destination = remainder[arrow + 2..].trim();
+            if target.is_empty() || destination.is_empty() {
+                return Err(format!(
+                    "{}:{}: malformed `array place` clause",
+                    span.line, span.column
+                ));
+            }
+            (
+                target,
+                Some(ConstructDestination::Place {
+                    target: parse_assign_target(destination)?,
+                }),
+            )
+        }
+    };
+    let (target_text, base_text) = split_record_target_base_clause(target_clause);
+    if target_text.is_empty() {
+        return Err(format!(
+            "{}:{}: malformed `array` target clause",
+            span.line, span.column
+        ));
+    }
+    Ok(ArrayRegion {
+        completion,
+        target: Box::new(parse_expression(target_text, &[], span)?),
+        base: base_text
+            .map(|base| parse_expression(base, &[], span))
+            .transpose()?
+            .map(Box::new),
+        destination,
+        default_modifier,
+        lines: children
+            .iter()
+            .map(parse_array_line)
+            .collect::<Result<Vec<_>, _>>()?,
+        span,
+    })
+}
+
+fn parse_array_line(entry: &RawBlockEntry) -> Result<ArrayLine, String> {
+    let (text, modifier) =
+        parse_headed_modifier_suffix(&entry.text, HeadedModifierMode::Construct, entry.span)?;
+    let Some(index_text) = text.strip_prefix('[').and_then(|rest| {
+        rest.split_once(']')
+            .map(|(head, tail)| (head.trim(), tail.trim()))
+    }) else {
+        return Err(format!(
+            "{}:{}: malformed `array` contribution line",
+            entry.span.line, entry.span.column
+        ));
+    };
+    let (index_text, remainder) = index_text;
+    let Some(value_text) = remainder.strip_prefix('=').map(str::trim) else {
+        return Err(format!(
+            "{}:{}: malformed `array` contribution line",
+            entry.span.line, entry.span.column
+        ));
+    };
+    let index = index_text.parse::<usize>().map_err(|_| {
+        format!(
+            "{}:{}: malformed `array` contribution line",
+            entry.span.line, entry.span.column
+        )
+    })?;
+    if value_text.is_empty() {
+        return Err(format!(
+            "{}:{}: malformed `array` contribution line",
+            entry.span.line, entry.span.column
+        ));
+    }
+    Ok(ArrayLine {
+        index,
+        value: parse_expression(value_text, &entry.children, entry.span)?,
+        modifier,
+        span: entry.span,
+    })
 }
 
 fn parse_memory_spec_decl(
@@ -4610,6 +5050,9 @@ fn parse_expression(text: &str, attached: &[RawBlockEntry], span: Span) -> Resul
         return Ok(expr);
     }
     if let Some(expr) = parse_record_yield_expression(trimmed, attached, span)? {
+        return Ok(expr);
+    }
+    if let Some(expr) = parse_array_yield_expression(trimmed, attached, span)? {
         return Ok(expr);
     }
     if let Some(rest) = trimmed.strip_prefix("match ") {
@@ -4889,15 +5332,9 @@ fn parse_unary_expression(text: &str) -> Result<Expr, String> {
     }
     if let Some(rest) = text.strip_prefix('&') {
         let rest = rest.trim_start();
-        if let Some(rest) = strip_keyword_prefix(rest, "mut") {
+        if let Some((op, rest)) = parse_capability_unary(rest) {
             return Ok(Expr::Unary {
-                op: UnaryOp::BorrowMut,
-                expr: Box::new(parse_unary_expression(rest)?),
-            });
-        }
-        if !rest.is_empty() {
-            return Ok(Expr::Unary {
-                op: UnaryOp::BorrowRead,
+                op,
                 expr: Box::new(parse_unary_expression(rest)?),
             });
         }
@@ -4983,6 +5420,10 @@ fn parse_literal_expression(text: &str) -> Option<Expr> {
     match trimmed {
         "true" => Some(Expr::BoolLiteral { value: true }),
         "false" => Some(Expr::BoolLiteral { value: false }),
+        _ if is_float_literal(trimmed) => Some(Expr::FloatLiteral {
+            text: trimmed.to_string(),
+            kind: parse_float_literal_kind(trimmed),
+        }),
         _ if is_int_literal(trimmed) => Some(Expr::IntLiteral {
             text: trimmed.to_string(),
         }),
@@ -5325,13 +5766,15 @@ fn parse_collection_literal(text: &str) -> Result<Option<Expr>, String> {
 
 fn parse_qualified_phrase(text: &str) -> Result<Option<Expr>, String> {
     let positions = find_top_level_token_positions(text, "::");
-    if positions.len() != 2 {
+    if positions.len() < 2 {
         return Ok(None);
     }
 
-    let subject_text = text[..positions[0]].trim();
-    let args_text = text[positions[0] + 2..positions[1]].trim();
-    let qualifier = text[positions[1] + 2..].trim();
+    let first = positions[0];
+    let last = *positions.last().expect("len checked above");
+    let subject_text = text[..first].trim();
+    let args_text = text[first + 2..last].trim();
+    let qualifier = text[last + 2..].trim();
     if subject_text.is_empty() || qualifier.is_empty() || subject_text_defers_to_unary(subject_text)
     {
         return Ok(None);
@@ -5669,35 +6112,32 @@ fn split_member_access(text: &str) -> Option<(&str, &str)> {
     Some((base, member))
 }
 
+fn assign_target_from_expr(expr: Expr) -> Result<AssignTarget, String> {
+    match expr {
+        Expr::Path { segments } if segments.len() == 1 => Ok(AssignTarget::Name {
+            text: segments[0].clone(),
+        }),
+        Expr::Unary {
+            op: UnaryOp::Deref,
+            expr,
+        } => Ok(AssignTarget::Deref { expr: *expr }),
+        Expr::MemberAccess { expr, member } => Ok(AssignTarget::MemberAccess {
+            target: Box::new(assign_target_from_expr(*expr)?),
+            member,
+        }),
+        Expr::Index { expr, index } => Ok(AssignTarget::Index {
+            target: Box::new(assign_target_from_expr(*expr)?),
+            index: *index,
+        }),
+        Expr::GenericApply { expr, .. } => assign_target_from_expr(*expr),
+        other => Err(format!("unsupported assignment target `{other:?}`")),
+    }
+}
+
 fn parse_assign_target(text: &str) -> Result<AssignTarget, String> {
     let trimmed = text.trim();
-    if let Some((base, inside)) = split_trailing_bracket_suffix(trimmed) {
-        let base = base.trim();
-        if !base.is_empty()
-            && should_parse_index_brackets(inside)
-            && let Ok(index) = parse_expression_core(inside.trim())
-        {
-            return Ok(AssignTarget::Index {
-                target: Box::new(parse_assign_target(base)?),
-                index,
-            });
-        }
-    }
-
-    if let Some((base, member)) = split_member_access(trimmed) {
-        return Ok(AssignTarget::MemberAccess {
-            target: Box::new(parse_assign_target(base)?),
-            member: member.to_string(),
-        });
-    }
-
-    if is_identifier(trimmed) {
-        return Ok(AssignTarget::Name {
-            text: trimmed.to_string(),
-        });
-    }
-
-    Err(format!("unsupported assignment target `{trimmed}`"))
+    let expr = parse_expression_core(trimmed)?;
+    assign_target_from_expr(expr).map_err(|_| format!("unsupported assignment target `{trimmed}`"))
 }
 
 fn find_top_level_binary_op(text: &str, ops: &[BinaryOpSpec]) -> Option<(usize, BinaryOp, usize)> {
@@ -5787,6 +6227,17 @@ fn strip_keyword_prefix<'a>(text: &'a str, keyword: &str) -> Option<&'a str> {
         return None;
     }
     Some(rest.trim_start())
+}
+
+fn parse_capability_unary(text: &str) -> Option<(UnaryOp, &str)> {
+    [
+        ("read", UnaryOp::CapabilityRead),
+        ("edit", UnaryOp::CapabilityEdit),
+        ("take", UnaryOp::CapabilityTake),
+        ("hold", UnaryOp::CapabilityHold),
+    ]
+    .into_iter()
+    .find_map(|(keyword, op)| strip_keyword_prefix(text, keyword).map(|rest| (op, rest)))
 }
 
 fn strip_group_parens(text: &str) -> Option<&str> {
@@ -5976,6 +6427,14 @@ fn find_top_level_dot_positions(text: &str) -> Vec<usize> {
         .filter(|index| {
             !matches!(text[..*index].chars().next_back(), Some('.'))
                 && !matches!(text[*index + 1..].chars().next(), Some('.'))
+                && !matches!(
+                    (
+                        text[..*index].chars().next_back(),
+                        text[*index + 1..].chars().next()
+                    ),
+                    (Some(left), Some(right))
+                        if left.is_ascii_digit() && right.is_ascii_digit()
+                )
         })
         .collect()
 }
@@ -6305,15 +6764,22 @@ fn find_top_level_keyword(text: &str, keyword: &str) -> Option<usize> {
 }
 
 fn parse_field_decl(trimmed: &str, span: Span, forewords: Vec<ForewordApp>) -> Option<FieldDecl> {
-    let (name, ty) = trimmed.split_once(':')?;
+    let (name, ty_text) = trimmed.split_once(':')?;
     let name = name.trim();
-    let ty = ty.trim();
-    if !is_identifier(name) || ty.is_empty() {
+    let ty_text = ty_text.trim();
+    if !is_identifier(name) || ty_text.is_empty() {
         return None;
     }
+    let (ty_text, bit_width) = if let Some((ty, width_text)) = ty_text.rsplit_once(" bits ") {
+        let width = width_text.trim().parse::<u16>().ok()?;
+        (ty.trim(), Some(width))
+    } else {
+        (ty_text, None)
+    };
     Some(FieldDecl {
         name: name.to_string(),
-        ty: parse_surface_type(ty).ok()?,
+        ty: parse_surface_type(ty_text).ok()?,
+        bit_width,
         forewords,
         span,
     })
@@ -6647,6 +7113,7 @@ fn is_builtin_foreword_name(name: &str) -> bool {
             | "boundary"
             | "stage"
             | "chain"
+            | "unsafe"
     )
 }
 
@@ -6677,6 +7144,9 @@ fn symbol_foreword_target(kind: SymbolKind) -> ForewordTarget {
     match kind {
         SymbolKind::Fn => ForewordTarget::Function,
         SymbolKind::Record => ForewordTarget::Record,
+        SymbolKind::Struct => ForewordTarget::Record,
+        SymbolKind::Union => ForewordTarget::Record,
+        SymbolKind::Array => ForewordTarget::Record,
         SymbolKind::Object => ForewordTarget::Object,
         SymbolKind::Owner => ForewordTarget::Owner,
         SymbolKind::Enum => ForewordTarget::Enum,
@@ -6739,6 +7209,14 @@ fn foreword_target_allows(target: ForewordTarget, foreword_name: &str) -> bool {
             ForewordTarget::Function | ForewordTarget::ImplMethod
         ),
         "stage" => matches!(
+            target,
+            ForewordTarget::Function
+                | ForewordTarget::TraitMethod
+                | ForewordTarget::ImplMethod
+                | ForewordTarget::Behavior
+                | ForewordTarget::System
+        ),
+        "unsafe" => matches!(
             target,
             ForewordTarget::Function
                 | ForewordTarget::TraitMethod
@@ -6863,6 +7341,7 @@ fn validate_foreword_list(
                 }
                 saw_stage = true;
             }
+            "unsafe" => validate_unsafe_payload(foreword)?,
             _ => {}
         }
     }
@@ -7064,6 +7543,22 @@ fn validate_stage_payload(foreword: &ForewordApp) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_unsafe_payload(foreword: &ForewordApp) -> Result<(), String> {
+    match foreword.args.as_slice() {
+        [
+            ForewordArg {
+                name: None,
+                typed_value: ForewordArgValue::Str(value),
+                ..
+            },
+        ] if !value.is_empty() => Ok(()),
+        _ => Err(format!(
+            "{}:{}: invalid payload for foreword `#unsafe`: expected exactly one non-empty string trace id",
+            foreword.span.line, foreword.span.column
+        )),
+    }
+}
+
 fn validate_chain_payload(foreword: &ForewordApp) -> Result<(), String> {
     for arg in &foreword.args {
         let Some(key) = arg.name.as_deref() else {
@@ -7212,7 +7707,7 @@ fn validate_test_contract(symbol: &SymbolDecl, foreword: &ForewordApp) -> Result
 
 fn validate_boundary_signature(symbol: &SymbolDecl, target: &str) -> Result<(), String> {
     for param in &symbol.params {
-        if matches!(param.mode, Some(ParamMode::Edit)) || param.ty.is_mut_ref() {
+        if matches!(param.mode, Some(ParamMode::Edit | ParamMode::Hold)) || param.ty.is_mut_ref() {
             return Err(format!(
                 "{}:{}: `#boundary` target `{target}` does not allow mutable borrows",
                 symbol.span.line, symbol.span.column
@@ -7264,6 +7759,66 @@ pub struct BuiltinTypeInfo {
 const BUILTIN_TYPE_INFOS: &[BuiltinTypeInfo] = &[
     BuiltinTypeInfo {
         name: "Int",
+        ownership: BuiltinOwnershipClass::Copy,
+        boundary_unsafe: false,
+    },
+    BuiltinTypeInfo {
+        name: "I8",
+        ownership: BuiltinOwnershipClass::Copy,
+        boundary_unsafe: false,
+    },
+    BuiltinTypeInfo {
+        name: "U8",
+        ownership: BuiltinOwnershipClass::Copy,
+        boundary_unsafe: false,
+    },
+    BuiltinTypeInfo {
+        name: "I16",
+        ownership: BuiltinOwnershipClass::Copy,
+        boundary_unsafe: false,
+    },
+    BuiltinTypeInfo {
+        name: "U16",
+        ownership: BuiltinOwnershipClass::Copy,
+        boundary_unsafe: false,
+    },
+    BuiltinTypeInfo {
+        name: "I32",
+        ownership: BuiltinOwnershipClass::Copy,
+        boundary_unsafe: false,
+    },
+    BuiltinTypeInfo {
+        name: "U32",
+        ownership: BuiltinOwnershipClass::Copy,
+        boundary_unsafe: false,
+    },
+    BuiltinTypeInfo {
+        name: "I64",
+        ownership: BuiltinOwnershipClass::Copy,
+        boundary_unsafe: false,
+    },
+    BuiltinTypeInfo {
+        name: "U64",
+        ownership: BuiltinOwnershipClass::Copy,
+        boundary_unsafe: false,
+    },
+    BuiltinTypeInfo {
+        name: "ISize",
+        ownership: BuiltinOwnershipClass::Copy,
+        boundary_unsafe: false,
+    },
+    BuiltinTypeInfo {
+        name: "USize",
+        ownership: BuiltinOwnershipClass::Copy,
+        boundary_unsafe: false,
+    },
+    BuiltinTypeInfo {
+        name: "F32",
+        ownership: BuiltinOwnershipClass::Copy,
+        boundary_unsafe: false,
+    },
+    BuiltinTypeInfo {
+        name: "F64",
         ownership: BuiltinOwnershipClass::Copy,
         boundary_unsafe: false,
     },
@@ -7398,16 +7953,23 @@ fn validate_statement_foreword_contract(
 ) -> Result<(), String> {
     for statement in statements {
         for foreword in &statement.forewords {
-            if foreword.path.len() != 1 || foreword.name != "chain" {
-                return Err(format!(
-                    "{}:{}: `#{}` is not a valid statement-level contract",
-                    foreword.span.line, foreword.span.column, foreword.name
-                ));
+            match (foreword.path.len(), foreword.name.as_str()) {
+                (1, "chain") => validate_chain_payload(foreword)?,
+                (1, "unsafe") => validate_unsafe_payload(foreword)?,
+                _ => {
+                    return Err(format!(
+                        "{}:{}: `#{}` is not a valid statement-level contract",
+                        foreword.span.line, foreword.span.column, foreword.name
+                    ));
+                }
             }
-            validate_chain_payload(foreword)?;
         }
-        if !statement.forewords.is_empty() && !statement_is_chain_target(statement) {
-            let foreword = &statement.forewords[0];
+        if let Some(foreword) = statement
+            .forewords
+            .iter()
+            .find(|foreword| foreword.name == "chain")
+            && !statement_is_chain_target(statement)
+        {
             return Err(format!(
                 "{}:{}: `#chain` can only target chain statements",
                 foreword.span.line, foreword.span.column
@@ -7465,6 +8027,9 @@ fn validate_statement_phrase_contract(statements: &[Statement]) -> Result<(), St
                     validate_expr_phrase_contract(value, statement.span, false)?;
                 }
             }
+            StatementKind::Reclaim { expr } => {
+                validate_expr_phrase_contract(expr, statement.span, false)?;
+            }
             StatementKind::If {
                 condition,
                 then_branch,
@@ -7484,9 +8049,25 @@ fn validate_statement_phrase_contract(statements: &[Statement]) -> Result<(), St
                 validate_expr_phrase_contract(iterable, statement.span, false)?;
                 validate_statement_phrase_contract(body)?;
             }
-            StatementKind::Defer { expr } => {
-                validate_expr_phrase_contract(expr, statement.span, false)?;
+            StatementKind::Array(region) => {
+                validate_expr_phrase_contract(&region.target, statement.span, false)?;
+                if let Some(base) = &region.base {
+                    validate_expr_phrase_contract(base, statement.span, false)?;
+                }
+                validate_headed_modifier_phrase_contract(
+                    region.default_modifier.as_ref(),
+                    statement.span,
+                )?;
+                for line in &region.lines {
+                    validate_expr_phrase_contract(&line.value, line.span, false)?;
+                    validate_headed_modifier_phrase_contract(line.modifier.as_ref(), line.span)?;
+                }
             }
+            StatementKind::Defer { action } => match action {
+                DeferAction::Expr { expr } | DeferAction::Reclaim { expr } => {
+                    validate_expr_phrase_contract(expr, statement.span, false)?;
+                }
+            },
             StatementKind::Assign { value, .. } => {
                 validate_expr_phrase_contract(value, statement.span, false)?;
             }
@@ -7591,6 +8172,7 @@ fn validate_expr_phrase_contract(
         Expr::Path { .. }
         | Expr::BoolLiteral { .. }
         | Expr::IntLiteral { .. }
+        | Expr::FloatLiteral { .. }
         | Expr::StrLiteral { .. } => {}
         Expr::Pair { left, right } => {
             validate_expr_phrase_contract(left, span, false)?;
@@ -7608,6 +8190,20 @@ fn validate_expr_phrase_contract(
             }
         }
         Expr::RecordRegion(region) => {
+            validate_expr_phrase_contract(&region.target, region.span, false)?;
+            if let Some(base) = &region.base {
+                validate_expr_phrase_contract(base, region.span, false)?;
+            }
+            validate_headed_modifier_phrase_contract(
+                region.default_modifier.as_ref(),
+                region.span,
+            )?;
+            for line in &region.lines {
+                validate_expr_phrase_contract(&line.value, line.span, false)?;
+                validate_headed_modifier_phrase_contract(line.modifier.as_ref(), line.span)?;
+            }
+        }
+        Expr::ArrayRegion(region) => {
             validate_expr_phrase_contract(&region.target, region.span, false)?;
             if let Some(base) = &region.base {
                 validate_expr_phrase_contract(base, region.span, false)?;
@@ -7926,6 +8522,14 @@ fn validate_symbol_tuple_contract(symbol: &SymbolDecl) -> Result<(), String> {
                 validate_tuple_type_contract(&field.ty, field.span, "field type")?;
             }
         }
+        SymbolBody::Struct { fields } | SymbolBody::Union { fields } => {
+            for field in fields {
+                validate_tuple_type_contract(&field.ty, field.span, "field type")?;
+            }
+        }
+        SymbolBody::Array { element_ty, .. } => {
+            validate_tuple_type_contract(element_ty, symbol.span, "array element type")?;
+        }
         SymbolBody::Object { fields, methods } => {
             for field in fields {
                 validate_tuple_type_contract(&field.ty, field.span, "field type")?;
@@ -7998,6 +8602,9 @@ fn validate_statement_block_tuple_contract(statements: &[Statement]) -> Result<(
                     validate_expr_tuple_contract(value, statement.span)?;
                 }
             }
+            StatementKind::Reclaim { expr } => {
+                validate_expr_tuple_contract(expr, statement.span)?;
+            }
             StatementKind::If {
                 condition,
                 then_branch,
@@ -8017,7 +8624,10 @@ fn validate_statement_block_tuple_contract(statements: &[Statement]) -> Result<(
                 validate_expr_tuple_contract(iterable, statement.span)?;
                 validate_statement_block_tuple_contract(body)?;
             }
-            StatementKind::Defer { expr } | StatementKind::Expr { expr } => {
+            StatementKind::Defer {
+                action: DeferAction::Expr { expr } | DeferAction::Reclaim { expr },
+            }
+            | StatementKind::Expr { expr } => {
                 validate_expr_tuple_contract(expr, statement.span)?;
             }
             StatementKind::Assign { target, value, .. } => {
@@ -8074,6 +8684,23 @@ fn validate_statement_block_tuple_contract(statements: &[Statement]) -> Result<(
                     validate_headed_modifier_tuple_contract(line.modifier.as_ref(), line.span)?;
                 }
             }
+            StatementKind::Array(region) => {
+                validate_expr_tuple_contract(&region.target, region.span)?;
+                if let Some(base) = &region.base {
+                    validate_expr_tuple_contract(base, region.span)?;
+                }
+                validate_headed_modifier_tuple_contract(
+                    region.default_modifier.as_ref(),
+                    region.span,
+                )?;
+                if let Some(ConstructDestination::Place { target }) = &region.destination {
+                    validate_assign_target_tuple_contract(target, region.span)?;
+                }
+                for line in &region.lines {
+                    validate_expr_tuple_contract(&line.value, line.span)?;
+                    validate_headed_modifier_tuple_contract(line.modifier.as_ref(), line.span)?;
+                }
+            }
             StatementKind::Construct(region) => {
                 validate_expr_tuple_contract(&region.target, region.span)?;
                 validate_headed_modifier_tuple_contract(
@@ -8106,6 +8733,7 @@ fn validate_expr_tuple_contract(expr: &Expr, span: Span) -> Result<(), String> {
         Expr::Path { .. }
         | Expr::BoolLiteral { .. }
         | Expr::IntLiteral { .. }
+        | Expr::FloatLiteral { .. }
         | Expr::StrLiteral { .. } => Ok(()),
         Expr::Pair { left, right } => {
             validate_expr_tuple_contract(left, span)?;
@@ -8130,6 +8758,21 @@ fn validate_expr_tuple_contract(expr: &Expr, span: Span) -> Result<(), String> {
                 validate_expr_tuple_contract(base, region.span)?;
             }
             validate_headed_modifier_tuple_contract(region.default_modifier.as_ref(), region.span)?;
+            for line in &region.lines {
+                validate_expr_tuple_contract(&line.value, line.span)?;
+                validate_headed_modifier_tuple_contract(line.modifier.as_ref(), line.span)?;
+            }
+            Ok(())
+        }
+        Expr::ArrayRegion(region) => {
+            validate_expr_tuple_contract(&region.target, region.span)?;
+            if let Some(base) = &region.base {
+                validate_expr_tuple_contract(base, region.span)?;
+            }
+            validate_headed_modifier_tuple_contract(region.default_modifier.as_ref(), region.span)?;
+            if let Some(ConstructDestination::Place { target }) = &region.destination {
+                validate_assign_target_tuple_contract(target, region.span)?;
+            }
             for line in &region.lines {
                 validate_expr_tuple_contract(&line.value, line.span)?;
                 validate_headed_modifier_tuple_contract(line.modifier.as_ref(), line.span)?;
@@ -8260,6 +8903,7 @@ fn validate_headed_modifier_tuple_contract(
 fn validate_assign_target_tuple_contract(target: &AssignTarget, span: Span) -> Result<(), String> {
     match target {
         AssignTarget::Name { .. } => Ok(()),
+        AssignTarget::Deref { .. } => Ok(()),
         AssignTarget::MemberAccess { target, member } => {
             validate_assign_target_tuple_contract(target, span)?;
             if is_numeric_member_selector(member) {
@@ -8575,6 +9219,30 @@ fn is_int_literal(value: &str) -> bool {
     !value.is_empty() && value.chars().all(|ch| ch.is_ascii_digit())
 }
 
+fn parse_float_literal_kind(value: &str) -> FloatLiteralKind {
+    let trimmed = value.trim();
+    if trimmed.ends_with("f32") {
+        FloatLiteralKind::F32
+    } else {
+        FloatLiteralKind::F64
+    }
+}
+
+fn is_float_literal(value: &str) -> bool {
+    let trimmed = value.trim();
+    let core = trimmed
+        .strip_suffix("f32")
+        .or_else(|| trimmed.strip_suffix("f64"))
+        .unwrap_or(trimmed);
+    let Some((left, right)) = core.split_once('.') else {
+        return false;
+    };
+    !left.is_empty()
+        && !right.is_empty()
+        && left.chars().all(|ch| ch.is_ascii_digit())
+        && right.chars().all(|ch| ch.is_ascii_digit())
+}
+
 fn is_string_literal(value: &str) -> bool {
     if !value.starts_with('"') || !value.ends_with('"') || value.len() < 2 {
         return false;
@@ -8612,11 +9280,12 @@ mod tests {
     use super::freeze::{FROZEN_AST_NODE_KINDS, FROZEN_TOKEN_KINDS};
     use super::{
         AssignTarget, BUILTIN_TYPE_INFOS, BinaryOp, ChainConnector, ChainIntroducer, ChainStep,
-        DirectiveKind, Expr, ForewordAliasKind, ForewordApp, ForewordArg, ForewordDefinitionTarget,
-        HeaderAttachment, MatchPattern, OpaqueBoundaryPolicy, OpaqueOwnershipPolicy,
-        OpaqueTypePolicy, ParamMode, PhraseArg, QualifiedPhraseQualifierKind, ShackleDeclKind,
-        Statement, StatementKind, SurfaceTraitRef, SurfaceType, SurfaceWhereClause, SymbolBody,
-        SymbolKind, UnaryOp, builtin_type_info, parse_module,
+        DeferAction, DirectiveKind, Expr, ForewordAliasKind, ForewordApp, ForewordArg,
+        ForewordDefinitionTarget, HeaderAttachment, MatchPattern, OpaqueBoundaryPolicy,
+        OpaqueOwnershipPolicy, OpaqueTypePolicy, ParamMode, PhraseArg,
+        QualifiedPhraseQualifierKind, ShackleDeclKind, Statement, StatementKind, SurfaceTraitRef,
+        SurfaceType, SurfaceWhereClause, SymbolBody, SymbolKind, UnaryOp, builtin_type_info,
+        parse_module,
     };
 
     fn expr_is_path(expr: &Expr, name: &str) -> bool {
@@ -9566,6 +10235,40 @@ mod tests {
     }
 
     #[test]
+    fn parse_module_accepts_decimal_float_literals_in_binary_expressions() {
+        let parsed =
+            parse_module("fn main() -> F64:\n    let value = 1.5 + 2.5\n    return value\n")
+                .expect("decimal float literals should parse without tuple-member access");
+
+        match &parsed.symbols[0].statements[0].kind {
+            StatementKind::Let { value, .. } => match value {
+                Expr::Binary { left, right, .. } => {
+                    assert!(matches!(left.as_ref(), Expr::FloatLiteral { .. }));
+                    assert!(matches!(right.as_ref(), Expr::FloatLiteral { .. }));
+                }
+                other => panic!("expected binary float expression, got {other:?}"),
+            },
+            other => panic!("expected float let binding, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_module_accepts_member_access_plus_decimal_float_literal() {
+        parse_module(
+            "struct Vec2:\n    x: F32\n    y: F32\nfn main() -> F64:\n    let point = Vec2 :: x = 1.5f32, y = 2.5f32 :: call\n    let sum = (F64 :: point.x :: call) + 2.5\n    return sum\n",
+        )
+        .expect("member access and decimal float literal should parse together");
+    }
+
+    #[test]
+    fn parse_module_accepts_nested_qualified_phrase_inside_named_arg() {
+        parse_module(
+            "struct Flags:\n    mask: U32 bits 3\nfn main() -> Int:\n    let flags = Flags :: mask = U32 :: 3 :: call :: call\n    return Int :: flags.mask :: call\n",
+        )
+        .expect("nested qualified phrases inside named args should parse");
+    }
+
+    #[test]
     fn parse_module_accepts_exact_pair_destructuring_in_let_and_for_statements() {
         let parsed = parse_module(
             "fn main() -> Int:\n    let (left, right) = pair\n    for (first, second) in pairs:\n        return first\n    return 0\n",
@@ -9613,7 +10316,9 @@ mod tests {
         assert_eq!(statements.len(), 7);
 
         match &statements[0].kind {
-            StatementKind::Defer { expr } => match expr {
+            StatementKind::Defer {
+                action: DeferAction::Expr { expr },
+            } => match expr {
                 Expr::QualifiedPhrase {
                     subject,
                     args,
@@ -10244,7 +10949,7 @@ mod tests {
             "    value: Int\n",
             "\n",
             "create Session [Counter] context: SessionCtx scope-exit:\n",
-            "    done: when false hold [Counter]\n",
+            "    done: when false retain [Counter]\n",
             "\n",
             "fn main() -> Int:\n",
             "    return 0\n",
@@ -10423,7 +11128,7 @@ mod tests {
     #[test]
     fn parse_module_collects_assignment_targets() {
         let parsed = parse_module(
-            "fn main() -> Int:\n    self.tick.value = self.tick.value + 1\n    xs[1] = 9\n    xs[i] += 3\n    return 0\n",
+            "fn main() -> Int:\n    self.tick.value = self.tick.value + 1\n    xs[1] = 9\n    value += 3\n    *held = 7\n    (*held).value = 4\n    return 0\n",
         )
         .expect("parse should pass");
 
@@ -10456,23 +11161,41 @@ mod tests {
         }
         match &statements[2].kind {
             StatementKind::Assign { target, .. } => match target {
-                AssignTarget::Index { target, index } => {
-                    assert!(matches!(
-                        target.as_ref(),
-                        AssignTarget::Name { text } if text == "xs"
-                    ));
-                    assert!(expr_is_path(index, "i"));
+                AssignTarget::Name { text } => {
+                    assert_eq!(text, "value");
                 }
-                other => panic!("expected indexed compound-assignment target, got {other:?}"),
+                other => panic!("expected named compound-assignment target, got {other:?}"),
             },
             other => panic!("expected third assignment statement, got {other:?}"),
+        }
+        match &statements[3].kind {
+            StatementKind::Assign { target, .. } => match target {
+                AssignTarget::Deref { expr } => {
+                    assert!(expr_is_path(expr, "held"));
+                }
+                other => panic!("expected deref assignment target, got {other:?}"),
+            },
+            other => panic!("expected fourth assignment statement, got {other:?}"),
+        }
+        match &statements[4].kind {
+            StatementKind::Assign { target, .. } => match target {
+                AssignTarget::MemberAccess { target, member } => {
+                    assert_eq!(member, "value");
+                    assert!(matches!(
+                        target.as_ref(),
+                        AssignTarget::Deref { expr } if expr_is_path(expr, "held")
+                    ));
+                }
+                other => panic!("expected deref member assignment target, got {other:?}"),
+            },
+            other => panic!("expected fifth assignment statement, got {other:?}"),
         }
     }
 
     #[test]
-    fn parse_module_collects_borrow_and_deref_expressions() {
+    fn parse_module_collects_capability_and_deref_expressions() {
         let parsed = parse_module(
-            "fn main() -> Int:\n    let local_x = 1\n    let mut local_y = 2\n    let x_ref = &local_x\n    let y_mut = &mut local_y\n    let sum = *x_ref + *y_mut\n    return sum\n",
+            "fn main() -> Int:\n    let local_x = 1\n    let mut local_y = 2\n    let x_ref = &read local_x\n    let y_cap = &edit local_y\n    let sum = *x_ref + *y_cap\n    return sum\n",
         )
         .expect("parse should pass");
 
@@ -10483,7 +11206,7 @@ mod tests {
                 assert!(matches!(
                     value,
                     Expr::Unary {
-                        op: UnaryOp::BorrowRead,
+                        op: UnaryOp::CapabilityRead,
                         expr
                     } if matches!(
                         expr.as_ref(),
@@ -10496,11 +11219,11 @@ mod tests {
 
         match &statements[3].kind {
             StatementKind::Let { name, value, .. } => {
-                assert_eq!(name, "y_mut");
+                assert_eq!(name, "y_cap");
                 assert!(matches!(
                     value,
                     Expr::Unary {
-                        op: UnaryOp::BorrowMut,
+                        op: UnaryOp::CapabilityEdit,
                         expr
                     } if matches!(
                         expr.as_ref(),
@@ -10536,13 +11259,41 @@ mod tests {
                             expr
                         } if matches!(
                             expr.as_ref(),
-                            expr if expr_is_path(expr, "y_mut")
+                            expr if expr_is_path(expr, "y_cap")
                         )
                     )
                 ));
             }
             other => panic!("expected sum let, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_module_collects_reclaim_statement() {
+        let parsed = parse_module(
+            "fn main() -> Int:\n    let mut local = 1\n    let held = &hold local\n    reclaim held\n    return 0\n",
+        )
+        .expect("reclaim should parse");
+
+        assert!(matches!(
+            parsed.symbols[0].statements[2].kind,
+            StatementKind::Reclaim { .. }
+        ));
+    }
+
+    #[test]
+    fn parse_module_collects_deferred_reclaim_statement() {
+        let parsed = parse_module(
+            "fn main() -> Int:\n    let mut local = 1\n    let held = &hold local\n    defer reclaim held\n    return 0\n",
+        )
+        .expect("defer reclaim should parse");
+
+        assert!(matches!(
+            parsed.symbols[0].statements[2].kind,
+            StatementKind::Defer {
+                action: DeferAction::Reclaim { .. }
+            }
+        ));
     }
 
     #[test]

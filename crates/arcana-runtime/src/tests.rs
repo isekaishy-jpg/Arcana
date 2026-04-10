@@ -5,27 +5,29 @@ use super::{
     ParsedAssignTarget, ParsedCleanupFooter, ParsedExpr, ParsedPhraseArg,
     ParsedPhraseQualifierKind, ParsedStmt, RuntimeCallArg, RuntimeEntrypointPlan,
     RuntimeExecutionState, RuntimeFrameArenaHandle, RuntimeFrameArenaPolicy,
-    RuntimeFrameArenaState, RuntimeFrameRecyclePolicy, RuntimeHost, RuntimeIntrinsic,
-    RuntimeMemoryHandlePolicy, RuntimeMemoryPressurePolicy, RuntimeOpaqueValue, RuntimePackagePlan,
-    RuntimeParamPlan, RuntimePoolIdValue, RuntimeReferenceTarget, RuntimeReferenceValue,
-    RuntimeResetOnPolicy, RuntimeRingIdValue, RuntimeRoutinePlan, RuntimeScope,
-    RuntimeSessionIdValue, RuntimeSlabIdValue, RuntimeSlabPolicy, RuntimeSlabState,
-    RuntimeTempArenaHandle, RuntimeValue, arcana_desktop_session_record,
-    arcana_desktop_wake_record, arcana_desktop_window_value, arcana_window_id_record,
-    default_runtime_pool_policy, default_runtime_ring_policy, default_runtime_session_policy,
-    default_runtime_slab_policy, ensure_runtime_frame_capacity, ensure_runtime_slab_capacity,
-    err_variant, execute_entrypoint_routine, execute_exported_abi_routine,
-    execute_exported_json_abi_routine, execute_main, execute_routine, execute_routine_with_state,
-    execute_runtime_intrinsic, insert_runtime_channel, insert_runtime_local,
-    insert_runtime_pool_arena, insert_runtime_read_view_from_reference,
+    RuntimeFrameArenaState, RuntimeFrameRecyclePolicy, RuntimeHost, RuntimeIntrinsic, RuntimeLocal,
+    RuntimeLocalHandle, RuntimeMemoryHandlePolicy, RuntimeMemoryPressurePolicy, RuntimeOpaqueValue,
+    RuntimePackagePlan, RuntimeParamPlan, RuntimePoolIdValue, RuntimeReferenceMode,
+    RuntimeReferenceTarget, RuntimeReferenceValue, RuntimeResetOnPolicy, RuntimeRingIdValue,
+    RuntimeRoutinePlan, RuntimeScope, RuntimeSessionIdValue, RuntimeSlabIdValue, RuntimeSlabPolicy,
+    RuntimeSlabState, RuntimeTempArenaHandle, RuntimeTypeBindings, RuntimeValue,
+    arcana_desktop_session_record, arcana_desktop_wake_record, arcana_desktop_window_value,
+    arcana_window_id_record, default_runtime_pool_policy, default_runtime_ring_policy,
+    default_runtime_session_policy, default_runtime_slab_policy, ensure_runtime_frame_capacity,
+    ensure_runtime_slab_capacity, err_variant, execute_entrypoint_routine,
+    execute_exported_abi_routine, execute_exported_json_abi_routine, execute_main, execute_routine,
+    execute_routine_with_state, execute_runtime_intrinsic, insert_runtime_channel,
+    insert_runtime_local, insert_runtime_pool_arena, insert_runtime_read_view_from_reference,
     insert_runtime_read_view_from_ring_window, insert_runtime_ring_buffer,
     insert_runtime_session_arena, insert_runtime_slab, load_package_plan,
     lookup_runtime_owner_plan, none_variant, ok_variant, owner_state_key, parse_cleanup_footer_row,
     parse_runtime_package_image, parse_stmt, plan_from_artifact, pool_id_is_live,
-    render_exported_json_abi_manifest, render_runtime_package_image,
+    read_runtime_reference, reclaim_held_target_local, reclaim_hold_capability_root_local,
+    redeem_take_reference, render_exported_json_abi_manifest, render_runtime_package_image,
     reset_runtime_native_products_cache, resolve_routine_index, resolve_routine_index_for_call,
     runtime_read_view_snapshot, runtime_reset_owner_exit_memory_specs_in_scopes,
     runtime_validate_split_value, some_variant, try_execute_arcana_owned_api_call,
+    validate_scope_hold_tokens, write_assign_target_value_runtime,
 };
 use arcana_aot::{
     AOT_INTERNAL_FORMAT, AotEntrypointArtifact, AotOwnerArtifact, AotPackageArtifact,
@@ -3505,7 +3507,7 @@ fn execute_main_manual_routine_cleanup_footers_run_after_defers() {
                     resolved_routine: None,
                 }],
                 statements: vec![
-                    ParsedStmt::Defer(ParsedExpr::Phrase {
+                    ParsedStmt::Defer(arcana_ir::ExecDeferAction::Expr(ParsedExpr::Phrase {
                         subject: Box::new(ParsedExpr::Path(vec![
                             "std".to_string(),
                             "io".to_string(),
@@ -3522,7 +3524,7 @@ fn execute_main_manual_routine_cleanup_footers_run_after_defers() {
                         resolved_routine: None,
                         dynamic_dispatch: None,
                         attached: Vec::new(),
-                    }),
+                    })),
                     ParsedStmt::Expr {
                         expr: ParsedExpr::Phrase {
                             subject: Box::new(ParsedExpr::Phrase {
@@ -4466,7 +4468,7 @@ fn execute_main_runs_memory_views_and_new_family_workspace() {
             "    read_values[1] = 52\n",
             "    read_values[2] = 171\n",
             "    read_values[3] = 205\n",
-            "    let view = &read_values[1..3]\n",
+            "    let view = &read read_values[1..3]\n",
             "    if (view :: :: len) != 2:\n",
             "        return 114\n",
             "    if (view :: 0 :: get) != 52:\n",
@@ -4475,7 +4477,7 @@ fn execute_main_runs_memory_views_and_new_family_workspace() {
             "    edit_values[0] = 18\n",
             "    edit_values[1] = 52\n",
             "    if true:\n",
-            "        let mut edit = &mut edit_values[0..2]\n",
+            "        let mut edit = &edit edit_values[0..2]\n",
             "        edit :: 1, 255 :: set\n",
             "        if (edit :: 1 :: get) != 255:\n",
             "            return 116\n",
@@ -4508,7 +4510,7 @@ fn execute_main_runs_memory_views_and_new_family_workspace() {
             "    if written[1] != 52:\n",
             "        return 132\n",
             "    let text = \"hello\"\n",
-            "    let text_view = &text[1..4]\n",
+            "    let text_view = &read text[1..4]\n",
             "    if (text_view :: :: len_bytes) != 3:\n",
             "        return 118\n",
             "    if (text_view :: 0 :: byte_at) != 101:\n",
@@ -5297,7 +5299,7 @@ fn session_unseal_rejects_live_reference_views() {
         &mut state,
         &["Int".to_string()],
         RuntimeReferenceValue {
-            mutable: false,
+            mode: RuntimeReferenceMode::Read,
             target: RuntimeReferenceTarget::SessionSlot {
                 id,
                 members: Vec::new(),
@@ -5401,7 +5403,7 @@ fn session_unseal_rejects_live_borrows() {
         "borrow".to_string(),
         false,
         RuntimeValue::Ref(RuntimeReferenceValue {
-            mutable: false,
+            mode: RuntimeReferenceMode::Read,
             target: RuntimeReferenceTarget::SessionSlot {
                 id,
                 members: Vec::new(),
@@ -5454,7 +5456,7 @@ fn slab_unseal_rejects_live_reference_views() {
         &mut state,
         &["Int".to_string()],
         RuntimeReferenceValue {
-            mutable: false,
+            mode: RuntimeReferenceMode::Read,
             target: RuntimeReferenceTarget::SlabSlot {
                 id,
                 members: Vec::new(),
@@ -5552,7 +5554,7 @@ fn slab_unseal_rejects_live_borrows() {
         "borrow".to_string(),
         false,
         RuntimeValue::Ref(RuntimeReferenceValue {
-            mutable: false,
+            mode: RuntimeReferenceMode::Read,
             target: RuntimeReferenceTarget::SlabSlot {
                 id,
                 members: Vec::new(),
@@ -5598,7 +5600,7 @@ fn array_view_edit_rejects_conflicting_live_read_view() {
         .expect("values local should exist")
         .handle;
     let reference = RuntimeReferenceValue {
-        mutable: true,
+        mode: RuntimeReferenceMode::Edit,
         target: RuntimeReferenceTarget::Local {
             local,
             members: Vec::new(),
@@ -5663,7 +5665,7 @@ fn edit_view_subview_edit_allows_source_reborrow_without_other_aliases() {
         .expect("values local should exist")
         .handle;
     let reference = RuntimeReferenceValue {
-        mutable: true,
+        mode: RuntimeReferenceMode::Edit,
         target: RuntimeReferenceTarget::Local {
             local,
             members: Vec::new(),
@@ -6262,7 +6264,7 @@ fn session_reset_rejects_live_reference_views() {
         &mut state,
         &["Int".to_string()],
         RuntimeReferenceValue {
-            mutable: false,
+            mode: RuntimeReferenceMode::Read,
             target: RuntimeReferenceTarget::SessionSlot {
                 id,
                 members: Vec::new(),
@@ -6316,7 +6318,7 @@ fn slab_remove_rejects_live_reference_views() {
         &mut state,
         &["Int".to_string()],
         RuntimeReferenceValue {
-            mutable: false,
+            mode: RuntimeReferenceMode::Read,
             target: RuntimeReferenceTarget::SlabSlot {
                 id,
                 members: Vec::new(),
@@ -6375,7 +6377,7 @@ fn ring_push_rejects_overwrite_while_live_reference_views() {
         &mut state,
         &["Int".to_string()],
         RuntimeReferenceValue {
-            mutable: false,
+            mode: RuntimeReferenceMode::Read,
             target: RuntimeReferenceTarget::RingSlot {
                 id,
                 members: Vec::new(),
@@ -6433,7 +6435,7 @@ fn pool_compact_rejects_live_reference_views() {
         &mut state,
         &["Int".to_string()],
         RuntimeReferenceValue {
-            mutable: false,
+            mode: RuntimeReferenceMode::Read,
             target: RuntimeReferenceTarget::PoolSlot {
                 id,
                 members: Vec::new(),
@@ -6593,7 +6595,7 @@ fn execute_main_consumes_named_recycle_owner_exits() {
             "obj Counter:\n",
             "    value: Int\n",
             "create Session [Counter] scope-exit:\n",
-            "    done: when false hold [Counter]\n",
+            "    done: when false retain [Counter]\n",
             "fn main() -> Int:\n",
             "    if true:\n",
             "        let active = Session :: :: call\n",
@@ -6816,8 +6818,8 @@ fn execute_main_runs_local_borrow_and_deref_routines() {
             "fn main() -> Int:\n",
             "    let local_x = 1\n",
             "    let mut local_y = 2\n",
-            "    let x_ref = &local_x\n",
-            "    let y_ref = &mut local_y\n",
+            "    let x_ref = &read local_x\n",
+            "    let y_ref = &edit local_y\n",
             "    let sum = *x_ref + *y_ref\n",
             "    std.io.print[Int] :: sum :: call\n",
             "    return 0\n",
@@ -6849,6 +6851,473 @@ fn execute_main_runs_local_borrow_and_deref_routines() {
     assert_eq!(host.stdout, vec!["3".to_string()]);
 
     let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn execute_main_runs_hold_capability_reclaim_flow() {
+    let dir = temp_workspace_dir("hold_capability_reclaim");
+    write_file(
+        &dir.join("book.toml"),
+        "name = \"runtime_hold_capability_reclaim\"\nkind = \"app\"\n",
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "import std.io\n",
+            "fn main() -> Int:\n",
+            "    let mut x = 1\n",
+            "    let held = &hold x\n",
+            "    let snapshot = *held\n",
+            "    std.io.print[Int] :: snapshot :: call\n",
+            "    reclaim held\n",
+            "    x = 2\n",
+            "    std.io.print[Int] :: x :: call\n",
+            "    return x\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let graph = load_workspace_graph(&dir).expect("workspace graph should load");
+    let checked = check_workspace_graph(&graph).expect("workspace should check");
+    let fingerprints = compute_member_fingerprints_for_checked_workspace(&graph, &checked)
+        .expect("fingerprints should compute");
+    let order = plan_workspace(&graph).expect("workspace order should plan");
+    let statuses =
+        plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
+    execute_workspace_build(&graph, &fingerprints, &statuses);
+
+    let artifact_path = graph.root_dir.join(
+        statuses
+            .iter()
+            .find(|status| status.member_name() == "runtime_hold_capability_reclaim")
+            .expect("app artifact status should exist")
+            .artifact_rel_path(),
+    );
+    let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
+    let mut host = BufferedHost::default();
+    let code = execute_main(&plan, &mut host).expect("runtime should execute");
+
+    assert_eq!(code, 2);
+    assert_eq!(host.stdout, vec!["1".to_string(), "2".to_string()]);
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn execute_main_runs_deferred_hold_reclaim_flow() {
+    let dir = temp_workspace_dir("deferred_hold_reclaim");
+    write_file(
+        &dir.join("book.toml"),
+        "name = \"runtime_deferred_hold_reclaim\"\nkind = \"app\"\n",
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "import std.io\n",
+            "fn main() -> Int:\n",
+            "    let mut x = 1\n",
+            "    if true:\n",
+            "        let held = &hold x\n",
+            "        defer reclaim held\n",
+            "        let snapshot = *held\n",
+            "        std.io.print[Int] :: snapshot :: call\n",
+            "    x = 3\n",
+            "    std.io.print[Int] :: x :: call\n",
+            "    return x\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let graph = load_workspace_graph(&dir).expect("workspace graph should load");
+    let checked = check_workspace_graph(&graph).expect("workspace should check");
+    let fingerprints = compute_member_fingerprints_for_checked_workspace(&graph, &checked)
+        .expect("fingerprints should compute");
+    let order = plan_workspace(&graph).expect("workspace order should plan");
+    let statuses =
+        plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
+    execute_workspace_build(&graph, &fingerprints, &statuses);
+
+    let artifact_path = graph.root_dir.join(
+        statuses
+            .iter()
+            .find(|status| status.member_name() == "runtime_deferred_hold_reclaim")
+            .expect("app artifact status should exist")
+            .artifact_rel_path(),
+    );
+    let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
+    let mut host = BufferedHost::default();
+    let code = execute_main(&plan, &mut host).expect("runtime should execute");
+
+    assert_eq!(code, 3);
+    assert_eq!(host.stdout, vec!["1".to_string(), "3".to_string()]);
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn execute_main_runs_take_capability_once() {
+    let dir = temp_workspace_dir("take_capability_once");
+    write_file(
+        &dir.join("book.toml"),
+        "name = \"runtime_take_capability_once\"\nkind = \"app\"\n",
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "import std.io\n",
+            "fn main() -> Int:\n",
+            "    let text = \"hi\"\n",
+            "    let token = &take text\n",
+            "    let value = *token\n",
+            "    std.io.print[Str] :: value :: call\n",
+            "    return 0\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let graph = load_workspace_graph(&dir).expect("workspace graph should load");
+    let checked = check_workspace_graph(&graph).expect("workspace should check");
+    let fingerprints = compute_member_fingerprints_for_checked_workspace(&graph, &checked)
+        .expect("fingerprints should compute");
+    let order = plan_workspace(&graph).expect("workspace order should plan");
+    let statuses =
+        plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
+    execute_workspace_build(&graph, &fingerprints, &statuses);
+
+    let artifact_path = graph.root_dir.join(
+        statuses
+            .iter()
+            .find(|status| status.member_name() == "runtime_take_capability_once")
+            .expect("app artifact status should exist")
+            .artifact_rel_path(),
+    );
+    let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
+    let mut host = BufferedHost::default();
+    let code = execute_main(&plan, &mut host).expect("runtime should execute");
+
+    assert_eq!(code, 0);
+    assert_eq!(host.stdout, vec!["hi".to_string()]);
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn execute_main_runs_plain_hold_param_for_call_duration_only() {
+    let dir = temp_workspace_dir("plain_hold_param");
+    write_file(
+        &dir.join("book.toml"),
+        "name = \"runtime_plain_hold_param\"\nkind = \"app\"\n",
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "import std.io\n",
+            "fn inspect(hold value: Int) -> Int:\n",
+            "    std.io.print[Int] :: value :: call\n",
+            "    return value + 1\n",
+            "fn main() -> Int:\n",
+            "    let mut x = 4\n",
+            "    let seen = inspect :: x :: call\n",
+            "    x = 9\n",
+            "    std.io.print[Int] :: seen :: call\n",
+            "    std.io.print[Int] :: x :: call\n",
+            "    return x\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let graph = load_workspace_graph(&dir).expect("workspace graph should load");
+    let checked = check_workspace_graph(&graph).expect("workspace should check");
+    let fingerprints = compute_member_fingerprints_for_checked_workspace(&graph, &checked)
+        .expect("fingerprints should compute");
+    let order = plan_workspace(&graph).expect("workspace order should plan");
+    let statuses =
+        plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
+    execute_workspace_build(&graph, &fingerprints, &statuses);
+
+    let artifact_path = graph.root_dir.join(
+        statuses
+            .iter()
+            .find(|status| status.member_name() == "runtime_plain_hold_param")
+            .expect("app artifact status should exist")
+            .artifact_rel_path(),
+    );
+    let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
+    let mut host = BufferedHost::default();
+    let code = execute_main(&plan, &mut host).expect("runtime should execute");
+
+    assert_eq!(code, 9);
+    assert_eq!(
+        host.stdout,
+        vec!["4".to_string(), "5".to_string(), "9".to_string()]
+    );
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn execute_main_runs_assignment_through_edit_capability() {
+    let dir = temp_workspace_dir("capability_deref_assign");
+    write_file(
+        &dir.join("book.toml"),
+        "name = \"runtime_capability_deref_assign\"\nkind = \"app\"\n",
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "import std.io\n",
+            "fn main() -> Int:\n",
+            "    let mut x = 1\n",
+            "    let edit_cap = &edit x\n",
+            "    *edit_cap = 3\n",
+            "    std.io.print[Int] :: *edit_cap :: call\n",
+            "    return *edit_cap\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let graph = load_workspace_graph(&dir).expect("workspace graph should load");
+    let checked = check_workspace_graph(&graph).expect("workspace should check");
+    let fingerprints = compute_member_fingerprints_for_checked_workspace(&graph, &checked)
+        .expect("fingerprints should compute");
+    let order = plan_workspace(&graph).expect("workspace order should plan");
+    let statuses =
+        plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
+    execute_workspace_build(&graph, &fingerprints, &statuses);
+
+    let artifact_path = graph.root_dir.join(
+        statuses
+            .iter()
+            .find(|status| status.member_name() == "runtime_capability_deref_assign")
+            .expect("app artifact status should exist")
+            .artifact_rel_path(),
+    );
+    let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
+    let mut host = BufferedHost::default();
+    let code = execute_main(&plan, &mut host).expect("runtime should execute");
+
+    assert_eq!(code, 3);
+    assert_eq!(host.stdout, vec!["3".to_string()]);
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn runtime_hold_capability_member_assignment_updates_target() {
+    let plan = empty_runtime_plan("demo");
+    let mut state = RuntimeExecutionState::default();
+    let mut scopes = vec![RuntimeScope::default()];
+    insert_runtime_local(
+        &mut state,
+        0,
+        &mut scopes[0],
+        0,
+        "counter".to_string(),
+        true,
+        RuntimeValue::Record {
+            name: "Counter".to_string(),
+            fields: BTreeMap::from([("value".to_string(), RuntimeValue::Int(1))]),
+        },
+    );
+    let counter_handle = scopes[0]
+        .locals
+        .get("counter")
+        .expect("counter local should exist")
+        .handle;
+    scopes[0]
+        .locals
+        .get_mut("counter")
+        .expect("counter local should exist")
+        .held = true;
+    insert_runtime_local(
+        &mut state,
+        0,
+        &mut scopes[0],
+        1,
+        "held".to_string(),
+        false,
+        RuntimeValue::Ref(RuntimeReferenceValue {
+            mode: RuntimeReferenceMode::Hold,
+            target: RuntimeReferenceTarget::Local {
+                local: counter_handle,
+                members: Vec::new(),
+            },
+        }),
+    );
+
+    let mut host = BufferedHost::default();
+    write_assign_target_value_runtime(
+        &ParsedAssignTarget::Member {
+            target: Box::new(ParsedAssignTarget::Name("held".to_string())),
+            member: "value".to_string(),
+        },
+        RuntimeValue::Int(4),
+        &plan,
+        "demo",
+        "demo",
+        &mut scopes,
+        &BTreeMap::new(),
+        &RuntimeTypeBindings::default(),
+        &mut state,
+        &mut host,
+    )
+    .expect("assignment through hold capability member should succeed");
+
+    let value = read_runtime_reference(
+        &mut scopes,
+        &plan,
+        "demo",
+        "demo",
+        &BTreeMap::new(),
+        &RuntimeTypeBindings::default(),
+        &mut state,
+        &RuntimeReferenceValue {
+            mode: RuntimeReferenceMode::Hold,
+            target: RuntimeReferenceTarget::Local {
+                local: counter_handle,
+                members: vec!["value".to_string()],
+            },
+        },
+        &mut host,
+    )
+    .expect("hold member reference should read through hold capability");
+    assert_eq!(value, RuntimeValue::Int(4));
+
+    reclaim_held_target_local(
+        &mut scopes,
+        &RuntimeReferenceTarget::Local {
+            local: counter_handle,
+            members: Vec::new(),
+        },
+    )
+    .expect("hold target should reclaim");
+    reclaim_hold_capability_root_local(&mut scopes, &ParsedExpr::Path(vec!["held".to_string()]))
+        .expect("hold token should reclaim");
+    validate_scope_hold_tokens(&scopes[0]).expect("hold token should no longer be live");
+}
+
+#[test]
+fn runtime_reclaim_helpers_release_hold_target_and_token() {
+    let x_handle = RuntimeLocalHandle(0);
+    let held_handle = RuntimeLocalHandle(1);
+    let hold_target = RuntimeReferenceTarget::Local {
+        local: x_handle,
+        members: Vec::new(),
+    };
+    let mut scopes = vec![RuntimeScope {
+        locals: BTreeMap::from([
+            (
+                "x".to_string(),
+                RuntimeLocal {
+                    binding_id: 0,
+                    handle: x_handle,
+                    mutable: true,
+                    moved: false,
+                    held: true,
+                    take_reserved: false,
+                    value: RuntimeValue::Int(1),
+                },
+            ),
+            (
+                "held".to_string(),
+                RuntimeLocal {
+                    binding_id: 1,
+                    handle: held_handle,
+                    mutable: false,
+                    moved: false,
+                    held: false,
+                    take_reserved: false,
+                    value: RuntimeValue::Ref(RuntimeReferenceValue {
+                        mode: RuntimeReferenceMode::Hold,
+                        target: hold_target.clone(),
+                    }),
+                },
+            ),
+        ]),
+        ..RuntimeScope::default()
+    }];
+
+    reclaim_held_target_local(&mut scopes, &hold_target).expect("hold target should reclaim");
+    reclaim_hold_capability_root_local(&mut scopes, &ParsedExpr::Path(vec!["held".to_string()]))
+        .expect("hold token should reclaim");
+
+    let x = scopes[0].locals.get("x").expect("x should remain");
+    assert!(!x.held, "hold target should no longer be suspended");
+    let held = scopes[0]
+        .locals
+        .get("held")
+        .expect("held token should remain");
+    assert!(held.moved, "hold token should be consumed");
+    assert_eq!(held.value, RuntimeValue::Unit);
+}
+
+#[test]
+fn runtime_redeem_take_reference_marks_target_moved() {
+    let text_handle = RuntimeLocalHandle(0);
+    let mut scopes = vec![RuntimeScope {
+        locals: BTreeMap::from([(
+            "text".to_string(),
+            RuntimeLocal {
+                binding_id: 0,
+                handle: text_handle,
+                mutable: false,
+                moved: false,
+                held: false,
+                take_reserved: true,
+                value: RuntimeValue::Str("hi".to_string()),
+            },
+        )]),
+        ..RuntimeScope::default()
+    }];
+
+    redeem_take_reference(
+        &mut scopes,
+        &RuntimeReferenceValue {
+            mode: RuntimeReferenceMode::Take,
+            target: RuntimeReferenceTarget::Local {
+                local: text_handle,
+                members: Vec::new(),
+            },
+        },
+    )
+    .expect("take capability should redeem");
+
+    let text = scopes[0].locals.get("text").expect("text should remain");
+    assert!(text.moved, "take target should be marked moved");
+    assert!(
+        !text.take_reserved,
+        "take reservation should clear after redeem"
+    );
+}
+
+#[test]
+fn validate_scope_hold_tokens_rejects_unreclaimed_hold_capability() {
+    let mut scope = RuntimeScope::default();
+    scope.locals.insert(
+        "held".to_string(),
+        RuntimeLocal {
+            binding_id: 0,
+            handle: RuntimeLocalHandle(1),
+            mutable: false,
+            moved: false,
+            held: false,
+            take_reserved: false,
+            value: RuntimeValue::Ref(RuntimeReferenceValue {
+                mode: RuntimeReferenceMode::Hold,
+                target: RuntimeReferenceTarget::Local {
+                    local: RuntimeLocalHandle(2),
+                    members: Vec::new(),
+                },
+            }),
+        },
+    );
+
+    let err = validate_scope_hold_tokens(&scope)
+        .expect_err("scope validation should reject unreclaimed hold tokens");
+    assert!(
+        err.contains("local `held` holds an unreclaimed `&hold` capability at scope exit"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -8357,6 +8826,125 @@ fn execute_main_runs_local_record_constructor_and_impl_method() {
 
     assert_eq!(code, 0);
     assert_eq!(host.stdout, vec!["7".to_string(), "14".to_string()]);
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn execute_main_runs_value_surface_struct_array_and_float_routines() {
+    let dir = temp_workspace_dir("value_surface_runtime");
+    write_file(
+        &dir.join("book.toml"),
+        "name = \"runtime_value_surface\"\nkind = \"app\"\n",
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "import std.io\n",
+            "struct Vec2:\n",
+            "    x: F32\n",
+            "    y: F32\n",
+            "array Trio[Int, 3]:\n",
+            "fn main() -> Int:\n",
+            "    let point = Vec2 :: x = 1.5f32, y = 2.5f32 :: call\n",
+            "    let xs = Trio :: 1, 2, 3 :: call\n",
+            "    let ys = array yield Trio -return 0\n",
+            "        [0] = 4\n",
+            "        [1] = 5\n",
+            "        [2] = 6\n",
+            "    let sum = (F64 :: point.x :: call) + 2.5\n",
+            "    let neg = -1.5f32\n",
+            "    std.io.print[F64] :: sum :: call\n",
+            "    std.io.print[F32] :: neg :: call\n",
+            "    std.io.print[Int] :: xs[0] + ys[2] :: call\n",
+            "    return 0\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let graph = load_workspace_graph(&dir).expect("workspace graph should load");
+    let checked = check_workspace_graph(&graph).expect("workspace should check");
+    let fingerprints = compute_member_fingerprints_for_checked_workspace(&graph, &checked)
+        .expect("fingerprints should compute");
+    let order = plan_workspace(&graph).expect("workspace order should plan");
+    let statuses =
+        plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
+    execute_workspace_build(&graph, &fingerprints, &statuses);
+
+    let artifact_path = graph.root_dir.join(
+        statuses
+            .iter()
+            .find(|status| status.member_name() == "runtime_value_surface")
+            .expect("app artifact status should exist")
+            .artifact_rel_path(),
+    );
+    let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
+    let mut host = BufferedHost::default();
+    let code = execute_main(&plan, &mut host).expect("runtime should execute");
+
+    assert_eq!(code, 0);
+    assert_eq!(
+        host.stdout,
+        vec!["4.0".to_string(), "-1.5".to_string(), "7".to_string()]
+    );
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn execute_main_runs_struct_bitfield_layout_semantics() {
+    let dir = temp_workspace_dir("value_surface_bitfields");
+    write_file(
+        &dir.join("book.toml"),
+        "name = \"runtime_value_surface_bitfields\"\nkind = \"app\"\n",
+    );
+    write_file(
+        &dir.join("src").join("shelf.arc"),
+        concat!(
+            "import std.io\n",
+            "struct Flags:\n",
+            "    low: U8 bits 3\n",
+            "    high: U8 bits 5\n",
+            "struct SignedFlags:\n",
+            "    head: I8 bits 3\n",
+            "    tail: U8 bits 5\n",
+            "fn main() -> Int:\n",
+            "    let mut flags = Flags :: low = U8 :: 5 :: call, high = U8 :: 17 :: call :: call\n",
+            "    flags.low = U8 :: 3 :: call\n",
+            "    flags.high = U8 :: 9 :: call\n",
+            "    let signed = SignedFlags :: head = I8 :: -1 :: call, tail = U8 :: 4 :: call :: call\n",
+            "    let low = Int :: flags.low :: call\n",
+            "    let high = Int :: flags.high :: call\n",
+            "    let head = Int :: signed.head :: call\n",
+            "    std.io.print[Int] :: low + (high * 10) :: call\n",
+            "    std.io.print[Int] :: head :: call\n",
+            "    return 0\n",
+        ),
+    );
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let graph = load_workspace_graph(&dir).expect("workspace graph should load");
+    let checked = check_workspace_graph(&graph).expect("workspace should check");
+    let fingerprints = compute_member_fingerprints_for_checked_workspace(&graph, &checked)
+        .expect("fingerprints should compute");
+    let order = plan_workspace(&graph).expect("workspace order should plan");
+    let statuses =
+        plan_build(&graph, &order, &fingerprints, None).expect("build plan should compute");
+    execute_workspace_build(&graph, &fingerprints, &statuses);
+
+    let artifact_path = graph.root_dir.join(
+        statuses
+            .iter()
+            .find(|status| status.member_name() == "runtime_value_surface_bitfields")
+            .expect("app artifact status should exist")
+            .artifact_rel_path(),
+    );
+    let plan = load_package_plan(&artifact_path).expect("runtime plan should load");
+    let mut host = BufferedHost::default();
+    let code = execute_main(&plan, &mut host).expect("runtime should execute");
+
+    assert_eq!(code, 0);
+    assert_eq!(host.stdout, vec!["93".to_string(), "-1".to_string()]);
 
     let _ = fs::remove_dir_all(dir);
 }
@@ -10714,7 +11302,7 @@ fn execute_main_runs_object_owner_hold_workspace_artifact() {
             "    value: Int\n",
             "\n",
             "create Session [Counter] scope-exit:\n",
-            "    done: when Counter.value >= 10 hold [Counter]\n",
+            "    done: when Counter.value >= 10 retain [Counter]\n",
             "\n",
             "Session\n",
             "Counter\n",
@@ -10751,7 +11339,7 @@ fn execute_main_owner_multi_exit_uses_first_matching_exit() {
             "    value: Int\n",
             "\n",
             "create Session [Counter] scope-exit:\n",
-            "    keep: when true hold [Counter]\n",
+            "    keep: when true retain [Counter]\n",
             "    drop: when true\n",
             "\n",
             "Session\n",
@@ -10881,7 +11469,7 @@ fn execute_main_runs_owner_init_hook_with_activation_context() {
             "        self.value = ctx.base\n",
             "\n",
             "create Session [Counter] scope-exit:\n",
-            "    done: when Counter.value > 10 hold [Counter]\n",
+            "    done: when Counter.value > 10 retain [Counter]\n",
             "\n",
             "Session\n",
             "Counter\n",
@@ -10923,7 +11511,7 @@ fn execute_main_runs_owner_resume_hook_with_activation_context() {
             "        self.value += ctx.base\n",
             "\n",
             "create Session [Counter] scope-exit:\n",
-            "    done: when Counter.value == 3 hold [Counter]\n",
+            "    done: when Counter.value == 3 retain [Counter]\n",
             "\n",
             "Session\n",
             "Counter\n",
@@ -11016,7 +11604,7 @@ fn execute_main_runs_attached_owner_helper_with_active_state() {
             "    value: Int\n",
             "\n",
             "create Session [Counter] scope-exit:\n",
-            "    done: when Counter.value >= 10 hold [Counter]\n",
+            "    done: when Counter.value >= 10 retain [Counter]\n",
             "\n",
             "Session\n",
             "Counter\n",
@@ -11058,7 +11646,7 @@ fn execute_main_runs_object_only_attached_helper_with_active_state() {
             "    value: Int\n",
             "\n",
             "create Session [Counter] scope-exit:\n",
-            "    done: when Counter.value >= 10 hold [Counter]\n",
+            "    done: when Counter.value >= 10 retain [Counter]\n",
             "\n",
             "Counter\n",
             "fn bump() -> Int:\n",
@@ -11099,7 +11687,7 @@ fn execute_main_runs_object_only_attached_helper_through_unattached_helper_chain
             "    value: Int\n",
             "\n",
             "create Session [Counter] scope-exit:\n",
-            "    done: when Counter.value >= 10 hold [Counter]\n",
+            "    done: when Counter.value >= 10 retain [Counter]\n",
             "\n",
             "Counter\n",
             "fn bump_inner() -> Int:\n",
@@ -11143,7 +11731,7 @@ fn execute_main_runs_nested_object_only_attached_helpers_with_active_state() {
             "    value: Int\n",
             "\n",
             "create Session [Counter] scope-exit:\n",
-            "    done: when Counter.value >= 10 hold [Counter]\n",
+            "    done: when Counter.value >= 10 retain [Counter]\n",
             "\n",
             "Counter\n",
             "fn bump() -> Int:\n",
@@ -11188,7 +11776,7 @@ fn execute_main_runs_late_attached_owner_block_with_active_state() {
             "    value: Int\n",
             "\n",
             "create Session [Counter] scope-exit:\n",
-            "    done: when Counter.value >= 10 hold [Counter]\n",
+            "    done: when Counter.value >= 10 retain [Counter]\n",
             "\n",
             "Session\n",
             "fn main() -> Int:\n",
@@ -11227,7 +11815,7 @@ fn execute_main_runs_object_only_late_attached_block_with_active_state() {
             "    value: Int\n",
             "\n",
             "create Session [Counter] scope-exit:\n",
-            "    done: when Counter.value >= 10 hold [Counter]\n",
+            "    done: when Counter.value >= 10 retain [Counter]\n",
             "\n",
             "Session\n",
             "fn main() -> Int:\n",
@@ -11271,7 +11859,7 @@ fn execute_main_rejects_owner_object_init_without_required_context() {
             "        self.value = ctx.base\n",
             "\n",
             "create Session [Counter] scope-exit:\n",
-            "    done: when false hold [Counter]\n",
+            "    done: when false retain [Counter]\n",
             "\n",
             "Session\n",
             "Counter\n",
@@ -11311,7 +11899,7 @@ fn execute_main_runs_owner_activation_with_explicit_context_clause() {
             "        self.value = ctx.base\n",
             "\n",
             "create Session [Counter] context: SessionCtx scope-exit:\n",
-            "    done: when false hold [Counter]\n",
+            "    done: when false retain [Counter]\n",
             "\n",
             "Session\n",
             "Counter\n",

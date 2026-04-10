@@ -380,6 +380,22 @@ fn runtime_value_to_json_value(value: RuntimeValue) -> Result<serde_json::Value,
     match value {
         RuntimeValue::Unit => Ok(serde_json::Value::Null),
         RuntimeValue::Int(value) => Ok(serde_json::Value::Number(value.into())),
+        RuntimeValue::Float { text, kind } => {
+            let value = match kind {
+                arcana_ir::ExecFloatKind::F32 => {
+                    text.parse::<f32>().map(f64::from).map_err(|err| {
+                        format!("runtime json abi invalid F32 literal `{text}`: {err}")
+                    })?
+                }
+                arcana_ir::ExecFloatKind::F64 => text.parse::<f64>().map_err(|err| {
+                    format!("runtime json abi invalid F64 literal `{text}`: {err}")
+                })?,
+            };
+            let number = serde_json::Number::from_f64(value).ok_or_else(|| {
+                format!("runtime json abi float `{text}` is not representable as JSON number")
+            })?;
+            Ok(serde_json::Value::Number(number))
+        }
         RuntimeValue::Bool(value) => Ok(serde_json::Value::Bool(value)),
         RuntimeValue::Str(value) => Ok(serde_json::Value::String(value)),
         RuntimeValue::List(values) => Ok(serde_json::Value::Array(
@@ -440,6 +456,9 @@ fn runtime_value_to_json_value(value: RuntimeValue) -> Result<serde_json::Value,
         RuntimeValue::Record { name, fields } => {
             let mut mapped = serde_json::Map::new();
             for (key, value) in fields {
+                if super::runtime_is_hidden_bitfield_storage_field(&key) {
+                    continue;
+                }
                 mapped.insert(key, runtime_value_to_json_value(value)?);
             }
             Ok(serde_json::json!({

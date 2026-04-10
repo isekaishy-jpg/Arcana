@@ -2,10 +2,10 @@
 
 Status: `approved-pre-selfhost`
 
-This scope extracts the current rewrite-era contract for Arcana access modes and ownership behavior.
+This scope extracts the current rewrite-era contract for Arcana access modes, capability values, and ownership behavior.
 
 Scope notes:
-- This scope defines source-visible law for `read`, `edit`, `take`, and reference/place behavior.
+- This scope defines source-visible law for `read`, `edit`, `take`, `hold`, and capability/place behavior.
 - It applies equally to user routines, linked `std` routines, and host/runtime intrinsics.
 - Runtime/backend work may refine implementation strategy, but it must not weaken these source-visible ownership rules.
 
@@ -15,6 +15,7 @@ Scope notes:
 - Unannotated value parameters are `read`.
 - `edit` grants mutable access to a caller-observable place.
 - `take` is consuming access.
+- `hold` is retained-liveness access: direct use of the original place is suspended while the hold remains active.
 - Ownership behavior must be consistent across:
   - user-defined routines
   - trait methods and impl methods
@@ -41,17 +42,33 @@ Scope notes:
 - `take` must not behave differently just because the callee is an intrinsic or a host-backed wrapper.
 - Consuming resource/handle operations such as `close`, `stop`, `drain`, and `stream_close` follow the same `take` law as ordinary values.
 
-## References And Places
+## `hold`
 
-- Borrow and dereference remain explicit source operations:
-  - `&x`
-  - `&mut x`
-  - `&x[a..b]`
-  - `&mut x[a..b]`
+- Plain `hold` parameters are allowed at call boundaries.
+- Plain `hold` is ephemeral call hold only: caller direct use is suspended for the duration of the call.
+- A callee cannot keep `hold` access past the call unless an explicit `&hold[...]` capability value is involved.
+
+## Capability Values And Places
+
+- Capability creation and dereference remain explicit source operations:
+  - `&read x`
+  - `&edit x`
+  - `&take x`
+  - `&hold x`
+  - `&read x[a..b]`
+  - `&edit x[a..b]`
   - `*x`
+- Capability type forms are explicit:
+  - `&read[T, 'a]`
+  - `&edit[T, 'a]`
+  - `&take[T, 'a]`
+  - `&hold[T, 'a]`
+- `reclaim x` is the explicit hold-ending statement form.
 - Ownership and borrow rules are place-based, not copy-shaped.
 - Runtime and backend lowering must preserve place identity across member access, indexing, and call boundaries where the source contract treats the operation as acting on the same place.
 - Borrowed-slice creation is explicit adaptation, not implicit coercion.
+- `&read[...]` capability values are duplicable/shared.
+- `&edit[...]`, `&take[...]`, and `&hold[...]` capability values are linear and non-duplicable.
 - This scope does not approve general implicit autoderef or coercion growth.
 
 ## Diagnostics

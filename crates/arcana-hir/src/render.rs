@@ -1,12 +1,12 @@
 use super::{
-    HirAssignTarget, HirAvailabilityAttachment, HirBehaviorAttr, HirBinaryOp, HirBindLineKind,
-    HirChainConnector, HirChainIntroducer, HirChainStep, HirCleanupFooter, HirConstructDestination,
-    HirConstructRegion, HirDirective, HirEnumVariant, HirExpr, HirForewordApp, HirForewordArg,
-    HirHeadedModifier, HirHeadedModifierKind, HirHeaderAttachment, HirImplAssocTypeBinding,
-    HirImplDecl, HirLangItem, HirMatchArm, HirMatchPattern, HirMemorySpecDecl, HirModuleDependency,
-    HirOwnerExit, HirOwnerObject, HirPhraseArg, HirRecordRegion, HirRecycleLineKind, HirStatement,
-    HirStatementKind, HirSymbol, HirSymbolBody, HirType, HirUnaryOp,
-    signature::render_symbol_signature,
+    HirArrayRegion, HirAssignTarget, HirAvailabilityAttachment, HirBehaviorAttr, HirBinaryOp,
+    HirBindLineKind, HirChainConnector, HirChainIntroducer, HirChainStep, HirCleanupFooter,
+    HirConstructDestination, HirConstructRegion, HirDirective, HirEnumVariant, HirExpr,
+    HirForewordApp, HirForewordArg, HirHeadedModifier, HirHeadedModifierKind, HirHeaderAttachment,
+    HirImplAssocTypeBinding, HirImplDecl, HirLangItem, HirMatchArm, HirMatchPattern,
+    HirMemorySpecDecl, HirModuleDependency, HirOwnerExit, HirOwnerObject, HirPhraseArg,
+    HirRecordRegion, HirRecycleLineKind, HirStatement, HirStatementKind, HirSymbol, HirSymbolBody,
+    HirType, HirUnaryOp, signature::render_symbol_signature,
 };
 
 pub(crate) fn encode_surface_text(text: &str) -> String {
@@ -424,6 +424,27 @@ fn render_symbol_body_fingerprint(body: &HirSymbolBody) -> String {
                 .collect::<Vec<_>>()
                 .join(",")
         ),
+        HirSymbolBody::Struct { fields } => format!(
+            "struct([{}])",
+            fields
+                .iter()
+                .map(render_field_fingerprint)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        HirSymbolBody::Union { fields } => format!(
+            "union([{}])",
+            fields
+                .iter()
+                .map(render_field_fingerprint)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        HirSymbolBody::Array { element_ty, len } => format!(
+            "array(element={}|len={})",
+            quote_fingerprint_text(element_ty),
+            len
+        ),
         HirSymbolBody::Object { fields, methods } => format!(
             "object(fields=[{}]|methods=[{}])",
             fields
@@ -479,9 +500,13 @@ fn render_symbol_body_fingerprint(body: &HirSymbolBody) -> String {
 
 fn render_field_fingerprint(field: &super::HirField) -> String {
     format!(
-        "field(name={}|ty={}|forewords=[{}])",
+        "field(name={}|ty={}|bit_width={}|forewords=[{}])",
         quote_fingerprint_text(&field.name),
         quote_fingerprint_text(&field.ty),
+        field
+            .bit_width
+            .map(|width| width.to_string())
+            .unwrap_or_else(|| "none".to_string()),
         field
             .forewords
             .iter()
@@ -518,11 +543,11 @@ fn render_owner_object_fingerprint(object: &HirOwnerObject) -> String {
 
 fn render_owner_exit_fingerprint(owner_exit: &HirOwnerExit) -> String {
     format!(
-        "exit(name={}|condition={}|holds=[{}])",
+        "exit(name={}|condition={}|retains=[{}])",
         quote_fingerprint_text(&owner_exit.name),
         render_expr_fingerprint(&owner_exit.condition),
         owner_exit
-            .holds
+            .retains
             .iter()
             .map(quote_fingerprint_text)
             .collect::<Vec<_>>()
@@ -691,6 +716,9 @@ fn render_statement_kind_fingerprint(kind: &HirStatementKind) -> String {
                 .map(render_expr_fingerprint)
                 .unwrap_or_else(|| "none".to_string())
         ),
+        HirStatementKind::Reclaim { expr } => {
+            format!("reclaim({})", render_expr_fingerprint(expr))
+        }
         HirStatementKind::If {
             condition,
             then_branch,
@@ -736,7 +764,14 @@ fn render_statement_kind_fingerprint(kind: &HirStatementKind) -> String {
                 .collect::<Vec<_>>()
                 .join(",")
         ),
-        HirStatementKind::Defer { expr } => format!("defer({})", render_expr_fingerprint(expr)),
+        HirStatementKind::Defer { action } => match action {
+            crate::HirDeferAction::Expr { expr } => {
+                format!("defer({})", render_expr_fingerprint(expr))
+            }
+            crate::HirDeferAction::Reclaim { expr } => {
+                format!("defer(reclaim({}))", render_expr_fingerprint(expr))
+            }
+        },
         HirStatementKind::Break => "break".to_string(),
         HirStatementKind::Continue => "continue".to_string(),
         HirStatementKind::Assign { target, op, value } => format!(
@@ -839,6 +874,9 @@ fn render_statement_kind_fingerprint(kind: &HirStatementKind) -> String {
         HirStatementKind::Record(region) => {
             format!("record({})", render_record_region_fingerprint(region))
         }
+        HirStatementKind::Array(region) => {
+            format!("array({})", render_array_region_fingerprint(region))
+        }
         HirStatementKind::MemorySpec(spec) => {
             format!("memory_spec({})", render_memory_spec_fingerprint(spec))
         }
@@ -849,6 +887,9 @@ fn render_statement_kind_fingerprint(kind: &HirStatementKind) -> String {
 fn render_assign_target_fingerprint(target: &HirAssignTarget) -> String {
     match target {
         HirAssignTarget::Name { text } => format!("name({})", quote_fingerprint_text(text)),
+        HirAssignTarget::Deref { expr } => {
+            format!("deref({})", render_expr_fingerprint(expr))
+        }
         HirAssignTarget::MemberAccess { target, member } => format!(
             "member(base={}|member={})",
             render_assign_target_fingerprint(target),
@@ -874,6 +915,11 @@ pub fn render_expr_fingerprint(expr: &HirExpr) -> String {
         ),
         HirExpr::BoolLiteral { value } => format!("bool({value})"),
         HirExpr::IntLiteral { text } => format!("int({})", quote_fingerprint_text(text)),
+        HirExpr::FloatLiteral { text, kind } => format!(
+            "float(kind={}|text={})",
+            kind.as_str(),
+            quote_fingerprint_text(text)
+        ),
         HirExpr::StrLiteral { text } => format!("str({})", quote_fingerprint_text(text)),
         HirExpr::Pair { left, right } => format!(
             "pair({},{})",
@@ -908,6 +954,9 @@ pub fn render_expr_fingerprint(expr: &HirExpr) -> String {
         }
         HirExpr::RecordRegion(region) => {
             format!("record({})", render_record_region_fingerprint(region))
+        }
+        HirExpr::ArrayRegion(region) => {
+            format!("array({})", render_array_region_fingerprint(region))
         }
         HirExpr::MemoryPhrase {
             family,
@@ -1090,7 +1139,8 @@ fn render_construct_region_fingerprint(region: &HirConstructRegion) -> String {
 
 fn render_record_region_fingerprint(region: &HirRecordRegion) -> String {
     format!(
-        "completion={}|target={}|base={}|destination={}|default_modifier={}|lines=[{}]",
+        "kind={}|completion={}|target={}|base={}|destination={}|default_modifier={}|lines=[{}]",
+        region.kind.as_str(),
         region.completion.as_str(),
         render_expr_fingerprint(&region.target),
         region
@@ -1122,6 +1172,52 @@ fn render_record_region_fingerprint(region: &HirRecordRegion) -> String {
                 format!(
                     "contrib(name={}|value={}|modifier={})",
                     quote_fingerprint_text(&line.name),
+                    render_expr_fingerprint(&line.value),
+                    line.modifier
+                        .as_ref()
+                        .map(render_headed_modifier_fingerprint)
+                        .unwrap_or_else(|| "none".to_string())
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
+fn render_array_region_fingerprint(region: &HirArrayRegion) -> String {
+    format!(
+        "completion={}|target={}|base={}|destination={}|default_modifier={}|lines=[{}]",
+        region.completion.as_str(),
+        render_expr_fingerprint(&region.target),
+        region
+            .base
+            .as_ref()
+            .map(|base| render_expr_fingerprint(base))
+            .unwrap_or_else(|| "none".to_string()),
+        region
+            .destination
+            .as_ref()
+            .map(|destination| match destination {
+                HirConstructDestination::Deliver { name } => {
+                    format!("deliver({})", quote_fingerprint_text(name))
+                }
+                HirConstructDestination::Place { target } => {
+                    format!("place({})", render_assign_target_fingerprint(target))
+                }
+            })
+            .unwrap_or_else(|| "none".to_string()),
+        region
+            .default_modifier
+            .as_ref()
+            .map(render_headed_modifier_fingerprint)
+            .unwrap_or_else(|| "none".to_string()),
+        region
+            .lines
+            .iter()
+            .map(|line| {
+                format!(
+                    "contrib(index={}|value={}|modifier={})",
+                    line.index,
                     render_expr_fingerprint(&line.value),
                     line.modifier
                         .as_ref()
@@ -1284,8 +1380,10 @@ fn render_unary_op_fingerprint(op: HirUnaryOp) -> &'static str {
         HirUnaryOp::Neg => "neg",
         HirUnaryOp::Not => "not",
         HirUnaryOp::BitNot => "bit_not",
-        HirUnaryOp::BorrowRead => "borrow_read",
-        HirUnaryOp::BorrowMut => "borrow_mut",
+        HirUnaryOp::CapabilityRead => "cap_read",
+        HirUnaryOp::CapabilityEdit => "cap_edit",
+        HirUnaryOp::CapabilityTake => "cap_take",
+        HirUnaryOp::CapabilityHold => "cap_hold",
         HirUnaryOp::Deref => "deref",
         HirUnaryOp::Weave => "weave",
         HirUnaryOp::Split => "split",

@@ -34,10 +34,11 @@ pub use runtime_requirements::{
 };
 
 pub use executable::{
-    ExecAssignOp, ExecAssignTarget, ExecAvailabilityAttachment, ExecAvailabilityKind, ExecBinaryOp,
-    ExecBindLine, ExecBindLineKind, ExecChainConnector, ExecChainIntroducer, ExecChainStep,
-    ExecCleanupFooter, ExecConstructContributionMode, ExecConstructDestination, ExecConstructLine,
-    ExecConstructRegion, ExecDynamicDispatch, ExecExpr, ExecHeadedModifier, ExecHeaderAttachment,
+    ExecArrayLine, ExecArrayRegion, ExecAssignOp, ExecAssignTarget, ExecAvailabilityAttachment,
+    ExecAvailabilityKind, ExecBinaryOp, ExecBindLine, ExecBindLineKind, ExecChainConnector,
+    ExecChainIntroducer, ExecChainStep, ExecCleanupFooter, ExecConstructContributionMode,
+    ExecConstructDestination, ExecConstructLine, ExecConstructRegion, ExecDeferAction,
+    ExecDynamicDispatch, ExecExpr, ExecFloatKind, ExecHeadedModifier, ExecHeaderAttachment,
     ExecMatchArm, ExecMatchPattern, ExecMemoryDetailLine, ExecMemorySpecDecl, ExecNamedBindingId,
     ExecPhraseArg, ExecPhraseQualifierKind, ExecRecordRegion, ExecRecycleLine, ExecRecycleLineKind,
     ExecStmt, ExecUnaryOp,
@@ -246,6 +247,21 @@ pub struct IrShackleDecl {
     pub surface_text: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecStructBitfieldFieldLayout {
+    pub name: String,
+    pub base_type: String,
+    pub storage_index: u16,
+    pub bit_offset: u16,
+    pub bit_width: u16,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecStructBitfieldLayout {
+    pub type_name: String,
+    pub fields: Vec<ExecStructBitfieldFieldLayout>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IrOwnerObject {
     pub type_path: Vec<String>,
@@ -260,7 +276,7 @@ pub struct IrOwnerObject {
 pub struct IrOwnerExit {
     pub name: String,
     pub condition: ExecExpr,
-    pub holds: Vec<String>,
+    pub retains: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -494,6 +510,14 @@ fn rewrite_stmt_routine_keys(
             current_package_id,
             expr,
         ),
+        ExecStmt::Reclaim(expr) => rewrite_expr_routine_keys(
+            package_display_names,
+            package_direct_dep_ids,
+            duplicate_keys,
+            routine_key_map,
+            current_package_id,
+            expr,
+        ),
         ExecStmt::ReturnVoid | ExecStmt::Break | ExecStmt::Continue => Ok(()),
         ExecStmt::ReturnValue { value } => rewrite_expr_routine_keys(
             package_display_names,
@@ -585,14 +609,18 @@ fn rewrite_stmt_routine_keys(
             }
             Ok(())
         }
-        ExecStmt::Defer(expr) => rewrite_expr_routine_keys(
-            package_display_names,
-            package_direct_dep_ids,
-            duplicate_keys,
-            routine_key_map,
-            current_package_id,
-            expr,
-        ),
+        ExecStmt::Defer(action) => match action {
+            ExecDeferAction::Expr(expr) | ExecDeferAction::Reclaim(expr) => {
+                rewrite_expr_routine_keys(
+                    package_display_names,
+                    package_direct_dep_ids,
+                    duplicate_keys,
+                    routine_key_map,
+                    current_package_id,
+                    expr,
+                )
+            }
+        },
         ExecStmt::Assign { target, value, .. } => {
             rewrite_assign_target_routine_keys(
                 package_display_names,
@@ -827,6 +855,71 @@ fn rewrite_stmt_routine_keys(
             }
             Ok(())
         }
+        ExecStmt::Array(region) => {
+            rewrite_expr_routine_keys(
+                package_display_names,
+                package_direct_dep_ids,
+                duplicate_keys,
+                routine_key_map,
+                current_package_id,
+                &mut region.target,
+            )?;
+            if let Some(base) = &mut region.base {
+                rewrite_expr_routine_keys(
+                    package_display_names,
+                    package_direct_dep_ids,
+                    duplicate_keys,
+                    routine_key_map,
+                    current_package_id,
+                    base,
+                )?;
+            }
+            if let Some(ExecConstructDestination::Place { target }) = &mut region.destination {
+                rewrite_assign_target_routine_keys(
+                    package_display_names,
+                    package_direct_dep_ids,
+                    duplicate_keys,
+                    routine_key_map,
+                    current_package_id,
+                    target,
+                )?;
+            }
+            if let Some(modifier) = &mut region.default_modifier
+                && let Some(payload) = &mut modifier.payload
+            {
+                rewrite_expr_routine_keys(
+                    package_display_names,
+                    package_direct_dep_ids,
+                    duplicate_keys,
+                    routine_key_map,
+                    current_package_id,
+                    payload,
+                )?;
+            }
+            for line in &mut region.lines {
+                rewrite_expr_routine_keys(
+                    package_display_names,
+                    package_direct_dep_ids,
+                    duplicate_keys,
+                    routine_key_map,
+                    current_package_id,
+                    &mut line.value,
+                )?;
+                if let Some(modifier) = &mut line.modifier
+                    && let Some(payload) = &mut modifier.payload
+                {
+                    rewrite_expr_routine_keys(
+                        package_display_names,
+                        package_direct_dep_ids,
+                        duplicate_keys,
+                        routine_key_map,
+                        current_package_id,
+                        payload,
+                    )?;
+                }
+            }
+            Ok(())
+        }
         ExecStmt::MemorySpec(spec) => {
             if let Some(modifier) = &mut spec.default_modifier
                 && let Some(payload) = &mut modifier.payload
@@ -915,7 +1008,11 @@ fn rewrite_expr_routine_keys(
     expr: &mut ExecExpr,
 ) -> Result<(), String> {
     match expr {
-        ExecExpr::Int(_) | ExecExpr::Bool(_) | ExecExpr::Str(_) | ExecExpr::Path(_) => Ok(()),
+        ExecExpr::Int(_)
+        | ExecExpr::Float { .. }
+        | ExecExpr::Bool(_)
+        | ExecExpr::Str(_)
+        | ExecExpr::Path(_) => Ok(()),
         ExecExpr::Pair { left, right } | ExecExpr::Binary { left, right, .. } => {
             rewrite_expr_routine_keys(
                 package_display_names,
@@ -1024,6 +1121,71 @@ fn rewrite_expr_routine_keys(
             Ok(())
         }
         ExecExpr::RecordRegion(region) => {
+            rewrite_expr_routine_keys(
+                package_display_names,
+                package_direct_dep_ids,
+                duplicate_keys,
+                routine_key_map,
+                current_package_id,
+                &mut region.target,
+            )?;
+            if let Some(base) = &mut region.base {
+                rewrite_expr_routine_keys(
+                    package_display_names,
+                    package_direct_dep_ids,
+                    duplicate_keys,
+                    routine_key_map,
+                    current_package_id,
+                    base,
+                )?;
+            }
+            if let Some(ExecConstructDestination::Place { target }) = &mut region.destination {
+                rewrite_assign_target_routine_keys(
+                    package_display_names,
+                    package_direct_dep_ids,
+                    duplicate_keys,
+                    routine_key_map,
+                    current_package_id,
+                    target,
+                )?;
+            }
+            if let Some(modifier) = &mut region.default_modifier
+                && let Some(payload) = &mut modifier.payload
+            {
+                rewrite_expr_routine_keys(
+                    package_display_names,
+                    package_direct_dep_ids,
+                    duplicate_keys,
+                    routine_key_map,
+                    current_package_id,
+                    payload,
+                )?;
+            }
+            for line in &mut region.lines {
+                rewrite_expr_routine_keys(
+                    package_display_names,
+                    package_direct_dep_ids,
+                    duplicate_keys,
+                    routine_key_map,
+                    current_package_id,
+                    &mut line.value,
+                )?;
+                if let Some(modifier) = &mut line.modifier
+                    && let Some(payload) = &mut modifier.payload
+                {
+                    rewrite_expr_routine_keys(
+                        package_display_names,
+                        package_direct_dep_ids,
+                        duplicate_keys,
+                        routine_key_map,
+                        current_package_id,
+                        payload,
+                    )?;
+                }
+            }
+            Ok(())
+        }
+        ExecExpr::ArrayRegion(region) => {
             rewrite_expr_routine_keys(
                 package_display_names,
                 package_direct_dep_ids,
@@ -1572,6 +1734,7 @@ fn render_lang_item_row(module_id: &str, name: &str, target: &[String]) -> Strin
 }
 
 const MEMORY_SPEC_SURFACE_ROW_PREFIX: &str = "memory_spec:";
+const STRUCT_BITFIELD_LAYOUT_ROW_PREFIX: &str = "struct_bitfield_layout:";
 
 pub fn render_memory_spec_surface_row(spec: &ExecMemorySpecDecl) -> Result<String, String> {
     serde_json::to_string(spec)
@@ -1588,12 +1751,110 @@ pub fn parse_memory_spec_surface_row(row: &str) -> Result<Option<ExecMemorySpecD
         .map_err(|err| format!("failed to parse memory spec surface row: {err}"))
 }
 
+pub fn render_struct_bitfield_layout_row(
+    layout: &ExecStructBitfieldLayout,
+) -> Result<String, String> {
+    serde_json::to_string(layout)
+        .map(|json| format!("{STRUCT_BITFIELD_LAYOUT_ROW_PREFIX}{json}"))
+        .map_err(|err| format!("failed to render struct bitfield layout row: {err}"))
+}
+
+pub fn parse_struct_bitfield_layout_row(
+    row: &str,
+) -> Result<Option<ExecStructBitfieldLayout>, String> {
+    let Some(json) = row.strip_prefix(STRUCT_BITFIELD_LAYOUT_ROW_PREFIX) else {
+        return Ok(None);
+    };
+    serde_json::from_str(json)
+        .map(Some)
+        .map_err(|err| format!("failed to parse struct bitfield layout row: {err}"))
+}
+
+fn fixed_width_builtin_bits_for_hir_type(ty: &HirType) -> Option<u16> {
+    let root = match &ty.kind {
+        HirTypeKind::Path(path) => path.segments.last()?.as_str(),
+        HirTypeKind::Apply { base, .. } => base.segments.last()?.as_str(),
+        HirTypeKind::Ref { inner, .. } => return fixed_width_builtin_bits_for_hir_type(inner),
+        _ => return None,
+    };
+    match root {
+        "I8" | "U8" => Some(8),
+        "I16" | "U16" => Some(16),
+        "I32" | "U32" => Some(32),
+        "I64" | "U64" => Some(64),
+        _ => None,
+    }
+}
+
+fn lower_struct_bitfield_layout(
+    module_id: &str,
+    symbol: &HirSymbol,
+    fields: &[arcana_hir::HirField],
+) -> Option<ExecStructBitfieldLayout> {
+    let mut lowered = Vec::new();
+    let mut current_storage: Option<(String, u16, u16, u16)> = None;
+    let mut next_storage_index = 0_u16;
+    for field in fields {
+        let Some(bit_width) = field.bit_width else {
+            current_storage = None;
+            continue;
+        };
+        let base_type = field.ty.render();
+        let Some(base_width) = fixed_width_builtin_bits_for_hir_type(&field.ty) else {
+            current_storage = None;
+            continue;
+        };
+        let (storage_index, bit_offset) = match current_storage.as_mut() {
+            Some((current_base, current_base_width, current_index, current_offset))
+                if *current_base == base_type
+                    && *current_base_width == base_width
+                    && current_offset.saturating_add(bit_width) <= base_width =>
+            {
+                let offset = *current_offset;
+                *current_offset += bit_width;
+                (*current_index, offset)
+            }
+            _ => {
+                let storage_index = next_storage_index;
+                next_storage_index += 1;
+                current_storage = Some((base_type.clone(), base_width, storage_index, bit_width));
+                (storage_index, 0)
+            }
+        };
+        lowered.push(ExecStructBitfieldFieldLayout {
+            name: field.name.clone(),
+            base_type,
+            storage_index,
+            bit_offset,
+            bit_width,
+        });
+    }
+    (!lowered.is_empty()).then(|| ExecStructBitfieldLayout {
+        type_name: format!("{module_id}.{}", symbol.name),
+        fields: lowered,
+    })
+}
+
+fn module_struct_bitfield_layout_rows(module: &HirModuleSummary) -> Vec<String> {
+    module
+        .symbols
+        .iter()
+        .filter_map(|symbol| match &symbol.body {
+            HirSymbolBody::Struct { fields } => {
+                lower_struct_bitfield_layout(&module.module_id, symbol, fields)
+            }
+            _ => None,
+        })
+        .filter_map(|layout| render_struct_bitfield_layout_row(&layout).ok())
+        .collect()
+}
+
 fn resolved_module_lang_item_rows(
     workspace: &HirWorkspaceSummary,
     resolved_module: &HirResolvedModule,
     module: &HirModuleSummary,
 ) -> Vec<String> {
-    module
+    let mut rows = module
         .lang_items
         .iter()
         .map(|item| {
@@ -1602,7 +1863,9 @@ fn resolved_module_lang_item_rows(
                 .unwrap_or_else(|| item.target.clone());
             render_lang_item_row(&module.module_id, &item.name, &target)
         })
-        .collect()
+        .collect::<Vec<_>>();
+    rows.extend(module_struct_bitfield_layout_rows(module));
+    rows
 }
 
 fn render_dependency_row(edge: &HirModuleDependency) -> String {
@@ -3168,8 +3431,10 @@ fn lower_unary_op(op: HirUnaryOp) -> ExecUnaryOp {
         HirUnaryOp::Neg => ExecUnaryOp::Neg,
         HirUnaryOp::Not => ExecUnaryOp::Not,
         HirUnaryOp::BitNot => ExecUnaryOp::BitNot,
-        HirUnaryOp::BorrowRead => ExecUnaryOp::BorrowRead,
-        HirUnaryOp::BorrowMut => ExecUnaryOp::BorrowMut,
+        HirUnaryOp::CapabilityRead => ExecUnaryOp::CapabilityRead,
+        HirUnaryOp::CapabilityEdit => ExecUnaryOp::CapabilityEdit,
+        HirUnaryOp::CapabilityTake => ExecUnaryOp::CapabilityTake,
+        HirUnaryOp::CapabilityHold => ExecUnaryOp::CapabilityHold,
         HirUnaryOp::Deref => ExecUnaryOp::Deref,
         HirUnaryOp::Weave => ExecUnaryOp::Weave,
         HirUnaryOp::Split => ExecUnaryOp::Split,
@@ -3879,6 +4144,8 @@ fn lower_chain_step_exec_resolved(
 fn lower_assign_target_exec(target: &HirAssignTarget) -> ExecAssignTarget {
     match target {
         HirAssignTarget::Name { text } => ExecAssignTarget::Name(text.clone()),
+        HirAssignTarget::Deref { expr } => lower_assign_target_exec_from_expr(expr)
+            .expect("deref assignment target should lower from an assignable expression"),
         HirAssignTarget::MemberAccess { target, member } => ExecAssignTarget::Member {
             target: Box::new(lower_assign_target_exec(target)),
             member: member.clone(),
@@ -3896,6 +4163,8 @@ fn lower_assign_target_exec_resolved(
 ) -> ExecAssignTarget {
     match target {
         HirAssignTarget::Name { text } => ExecAssignTarget::Name(text.clone()),
+        HirAssignTarget::Deref { expr } => lower_assign_target_exec_resolved_from_expr(expr, scope)
+            .expect("resolved deref assignment target should lower from an assignable expression"),
         HirAssignTarget::MemberAccess { target, member } => ExecAssignTarget::Member {
             target: Box::new(lower_assign_target_exec_resolved(target, scope)),
             member: member.clone(),
@@ -3904,6 +4173,65 @@ fn lower_assign_target_exec_resolved(
             target: Box::new(lower_assign_target_exec_resolved(target, scope)),
             index: lower_exec_expr_resolved(index, scope),
         },
+    }
+}
+
+fn lower_assign_target_exec_from_expr(expr: &HirExpr) -> Option<ExecAssignTarget> {
+    match expr {
+        HirExpr::Path { segments } if segments.len() == 1 => {
+            Some(ExecAssignTarget::Name(segments[0].clone()))
+        }
+        HirExpr::MemberAccess { expr, member } => Some(ExecAssignTarget::Member {
+            target: Box::new(lower_assign_target_exec_from_expr(expr)?),
+            member: member.clone(),
+        }),
+        HirExpr::Index { expr, index } => Some(ExecAssignTarget::Index {
+            target: Box::new(lower_assign_target_exec_from_expr(expr)?),
+            index: lower_exec_expr(index),
+        }),
+        HirExpr::GenericApply { expr, .. } => lower_assign_target_exec_from_expr(expr),
+        HirExpr::Unary {
+            op:
+                HirUnaryOp::CapabilityRead
+                | HirUnaryOp::CapabilityEdit
+                | HirUnaryOp::CapabilityTake
+                | HirUnaryOp::CapabilityHold
+                | HirUnaryOp::Deref,
+            expr,
+        } => lower_assign_target_exec_from_expr(expr),
+        _ => None,
+    }
+}
+
+fn lower_assign_target_exec_resolved_from_expr(
+    expr: &HirExpr,
+    scope: &ResolvedRenderScope<'_>,
+) -> Option<ExecAssignTarget> {
+    match expr {
+        HirExpr::Path { segments } if segments.len() == 1 => {
+            Some(ExecAssignTarget::Name(segments[0].clone()))
+        }
+        HirExpr::MemberAccess { expr, member } => Some(ExecAssignTarget::Member {
+            target: Box::new(lower_assign_target_exec_resolved_from_expr(expr, scope)?),
+            member: member.clone(),
+        }),
+        HirExpr::Index { expr, index } => Some(ExecAssignTarget::Index {
+            target: Box::new(lower_assign_target_exec_resolved_from_expr(expr, scope)?),
+            index: lower_exec_expr_resolved(index, scope),
+        }),
+        HirExpr::GenericApply { expr, .. } => {
+            lower_assign_target_exec_resolved_from_expr(expr, scope)
+        }
+        HirExpr::Unary {
+            op:
+                HirUnaryOp::CapabilityRead
+                | HirUnaryOp::CapabilityEdit
+                | HirUnaryOp::CapabilityTake
+                | HirUnaryOp::CapabilityHold
+                | HirUnaryOp::Deref,
+            expr,
+        } => lower_assign_target_exec_resolved_from_expr(expr, scope),
+        _ => None,
     }
 }
 
@@ -3989,6 +4317,7 @@ fn lower_construct_region_exec(region: &arcana_hir::HirConstructRegion) -> ExecC
 
 fn lower_record_region_exec(region: &arcana_hir::HirRecordRegion) -> ExecRecordRegion {
     ExecRecordRegion {
+        kind: region.kind.as_str().to_string(),
         completion: region.completion.as_str().to_string(),
         target: Box::new(lower_exec_expr(&region.target)),
         base: region
@@ -4023,6 +4352,43 @@ fn lower_record_region_exec(region: &arcana_hir::HirRecordRegion) -> ExecRecordR
             })
             .collect(),
         copied_fields: Vec::new(),
+    }
+}
+
+fn lower_array_region_exec(region: &arcana_hir::HirArrayRegion) -> ExecArrayRegion {
+    ExecArrayRegion {
+        completion: region.completion.as_str().to_string(),
+        target: Box::new(lower_exec_expr(&region.target)),
+        base: region
+            .base
+            .as_ref()
+            .map(|base| Box::new(lower_exec_expr(base))),
+        destination: region
+            .destination
+            .as_ref()
+            .map(|destination| match destination {
+                arcana_hir::HirConstructDestination::Deliver { name } => {
+                    ExecConstructDestination::Deliver { name: name.clone() }
+                }
+                arcana_hir::HirConstructDestination::Place { target } => {
+                    ExecConstructDestination::Place {
+                        target: lower_assign_target_exec(target),
+                    }
+                }
+            }),
+        default_modifier: region
+            .default_modifier
+            .as_ref()
+            .map(lower_headed_modifier_exec),
+        lines: region
+            .lines
+            .iter()
+            .map(|line| ExecArrayLine {
+                index: line.index,
+                value: lower_exec_expr(&line.value),
+                modifier: line.modifier.as_ref().map(lower_headed_modifier_exec),
+            })
+            .collect(),
     }
 }
 
@@ -4071,6 +4437,7 @@ fn lower_record_region_exec_resolved(
     scope: &ResolvedRenderScope<'_>,
 ) -> ExecRecordRegion {
     ExecRecordRegion {
+        kind: region.kind.as_str().to_string(),
         completion: region.completion.as_str().to_string(),
         target: Box::new(lower_exec_expr_resolved(&region.target, scope)),
         base: region
@@ -4111,11 +4478,61 @@ fn lower_record_region_exec_resolved(
     }
 }
 
+fn lower_array_region_exec_resolved(
+    region: &arcana_hir::HirArrayRegion,
+    scope: &ResolvedRenderScope<'_>,
+) -> ExecArrayRegion {
+    ExecArrayRegion {
+        completion: region.completion.as_str().to_string(),
+        target: Box::new(lower_exec_expr_resolved(&region.target, scope)),
+        base: region
+            .base
+            .as_ref()
+            .map(|base| Box::new(lower_exec_expr_resolved(base, scope))),
+        destination: region
+            .destination
+            .as_ref()
+            .map(|destination| match destination {
+                arcana_hir::HirConstructDestination::Deliver { name } => {
+                    ExecConstructDestination::Deliver { name: name.clone() }
+                }
+                arcana_hir::HirConstructDestination::Place { target } => {
+                    ExecConstructDestination::Place {
+                        target: lower_assign_target_exec_resolved(target, scope),
+                    }
+                }
+            }),
+        default_modifier: region
+            .default_modifier
+            .as_ref()
+            .map(|modifier| lower_headed_modifier_exec_resolved(modifier, scope)),
+        lines: region
+            .lines
+            .iter()
+            .map(|line| ExecArrayLine {
+                index: line.index,
+                value: lower_exec_expr_resolved(&line.value, scope),
+                modifier: line
+                    .modifier
+                    .as_ref()
+                    .map(|modifier| lower_headed_modifier_exec_resolved(modifier, scope)),
+            })
+            .collect(),
+    }
+}
+
 fn lower_exec_expr(expr: &HirExpr) -> ExecExpr {
     match expr {
         HirExpr::Path { segments } => ExecExpr::Path(segments.clone()),
         HirExpr::BoolLiteral { value } => ExecExpr::Bool(*value),
         HirExpr::IntLiteral { text } => ExecExpr::Int(text.parse().unwrap_or_default()),
+        HirExpr::FloatLiteral { text, kind } => ExecExpr::Float {
+            text: text.clone(),
+            kind: match kind {
+                arcana_hir::HirFloatLiteralKind::F32 => ExecFloatKind::F32,
+                arcana_hir::HirFloatLiteralKind::F64 => ExecFloatKind::F64,
+            },
+        },
         HirExpr::StrLiteral { text } => {
             ExecExpr::Str(decode_source_string_literal(text).unwrap_or_else(|_| text.clone()))
         }
@@ -4141,6 +4558,9 @@ fn lower_exec_expr(expr: &HirExpr) -> ExecExpr {
         }
         HirExpr::RecordRegion(region) => {
             ExecExpr::RecordRegion(Box::new(lower_record_region_exec(region)))
+        }
+        HirExpr::ArrayRegion(region) => {
+            ExecExpr::ArrayRegion(Box::new(lower_array_region_exec(region)))
         }
         HirExpr::Chain {
             style,
@@ -4237,6 +4657,13 @@ fn lower_exec_expr_resolved(expr: &HirExpr, scope: &ResolvedRenderScope<'_>) -> 
         HirExpr::Path { segments } => ExecExpr::Path(segments.clone()),
         HirExpr::BoolLiteral { value } => ExecExpr::Bool(*value),
         HirExpr::IntLiteral { text } => ExecExpr::Int(text.parse().unwrap_or_default()),
+        HirExpr::FloatLiteral { text, kind } => ExecExpr::Float {
+            text: text.clone(),
+            kind: match kind {
+                arcana_hir::HirFloatLiteralKind::F32 => ExecFloatKind::F32,
+                arcana_hir::HirFloatLiteralKind::F64 => ExecFloatKind::F64,
+            },
+        },
         HirExpr::StrLiteral { text } => {
             ExecExpr::Str(decode_source_string_literal(text).unwrap_or_else(|_| text.clone()))
         }
@@ -4271,6 +4698,9 @@ fn lower_exec_expr_resolved(expr: &HirExpr, scope: &ResolvedRenderScope<'_>) -> 
         )),
         HirExpr::RecordRegion(region) => {
             ExecExpr::RecordRegion(Box::new(lower_record_region_exec_resolved(region, scope)))
+        }
+        HirExpr::ArrayRegion(region) => {
+            ExecExpr::ArrayRegion(Box::new(lower_array_region_exec_resolved(region, scope)))
         }
         HirExpr::Chain {
             style,
@@ -4552,7 +4982,15 @@ fn lower_exec_stmt_sequence(statement: &HirStatement) -> Vec<ExecStmt> {
                 cleanup_footers: statement.cleanup_footers.iter().map(lower_rollup).collect(),
             }]
         }
-        HirStatementKind::Defer { expr } => vec![ExecStmt::Defer(lower_exec_expr(expr))],
+        HirStatementKind::Defer { action } => vec![ExecStmt::Defer(match action {
+            arcana_hir::HirDeferAction::Expr { expr } => {
+                ExecDeferAction::Expr(lower_exec_expr(expr))
+            }
+            arcana_hir::HirDeferAction::Reclaim { expr } => {
+                ExecDeferAction::Reclaim(lower_exec_expr(expr))
+            }
+        })],
+        HirStatementKind::Reclaim { expr } => vec![ExecStmt::Reclaim(lower_exec_expr(expr))],
         HirStatementKind::Break => vec![ExecStmt::Break],
         HirStatementKind::Continue => vec![ExecStmt::Continue],
         HirStatementKind::Assign { target, op, value } => vec![ExecStmt::Assign {
@@ -4633,6 +5071,9 @@ fn lower_exec_stmt_sequence(statement: &HirStatement) -> Vec<ExecStmt> {
         }
         HirStatementKind::Record(region) => {
             vec![ExecStmt::Record(lower_record_region_exec(region))]
+        }
+        HirStatementKind::Array(region) => {
+            vec![ExecStmt::Array(lower_array_region_exec(region))]
         }
         HirStatementKind::MemorySpec(spec) => {
             vec![ExecStmt::MemorySpec(lower_module_memory_spec_exec(spec))]
@@ -4991,8 +5432,19 @@ fn lower_exec_stmt_resolved(
                 rollup_bindings,
             )
         }
-        HirStatementKind::Defer { expr } => (
-            vec![ExecStmt::Defer(lower_exec_expr_resolved(expr, scope))],
+        HirStatementKind::Defer { action } => (
+            vec![ExecStmt::Defer(match action {
+                arcana_hir::HirDeferAction::Expr { expr } => {
+                    ExecDeferAction::Expr(lower_exec_expr_resolved(expr, scope))
+                }
+                arcana_hir::HirDeferAction::Reclaim { expr } => {
+                    ExecDeferAction::Reclaim(lower_exec_expr_resolved(expr, scope))
+                }
+            })],
+            Vec::new(),
+        ),
+        HirStatementKind::Reclaim { expr } => (
+            vec![ExecStmt::Reclaim(lower_exec_expr_resolved(expr, scope))],
             Vec::new(),
         ),
         HirStatementKind::Break => (vec![ExecStmt::Break], Vec::new()),
@@ -5159,6 +5611,16 @@ fn lower_exec_stmt_resolved(
             }
             (vec![lowered], Vec::new())
         }
+        HirStatementKind::Array(region) => {
+            let lowered = ExecStmt::Array(lower_array_region_exec_resolved(region, scope));
+            if let Some(arcana_hir::HirConstructDestination::Deliver { name }) = &region.destination
+                && let Some(target_path) = flatten_callable_expr_path(&region.target)
+                && let Some(ty) = resolve_record_result_type_for_scope(scope, &target_path)
+            {
+                scope.value_scope.insert(name.clone(), ty);
+            }
+            (vec![lowered], Vec::new())
+        }
         HirStatementKind::MemorySpec(spec) => (
             vec![ExecStmt::MemorySpec(ExecMemorySpecDecl {
                 family: spec.family.as_str().to_string(),
@@ -5304,7 +5766,7 @@ fn lower_owner_decl(module: &HirModuleSummary, symbol: &HirSymbol) -> Option<IrO
             .map(|owner_exit| IrOwnerExit {
                 name: owner_exit.name.clone(),
                 condition: lower_exec_expr(&owner_exit.condition),
-                holds: owner_exit.holds.clone(),
+                retains: owner_exit.retains.clone(),
             })
             .collect(),
     })
@@ -5446,7 +5908,7 @@ fn lower_owner_decl_resolved(
             .map(|owner_exit| IrOwnerExit {
                 name: owner_exit.name.clone(),
                 condition: lower_exec_expr_resolved(&owner_exit.condition, &scope),
-                holds: owner_exit.holds.clone(),
+                retains: owner_exit.retains.clone(),
             })
             .collect(),
     }))
@@ -5594,6 +6056,7 @@ fn lower_package(package: &HirPackageSummary) -> IrPackage {
                     .lang_items
                     .iter()
                     .map(|item| render_lang_item_row(&module.module_id, &item.name, &item.target))
+                    .chain(module_struct_bitfield_layout_rows(module))
                     .collect(),
                 exported_surface_rows: {
                     let mut rows = module.summary_surface_rows();
@@ -6069,13 +6532,15 @@ pub fn lower_workspace_package_with_resolution(
                     resolved_module_lang_item_rows(workspace, resolved_module, module)
                 })
                 .unwrap_or_else(|| {
-                    module
+                    let mut rows = module
                         .lang_items
                         .iter()
                         .map(|item| {
                             render_lang_item_row(&module.module_id, &item.name, &item.target)
                         })
-                        .collect()
+                        .collect::<Vec<_>>();
+                    rows.extend(module_struct_bitfield_layout_rows(module));
+                    rows
                 });
             (module.module_id.clone(), rows)
         })

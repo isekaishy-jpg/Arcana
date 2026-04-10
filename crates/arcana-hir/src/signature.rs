@@ -4,6 +4,9 @@ pub fn render_symbol_signature(symbol: &HirSymbol) -> String {
     match symbol.kind {
         HirSymbolKind::Fn | HirSymbolKind::System => render_function_signature(symbol),
         HirSymbolKind::Record => render_record_signature(symbol),
+        HirSymbolKind::Struct => render_struct_signature(symbol),
+        HirSymbolKind::Union => render_union_signature(symbol),
+        HirSymbolKind::Array => render_array_signature(symbol),
         HirSymbolKind::Object => render_object_signature(symbol),
         HirSymbolKind::Owner => render_owner_signature(symbol),
         HirSymbolKind::Enum => render_enum_signature(symbol),
@@ -65,26 +68,49 @@ pub(crate) fn render_function_signature(symbol: &HirSymbol) -> String {
 fn render_record_signature(symbol: &HirSymbol) -> String {
     let mut lines = vec![render_named_type_header("record", symbol)];
     if let HirSymbolBody::Record { fields } = &symbol.body {
-        lines.extend(
-            fields
-                .iter()
-                .map(|field| format!("{}: {}", field.name, field.ty)),
-        );
+        lines.extend(fields.iter().map(render_field_signature));
     }
     lines.join("\n")
+}
+
+fn render_struct_signature(symbol: &HirSymbol) -> String {
+    let mut lines = vec![render_named_type_header("struct", symbol)];
+    if let HirSymbolBody::Struct { fields } = &symbol.body {
+        lines.extend(fields.iter().map(render_field_signature));
+    }
+    lines.join("\n")
+}
+
+fn render_union_signature(symbol: &HirSymbol) -> String {
+    let mut lines = vec![render_named_type_header("union", symbol)];
+    if let HirSymbolBody::Union { fields } = &symbol.body {
+        lines.extend(fields.iter().map(render_field_signature));
+    }
+    lines.join("\n")
+}
+
+fn render_array_signature(symbol: &HirSymbol) -> String {
+    if let HirSymbolBody::Array { element_ty, len } = &symbol.body {
+        format!("array {}[{}, {}]:", symbol.name, element_ty.render(), len)
+    } else {
+        format!("array {}:", symbol.name)
+    }
 }
 
 fn render_object_signature(symbol: &HirSymbol) -> String {
     let mut lines = vec![render_named_type_header("obj", symbol)];
     if let HirSymbolBody::Object { fields, methods } = &symbol.body {
-        lines.extend(
-            fields
-                .iter()
-                .map(|field| format!("{}: {}", field.name, field.ty)),
-        );
+        lines.extend(fields.iter().map(render_field_signature));
         lines.extend(methods.iter().map(render_function_signature));
     }
     lines.join("\n")
+}
+
+fn render_field_signature(field: &super::HirField) -> String {
+    match field.bit_width {
+        Some(width) => format!("{}: {} bits {}", field.name, field.ty, width),
+        None => format!("{}: {}", field.name, field.ty),
+    }
 }
 
 fn render_owner_signature(symbol: &HirSymbol) -> String {

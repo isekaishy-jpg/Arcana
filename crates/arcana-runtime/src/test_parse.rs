@@ -259,8 +259,10 @@ fn parse_unary_op(text: &str) -> Result<ParsedUnaryOp, String> {
         "-" => Ok(ParsedUnaryOp::Neg),
         "not" => Ok(ParsedUnaryOp::Not),
         "~" => Ok(ParsedUnaryOp::BitNot),
-        "&" => Ok(ParsedUnaryOp::BorrowRead),
-        "&mut" => Ok(ParsedUnaryOp::BorrowMut),
+        "&read" => Ok(ParsedUnaryOp::CapabilityRead),
+        "&edit" => Ok(ParsedUnaryOp::CapabilityEdit),
+        "&take" => Ok(ParsedUnaryOp::CapabilityTake),
+        "&hold" => Ok(ParsedUnaryOp::CapabilityHold),
         "*" => Ok(ParsedUnaryOp::Deref),
         "weave" => Ok(ParsedUnaryOp::Weave),
         "split" => Ok(ParsedUnaryOp::Split),
@@ -922,8 +924,19 @@ pub(crate) fn parse_stmt(text: &str) -> Result<ParsedStmt, String> {
         });
     }
     if core.starts_with("defer(") && core.ends_with(')') {
-        return Ok(ParsedStmt::Defer(parse_expr(strip_prefix_suffix(
-            core, "defer(", ")",
+        let inner = strip_prefix_suffix(core, "defer(", ")")?;
+        if inner.starts_with("reclaim(") && inner.ends_with(')') {
+            return Ok(ParsedStmt::Defer(arcana_ir::ExecDeferAction::Reclaim(
+                parse_expr(strip_prefix_suffix(inner, "reclaim(", ")")?)?,
+            )));
+        }
+        return Ok(ParsedStmt::Defer(arcana_ir::ExecDeferAction::Expr(
+            parse_expr(inner)?,
+        )));
+    }
+    if core.starts_with("reclaim(") && core.ends_with(')') {
+        return Ok(ParsedStmt::Reclaim(parse_expr(strip_prefix_suffix(
+            core, "reclaim(", ")",
         )?)?));
     }
     if core == "break" {

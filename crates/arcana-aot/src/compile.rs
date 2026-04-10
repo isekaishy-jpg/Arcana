@@ -115,7 +115,7 @@ fn compile_owner_exit(owner_exit: &IrOwnerExit) -> AotOwnerExitArtifact {
     AotOwnerExitArtifact {
         name: owner_exit.name.clone(),
         condition: owner_exit.condition.clone(),
-        holds: owner_exit.holds.clone(),
+        retains: owner_exit.retains.clone(),
     }
 }
 

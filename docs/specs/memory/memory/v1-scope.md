@@ -14,7 +14,7 @@ Freeze-exception note:
   - new families `temp`, `session`, `ring`, and `slab`
   - new `Memory` detail keys `reset_on`, `page`, `overwrite`, and `window`
   - broadened memory-phrase behavior for `ring`
-  - explicit borrowed-slice syntax `&x[a..b]` and `&mut x[a..b]`
+  - explicit borrowed-slice syntax `&read x[a..b]` and `&edit x[a..b]`
 
 ## Included Families
 
@@ -227,8 +227,8 @@ These guarantees are public contract because compiler caches, diagnostics, and s
 - Current owned slice behavior remains unchanged:
   - `x[a..b]` is an owned slice/copy
 - Borrowed-slice creation is explicit:
-  - `&x[a..b]`
-  - `&mut x[a..b]`
+  - `&read x[a..b]`
+  - `&edit x[a..b]`
 - Borrowed-slice syntax is intentionally narrow:
   - built-in/indexable std surfaces
   - view types

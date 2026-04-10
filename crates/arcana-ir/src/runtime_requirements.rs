@@ -145,6 +145,7 @@ fn collect_stmt_callees(
 ) {
     match statement {
         ExecStmt::Let { value, .. } => collect_expr_callees(package, current_module_id, value, out),
+        ExecStmt::Reclaim(expr) => collect_expr_callees(package, current_module_id, expr, out),
         ExecStmt::Expr {
             expr,
             cleanup_footers,
@@ -204,7 +205,11 @@ fn collect_stmt_callees(
                 collect_stmt_callees(package, current_module_id, statement, out);
             }
         }
-        ExecStmt::Defer(expr) => collect_expr_callees(package, current_module_id, expr, out),
+        ExecStmt::Defer(action) => match action {
+            crate::ExecDeferAction::Expr(expr) | crate::ExecDeferAction::Reclaim(expr) => {
+                collect_expr_callees(package, current_module_id, expr, out)
+            }
+        },
         ExecStmt::ActivateOwner { context, .. } => {
             if let Some(context) = context {
                 collect_expr_callees(package, current_module_id, context, out);
@@ -305,6 +310,28 @@ fn collect_stmt_callees(
                 }
             }
         }
+        ExecStmt::Array(region) => {
+            collect_expr_callees(package, current_module_id, &region.target, out);
+            if let Some(base) = &region.base {
+                collect_expr_callees(package, current_module_id, base, out);
+            }
+            if let Some(modifier) = &region.default_modifier
+                && let Some(payload) = &modifier.payload
+            {
+                collect_expr_callees(package, current_module_id, payload, out);
+            }
+            if let Some(crate::ExecConstructDestination::Place { target }) = &region.destination {
+                collect_assign_target_callees(package, current_module_id, target, out);
+            }
+            for line in &region.lines {
+                collect_expr_callees(package, current_module_id, &line.value, out);
+                if let Some(modifier) = &line.modifier
+                    && let Some(payload) = &modifier.payload
+                {
+                    collect_expr_callees(package, current_module_id, payload, out);
+                }
+            }
+        }
         ExecStmt::MemorySpec(spec) => {
             if let Some(modifier) = &spec.default_modifier
                 && let Some(payload) = &modifier.payload
@@ -348,7 +375,11 @@ fn collect_expr_callees(
     out: &mut BTreeSet<String>,
 ) {
     match expr {
-        ExecExpr::Int(_) | ExecExpr::Bool(_) | ExecExpr::Str(_) | ExecExpr::Path(_) => {}
+        ExecExpr::Int(_)
+        | ExecExpr::Float { .. }
+        | ExecExpr::Bool(_)
+        | ExecExpr::Str(_)
+        | ExecExpr::Path(_) => {}
         ExecExpr::Pair { left, right } => {
             collect_expr_callees(package, current_module_id, left, out);
             collect_expr_callees(package, current_module_id, right, out);
@@ -384,6 +415,28 @@ fn collect_expr_callees(
             }
         }
         ExecExpr::RecordRegion(region) => {
+            collect_expr_callees(package, current_module_id, &region.target, out);
+            if let Some(base) = &region.base {
+                collect_expr_callees(package, current_module_id, base, out);
+            }
+            if let Some(modifier) = &region.default_modifier
+                && let Some(payload) = &modifier.payload
+            {
+                collect_expr_callees(package, current_module_id, payload, out);
+            }
+            if let Some(crate::ExecConstructDestination::Place { target }) = &region.destination {
+                collect_assign_target_callees(package, current_module_id, target, out);
+            }
+            for line in &region.lines {
+                collect_expr_callees(package, current_module_id, &line.value, out);
+                if let Some(modifier) = &line.modifier
+                    && let Some(payload) = &modifier.payload
+                {
+                    collect_expr_callees(package, current_module_id, payload, out);
+                }
+            }
+        }
+        ExecExpr::ArrayRegion(region) => {
             collect_expr_callees(package, current_module_id, &region.target, out);
             if let Some(base) = &region.base {
                 collect_expr_callees(package, current_module_id, base, out);

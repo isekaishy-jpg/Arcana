@@ -5756,7 +5756,7 @@ toolchain = \"future-toolchain\"\n"
                 "    value: Int\n",
                 "\n",
                 "export create Session [Counter] scope-exit:\n",
-                "    done: when Counter.value >= 1 hold [Counter]\n",
+                "    done: when Counter.value >= 1 retain [Counter]\n",
             ),
         );
 
@@ -5815,7 +5815,7 @@ toolchain = \"future-toolchain\"\n"
                 "        self.value = ctx.base\n",
                 "\n",
                 "export create Session [Counter] scope-exit:\n",
-                "    done: when Counter.value >= 1 hold [Counter]\n",
+                "    done: when Counter.value >= 1 retain [Counter]\n",
             ),
         );
 
@@ -5833,7 +5833,7 @@ toolchain = \"future-toolchain\"\n"
                 "        self.value = ctx.base\n",
                 "\n",
                 "export create Session [Counter] scope-exit:\n",
-                "    done: when Counter.value >= 1 hold [Counter]\n",
+                "    done: when Counter.value >= 1 retain [Counter]\n",
             ),
         );
 

@@ -41,8 +41,8 @@ enum SemanticTypeKey {
         args: Vec<TypeId>,
     },
     Ref {
+        mode: String,
         lifetime: Option<SemanticLifetimeKey>,
-        mutable: bool,
         inner: TypeId,
     },
     Tuple(Vec<TypeId>),
@@ -233,14 +233,14 @@ impl SemanticArena {
                     .collect(),
             },
             HirTypeKind::Ref {
+                mode,
                 lifetime,
-                mutable,
                 inner,
             } => SemanticTypeKey::Ref {
+                mode: mode.as_str().to_string(),
                 lifetime: lifetime
                     .as_ref()
                     .map(|lifetime| lower_lifetime_key(scope, &lifetime.name)),
-                mutable: *mutable,
                 inner: self.type_id_for_hir(workspace, resolved_module, scope, inner),
             },
             HirTypeKind::Tuple(items) => SemanticTypeKey::Tuple(

@@ -1663,20 +1663,15 @@ fn render_shackle_rust_type(
                 .join(", ")
         ),
         IrRoutineTypeKind::Ref {
+            mode,
             lifetime,
-            mutable,
             inner,
         } => {
-            let mut rendered = String::from("&");
+            let mut args = vec![render_shackle_rust_type(spec, inner)];
             if let Some(lifetime) = lifetime {
-                rendered.push_str(&lifetime.name);
-                rendered.push(' ');
+                args.push(lifetime.name.clone());
             }
-            if *mutable {
-                rendered.push_str("mut ");
-            }
-            rendered.push_str(&render_shackle_rust_type(spec, inner));
-            rendered
+            format!("&{}[{}]", mode, args.join(", "))
         }
         IrRoutineTypeKind::Tuple(items) => format!(
             "({})",

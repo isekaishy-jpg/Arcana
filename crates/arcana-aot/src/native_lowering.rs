@@ -387,9 +387,12 @@ impl<'a> NativeLoweringBuilder<'a> {
         while let Some(stmt) = iter.next() {
             let is_last = iter.peek().is_none();
             match stmt {
-                ExecStmt::Defer(expr) => {
-                    current_defers.push(self.lower_typed_expr(expr, &bindings)?.expr);
-                }
+                ExecStmt::Defer(action) => match action {
+                    arcana_ir::ExecDeferAction::Expr(expr) => {
+                        current_defers.push(self.lower_typed_expr(expr, &bindings)?.expr);
+                    }
+                    arcana_ir::ExecDeferAction::Reclaim(_) => return None,
+                },
                 ExecStmt::Let { name, .. } => {
                     lowered_statements.push(self.lower_stmt(stmt, &mut bindings)?);
                     self.activate_cleanup_actions_for_binding(
@@ -626,9 +629,12 @@ impl<'a> NativeLoweringBuilder<'a> {
         let mut current_cleanup_actions = ctx.current_cleanup_actions.to_vec();
         for stmt in statements {
             match stmt {
-                ExecStmt::Defer(expr) => {
-                    current_defers.push(self.lower_typed_expr(expr, &bindings)?.expr);
-                }
+                ExecStmt::Defer(action) => match action {
+                    arcana_ir::ExecDeferAction::Expr(expr) => {
+                        current_defers.push(self.lower_typed_expr(expr, &bindings)?.expr);
+                    }
+                    arcana_ir::ExecDeferAction::Reclaim(_) => return None,
+                },
                 ExecStmt::Let { name, .. } => {
                     lowered_statements.push(self.lower_stmt(stmt, &mut bindings)?);
                     self.activate_cleanup_actions_for_binding(
@@ -4064,7 +4070,7 @@ mod tests {
                         name: "value".to_string(),
                         value: ExecExpr::Int(1),
                     },
-                    ExecStmt::Defer(ExecExpr::Phrase {
+                    ExecStmt::Defer(arcana_ir::ExecDeferAction::Expr(ExecExpr::Phrase {
                         subject: Box::new(ExecExpr::Path(vec!["touch".to_string()])),
                         args: vec![ExecPhraseArg {
                             name: None,
@@ -4077,7 +4083,7 @@ mod tests {
                         resolved_routine: Some("core#fn-1".to_string()),
                         dynamic_dispatch: None,
                         attached: Vec::new(),
-                    }),
+                    })),
                     ExecStmt::Assign {
                         target: ExecAssignTarget::Name("value".to_string()),
                         op: ExecAssignOp::AddAssign,
@@ -4476,7 +4482,7 @@ mod tests {
                                 name: "value".to_string(),
                                 value: ExecExpr::Int(9),
                             },
-                            ExecStmt::Defer(ExecExpr::Phrase {
+                            ExecStmt::Defer(arcana_ir::ExecDeferAction::Expr(ExecExpr::Phrase {
                                 subject: Box::new(ExecExpr::Path(vec!["touch".to_string()])),
                                 args: vec![ExecPhraseArg {
                                     name: None,
@@ -4492,7 +4498,7 @@ mod tests {
                                 resolved_routine: Some("core#fn-1".to_string()),
                                 dynamic_dispatch: None,
                                 attached: Vec::new(),
-                            }),
+                            })),
                             ExecStmt::ReturnValue {
                                 value: ExecExpr::Path(vec!["value".to_string()]),
                             },
@@ -4651,7 +4657,7 @@ mod tests {
                             right: Box::new(ExecExpr::Int(3)),
                         },
                         body: vec![
-                            ExecStmt::Defer(ExecExpr::Phrase {
+                            ExecStmt::Defer(arcana_ir::ExecDeferAction::Expr(ExecExpr::Phrase {
                                 subject: Box::new(ExecExpr::Path(vec!["touch".to_string()])),
                                 args: vec![ExecPhraseArg {
                                     name: None,
@@ -4667,7 +4673,7 @@ mod tests {
                                 resolved_routine: Some("core#fn-1".to_string()),
                                 dynamic_dispatch: None,
                                 attached: Vec::new(),
-                            }),
+                            })),
                             ExecStmt::If {
                                 condition: ExecExpr::Binary {
                                     left: Box::new(ExecExpr::Path(vec!["i".to_string()])),

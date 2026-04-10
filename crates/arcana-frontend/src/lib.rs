@@ -505,6 +505,8 @@ impl Diagnostic {
 enum ExprTypeClass {
     Bool,
     Int,
+    F32,
+    F64,
     Str,
     Pair,
     Collection,
@@ -515,11 +517,153 @@ impl ExprTypeClass {
         match self {
             Self::Bool => "Bool",
             Self::Int => "Int",
+            Self::F32 => "F32",
+            Self::F64 => "F64",
             Self::Str => "Str",
             Self::Pair => "pair",
             Self::Collection => "collection",
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NumericTypeClass {
+    Int,
+    I8,
+    U8,
+    I16,
+    U16,
+    I32,
+    U32,
+    I64,
+    U64,
+    ISize,
+    USize,
+    F32,
+    F64,
+}
+
+impl NumericTypeClass {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Int => "Int",
+            Self::I8 => "I8",
+            Self::U8 => "U8",
+            Self::I16 => "I16",
+            Self::U16 => "U16",
+            Self::I32 => "I32",
+            Self::U32 => "U32",
+            Self::I64 => "I64",
+            Self::U64 => "U64",
+            Self::ISize => "ISize",
+            Self::USize => "USize",
+            Self::F32 => "F32",
+            Self::F64 => "F64",
+        }
+    }
+
+    const fn is_float(self) -> bool {
+        matches!(self, Self::F32 | Self::F64)
+    }
+
+    const fn is_integer(self) -> bool {
+        !self.is_float()
+    }
+
+    const fn is_signed_integer(self) -> bool {
+        matches!(
+            self,
+            Self::Int | Self::I8 | Self::I16 | Self::I32 | Self::I64 | Self::ISize
+        )
+    }
+
+    const fn is_unsigned_integer(self) -> bool {
+        matches!(
+            self,
+            Self::U8 | Self::U16 | Self::U32 | Self::U64 | Self::USize
+        )
+    }
+
+    const fn is_fixed_width_integer(self) -> bool {
+        matches!(
+            self,
+            Self::I8
+                | Self::U8
+                | Self::I16
+                | Self::U16
+                | Self::I32
+                | Self::U32
+                | Self::I64
+                | Self::U64
+        )
+    }
+
+    const fn bit_width(self) -> Option<u16> {
+        match self {
+            Self::I8 | Self::U8 => Some(8),
+            Self::I16 | Self::U16 => Some(16),
+            Self::I32 | Self::U32 => Some(32),
+            Self::I64 | Self::U64 => Some(64),
+            _ => None,
+        }
+    }
+
+    const fn widening_rank(self) -> Option<u8> {
+        match self {
+            Self::Int => Some(0),
+            Self::I8 | Self::U8 => Some(1),
+            Self::I16 | Self::U16 => Some(2),
+            Self::I32 | Self::U32 => Some(3),
+            Self::I64 | Self::U64 => Some(4),
+            Self::ISize | Self::USize => Some(5),
+            Self::F32 | Self::F64 => None,
+        }
+    }
+}
+
+fn numeric_type_class_from_name(name: &str) -> Option<NumericTypeClass> {
+    Some(match name {
+        "Int" => NumericTypeClass::Int,
+        "I8" => NumericTypeClass::I8,
+        "U8" => NumericTypeClass::U8,
+        "I16" => NumericTypeClass::I16,
+        "U16" => NumericTypeClass::U16,
+        "I32" => NumericTypeClass::I32,
+        "U32" => NumericTypeClass::U32,
+        "I64" => NumericTypeClass::I64,
+        "U64" => NumericTypeClass::U64,
+        "ISize" => NumericTypeClass::ISize,
+        "USize" => NumericTypeClass::USize,
+        "F32" => NumericTypeClass::F32,
+        "F64" => NumericTypeClass::F64,
+        _ => return None,
+    })
+}
+
+fn same_signed_numeric_widen(
+    left: NumericTypeClass,
+    right: NumericTypeClass,
+) -> Option<NumericTypeClass> {
+    match (left, right) {
+        (left, right) if left == right => Some(left),
+        (NumericTypeClass::Int, right) if right.is_signed_integer() => Some(right),
+        (left, NumericTypeClass::Int) if left.is_signed_integer() => Some(left),
+        (left, right) if left.is_signed_integer() && right.is_signed_integer() => {
+            let left_rank = left.widening_rank()?;
+            let right_rank = right.widening_rank()?;
+            Some(if left_rank >= right_rank { left } else { right })
+        }
+        (left, right) if left.is_unsigned_integer() && right.is_unsigned_integer() => {
+            let left_rank = left.widening_rank()?;
+            let right_rank = right.widening_rank()?;
+            Some(if left_rank >= right_rank { left } else { right })
+        }
+        _ => None,
+    }
+}
+
+fn numeric_types_compatible(left: NumericTypeClass, right: NumericTypeClass) -> bool {
+    left == right || same_signed_numeric_widen(left, right).is_some()
 }
 
 #[derive(Clone, Debug, Default)]
@@ -637,6 +781,7 @@ struct ValueScope {
     loop_depth: usize,
     headed_region_depth: usize,
     enclosing_return_type: Option<HirType>,
+    unsafe_trace: Option<String>,
 }
 
 impl Default for ValueScope {
@@ -657,6 +802,7 @@ impl Default for ValueScope {
             loop_depth: 0,
             headed_region_depth: 0,
             enclosing_return_type: None,
+            unsafe_trace: None,
         }
     }
 }
@@ -875,19 +1021,31 @@ fn infer_expr_type(expr: &HirExpr) -> Option<ExprTypeClass> {
     match expr {
         HirExpr::BoolLiteral { .. } => Some(ExprTypeClass::Bool),
         HirExpr::IntLiteral { .. } => Some(ExprTypeClass::Int),
+        HirExpr::FloatLiteral { kind, .. } => Some(match kind {
+            arcana_hir::HirFloatLiteralKind::F32 => ExprTypeClass::F32,
+            arcana_hir::HirFloatLiteralKind::F64 => ExprTypeClass::F64,
+        }),
         HirExpr::StrLiteral { .. } => Some(ExprTypeClass::Str),
         HirExpr::Pair { .. } => Some(ExprTypeClass::Pair),
         HirExpr::CollectionLiteral { .. } => Some(ExprTypeClass::Collection),
-        HirExpr::Unary { op, .. } => match op {
+        HirExpr::Unary { op, expr } => match op {
             HirUnaryOp::Not => Some(ExprTypeClass::Bool),
-            HirUnaryOp::Neg | HirUnaryOp::BitNot => Some(ExprTypeClass::Int),
-            HirUnaryOp::BorrowRead
-            | HirUnaryOp::BorrowMut
+            HirUnaryOp::Neg => match infer_expr_type(expr) {
+                Some(ExprTypeClass::Int | ExprTypeClass::F32 | ExprTypeClass::F64) => {
+                    infer_expr_type(expr)
+                }
+                _ => None,
+            },
+            HirUnaryOp::BitNot => Some(ExprTypeClass::Int),
+            HirUnaryOp::CapabilityRead
+            | HirUnaryOp::CapabilityEdit
+            | HirUnaryOp::CapabilityTake
+            | HirUnaryOp::CapabilityHold
             | HirUnaryOp::Deref
             | HirUnaryOp::Weave
             | HirUnaryOp::Split => None,
         },
-        HirExpr::Binary { op, .. } => match op {
+        HirExpr::Binary { left, op, right } => match op {
             HirBinaryOp::And
             | HirBinaryOp::Or
             | HirBinaryOp::EqEq
@@ -896,16 +1054,27 @@ fn infer_expr_type(expr: &HirExpr) -> Option<ExprTypeClass> {
             | HirBinaryOp::LtEq
             | HirBinaryOp::Gt
             | HirBinaryOp::GtEq => Some(ExprTypeClass::Bool),
-            HirBinaryOp::Sub
-            | HirBinaryOp::Mul
-            | HirBinaryOp::Div
-            | HirBinaryOp::Mod
+            HirBinaryOp::Mod
             | HirBinaryOp::BitOr
             | HirBinaryOp::BitXor
             | HirBinaryOp::BitAnd
             | HirBinaryOp::Shl
             | HirBinaryOp::Shr => Some(ExprTypeClass::Int),
-            HirBinaryOp::Add => None,
+            HirBinaryOp::Add | HirBinaryOp::Sub | HirBinaryOp::Mul | HirBinaryOp::Div => {
+                match (infer_expr_type(left), infer_expr_type(right)) {
+                    (Some(ExprTypeClass::Str), Some(ExprTypeClass::Str))
+                        if matches!(op, HirBinaryOp::Add) =>
+                    {
+                        Some(ExprTypeClass::Str)
+                    }
+                    (Some(left_kind), Some(right_kind)) if left_kind == right_kind => matches!(
+                        left_kind,
+                        ExprTypeClass::Int | ExprTypeClass::F32 | ExprTypeClass::F64
+                    )
+                    .then_some(left_kind),
+                    _ => None,
+                }
+            }
         },
         _ => None,
     }
@@ -915,6 +1084,8 @@ fn builtin_scalar_expr_type(expr_type: ExprTypeClass) -> Option<HirType> {
     let name = match expr_type {
         ExprTypeClass::Bool => "Bool",
         ExprTypeClass::Int => "Int",
+        ExprTypeClass::F32 => "F32",
+        ExprTypeClass::F64 => "F64",
         ExprTypeClass::Str => "Str",
         ExprTypeClass::Pair | ExprTypeClass::Collection => return None,
     };
@@ -998,11 +1169,23 @@ fn unary_op_token(op: HirUnaryOp) -> &'static str {
         HirUnaryOp::Neg => "-",
         HirUnaryOp::Not => "not",
         HirUnaryOp::BitNot => "~",
-        HirUnaryOp::BorrowRead => "&",
-        HirUnaryOp::BorrowMut => "*",
+        HirUnaryOp::CapabilityRead => "&read",
+        HirUnaryOp::CapabilityEdit => "&edit",
+        HirUnaryOp::CapabilityTake => "&take",
+        HirUnaryOp::CapabilityHold => "&hold",
         HirUnaryOp::Deref => "*",
         HirUnaryOp::Weave => "weave",
         HirUnaryOp::Split => "split",
+    }
+}
+
+fn capability_mode_for_unary_op(op: HirUnaryOp) -> Option<arcana_hir::HirParamMode> {
+    match op {
+        HirUnaryOp::CapabilityRead => Some(arcana_hir::HirParamMode::Read),
+        HirUnaryOp::CapabilityEdit => Some(arcana_hir::HirParamMode::Edit),
+        HirUnaryOp::CapabilityTake => Some(arcana_hir::HirParamMode::Take),
+        HirUnaryOp::CapabilityHold => Some(arcana_hir::HirParamMode::Hold),
+        _ => None,
     }
 }
 
@@ -1030,12 +1213,14 @@ enum BorrowedSliceSurfaceKind {
 struct LocalBorrowState {
     shared_count: usize,
     mutable: bool,
+    held: bool,
 }
 
 #[derive(Clone, Debug, Default)]
 struct BorrowFlowState {
     locals: BTreeMap<String, LocalBorrowState>,
     moved_locals: BTreeSet<String>,
+    hold_tokens: BTreeMap<String, String>,
     active_cleanup_bindings: BTreeSet<u64>,
 }
 
@@ -1054,7 +1239,11 @@ impl BorrowFlowState {
 
     fn has_any_borrow(&self, name: &str) -> bool {
         let state = self.local_state(name);
-        state.mutable || state.shared_count > 0
+        state.mutable || state.shared_count > 0 || state.held
+    }
+
+    fn has_hold(&self, name: &str) -> bool {
+        self.local_state(name).held
     }
 
     fn has_moved(&self, name: &str) -> bool {
@@ -1069,6 +1258,29 @@ impl BorrowFlowState {
     fn note_mut_borrow(&mut self, name: &str) {
         let state = self.locals.entry(name.to_string()).or_default();
         state.mutable = true;
+    }
+
+    fn note_hold(&mut self, name: &str) {
+        let state = self.locals.entry(name.to_string()).or_default();
+        state.held = true;
+    }
+
+    fn clear_hold(&mut self, name: &str) {
+        if let Some(state) = self.locals.get_mut(name) {
+            state.held = false;
+            if state.shared_count == 0 && !state.mutable {
+                self.locals.remove(name);
+            }
+        }
+    }
+
+    fn note_hold_token(&mut self, token: &str, target: &str) {
+        self.hold_tokens
+            .insert(token.to_string(), target.to_string());
+    }
+
+    fn hold_token_target(&self, token: &str) -> Option<&str> {
+        self.hold_tokens.get(token).map(String::as_str)
     }
 
     fn note_moved(&mut self, name: &str) {
@@ -1086,6 +1298,7 @@ impl BorrowFlowState {
     fn clear_local(&mut self, name: &str) {
         self.locals.remove(name);
         self.moved_locals.remove(name);
+        self.hold_tokens.remove(name);
     }
 
     fn merge_moves_from(&mut self, other: &Self) {
@@ -1114,6 +1327,78 @@ fn hir_type_matches_path(ty: &HirType, expected: &[&str]) -> bool {
         HirTypeKind::Ref { inner, .. } => hir_type_matches_path(inner, expected),
         _ => false,
     }
+}
+
+fn hir_type_root_name(ty: &HirType) -> Option<&str> {
+    match &ty.kind {
+        HirTypeKind::Path(path) => path.segments.last().map(String::as_str),
+        HirTypeKind::Apply { base, .. } => base.segments.last().map(String::as_str),
+        HirTypeKind::Ref { inner, .. } => hir_type_root_name(inner),
+        _ => None,
+    }
+}
+
+fn numeric_type_class_for_hir_type(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    ty: &HirType,
+) -> Option<NumericTypeClass> {
+    let canonical =
+        canonicalize_local_hir_type(workspace, resolved_module, ty).unwrap_or_else(|| ty.clone());
+    numeric_type_class_from_name(hir_type_root_name(&canonical)?)
+}
+
+fn infer_numeric_expr_type_class(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    type_scope: &TypeScope,
+    scope: &ValueScope,
+    expr: &HirExpr,
+) -> Option<NumericTypeClass> {
+    infer_expr_value_type(workspace, resolved_module, type_scope, scope, expr)
+        .and_then(|ty| numeric_type_class_for_hir_type(workspace, resolved_module, &ty))
+}
+
+fn is_builtin_numeric_conversion_subject(
+    subject: &HirExpr,
+    qualifier_kind: arcana_hir::HirQualifiedPhraseQualifierKind,
+) -> bool {
+    if qualifier_kind != arcana_hir::HirQualifiedPhraseQualifierKind::Call {
+        return false;
+    }
+    let Some(path) = flatten_callable_expr_path(subject) else {
+        return false;
+    };
+    let [name] = &path[..] else {
+        return false;
+    };
+    numeric_type_class_from_name(name).is_some()
+}
+
+fn is_builtin_numeric_type_path(path: &[String]) -> bool {
+    matches!(path, [name] if numeric_type_class_from_name(name).is_some())
+}
+
+fn resolved_symbol_kind_for_expr(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    type_scope: &TypeScope,
+    scope: &ValueScope,
+    expr: &HirExpr,
+) -> Option<HirSymbolKind> {
+    let ty = infer_expr_value_type(workspace, resolved_module, type_scope, scope, expr)?;
+    let canonical =
+        canonicalize_local_hir_type(workspace, resolved_module, &ty).unwrap_or_else(|| ty.clone());
+    let mut current = &canonical;
+    while let HirTypeKind::Ref { inner, .. } = &current.kind {
+        current = inner;
+    }
+    let path = match &current.kind {
+        HirTypeKind::Path(path) => &path.segments,
+        HirTypeKind::Apply { base, .. } => &base.segments,
+        _ => return None,
+    };
+    lookup_symbol_path(workspace, resolved_module, path).map(|resolved| resolved.symbol.kind)
 }
 
 fn classify_borrowed_slice_surface(
@@ -1198,12 +1483,24 @@ fn expr_place_root_local<'a>(expr: &'a HirExpr, scope: &ValueScope) -> Option<&'
     }
 }
 
+fn hold_capability_target_local<'a>(expr: &'a HirExpr, scope: &ValueScope) -> Option<&'a str> {
+    match expr {
+        HirExpr::Unary {
+            op: HirUnaryOp::CapabilityHold,
+            expr,
+        } => expr_place_root_local(expr, scope),
+        HirExpr::GenericApply { expr, .. } => hold_capability_target_local(expr, scope),
+        _ => None,
+    }
+}
+
 fn assign_target_root_local<'a>(
     target: &'a HirAssignTarget,
     scope: &ValueScope,
 ) -> Option<&'a str> {
     match target {
         HirAssignTarget::Name { text } if scope.contains(text) => Some(text.as_str()),
+        HirAssignTarget::Deref { .. } => None,
         HirAssignTarget::MemberAccess { target, .. } | HirAssignTarget::Index { target, .. } => {
             assign_target_root_local(target, scope)
         }
@@ -1524,7 +1821,12 @@ fn infer_type_ownership(
     ty: &HirType,
 ) -> OwnershipClass {
     match &ty.kind {
-        arcana_hir::HirTypeKind::Ref { .. } => OwnershipClass::Copy,
+        arcana_hir::HirTypeKind::Ref { mode, .. } => match mode {
+            arcana_hir::HirParamMode::Read => OwnershipClass::Copy,
+            arcana_hir::HirParamMode::Edit
+            | arcana_hir::HirParamMode::Take
+            | arcana_hir::HirParamMode::Hold => OwnershipClass::Move,
+        },
         arcana_hir::HirTypeKind::Path(path) => {
             if path.segments.len() == 1 && type_scope.allows_type_name(&path.segments[0]) {
                 return OwnershipClass::Unknown;
@@ -1541,9 +1843,12 @@ fn infer_type_ownership(
             };
             match symbol_ref.symbol.kind {
                 HirSymbolKind::OpaqueType => ownership_of_opaque_symbol(symbol_ref.symbol),
-                HirSymbolKind::Record | HirSymbolKind::Object | HirSymbolKind::Enum => {
-                    OwnershipClass::Move
-                }
+                HirSymbolKind::Record
+                | HirSymbolKind::Struct
+                | HirSymbolKind::Union
+                | HirSymbolKind::Array
+                | HirSymbolKind::Object
+                | HirSymbolKind::Enum => OwnershipClass::Move,
                 _ => OwnershipClass::Unknown,
             }
         }
@@ -1585,6 +1890,17 @@ fn infer_expr_value_type(
     {
         return resolve_record_result_type(workspace, resolved_module, &path);
     }
+    if let HirExpr::ArrayRegion(region) = expr
+        && let Some(path) = flatten_callable_expr_path(&region.target)
+        && lookup_symbol_path(workspace, resolved_module, &path).is_some()
+    {
+        return Some(canonical_type_from_path(
+            workspace,
+            resolved_module,
+            &path,
+            Span::default(),
+        ));
+    }
     infer_receiver_expr_type(workspace, resolved_module, scope, expr)
         .or_else(|| infer_expr_type(expr).and_then(builtin_scalar_expr_type))
 }
@@ -1593,6 +1909,10 @@ fn assign_target_to_expr(target: &HirAssignTarget) -> HirExpr {
     match target {
         HirAssignTarget::Name { text } => HirExpr::Path {
             segments: vec![text.clone()],
+        },
+        HirAssignTarget::Deref { expr } => HirExpr::Unary {
+            op: HirUnaryOp::Deref,
+            expr: Box::new(expr.clone()),
         },
         HirAssignTarget::MemberAccess { target, member } => HirExpr::MemberAccess {
             expr: Box::new(assign_target_to_expr(target)),
@@ -1624,7 +1944,9 @@ fn infer_expr_ownership(
     expr: &HirExpr,
 ) -> OwnershipClass {
     match expr {
-        HirExpr::BoolLiteral { .. } | HirExpr::IntLiteral { .. } => OwnershipClass::Copy,
+        HirExpr::BoolLiteral { .. } | HirExpr::IntLiteral { .. } | HirExpr::FloatLiteral { .. } => {
+            OwnershipClass::Copy
+        }
         HirExpr::StrLiteral { .. } | HirExpr::CollectionLiteral { .. } => OwnershipClass::Move,
         HirExpr::Pair { left, right } => {
             let left_kind =
@@ -1642,10 +1964,21 @@ fn infer_expr_ownership(
         HirExpr::Path { segments } if segments.len() == 1 && scope.contains(&segments[0]) => {
             scope.ownership_of(&segments[0])
         }
-        HirExpr::Unary {
-            op: HirUnaryOp::BorrowRead | HirUnaryOp::BorrowMut,
-            ..
-        } => OwnershipClass::Copy,
+        HirExpr::Unary { op, .. }
+            if matches!(
+                op,
+                HirUnaryOp::CapabilityRead
+                    | HirUnaryOp::CapabilityEdit
+                    | HirUnaryOp::CapabilityTake
+                    | HirUnaryOp::CapabilityHold
+            ) =>
+        {
+            match capability_mode_for_unary_op(*op) {
+                Some(arcana_hir::HirParamMode::Read) => OwnershipClass::Copy,
+                Some(_) => OwnershipClass::Move,
+                None => OwnershipClass::Unknown,
+            }
+        }
         _ => infer_expr_value_type(workspace, resolved_module, type_scope, scope, expr)
             .map(|ty| infer_type_ownership(workspace, resolved_module, type_scope, &ty))
             .unwrap_or_default(),
@@ -1912,9 +2245,14 @@ fn validate_borrow_operand_place(
     expr: &HirExpr,
     span: Span,
     diagnostics: &mut Vec<Diagnostic>,
-    mutable: bool,
+    mode: arcana_hir::HirParamMode,
 ) {
-    let op = if mutable { "&mut" } else { "&" };
+    let op = match mode {
+        arcana_hir::HirParamMode::Read => "&read",
+        arcana_hir::HirParamMode::Edit => "&edit",
+        arcana_hir::HirParamMode::Take => "&take",
+        arcana_hir::HirParamMode::Hold => "&hold",
+    };
     let Some(place_mutability) = expr_place_mutability(expr, scope) else {
         push_type_contract_diagnostic(
             module_path,
@@ -1926,42 +2264,65 @@ fn validate_borrow_operand_place(
     };
 
     if let Some(name) = expr_place_root_local(expr, scope)
-        && mutable
+        && matches!(
+            mode,
+            arcana_hir::HirParamMode::Edit | arcana_hir::HirParamMode::Hold
+        )
         && !scope.is_mutable(name)
     {
         push_type_contract_diagnostic(
             module_path,
             span,
             diagnostics,
-            format!("cannot mutably borrow immutable local `{name}`"),
+            format!("cannot create {op} capability from immutable local `{name}`"),
         );
         return;
     }
 
-    if mutable && matches!(place_mutability, PlaceMutability::Immutable) {
+    if matches!(
+        mode,
+        arcana_hir::HirParamMode::Edit | arcana_hir::HirParamMode::Hold
+    ) && matches!(place_mutability, PlaceMutability::Immutable)
+    {
         let name = expr_place_root_local(expr, scope).unwrap_or("value");
         push_type_contract_diagnostic(
             module_path,
             span,
             diagnostics,
-            format!("cannot mutably borrow immutable local `{name}`"),
+            format!("cannot create {op} capability from immutable local `{name}`"),
         );
         return;
     }
 
     if let HirExpr::Slice { expr: target, .. } = expr {
+        if matches!(
+            mode,
+            arcana_hir::HirParamMode::Take | arcana_hir::HirParamMode::Hold
+        ) {
+            push_type_contract_diagnostic(
+                module_path,
+                span,
+                diagnostics,
+                format!("operand of `{op}` must be a whole local place expression"),
+            );
+            return;
+        }
         match classify_borrowed_slice_surface(workspace, resolved_module, scope, target) {
             BorrowedSliceSurfaceKind::Array | BorrowedSliceSurfaceKind::EditView => {}
-            BorrowedSliceSurfaceKind::ByteEditView if mutable => {}
-            BorrowedSliceSurfaceKind::Str | BorrowedSliceSurfaceKind::StrView if mutable => {
+            BorrowedSliceSurfaceKind::ByteEditView if mode == arcana_hir::HirParamMode::Edit => {}
+            BorrowedSliceSurfaceKind::Str | BorrowedSliceSurfaceKind::StrView
+                if mode == arcana_hir::HirParamMode::Edit =>
+            {
                 push_type_contract_diagnostic(
                     module_path,
                     span,
                     diagnostics,
-                    "string slices are read-only; `&mut x[a..b]` is not allowed".to_string(),
+                    "string slices are read-only; `&edit x[a..b]` is not allowed".to_string(),
                 );
             }
-            BorrowedSliceSurfaceKind::ReadView | BorrowedSliceSurfaceKind::ByteView if mutable => {
+            BorrowedSliceSurfaceKind::ReadView | BorrowedSliceSurfaceKind::ByteView
+                if mode == arcana_hir::HirParamMode::Edit =>
+            {
                 push_type_contract_diagnostic(
                     module_path,
                     span,
@@ -2017,6 +2378,13 @@ fn validate_direct_local_place_access(
             span,
             diagnostics,
             format!("cannot access local `{name}` directly while it is mutably borrowed"),
+        );
+    } else if state.has_hold(name) {
+        push_type_contract_diagnostic(
+            module_path,
+            span,
+            diagnostics,
+            format!("cannot access local `{name}` directly while it is held"),
         );
     }
 }
@@ -2099,7 +2467,7 @@ fn validate_borrow_op_conflict(
     span: Span,
     state: &mut BorrowFlowState,
     diagnostics: &mut Vec<Diagnostic>,
-    mutable: bool,
+    mode: arcana_hir::HirParamMode,
 ) {
     validate_place_expr_borrow_flow(
         workspace,
@@ -2124,33 +2492,84 @@ fn validate_borrow_op_conflict(
         );
         return;
     }
-    if mutable {
-        if state.has_mut_borrow(name) {
-            push_type_contract_diagnostic(
-                module_path,
-                span,
-                diagnostics,
-                format!("cannot mutably borrow `{name}` while it is already mutably borrowed"),
-            );
-        } else if state.has_shared_borrow(name) {
-            push_type_contract_diagnostic(
-                module_path,
-                span,
-                diagnostics,
-                format!("cannot mutably borrow `{name}` while it is already borrowed"),
-            );
+    match mode {
+        arcana_hir::HirParamMode::Read => {
+            if state.has_mut_borrow(name) {
+                push_type_contract_diagnostic(
+                    module_path,
+                    span,
+                    diagnostics,
+                    format!(
+                        "cannot create `&read` capability for `{name}` while it is mutably borrowed"
+                    ),
+                );
+            } else if state.has_hold(name) {
+                push_type_contract_diagnostic(
+                    module_path,
+                    span,
+                    diagnostics,
+                    format!("cannot create `&read` capability for `{name}` while it is held"),
+                );
+            }
+            state.note_shared_borrow(name);
         }
-        state.note_mut_borrow(name);
-    } else {
-        if state.has_mut_borrow(name) {
-            push_type_contract_diagnostic(
-                module_path,
-                span,
-                diagnostics,
-                format!("cannot borrow `{name}` while it is mutably borrowed"),
-            );
+        arcana_hir::HirParamMode::Edit => {
+            if state.has_mut_borrow(name) {
+                push_type_contract_diagnostic(
+                    module_path,
+                    span,
+                    diagnostics,
+                    format!(
+                        "cannot create `&edit` capability for `{name}` while it is already mutably borrowed"
+                    ),
+                );
+            } else if state.has_shared_borrow(name) {
+                push_type_contract_diagnostic(
+                    module_path,
+                    span,
+                    diagnostics,
+                    format!(
+                        "cannot create `&edit` capability for `{name}` while it is already borrowed"
+                    ),
+                );
+            } else if state.has_hold(name) {
+                push_type_contract_diagnostic(
+                    module_path,
+                    span,
+                    diagnostics,
+                    format!("cannot create `&edit` capability for `{name}` while it is held"),
+                );
+            }
+            state.note_mut_borrow(name);
         }
-        state.note_shared_borrow(name);
+        arcana_hir::HirParamMode::Take => {
+            if state.has_any_borrow(name) {
+                push_type_contract_diagnostic(
+                    module_path,
+                    span,
+                    diagnostics,
+                    format!(
+                        "cannot create `&take` capability for `{name}` while it is borrowed or held"
+                    ),
+                );
+            } else {
+                state.note_moved(name);
+            }
+        }
+        arcana_hir::HirParamMode::Hold => {
+            if state.has_any_borrow(name) {
+                push_type_contract_diagnostic(
+                    module_path,
+                    span,
+                    diagnostics,
+                    format!(
+                        "cannot create `&hold` capability for `{name}` while it is borrowed or held"
+                    ),
+                );
+            } else {
+                state.note_hold(name);
+            }
+        }
     }
 }
 
@@ -2299,6 +2718,51 @@ fn validate_call_param_mode_flow(
                     state.note_moved(name);
                 }
             }
+            Some(arcana_hir::HirParamMode::Hold) => {
+                let Some(mutability) = expr_place_mutability(expr, scope) else {
+                    push_type_contract_diagnostic(
+                        module_path,
+                        span,
+                        diagnostics,
+                        format!(
+                            "argument for hold parameter `{}` must be a local place expression",
+                            param.name
+                        ),
+                    );
+                    continue;
+                };
+                let Some(name) = expr_place_root_local(expr, scope) else {
+                    continue;
+                };
+                if state.has_moved(name) {
+                    push_type_contract_diagnostic(
+                        module_path,
+                        span,
+                        diagnostics,
+                        format!("use of moved local `{name}`"),
+                    );
+                } else if matches!(mutability, PlaceMutability::Immutable) {
+                    push_type_contract_diagnostic(
+                        module_path,
+                        span,
+                        diagnostics,
+                        format!(
+                            "cannot pass immutable local `{name}` to hold parameter `{}`",
+                            param.name
+                        ),
+                    );
+                } else if state.has_any_borrow(name) {
+                    push_type_contract_diagnostic(
+                        module_path,
+                        span,
+                        diagnostics,
+                        format!(
+                            "cannot pass local `{name}` to hold parameter `{}` while it is borrowed or held",
+                            param.name
+                        ),
+                    );
+                }
+            }
         }
     }
 }
@@ -2395,7 +2859,10 @@ fn validate_expr_borrow_flow_inner(
                 );
             }
         }
-        HirExpr::BoolLiteral { .. } | HirExpr::IntLiteral { .. } | HirExpr::StrLiteral { .. } => {}
+        HirExpr::BoolLiteral { .. }
+        | HirExpr::IntLiteral { .. }
+        | HirExpr::FloatLiteral { .. }
+        | HirExpr::StrLiteral { .. } => {}
         HirExpr::Pair { left, right } => {
             validate_expr_borrow_flow_inner(
                 workspace,
@@ -2528,6 +2995,80 @@ fn validate_expr_borrow_flow_inner(
             }
         }
         HirExpr::RecordRegion(region) => {
+            validate_expr_borrow_flow_inner(
+                workspace,
+                resolved_module,
+                type_scope,
+                module_path,
+                scope,
+                &region.target,
+                span,
+                state,
+                false,
+                diagnostics,
+            );
+            if let Some(base) = &region.base {
+                validate_expr_borrow_flow_inner(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    module_path,
+                    scope,
+                    base,
+                    span,
+                    state,
+                    false,
+                    diagnostics,
+                );
+            }
+            if let Some(modifier) = &region.default_modifier
+                && let Some(payload) = &modifier.payload
+            {
+                validate_expr_borrow_flow_inner(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    module_path,
+                    scope,
+                    payload,
+                    span,
+                    state,
+                    false,
+                    diagnostics,
+                );
+            }
+            for line in &region.lines {
+                validate_expr_borrow_flow_inner(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    module_path,
+                    scope,
+                    &line.value,
+                    line.span,
+                    state,
+                    false,
+                    diagnostics,
+                );
+                if let Some(modifier) = &line.modifier
+                    && let Some(payload) = &modifier.payload
+                {
+                    validate_expr_borrow_flow_inner(
+                        workspace,
+                        resolved_module,
+                        type_scope,
+                        module_path,
+                        scope,
+                        payload,
+                        line.span,
+                        state,
+                        false,
+                        diagnostics,
+                    );
+                }
+            }
+        }
+        HirExpr::ArrayRegion(region) => {
             validate_expr_borrow_flow_inner(
                 workspace,
                 resolved_module,
@@ -2789,7 +3330,7 @@ fn validate_expr_borrow_flow_inner(
             );
         }
         HirExpr::Unary { op, expr } => match op {
-            HirUnaryOp::BorrowRead => validate_borrow_op_conflict(
+            HirUnaryOp::CapabilityRead => validate_borrow_op_conflict(
                 workspace,
                 resolved_module,
                 type_scope,
@@ -2799,9 +3340,9 @@ fn validate_expr_borrow_flow_inner(
                 span,
                 state,
                 diagnostics,
-                false,
+                arcana_hir::HirParamMode::Read,
             ),
-            HirUnaryOp::BorrowMut => validate_borrow_op_conflict(
+            HirUnaryOp::CapabilityEdit => validate_borrow_op_conflict(
                 workspace,
                 resolved_module,
                 type_scope,
@@ -2811,7 +3352,31 @@ fn validate_expr_borrow_flow_inner(
                 span,
                 state,
                 diagnostics,
-                true,
+                arcana_hir::HirParamMode::Edit,
+            ),
+            HirUnaryOp::CapabilityTake => validate_borrow_op_conflict(
+                workspace,
+                resolved_module,
+                type_scope,
+                module_path,
+                scope,
+                expr,
+                span,
+                state,
+                diagnostics,
+                arcana_hir::HirParamMode::Take,
+            ),
+            HirUnaryOp::CapabilityHold => validate_borrow_op_conflict(
+                workspace,
+                resolved_module,
+                type_scope,
+                module_path,
+                scope,
+                expr,
+                span,
+                state,
+                diagnostics,
+                arcana_hir::HirParamMode::Hold,
             ),
             HirUnaryOp::Deref | HirUnaryOp::Neg | HirUnaryOp::Not | HirUnaryOp::BitNot => {
                 validate_expr_borrow_flow_inner(
@@ -3024,14 +3589,14 @@ fn validate_expr_borrow_flow_inner(
 fn collect_expr_local_borrows(
     expr: &HirExpr,
     scope: &ValueScope,
-    borrows: &mut Vec<(String, bool)>,
+    borrows: &mut Vec<(String, arcana_hir::HirParamMode)>,
 ) {
     match expr {
         HirExpr::Unary { op, expr } => {
-            if matches!(op, HirUnaryOp::BorrowRead | HirUnaryOp::BorrowMut)
+            if let Some(mode) = capability_mode_for_unary_op(*op)
                 && let Some(name) = expr_place_root_local(expr, scope)
             {
-                borrows.push((name.to_string(), matches!(op, HirUnaryOp::BorrowMut)));
+                borrows.push((name.to_string(), mode));
             }
             collect_expr_local_borrows(expr, scope, borrows);
         }
@@ -3067,6 +3632,25 @@ fn collect_expr_local_borrows(
             }
         }
         HirExpr::RecordRegion(region) => {
+            collect_expr_local_borrows(&region.target, scope, borrows);
+            if let Some(base) = &region.base {
+                collect_expr_local_borrows(base, scope, borrows);
+            }
+            if let Some(modifier) = &region.default_modifier
+                && let Some(payload) = &modifier.payload
+            {
+                collect_expr_local_borrows(payload, scope, borrows);
+            }
+            for line in &region.lines {
+                collect_expr_local_borrows(&line.value, scope, borrows);
+                if let Some(modifier) = &line.modifier
+                    && let Some(payload) = &modifier.payload
+                {
+                    collect_expr_local_borrows(payload, scope, borrows);
+                }
+            }
+        }
+        HirExpr::ArrayRegion(region) => {
             collect_expr_local_borrows(&region.target, scope, borrows);
             if let Some(base) = &region.base {
                 collect_expr_local_borrows(base, scope, borrows);
@@ -3172,6 +3756,7 @@ fn collect_expr_local_borrows(
         HirExpr::Path { .. }
         | HirExpr::BoolLiteral { .. }
         | HirExpr::IntLiteral { .. }
+        | HirExpr::FloatLiteral { .. }
         | HirExpr::StrLiteral { .. } => {}
     }
 }
@@ -3179,11 +3764,12 @@ fn collect_expr_local_borrows(
 fn note_escaping_expr_borrows(state: &mut BorrowFlowState, expr: &HirExpr, scope: &ValueScope) {
     let mut borrows = Vec::new();
     collect_expr_local_borrows(expr, scope, &mut borrows);
-    for (name, mutable) in borrows {
-        if mutable {
-            state.note_mut_borrow(&name);
-        } else {
-            state.note_shared_borrow(&name);
+    for (name, mode) in borrows {
+        match mode {
+            arcana_hir::HirParamMode::Read => state.note_shared_borrow(&name),
+            arcana_hir::HirParamMode::Edit => state.note_mut_borrow(&name),
+            arcana_hir::HirParamMode::Take => state.note_moved(&name),
+            arcana_hir::HirParamMode::Hold => state.note_hold(&name),
         }
     }
 }
@@ -3360,6 +3946,53 @@ fn note_expr_moves(
                 }
             }
         }
+        HirExpr::ArrayRegion(region) => {
+            note_expr_moves(
+                workspace,
+                resolved_module,
+                type_scope,
+                scope,
+                &region.target,
+                state,
+            );
+            if let Some(base) = &region.base {
+                note_expr_moves(workspace, resolved_module, type_scope, scope, base, state);
+            }
+            if let Some(modifier) = &region.default_modifier
+                && let Some(payload) = &modifier.payload
+            {
+                note_expr_moves(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    scope,
+                    payload,
+                    state,
+                );
+            }
+            for line in &region.lines {
+                note_expr_moves(
+                    workspace,
+                    resolved_module,
+                    type_scope,
+                    scope,
+                    &line.value,
+                    state,
+                );
+                if let Some(modifier) = &line.modifier
+                    && let Some(payload) = &modifier.payload
+                {
+                    note_expr_moves(
+                        workspace,
+                        resolved_module,
+                        type_scope,
+                        scope,
+                        payload,
+                        state,
+                    );
+                }
+            }
+        }
         HirExpr::Chain { steps, .. } => {
             for step in steps {
                 note_expr_moves(
@@ -3441,6 +4074,7 @@ fn note_expr_moves(
         HirExpr::Path { .. }
         | HirExpr::BoolLiteral { .. }
         | HirExpr::IntLiteral { .. }
+        | HirExpr::FloatLiteral { .. }
         | HirExpr::StrLiteral { .. } => {}
     }
 }
@@ -3452,8 +4086,13 @@ fn collect_returned_local_borrows(
 ) {
     match expr {
         HirExpr::Unary { op, expr } => {
-            if matches!(op, HirUnaryOp::BorrowRead | HirUnaryOp::BorrowMut)
-                && let Some(name) = expr_place_root_local(expr, scope)
+            if matches!(
+                op,
+                HirUnaryOp::CapabilityRead
+                    | HirUnaryOp::CapabilityEdit
+                    | HirUnaryOp::CapabilityTake
+                    | HirUnaryOp::CapabilityHold
+            ) && let Some(name) = expr_place_root_local(expr, scope)
             {
                 roots.insert(name.to_string());
             }
@@ -3491,6 +4130,25 @@ fn collect_returned_local_borrows(
             }
         }
         HirExpr::RecordRegion(region) => {
+            collect_returned_local_borrows(&region.target, scope, roots);
+            if let Some(base) = &region.base {
+                collect_returned_local_borrows(base, scope, roots);
+            }
+            if let Some(modifier) = &region.default_modifier
+                && let Some(payload) = &modifier.payload
+            {
+                collect_returned_local_borrows(payload, scope, roots);
+            }
+            for line in &region.lines {
+                collect_returned_local_borrows(&line.value, scope, roots);
+                if let Some(modifier) = &line.modifier
+                    && let Some(payload) = &modifier.payload
+                {
+                    collect_returned_local_borrows(payload, scope, roots);
+                }
+            }
+        }
+        HirExpr::ArrayRegion(region) => {
             collect_returned_local_borrows(&region.target, scope, roots);
             if let Some(base) = &region.base {
                 collect_returned_local_borrows(base, scope, roots);
@@ -3596,6 +4254,7 @@ fn collect_returned_local_borrows(
         HirExpr::Path { .. }
         | HirExpr::BoolLiteral { .. }
         | HirExpr::IntLiteral { .. }
+        | HirExpr::FloatLiteral { .. }
         | HirExpr::StrLiteral { .. } => {}
     }
 }
@@ -3621,6 +4280,284 @@ fn validate_return_borrow_ties(
                 "returned reference must be tied to input lifetimes; local `{root}` does not live long enough"
             ),
         );
+    }
+}
+
+fn validate_builtin_numeric_conversion_semantics(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    module_path: &Path,
+    type_scope: &TypeScope,
+    scope: &ValueScope,
+    subject: &HirExpr,
+    qualifier_kind: arcana_hir::HirQualifiedPhraseQualifierKind,
+    args: &[arcana_hir::HirPhraseArg],
+    attached: &[arcana_hir::HirHeaderAttachment],
+    span: Span,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> bool {
+    if qualifier_kind != arcana_hir::HirQualifiedPhraseQualifierKind::Call {
+        return false;
+    }
+    let Some(path) = flatten_callable_expr_path(subject) else {
+        return false;
+    };
+    let [name] = &path[..] else {
+        return false;
+    };
+    let Some(target_numeric) = numeric_type_class_from_name(name) else {
+        return false;
+    };
+    let positional = args
+        .iter()
+        .filter_map(|arg| match arg {
+            arcana_hir::HirPhraseArg::Positional(expr) => Some(expr),
+            arcana_hir::HirPhraseArg::Named { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    let has_named = args
+        .iter()
+        .any(|arg| matches!(arg, arcana_hir::HirPhraseArg::Named { .. }));
+    if positional.len() != 1 || has_named {
+        diagnostics.push(Diagnostic {
+            path: module_path.to_path_buf(),
+            line: span.line,
+            column: span.column,
+            message: format!(
+                "`{}` numeric conversion expects exactly one positional argument",
+                target_numeric.label()
+            ),
+        });
+        return true;
+    }
+    if !attached.is_empty() {
+        diagnostics.push(Diagnostic {
+            path: module_path.to_path_buf(),
+            line: span.line,
+            column: span.column,
+            message: format!(
+                "`{}` numeric conversion does not support attached blocks",
+                target_numeric.label()
+            ),
+        });
+    }
+    let actual =
+        infer_numeric_expr_type_class(workspace, resolved_module, type_scope, scope, positional[0]);
+    if actual.is_none() {
+        diagnostics.push(Diagnostic {
+            path: module_path.to_path_buf(),
+            line: span.line,
+            column: span.column,
+            message: format!(
+                "`{}` numeric conversion requires a numeric argument",
+                target_numeric.label()
+            ),
+        });
+    }
+    true
+}
+
+fn validate_callable_nominal_surface_semantics(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    module_path: &Path,
+    type_scope: &TypeScope,
+    scope: &ValueScope,
+    subject: &HirExpr,
+    qualifier_kind: arcana_hir::HirQualifiedPhraseQualifierKind,
+    qualifier: &str,
+    args: &[arcana_hir::HirPhraseArg],
+    attached: &[arcana_hir::HirHeaderAttachment],
+    span: Span,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if validate_builtin_numeric_conversion_semantics(
+        workspace,
+        resolved_module,
+        module_path,
+        type_scope,
+        scope,
+        subject,
+        qualifier_kind,
+        args,
+        attached,
+        span,
+        diagnostics,
+    ) {
+        return;
+    }
+    if qualifier_kind != arcana_hir::HirQualifiedPhraseQualifierKind::Call {
+        return;
+    }
+    let Some(symbol) = resolve_qualified_phrase_target_symbol(
+        workspace,
+        resolved_module,
+        type_scope,
+        scope,
+        subject,
+        qualifier_kind,
+        qualifier,
+    ) else {
+        return;
+    };
+    match &symbol.body {
+        HirSymbolBody::Union { .. } => diagnostics.push(Diagnostic {
+            path: module_path.to_path_buf(),
+            line: span.line,
+            column: span.column,
+            message: format!("union `{}` is not callable in this phase", symbol.name),
+        }),
+        HirSymbolBody::Struct { fields } => {
+            if !attached.is_empty() {
+                diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: span.line,
+                    column: span.column,
+                    message: format!(
+                        "struct constructor `{}` does not support attached blocks in v1",
+                        symbol.name
+                    ),
+                });
+            }
+            let mut seen = BTreeSet::new();
+            for arg in args {
+                let arcana_hir::HirPhraseArg::Named { name, value } = arg else {
+                    diagnostics.push(Diagnostic {
+                        path: module_path.to_path_buf(),
+                        line: span.line,
+                        column: span.column,
+                        message: format!(
+                            "struct constructor `{}` requires named field arguments in v1",
+                            symbol.name
+                        ),
+                    });
+                    return;
+                };
+                let Some(field) = fields.iter().find(|field| field.name == *name) else {
+                    diagnostics.push(Diagnostic {
+                        path: module_path.to_path_buf(),
+                        line: span.line,
+                        column: span.column,
+                        message: format!(
+                            "struct constructor `{}` has no field `{name}`",
+                            symbol.name
+                        ),
+                    });
+                    continue;
+                };
+                if !seen.insert(name.clone()) {
+                    diagnostics.push(Diagnostic {
+                        path: module_path.to_path_buf(),
+                        line: span.line,
+                        column: span.column,
+                        message: format!(
+                            "struct constructor `{}` provided duplicate field `{name}`",
+                            symbol.name
+                        ),
+                    });
+                    continue;
+                }
+                if let Some(actual) =
+                    infer_expr_value_type(workspace, resolved_module, type_scope, scope, value)
+                {
+                    let actual_key = canonical_hir_type_key(workspace, resolved_module, &actual);
+                    let expected_key =
+                        canonical_hir_type_key(workspace, resolved_module, &field.ty);
+                    if actual_key != expected_key {
+                        diagnostics.push(Diagnostic {
+                            path: module_path.to_path_buf(),
+                            line: span.line,
+                            column: span.column,
+                            message: format!(
+                                "struct constructor field `{name}` expects `{}`, found `{}`",
+                                field.ty.render(),
+                                actual.render()
+                            ),
+                        });
+                    }
+                }
+            }
+            for field in fields {
+                if !seen.contains(&field.name) && type_option_payload(&field.ty).is_none() {
+                    diagnostics.push(Diagnostic {
+                        path: module_path.to_path_buf(),
+                        line: span.line,
+                        column: span.column,
+                        message: format!(
+                            "struct constructor `{}` is missing required field `{}`",
+                            symbol.name, field.name
+                        ),
+                    });
+                }
+            }
+        }
+        HirSymbolBody::Array { element_ty, len } => {
+            if !attached.is_empty() {
+                diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: span.line,
+                    column: span.column,
+                    message: format!(
+                        "array constructor `{}` does not support attached blocks in v1",
+                        symbol.name
+                    ),
+                });
+            }
+            if args
+                .iter()
+                .any(|arg| matches!(arg, arcana_hir::HirPhraseArg::Named { .. }))
+            {
+                diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: span.line,
+                    column: span.column,
+                    message: format!(
+                        "array constructor `{}` requires positional elements in v1",
+                        symbol.name
+                    ),
+                });
+                return;
+            }
+            if args.len() != *len {
+                diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: span.line,
+                    column: span.column,
+                    message: format!(
+                        "array constructor `{}` expects exactly {} positional elements, found {}",
+                        symbol.name,
+                        len,
+                        args.len()
+                    ),
+                });
+            }
+            for arg in args {
+                let arcana_hir::HirPhraseArg::Positional(expr) = arg else {
+                    continue;
+                };
+                if let Some(actual) =
+                    infer_expr_value_type(workspace, resolved_module, type_scope, scope, expr)
+                {
+                    let actual_key = canonical_hir_type_key(workspace, resolved_module, &actual);
+                    let expected_key =
+                        canonical_hir_type_key(workspace, resolved_module, element_ty);
+                    if actual_key != expected_key {
+                        diagnostics.push(Diagnostic {
+                            path: module_path.to_path_buf(),
+                            line: span.line,
+                            column: span.column,
+                            message: format!(
+                                "array constructor `{}` expects `{}` elements, found `{}`",
+                                symbol.name,
+                                element_ty.render(),
+                                actual.render()
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -4304,6 +5241,11 @@ fn builtin_foreword_catalog_entries() -> Vec<ForewordCatalogEntry> {
             "metadata",
             &["fn", "trait_method", "impl_method", "behavior", "system"],
         ),
+        builtin_foreword_catalog_entry(
+            "unsafe",
+            "metadata",
+            &["fn", "trait_method", "impl_method", "behavior", "system"],
+        ),
         builtin_foreword_catalog_entry("chain", "metadata", &["statement.chain"]),
     ]
 }
@@ -4443,6 +5385,16 @@ fn builtin_foreword_exports() -> Vec<ResolvedForewordExport> {
         builtin_foreword_export("boundary", vec![Target::Function, Target::ImplMethod]),
         builtin_foreword_export(
             "stage",
+            vec![
+                Target::Function,
+                Target::TraitMethod,
+                Target::ImplMethod,
+                Target::Behavior,
+                Target::System,
+            ],
+        ),
+        builtin_foreword_export(
+            "unsafe",
             vec![
                 Target::Function,
                 Target::TraitMethod,
@@ -5187,12 +6139,15 @@ fn build_adapter_param_snapshot(param: &arcana_hir::HirParam) -> AdapterParamSna
 
 fn build_adapter_symbol_snapshot(symbol: &HirSymbol) -> AdapterSymbolSnapshot {
     let (fields, methods, variants, assoc_types) = match &symbol.body {
-        HirSymbolBody::Record { fields } => (
+        HirSymbolBody::Record { fields }
+        | HirSymbolBody::Struct { fields }
+        | HirSymbolBody::Union { fields } => (
             fields.iter().map(build_adapter_field_snapshot).collect(),
             Vec::new(),
             Vec::new(),
             Vec::new(),
         ),
+        HirSymbolBody::Array { .. } => (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
         HirSymbolBody::Object { fields, methods } => (
             fields.iter().map(build_adapter_field_snapshot).collect(),
             methods.iter().map(build_adapter_symbol_snapshot).collect(),
@@ -8057,6 +9012,64 @@ fn collect_deprecated_call_warnings_in_expr(
                 );
             }
         }
+        HirExpr::ArrayRegion(region) => {
+            collect_deprecated_call_warnings_in_expr(
+                workspace,
+                resolved_module,
+                module_path,
+                type_scope,
+                scope,
+                &region.target,
+                span,
+                policy,
+                warnings,
+                diagnostics,
+            );
+            if let Some(base) = &region.base {
+                collect_deprecated_call_warnings_in_expr(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    scope,
+                    base,
+                    span,
+                    policy,
+                    warnings,
+                    diagnostics,
+                );
+            }
+            for line in &region.lines {
+                collect_deprecated_call_warnings_in_expr(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    scope,
+                    &line.value,
+                    span,
+                    policy,
+                    warnings,
+                    diagnostics,
+                );
+            }
+            if let Some(arcana_hir::HirConstructDestination::Place { target }) = &region.destination
+            {
+                let expr = assign_target_to_expr(target);
+                collect_deprecated_call_warnings_in_expr(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    scope,
+                    &expr,
+                    span,
+                    policy,
+                    warnings,
+                    diagnostics,
+                );
+            }
+        }
         HirExpr::Chain { steps, .. } => {
             for step in steps {
                 collect_deprecated_call_warnings_in_expr(
@@ -8288,6 +9301,7 @@ fn collect_deprecated_call_warnings_in_expr(
         HirExpr::Path { .. }
         | HirExpr::BoolLiteral { .. }
         | HirExpr::IntLiteral { .. }
+        | HirExpr::FloatLiteral { .. }
         | HirExpr::StrLiteral { .. } => {}
     }
 }
@@ -8349,6 +9363,20 @@ fn collect_deprecated_call_warnings_in_statements(
                         diagnostics,
                     );
                 }
+            }
+            HirStatementKind::Reclaim { expr } => {
+                collect_deprecated_call_warnings_in_expr(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    scope,
+                    expr,
+                    statement.span,
+                    policy,
+                    warnings,
+                    diagnostics,
+                );
             }
             HirStatementKind::If {
                 condition,
@@ -8466,7 +9494,11 @@ fn collect_deprecated_call_warnings_in_statements(
                     diagnostics,
                 );
             }
-            HirStatementKind::Defer { expr } | HirStatementKind::Expr { expr } => {
+            HirStatementKind::Defer { action } => {
+                let expr = match action {
+                    arcana_hir::HirDeferAction::Expr { expr }
+                    | arcana_hir::HirDeferAction::Reclaim { expr } => expr,
+                };
                 collect_deprecated_call_warnings_in_expr(
                     workspace,
                     resolved_module,
@@ -8480,6 +9512,18 @@ fn collect_deprecated_call_warnings_in_statements(
                     diagnostics,
                 )
             }
+            HirStatementKind::Expr { expr } => collect_deprecated_call_warnings_in_expr(
+                workspace,
+                resolved_module,
+                module_path,
+                type_scope,
+                scope,
+                expr,
+                statement.span,
+                policy,
+                warnings,
+                diagnostics,
+            ),
             HirStatementKind::Assign { value, .. } => collect_deprecated_call_warnings_in_expr(
                 workspace,
                 resolved_module,
@@ -8495,6 +9539,7 @@ fn collect_deprecated_call_warnings_in_statements(
             HirStatementKind::Recycle { .. }
             | HirStatementKind::Bind { .. }
             | HirStatementKind::Record(_)
+            | HirStatementKind::Array(_)
             | HirStatementKind::Construct(_)
             | HirStatementKind::MemorySpec(_)
             | HirStatementKind::Break
@@ -9537,12 +10582,13 @@ fn validate_record_region_semantics(
     region: &arcana_hir::HirRecordRegion,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
+    let region_kind = region.kind.as_str();
     if region.default_modifier.is_none() {
         diagnostics.push(Diagnostic {
             path: module_path.to_path_buf(),
             line: region.span.line,
             column: region.span.column,
-            message: "record requires a default modifier in v1".to_string(),
+            message: format!("{region_kind} requires a default modifier in v1"),
         });
     }
     let Some(target_path) = flatten_callable_expr_path(&region.target) else {
@@ -9550,23 +10596,52 @@ fn validate_record_region_semantics(
             path: module_path.to_path_buf(),
             line: region.span.line,
             column: region.span.column,
-            message: "record target must be a path-like record reference".to_string(),
+            message: format!("{region_kind} target must be a path-like {region_kind} reference"),
         });
         return;
     };
-    let Some(fields) = resolve_record_target_fields(workspace, resolved_module, &target_path)
-    else {
+    let Some(resolved) = lookup_symbol_path(workspace, resolved_module, &target_path) else {
         diagnostics.push(Diagnostic {
             path: module_path.to_path_buf(),
             line: region.span.line,
             column: region.span.column,
             message: format!(
-                "record target `{}` must resolve to a record",
+                "{region_kind} target `{}` must resolve to a {region_kind}",
                 target_path.join(".")
             ),
         });
         return;
     };
+    let fields = match (&region.kind, &resolved.symbol.body) {
+        (arcana_hir::HirNominalFieldRegionKind::Record, HirSymbolBody::Record { fields })
+        | (arcana_hir::HirNominalFieldRegionKind::Struct, HirSymbolBody::Struct { fields })
+        | (arcana_hir::HirNominalFieldRegionKind::Union, HirSymbolBody::Union { fields }) => fields
+            .iter()
+            .map(|field| (field.name.clone(), field.ty.clone()))
+            .collect::<BTreeMap<_, _>>(),
+        _ => {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: region.span.line,
+                column: region.span.column,
+                message: format!(
+                    "{region_kind} target `{}` must resolve to a {region_kind}",
+                    target_path.join(".")
+                ),
+            });
+            return;
+        }
+    };
+    if matches!(region.kind, arcana_hir::HirNominalFieldRegionKind::Union)
+        && scope.unsafe_trace.is_none()
+    {
+        push_unsafe_required_diagnostic(
+            module_path,
+            region.span,
+            diagnostics,
+            "union construction",
+        );
+    }
     if let Some(arcana_hir::HirConstructDestination::Place { target }) = &region.destination {
         let expected_ty = resolve_record_result_type(workspace, resolved_module, &target_path);
         let actual_ty =
@@ -9582,7 +10657,7 @@ fn validate_record_region_semantics(
                     line: region.span.line,
                     column: region.span.column,
                     message: format!(
-                        "record place target type `{}` does not match record result type `{}`",
+                        "{region_kind} place target type `{}` does not match {region_kind} result type `{}`",
                         actual_ty.render(),
                         expected_ty.render()
                     ),
@@ -9593,7 +10668,7 @@ fn validate_record_region_semantics(
                     path: module_path.to_path_buf(),
                     line: region.span.line,
                     column: region.span.column,
-                    message: "record place target must have a known type in v1".to_string(),
+                    message: format!("{region_kind} place target must have a known type in v1"),
                 });
             }
             _ => {}
@@ -9606,10 +10681,19 @@ fn validate_record_region_semantics(
             path: module_path.to_path_buf(),
             line: region.span.line,
             column: region.span.column,
-            message: format!("record deliver binding `{name}` already exists in this scope"),
+            message: format!("{region_kind} deliver binding `{name}` already exists in this scope"),
         });
     }
 
+    if matches!(region.kind, arcana_hir::HirNominalFieldRegionKind::Union) && region.base.is_some()
+    {
+        diagnostics.push(Diagnostic {
+            path: module_path.to_path_buf(),
+            line: region.span.line,
+            column: region.span.column,
+            message: "union regions do not support `from <base>` in this phase".to_string(),
+        });
+    }
     let base_fields = region
         .base
         .as_ref()
@@ -9617,12 +10701,15 @@ fn validate_record_region_semantics(
         .and_then(|ty| canonicalize_local_hir_type(workspace, resolved_module, &ty))
         .and_then(|ty| resolve_record_fields_for_type(workspace, resolved_module, &ty));
 
-    if region.base.is_some() && base_fields.is_none() {
+    if region.base.is_some()
+        && !matches!(region.kind, arcana_hir::HirNominalFieldRegionKind::Union)
+        && base_fields.is_none()
+    {
         diagnostics.push(Diagnostic {
             path: module_path.to_path_buf(),
             line: region.span.line,
             column: region.span.column,
-            message: "record base must have a known record type in v1".to_string(),
+            message: format!("{region_kind} base must have a known {region_kind} type in v1"),
         });
     }
 
@@ -9633,7 +10720,10 @@ fn validate_record_region_semantics(
                 path: module_path.to_path_buf(),
                 line: line.span.line,
                 column: line.span.column,
-                message: format!("record field `{}` is provided more than once", line.name),
+                message: format!(
+                    "{region_kind} field `{}` is provided more than once",
+                    line.name
+                ),
             });
         }
         let Some(field_ty) = fields.get(&line.name) else {
@@ -9642,7 +10732,7 @@ fn validate_record_region_semantics(
                 line: line.span.line,
                 column: line.span.column,
                 message: format!(
-                    "record field `{}` does not exist on `{}`",
+                    "{region_kind} field `{}` does not exist on `{}`",
                     line.name,
                     target_path.join(".")
                 ),
@@ -9675,12 +10765,25 @@ fn validate_record_region_semantics(
                 line: modifier.span.line,
                 column: modifier.span.column,
                 message: format!(
-                    "record `-skip` is only valid for Option fields; `{}` is `{}`",
+                    "{region_kind} `-skip` is only valid for Option fields; `{}` is `{}`",
                     line.name,
                     field_ty.render()
                 ),
             });
         }
+    }
+
+    if matches!(region.kind, arcana_hir::HirNominalFieldRegionKind::Union) {
+        if seen.len() != 1 {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: region.span.line,
+                column: region.span.column,
+                message: "union regions must initialize exactly one field in this phase"
+                    .to_string(),
+            });
+        }
+        return;
     }
 
     for (field_name, field_ty) in &fields {
@@ -9708,7 +10811,7 @@ fn validate_record_region_semantics(
                 line: region.span.line,
                 column: region.span.column,
                 message: format!(
-                    "record base field `{field_name}` has incompatible type `{}` for target `{}` field `{}`",
+                    "{region_kind} base field `{field_name}` has incompatible type `{}` for target `{}` field `{}`",
                     base_ty.render(),
                     target_path.join("."),
                     field_ty.render()
@@ -9722,8 +10825,211 @@ fn validate_record_region_semantics(
                 line: region.span.line,
                 column: region.span.column,
                 message: format!(
-                    "record target `{}` is missing required field `{field_name}`",
+                    "{region_kind} target `{}` is missing required field `{field_name}`",
                     target_path.join(".")
+                ),
+            });
+        }
+    }
+}
+
+fn validate_array_region_semantics(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    module_path: &Path,
+    type_scope: &TypeScope,
+    scope: &ValueScope,
+    expected_return_type: Option<&HirType>,
+    region: &arcana_hir::HirArrayRegion,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if region.default_modifier.is_none() {
+        diagnostics.push(Diagnostic {
+            path: module_path.to_path_buf(),
+            line: region.span.line,
+            column: region.span.column,
+            message: "array requires a default modifier in v1".to_string(),
+        });
+    }
+    let Some(target_path) = flatten_callable_expr_path(&region.target) else {
+        diagnostics.push(Diagnostic {
+            path: module_path.to_path_buf(),
+            line: region.span.line,
+            column: region.span.column,
+            message: "array target must be a path-like array reference".to_string(),
+        });
+        return;
+    };
+    let Some((element_ty, len)) =
+        resolve_array_target_shape(workspace, resolved_module, &target_path)
+    else {
+        diagnostics.push(Diagnostic {
+            path: module_path.to_path_buf(),
+            line: region.span.line,
+            column: region.span.column,
+            message: format!(
+                "array target `{}` must resolve to an array",
+                target_path.join(".")
+            ),
+        });
+        return;
+    };
+    if let Some(arcana_hir::HirConstructDestination::Place { target }) = &region.destination {
+        let expected_ty = Some(canonical_type_from_path(
+            workspace,
+            resolved_module,
+            &target_path,
+            region.span,
+        ));
+        let actual_ty =
+            infer_assign_target_value_type(workspace, resolved_module, type_scope, scope, target)
+                .and_then(|ty| canonicalize_local_hir_type(workspace, resolved_module, &ty));
+        match (expected_ty, actual_ty) {
+            (Some(expected_ty), Some(actual_ty))
+                if canonical_hir_type_key(workspace, resolved_module, &expected_ty)
+                    != canonical_hir_type_key(workspace, resolved_module, &actual_ty) =>
+            {
+                diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: region.span.line,
+                    column: region.span.column,
+                    message: format!(
+                        "array place target type `{}` does not match array result type `{}`",
+                        actual_ty.render(),
+                        expected_ty.render()
+                    ),
+                });
+            }
+            (Some(_), None) => {
+                diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: region.span.line,
+                    column: region.span.column,
+                    message: "array place target must have a known type in v1".to_string(),
+                });
+            }
+            _ => {}
+        }
+    }
+    if let Some(arcana_hir::HirConstructDestination::Deliver { name }) = &region.destination
+        && scope.contains(name)
+    {
+        diagnostics.push(Diagnostic {
+            path: module_path.to_path_buf(),
+            line: region.span.line,
+            column: region.span.column,
+            message: format!("array deliver binding `{name}` already exists in this scope"),
+        });
+    }
+    if let Some(base) = &region.base
+        && let Some(base_ty) =
+            infer_expr_value_type(workspace, resolved_module, type_scope, scope, base)
+                .and_then(|ty| canonicalize_local_hir_type(workspace, resolved_module, &ty))
+    {
+        let target_ty =
+            canonical_type_from_path(workspace, resolved_module, &target_path, region.span);
+        if canonical_hir_type_key(workspace, resolved_module, &base_ty)
+            != canonical_hir_type_key(workspace, resolved_module, &target_ty)
+        {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: region.span.line,
+                column: region.span.column,
+                message: format!(
+                    "array base type `{}` does not match target `{}`",
+                    base_ty.render(),
+                    target_ty.render()
+                ),
+            });
+        }
+    } else if region.base.is_some() {
+        diagnostics.push(Diagnostic {
+            path: module_path.to_path_buf(),
+            line: region.span.line,
+            column: region.span.column,
+            message: "array base must have a known array type in v1".to_string(),
+        });
+    }
+
+    let mut seen = BTreeSet::new();
+    for line in &region.lines {
+        if line.index >= len {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: line.span.line,
+                column: line.span.column,
+                message: format!(
+                    "array index `{}` is out of range for `{}` of length {len}",
+                    line.index,
+                    target_path.join(".")
+                ),
+            });
+            continue;
+        }
+        if !seen.insert(line.index) {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: line.span.line,
+                column: line.span.column,
+                message: format!("array index `{}` is provided more than once", line.index),
+            });
+        }
+        let modifier = line.modifier.as_ref().or(region.default_modifier.as_ref());
+        let synthetic_line = arcana_hir::HirConstructLine {
+            name: format!("[{}]", line.index),
+            value: line.value.clone(),
+            modifier: line.modifier.clone(),
+            span: line.span,
+        };
+        validate_construct_contribution_semantics(
+            workspace,
+            resolved_module,
+            module_path,
+            type_scope,
+            scope,
+            expected_return_type,
+            &synthetic_line,
+            &format!("{}[{}]", target_path.join("."), line.index),
+            &element_ty,
+            modifier,
+            diagnostics,
+        );
+        if let Some(modifier) = modifier
+            && matches!(
+                modifier.kind,
+                arcana_hir::HirHeadedModifierKind::Keyword(HeadedModifierKeyword::Skip)
+            )
+            && type_option_payload(&element_ty).is_none()
+        {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: modifier.span.line,
+                column: modifier.span.column,
+                message: format!(
+                    "array `-skip` is only valid for Option elements; element type is `{}`",
+                    element_ty.render()
+                ),
+            });
+        }
+    }
+
+    if region.base.is_none() {
+        let missing = (0..len)
+            .filter(|index| !seen.contains(index))
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            diagnostics.push(Diagnostic {
+                path: module_path.to_path_buf(),
+                line: region.span.line,
+                column: region.span.column,
+                message: format!(
+                    "array target `{}` is missing required indices {}",
+                    target_path.join("."),
+                    missing
+                        .iter()
+                        .map(|index| index.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 ),
             });
         }
@@ -10194,7 +11500,9 @@ fn validate_symbol_surface_types(
     }
     match &symbol.body {
         HirSymbolBody::None => {}
-        HirSymbolBody::Record { fields } => {
+        HirSymbolBody::Record { fields }
+        | HirSymbolBody::Struct { fields }
+        | HirSymbolBody::Union { fields } => {
             for field in fields {
                 validate_type_surface(
                     workspace,
@@ -10206,7 +11514,81 @@ fn validate_symbol_surface_types(
                     &format!("field type `{}`", field.name),
                     diagnostics,
                 );
+                if let Some(bit_width) = field.bit_width {
+                    if symbol.kind != HirSymbolKind::Struct {
+                        diagnostics.push(Diagnostic {
+                            path: module_path.to_path_buf(),
+                            line: field.span.line,
+                            column: field.span.column,
+                            message: format!(
+                                "bitfield `{}` is only valid on `struct` fields in this phase",
+                                field.name
+                            ),
+                        });
+                        continue;
+                    }
+                    let Some(base_numeric) =
+                        numeric_type_class_for_hir_type(workspace, resolved_module, &field.ty)
+                    else {
+                        diagnostics.push(Diagnostic {
+                            path: module_path.to_path_buf(),
+                            line: field.span.line,
+                            column: field.span.column,
+                            message: format!(
+                                "bitfield `{}` must use a fixed-width integer builtin base type",
+                                field.name
+                            ),
+                        });
+                        continue;
+                    };
+                    if !base_numeric.is_fixed_width_integer() {
+                        diagnostics.push(Diagnostic {
+                            path: module_path.to_path_buf(),
+                            line: field.span.line,
+                            column: field.span.column,
+                            message: format!(
+                                "bitfield `{}` must use a fixed-width integer builtin base type, found `{}`",
+                                field.name,
+                                base_numeric.label()
+                            ),
+                        });
+                    } else if bit_width == 0 {
+                        diagnostics.push(Diagnostic {
+                            path: module_path.to_path_buf(),
+                            line: field.span.line,
+                            column: field.span.column,
+                            message: format!(
+                                "bitfield `{}` width must be greater than zero",
+                                field.name
+                            ),
+                        });
+                    } else if let Some(base_width) = base_numeric.bit_width()
+                        && bit_width > base_width
+                    {
+                        diagnostics.push(Diagnostic {
+                            path: module_path.to_path_buf(),
+                            line: field.span.line,
+                            column: field.span.column,
+                            message: format!(
+                                "bitfield `{}` width `{bit_width}` exceeds base type width `{base_width}`",
+                                field.name
+                            ),
+                        });
+                    }
+                }
             }
+        }
+        HirSymbolBody::Array { element_ty, .. } => {
+            validate_type_surface(
+                workspace,
+                resolved_module,
+                module_path,
+                &scope,
+                element_ty,
+                symbol.span,
+                &format!("array element type `{}`", symbol.name),
+                diagnostics,
+            );
         }
         HirSymbolBody::Object { fields, methods } => {
             let object_scope = scope.with_self();
@@ -10377,14 +11759,14 @@ fn validate_symbol_surface_types(
                         ),
                     });
                 }
-                for hold in &owner_exit.holds {
-                    if !objects.iter().any(|object| object.local_name == *hold) {
+                for retain in &owner_exit.retains {
+                    if !objects.iter().any(|object| object.local_name == *retain) {
                         diagnostics.push(Diagnostic {
                             path: module_path.to_path_buf(),
                             line: owner_exit.span.line,
                             column: owner_exit.span.column,
                             message: format!(
-                                "owner exit `{}` holds unknown object `{hold}`",
+                                "owner exit `{}` retains unknown object `{retain}`",
                                 owner_exit.name
                             ),
                         });
@@ -11314,15 +12696,18 @@ fn resolve_construct_target_shape(
     resolved_module: &HirResolvedModule,
     path: &[String],
 ) -> Option<ConstructTargetShape> {
-    if let Some(resolved) = lookup_symbol_path(workspace, resolved_module, path)
-        && let HirSymbolBody::Record { fields } = &resolved.symbol.body
-    {
-        return Some(ConstructTargetShape::Record {
-            fields: fields
-                .iter()
-                .map(|field| (field.name.clone(), field.ty.clone()))
-                .collect(),
-        });
+    if let Some(resolved) = lookup_symbol_path(workspace, resolved_module, path) {
+        match &resolved.symbol.body {
+            HirSymbolBody::Record { fields } | HirSymbolBody::Struct { fields } => {
+                return Some(ConstructTargetShape::Record {
+                    fields: fields
+                        .iter()
+                        .map(|field| (field.name.clone(), field.ty.clone()))
+                        .collect(),
+                });
+            }
+            _ => {}
+        }
     }
     let (variant_name, enum_path) = path.split_last()?;
     let resolved = lookup_symbol_path(workspace, resolved_module, enum_path)?;
@@ -11343,8 +12728,11 @@ fn resolve_record_target_fields(
     path: &[String],
 ) -> Option<BTreeMap<String, HirType>> {
     let resolved = lookup_symbol_path(workspace, resolved_module, path)?;
-    let HirSymbolBody::Record { fields } = &resolved.symbol.body else {
-        return None;
+    let fields = match &resolved.symbol.body {
+        HirSymbolBody::Record { fields }
+        | HirSymbolBody::Struct { fields }
+        | HirSymbolBody::Union { fields } => fields,
+        _ => return None,
     };
     Some(
         fields
@@ -11399,6 +12787,69 @@ fn resolve_record_fields_for_type(
         _ => return None,
     };
     resolve_record_target_fields(workspace, resolved_module, path)
+}
+
+fn resolve_array_target_shape(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    path: &[String],
+) -> Option<(HirType, usize)> {
+    let resolved = lookup_symbol_path(workspace, resolved_module, path)?;
+    match &resolved.symbol.body {
+        HirSymbolBody::Array { element_ty, len } => Some((element_ty.clone(), *len)),
+        _ => None,
+    }
+}
+
+fn unsafe_trace_from_forewords(apps: &[arcana_hir::HirForewordApp]) -> Option<String> {
+    apps.iter().find_map(|app| {
+        let is_unsafe = matches!(app.path.as_slice(), [name] if name == "unsafe");
+        if !is_unsafe {
+            return None;
+        }
+        app.args.first().and_then(|arg| match &arg.typed_value {
+            arcana_hir::HirForewordArgValue::Str(value) if !value.is_empty() => Some(value.clone()),
+            _ => None,
+        })
+    })
+}
+
+fn push_unsafe_required_diagnostic(
+    module_path: &Path,
+    span: Span,
+    diagnostics: &mut Vec<Diagnostic>,
+    context: &str,
+) {
+    diagnostics.push(Diagnostic {
+        path: module_path.to_path_buf(),
+        line: span.line,
+        column: span.column,
+        message: format!(
+            "{context} requires an active `#unsafe[\"trace.id\"]` foreword in this scope"
+        ),
+    });
+}
+
+fn expr_uses_union_surface(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    type_scope: &TypeScope,
+    scope: &ValueScope,
+    expr: &HirExpr,
+) -> bool {
+    resolved_symbol_kind_for_expr(workspace, resolved_module, type_scope, scope, expr)
+        .is_some_and(|kind| kind == HirSymbolKind::Union)
+}
+
+fn assign_target_uses_union_surface(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    type_scope: &TypeScope,
+    scope: &ValueScope,
+    target: &HirAssignTarget,
+) -> bool {
+    let expr = assign_target_to_expr(target);
+    expr_uses_union_surface(workspace, resolved_module, type_scope, scope, &expr)
 }
 
 fn canonicalize_local_hir_type(
@@ -11477,6 +12928,9 @@ fn validate_symbol_value_semantics(
     let type_scope = inherited_type_scope.with_params(&symbol.type_params);
     let mut scope = inherited_scope.with_symbol_params(&symbol.params);
     scope.enclosing_return_type = symbol.return_type.clone();
+    if let Some(trace) = unsafe_trace_from_forewords(&symbol.forewords) {
+        scope.unsafe_trace = Some(trace);
+    }
     apply_availability_attachments_to_scope(
         workspace,
         resolved_workspace,
@@ -12389,7 +13843,17 @@ fn validate_statement_block_semantics(
     expected_return_type: Option<&HirType>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
+    let incoming_hold_tokens = borrow_state
+        .hold_tokens
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut deferred_reclaim_tokens = BTreeSet::<String>::new();
     for statement in statements {
+        let saved_unsafe_trace = scope.unsafe_trace.clone();
+        if let Some(trace) = unsafe_trace_from_forewords(&statement.forewords) {
+            scope.unsafe_trace = Some(trace);
+        }
         validate_rollup_handlers(
             workspace,
             resolved_module,
@@ -12417,6 +13881,7 @@ fn validate_statement_block_semantics(
                             column: statement.span.column,
                             message: "owner activation bindings must use a simple name".to_string(),
                         });
+                        scope.unsafe_trace = saved_unsafe_trace;
                         continue;
                     }
                     if let Some(ref message) = owner_activation.invalid {
@@ -12482,6 +13947,7 @@ fn validate_statement_block_semantics(
                             &inserted_name,
                         );
                     }
+                    scope.unsafe_trace = saved_unsafe_trace;
                     continue;
                 }
                 validate_expr_semantics(
@@ -12528,6 +13994,9 @@ fn validate_statement_block_semantics(
                     Ok(inserted) => {
                         for inserted_name in inserted {
                             borrow_state.clear_local(&inserted_name);
+                            if let Some(target_name) = hold_capability_target_local(value, scope) {
+                                borrow_state.note_hold_token(&inserted_name, target_name);
+                            }
                             activate_current_cleanup_binding(
                                 workspace,
                                 resolved_module,
@@ -12544,6 +14013,25 @@ fn validate_statement_block_semantics(
                         column: statement.span.column,
                         message,
                     }),
+                }
+            }
+            HirStatementKind::Reclaim { expr } => {
+                validate_reclaim_expr_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    scope,
+                    expr,
+                    statement.span,
+                    borrow_state,
+                    diagnostics,
+                );
+                if let Some((token_name, target_name)) =
+                    reclaim_expr_hold_token(expr, scope, borrow_state)
+                {
+                    borrow_state.clear_hold(&target_name);
+                    borrow_state.clear_local(&token_name);
                 }
             }
             HirStatementKind::Return { value } => {
@@ -12960,15 +14448,64 @@ fn validate_statement_block_semantics(
                 }
                 borrow_state.merge_moves_from(&body_borrows);
             }
-            HirStatementKind::Defer { expr } | HirStatementKind::Expr { expr } => {
-                if let HirStatementKind::Expr { .. } = &statement.kind
-                    && let Some(owner_activation) = resolve_owner_activation_expr(
+            HirStatementKind::Defer { action } => match action {
+                arcana_hir::HirDeferAction::Expr { expr } => {
+                    validate_expr_semantics(
                         workspace,
-                        resolved_workspace,
                         resolved_module,
+                        module_path,
+                        type_scope,
+                        scope,
                         expr,
-                    )
-                {
+                        statement.span,
+                        diagnostics,
+                    );
+                    validate_expr_borrow_flow(
+                        workspace,
+                        resolved_module,
+                        type_scope,
+                        module_path,
+                        scope,
+                        expr,
+                        statement.span,
+                        borrow_state,
+                        diagnostics,
+                    );
+                    note_expr_moves(
+                        workspace,
+                        resolved_module,
+                        type_scope,
+                        scope,
+                        expr,
+                        borrow_state,
+                    );
+                }
+                arcana_hir::HirDeferAction::Reclaim { expr } => {
+                    validate_reclaim_expr_semantics(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        type_scope,
+                        scope,
+                        expr,
+                        statement.span,
+                        borrow_state,
+                        diagnostics,
+                    );
+                    if let Some((token_name, _)) =
+                        reclaim_expr_hold_token(expr, scope, borrow_state)
+                    {
+                        deferred_reclaim_tokens.insert(token_name);
+                    }
+                }
+            },
+            HirStatementKind::Expr { expr } => {
+                if let Some(owner_activation) = resolve_owner_activation_expr(
+                    workspace,
+                    resolved_workspace,
+                    resolved_module,
+                    expr,
+                ) {
                     if let Some(ref message) = owner_activation.invalid {
                         diagnostics.push(Diagnostic {
                             path: module_path.to_path_buf(),
@@ -13031,6 +14568,7 @@ fn validate_statement_block_semantics(
                             &inserted_name,
                         );
                     }
+                    scope.unsafe_trace = saved_unsafe_trace;
                     continue;
                 }
                 validate_expr_semantics(
@@ -13941,6 +15479,161 @@ fn validate_statement_block_semantics(
                     borrow_state.clear_local(name);
                 }
             }
+            HirStatementKind::Array(region) => {
+                let mut region_scope = scope.clone();
+                region_scope.headed_region_depth += 1;
+                validate_expr_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    &region_scope,
+                    &region.target,
+                    region.span,
+                    diagnostics,
+                );
+                if let Some(base) = &region.base {
+                    validate_expr_semantics(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        type_scope,
+                        &region_scope,
+                        base,
+                        region.span,
+                        diagnostics,
+                    );
+                }
+                if let Some(arcana_hir::HirConstructDestination::Place { target }) =
+                    &region.destination
+                {
+                    validate_assign_target_semantics(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        type_scope,
+                        scope,
+                        target,
+                        region.span,
+                        diagnostics,
+                    );
+                    validate_assign_target_borrow_flow(
+                        workspace,
+                        resolved_module,
+                        type_scope,
+                        module_path,
+                        scope,
+                        target,
+                        region.span,
+                        borrow_state,
+                        diagnostics,
+                    );
+                }
+                if let Some(modifier) = &region.default_modifier
+                    && let Some(payload) = &modifier.payload
+                {
+                    validate_expr_semantics(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        type_scope,
+                        &region_scope,
+                        payload,
+                        region.span,
+                        diagnostics,
+                    );
+                    validate_return_modifier_payload_type(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        type_scope,
+                        &region_scope,
+                        modifier,
+                        expected_return_type,
+                        "`array -return` payload",
+                        diagnostics,
+                    );
+                }
+                for line in &region.lines {
+                    validate_expr_semantics(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        type_scope,
+                        &region_scope,
+                        &line.value,
+                        line.span,
+                        diagnostics,
+                    );
+                    if let Some(modifier) = &line.modifier
+                        && let Some(payload) = &modifier.payload
+                    {
+                        validate_expr_semantics(
+                            workspace,
+                            resolved_module,
+                            module_path,
+                            type_scope,
+                            &region_scope,
+                            payload,
+                            line.span,
+                            diagnostics,
+                        );
+                        validate_return_modifier_payload_type(
+                            workspace,
+                            resolved_module,
+                            module_path,
+                            type_scope,
+                            &region_scope,
+                            modifier,
+                            expected_return_type,
+                            "`array -return` payload",
+                            diagnostics,
+                        );
+                    }
+                }
+                validate_array_region_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    &region_scope,
+                    expected_return_type,
+                    region,
+                    diagnostics,
+                );
+                if let Some(arcana_hir::HirConstructDestination::Deliver { name }) =
+                    &region.destination
+                    && let Some(target_path) = flatten_callable_expr_path(&region.target)
+                    && lookup_symbol_path(workspace, resolved_module, &target_path).is_some()
+                {
+                    let delivered_ty = Some(canonical_type_from_path(
+                        workspace,
+                        resolved_module,
+                        &target_path,
+                        region.span,
+                    ));
+                    let ownership = delivered_ty
+                        .as_ref()
+                        .map(|ty| infer_type_ownership(workspace, resolved_module, type_scope, ty))
+                        .unwrap_or_default();
+                    borrow_state.clear_local(name);
+                    scope.insert_typed(name, false, ownership, delivered_ty);
+                    activate_current_cleanup_binding(
+                        workspace,
+                        resolved_module,
+                        borrow_state,
+                        scope,
+                        current_block_cleanup_policy,
+                        name,
+                    );
+                }
+                if let Some(arcana_hir::HirConstructDestination::Place { target }) =
+                    &region.destination
+                    && let Some(name) = assign_target_root_local(target, scope)
+                {
+                    borrow_state.clear_local(name);
+                }
+            }
             HirStatementKind::MemorySpec(spec) => {
                 let mut region_scope = scope.clone();
                 region_scope.headed_region_depth += 1;
@@ -13994,6 +15687,128 @@ fn validate_statement_block_semantics(
             }
             HirStatementKind::Break | HirStatementKind::Continue => {}
         }
+        scope.unsafe_trace = saved_unsafe_trace;
+    }
+    apply_deferred_reclaim_tokens(borrow_state, &deferred_reclaim_tokens);
+    validate_unreclaimed_hold_tokens(
+        module_path,
+        statements,
+        borrow_state,
+        &incoming_hold_tokens,
+        diagnostics,
+    );
+}
+
+fn validate_reclaim_expr_semantics(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    module_path: &Path,
+    type_scope: &TypeScope,
+    scope: &ValueScope,
+    expr: &HirExpr,
+    span: Span,
+    borrow_state: &mut BorrowFlowState,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    validate_expr_semantics(
+        workspace,
+        resolved_module,
+        module_path,
+        type_scope,
+        scope,
+        expr,
+        span,
+        diagnostics,
+    );
+    validate_expr_borrow_flow(
+        workspace,
+        resolved_module,
+        type_scope,
+        module_path,
+        scope,
+        expr,
+        span,
+        borrow_state,
+        diagnostics,
+    );
+    if !matches!(
+        infer_expr_value_type(workspace, resolved_module, type_scope, scope, expr)
+            .map(|ty| ty.kind),
+        Some(arcana_hir::HirTypeKind::Ref {
+            mode: arcana_hir::HirParamMode::Hold,
+            ..
+        })
+    ) {
+        diagnostics.push(Diagnostic {
+            path: module_path.to_path_buf(),
+            line: span.line,
+            column: span.column,
+            message: "`reclaim` expects an `&hold[...]` capability".to_string(),
+        });
+    }
+    if reclaim_expr_hold_token(expr, scope, borrow_state).is_none() {
+        diagnostics.push(Diagnostic {
+            path: module_path.to_path_buf(),
+            line: span.line,
+            column: span.column,
+            message: "`reclaim` expects a local `&hold[...]` capability binding".to_string(),
+        });
+    }
+}
+
+fn reclaim_expr_hold_token(
+    expr: &HirExpr,
+    scope: &ValueScope,
+    borrow_state: &BorrowFlowState,
+) -> Option<(String, String)> {
+    let token_name = match expr {
+        HirExpr::Path { segments } if segments.len() == 1 && scope.contains(&segments[0]) => {
+            segments[0].as_str()
+        }
+        _ => return None,
+    };
+    let target_name = borrow_state.hold_token_target(token_name)?;
+    Some((token_name.to_string(), target_name.to_string()))
+}
+
+fn apply_deferred_reclaim_tokens(
+    borrow_state: &mut BorrowFlowState,
+    deferred_reclaim_tokens: &BTreeSet<String>,
+) {
+    for token_name in deferred_reclaim_tokens {
+        let Some(target_name) = borrow_state
+            .hold_token_target(token_name)
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        borrow_state.clear_hold(&target_name);
+        borrow_state.clear_local(token_name);
+    }
+}
+
+fn validate_unreclaimed_hold_tokens(
+    module_path: &Path,
+    statements: &[HirStatement],
+    borrow_state: &BorrowFlowState,
+    incoming_hold_tokens: &BTreeSet<String>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let Some(span) = statements.last().map(|statement| statement.span) else {
+        return;
+    };
+    for (token, target) in &borrow_state.hold_tokens {
+        if incoming_hold_tokens.contains(token) {
+            continue;
+        }
+        diagnostics.push(Diagnostic {
+            path: module_path.to_path_buf(),
+            line: span.line,
+            column: span.column,
+            message: format!(
+                "local `{token}` exits scope with an unreclaimed `&hold` capability for `{target}`"
+            ),
+        });
     }
 }
 
@@ -14018,6 +15833,39 @@ fn validate_assign_target_semantics(
             "assignment target",
             diagnostics,
         ),
+        HirAssignTarget::Deref { expr } => {
+            validate_expr_semantics(
+                workspace,
+                resolved_module,
+                module_path,
+                type_scope,
+                scope,
+                expr,
+                span,
+                diagnostics,
+            );
+            let Some(actual) =
+                infer_expr_value_type(workspace, resolved_module, type_scope, scope, expr)
+            else {
+                return;
+            };
+            let is_writable_capability = matches!(
+                actual.kind,
+                arcana_hir::HirTypeKind::Ref {
+                    mode: arcana_hir::HirParamMode::Edit | arcana_hir::HirParamMode::Hold,
+                    ..
+                }
+            );
+            if !is_writable_capability {
+                push_type_contract_diagnostic(
+                    module_path,
+                    span,
+                    diagnostics,
+                    "assignment through `*` requires an `&edit[...]` or `&hold[...]` capability"
+                        .to_string(),
+                );
+            }
+        }
         target @ HirAssignTarget::MemberAccess {
             target: inner_target,
             ..
@@ -14047,6 +15895,21 @@ fn validate_assign_target_semantics(
                 span,
                 diagnostics,
             );
+            if assign_target_uses_union_surface(
+                workspace,
+                resolved_module,
+                type_scope,
+                scope,
+                inner_target,
+            ) && scope.unsafe_trace.is_none()
+            {
+                push_unsafe_required_diagnostic(
+                    module_path,
+                    span,
+                    diagnostics,
+                    "union field write",
+                );
+            }
         }
         HirAssignTarget::Index { target, index } => {
             validate_assign_target_semantics(
@@ -14115,6 +15978,19 @@ fn validate_assign_target_borrow_flow(
 
     match target {
         HirAssignTarget::Name { .. } => {}
+        HirAssignTarget::Deref { expr } => {
+            validate_expr_borrow_flow(
+                workspace,
+                resolved_module,
+                type_scope,
+                module_path,
+                scope,
+                expr,
+                span,
+                state,
+                diagnostics,
+            );
+        }
         HirAssignTarget::MemberAccess { target, .. } => {
             validate_assign_target_borrow_flow(
                 workspace,
@@ -14166,17 +16042,34 @@ fn validate_expr_semantics(
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     match expr {
-        HirExpr::Path { segments } => validate_value_path_segments(
-            workspace,
-            resolved_module,
-            module_path,
-            scope,
-            segments,
-            span,
-            "value expression",
-            diagnostics,
-        ),
-        HirExpr::BoolLiteral { .. } | HirExpr::IntLiteral { .. } | HirExpr::StrLiteral { .. } => {}
+        HirExpr::Path { segments } => {
+            if is_builtin_numeric_type_path(segments) {
+                diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: span.line,
+                    column: span.column,
+                    message: format!(
+                        "builtin numeric type `{}` is only valid as a callable conversion subject",
+                        segments.join(".")
+                    ),
+                });
+            } else {
+                validate_value_path_segments(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    scope,
+                    segments,
+                    span,
+                    "value expression",
+                    diagnostics,
+                );
+            }
+        }
+        HirExpr::BoolLiteral { .. }
+        | HirExpr::IntLiteral { .. }
+        | HirExpr::FloatLiteral { .. }
+        | HirExpr::StrLiteral { .. } => {}
         HirExpr::Pair { left, right } => {
             validate_expr_semantics(
                 workspace,
@@ -14475,6 +16368,126 @@ fn validate_expr_semantics(
                 diagnostics,
             );
         }
+        HirExpr::ArrayRegion(region) => {
+            if scope.headed_region_depth > 0 {
+                diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: span.line,
+                    column: span.column,
+                    message: "headed regions cannot nest inside another headed region in v1"
+                        .to_string(),
+                });
+            }
+            let mut region_scope = scope.clone();
+            region_scope.headed_region_depth += 1;
+            validate_expr_semantics(
+                workspace,
+                resolved_module,
+                module_path,
+                type_scope,
+                &region_scope,
+                &region.target,
+                span,
+                diagnostics,
+            );
+            if let Some(base) = &region.base {
+                validate_expr_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    &region_scope,
+                    base,
+                    span,
+                    diagnostics,
+                );
+            }
+            if let Some(arcana_hir::HirConstructDestination::Place { target }) = &region.destination
+            {
+                validate_assign_target_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    scope,
+                    target,
+                    span,
+                    diagnostics,
+                );
+            }
+            if let Some(modifier) = &region.default_modifier
+                && let Some(payload) = &modifier.payload
+            {
+                validate_expr_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    &region_scope,
+                    payload,
+                    span,
+                    diagnostics,
+                );
+                validate_return_modifier_payload_type(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    &region_scope,
+                    modifier,
+                    scope.enclosing_return_type.as_ref(),
+                    "`array -return` payload",
+                    diagnostics,
+                );
+            }
+            for line in &region.lines {
+                validate_expr_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    &region_scope,
+                    &line.value,
+                    line.span,
+                    diagnostics,
+                );
+                if let Some(modifier) = &line.modifier
+                    && let Some(payload) = &modifier.payload
+                {
+                    validate_expr_semantics(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        type_scope,
+                        &region_scope,
+                        payload,
+                        line.span,
+                        diagnostics,
+                    );
+                    validate_return_modifier_payload_type(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        type_scope,
+                        &region_scope,
+                        modifier,
+                        scope.enclosing_return_type.as_ref(),
+                        "`array -return` payload",
+                        diagnostics,
+                    );
+                }
+            }
+            validate_array_region_semantics(
+                workspace,
+                resolved_module,
+                module_path,
+                type_scope,
+                &region_scope,
+                scope.enclosing_return_type.as_ref(),
+                region,
+                diagnostics,
+            );
+        }
         HirExpr::Chain { steps, .. } => {
             for step in steps {
                 validate_chain_step_semantics(
@@ -14646,16 +16659,18 @@ fn validate_expr_semantics(
             attached,
             ..
         } => {
-            validate_expr_semantics(
-                workspace,
-                resolved_module,
-                module_path,
-                type_scope,
-                scope,
-                subject,
-                span,
-                diagnostics,
-            );
+            if !is_builtin_numeric_conversion_subject(subject, *qualifier_kind) {
+                validate_expr_semantics(
+                    workspace,
+                    resolved_module,
+                    module_path,
+                    type_scope,
+                    scope,
+                    subject,
+                    span,
+                    diagnostics,
+                );
+            }
             validate_bare_method_resolution(
                 workspace,
                 resolved_module,
@@ -14717,6 +16732,20 @@ fn validate_expr_semantics(
                 span,
                 diagnostics,
             );
+            validate_callable_nominal_surface_semantics(
+                workspace,
+                resolved_module,
+                module_path,
+                type_scope,
+                scope,
+                subject,
+                *qualifier_kind,
+                qualifier,
+                args,
+                attached,
+                span,
+                diagnostics,
+            );
         }
         HirExpr::Await { expr } => validate_expr_semantics(
             workspace,
@@ -14748,15 +16777,47 @@ fn validate_expr_semantics(
                     ExprTypeClass::Bool,
                     &format!("operand of `{}`", unary_op_token(*op)),
                 ),
-                HirUnaryOp::Neg | HirUnaryOp::BitNot => validate_expected_expr_type(
-                    module_path,
-                    expr,
-                    span,
-                    diagnostics,
-                    ExprTypeClass::Int,
-                    &format!("operand of `{}`", unary_op_token(*op)),
-                ),
-                HirUnaryOp::BorrowRead => {
+                HirUnaryOp::Neg => {
+                    let actual = infer_numeric_expr_type_class(
+                        workspace,
+                        resolved_module,
+                        type_scope,
+                        scope,
+                        expr,
+                    );
+                    if !actual.is_some_and(|kind| kind.is_integer() || kind.is_float()) {
+                        push_type_contract_diagnostic(
+                            module_path,
+                            span,
+                            diagnostics,
+                            format!(
+                                "operand of `{}` requires a numeric type",
+                                unary_op_token(*op)
+                            ),
+                        );
+                    }
+                }
+                HirUnaryOp::BitNot => {
+                    let actual = infer_numeric_expr_type_class(
+                        workspace,
+                        resolved_module,
+                        type_scope,
+                        scope,
+                        expr,
+                    );
+                    if !actual.is_some_and(NumericTypeClass::is_integer) {
+                        push_type_contract_diagnostic(
+                            module_path,
+                            span,
+                            diagnostics,
+                            format!(
+                                "operand of `{}` requires an integer type",
+                                unary_op_token(*op)
+                            ),
+                        );
+                    }
+                }
+                HirUnaryOp::CapabilityRead => {
                     validate_borrow_operand_place(
                         workspace,
                         resolved_module,
@@ -14765,10 +16826,10 @@ fn validate_expr_semantics(
                         expr,
                         span,
                         diagnostics,
-                        false,
+                        arcana_hir::HirParamMode::Read,
                     );
                 }
-                HirUnaryOp::BorrowMut => {
+                HirUnaryOp::CapabilityEdit => {
                     validate_borrow_operand_place(
                         workspace,
                         resolved_module,
@@ -14777,7 +16838,31 @@ fn validate_expr_semantics(
                         expr,
                         span,
                         diagnostics,
-                        true,
+                        arcana_hir::HirParamMode::Edit,
+                    );
+                }
+                HirUnaryOp::CapabilityTake => {
+                    validate_borrow_operand_place(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        scope,
+                        expr,
+                        span,
+                        diagnostics,
+                        arcana_hir::HirParamMode::Take,
+                    );
+                }
+                HirUnaryOp::CapabilityHold => {
+                    validate_borrow_operand_place(
+                        workspace,
+                        resolved_module,
+                        module_path,
+                        scope,
+                        expr,
+                        span,
+                        diagnostics,
+                        arcana_hir::HirParamMode::Hold,
                     );
                 }
                 HirUnaryOp::Deref | HirUnaryOp::Weave | HirUnaryOp::Split => {}
@@ -14832,22 +16917,57 @@ fn validate_expr_semantics(
                 | HirBinaryOp::BitAnd
                 | HirBinaryOp::Shl
                 | HirBinaryOp::Shr => {
-                    validate_expected_expr_type(
-                        module_path,
+                    let left_numeric = infer_numeric_expr_type_class(
+                        workspace,
+                        resolved_module,
+                        type_scope,
+                        scope,
                         left,
-                        span,
-                        diagnostics,
-                        ExprTypeClass::Int,
-                        &format!("left operand of `{}`", binary_op_token(*op)),
                     );
-                    validate_expected_expr_type(
-                        module_path,
+                    let right_numeric = infer_numeric_expr_type_class(
+                        workspace,
+                        resolved_module,
+                        type_scope,
+                        scope,
                         right,
-                        span,
-                        diagnostics,
-                        ExprTypeClass::Int,
-                        &format!("right operand of `{}`", binary_op_token(*op)),
                     );
+                    match (left_numeric, right_numeric) {
+                        (Some(left_kind), Some(right_kind))
+                            if numeric_types_compatible(left_kind, right_kind)
+                                && (matches!(
+                                    op,
+                                    HirBinaryOp::Sub | HirBinaryOp::Mul | HirBinaryOp::Div
+                                ) && (left_kind.is_integer() || left_kind.is_float())
+                                    || matches!(
+                                        op,
+                                        HirBinaryOp::Mod
+                                            | HirBinaryOp::BitOr
+                                            | HirBinaryOp::BitXor
+                                            | HirBinaryOp::BitAnd
+                                            | HirBinaryOp::Shl
+                                            | HirBinaryOp::Shr
+                                    ) && left_kind.is_integer()) => {}
+                        (Some(left_kind), Some(right_kind)) => push_type_contract_diagnostic(
+                            module_path,
+                            span,
+                            diagnostics,
+                            format!(
+                                "operands of `{}` must use compatible numeric widths within the same signed lane, found `{}` and `{}`",
+                                binary_op_token(*op),
+                                left_kind.label(),
+                                right_kind.label()
+                            ),
+                        ),
+                        _ => push_type_contract_diagnostic(
+                            module_path,
+                            span,
+                            diagnostics,
+                            format!(
+                                "operands of `{}` must be numeric values with compatible widths in the same signed lane",
+                                binary_op_token(*op)
+                            ),
+                        ),
+                    }
                 }
                 HirBinaryOp::Add
                 | HirBinaryOp::EqEq
@@ -14855,7 +16975,76 @@ fn validate_expr_semantics(
                 | HirBinaryOp::Lt
                 | HirBinaryOp::LtEq
                 | HirBinaryOp::Gt
-                | HirBinaryOp::GtEq => {}
+                | HirBinaryOp::GtEq => {
+                    let left_numeric = infer_numeric_expr_type_class(
+                        workspace,
+                        resolved_module,
+                        type_scope,
+                        scope,
+                        left,
+                    );
+                    let right_numeric = infer_numeric_expr_type_class(
+                        workspace,
+                        resolved_module,
+                        type_scope,
+                        scope,
+                        right,
+                    );
+                    if matches!(op, HirBinaryOp::Add) {
+                        match (left_numeric, right_numeric) {
+                            (Some(left_kind), Some(right_kind))
+                                if numeric_types_compatible(left_kind, right_kind)
+                                    && (left_kind.is_integer() || left_kind.is_float()) => {}
+                            _ => {
+                                let left_is_str = infer_expr_value_type(
+                                    workspace,
+                                    resolved_module,
+                                    type_scope,
+                                    scope,
+                                    left,
+                                )
+                                .and_then(|ty| hir_type_root_name(&ty).map(str::to_string))
+                                .is_some_and(|name| name == "Str");
+                                let right_is_str = infer_expr_value_type(
+                                    workspace,
+                                    resolved_module,
+                                    type_scope,
+                                    scope,
+                                    right,
+                                )
+                                .and_then(|ty| hir_type_root_name(&ty).map(str::to_string))
+                                .is_some_and(|name| name == "Str");
+                                if !(left_is_str && right_is_str) {
+                                    push_type_contract_diagnostic(
+                                        module_path,
+                                        span,
+                                        diagnostics,
+                                        format!(
+                                            "operands of `{}` must be Str or numeric values with compatible widths in the same signed lane",
+                                            binary_op_token(*op)
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+                    } else if let (Some(left_kind), Some(right_kind)) =
+                        (left_numeric, right_numeric)
+                    {
+                        if !numeric_types_compatible(left_kind, right_kind) {
+                            push_type_contract_diagnostic(
+                                module_path,
+                                span,
+                                diagnostics,
+                                format!(
+                                    "operands of `{}` must use compatible numeric widths within the same signed lane, found `{}` and `{}`",
+                                    binary_op_token(*op),
+                                    left_kind.label(),
+                                    right_kind.label()
+                                ),
+                            );
+                        }
+                    }
+                }
             }
         }
         member_expr @ HirExpr::MemberAccess { expr, .. } => {
@@ -14884,6 +17073,11 @@ fn validate_expr_semantics(
                 span,
                 diagnostics,
             );
+            if expr_uses_union_surface(workspace, resolved_module, type_scope, scope, expr)
+                && scope.unsafe_trace.is_none()
+            {
+                push_unsafe_required_diagnostic(module_path, span, diagnostics, "union field read");
+            }
             if let HirExpr::MemberAccess { member, .. } = member_expr
                 && is_tuple_projection_member(member)
                 && let Some(actual) = infer_expr_type(expr)
@@ -15223,6 +17417,9 @@ fn validate_value_path_segments(
     context: &str,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
+    if is_builtin_numeric_type_path(path) {
+        return;
+    }
     if path.len() == 1 && scope.contains(&path[0]) {
         return;
     }
@@ -15445,6 +17642,7 @@ fn flatten_member_expr_path(expr: &HirExpr) -> Option<Vec<String>> {
 fn flatten_assign_target_path(target: &HirAssignTarget) -> Option<Vec<String>> {
     match target {
         HirAssignTarget::Name { text } => Some(vec![text.clone()]),
+        HirAssignTarget::Deref { .. } => None,
         HirAssignTarget::MemberAccess { target, member } if is_identifier_text(member) => {
             let mut path = flatten_assign_target_path(target)?;
             path.push(member.clone());
@@ -15921,7 +18119,7 @@ mod tests {
                         "        self.value = ctx.base\n",
                         "\n",
                         "create Session [Counter] context: SessionCtx scope-exit:\n",
-                        "    done: when Counter.value > 10 hold [Counter]\n",
+                        "    done: when Counter.value > 10 retain [Counter]\n",
                         "\n",
                         "Session\n",
                         "Counter\n",
@@ -18678,7 +20876,7 @@ mod tests {
             &[
                 (
                     "src/shelf.arc",
-                    "enum Result[T, E]:\n    Ok(T)\n    Err(E)\ntrait Cleanup[T]:\n    fn cleanup(take self: T) -> Result[Unit, Str]\nlang cleanup_contract = Cleanup\nobj Counter:\n    value: Int\n    fn init(edit self: Self):\n        self.value = 1\nimpl Cleanup[Counter] for Counter:\n    fn cleanup(take self: Counter) -> Result[Unit, Str]:\n        return Result.Ok[Unit, Str] :: :: call\ncreate Session [Counter] scope-exit:\n    done: when false hold [Counter]\nfn dispose(take value: Counter) -> Result[Unit, Str]:\n    return Result.Ok[Unit, Str] :: :: call\nSession\nCounter\nfn main() -> Int:\n    let active = Session :: :: call\n    return 0\n-cleanup[target = Counter, handler = dispose]\n",
+                    "enum Result[T, E]:\n    Ok(T)\n    Err(E)\ntrait Cleanup[T]:\n    fn cleanup(take self: T) -> Result[Unit, Str]\nlang cleanup_contract = Cleanup\nobj Counter:\n    value: Int\n    fn init(edit self: Self):\n        self.value = 1\nimpl Cleanup[Counter] for Counter:\n    fn cleanup(take self: Counter) -> Result[Unit, Str]:\n        return Result.Ok[Unit, Str] :: :: call\ncreate Session [Counter] scope-exit:\n    done: when false retain [Counter]\nfn dispose(take value: Counter) -> Result[Unit, Str]:\n    return Result.Ok[Unit, Str] :: :: call\nSession\nCounter\nfn main() -> Int:\n    let active = Session :: :: call\n    return 0\n-cleanup[target = Counter, handler = dispose]\n",
                 ),
                 ("src/types.arc", ""),
             ],
@@ -19083,7 +21281,7 @@ mod tests {
             &[
                 (
                     "src/shelf.arc",
-                    "fn main() -> Int:\n    let x = &(1 + 2)\n    return 0\n",
+                    "fn main() -> Int:\n    let x = &read (1 + 2)\n    return 0\n",
                 ),
                 ("src/types.arc", ""),
             ],
@@ -19091,7 +21289,7 @@ mod tests {
 
         let err = check_path(&root).expect_err("borrow of non-place should fail");
         assert!(
-            err.contains("operand of `&` must be a local place expression"),
+            err.contains("operand of `&read` must be a local place expression"),
             "{err}"
         );
 
@@ -19107,15 +21305,15 @@ mod tests {
             &[
                 (
                     "src/shelf.arc",
-                    "fn main() -> Int:\n    let x = 1\n    let y = &mut x\n    return 0\n",
+                    "fn main() -> Int:\n    let x = 1\n    let y = &edit x\n    return 0\n",
                 ),
                 ("src/types.arc", ""),
             ],
         );
 
-        let err = check_path(&root).expect_err("mutable borrow of immutable local should fail");
+        let err = check_path(&root).expect_err("edit capability from immutable local should fail");
         assert!(
-            err.contains("cannot mutably borrow immutable local `x`"),
+            err.contains("cannot create `&edit` capability from immutable local `x`"),
             "{err}"
         );
 
@@ -19131,15 +21329,15 @@ mod tests {
             &[
                 (
                     "src/shelf.arc",
-                    "fn main() -> Int:\n    let mut x = 1\n    let a = &x\n    let b = &mut x\n    return 0\n",
+                    "fn main() -> Int:\n    let mut x = 1\n    let a = &read x\n    let b = &edit x\n    return 0\n",
                 ),
                 ("src/types.arc", ""),
             ],
         );
 
-        let err = check_path(&root).expect_err("conflicting borrows should fail");
+        let err = check_path(&root).expect_err("conflicting capabilities should fail");
         assert!(
-            err.contains("cannot mutably borrow `x` while it is already borrowed"),
+            err.contains("cannot create `&edit` capability for `x` while it is already borrowed"),
             "{err}"
         );
 
@@ -19164,11 +21362,11 @@ mod tests {
                         "    read_xs[1] = 2\n",
                         "    read_xs[2] = 3\n",
                         "    read_xs[3] = 4\n",
-                        "    let view = &read_xs[1..3]\n",
+                        "    let view = &read read_xs[1..3]\n",
                         "    let mut edit_xs = std.collections.array.new[Int] :: 2, 0 :: call\n",
                         "    edit_xs[0] = 5\n",
                         "    edit_xs[1] = 6\n",
-                        "    let mut edit = &mut edit_xs[0..2]\n",
+                        "    let mut edit = &edit edit_xs[0..2]\n",
                         "    edit :: 1, 9 :: set\n",
                         "    return (view :: :: len) + (edit :: :: len)\n",
                     ),
@@ -19190,7 +21388,7 @@ mod tests {
             &[
                 (
                     "src/shelf.arc",
-                    "fn main() -> Int:\n    let mut text = \"hello\"\n    let x = &mut text[1..4]\n    return 0\n",
+                    "fn main() -> Int:\n    let mut text = \"hello\"\n    let x = &edit text[1..4]\n    return 0\n",
                 ),
                 ("src/types.arc", ""),
             ],
@@ -19198,7 +21396,7 @@ mod tests {
 
         let err = check_path(&root).expect_err("mutable string slice borrow should fail");
         assert!(
-            err.contains("string slices are read-only; `&mut x[a..b]` is not allowed"),
+            err.contains("string slices are read-only; `&edit x[a..b]` is not allowed"),
             "{err}"
         );
 
@@ -19214,7 +21412,7 @@ mod tests {
             &[
                 (
                     "src/shelf.arc",
-                    "fn main() -> Int:\n    let xs = [1, 2, 3]\n    let view = &xs[0..2]\n    return 0\n",
+                    "fn main() -> Int:\n    let xs = [1, 2, 3]\n    let view = &read xs[0..2]\n    return 0\n",
                 ),
                 ("src/types.arc", ""),
             ],
@@ -19238,7 +21436,7 @@ mod tests {
             &[
                 (
                     "src/shelf.arc",
-                    "fn main() -> Int:\n    let mut x = 1\n    let a = &x\n    x = 2\n    return 0\n",
+                    "fn main() -> Int:\n    let mut x = 1\n    let a = &read x\n    x = 2\n    return 0\n",
                 ),
                 ("src/types.arc", ""),
             ],
@@ -19262,7 +21460,7 @@ mod tests {
             &[
                 (
                     "src/shelf.arc",
-                    "fn main() -> Int:\n    let mut x = 1\n    let a = &mut x\n    let y = x + 1\n    return y\n",
+                    "fn main() -> Int:\n    let mut x = 1\n    let a = &edit x\n    let y = x + 1\n    return y\n",
                 ),
                 ("src/types.arc", ""),
             ],
@@ -19274,6 +21472,288 @@ mod tests {
             "{err}"
         );
 
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_direct_access_while_held() {
+        let root = make_temp_package(
+            "typed_hold_direct_access",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    concat!(
+                        "fn main() -> Int:\n",
+                        "    let mut x = 1\n",
+                        "    let held = &hold x\n",
+                        "    let y = x + 1\n",
+                        "    defer reclaim held\n",
+                        "    return y\n",
+                    ),
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("direct access while held should fail");
+        assert!(
+            err.contains("cannot access local `x` directly while it is held"),
+            "{err}"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_accepts_hold_capability_with_reclaim() {
+        let root = make_temp_package(
+            "typed_hold_reclaim",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    concat!(
+                        "fn main() -> Int:\n",
+                        "    let mut x = 1\n",
+                        "    let held = &hold x\n",
+                        "    reclaim held\n",
+                        "    x = 2\n",
+                        "    return x\n",
+                    ),
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        check_path(&root).expect("hold reclaim flow should type-check");
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_accepts_deferred_hold_reclaim() {
+        let root = make_temp_package(
+            "typed_deferred_hold_reclaim",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    concat!(
+                        "fn main() -> Int:\n",
+                        "    let mut x = 1\n",
+                        "    let held = &hold x\n",
+                        "    defer reclaim held\n",
+                        "    return 0\n",
+                    ),
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        check_path(&root).expect("defer reclaim should satisfy hold scope rules");
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_unreclaimed_hold_capability() {
+        let root = make_temp_package(
+            "typed_unreclaimed_hold",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    concat!(
+                        "fn main() -> Int:\n",
+                        "    let mut x = 1\n",
+                        "    let held = &hold x\n",
+                        "    return 0\n",
+                    ),
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("unreclaimed hold should fail");
+        assert!(
+            err.contains("local `held` exits scope with an unreclaimed `&hold` capability for `x`"),
+            "{err}"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_reclaim_of_non_hold_capability() {
+        let root = make_temp_package(
+            "typed_reclaim_non_hold",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    "fn main() -> Int:\n    let x = 1\n    reclaim x\n    return 0\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("reclaim on non-hold should fail");
+        assert!(
+            err.contains("`reclaim` expects an `&hold[...]` capability"),
+            "{err}"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_reclaim_of_nonlocal_hold_expression() {
+        let root = make_temp_package(
+            "typed_reclaim_nonlocal_hold_expr",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    concat!(
+                        "fn main() -> Int:\n",
+                        "    let mut x = 1\n",
+                        "    reclaim &hold x\n",
+                        "    return 0\n",
+                    ),
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("reclaim of nonlocal hold expression should fail");
+        assert!(
+            err.contains("`reclaim` expects a local `&hold[...]` capability binding"),
+            "{err}"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_use_after_take_capability_creation() {
+        let root = make_temp_package(
+            "typed_take_capability_use_after_reserve",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    concat!(
+                        "fn main() -> Int:\n",
+                        "    let text = \"hi\"\n",
+                        "    let token = &take text\n",
+                        "    let again = text\n",
+                        "    return 0\n",
+                    ),
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("direct use after &take should fail");
+        assert!(err.contains("use of moved local `text`"), "{err}");
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_accepts_assignment_through_edit_and_hold_capabilities() {
+        let root = make_temp_package(
+            "typed_deref_capability_assign",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    concat!(
+                        "struct Counter:\n",
+                        "    value: Int\n",
+                        "fn main() -> Int:\n",
+                        "    let mut x = 1\n",
+                        "    let edit_cap = &edit x\n",
+                        "    *edit_cap = 3\n",
+                        "    let mut counter = Counter :: value = 1 :: call\n",
+                        "    let held = &hold counter\n",
+                        "    (*held).value = 4\n",
+                        "    reclaim held\n",
+                        "    return *edit_cap + counter.value\n",
+                    ),
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        check_path(&root)
+            .expect("deref assignment through edit/hold capabilities should type-check");
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_assignment_through_read_capability() {
+        let root = make_temp_package(
+            "typed_deref_read_assign_rejected",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    concat!(
+                        "fn main() -> Int:\n",
+                        "    let x = 1\n",
+                        "    let cap = &read x\n",
+                        "    *cap = 2\n",
+                        "    return 0\n",
+                    ),
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("assignment through read capability should fail");
+        assert!(
+            err.contains(
+                "assignment through `*` requires an `&edit[...]` or `&hold[...]` capability"
+            ),
+            "{err}"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_accepts_plain_hold_param_for_call_duration_only() {
+        let root = make_temp_package(
+            "typed_plain_hold_param",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    concat!(
+                        "fn inspect(hold value: Int) -> Int:\n",
+                        "    return value + 1\n",
+                        "fn main() -> Int:\n",
+                        "    let mut x = 4\n",
+                        "    let seen = inspect :: x :: call\n",
+                        "    x = 9\n",
+                        "    return seen + x\n",
+                    ),
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        check_path(&root).expect("plain hold params should type-check");
         fs::remove_dir_all(root).expect("cleanup should succeed");
     }
 
@@ -19306,7 +21786,10 @@ mod tests {
             "app",
             &[],
             &[
-                ("src/shelf.arc", "fn bad['a]() -> &'a Int:\n    return 1\n"),
+                (
+                    "src/shelf.arc",
+                    "fn bad['a]() -> &read[Int, 'a]:\n    return 1\n",
+                ),
                 ("src/types.arc", ""),
             ],
         );
@@ -19713,7 +22196,7 @@ mod tests {
             &[
                 (
                     "src/shelf.arc",
-                    "fn bad['a](read value: &'a Int) -> &'a Int:\n    let x = 1\n    return &x\n",
+                    "fn bad['a](read value: &read[Int, 'a]) -> &read[Int, 'a]:\n    let x = 1\n    return &read x\n",
                 ),
                 ("src/types.arc", ""),
             ],
@@ -19760,7 +22243,7 @@ mod tests {
             &[
                 (
                     "src/shelf.arc",
-                    "fn consume(take value: Str):\n    return\nfn main() -> Int:\n    let s = \"hi\"\n    let r = &s\n    consume :: s :: call\n    return 0\n",
+                    "fn consume(take value: Str):\n    return\nfn main() -> Int:\n    let s = \"hi\"\n    let r = &read s\n    consume :: s :: call\n    return 0\n",
                 ),
                 ("src/types.arc", ""),
             ],
@@ -20093,7 +22576,7 @@ mod tests {
             &[
                 (
                     "src/shelf.arc",
-                    "fn keep['a](read value: &'a Int) -> &'a Int:\n    return value\n",
+                    "fn keep['a](read value: &read[Int, 'a]) -> &read[Int, 'a]:\n    return value\n",
                 ),
                 ("src/types.arc", ""),
             ],
@@ -20136,7 +22619,7 @@ mod tests {
                 "    value: Int\n",
                 "\n",
                 "create Session [Counter] scope-exit:\n",
-                "    done: when Counter.value > 0 hold [Counter]\n",
+                "    done: when Counter.value > 0 retain [Counter]\n",
                 "\n",
                 "Session\n",
                 "Counter\n",
@@ -20160,7 +22643,7 @@ mod tests {
                 "    value: Int\n",
                 "\n",
                 "create Session [Counter] scope-exit:\n",
-                "    done: when Counter.value > 0 hold [Counter]\n",
+                "    done: when Counter.value > 0 retain [Counter]\n",
                 "\n",
                 "Counter\n",
                 "fn bump() -> Int:\n",
@@ -20296,7 +22779,7 @@ mod tests {
                         "        return\n",
                         "\n",
                         "create Session [Counter] scope-exit:\n",
-                        "    done: when false hold [Counter]\n",
+                        "    done: when false retain [Counter]\n",
                         "\n",
                         "fn main() -> Int:\n",
                         "    return 0\n",
@@ -20329,7 +22812,7 @@ mod tests {
                         "        self.value = ctx.base\n",
                         "\n",
                         "create Session [Counter] scope-exit:\n",
-                        "    done: when Counter.value > 10 hold [Counter]\n",
+                        "    done: when Counter.value > 10 retain [Counter]\n",
                         "\n",
                         "Session\n",
                         "Counter\n",
@@ -20615,7 +23098,7 @@ mod tests {
                     "obj Counter:\n",
                     "    value: Int\n",
                     "create Session [Counter] scope-exit:\n",
-                    "    done: when false hold [Counter]\n",
+                    "    done: when false retain [Counter]\n",
                     "fn helper() -> Int:\n",
                     "    recycle -done\n",
                     "        false\n",
@@ -21436,5 +23919,218 @@ mod tests {
             .expect("clock should be after unix epoch")
             .as_nanos() as u64;
         time ^ NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed)
+    }
+
+    #[test]
+    fn check_path_accepts_struct_array_float_and_bitfield_surface() {
+        let root = make_temp_package(
+            "value_surface_positive",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    concat!(
+                        "struct Vec2:\n",
+                        "    x: F32\n",
+                        "    y: F32\n",
+                        "struct Flags:\n",
+                        "    mask: U32 bits 3\n",
+                        "array Trio[Int, 3]:\n",
+                        "fn main() -> Int:\n",
+                        "    let point = Vec2 :: x = 1.0f32, y = 2.0f32 :: call\n",
+                        "    let flags = Flags :: mask = U32 :: 3 :: call :: call\n",
+                        "    let xs = Trio :: 1, 2, 3 :: call\n",
+                        "    let ys = array yield Trio -return 0\n",
+                        "        [0] = 4\n",
+                        "        [1] = 5\n",
+                        "        [2] = 6\n",
+                        "    let sum = (F64 :: point.x :: call) + 2.5\n",
+                        "    let mask = Int :: flags.mask :: call\n",
+                        "    let total = xs[0] + ys[1] + mask\n",
+                        "    return total\n",
+                    ),
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let summary = check_path(&root).expect("value surface package should check");
+        assert_eq!(summary.package_count, 1);
+        assert_eq!(summary.module_count, 2);
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_accepts_same_signed_numeric_widening() {
+        let root = make_temp_package(
+            "value_surface_numeric_widen",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    concat!(
+                        "fn main() -> Int:\n",
+                        "    let signed = (I8 :: 1 :: call) + (I16 :: 2 :: call)\n",
+                        "    let literal_lift = 1 + (I32 :: 3 :: call)\n",
+                        "    let unsigned = (U8 :: 4 :: call) + (U16 :: 5 :: call)\n",
+                        "    return (Int :: signed :: call) + (Int :: literal_lift :: call) + (Int :: unsigned :: call)\n",
+                    ),
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let summary = check_path(&root).expect("same-signed widening package should check");
+        assert_eq!(summary.package_count, 1);
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_mixed_signed_numeric_widening() {
+        let root = make_temp_package(
+            "value_surface_numeric_widen_invalid",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    concat!(
+                        "fn main() -> Int:\n",
+                        "    let bad = (I8 :: 1 :: call) + (U16 :: 2 :: call)\n",
+                        "    return Int :: bad :: call\n",
+                    ),
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("mixed signed widening should fail");
+        assert!(
+            err.contains("same signed lane") || err.contains("compatible numeric widths"),
+            "{err}"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_union_usage_without_unsafe() {
+        let root = make_temp_package(
+            "union_requires_unsafe",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    concat!(
+                        "union Slot:\n",
+                        "    value: Int\n",
+                        "    other: Int\n",
+                        "fn main() -> Int:\n",
+                        "    let slot = union yield Slot -return 0\n",
+                        "        value = 7\n",
+                        "    return slot.value\n",
+                    ),
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("unsafe-free union use should fail");
+        assert!(
+            err.contains("requires an active `#unsafe[\"trace.id\"]` foreword"),
+            "{err}"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_accepts_union_usage_with_unsafe() {
+        let root = make_temp_package(
+            "union_with_unsafe",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    concat!(
+                        "union Slot:\n",
+                        "    value: Int\n",
+                        "    other: Int\n",
+                        "#unsafe[\"value.union\"]\n",
+                        "fn main() -> Int:\n",
+                        "    let slot = union yield Slot -return 0\n",
+                        "        value = 7\n",
+                        "    return slot.value\n",
+                    ),
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let summary = check_path(&root).expect("unsafe union package should check");
+        assert_eq!(summary.package_count, 1);
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_accepts_union_usage_with_statement_unsafe() {
+        let root = make_temp_package(
+            "union_with_statement_unsafe",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    concat!(
+                        "union Slot:\n",
+                        "    value: Int\n",
+                        "    other: Int\n",
+                        "fn main() -> Int:\n",
+                        "    #unsafe[\"value.union\"]\n",
+                        "    let slot = union yield Slot -return 0\n",
+                        "        value = 7\n",
+                        "    #unsafe[\"value.union\"]\n",
+                        "    return slot.value\n",
+                    ),
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let summary = check_path(&root).expect("statement-level unsafe union package should check");
+        assert_eq!(summary.package_count, 1);
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_rejects_non_fixed_width_bitfield_base() {
+        let root = make_temp_package(
+            "bitfield_invalid_base",
+            "app",
+            &[],
+            &[
+                (
+                    "src/shelf.arc",
+                    "struct Flags:\n    mask: Int bits 3\nfn main() -> Int:\n    return 0\n",
+                ),
+                ("src/types.arc", ""),
+            ],
+        );
+
+        let err = check_path(&root).expect_err("bitfield base should fail");
+        assert!(
+            err.contains("must use a fixed-width integer builtin base type"),
+            "{err}"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup should succeed");
     }
 }

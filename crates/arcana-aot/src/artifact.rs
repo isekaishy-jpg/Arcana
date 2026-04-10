@@ -117,7 +117,7 @@ pub struct AotOwnerObjectArtifact {
 pub struct AotOwnerExitArtifact {
     pub name: String,
     pub condition: ExecExpr,
-    pub holds: Vec<String>,
+    pub retains: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

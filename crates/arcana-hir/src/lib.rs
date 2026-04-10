@@ -281,6 +281,9 @@ pub enum HirSymbolKind {
     Fn,
     System,
     Record,
+    Struct,
+    Union,
+    Array,
     Object,
     Owner,
     Enum,
@@ -296,6 +299,9 @@ impl HirSymbolKind {
             Self::Fn => "fn",
             Self::System => "system",
             Self::Record => "record",
+            Self::Struct => "struct",
+            Self::Union => "union",
+            Self::Array => "array",
             Self::Object => "obj",
             Self::Owner => "create",
             Self::Enum => "enum",
@@ -426,6 +432,7 @@ pub enum HirParamMode {
     Read,
     Edit,
     Take,
+    Hold,
 }
 
 impl HirParamMode {
@@ -434,6 +441,7 @@ impl HirParamMode {
             Self::Read => "read",
             Self::Edit => "edit",
             Self::Take => "take",
+            Self::Hold => "hold",
         }
     }
 }
@@ -451,6 +459,7 @@ pub struct HirParam {
 pub struct HirField {
     pub name: String,
     pub ty: HirType,
+    pub bit_width: Option<u16>,
     pub forewords: Vec<HirForewordApp>,
     pub span: Span,
 }
@@ -592,7 +601,7 @@ pub enum HirQualifiedPhraseQualifierKind {
 pub struct HirOwnerExit {
     pub name: String,
     pub condition: HirExpr,
-    pub holds: Vec<String>,
+    pub retains: Vec<String>,
     pub span: Span,
 }
 
@@ -707,14 +716,51 @@ pub struct HirConstructRegion {
     pub span: Span,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HirNominalFieldRegionKind {
+    Record,
+    Struct,
+    Union,
+}
+
+impl HirNominalFieldRegionKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Record => "record",
+            Self::Struct => "struct",
+            Self::Union => "union",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HirRecordRegion {
+    pub kind: HirNominalFieldRegionKind,
     pub completion: ConstructCompletionKind,
     pub target: Box<HirExpr>,
     pub base: Option<Box<HirExpr>>,
     pub destination: Option<HirConstructDestination>,
     pub default_modifier: Option<HirHeadedModifier>,
     pub lines: Vec<HirConstructLine>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HirArrayLine {
+    pub index: usize,
+    pub value: HirExpr,
+    pub modifier: Option<HirHeadedModifier>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HirArrayRegion {
+    pub completion: ConstructCompletionKind,
+    pub target: Box<HirExpr>,
+    pub base: Option<Box<HirExpr>>,
+    pub destination: Option<HirConstructDestination>,
+    pub default_modifier: Option<HirHeadedModifier>,
+    pub lines: Vec<HirArrayLine>,
     pub span: Span,
 }
 
@@ -775,8 +821,10 @@ pub enum HirUnaryOp {
     Neg,
     Not,
     BitNot,
-    BorrowRead,
-    BorrowMut,
+    CapabilityRead,
+    CapabilityEdit,
+    CapabilityTake,
+    CapabilityHold,
     Deref,
     Weave,
     Split,
@@ -815,6 +863,10 @@ pub enum HirExpr {
     IntLiteral {
         text: String,
     },
+    FloatLiteral {
+        text: String,
+        kind: HirFloatLiteralKind,
+    },
     StrLiteral {
         text: String,
     },
@@ -831,6 +883,7 @@ pub enum HirExpr {
     },
     ConstructRegion(Box<HirConstructRegion>),
     RecordRegion(Box<HirRecordRegion>),
+    ArrayRegion(Box<HirArrayRegion>),
     Chain {
         style: String,
         introducer: HirChainIntroducer,
@@ -889,6 +942,21 @@ pub enum HirExpr {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HirFloatLiteralKind {
+    F32,
+    F64,
+}
+
+impl HirFloatLiteralKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::F32 => "F32",
+            Self::F64 => "F64",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HirAssignOp {
     Assign,
     AddAssign,
@@ -926,6 +994,9 @@ pub enum HirAssignTarget {
     Name {
         text: String,
     },
+    Deref {
+        expr: HirExpr,
+    },
     MemberAccess {
         target: Box<HirAssignTarget>,
         member: String,
@@ -934,6 +1005,12 @@ pub enum HirAssignTarget {
         target: Box<HirAssignTarget>,
         index: HirExpr,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HirDeferAction {
+    Expr { expr: HirExpr },
+    Reclaim { expr: HirExpr },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -961,6 +1038,9 @@ pub enum HirStatementKind {
         body: Vec<HirStatement>,
     },
     Defer {
+        action: HirDeferAction,
+    },
+    Reclaim {
         expr: HirExpr,
     },
     Break,
@@ -979,6 +1059,7 @@ pub enum HirStatementKind {
         lines: Vec<HirBindLine>,
     },
     Record(HirRecordRegion),
+    Array(HirArrayRegion),
     Construct(HirConstructRegion),
     MemorySpec(HirMemorySpecDecl),
     Expr {
@@ -1014,6 +1095,16 @@ pub enum HirSymbolBody {
     None,
     Record {
         fields: Vec<HirField>,
+    },
+    Struct {
+        fields: Vec<HirField>,
+    },
+    Union {
+        fields: Vec<HirField>,
+    },
+    Array {
+        element_ty: HirType,
+        len: usize,
     },
     Object {
         fields: Vec<HirField>,
@@ -1676,12 +1767,12 @@ pub fn canonicalize_hir_type_in_module(
                     .collect(),
             },
             HirTypeKind::Ref {
+                mode,
                 lifetime,
-                mutable,
                 inner,
             } => HirTypeKind::Ref {
+                mode: *mode,
                 lifetime: lifetime.clone(),
-                mutable: *mutable,
                 inner: Box::new(canonicalize_hir_type_in_module(
                     workspace, package, module, inner,
                 )),
@@ -1908,6 +1999,9 @@ fn symbol_return_type(
     matches!(
         symbol_ref.symbol.kind,
         HirSymbolKind::Record
+            | HirSymbolKind::Struct
+            | HirSymbolKind::Union
+            | HirSymbolKind::Array
             | HirSymbolKind::Object
             | HirSymbolKind::Enum
             | HirSymbolKind::OpaqueType
@@ -1923,6 +2017,8 @@ fn symbol_call_return_type(
     if matches!(
         symbol_ref.symbol.kind,
         HirSymbolKind::Record
+            | HirSymbolKind::Struct
+            | HirSymbolKind::Array
             | HirSymbolKind::Object
             | HirSymbolKind::Enum
             | HirSymbolKind::OpaqueType
@@ -1985,6 +2081,11 @@ fn infer_call_target_return_hir_type<L: HirLocalTypeLookup>(
     qualifier_type_args: Option<&[HirType]>,
 ) -> Option<HirType> {
     let path = flatten_callable_expr_path(subject)?;
+    if let [name] = &path[..]
+        && builtin_type_info(name).is_some()
+    {
+        return Some(builtin_hir_type(name));
+    }
     let generic_args = qualifier_type_args
         .filter(|args| !args.is_empty())
         .map(|args| args.to_vec())
@@ -2021,10 +2122,17 @@ fn infer_member_access_hir_type<L: HirLocalTypeLookup>(
     member: &str,
 ) -> Option<HirType> {
     let base_ty = infer_receiver_expr_type(workspace, resolved_module, locals, expr)?;
+    if let HirTypeKind::Tuple(items) = &hir_strip_reference_type(&base_ty).kind {
+        let index = member.parse::<usize>().ok()?;
+        return items.get(index).cloned();
+    }
     let base_path = hir_type_base_path(hir_strip_reference_type(&base_ty))?;
     let symbol_ref = lookup_symbol_path(workspace, resolved_module, &base_path)?;
     let field = match &symbol_ref.symbol.body {
-        HirSymbolBody::Record { fields } | HirSymbolBody::Object { fields, .. } => {
+        HirSymbolBody::Record { fields }
+        | HirSymbolBody::Struct { fields }
+        | HirSymbolBody::Union { fields }
+        | HirSymbolBody::Object { fields, .. } => {
             fields.iter().find(|field| field.name == member)?
         }
         _ => return None,
@@ -2064,7 +2172,8 @@ fn infer_index_hir_type<L: HirLocalTypeLookup>(
     expr: &HirExpr,
 ) -> Option<HirType> {
     let base_ty = infer_receiver_expr_type(workspace, resolved_module, locals, expr)?;
-    match &hir_strip_reference_type(&base_ty).kind {
+    let stripped = hir_strip_reference_type(&base_ty);
+    match &stripped.kind {
         HirTypeKind::Apply { base, args }
             if hir_path_matches_any(
                 base,
@@ -2082,6 +2191,13 @@ fn infer_index_hir_type<L: HirLocalTypeLookup>(
             if hir_path_matches_any(base, &[&["Map"], &["std", "collections", "map", "Map"]]) =>
         {
             args.get(1).cloned()
+        }
+        HirTypeKind::Path(path) => {
+            let symbol_ref = lookup_symbol_path(workspace, resolved_module, &path.segments)?;
+            match &symbol_ref.symbol.body {
+                HirSymbolBody::Array { element_ty, .. } => Some(element_ty.clone()),
+                _ => None,
+            }
         }
         _ => None,
     }
@@ -2204,6 +2320,142 @@ fn infer_borrowed_slice_hir_type<L: HirLocalTypeLookup>(
     }
 }
 
+fn hir_type_is_builtin_name(ty: &HirType, name: &str) -> bool {
+    match &hir_strip_reference_type(ty).kind {
+        HirTypeKind::Path(path) => hir_path_matches_any(path, &[&[name]]),
+        _ => false,
+    }
+}
+
+fn hir_type_builtin_root_name(ty: &HirType) -> Option<String> {
+    let path = hir_type_base_path(hir_strip_reference_type(ty))?;
+    path.last().cloned()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HirNumericTypeClass {
+    Int,
+    I8,
+    U8,
+    I16,
+    U16,
+    I32,
+    U32,
+    I64,
+    U64,
+    ISize,
+    USize,
+    F32,
+    F64,
+}
+
+impl HirNumericTypeClass {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Int => "Int",
+            Self::I8 => "I8",
+            Self::U8 => "U8",
+            Self::I16 => "I16",
+            Self::U16 => "U16",
+            Self::I32 => "I32",
+            Self::U32 => "U32",
+            Self::I64 => "I64",
+            Self::U64 => "U64",
+            Self::ISize => "ISize",
+            Self::USize => "USize",
+            Self::F32 => "F32",
+            Self::F64 => "F64",
+        }
+    }
+
+    const fn is_signed_integer(self) -> bool {
+        matches!(
+            self,
+            Self::Int | Self::I8 | Self::I16 | Self::I32 | Self::I64 | Self::ISize
+        )
+    }
+
+    const fn is_unsigned_integer(self) -> bool {
+        matches!(
+            self,
+            Self::U8 | Self::U16 | Self::U32 | Self::U64 | Self::USize
+        )
+    }
+
+    const fn widening_rank(self) -> Option<u8> {
+        match self {
+            Self::Int => Some(0),
+            Self::I8 | Self::U8 => Some(1),
+            Self::I16 | Self::U16 => Some(2),
+            Self::I32 | Self::U32 => Some(3),
+            Self::I64 | Self::U64 => Some(4),
+            Self::ISize | Self::USize => Some(5),
+            Self::F32 | Self::F64 => None,
+        }
+    }
+}
+
+fn hir_numeric_type_class_from_name(name: &str) -> Option<HirNumericTypeClass> {
+    Some(match name {
+        "Int" => HirNumericTypeClass::Int,
+        "I8" => HirNumericTypeClass::I8,
+        "U8" => HirNumericTypeClass::U8,
+        "I16" => HirNumericTypeClass::I16,
+        "U16" => HirNumericTypeClass::U16,
+        "I32" => HirNumericTypeClass::I32,
+        "U32" => HirNumericTypeClass::U32,
+        "I64" => HirNumericTypeClass::I64,
+        "U64" => HirNumericTypeClass::U64,
+        "ISize" => HirNumericTypeClass::ISize,
+        "USize" => HirNumericTypeClass::USize,
+        "F32" => HirNumericTypeClass::F32,
+        "F64" => HirNumericTypeClass::F64,
+        _ => return None,
+    })
+}
+
+fn infer_widened_builtin_numeric_hir_type<L: HirLocalTypeLookup>(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    locals: &L,
+    left: &HirExpr,
+    right: &HirExpr,
+) -> Option<HirType> {
+    let left_ty = infer_receiver_expr_type(workspace, resolved_module, locals, left)?;
+    let right_ty = infer_receiver_expr_type(workspace, resolved_module, locals, right)?;
+    let left_class = hir_numeric_type_class_from_name(&hir_type_builtin_root_name(&left_ty)?)?;
+    let right_class = hir_numeric_type_class_from_name(&hir_type_builtin_root_name(&right_ty)?)?;
+    let widened = match (left_class, right_class) {
+        (left, right) if left == right => Some(left),
+        (HirNumericTypeClass::Int, right) if right.is_signed_integer() => Some(right),
+        (left, HirNumericTypeClass::Int) if left.is_signed_integer() => Some(left),
+        (left, right) if left.is_signed_integer() && right.is_signed_integer() => {
+            let left_rank = left.widening_rank()?;
+            let right_rank = right.widening_rank()?;
+            Some(if left_rank >= right_rank { left } else { right })
+        }
+        (left, right) if left.is_unsigned_integer() && right.is_unsigned_integer() => {
+            let left_rank = left.widening_rank()?;
+            let right_rank = right.widening_rank()?;
+            Some(if left_rank >= right_rank { left } else { right })
+        }
+        _ => None,
+    }?;
+    Some(builtin_hir_type(widened.label()))
+}
+
+fn infer_same_builtin_operand_hir_type<L: HirLocalTypeLookup>(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    locals: &L,
+    left: &HirExpr,
+    right: &HirExpr,
+) -> Option<HirType> {
+    let left_ty = infer_receiver_expr_type(workspace, resolved_module, locals, left)?;
+    let right_ty = infer_receiver_expr_type(workspace, resolved_module, locals, right)?;
+    (left_ty == right_ty).then_some(left_ty)
+}
+
 pub fn infer_receiver_expr_type<L: HirLocalTypeLookup>(
     workspace: &HirWorkspaceSummary,
     resolved_module: &HirResolvedModule,
@@ -2213,6 +2465,10 @@ pub fn infer_receiver_expr_type<L: HirLocalTypeLookup>(
     match expr {
         HirExpr::BoolLiteral { .. } => Some(builtin_hir_type("Bool")),
         HirExpr::IntLiteral { .. } => Some(builtin_hir_type("Int")),
+        HirExpr::FloatLiteral { kind, .. } => Some(builtin_hir_type(match kind {
+            HirFloatLiteralKind::F32 => "F32",
+            HirFloatLiteralKind::F64 => "F64",
+        })),
         HirExpr::StrLiteral { .. } => Some(builtin_hir_type("Str")),
         HirExpr::Pair { left, right } => Some(HirType {
             kind: HirTypeKind::Tuple(vec![
@@ -2246,7 +2502,13 @@ pub fn infer_receiver_expr_type<L: HirLocalTypeLookup>(
             symbol_return_type(workspace, symbol_ref)
         }
         HirExpr::Unary { op, expr }
-            if matches!(op, HirUnaryOp::BorrowRead | HirUnaryOp::BorrowMut) =>
+            if matches!(
+                op,
+                HirUnaryOp::CapabilityRead
+                    | HirUnaryOp::CapabilityEdit
+                    | HirUnaryOp::CapabilityTake
+                    | HirUnaryOp::CapabilityHold
+            ) =>
         {
             if let HirExpr::Slice {
                 expr: slice_base, ..
@@ -2256,7 +2518,7 @@ pub fn infer_receiver_expr_type<L: HirLocalTypeLookup>(
                     resolved_module,
                     locals,
                     slice_base,
-                    matches!(op, HirUnaryOp::BorrowMut),
+                    matches!(op, HirUnaryOp::CapabilityEdit),
                 )
             {
                 return Some(view_ty);
@@ -2264,8 +2526,14 @@ pub fn infer_receiver_expr_type<L: HirLocalTypeLookup>(
             infer_receiver_expr_type(workspace, resolved_module, locals, expr).map(|inner| {
                 HirType {
                     kind: HirTypeKind::Ref {
+                        mode: match op {
+                            HirUnaryOp::CapabilityRead => HirParamMode::Read,
+                            HirUnaryOp::CapabilityEdit => HirParamMode::Edit,
+                            HirUnaryOp::CapabilityTake => HirParamMode::Take,
+                            HirUnaryOp::CapabilityHold => HirParamMode::Hold,
+                            _ => unreachable!("guarded above"),
+                        },
                         lifetime: None,
-                        mutable: matches!(op, HirUnaryOp::BorrowMut),
                         inner: Box::new(inner),
                     },
                     span: Span::default(),
@@ -2292,6 +2560,14 @@ pub fn infer_receiver_expr_type<L: HirLocalTypeLookup>(
                 ty
             }
         }),
+        HirExpr::Unary {
+            op: HirUnaryOp::Neg | HirUnaryOp::BitNot,
+            expr,
+        } => infer_receiver_expr_type(workspace, resolved_module, locals, expr),
+        HirExpr::Unary {
+            op: HirUnaryOp::Not,
+            ..
+        } => Some(builtin_hir_type("Bool")),
         HirExpr::GenericApply { expr, .. } => {
             infer_receiver_expr_type(workspace, resolved_module, locals, expr)
         }
@@ -2431,6 +2707,36 @@ pub fn infer_receiver_expr_type<L: HirLocalTypeLookup>(
         HirExpr::MemberAccess { expr, member } => {
             infer_member_access_hir_type(workspace, resolved_module, locals, expr, member)
         }
+        HirExpr::ConstructRegion(region) => {
+            let target_path = flatten_callable_expr_path(&region.target)?;
+            if let Some(symbol_ref) = lookup_symbol_path(workspace, resolved_module, &target_path) {
+                return symbol_call_return_type(workspace, symbol_ref, &[]);
+            }
+            if target_path.len() >= 2 {
+                let enum_path = target_path[..target_path.len() - 1].to_vec();
+                if let Some(enum_ref) = lookup_symbol_path(workspace, resolved_module, &enum_path)
+                    && matches!(enum_ref.symbol.kind, HirSymbolKind::Enum)
+                {
+                    return symbol_call_return_type(workspace, enum_ref, &[]);
+                }
+            }
+            None
+        }
+        HirExpr::RecordRegion(region) => {
+            let target_path = flatten_callable_expr_path(&region.target)?;
+            let symbol_ref = lookup_symbol_path(workspace, resolved_module, &target_path)?;
+            matches!(
+                symbol_ref.symbol.kind,
+                HirSymbolKind::Record | HirSymbolKind::Struct | HirSymbolKind::Union
+            )
+            .then(|| build_symbol_result_type(symbol_ref.module_id, symbol_ref.symbol, &[]))
+        }
+        HirExpr::ArrayRegion(region) => {
+            let target_path = flatten_callable_expr_path(&region.target)?;
+            let symbol_ref = lookup_symbol_path(workspace, resolved_module, &target_path)?;
+            matches!(symbol_ref.symbol.kind, HirSymbolKind::Array)
+                .then(|| build_symbol_result_type(symbol_ref.module_id, symbol_ref.symbol, &[]))
+        }
         HirExpr::Index { expr, .. } => {
             infer_index_hir_type(workspace, resolved_module, locals, expr)
         }
@@ -2469,6 +2775,57 @@ pub fn infer_receiver_expr_type<L: HirLocalTypeLookup>(
                 _ => None,
             }
         }
+        HirExpr::Binary { left, right, op } => match op {
+            HirBinaryOp::Or
+            | HirBinaryOp::And
+            | HirBinaryOp::EqEq
+            | HirBinaryOp::NotEq
+            | HirBinaryOp::Lt
+            | HirBinaryOp::LtEq
+            | HirBinaryOp::Gt
+            | HirBinaryOp::GtEq => Some(builtin_hir_type("Bool")),
+            HirBinaryOp::Add => {
+                if let Some(ty) = infer_widened_builtin_numeric_hir_type(
+                    workspace,
+                    resolved_module,
+                    locals,
+                    left,
+                    right,
+                ) {
+                    Some(ty)
+                } else {
+                    let ty = infer_same_builtin_operand_hir_type(
+                        workspace,
+                        resolved_module,
+                        locals,
+                        left,
+                        right,
+                    )?;
+                    if hir_type_is_builtin_name(&ty, "Str")
+                        || builtin_type_info(&hir_type_builtin_root_name(&ty)?).is_some()
+                    {
+                        Some(ty)
+                    } else {
+                        None
+                    }
+                }
+            }
+            HirBinaryOp::Sub
+            | HirBinaryOp::Mul
+            | HirBinaryOp::Div
+            | HirBinaryOp::Mod
+            | HirBinaryOp::BitOr
+            | HirBinaryOp::BitXor
+            | HirBinaryOp::BitAnd
+            | HirBinaryOp::Shl
+            | HirBinaryOp::Shr => infer_widened_builtin_numeric_hir_type(
+                workspace,
+                resolved_module,
+                locals,
+                left,
+                right,
+            ),
+        },
         _ => None,
     }
 }
@@ -3319,6 +3676,9 @@ fn lower_symbol_kind(kind: &ParsedSymbolKind) -> HirSymbolKind {
         ParsedSymbolKind::Fn => HirSymbolKind::Fn,
         ParsedSymbolKind::System => HirSymbolKind::System,
         ParsedSymbolKind::Record => HirSymbolKind::Record,
+        ParsedSymbolKind::Struct => HirSymbolKind::Struct,
+        ParsedSymbolKind::Union => HirSymbolKind::Union,
+        ParsedSymbolKind::Array => HirSymbolKind::Array,
         ParsedSymbolKind::Object => HirSymbolKind::Object,
         ParsedSymbolKind::Owner => HirSymbolKind::Owner,
         ParsedSymbolKind::Enum => HirSymbolKind::Enum,
@@ -3361,6 +3721,7 @@ fn lower_param_mode(mode: &ParsedParamMode) -> HirParamMode {
         ParsedParamMode::Read => HirParamMode::Read,
         ParsedParamMode::Edit => HirParamMode::Edit,
         ParsedParamMode::Take => HirParamMode::Take,
+        ParsedParamMode::Hold => HirParamMode::Hold,
     }
 }
 
@@ -3373,10 +3734,39 @@ fn lower_symbol_body(body: &arcana_syntax::SymbolBody) -> HirSymbolBody {
                 .map(|field| HirField {
                     name: field.name.clone(),
                     ty: type_surface::lower_surface_type(&field.ty),
+                    bit_width: field.bit_width,
                     forewords: lower_forewords(&field.forewords),
                     span: field.span,
                 })
                 .collect(),
+        },
+        arcana_syntax::SymbolBody::Struct { fields } => HirSymbolBody::Struct {
+            fields: fields
+                .iter()
+                .map(|field| HirField {
+                    name: field.name.clone(),
+                    ty: type_surface::lower_surface_type(&field.ty),
+                    bit_width: field.bit_width,
+                    forewords: lower_forewords(&field.forewords),
+                    span: field.span,
+                })
+                .collect(),
+        },
+        arcana_syntax::SymbolBody::Union { fields } => HirSymbolBody::Union {
+            fields: fields
+                .iter()
+                .map(|field| HirField {
+                    name: field.name.clone(),
+                    ty: type_surface::lower_surface_type(&field.ty),
+                    bit_width: field.bit_width,
+                    forewords: lower_forewords(&field.forewords),
+                    span: field.span,
+                })
+                .collect(),
+        },
+        arcana_syntax::SymbolBody::Array { element_ty, len } => HirSymbolBody::Array {
+            element_ty: type_surface::lower_surface_type(element_ty),
+            len: *len,
         },
         arcana_syntax::SymbolBody::Object { fields, methods } => HirSymbolBody::Object {
             fields: fields
@@ -3384,6 +3774,7 @@ fn lower_symbol_body(body: &arcana_syntax::SymbolBody) -> HirSymbolBody {
                 .map(|field| HirField {
                     name: field.name.clone(),
                     ty: type_surface::lower_surface_type(&field.ty),
+                    bit_width: field.bit_width,
                     forewords: lower_forewords(&field.forewords),
                     span: field.span,
                 })
@@ -3422,7 +3813,7 @@ fn lower_symbol_body(body: &arcana_syntax::SymbolBody) -> HirSymbolBody {
                 .map(|owner_exit| HirOwnerExit {
                     name: owner_exit.name.clone(),
                     condition: lower_expr(&owner_exit.condition),
-                    holds: owner_exit.holds.clone(),
+                    retains: owner_exit.retains.clone(),
                     span: owner_exit.span,
                 })
                 .collect(),
@@ -3818,6 +4209,11 @@ fn lower_construct_region(region: &arcana_syntax::ConstructRegion) -> HirConstru
 
 fn lower_record_region(region: &arcana_syntax::RecordRegion) -> HirRecordRegion {
     HirRecordRegion {
+        kind: match region.kind {
+            arcana_syntax::NominalFieldRegionKind::Record => HirNominalFieldRegionKind::Record,
+            arcana_syntax::NominalFieldRegionKind::Struct => HirNominalFieldRegionKind::Struct,
+            arcana_syntax::NominalFieldRegionKind::Union => HirNominalFieldRegionKind::Union,
+        },
         completion: region.completion,
         target: Box::new(lower_expr(&region.target)),
         base: region.base.as_ref().map(|base| Box::new(lower_expr(base))),
@@ -3849,6 +4245,39 @@ fn lower_record_region(region: &arcana_syntax::RecordRegion) -> HirRecordRegion 
     }
 }
 
+fn lower_array_region(region: &arcana_syntax::ArrayRegion) -> HirArrayRegion {
+    HirArrayRegion {
+        completion: region.completion,
+        target: Box::new(lower_expr(&region.target)),
+        base: region.base.as_ref().map(|base| Box::new(lower_expr(base))),
+        destination: region
+            .destination
+            .as_ref()
+            .map(|destination| match destination {
+                arcana_syntax::ConstructDestination::Deliver { name } => {
+                    HirConstructDestination::Deliver { name: name.clone() }
+                }
+                arcana_syntax::ConstructDestination::Place { target } => {
+                    HirConstructDestination::Place {
+                        target: lower_assign_target(target),
+                    }
+                }
+            }),
+        default_modifier: region.default_modifier.as_ref().map(lower_headed_modifier),
+        lines: region
+            .lines
+            .iter()
+            .map(|line| HirArrayLine {
+                index: line.index,
+                value: lower_expr(&line.value),
+                modifier: line.modifier.as_ref().map(lower_headed_modifier),
+                span: line.span,
+            })
+            .collect(),
+        span: region.span,
+    }
+}
+
 fn lower_assign_op(op: &ParsedAssignOp) -> HirAssignOp {
     match op {
         ParsedAssignOp::Assign => HirAssignOp::Assign,
@@ -3868,6 +4297,9 @@ fn lower_assign_op(op: &ParsedAssignOp) -> HirAssignOp {
 fn lower_assign_target(target: &arcana_syntax::AssignTarget) -> HirAssignTarget {
     match target {
         arcana_syntax::AssignTarget::Name { text } => HirAssignTarget::Name { text: text.clone() },
+        arcana_syntax::AssignTarget::Deref { expr } => HirAssignTarget::Deref {
+            expr: lower_expr(expr),
+        },
         arcana_syntax::AssignTarget::MemberAccess { target, member } => {
             HirAssignTarget::MemberAccess {
                 target: Box::new(lower_assign_target(target)),
@@ -3918,6 +4350,13 @@ fn lower_expr(expr: &ParsedExpr) -> HirExpr {
         },
         ParsedExpr::BoolLiteral { value } => HirExpr::BoolLiteral { value: *value },
         ParsedExpr::IntLiteral { text } => HirExpr::IntLiteral { text: text.clone() },
+        ParsedExpr::FloatLiteral { text, kind } => HirExpr::FloatLiteral {
+            text: text.clone(),
+            kind: match kind {
+                arcana_syntax::FloatLiteralKind::F32 => HirFloatLiteralKind::F32,
+                arcana_syntax::FloatLiteralKind::F64 => HirFloatLiteralKind::F64,
+            },
+        },
         ParsedExpr::StrLiteral { text } => HirExpr::StrLiteral { text: text.clone() },
         ParsedExpr::Pair { left, right } => HirExpr::Pair {
             left: Box::new(lower_expr(left)),
@@ -3942,6 +4381,9 @@ fn lower_expr(expr: &ParsedExpr) -> HirExpr {
         }
         ParsedExpr::RecordRegion(region) => {
             HirExpr::RecordRegion(Box::new(lower_record_region(region)))
+        }
+        ParsedExpr::ArrayRegion(region) => {
+            HirExpr::ArrayRegion(Box::new(lower_array_region(region)))
         }
         ParsedExpr::Chain {
             style,
@@ -4085,8 +4527,10 @@ fn lower_unary_op(op: &arcana_syntax::UnaryOp) -> HirUnaryOp {
         arcana_syntax::UnaryOp::Neg => HirUnaryOp::Neg,
         arcana_syntax::UnaryOp::Not => HirUnaryOp::Not,
         arcana_syntax::UnaryOp::BitNot => HirUnaryOp::BitNot,
-        arcana_syntax::UnaryOp::BorrowRead => HirUnaryOp::BorrowRead,
-        arcana_syntax::UnaryOp::BorrowMut => HirUnaryOp::BorrowMut,
+        arcana_syntax::UnaryOp::CapabilityRead => HirUnaryOp::CapabilityRead,
+        arcana_syntax::UnaryOp::CapabilityEdit => HirUnaryOp::CapabilityEdit,
+        arcana_syntax::UnaryOp::CapabilityTake => HirUnaryOp::CapabilityTake,
+        arcana_syntax::UnaryOp::CapabilityHold => HirUnaryOp::CapabilityHold,
         arcana_syntax::UnaryOp::Deref => HirUnaryOp::Deref,
         arcana_syntax::UnaryOp::Weave => HirUnaryOp::Weave,
         arcana_syntax::UnaryOp::Split => HirUnaryOp::Split,
@@ -4191,7 +4635,17 @@ fn lower_statement(statement: &arcana_syntax::Statement) -> HirStatement {
                 iterable: lower_expr(iterable),
                 body: lower_statements(body),
             },
-            ParsedStatementKind::Defer { expr } => HirStatementKind::Defer {
+            ParsedStatementKind::Defer { action } => HirStatementKind::Defer {
+                action: match action {
+                    arcana_syntax::DeferAction::Expr { expr } => HirDeferAction::Expr {
+                        expr: lower_expr(expr),
+                    },
+                    arcana_syntax::DeferAction::Reclaim { expr } => HirDeferAction::Reclaim {
+                        expr: lower_expr(expr),
+                    },
+                },
+            },
+            ParsedStatementKind::Reclaim { expr } => HirStatementKind::Reclaim {
                 expr: lower_expr(expr),
             },
             ParsedStatementKind::Break => HirStatementKind::Break,
@@ -4277,6 +4731,9 @@ fn lower_statement(statement: &arcana_syntax::Statement) -> HirStatement {
             ParsedStatementKind::Record(region) => {
                 HirStatementKind::Record(lower_record_region(region))
             }
+            ParsedStatementKind::Array(region) => {
+                HirStatementKind::Array(lower_array_region(region))
+            }
             ParsedStatementKind::MemorySpec(spec) => {
                 HirStatementKind::MemorySpec(lower_memory_spec_decl(spec))
             }
@@ -4299,8 +4756,8 @@ mod tests {
     use super::freeze::FROZEN_HIR_NODE_KINDS;
     use super::{
         HirAssignOp, HirAssignTarget, HirBinaryOp, HirChainConnector, HirChainIntroducer,
-        HirChainStep, HirDirectiveKind, HirExpr, HirForewordAliasKind, HirForewordApp,
-        HirForewordArg, HirForewordRetention, HirForewordTier, HirHeaderAttachment,
+        HirChainStep, HirDeferAction, HirDirectiveKind, HirExpr, HirForewordAliasKind,
+        HirForewordApp, HirForewordArg, HirForewordRetention, HirForewordTier, HirHeaderAttachment,
         HirMatchPattern, HirPackageLayout, HirPackageSummary, HirPhraseArg, HirShackleDeclKind,
         HirStatement, HirStatementKind, HirSymbolBody, HirSymbolKind, HirTraitRef, HirType,
         HirUnaryOp, HirWhereClause, HirWorkspacePackage, build_package_layout,
@@ -4902,7 +5359,9 @@ mod tests {
         assert_eq!(statements.len(), 7);
 
         match &statements[0].kind {
-            HirStatementKind::Defer { expr } => match expr {
+            HirStatementKind::Defer {
+                action: HirDeferAction::Expr { expr },
+            } => match expr {
                 HirExpr::QualifiedPhrase {
                     subject,
                     args,
@@ -5085,6 +5544,22 @@ mod tests {
             }
             other => panic!("expected return statement, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn lower_module_text_captures_deferred_reclaim_statement() {
+        let module = lower_module_text(
+            "expr_demo",
+            "fn main() -> Int:\n    let mut local = 1\n    let held = &hold local\n    defer reclaim held\n    return 0\n",
+        )
+        .expect("lowering should pass");
+
+        assert!(matches!(
+            module.symbols[0].statements[2].kind,
+            HirStatementKind::Defer {
+                action: HirDeferAction::Reclaim { .. }
+            }
+        ));
     }
 
     #[test]
@@ -5413,7 +5888,7 @@ mod tests {
     fn lower_module_text_captures_assignment_targets() {
         let module = lower_module_text(
             "assign_demo",
-            "fn main() -> Int:\n    self.tick.value = self.tick.value + 1\n    xs[1] = 9\n    xs[i] += 3\n    return 0\n",
+            "fn main() -> Int:\n    self.tick.value = self.tick.value + 1\n    xs[1] = 9\n    value += 3\n    *held = 7\n    (*held).value = 4\n    return 0\n",
         )
         .expect("lowering should pass");
 
@@ -5446,24 +5921,42 @@ mod tests {
         }
         match &statements[2].kind {
             HirStatementKind::Assign { target, .. } => match target {
-                HirAssignTarget::Index { target, index } => {
-                    assert!(matches!(
-                        target.as_ref(),
-                        HirAssignTarget::Name { text } if text == "xs"
-                    ));
-                    assert!(expr_is_path(index, "i"));
+                HirAssignTarget::Name { text } => {
+                    assert_eq!(text, "value");
                 }
-                other => panic!("expected indexed compound-assignment target, got {other:?}"),
+                other => panic!("expected named compound-assignment target, got {other:?}"),
             },
             other => panic!("expected third assignment statement, got {other:?}"),
+        }
+        match &statements[3].kind {
+            HirStatementKind::Assign { target, .. } => match target {
+                HirAssignTarget::Deref { expr } => {
+                    assert!(expr_is_path(expr, "held"));
+                }
+                other => panic!("expected deref assignment target, got {other:?}"),
+            },
+            other => panic!("expected fourth assignment statement, got {other:?}"),
+        }
+        match &statements[4].kind {
+            HirStatementKind::Assign { target, .. } => match target {
+                HirAssignTarget::MemberAccess { target, member } => {
+                    assert_eq!(member, "value");
+                    assert!(matches!(
+                        target.as_ref(),
+                        HirAssignTarget::Deref { expr } if expr_is_path(expr, "held")
+                    ));
+                }
+                other => panic!("expected deref member assignment target, got {other:?}"),
+            },
+            other => panic!("expected fifth assignment statement, got {other:?}"),
         }
     }
 
     #[test]
-    fn lower_module_text_captures_borrow_and_deref_expressions() {
+    fn lower_module_text_captures_capability_and_deref_expressions() {
         let module = lower_module_text(
             "borrow_demo",
-            "fn main() -> Int:\n    let local_x = 1\n    let mut local_y = 2\n    let x_ref = &local_x\n    let y_mut = &mut local_y\n    let sum = *x_ref + *y_mut\n    return sum\n",
+            "fn main() -> Int:\n    let local_x = 1\n    let mut local_y = 2\n    let x_ref = &read local_x\n    let y_cap = &edit local_y\n    let sum = *x_ref + *y_cap\n    return sum\n",
         )
         .expect("lowering should pass");
 
@@ -5474,7 +5967,7 @@ mod tests {
                 assert!(matches!(
                     value,
                     HirExpr::Unary {
-                        op: HirUnaryOp::BorrowRead,
+                        op: HirUnaryOp::CapabilityRead,
                         expr
                     } if matches!(
                         expr.as_ref(),
@@ -5487,11 +5980,11 @@ mod tests {
 
         match &statements[3].kind {
             HirStatementKind::Let { name, value, .. } => {
-                assert_eq!(name, "y_mut");
+                assert_eq!(name, "y_cap");
                 assert!(matches!(
                     value,
                     HirExpr::Unary {
-                        op: HirUnaryOp::BorrowMut,
+                        op: HirUnaryOp::CapabilityEdit,
                         expr
                     } if matches!(
                         expr.as_ref(),
@@ -5499,7 +5992,7 @@ mod tests {
                     )
                 ));
             }
-            other => panic!("expected y_mut let, got {other:?}"),
+            other => panic!("expected y_cap let, got {other:?}"),
         }
 
         match &statements[4].kind {
@@ -5527,7 +6020,7 @@ mod tests {
                             expr
                         } if matches!(
                             expr.as_ref(),
-                            expr if expr_is_path(expr, "y_mut")
+                            expr if expr_is_path(expr, "y_cap")
                         )
                     )
                 ));
