@@ -1,6 +1,10 @@
 use std::collections::BTreeSet;
 
 use crate::artifact::AotPackageArtifact;
+use crate::native_abi::{
+    collect_binding_layouts, collect_native_binding_callbacks, collect_native_binding_imports,
+};
+use arcana_cabi::{validate_binding_callbacks, validate_binding_imports, validate_binding_layouts};
 use arcana_ir::{
     IrForewordRetention, IrRoutineType, IrRoutineTypeKind, parse_memory_spec_surface_row,
     parse_struct_bitfield_layout_row,
@@ -887,6 +891,57 @@ pub fn validate_package_artifact(artifact: &AotPackageArtifact) -> Result<(), St
                 ));
             }
         }
+    }
+
+    for decl in &artifact.shackle_decls {
+        match decl.kind.as_str() {
+            "type" | "struct" | "union" | "callback" => {
+                if decl.raw_layout.is_none() {
+                    return Err(format!(
+                        "backend artifact shackle {} `{}` is missing typed raw layout metadata",
+                        decl.kind, decl.name
+                    ));
+                }
+            }
+            "flags" if decl.binding.is_some() => {
+                if decl.raw_layout.is_none() {
+                    return Err(format!(
+                        "backend artifact shackle flags `{}` is missing typed raw layout metadata",
+                        decl.name
+                    ));
+                }
+            }
+            "import fn" | "import_fn" => {
+                if decl.import_target.is_none() {
+                    return Err(format!(
+                        "backend artifact shackle import fn `{}` is missing typed import metadata",
+                        decl.name
+                    ));
+                }
+            }
+            "thunk" => {
+                if decl.thunk_target.is_none() {
+                    return Err(format!(
+                        "backend artifact shackle thunk `{}` is missing typed thunk metadata",
+                        decl.name
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let binding_imports = collect_native_binding_imports(artifact)?;
+    validate_binding_imports(&binding_imports)?;
+    let binding_callbacks = collect_native_binding_callbacks(artifact)?;
+    validate_binding_callbacks(&binding_callbacks)?;
+    validate_binding_layouts(&artifact.binding_layouts)?;
+    let collected_layouts = collect_binding_layouts(artifact)?;
+    if collected_layouts != artifact.binding_layouts {
+        return Err(
+            "backend artifact binding layout table does not match typed shackle metadata"
+                .to_string(),
+        );
     }
 
     Ok(())

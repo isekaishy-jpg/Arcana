@@ -144,6 +144,7 @@ It defines:
 - It additionally provides:
   - `imports`
   - `callbacks`
+  - `layouts`
   - `register_callback`
     - registration includes callback-owned `owned_bytes_free` and `owned_str_free` helpers for callback-produced `Str` and `Bytes` outputs/write-backs
   - `unregister_callback`
@@ -189,16 +190,39 @@ It defines:
   - `source_mode`, `pass_mode`, `input_type`, `write_back_type`, and `return_type` are authoritative in both directions
   - callbacks use `out_write_backs` plus `out_result`, matching the import lane
 - Generated binding products must reject undeclared callback registrations and duplicate active registrations for the same callback name.
-- Supported v1 binding value tags are:
-  - `Int`
-  - `Bool`
-  - `Str`
-  - `Bytes`
-  - `Opaque`
-  - `Unit`
+- Binding v1 now carries a raw native transport model in addition to the ordinary export ABI:
+  - scalar tags:
+    - `Int`
+    - `Bool`
+    - `I8` / `U8`
+    - `I16` / `U16`
+    - `I32` / `U32`
+    - `I64` / `U64`
+    - `ISize` / `USize`
+    - `F32` / `F64`
+  - view/owned tags:
+    - `Str`
+    - `Bytes`
+  - handle/control tags:
+    - `Opaque`
+    - `Unit`
+  - raw layout tag:
+    - `Layout`
+- Binding metadata may name stable raw layout ids through `Named(...)` binding types.
+- Binding layout tables are part of the product contract and cover:
+  - aliases
+  - structs
+  - unions
+  - fixed arrays
+  - integer-backed enums
+  - flags/newtypes
+  - callbacks / function-pointer signatures
+  - COM-style interface pointers
+  - named bitfields
 - `Str` and `Bytes` inputs use views.
-- `Str` and `Bytes` outputs and write-backs use owned buffers released through cabi-owned free helpers.
+- `Str`, `Bytes`, and `Layout` outputs and write-backs use owned buffers released through cabi-owned free helpers.
 - Opaque values may cross only as package-owned opaque handle types declared in source by a binding-owning package.
+- Pointer and function-pointer semantics live inside the raw layout model; they are not a separate ordinary Arcana pointer ABI.
 - `edit` is part of the public binding contract:
   - import and callback write-backs are one slot per declared param row, in declaration order
   - params without write-back semantics must return `Unit` in their slot

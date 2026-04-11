@@ -8,6 +8,7 @@ use crate::artifact::{
     AotOwnerArtifact, AotOwnerExitArtifact, AotOwnerObjectArtifact, AotPackageArtifact,
     AotPackageModuleArtifact, AotRoutineArtifact, AotShackleDeclArtifact,
 };
+use crate::native_abi::{collect_binding_layouts, populate_typed_shackle_metadata};
 
 pub fn compile_module(module: &IrModule) -> AotArtifact {
     AotArtifact {
@@ -96,6 +97,20 @@ fn compile_shackle_decl(decl: &arcana_ir::IrShackleDecl) -> AotShackleDeclArtifa
         callback_type: decl.callback_type.clone(),
         binding: decl.binding.clone(),
         body_entries: decl.body_entries.clone(),
+        raw_layout: decl.raw_layout.clone(),
+        import_target: decl.import_target.as_ref().map(|target| {
+            crate::artifact::AotShackleImportTargetArtifact {
+                library: target.library.clone(),
+                symbol: target.symbol.clone(),
+                abi: target.abi.clone(),
+            }
+        }),
+        thunk_target: decl.thunk_target.as_ref().map(|target| {
+            crate::artifact::AotShackleThunkTargetArtifact {
+                target: target.target.clone(),
+                abi: target.abi.clone(),
+            }
+        }),
         surface_text: decl.surface_text.clone(),
     }
 }
@@ -132,7 +147,12 @@ fn compile_owner(owner: &IrOwnerDecl) -> AotOwnerArtifact {
 }
 
 pub fn compile_package(package: &IrPackage) -> AotPackageArtifact {
-    AotPackageArtifact {
+    let shackle_decls = package
+        .shackle_decls
+        .iter()
+        .map(compile_shackle_decl)
+        .collect::<Vec<_>>();
+    let mut artifact = AotPackageArtifact {
         format: AOT_INTERNAL_FORMAT.to_string(),
         package_id: package.package_id.clone(),
         package_name: package.package_name.clone(),
@@ -155,16 +175,28 @@ pub fn compile_package(package: &IrPackage) -> AotPackageArtifact {
             .iter()
             .map(compile_native_callback)
             .collect(),
-        shackle_decls: package
-            .shackle_decls
-            .iter()
-            .map(compile_shackle_decl)
-            .collect(),
+        shackle_decls,
+        binding_layouts: Vec::new(),
         owners: package.owners.iter().map(compile_owner).collect(),
         modules: package
             .modules
             .iter()
             .map(compile_module_artifact)
             .collect(),
+    };
+    if artifact.shackle_decls.iter().any(|decl| {
+        matches!(
+            decl.kind.as_str(),
+            "type" | "struct" | "union" | "callback" | "flags"
+        ) && decl.raw_layout.is_none()
+            || matches!(decl.kind.as_str(), "import fn" | "import_fn")
+                && decl.import_target.is_none()
+            || decl.kind == "thunk" && decl.thunk_target.is_none()
+    }) {
+        populate_typed_shackle_metadata(&mut artifact)
+            .expect("typed shackle metadata collection should succeed");
     }
+    artifact.binding_layouts =
+        collect_binding_layouts(&artifact).expect("binding layout collection should succeed");
+    artifact
 }

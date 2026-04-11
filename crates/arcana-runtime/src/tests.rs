@@ -6,18 +6,19 @@ use super::{
     ParsedPhraseQualifierKind, ParsedStmt, RuntimeCallArg, RuntimeEntrypointPlan,
     RuntimeExecutionState, RuntimeFrameArenaHandle, RuntimeFrameArenaPolicy,
     RuntimeFrameArenaState, RuntimeFrameRecyclePolicy, RuntimeHost, RuntimeIntrinsic, RuntimeLocal,
-    RuntimeLocalHandle, RuntimeMemoryHandlePolicy, RuntimeMemoryPressurePolicy, RuntimeOpaqueValue,
-    RuntimePackagePlan, RuntimeParamPlan, RuntimePoolIdValue, RuntimeReferenceMode,
-    RuntimeReferenceTarget, RuntimeReferenceValue, RuntimeResetOnPolicy, RuntimeRingIdValue,
-    RuntimeRoutinePlan, RuntimeScope, RuntimeSessionIdValue, RuntimeSlabIdValue, RuntimeSlabPolicy,
-    RuntimeSlabState, RuntimeTempArenaHandle, RuntimeTypeBindings, RuntimeValue,
-    arcana_desktop_session_record, arcana_desktop_wake_record, arcana_desktop_window_value,
-    arcana_window_id_record, default_runtime_pool_policy, default_runtime_ring_policy,
-    default_runtime_session_policy, default_runtime_slab_policy, ensure_runtime_frame_capacity,
-    ensure_runtime_slab_capacity, err_variant, execute_entrypoint_routine,
-    execute_exported_abi_routine, execute_exported_json_abi_routine, execute_main, execute_routine,
-    execute_routine_with_state, execute_runtime_intrinsic, insert_runtime_channel,
-    insert_runtime_local, insert_runtime_pool_arena, insert_runtime_read_view_from_reference,
+    RuntimeLocalHandle, RuntimeMemoryHandlePolicy, RuntimeMemoryPressurePolicy,
+    RuntimeNativeCallbackPlan, RuntimeOpaqueValue, RuntimePackagePlan, RuntimeParamPlan,
+    RuntimePoolIdValue, RuntimeReferenceMode, RuntimeReferenceTarget, RuntimeReferenceValue,
+    RuntimeResetOnPolicy, RuntimeRingIdValue, RuntimeRoutinePlan, RuntimeScope,
+    RuntimeSessionIdValue, RuntimeSlabIdValue, RuntimeSlabPolicy, RuntimeSlabState,
+    RuntimeTempArenaHandle, RuntimeTypeBindings, RuntimeValue, arcana_desktop_session_record,
+    arcana_desktop_wake_record, arcana_desktop_window_value, arcana_window_id_record,
+    default_runtime_pool_policy, default_runtime_ring_policy, default_runtime_session_policy,
+    default_runtime_slab_policy, ensure_runtime_frame_capacity, ensure_runtime_slab_capacity,
+    err_variant, execute_entrypoint_routine, execute_exported_abi_routine,
+    execute_exported_json_abi_routine, execute_main, execute_routine, execute_routine_with_state,
+    execute_runtime_intrinsic, insert_runtime_channel, insert_runtime_local,
+    insert_runtime_pool_arena, insert_runtime_read_view_from_reference,
     insert_runtime_read_view_from_ring_window, insert_runtime_ring_buffer,
     insert_runtime_session_arena, insert_runtime_slab, load_package_plan,
     lookup_runtime_owner_plan, none_variant, ok_variant, owner_state_key, parse_cleanup_footer_row,
@@ -122,6 +123,7 @@ fn empty_runtime_plan(package_id: &str) -> RuntimePackagePlan {
         routines: Vec::new(),
         native_callbacks: Vec::new(),
         shackle_decls: Vec::new(),
+        binding_layouts: Vec::new(),
         owners: Vec::new(),
     }
 }
@@ -976,6 +978,7 @@ fn sample_return_artifact() -> AotPackageArtifact {
         }],
         native_callbacks: Vec::new(),
         shackle_decls: Vec::new(),
+        binding_layouts: Vec::new(),
         owners: Vec::new(),
         modules: vec![AotPackageModuleArtifact {
             package_id: test_package_id_for_module("hello"),
@@ -1042,6 +1045,7 @@ fn sample_print_artifact() -> AotPackageArtifact {
             }],
             native_callbacks: Vec::new(),
             shackle_decls: Vec::new(),
+        binding_layouts: Vec::new(),
         owners: Vec::new(),
             modules: vec![AotPackageModuleArtifact {
                 package_id: test_package_id_for_module("hello"),
@@ -1134,6 +1138,7 @@ fn sample_stmt_metadata_artifact() -> AotPackageArtifact {
             ],
             native_callbacks: Vec::new(),
             shackle_decls: Vec::new(),
+        binding_layouts: Vec::new(),
         owners: Vec::new(),
             modules: vec![AotPackageModuleArtifact {
                 package_id: test_package_id_for_module("metadata"),
@@ -1213,6 +1218,7 @@ fn sample_attachment_foreword_artifact() -> AotPackageArtifact {
             }],
             native_callbacks: Vec::new(),
             shackle_decls: Vec::new(),
+        binding_layouts: Vec::new(),
         owners: Vec::new(),
             modules: vec![AotPackageModuleArtifact {
                 package_id: test_package_id_for_module("attachment"),
@@ -1471,6 +1477,7 @@ fn resolve_routine_index_for_call_prefers_lowered_routine_identity() {
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
         shackle_decls: Vec::new(),
+        binding_layouts: Vec::new(),
         owners: Vec::new(),
         routines: vec![
             RuntimeRoutinePlan {
@@ -1574,6 +1581,7 @@ fn runtime_dynamic_bare_method_fallback_matches_receiver_type_args() {
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
         shackle_decls: Vec::new(),
+        binding_layouts: Vec::new(),
         owners: Vec::new(),
         routines: vec![
             RuntimeRoutinePlan {
@@ -1686,6 +1694,7 @@ fn runtime_dynamic_bare_method_fallback_matches_opaque_family_receiver() {
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
         shackle_decls: Vec::new(),
+        binding_layouts: Vec::new(),
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
             package_id: test_package_id_for_module("desktop"),
@@ -1777,6 +1786,7 @@ fn runtime_dynamic_bare_method_fallback_keeps_owner_identity() {
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
         shackle_decls: Vec::new(),
+        binding_layouts: Vec::new(),
         owners: Vec::new(),
         routines: vec![
             RuntimeRoutinePlan {
@@ -1882,6 +1892,7 @@ fn runtime_dynamic_bare_method_fallback_rejects_wrong_sole_candidate() {
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
         shackle_decls: Vec::new(),
+        binding_layouts: Vec::new(),
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
             package_id: test_package_id_for_module("ops"),
@@ -1965,6 +1976,7 @@ fn runtime_dynamic_bare_method_fallback_rejects_qualified_leaf_collision() {
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
         shackle_decls: Vec::new(),
+        binding_layouts: Vec::new(),
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
             package_id: test_package_id_for_module("app"),
@@ -2041,7 +2053,7 @@ fn runtime_json_abi_manifest_lists_exported_callable_routines() {
     let value = manifest
         .parse::<serde_json::Value>()
         .expect("manifest should parse as json");
-    assert_eq!(value["format"].as_str(), Some("arcana-runtime-json-abi-v3"));
+    assert_eq!(value["format"].as_str(), Some("arcana-runtime-json-abi-v4"));
     let routines = value["routines"]
         .as_array()
         .expect("manifest routines should be an array");
@@ -2049,6 +2061,138 @@ fn runtime_json_abi_manifest_lists_exported_callable_routines() {
     assert_eq!(routines[0]["routine_key"].as_str(), Some("hello#sym-0"));
     assert_eq!(routines[0]["params"], serde_json::json!([]));
     assert_eq!(routines[0]["return_type"].as_str(), Some("Int"));
+}
+
+#[test]
+fn runtime_json_abi_manifest_records_binding_raw_metadata() {
+    let mut plan = empty_runtime_plan("hostapi");
+    plan.routines = vec![RuntimeRoutinePlan {
+        package_id: "hostapi".to_string(),
+        module_id: "hostapi.raw".to_string(),
+        routine_key: "hostapi#fn-0".to_string(),
+        symbol_name: "BumpRect".to_string(),
+        symbol_kind: "fn".to_string(),
+        exported: true,
+        is_async: false,
+        type_params: Vec::new(),
+        behavior_attrs: BTreeMap::new(),
+        params: vec![RuntimeParamPlan {
+            binding_id: 0,
+            mode: Some("edit".to_string()),
+            name: "rect".to_string(),
+            ty: parse_routine_type_text("hostapi.raw.Rect").expect("type should parse"),
+        }],
+        return_type: test_return_type("fn BumpRect() -> hostapi.raw.Mode:"),
+        intrinsic_impl: None,
+        native_impl: Some("hostapi.raw.BumpRect".to_string()),
+        impl_target_type: None,
+        impl_trait_path: None,
+        availability: Vec::new(),
+        cleanup_footers: Vec::new(),
+        statements: Vec::new(),
+    }];
+    plan.native_callbacks = vec![RuntimeNativeCallbackPlan {
+        package_id: "hostapi".to_string(),
+        module_id: "hostapi.raw".to_string(),
+        name: "hostapi.raw.WindowProc".to_string(),
+        params: vec![RuntimeParamPlan {
+            binding_id: 0,
+            mode: None,
+            name: "message".to_string(),
+            ty: parse_routine_type_text("I32").expect("type should parse"),
+        }],
+        return_type: test_return_type("fn WindowProc() -> I32:"),
+        target: vec![
+            "hostapi".to_string(),
+            "callbacks".to_string(),
+            "proc".to_string(),
+        ],
+        target_routine_key: None,
+    }];
+    plan.binding_layouts = vec![
+        arcana_cabi::ArcanaCabiBindingLayout {
+            layout_id: "hostapi.raw.Rect".to_string(),
+            size: 12,
+            align: 4,
+            kind: arcana_cabi::ArcanaCabiBindingLayoutKind::Struct {
+                fields: vec![
+                    arcana_cabi::ArcanaCabiBindingLayoutField {
+                        name: "left".to_string(),
+                        ty: arcana_cabi::ArcanaCabiBindingRawType::Scalar(
+                            arcana_cabi::ArcanaCabiBindingScalarType::I32,
+                        ),
+                        offset: 0,
+                        bit_width: None,
+                        bit_offset: None,
+                    },
+                    arcana_cabi::ArcanaCabiBindingLayoutField {
+                        name: "top".to_string(),
+                        ty: arcana_cabi::ArcanaCabiBindingRawType::Scalar(
+                            arcana_cabi::ArcanaCabiBindingScalarType::I32,
+                        ),
+                        offset: 4,
+                        bit_width: None,
+                        bit_offset: None,
+                    },
+                    arcana_cabi::ArcanaCabiBindingLayoutField {
+                        name: "flags".to_string(),
+                        ty: arcana_cabi::ArcanaCabiBindingRawType::Scalar(
+                            arcana_cabi::ArcanaCabiBindingScalarType::U32,
+                        ),
+                        offset: 8,
+                        bit_width: Some(3),
+                        bit_offset: Some(0),
+                    },
+                ],
+            },
+        },
+        arcana_cabi::ArcanaCabiBindingLayout {
+            layout_id: "hostapi.raw.Mode".to_string(),
+            size: 4,
+            align: 4,
+            kind: arcana_cabi::ArcanaCabiBindingLayoutKind::Enum {
+                repr: arcana_cabi::ArcanaCabiBindingScalarType::U32,
+                variants: vec![
+                    arcana_cabi::ArcanaCabiBindingLayoutEnumVariant {
+                        name: "Idle".to_string(),
+                        value: 0,
+                    },
+                    arcana_cabi::ArcanaCabiBindingLayoutEnumVariant {
+                        name: "Busy".to_string(),
+                        value: 1,
+                    },
+                ],
+            },
+        },
+    ];
+
+    let manifest = render_exported_json_abi_manifest(&plan).expect("json abi manifest");
+    let value = manifest
+        .parse::<serde_json::Value>()
+        .expect("manifest should parse as json");
+    let binding = value["binding"]
+        .as_object()
+        .expect("binding json abi section should exist");
+    assert_eq!(
+        binding["imports"][0]["name"].as_str(),
+        Some("hostapi.raw.BumpRect")
+    );
+    assert_eq!(
+        binding["imports"][0]["params"][0]["input_type"].as_str(),
+        Some("hostapi.raw.Rect")
+    );
+    assert_eq!(
+        binding["imports"][0]["params"][0]["write_back_type"].as_str(),
+        Some("hostapi.raw.Rect")
+    );
+    assert_eq!(
+        binding["callbacks"][0]["name"].as_str(),
+        Some("hostapi.raw.WindowProc")
+    );
+    assert_eq!(
+        binding["layouts"][1]["layout_id"].as_str(),
+        Some("hostapi.raw.Mode")
+    );
 }
 
 #[test]
@@ -2078,6 +2222,7 @@ fn runtime_json_abi_executes_exported_routine() {
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
         shackle_decls: Vec::new(),
+        binding_layouts: Vec::new(),
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
             package_id: test_package_id_for_module("tool"),
@@ -2148,6 +2293,7 @@ fn runtime_json_abi_manifest_records_cabi_param_metadata() {
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
         shackle_decls: Vec::new(),
+        binding_layouts: Vec::new(),
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
             package_id: test_package_id_for_module("tool"),
@@ -2222,6 +2368,7 @@ fn runtime_json_abi_manifest_projects_default_read_source_mode() {
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
         shackle_decls: Vec::new(),
+        binding_layouts: Vec::new(),
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
             package_id: test_package_id_for_module("tool"),
@@ -2292,6 +2439,7 @@ fn runtime_json_abi_writes_back_edit_arguments() {
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
         shackle_decls: Vec::new(),
+        binding_layouts: Vec::new(),
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
             package_id: test_package_id_for_module("tool"),
@@ -2371,6 +2519,7 @@ fn runtime_json_abi_manifest_omits_unsupported_owner_reference_and_opaque_routin
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
         shackle_decls: Vec::new(),
+        binding_layouts: Vec::new(),
         owners: Vec::new(),
         routines: vec![
             RuntimeRoutinePlan {
@@ -2519,6 +2668,7 @@ fn runtime_json_abi_rejects_executing_unsupported_exported_routine() {
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
         shackle_decls: Vec::new(),
+        binding_layouts: Vec::new(),
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
             package_id: test_package_id_for_module("tool"),
@@ -2581,6 +2731,7 @@ fn runtime_native_abi_executes_exported_routine() {
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
         shackle_decls: Vec::new(),
+        binding_layouts: Vec::new(),
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
             package_id: test_package_id_for_module("tool"),
@@ -2653,6 +2804,7 @@ fn runtime_native_abi_supports_string_and_byte_values() {
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
         shackle_decls: Vec::new(),
+        binding_layouts: Vec::new(),
         owners: Vec::new(),
         routines: vec![
             RuntimeRoutinePlan {
@@ -2820,6 +2972,7 @@ fn runtime_native_abi_writes_back_edit_arguments() {
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
         shackle_decls: Vec::new(),
+        binding_layouts: Vec::new(),
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
             package_id: test_package_id_for_module("tool"),
@@ -3475,6 +3628,7 @@ fn execute_main_manual_routine_cleanup_footers_run_after_defers() {
         }],
         native_callbacks: Vec::new(),
         shackle_decls: Vec::new(),
+        binding_layouts: Vec::new(),
         owners: Vec::new(),
         routines: vec![
             RuntimeRoutinePlan {
@@ -9394,6 +9548,7 @@ fn execute_main_rejects_try_qualifier_arguments() {
         }],
         native_callbacks: Vec::new(),
         shackle_decls: Vec::new(),
+        binding_layouts: Vec::new(),
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
             package_id: test_package_id_for_module("try_args_runtime"),
@@ -9762,6 +9917,7 @@ fn execute_main_rejects_use_after_take_move() {
         }],
         native_callbacks: Vec::new(),
         shackle_decls: Vec::new(),
+        binding_layouts: Vec::new(),
         owners: Vec::new(),
         routines: vec![
             RuntimeRoutinePlan {
@@ -9921,6 +10077,7 @@ fn execute_main_rejects_direct_intrinsic_take_fallback_reuse() {
         }],
         native_callbacks: Vec::new(),
         shackle_decls: Vec::new(),
+        binding_layouts: Vec::new(),
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
             package_id: test_package_id_for_module("take_intrinsic_runtime"),
@@ -10036,6 +10193,7 @@ fn execute_main_binds_named_args_for_direct_intrinsic_fallback() {
         }],
         native_callbacks: Vec::new(),
         shackle_decls: Vec::new(),
+        binding_layouts: Vec::new(),
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
             package_id: test_package_id_for_module("named_intrinsic_runtime"),
@@ -11073,6 +11231,7 @@ fn resolve_routine_index_uses_current_package_dep_id_when_display_names_collide(
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
         shackle_decls: Vec::new(),
+        binding_layouts: Vec::new(),
         owners: Vec::new(),
         routines: vec![
             RuntimeRoutinePlan {
@@ -11160,6 +11319,7 @@ fn resolve_routine_index_rejects_globally_unique_package_name_without_direct_dep
         entrypoints: Vec::new(),
         native_callbacks: Vec::new(),
         shackle_decls: Vec::new(),
+        binding_layouts: Vec::new(),
         owners: Vec::new(),
         routines: vec![RuntimeRoutinePlan {
             package_id: core,

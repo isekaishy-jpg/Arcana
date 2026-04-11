@@ -5,9 +5,12 @@ use std::process::Command;
 
 use crate::artifact::AotShackleDeclArtifact;
 use crate::native_abi::{
-    NativeBindingCallback, NativeBindingImport, parse_native_param, parse_native_return_type,
+    NativeBindingCallback, NativeBindingImport, parse_native_binding_param,
+    parse_native_binding_return_type,
 };
-use arcana_cabi::ArcanaCabiProductRole;
+use arcana_cabi::{
+    ArcanaCabiBindingLayout, ArcanaCabiBindingParam, ArcanaCabiBindingType, ArcanaCabiProductRole,
+};
 use fs2::FileExt;
 use sha2::{Digest, Sha256};
 
@@ -24,6 +27,7 @@ pub struct AotInstanceProductSpec {
     pub package_image_text: Option<String>,
     pub binding_imports: Vec<NativeBindingImport>,
     pub binding_callbacks: Vec<NativeBindingCallback>,
+    pub binding_layouts: Vec<ArcanaCabiBindingLayout>,
     pub binding_shackle_decls: Vec<AotShackleDeclArtifact>,
 }
 
@@ -762,13 +766,37 @@ fn render_binding_metadata(spec: &AotInstanceProductSpec) -> String {
     out.push_str("        _ => false,\n");
     out.push_str("    }\n");
     out.push_str("}\n\n");
+    if !spec.binding_layouts.is_empty() {
+        for (layout_index, layout) in spec.binding_layouts.iter().enumerate() {
+            let detail_json = serde_json::to_string(layout)
+                .expect("binding layout metadata should serialize to json");
+            out.push_str(&format!(
+                "static BINDING_LAYOUT_{layout_index}_ID: &str = {};\n",
+                render_rust_string_literal(&format!("{}\0", layout.layout_id))
+            ));
+            out.push_str(&format!(
+                "static BINDING_LAYOUT_{layout_index}_DETAIL_JSON: &str = {};\n",
+                render_rust_string_literal(&format!("{detail_json}\0"))
+            ));
+        }
+        out.push_str("static BINDING_LAYOUTS: [arcana_cabi::ArcanaCabiBindingLayoutEntryV1; ");
+        out.push_str(&spec.binding_layouts.len().to_string());
+        out.push_str("] = [\n");
+        for (layout_index, _) in spec.binding_layouts.iter().enumerate() {
+            out.push_str(&format!(
+                "    arcana_cabi::ArcanaCabiBindingLayoutEntryV1 {{ layout_id: BINDING_LAYOUT_{layout_index}_ID.as_ptr() as *const c_char, detail_json: BINDING_LAYOUT_{layout_index}_DETAIL_JSON.as_ptr() as *const c_char }},\n"
+            ));
+        }
+        out.push_str("];\n\n");
+    } else {
+        out.push_str(
+            "static BINDING_LAYOUTS: [arcana_cabi::ArcanaCabiBindingLayoutEntryV1; 0] = [];\n\n",
+        );
+    }
     out
 }
 
-fn render_binding_param_array(
-    prefix: &str,
-    params: &[arcana_cabi::ArcanaCabiExportParam],
-) -> String {
+fn render_binding_param_array(prefix: &str, params: &[ArcanaCabiBindingParam]) -> String {
     let mut out = String::new();
     for (param_index, param) in params.iter().enumerate() {
         out.push_str(&format!(
@@ -829,7 +857,12 @@ fn render_binding_import_impls(
             import.name
         ));
         for (param_index, param) in import.params.iter().enumerate() {
-            out.push_str(&render_binding_param_decode(param_index, param)?);
+            out.push_str(&render_binding_param_decode(
+                spec,
+                param_index,
+                param,
+                &decl.params[param_index],
+            )?);
         }
         out.push_str(&render_binding_import_impl_body(spec, import, decl)?);
         out.push_str("}\n\n");
@@ -843,23 +876,31 @@ fn render_binding_import_impls(
 }
 
 fn render_binding_param_decode(
+    spec: &AotInstanceProductSpec,
     index: usize,
-    param: &arcana_cabi::ArcanaCabiExportParam,
+    param: &ArcanaCabiBindingParam,
+    decl_param: &arcana_ir::IrRoutineParam,
 ) -> Result<String, String> {
+    let target_ty = render_shackle_rust_type(spec, &decl_param.ty);
     let reader = match &param.input_type {
-        arcana_cabi::ArcanaCabiType::Int => "read_int_arg",
-        arcana_cabi::ArcanaCabiType::Bool => "read_bool_arg",
-        arcana_cabi::ArcanaCabiType::Str => "read_utf8_arg",
-        arcana_cabi::ArcanaCabiType::Bytes => "read_bytes_arg",
-        arcana_cabi::ArcanaCabiType::Opaque(_) => "read_opaque_arg",
-        arcana_cabi::ArcanaCabiType::Unit => "read_unit_arg",
-        other => {
-            return Err(format!(
-                "binding import param `{}` uses unsupported shackle lowering type `{}`",
-                param.name,
-                other.render()
-            ));
-        }
+        ArcanaCabiBindingType::Int => "read_int_arg".to_string(),
+        ArcanaCabiBindingType::Bool => "read_bool_arg".to_string(),
+        ArcanaCabiBindingType::Str => "read_utf8_arg".to_string(),
+        ArcanaCabiBindingType::Bytes => "read_bytes_arg".to_string(),
+        ArcanaCabiBindingType::I8 => "read_i8_arg".to_string(),
+        ArcanaCabiBindingType::U8 => "read_u8_arg".to_string(),
+        ArcanaCabiBindingType::I16 => "read_i16_arg".to_string(),
+        ArcanaCabiBindingType::U16 => "read_u16_arg".to_string(),
+        ArcanaCabiBindingType::I32 => "read_i32_arg".to_string(),
+        ArcanaCabiBindingType::U32 => "read_u32_arg".to_string(),
+        ArcanaCabiBindingType::I64 => "read_i64_arg".to_string(),
+        ArcanaCabiBindingType::U64 => "read_u64_arg".to_string(),
+        ArcanaCabiBindingType::ISize => "read_isize_arg".to_string(),
+        ArcanaCabiBindingType::USize => "read_usize_arg".to_string(),
+        ArcanaCabiBindingType::F32 => "read_f32_arg".to_string(),
+        ArcanaCabiBindingType::F64 => "read_f64_arg".to_string(),
+        ArcanaCabiBindingType::Named(_) => format!("read_layout_arg::<{target_ty}>"),
+        ArcanaCabiBindingType::Unit => "read_unit_arg".to_string(),
     };
     let local_name = sanitize_identifier(&param.name);
     let mut out = format!(
@@ -910,7 +951,7 @@ fn render_binding_import_impl_body(
                 import,
                 &call,
                 decl,
-                /*is_statement*/ import.return_type == arcana_cabi::ArcanaCabiType::Unit,
+                /*is_statement*/ import.return_type == ArcanaCabiBindingType::Unit,
             )?);
         }
         "const" => {
@@ -948,34 +989,42 @@ fn render_direct_shackle_import_call_args(
             let local = sanitize_identifier(&import_param.name);
             let target_ty = render_shackle_rust_type(spec, &decl_param.ty);
             let expr = match &import_param.input_type {
-                arcana_cabi::ArcanaCabiType::Int => {
+                ArcanaCabiBindingType::Int => {
                     if target_ty == "i64" {
                         local
                     } else {
                         format!("{local} as {target_ty}")
                     }
                 }
-                arcana_cabi::ArcanaCabiType::Bool => {
+                ArcanaCabiBindingType::Bool => {
                     if target_ty == "bool" {
                         local
                     } else {
                         format!("{local} as {target_ty}")
                     }
                 }
-                arcana_cabi::ArcanaCabiType::Opaque(_) => {
-                    format!("{local} as usize as {target_ty}")
+                ArcanaCabiBindingType::I8
+                | ArcanaCabiBindingType::U8
+                | ArcanaCabiBindingType::I16
+                | ArcanaCabiBindingType::U16
+                | ArcanaCabiBindingType::I32
+                | ArcanaCabiBindingType::U32
+                | ArcanaCabiBindingType::I64
+                | ArcanaCabiBindingType::U64
+                | ArcanaCabiBindingType::ISize
+                | ArcanaCabiBindingType::USize
+                | ArcanaCabiBindingType::F32
+                | ArcanaCabiBindingType::F64 => {
+                    if target_ty == rust_scalar_type_name(&import_param.input_type) {
+                        local
+                    } else {
+                        format!("{local} as {target_ty}")
+                    }
                 }
-                arcana_cabi::ArcanaCabiType::Str
-                | arcana_cabi::ArcanaCabiType::Bytes
-                | arcana_cabi::ArcanaCabiType::Unit => local,
-                other => {
-                    return Err(format!(
-                        "binding import `{}` param `{}` uses unsupported direct shackle import type `{}`",
-                        import.name,
-                        import_param.name,
-                        other.render()
-                    ));
-                }
+                ArcanaCabiBindingType::Named(_)
+                | ArcanaCabiBindingType::Str
+                | ArcanaCabiBindingType::Bytes
+                | ArcanaCabiBindingType::Unit => local,
             };
             Ok(expr)
         })
@@ -986,40 +1035,66 @@ fn render_direct_shackle_import_call_args(
 fn render_binding_result_expr(
     import: &NativeBindingImport,
     expr: &str,
-    decl: &AotShackleDeclArtifact,
+    _decl: &AotShackleDeclArtifact,
     is_statement: bool,
 ) -> Result<String, String> {
     let line = match &import.return_type {
-        arcana_cabi::ArcanaCabiType::Int => format!("    Ok(binding_int({expr} as i64))\n"),
-        arcana_cabi::ArcanaCabiType::Bool => {
+        ArcanaCabiBindingType::Int => format!("    Ok(binding_int({expr} as i64))\n"),
+        ArcanaCabiBindingType::Bool => {
             format!("    Ok(binding_bool({expr}))\n")
         }
-        arcana_cabi::ArcanaCabiType::Str => {
+        ArcanaCabiBindingType::Str => {
             format!("    Ok(binding_owned_str({expr}))\n")
         }
-        arcana_cabi::ArcanaCabiType::Bytes => {
+        ArcanaCabiBindingType::Bytes => {
             format!("    Ok(binding_owned_bytes({expr}))\n")
         }
-        arcana_cabi::ArcanaCabiType::Opaque(_) => {
-            format!("    Ok(binding_opaque({expr} as usize as u64))\n")
+        ArcanaCabiBindingType::I8 => format!("    Ok(binding_i8({expr} as i8))\n"),
+        ArcanaCabiBindingType::U8 => format!("    Ok(binding_u8({expr} as u8))\n"),
+        ArcanaCabiBindingType::I16 => format!("    Ok(binding_i16({expr} as i16))\n"),
+        ArcanaCabiBindingType::U16 => format!("    Ok(binding_u16({expr} as u16))\n"),
+        ArcanaCabiBindingType::I32 => format!("    Ok(binding_i32({expr} as i32))\n"),
+        ArcanaCabiBindingType::U32 => format!("    Ok(binding_u32({expr} as u32))\n"),
+        ArcanaCabiBindingType::I64 => format!("    Ok(binding_i64({expr} as i64))\n"),
+        ArcanaCabiBindingType::U64 => format!("    Ok(binding_u64({expr} as u64))\n"),
+        ArcanaCabiBindingType::ISize => format!("    Ok(binding_isize({expr} as isize))\n"),
+        ArcanaCabiBindingType::USize => format!("    Ok(binding_usize({expr} as usize))\n"),
+        ArcanaCabiBindingType::F32 => format!("    Ok(binding_f32({expr} as f32))\n"),
+        ArcanaCabiBindingType::F64 => format!("    Ok(binding_f64({expr} as f64))\n"),
+        ArcanaCabiBindingType::Named(_) => {
+            format!("    Ok(binding_layout({expr}))\n")
         }
-        arcana_cabi::ArcanaCabiType::Unit => {
+        ArcanaCabiBindingType::Unit => {
             if is_statement {
                 format!("    {expr};\n    Ok(binding_unit())\n")
             } else {
                 format!("    let _ = {expr};\n    Ok(binding_unit())\n")
             }
         }
-        other => {
-            return Err(format!(
-                "binding import `{}` resolved from shackle `{}` uses unsupported public transport type `{}`",
-                import.name,
-                decl.name,
-                other.render()
-            ));
-        }
     };
     Ok(line)
+}
+
+fn rust_scalar_type_name(ty: &ArcanaCabiBindingType) -> &'static str {
+    match ty {
+        ArcanaCabiBindingType::Int => "i64",
+        ArcanaCabiBindingType::Bool => "bool",
+        ArcanaCabiBindingType::I8 => "i8",
+        ArcanaCabiBindingType::U8 => "u8",
+        ArcanaCabiBindingType::I16 => "i16",
+        ArcanaCabiBindingType::U16 => "u16",
+        ArcanaCabiBindingType::I32 => "i32",
+        ArcanaCabiBindingType::U32 => "u32",
+        ArcanaCabiBindingType::I64 => "i64",
+        ArcanaCabiBindingType::U64 => "u64",
+        ArcanaCabiBindingType::ISize => "isize",
+        ArcanaCabiBindingType::USize => "usize",
+        ArcanaCabiBindingType::F32 => "f32",
+        ArcanaCabiBindingType::F64 => "f64",
+        ArcanaCabiBindingType::Str => "alloc::string::String",
+        ArcanaCabiBindingType::Bytes => "alloc::vec::Vec<u8>",
+        ArcanaCabiBindingType::Named(_) | ArcanaCabiBindingType::Unit => "",
+    }
 }
 
 fn render_generated_binding_preamble(
@@ -1153,10 +1228,100 @@ fn render_binding_runtime_support(
         "        ..ArcanaCabiBindingValueV1::default()\n",
         "    }\n",
         "}\n\n",
-        "fn binding_opaque(value: u64) -> ArcanaCabiBindingValueV1 {\n",
+        "fn binding_i8(value: i8) -> ArcanaCabiBindingValueV1 {\n",
         "    ArcanaCabiBindingValueV1 {\n",
-        "        tag: ArcanaCabiBindingValueTag::Opaque as u32,\n",
-        "        payload: ArcanaCabiBindingPayloadV1 { opaque_value: value },\n",
+        "        tag: ArcanaCabiBindingValueTag::I8 as u32,\n",
+        "        payload: ArcanaCabiBindingPayloadV1 { i8_value: value },\n",
+        "        ..ArcanaCabiBindingValueV1::default()\n",
+        "    }\n",
+        "}\n\n",
+        "fn binding_u8(value: u8) -> ArcanaCabiBindingValueV1 {\n",
+        "    ArcanaCabiBindingValueV1 {\n",
+        "        tag: ArcanaCabiBindingValueTag::U8 as u32,\n",
+        "        payload: ArcanaCabiBindingPayloadV1 { u8_value: value },\n",
+        "        ..ArcanaCabiBindingValueV1::default()\n",
+        "    }\n",
+        "}\n\n",
+        "fn binding_i16(value: i16) -> ArcanaCabiBindingValueV1 {\n",
+        "    ArcanaCabiBindingValueV1 {\n",
+        "        tag: ArcanaCabiBindingValueTag::I16 as u32,\n",
+        "        payload: ArcanaCabiBindingPayloadV1 { i16_value: value },\n",
+        "        ..ArcanaCabiBindingValueV1::default()\n",
+        "    }\n",
+        "}\n\n",
+        "fn binding_u16(value: u16) -> ArcanaCabiBindingValueV1 {\n",
+        "    ArcanaCabiBindingValueV1 {\n",
+        "        tag: ArcanaCabiBindingValueTag::U16 as u32,\n",
+        "        payload: ArcanaCabiBindingPayloadV1 { u16_value: value },\n",
+        "        ..ArcanaCabiBindingValueV1::default()\n",
+        "    }\n",
+        "}\n\n",
+        "fn binding_i32(value: i32) -> ArcanaCabiBindingValueV1 {\n",
+        "    ArcanaCabiBindingValueV1 {\n",
+        "        tag: ArcanaCabiBindingValueTag::I32 as u32,\n",
+        "        payload: ArcanaCabiBindingPayloadV1 { i32_value: value },\n",
+        "        ..ArcanaCabiBindingValueV1::default()\n",
+        "    }\n",
+        "}\n\n",
+        "fn binding_u32(value: u32) -> ArcanaCabiBindingValueV1 {\n",
+        "    ArcanaCabiBindingValueV1 {\n",
+        "        tag: ArcanaCabiBindingValueTag::U32 as u32,\n",
+        "        payload: ArcanaCabiBindingPayloadV1 { u32_value: value },\n",
+        "        ..ArcanaCabiBindingValueV1::default()\n",
+        "    }\n",
+        "}\n\n",
+        "fn binding_i64(value: i64) -> ArcanaCabiBindingValueV1 {\n",
+        "    ArcanaCabiBindingValueV1 {\n",
+        "        tag: ArcanaCabiBindingValueTag::I64 as u32,\n",
+        "        payload: ArcanaCabiBindingPayloadV1 { i64_value: value },\n",
+        "        ..ArcanaCabiBindingValueV1::default()\n",
+        "    }\n",
+        "}\n\n",
+        "fn binding_u64(value: u64) -> ArcanaCabiBindingValueV1 {\n",
+        "    ArcanaCabiBindingValueV1 {\n",
+        "        tag: ArcanaCabiBindingValueTag::U64 as u32,\n",
+        "        payload: ArcanaCabiBindingPayloadV1 { u64_value: value },\n",
+        "        ..ArcanaCabiBindingValueV1::default()\n",
+        "    }\n",
+        "}\n\n",
+        "fn binding_isize(value: isize) -> ArcanaCabiBindingValueV1 {\n",
+        "    ArcanaCabiBindingValueV1 {\n",
+        "        tag: ArcanaCabiBindingValueTag::ISize as u32,\n",
+        "        payload: ArcanaCabiBindingPayloadV1 { isize_value: value },\n",
+        "        ..ArcanaCabiBindingValueV1::default()\n",
+        "    }\n",
+        "}\n\n",
+        "fn binding_usize(value: usize) -> ArcanaCabiBindingValueV1 {\n",
+        "    ArcanaCabiBindingValueV1 {\n",
+        "        tag: ArcanaCabiBindingValueTag::USize as u32,\n",
+        "        payload: ArcanaCabiBindingPayloadV1 { usize_value: value },\n",
+        "        ..ArcanaCabiBindingValueV1::default()\n",
+        "    }\n",
+        "}\n\n",
+        "fn binding_f32(value: f32) -> ArcanaCabiBindingValueV1 {\n",
+        "    ArcanaCabiBindingValueV1 {\n",
+        "        tag: ArcanaCabiBindingValueTag::F32 as u32,\n",
+        "        payload: ArcanaCabiBindingPayloadV1 { f32_value: value },\n",
+        "        ..ArcanaCabiBindingValueV1::default()\n",
+        "    }\n",
+        "}\n\n",
+        "fn binding_f64(value: f64) -> ArcanaCabiBindingValueV1 {\n",
+        "    ArcanaCabiBindingValueV1 {\n",
+        "        tag: ArcanaCabiBindingValueTag::F64 as u32,\n",
+        "        payload: ArcanaCabiBindingPayloadV1 { f64_value: value },\n",
+        "        ..ArcanaCabiBindingValueV1::default()\n",
+        "    }\n",
+        "}\n\n",
+        "fn binding_layout<T: Copy>(value: T) -> ArcanaCabiBindingValueV1 {\n",
+        "    let len = std::mem::size_of::<T>();\n",
+        "    let bytes = if len == 0 {\n",
+        "        Vec::new()\n",
+        "    } else {\n",
+        "        unsafe { std::slice::from_raw_parts((&value as *const T).cast::<u8>(), len) }.to_vec()\n",
+        "    };\n",
+        "    ArcanaCabiBindingValueV1 {\n",
+        "        tag: ArcanaCabiBindingValueTag::Layout as u32,\n",
+        "        payload: ArcanaCabiBindingPayloadV1 { owned_bytes_value: into_owned_bytes(bytes) },\n",
         "        ..ArcanaCabiBindingValueV1::default()\n",
         "    }\n",
         "}\n\n",
@@ -1203,17 +1368,104 @@ fn render_binding_runtime_support(
         "    }\n",
         "    Ok(unsafe { value.payload.bool_value != 0 })\n",
         "}\n\n",
+        "fn read_i8_arg(value: &ArcanaCabiBindingValueV1, name: &str) -> Result<i8, String> {\n",
+        "    if binding_tag(value)? != ArcanaCabiBindingValueTag::I8 {\n",
+        "        return Err(format!(\"binding arg `{name}` must be I8\"));\n",
+        "    }\n",
+        "    Ok(unsafe { value.payload.i8_value })\n",
+        "}\n\n",
+        "fn read_u8_arg(value: &ArcanaCabiBindingValueV1, name: &str) -> Result<u8, String> {\n",
+        "    if binding_tag(value)? != ArcanaCabiBindingValueTag::U8 {\n",
+        "        return Err(format!(\"binding arg `{name}` must be U8\"));\n",
+        "    }\n",
+        "    Ok(unsafe { value.payload.u8_value })\n",
+        "}\n\n",
+        "fn read_i16_arg(value: &ArcanaCabiBindingValueV1, name: &str) -> Result<i16, String> {\n",
+        "    if binding_tag(value)? != ArcanaCabiBindingValueTag::I16 {\n",
+        "        return Err(format!(\"binding arg `{name}` must be I16\"));\n",
+        "    }\n",
+        "    Ok(unsafe { value.payload.i16_value })\n",
+        "}\n\n",
+        "fn read_u16_arg(value: &ArcanaCabiBindingValueV1, name: &str) -> Result<u16, String> {\n",
+        "    if binding_tag(value)? != ArcanaCabiBindingValueTag::U16 {\n",
+        "        return Err(format!(\"binding arg `{name}` must be U16\"));\n",
+        "    }\n",
+        "    Ok(unsafe { value.payload.u16_value })\n",
+        "}\n\n",
+        "fn read_i32_arg(value: &ArcanaCabiBindingValueV1, name: &str) -> Result<i32, String> {\n",
+        "    if binding_tag(value)? != ArcanaCabiBindingValueTag::I32 {\n",
+        "        return Err(format!(\"binding arg `{name}` must be I32\"));\n",
+        "    }\n",
+        "    Ok(unsafe { value.payload.i32_value })\n",
+        "}\n\n",
+        "fn read_u32_arg(value: &ArcanaCabiBindingValueV1, name: &str) -> Result<u32, String> {\n",
+        "    if binding_tag(value)? != ArcanaCabiBindingValueTag::U32 {\n",
+        "        return Err(format!(\"binding arg `{name}` must be U32\"));\n",
+        "    }\n",
+        "    Ok(unsafe { value.payload.u32_value })\n",
+        "}\n\n",
+        "fn read_i64_arg(value: &ArcanaCabiBindingValueV1, name: &str) -> Result<i64, String> {\n",
+        "    if binding_tag(value)? != ArcanaCabiBindingValueTag::I64 {\n",
+        "        return Err(format!(\"binding arg `{name}` must be I64\"));\n",
+        "    }\n",
+        "    Ok(unsafe { value.payload.i64_value })\n",
+        "}\n\n",
+        "fn read_u64_arg(value: &ArcanaCabiBindingValueV1, name: &str) -> Result<u64, String> {\n",
+        "    if binding_tag(value)? != ArcanaCabiBindingValueTag::U64 {\n",
+        "        return Err(format!(\"binding arg `{name}` must be U64\"));\n",
+        "    }\n",
+        "    Ok(unsafe { value.payload.u64_value })\n",
+        "}\n\n",
+        "fn read_isize_arg(value: &ArcanaCabiBindingValueV1, name: &str) -> Result<isize, String> {\n",
+        "    if binding_tag(value)? != ArcanaCabiBindingValueTag::ISize {\n",
+        "        return Err(format!(\"binding arg `{name}` must be ISize\"));\n",
+        "    }\n",
+        "    Ok(unsafe { value.payload.isize_value })\n",
+        "}\n\n",
+        "fn read_usize_arg(value: &ArcanaCabiBindingValueV1, name: &str) -> Result<usize, String> {\n",
+        "    if binding_tag(value)? != ArcanaCabiBindingValueTag::USize {\n",
+        "        return Err(format!(\"binding arg `{name}` must be USize\"));\n",
+        "    }\n",
+        "    Ok(unsafe { value.payload.usize_value })\n",
+        "}\n\n",
+        "fn read_f32_arg(value: &ArcanaCabiBindingValueV1, name: &str) -> Result<f32, String> {\n",
+        "    if binding_tag(value)? != ArcanaCabiBindingValueTag::F32 {\n",
+        "        return Err(format!(\"binding arg `{name}` must be F32\"));\n",
+        "    }\n",
+        "    Ok(unsafe { value.payload.f32_value })\n",
+        "}\n\n",
+        "fn read_f64_arg(value: &ArcanaCabiBindingValueV1, name: &str) -> Result<f64, String> {\n",
+        "    if binding_tag(value)? != ArcanaCabiBindingValueTag::F64 {\n",
+        "        return Err(format!(\"binding arg `{name}` must be F64\"));\n",
+        "    }\n",
+        "    Ok(unsafe { value.payload.f64_value })\n",
+        "}\n\n",
         "fn read_unit_arg(value: &ArcanaCabiBindingValueV1, name: &str) -> Result<(), String> {\n",
         "    if binding_tag(value)? != ArcanaCabiBindingValueTag::Unit {\n",
         "        return Err(format!(\"binding arg `{name}` must be Unit\"));\n",
         "    }\n",
         "    Ok(())\n",
         "}\n\n",
-        "fn read_opaque_arg(value: &ArcanaCabiBindingValueV1, name: &str) -> Result<u64, String> {\n",
-        "    if binding_tag(value)? != ArcanaCabiBindingValueTag::Opaque {\n",
-        "        return Err(format!(\"binding arg `{name}` must be Opaque\"));\n",
+        "fn read_layout_arg<T: Copy>(value: &ArcanaCabiBindingValueV1, name: &str) -> Result<T, String> {\n",
+        "    if binding_tag(value)? != ArcanaCabiBindingValueTag::Layout {\n",
+        "        return Err(format!(\"binding arg `{name}` must be Layout\"));\n",
         "    }\n",
-        "    Ok(unsafe { value.payload.opaque_value })\n",
+        "    let view = unsafe { value.payload.bytes_value };\n",
+        "    let expected_len = std::mem::size_of::<T>();\n",
+        "    if view.len != expected_len {\n",
+        "        return Err(format!(\"binding arg `{name}` layout size mismatch: expected {expected_len}, got {}\", view.len));\n",
+        "    }\n",
+        "    if view.ptr.is_null() {\n",
+        "        if expected_len == 0 {\n",
+        "            return Ok(unsafe { std::mem::zeroed() });\n",
+        "        }\n",
+        "        return Err(format!(\"binding arg `{name}` returned null Layout data with len {}\", view.len));\n",
+        "    }\n",
+        "    if (view.ptr as usize) % std::mem::align_of::<T>() == 0 {\n",
+        "        Ok(unsafe { *(view.ptr.cast::<T>()) })\n",
+        "    } else {\n",
+        "        Ok(unsafe { std::ptr::read_unaligned(view.ptr.cast::<T>()) })\n",
+        "    }\n",
         "}\n\n",
         "fn read_utf8_arg(value: &ArcanaCabiBindingValueV1, name: &str) -> Result<String, String> {\n",
         "    if binding_tag(value)? != ArcanaCabiBindingValueTag::Str {\n",
@@ -1448,6 +1700,8 @@ fn render_generated_binding_descriptor() -> &'static str {
         "    import_count: BINDING_IMPORTS.len(),\n",
         "    callbacks: BINDING_CALLBACKS.as_ptr(),\n",
         "    callback_count: BINDING_CALLBACKS.len(),\n",
+        "    layouts: BINDING_LAYOUTS.as_ptr(),\n",
+        "    layout_count: BINDING_LAYOUTS.len(),\n",
         "    register_callback: register_callback as ArcanaCabiBindingRegisterCallbackFn,\n",
         "    unregister_callback: unregister_callback as ArcanaCabiBindingUnregisterCallbackFn,\n",
         "    last_error_alloc: binding_last_error_alloc as ArcanaCabiLastErrorAllocFn,\n",
@@ -1505,22 +1759,17 @@ fn render_shackle_import_fn_decl(
         out.push('\n');
         return Ok(out);
     }
-    let binding = decl.binding.as_deref().ok_or_else(|| {
+    let import_target = decl.import_target.as_ref().ok_or_else(|| {
         format!(
-            "shackle import fn `{}` is missing a binding target in generated binding product",
-            decl.name
-        )
-    })?;
-    let (library, symbol) = binding.split_once('.').ok_or_else(|| {
-        format!(
-            "shackle import fn `{}` binding target `{binding}` must be `<library>.<symbol>`",
+            "shackle import fn `{}` is missing a typed import target in generated binding product",
             decl.name
         )
     })?;
     Ok(format!(
-        "#[link(name = {:?})]\nunsafe extern \"system\" {{\n    #[link_name = {:?}]\n    pub fn {}({}){};\n}}\n\n",
-        library,
-        symbol,
+        "#[link(name = {:?})]\nunsafe extern {:?} {{\n    #[link_name = {:?}]\n    pub fn {}({}){};\n}}\n\n",
+        import_target.library,
+        import_target.abi,
+        import_target.symbol,
         decl.name,
         render_shackle_rust_params(spec, &decl.params),
         render_shackle_rust_return_type(spec, decl.return_type.as_ref())
@@ -1771,8 +2020,14 @@ fn render_shackle_decl_item(
             Ok(out)
         }
         "thunk" => {
+            let abi = decl
+                .thunk_target
+                .as_ref()
+                .map(|target| target.abi.as_str())
+                .unwrap_or("system");
             let mut out = format!(
-                "#[allow(unused_variables)]\npub(crate) unsafe extern \"system\" fn {}({}){} {{\n",
+                "#[allow(unused_variables)]\npub(crate) unsafe extern {:?} fn {}({}){} {{\n",
+                abi,
                 decl.name,
                 render_shackle_rust_params(spec, &decl.params),
                 render_shackle_rust_return_type(spec, decl.return_type.as_ref())
@@ -1964,7 +2219,7 @@ fn lookup_binding_impl_decl<'a>(
     let decl_params = decl
         .params
         .iter()
-        .map(parse_native_param)
+        .map(parse_native_binding_param)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|err| {
             format!(
@@ -1972,12 +2227,13 @@ fn lookup_binding_impl_decl<'a>(
                 decl.name, import.name
             )
         })?;
-    let decl_return = parse_native_return_type(decl.return_type.as_ref()).map_err(|err| {
-        format!(
-            "shackle impl `{}` for binding import `{}` cannot lower return type: {err}",
-            decl.name, import.name
-        )
-    })?;
+    let decl_return =
+        parse_native_binding_return_type(decl.return_type.as_ref()).map_err(|err| {
+            format!(
+                "shackle impl `{}` for binding import `{}` cannot lower return type: {err}",
+                decl.name, import.name
+            )
+        })?;
     if decl_params != import.params || decl_return != import.return_type {
         return Err(format!(
             "shackle impl `{}` does not match binding import `{}` signature",
@@ -2104,9 +2360,11 @@ mod tests {
     use crate::native_abi::{NativeBindingCallback, NativeBindingImport};
     use arcana_cabi::{
         ARCANA_CABI_BINDING_CONTRACT_ID, ARCANA_CABI_CHILD_CONTRACT_ID,
-        ARCANA_CABI_PLUGIN_CONTRACT_ID, ArcanaCabiProductRole,
+        ARCANA_CABI_PLUGIN_CONTRACT_ID, ArcanaCabiBindingLayout, ArcanaCabiBindingLayoutField,
+        ArcanaCabiBindingLayoutKind, ArcanaCabiBindingRawType, ArcanaCabiBindingScalarType,
+        ArcanaCabiProductRole,
     };
-    use arcana_cabi::{ArcanaCabiExportParam, ArcanaCabiParamSourceMode, ArcanaCabiType};
+    use arcana_cabi::{ArcanaCabiBindingParam, ArcanaCabiBindingType, ArcanaCabiParamSourceMode};
 
     fn child_spec() -> AotInstanceProductSpec {
         AotInstanceProductSpec {
@@ -2119,6 +2377,7 @@ mod tests {
             package_image_text: None,
             binding_imports: Vec::new(),
             binding_callbacks: Vec::new(),
+            binding_layouts: Vec::new(),
             binding_shackle_decls: Vec::new(),
         }
     }
@@ -2134,6 +2393,7 @@ mod tests {
             package_image_text: None,
             binding_imports: Vec::new(),
             binding_callbacks: Vec::new(),
+            binding_layouts: Vec::new(),
             binding_shackle_decls: Vec::new(),
         }
     }
@@ -2151,22 +2411,23 @@ mod tests {
                 name: "foundation.module_path".to_string(),
                 symbol_name: "arcana_binding_import_arcana_winapi_foundation_module_path"
                     .to_string(),
-                return_type: ArcanaCabiType::Str,
-                params: vec![ArcanaCabiExportParam::binding(
+                return_type: ArcanaCabiBindingType::Str,
+                params: vec![ArcanaCabiBindingParam::binding(
                     "module",
                     ArcanaCabiParamSourceMode::Read,
-                    ArcanaCabiType::Opaque("arcana_winapi.types.ModuleHandle".to_string()),
+                    ArcanaCabiBindingType::Named("arcana_winapi.types.ModuleHandle".to_string()),
                 )],
             }],
             binding_callbacks: vec![NativeBindingCallback {
                 name: "window_proc".to_string(),
-                return_type: ArcanaCabiType::Int,
-                params: vec![ArcanaCabiExportParam::binding(
+                return_type: ArcanaCabiBindingType::Int,
+                params: vec![ArcanaCabiBindingParam::binding(
                     "window",
                     ArcanaCabiParamSourceMode::Edit,
-                    ArcanaCabiType::Opaque("arcana_winapi.types.HiddenWindow".to_string()),
+                    ArcanaCabiBindingType::Named("arcana_winapi.types.HiddenWindow".to_string()),
                 )],
             }],
+            binding_layouts: Vec::new(),
             binding_shackle_decls: vec![AotShackleDeclArtifact {
                 package_id: "arcana_winapi".to_string(),
                 module_id: "arcana_winapi.foundation".to_string(),
@@ -2186,6 +2447,9 @@ mod tests {
                 callback_type: None,
                 binding: Some("foundation.module_path".to_string()),
                 body_entries: vec!["Ok(binding_owned_str(\"module\".to_string()))".to_string()],
+                raw_layout: None,
+                import_target: None,
+                thunk_target: None,
                 surface_text: String::new(),
             }],
         }
@@ -2253,12 +2517,59 @@ mod tests {
             callback_type: None,
             binding: Some("*mut arcana_winapi.raw.types.HMODULE".to_string()),
             body_entries: Vec::new(),
+            raw_layout: None,
+            import_target: None,
+            thunk_target: None,
             surface_text: String::new(),
         });
         let lib_rs = render_instance_product_lib_rs(&spec).expect("lib.rs should render");
         assert!(lib_rs.contains("pub(crate) mod raw"));
         assert!(lib_rs.contains("pub(crate) mod types"));
         assert!(lib_rs.contains("pub(crate) type PHMODULE = *mut crate::raw::types::HMODULE;"));
+    }
+
+    #[test]
+    fn generated_binding_instance_product_emits_typed_raw_layout_tables() {
+        let mut spec = binding_spec();
+        spec.binding_layouts = vec![ArcanaCabiBindingLayout {
+            layout_id: "arcana_winapi.raw.Rect".to_string(),
+            size: 12,
+            align: 4,
+            kind: ArcanaCabiBindingLayoutKind::Struct {
+                fields: vec![
+                    ArcanaCabiBindingLayoutField {
+                        name: "left".to_string(),
+                        ty: ArcanaCabiBindingRawType::Scalar(ArcanaCabiBindingScalarType::I32),
+                        offset: 0,
+                        bit_width: None,
+                        bit_offset: None,
+                    },
+                    ArcanaCabiBindingLayoutField {
+                        name: "flags".to_string(),
+                        ty: ArcanaCabiBindingRawType::Scalar(ArcanaCabiBindingScalarType::U32),
+                        offset: 8,
+                        bit_width: Some(3),
+                        bit_offset: Some(0),
+                    },
+                ],
+            },
+        }];
+
+        let lib_rs = render_instance_product_lib_rs(&spec).expect("lib.rs should render");
+
+        assert!(lib_rs.contains("ArcanaCabiBindingLayoutEntryV1"));
+        assert!(
+            lib_rs.contains(
+                "static BINDING_LAYOUTS: [arcana_cabi::ArcanaCabiBindingLayoutEntryV1; 1]"
+            )
+        );
+        assert!(lib_rs.contains("static BINDING_LAYOUT_0_DETAIL_JSON"));
+        assert!(lib_rs.contains("arcana_winapi.raw.Rect"));
+        assert!(
+            lib_rs.contains("detail_json: BINDING_LAYOUT_0_DETAIL_JSON.as_ptr() as *const c_char")
+        );
+        assert!(lib_rs.contains("layouts: BINDING_LAYOUTS.as_ptr()"));
+        assert!(lib_rs.contains("layout_count: BINDING_LAYOUTS.len()"));
     }
 
     #[test]
@@ -2269,13 +2580,13 @@ mod tests {
                 name: "raw.kernel32.GetCurrentProcessId".to_string(),
                 symbol_name: "arcana_binding_import_arcana_winapi_raw_kernel32_getcurrentprocessid"
                     .to_string(),
-                return_type: ArcanaCabiType::Int,
+                return_type: ArcanaCabiBindingType::Int,
                 params: Vec::new(),
             },
             NativeBindingImport {
                 name: "raw.constants.MAGIC".to_string(),
                 symbol_name: "arcana_binding_import_arcana_winapi_raw_constants_magic".to_string(),
-                return_type: ArcanaCabiType::Int,
+                return_type: ArcanaCabiBindingType::Int,
                 params: Vec::new(),
             },
         ];
@@ -2293,6 +2604,13 @@ mod tests {
                 callback_type: None,
                 binding: Some("kernel32.GetCurrentProcessId".to_string()),
                 body_entries: Vec::new(),
+                raw_layout: None,
+                import_target: Some(crate::artifact::AotShackleImportTargetArtifact {
+                    library: "kernel32".to_string(),
+                    symbol: "GetCurrentProcessId".to_string(),
+                    abi: "system".to_string(),
+                }),
+                thunk_target: None,
                 surface_text: String::new(),
             },
             AotShackleDeclArtifact {
@@ -2308,6 +2626,9 @@ mod tests {
                 callback_type: None,
                 binding: Some("7".to_string()),
                 body_entries: Vec::new(),
+                raw_layout: None,
+                import_target: None,
+                thunk_target: None,
                 surface_text: String::new(),
             },
         ];

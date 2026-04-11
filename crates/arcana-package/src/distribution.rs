@@ -12,17 +12,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use arcana_aot::{
     ARCANA_NATIVE_PRODUCT_TEMP_PROBES_ENV, AotEmissionFile, AotInstanceProductSpec,
-    AotPackageEmission, AotShackleDeclArtifact, collect_native_binding_callbacks,
-    collect_native_binding_imports, compile_instance_product, compile_package,
-    default_instance_product_cargo_target_dir,
+    AotPackageEmission, AotShackleDeclArtifact, collect_binding_layouts,
+    collect_native_binding_callbacks, collect_native_binding_imports, compile_instance_product,
+    compile_package, default_instance_product_cargo_target_dir,
 };
-use arcana_cabi::ArcanaCabiProductRole;
 #[cfg(windows)]
 use arcana_cabi::{
     ARCANA_CABI_CONTRACT_VERSION_V1, ARCANA_CABI_GET_PRODUCT_API_V1_SYMBOL, ArcanaCabiBindingOpsV1,
     ArcanaCabiChildOpsV1, ArcanaCabiExportOpsV1, ArcanaCabiInstanceOpsV1, ArcanaCabiPluginOpsV1,
     ArcanaCabiProductApiV1,
 };
+use arcana_cabi::{ArcanaCabiBindingLayout, ArcanaCabiProductRole};
 use arcana_hir::resolve_workspace;
 use arcana_ir::lower_workspace_package_with_resolution;
 use fs2::FileExt;
@@ -153,6 +153,7 @@ struct NativeSelectionPlan {
 struct GeneratedBindingSurface {
     binding_imports: Vec<arcana_aot::NativeBindingImport>,
     binding_callbacks: Vec<arcana_aot::NativeBindingCallback>,
+    binding_layouts: Vec<ArcanaCabiBindingLayout>,
     binding_shackle_decls: Vec<AotShackleDeclArtifact>,
 }
 
@@ -1196,16 +1197,17 @@ fn build_generated_cabi_product(
         ));
     }
     let package_image_text = None;
-    let (binding_imports, binding_callbacks, binding_shackle_decls) =
+    let (binding_imports, binding_callbacks, binding_layouts, binding_shackle_decls) =
         if product.role == ArcanaCabiProductRole::Binding {
             let surface = collect_generated_binding_surface(graph, member)?;
             (
                 surface.binding_imports,
                 surface.binding_callbacks,
+                surface.binding_layouts,
                 surface.binding_shackle_decls,
             )
         } else {
-            (Vec::new(), Vec::new(), Vec::new())
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new())
         };
 
     let project_parent_dir = repo_root()
@@ -1238,6 +1240,7 @@ fn build_generated_cabi_product(
             package_image_text,
             binding_imports,
             binding_callbacks,
+            binding_layouts,
             binding_shackle_decls,
         },
         &project_dir,
@@ -1301,6 +1304,7 @@ fn collect_generated_binding_surface(
     Ok(GeneratedBindingSurface {
         binding_imports: collect_native_binding_imports(&artifact)?,
         binding_callbacks: collect_native_binding_callbacks(&artifact)?,
+        binding_layouts: collect_binding_layouts(&artifact)?,
         binding_shackle_decls: artifact.shackle_decls.clone(),
     })
 }

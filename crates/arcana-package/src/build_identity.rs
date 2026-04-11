@@ -888,6 +888,7 @@ mod tests {
             routines: Vec::new(),
             native_callbacks: Vec::new(),
             shackle_decls: Vec::new(),
+            binding_layouts: Vec::new(),
             owners: Vec::new(),
             modules: vec![AotPackageModuleArtifact {
                 package_id: test_package_id_for_module("tool"),

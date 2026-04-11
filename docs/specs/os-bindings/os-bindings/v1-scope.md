@@ -41,6 +41,7 @@ This scope freezes the pre-selfhost generic OS-binding seam for Arcana library p
 - `shackle`
   - binding-owning-package-only raw foreign declaration family
   - owns raw host imports, callback signatures, native layouts, constants, and package-local host routines
+  - lowers into typed raw binding metadata; generated Rust is a projection of that typed contract, not the owner of layout semantics
   - exported `shackle` items form the public raw layer of binding grimoires such as `arcana_winapi.raw.*`
   - exported `shackle import fn`, exported `shackle fn`, and exported `shackle const` must be dependency-visible through ordinary path resolution; consumers must not need a parallel special binding lookup model
 - `opaque type`
@@ -51,6 +52,10 @@ This scope freezes the pre-selfhost generic OS-binding seam for Arcana library p
 - `intrinsic fn` remains the trusted std/kernel-only surface.
 - Generic OS binding work must not be reintroduced as runtime package-name special cases.
 - `arcana-cabi` owns the foreign-boundary semantics; runtime owns only generic loading and invocation as a consumer of that contract.
+- The binding lane now carries raw native layout/value transport for Windows-first shackle declarations:
+  - fixed-width ints and floats
+  - pointer/function-pointer-bearing raw layouts
+  - structs, unions, fixed arrays, flags/enums, callbacks, interfaces, and named bitfields by stable layout id
 - Binding grimoires must own the Arcana-facing API; runtime must not invent binding-only callback, ownership, or write-back behavior locally.
 - Binding grimoires must keep host-native scope narrow:
   - host capability discovery

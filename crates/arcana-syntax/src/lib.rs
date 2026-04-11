@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use arcana_cabi::{ArcanaCabiBindingRawType, ArcanaCabiBindingScalarType};
 use arcana_language_law::{
     ConstructCompletionKind, HeadedModifierKeyword, MemoryDetailKey, MemoryFamily,
 };
@@ -1103,8 +1104,66 @@ pub struct ShackleDecl {
     pub callback_type: Option<SurfaceType>,
     pub binding: Option<String>,
     pub body_entries: Vec<String>,
+    pub raw_decl: Option<ShackleRawDecl>,
+    pub import_target: Option<ShackleImportTarget>,
+    pub thunk_target: Option<ShackleThunkTarget>,
     pub surface_text: String,
     pub span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShackleImportTarget {
+    pub library: String,
+    pub symbol: String,
+    pub abi: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShackleThunkTarget {
+    pub target: String,
+    pub abi: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShackleFieldSpec {
+    pub name: String,
+    pub ty: ArcanaCabiBindingRawType,
+    pub bit_width: Option<u16>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShackleEnumVariantSpec {
+    pub name: String,
+    pub value: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ShackleRawDecl {
+    Alias {
+        target: ArcanaCabiBindingRawType,
+    },
+    Array {
+        element_type: ArcanaCabiBindingRawType,
+        len: usize,
+    },
+    Enum {
+        repr: ArcanaCabiBindingScalarType,
+        variants: Vec<ShackleEnumVariantSpec>,
+    },
+    Struct {
+        fields: Vec<ShackleFieldSpec>,
+    },
+    Union {
+        fields: Vec<ShackleFieldSpec>,
+    },
+    Flags {
+        repr: ArcanaCabiBindingScalarType,
+    },
+    Callback {
+        abi: String,
+        params: Vec<ArcanaCabiBindingRawType>,
+        return_type: ArcanaCabiBindingRawType,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2706,6 +2765,14 @@ fn parse_shackle_decl(entry: &RawBlockEntry) -> Result<Option<ShackleDecl>, Stri
                 entry.span.line, entry.span.column
             )
         })?;
+        let raw_decl = shackle_raw_decl_from_surface(
+            kind,
+            binding.as_deref(),
+            &body_entries,
+            &[],
+            None,
+            entry.span,
+        )?;
         Ok(ShackleDecl {
             exported,
             kind,
@@ -2715,6 +2782,9 @@ fn parse_shackle_decl(entry: &RawBlockEntry) -> Result<Option<ShackleDecl>, Stri
             callback_type: None,
             binding,
             body_entries: body_entries.clone(),
+            raw_decl,
+            import_target: None,
+            thunk_target: None,
             surface_text: surface_text.clone(),
             span: entry.span,
         })
@@ -2770,6 +2840,14 @@ fn parse_shackle_decl(entry: &RawBlockEntry) -> Result<Option<ShackleDecl>, Stri
                 entry.span.line, entry.span.column
             ));
         }
+        let raw_decl = shackle_raw_decl_from_surface(
+            ShackleDeclKind::Callback,
+            None,
+            &body_entries,
+            &signature.params,
+            signature.return_type.as_ref(),
+            entry.span,
+        )?;
         return Ok(Some(ShackleDecl {
             exported,
             kind: ShackleDeclKind::Callback,
@@ -2779,6 +2857,9 @@ fn parse_shackle_decl(entry: &RawBlockEntry) -> Result<Option<ShackleDecl>, Stri
             callback_type: None,
             binding: None,
             body_entries,
+            raw_decl,
+            import_target: None,
+            thunk_target: None,
             surface_text,
             span: entry.span,
         }));
@@ -2802,6 +2883,9 @@ fn parse_shackle_decl(entry: &RawBlockEntry) -> Result<Option<ShackleDecl>, Stri
             callback_type: None,
             binding: Some(binding),
             body_entries,
+            raw_decl: None,
+            import_target: None,
+            thunk_target: None,
             surface_text,
             span: entry.span,
         }));
@@ -2823,6 +2907,345 @@ fn parse_shackle_decl(entry: &RawBlockEntry) -> Result<Option<ShackleDecl>, Stri
         "{}:{}: malformed shackle declaration",
         entry.span.line, entry.span.column
     ))
+}
+
+fn shackle_raw_decl_from_surface(
+    kind: ShackleDeclKind,
+    binding: Option<&str>,
+    body_entries: &[String],
+    params: &[ParamDecl],
+    return_type: Option<&SurfaceType>,
+    span: Span,
+) -> Result<Option<ShackleRawDecl>, String> {
+    match kind {
+        ShackleDeclKind::Type => {
+            let Some(binding) = binding else {
+                return Ok(None);
+            };
+            if let Some(repr) = ArcanaCabiBindingScalarType::parse(binding)
+                && !body_entries.is_empty()
+            {
+                return Ok(Some(ShackleRawDecl::Enum {
+                    repr,
+                    variants: parse_shackle_enum_variants(body_entries, span)?,
+                }));
+            }
+            if let Some((element_type, len)) = parse_shackle_fixed_array_type_expr(binding)? {
+                return Ok(Some(ShackleRawDecl::Array { element_type, len }));
+            }
+            Ok(Some(ShackleRawDecl::Alias {
+                target: parse_shackle_raw_type_expr(binding)?,
+            }))
+        }
+        ShackleDeclKind::Struct => Ok(Some(ShackleRawDecl::Struct {
+            fields: body_entries
+                .iter()
+                .map(|line| parse_shackle_field_spec(line))
+                .collect::<Result<Vec<_>, _>>()?,
+        })),
+        ShackleDeclKind::Union => Ok(Some(ShackleRawDecl::Union {
+            fields: body_entries
+                .iter()
+                .map(|line| parse_shackle_field_spec(line))
+                .collect::<Result<Vec<_>, _>>()?,
+        })),
+        ShackleDeclKind::Flags => {
+            let Some(binding) = binding else {
+                return Ok(None);
+            };
+            let Some(repr) = ArcanaCabiBindingScalarType::parse(binding) else {
+                return Err(format!(
+                    "{}:{}: shackle flags repr `{binding}` must be a scalar integer type",
+                    span.line, span.column
+                ));
+            };
+            Ok(Some(ShackleRawDecl::Flags { repr }))
+        }
+        ShackleDeclKind::Callback => Ok(Some(ShackleRawDecl::Callback {
+            abi: "system".to_string(),
+            params: params
+                .iter()
+                .map(|param| parse_shackle_surface_type_raw_type(&param.ty))
+                .collect::<Result<Vec<_>, _>>()?,
+            return_type: return_type
+                .map(parse_shackle_surface_type_raw_type)
+                .transpose()?
+                .unwrap_or(ArcanaCabiBindingRawType::Void),
+        })),
+        ShackleDeclKind::Const
+        | ShackleDeclKind::ImportFn
+        | ShackleDeclKind::Fn
+        | ShackleDeclKind::Thunk => Ok(None),
+    }
+}
+
+fn parse_shackle_import_target(binding: &str) -> Result<ShackleImportTarget, String> {
+    let (library, symbol) = binding.split_once('.').ok_or_else(|| {
+        format!("shackle import binding `{binding}` must be `<library>.<symbol>`")
+    })?;
+    if library.trim().is_empty() || symbol.trim().is_empty() {
+        return Err(format!(
+            "shackle import binding `{binding}` must use non-empty library and symbol names"
+        ));
+    }
+    Ok(ShackleImportTarget {
+        library: library.trim().to_string(),
+        symbol: symbol.trim().to_string(),
+        abi: "system".to_string(),
+    })
+}
+
+fn parse_shackle_enum_variants(
+    body_entries: &[String],
+    span: Span,
+) -> Result<Vec<ShackleEnumVariantSpec>, String> {
+    body_entries
+        .iter()
+        .map(|line| {
+            let trimmed = line.trim().trim_end_matches(',');
+            let (name, value_text) = trimmed.split_once('=').ok_or_else(|| {
+                format!(
+                    "{}:{}: malformed shackle enum variant `{trimmed}`",
+                    span.line, span.column
+                )
+            })?;
+            let name = parse_symbol_name(name.trim()).ok_or_else(|| {
+                format!(
+                    "{}:{}: malformed shackle enum variant name `{}`",
+                    span.line,
+                    span.column,
+                    name.trim()
+                )
+            })?;
+            let value = value_text.trim().parse::<i64>().map_err(|err| {
+                format!(
+                    "{}:{}: malformed shackle enum value `{}`: {err}",
+                    span.line,
+                    span.column,
+                    value_text.trim()
+                )
+            })?;
+            Ok(ShackleEnumVariantSpec { name, value })
+        })
+        .collect()
+}
+
+fn parse_shackle_field_spec(line: &str) -> Result<ShackleFieldSpec, String> {
+    let trimmed = line.trim().trim_end_matches(',');
+    let (name, ty_text) = trimmed
+        .split_once(':')
+        .ok_or_else(|| format!("malformed shackle field `{trimmed}`"))?;
+    let name = sanitize_name(name.trim());
+    let ty_text = ty_text.trim();
+    if let Some((base_text, width_text)) = ty_text.rsplit_once(" bits ") {
+        let bit_width = width_text
+            .trim()
+            .parse::<u16>()
+            .map_err(|err| format!("invalid shackle bitfield width `{width_text}`: {err}"))?;
+        return Ok(ShackleFieldSpec {
+            name,
+            ty: parse_shackle_raw_type_expr(base_text.trim())?,
+            bit_width: Some(bit_width),
+        });
+    }
+    Ok(ShackleFieldSpec {
+        name,
+        ty: parse_shackle_raw_type_expr(ty_text)?,
+        bit_width: None,
+    })
+}
+
+fn parse_shackle_fixed_array_type_expr(
+    text: &str,
+) -> Result<Option<(ArcanaCabiBindingRawType, usize)>, String> {
+    let trimmed = text.trim();
+    if !trimmed.starts_with('[') || !trimmed.ends_with(']') {
+        return Ok(None);
+    }
+    let inner = &trimmed[1..trimmed.len() - 1];
+    let Some((element_text, len_text)) = inner.rsplit_once(';') else {
+        return Ok(None);
+    };
+    let len = len_text
+        .trim()
+        .parse::<usize>()
+        .map_err(|err| format!("invalid fixed array length `{}`: {err}", len_text.trim()))?;
+    Ok(Some((
+        parse_shackle_raw_type_expr(element_text.trim())?,
+        len,
+    )))
+}
+
+fn parse_shackle_surface_type_raw_type(
+    ty: &SurfaceType,
+) -> Result<ArcanaCabiBindingRawType, String> {
+    match &ty.kind {
+        SurfaceTypeKind::Path(path) => {
+            let rendered = ty.render();
+            if let Some(scalar) = ArcanaCabiBindingScalarType::parse(
+                path.segments
+                    .first()
+                    .map(String::as_str)
+                    .unwrap_or(&rendered),
+            ) {
+                return Ok(ArcanaCabiBindingRawType::Scalar(scalar));
+            }
+            Ok(ArcanaCabiBindingRawType::Named(rendered))
+        }
+        SurfaceTypeKind::Apply { .. }
+        | SurfaceTypeKind::Tuple(_)
+        | SurfaceTypeKind::Ref { .. }
+        | SurfaceTypeKind::Projection(_) => Err(format!(
+            "unsupported raw shackle signature type `{}`",
+            ty.render()
+        )),
+    }
+}
+
+fn parse_shackle_raw_type_expr(text: &str) -> Result<ArcanaCabiBindingRawType, String> {
+    let trimmed = text.trim();
+    if trimmed == "c_void" || trimmed == "()" {
+        return Ok(ArcanaCabiBindingRawType::Void);
+    }
+    if let Some(scalar) = ArcanaCabiBindingScalarType::parse(trimmed) {
+        return Ok(ArcanaCabiBindingRawType::Scalar(scalar));
+    }
+    if let Some(rest) = trimmed.strip_prefix("*mut ") {
+        return Ok(ArcanaCabiBindingRawType::Pointer {
+            mutable: true,
+            inner: Box::new(parse_shackle_raw_type_expr(rest.trim())?),
+        });
+    }
+    if let Some(rest) = trimmed.strip_prefix("*const ") {
+        return Ok(ArcanaCabiBindingRawType::Pointer {
+            mutable: false,
+            inner: Box::new(parse_shackle_raw_type_expr(rest.trim())?),
+        });
+    }
+    if let Some(function_pointer) = parse_shackle_function_pointer_type(trimmed)? {
+        return Ok(function_pointer);
+    }
+    Ok(ArcanaCabiBindingRawType::Named(trimmed.to_string()))
+}
+
+fn parse_shackle_function_pointer_type(
+    text: &str,
+) -> Result<Option<ArcanaCabiBindingRawType>, String> {
+    let (nullable, inner) = if text.starts_with("Option<") && text.ends_with('>') {
+        (true, &text["Option<".len()..text.len() - 1])
+    } else {
+        (false, text)
+    };
+    let inner = inner.trim();
+    let inner = inner.strip_prefix("unsafe ").unwrap_or(inner).trim();
+    let Some(after_extern) = inner.strip_prefix("extern ") else {
+        return Ok(None);
+    };
+    let Some((abi_text, after_abi)) = after_extern.split_once(" fn(") else {
+        return Ok(None);
+    };
+    let Some((params_text, return_text)) = split_signature_param_section(after_abi) else {
+        return Err(format!("malformed shackle function pointer `{text}`"));
+    };
+    let params = split_signature_params(&params_text)
+        .into_iter()
+        .map(|param_text| parse_shackle_raw_type_expr(&param_text))
+        .collect::<Result<Vec<_>, _>>()?;
+    let return_type = if return_text.trim().is_empty() {
+        ArcanaCabiBindingRawType::Void
+    } else {
+        let return_text = return_text
+            .trim()
+            .strip_prefix("->")
+            .map(str::trim)
+            .unwrap_or("");
+        if return_text.is_empty() {
+            ArcanaCabiBindingRawType::Void
+        } else {
+            parse_shackle_raw_type_expr(return_text)?
+        }
+    };
+    Ok(Some(ArcanaCabiBindingRawType::FunctionPointer {
+        abi: abi_text.trim().trim_matches('"').to_string(),
+        nullable,
+        params,
+        return_type: Box::new(return_type),
+    }))
+}
+
+fn split_signature_params(text: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut square_depth = 0usize;
+    let mut paren_depth = 0usize;
+    for ch in text.chars() {
+        match ch {
+            '[' => {
+                square_depth += 1;
+                current.push(ch);
+            }
+            ']' => {
+                square_depth = square_depth.saturating_sub(1);
+                current.push(ch);
+            }
+            '(' => {
+                paren_depth += 1;
+                current.push(ch);
+            }
+            ')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+                current.push(ch);
+            }
+            ',' if square_depth == 0 && paren_depth == 0 => {
+                let trimmed = current.trim();
+                if !trimmed.is_empty() {
+                    parts.push(trimmed.to_string());
+                }
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    let trimmed = current.trim();
+    if !trimmed.is_empty() {
+        parts.push(trimmed.to_string());
+    }
+    parts
+}
+
+fn split_signature_param_section(text: &str) -> Option<(String, String)> {
+    let mut nested_paren_depth = 0usize;
+    for (index, ch) in text.char_indices() {
+        match ch {
+            '(' => nested_paren_depth += 1,
+            ')' => {
+                if nested_paren_depth == 0 {
+                    return Some((text[..index].to_string(), text[index + 1..].to_string()));
+                }
+                nested_paren_depth -= 1;
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn sanitize_name(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        "_".to_string()
+    } else if out.chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
+        format!("_{out}")
+    } else {
+        out
+    }
 }
 
 fn split_optional_binding(source: &str) -> (&str, Option<String>) {
@@ -2881,6 +3304,22 @@ fn parse_shackle_function_decl(
             span.line, span.column
         ));
     }
+    let import_target = if kind == ShackleDeclKind::ImportFn {
+        binding
+            .as_deref()
+            .map(parse_shackle_import_target)
+            .transpose()?
+    } else {
+        None
+    };
+    let thunk_target = if kind == ShackleDeclKind::Thunk {
+        binding.as_ref().map(|target| ShackleThunkTarget {
+            target: target.clone(),
+            abi: "system".to_string(),
+        })
+    } else {
+        None
+    };
     Ok(ShackleDecl {
         exported,
         kind,
@@ -2890,6 +3329,9 @@ fn parse_shackle_function_decl(
         callback_type: None,
         binding,
         body_entries,
+        raw_decl: None,
+        import_target,
+        thunk_target,
         surface_text,
         span,
     })
@@ -9283,9 +9725,9 @@ mod tests {
         DeferAction, DirectiveKind, Expr, ForewordAliasKind, ForewordApp, ForewordArg,
         ForewordDefinitionTarget, HeaderAttachment, MatchPattern, OpaqueBoundaryPolicy,
         OpaqueOwnershipPolicy, OpaqueTypePolicy, ParamMode, PhraseArg,
-        QualifiedPhraseQualifierKind, ShackleDeclKind, Statement, StatementKind, SurfaceTraitRef,
-        SurfaceType, SurfaceWhereClause, SymbolBody, SymbolKind, UnaryOp, builtin_type_info,
-        parse_module,
+        QualifiedPhraseQualifierKind, ShackleDeclKind, ShackleRawDecl, Statement, StatementKind,
+        SurfaceTraitRef, SurfaceType, SurfaceWhereClause, SymbolBody, SymbolKind, UnaryOp,
+        builtin_type_info, parse_module,
     };
 
     fn expr_is_path(expr: &Expr, name: &str) -> bool {
@@ -10203,11 +10645,21 @@ mod tests {
         assert_eq!(parsed.shackle_decls.len(), 3);
         assert_eq!(parsed.shackle_decls[0].kind, ShackleDeclKind::Callback);
         assert_eq!(parsed.shackle_decls[0].name, "WNDPROC");
+        assert!(matches!(
+            parsed.shackle_decls[0].raw_decl,
+            Some(ShackleRawDecl::Callback { .. })
+        ));
         assert_eq!(parsed.shackle_decls[1].kind, ShackleDeclKind::ImportFn);
         assert_eq!(
             parsed.shackle_decls[1].binding.as_deref(),
             Some("user32.CreateWindowExW")
         );
+        let import_target = parsed.shackle_decls[1]
+            .import_target
+            .as_ref()
+            .expect("typed import target should parse at syntax layer");
+        assert_eq!(import_target.library, "user32");
+        assert_eq!(import_target.symbol, "CreateWindowExW");
         assert_eq!(parsed.shackle_decls[2].kind, ShackleDeclKind::Fn);
         assert_eq!(parsed.shackle_decls[2].body_entries, vec!["return code"]);
         assert_eq!(parsed.native_callbacks.len(), 1);
@@ -10222,6 +10674,38 @@ mod tests {
                 .render(),
             "arcana_winapi.raw.user32.WNDPROC"
         );
+    }
+
+    #[test]
+    fn parse_module_lowers_typed_shackle_raw_decl_metadata() {
+        let parsed = parse_module(concat!(
+            "export shackle struct RECT:\n",
+            "    left: I32\n",
+            "    flags: U32 bits 3\n",
+            "export shackle type MODE = U32:\n",
+            "    None = 0\n",
+            "    Windowed = 1\n",
+            "export shackle type HANDLE_ARRAY = [U16; 4]\n",
+            "export shackle type IUnknown = *mut c_void\n",
+        ))
+        .expect("typed shackle raw decls should parse");
+
+        assert!(matches!(
+            parsed.shackle_decls[0].raw_decl,
+            Some(ShackleRawDecl::Struct { .. })
+        ));
+        assert!(matches!(
+            parsed.shackle_decls[1].raw_decl,
+            Some(ShackleRawDecl::Enum { .. })
+        ));
+        assert!(matches!(
+            parsed.shackle_decls[2].raw_decl,
+            Some(ShackleRawDecl::Array { .. })
+        ));
+        assert!(matches!(
+            parsed.shackle_decls[3].raw_decl,
+            Some(ShackleRawDecl::Alias { .. })
+        ));
     }
 
     #[test]

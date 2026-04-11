@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 // Tooling/debug projection of the cabi export contract, not the primary foreign ABI owner.
-use arcana_cabi::ArcanaCabiPassMode;
+use arcana_cabi::{ArcanaCabiBindingLayout, ArcanaCabiBindingSignature, ArcanaCabiPassMode};
 use arcana_ir::{IrRoutineType, IrRoutineTypeKind};
 use serde::Serialize;
 
@@ -9,10 +9,11 @@ use super::{
     RuntimeExecutionState, RuntimeHost, RuntimeOpaqueFamily, RuntimePackagePlan,
     RuntimeRoutinePlan, RuntimeValue, execute_routine_call_with_state,
     native_abi::project_export_write_backs, routine_plan::render_runtime_signature_text,
+    runtime_binding_callback_signatures_for_package, runtime_binding_import_signatures_for_package,
     runtime_eval_message, validate_runtime_requirements_supported,
 };
 
-pub const RUNTIME_JSON_ABI_FORMAT: &str = "arcana-runtime-json-abi-v3";
+pub const RUNTIME_JSON_ABI_FORMAT: &str = "arcana-runtime-json-abi-v4";
 
 #[derive(Serialize)]
 struct JsonAbiManifest<'a> {
@@ -20,6 +21,8 @@ struct JsonAbiManifest<'a> {
     package_name: &'a str,
     root_module_id: &'a str,
     routines: Vec<JsonAbiRoutine<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    binding: Option<JsonAbiBindingManifest>,
 }
 
 #[derive(Serialize)]
@@ -38,6 +41,30 @@ struct JsonAbiRoutine<'a> {
 #[derive(Serialize)]
 struct JsonAbiParam<'a> {
     name: &'a str,
+    source_mode: &'static str,
+    input_type: String,
+    pass_mode: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    write_back_type: Option<String>,
+}
+
+#[derive(Serialize)]
+struct JsonAbiBindingManifest {
+    imports: Vec<JsonAbiBindingSignature>,
+    callbacks: Vec<JsonAbiBindingSignature>,
+    layouts: Vec<ArcanaCabiBindingLayout>,
+}
+
+#[derive(Serialize)]
+struct JsonAbiBindingSignature {
+    name: String,
+    return_type: String,
+    params: Vec<JsonAbiBindingParamOwned>,
+}
+
+#[derive(Serialize)]
+struct JsonAbiBindingParamOwned {
+    name: String,
     source_mode: &'static str,
     input_type: String,
     pass_mode: &'static str,
@@ -79,9 +106,53 @@ pub fn render_exported_json_abi_manifest(plan: &RuntimePackagePlan) -> Result<St
                 impl_trait_path: routine.impl_trait_path.as_deref(),
             })
             .collect(),
+        binding: render_binding_json_abi_manifest(plan)?,
     };
     serde_json::to_string(&manifest)
         .map_err(|e| format!("failed to render runtime json abi manifest: {e}"))
+}
+
+fn render_binding_json_abi_manifest(
+    plan: &RuntimePackagePlan,
+) -> Result<Option<JsonAbiBindingManifest>, String> {
+    let imports = runtime_binding_import_signatures_for_package(plan, &plan.package_id)?
+        .into_iter()
+        .map(json_binding_signature)
+        .collect::<Vec<_>>();
+    let callbacks = runtime_binding_callback_signatures_for_package(plan, &plan.package_id)?
+        .into_iter()
+        .map(json_binding_signature)
+        .collect::<Vec<_>>();
+    if imports.is_empty() && callbacks.is_empty() && plan.binding_layouts.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(JsonAbiBindingManifest {
+        imports,
+        callbacks,
+        layouts: plan.binding_layouts.clone(),
+    }))
+}
+
+fn json_binding_signature(signature: ArcanaCabiBindingSignature) -> JsonAbiBindingSignature {
+    JsonAbiBindingSignature {
+        name: signature.name,
+        return_type: signature.return_type.render(),
+        params: signature
+            .params
+            .into_iter()
+            .map(|param| JsonAbiBindingParamOwned {
+                name: param.name,
+                source_mode: match param.source_mode {
+                    arcana_cabi::ArcanaCabiParamSourceMode::Take => "take",
+                    arcana_cabi::ArcanaCabiParamSourceMode::Edit => "edit",
+                    _ => "read",
+                },
+                input_type: param.input_type.render(),
+                pass_mode: param.pass_mode.as_str(),
+                write_back_type: param.write_back_type.as_ref().map(|ty| ty.render()),
+            })
+            .collect(),
+    }
 }
 
 pub fn execute_exported_json_abi_routine(

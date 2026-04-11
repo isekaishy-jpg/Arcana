@@ -1,3 +1,4 @@
+use arcana_cabi::ArcanaCabiBindingLayout;
 use arcana_ir::{
     ExecAvailabilityAttachment, ExecCleanupFooter, ExecExpr, ExecStmt, IrForewordMetadata,
     IrForewordRegistrationRow, IrRoutineParam, IrRoutineType,
@@ -81,6 +82,19 @@ pub struct AotNativeCallbackArtifact {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AotShackleImportTargetArtifact {
+    pub library: String,
+    pub symbol: String,
+    pub abi: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AotShackleThunkTargetArtifact {
+    pub target: String,
+    pub abi: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AotShackleDeclArtifact {
     pub package_id: String,
     pub module_id: String,
@@ -96,6 +110,12 @@ pub struct AotShackleDeclArtifact {
     pub binding: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub body_entries: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_layout: Option<ArcanaCabiBindingLayout>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub import_target: Option<AotShackleImportTargetArtifact>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thunk_target: Option<AotShackleThunkTargetArtifact>,
     pub surface_text: String,
 }
 
@@ -159,6 +179,8 @@ pub struct AotPackageArtifact {
     pub native_callbacks: Vec<AotNativeCallbackArtifact>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub shackle_decls: Vec<AotShackleDeclArtifact>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub binding_layouts: Vec<ArcanaCabiBindingLayout>,
     pub owners: Vec<AotOwnerArtifact>,
     pub modules: Vec<AotPackageModuleArtifact>,
 }

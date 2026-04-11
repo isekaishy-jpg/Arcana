@@ -19,6 +19,7 @@ pub use artifact::{
     AOT_INTERNAL_FORMAT, AotArtifact, AotEntrypointArtifact, AotNativeCallbackArtifact,
     AotOwnerArtifact, AotOwnerExitArtifact, AotOwnerObjectArtifact, AotPackageArtifact,
     AotPackageModuleArtifact, AotRoutineArtifact, AotRoutineParamArtifact, AotShackleDeclArtifact,
+    AotShackleImportTargetArtifact, AotShackleThunkTargetArtifact,
 };
 pub use codec::{parse_package_artifact, render_package_artifact};
 pub use compile::{compile_module, compile_package};
@@ -32,8 +33,9 @@ pub use instance_product::{
     compile_instance_product, default_instance_product_cargo_target_dir,
 };
 pub use native_abi::{
-    NativeBindingCallback, NativeBindingImport, collect_native_binding_callbacks,
-    collect_native_binding_imports,
+    NativeBindingCallback, NativeBindingImport, collect_binding_layouts,
+    collect_native_binding_callbacks, collect_native_binding_imports,
+    populate_typed_shackle_metadata,
 };
 pub use native_manifest::{
     NATIVE_BUNDLE_MANIFEST_FORMAT, NativeBundleLaunchManifest, NativeBundleManifest,
@@ -46,12 +48,17 @@ pub use validate::validate_package_artifact;
 mod tests {
     use super::{
         AOT_INTERNAL_FORMAT, AOT_WINDOWS_DLL_FORMAT, AOT_WINDOWS_EXE_FORMAT, AotEmitContext,
-        AotEmitTarget, AotEntrypointArtifact, AotPackageArtifact, AotPackageModuleArtifact,
-        AotRoutineArtifact, AotRoutineParamArtifact, AotRuntimeBinding,
-        NATIVE_BUNDLE_MANIFEST_FORMAT, NativeLaunchPlan, build_native_package_plan, compile_module,
-        compile_package, emit_package, emit_package_with_context, parse_native_bundle_manifest,
+        AotEmitTarget, AotEntrypointArtifact, AotNativeCallbackArtifact, AotNativeProduct,
+        AotPackageArtifact, AotPackageModuleArtifact, AotRoutineArtifact, AotRoutineParamArtifact,
+        AotRuntimeBinding, AotShackleDeclArtifact, NATIVE_BUNDLE_MANIFEST_FORMAT, NativeLaunchPlan,
+        NativePackagePlan, build_native_package_plan, compile_module, compile_package,
+        emit_package, emit_package_with_context, parse_native_bundle_manifest,
         parse_package_artifact, render_native_bundle_manifest, render_package_artifact,
         validate_package_artifact,
+    };
+    use arcana_cabi::{
+        ArcanaCabiBindingLayout, ArcanaCabiBindingLayoutField, ArcanaCabiBindingLayoutKind,
+        ArcanaCabiBindingRawType, ArcanaCabiBindingScalarType, ArcanaCabiProductRole,
     };
     use arcana_ir::{
         ExecCleanupFooter, ExecExpr, ExecPhraseQualifierKind, ExecStmt, IrEntrypoint, IrModule,
@@ -227,6 +234,7 @@ mod tests {
             }],
             native_callbacks: Vec::new(),
             shackle_decls: Vec::new(),
+            binding_layouts: Vec::new(),
             owners: Vec::new(),
             modules: vec![AotPackageModuleArtifact {
                 package_id: test_package_id_for_module("tool"),
@@ -962,6 +970,255 @@ mod tests {
     }
 
     #[test]
+    fn native_bundle_manifest_records_binding_raw_metadata() {
+        let artifact = AotPackageArtifact {
+            format: AOT_INTERNAL_FORMAT.to_string(),
+            package_id: "hostapi".to_string(),
+            package_name: "hostapi".to_string(),
+            root_module_id: "hostapi".to_string(),
+            direct_deps: Vec::new(),
+            direct_dep_ids: Vec::new(),
+            package_display_names: test_package_display_names_with_deps(
+                "hostapi".to_string(),
+                "hostapi".to_string(),
+                Vec::new(),
+                Vec::new(),
+            ),
+            package_direct_dep_ids: test_package_direct_dep_ids(
+                "hostapi".to_string(),
+                Vec::new(),
+                Vec::new(),
+            ),
+            module_count: 2,
+            dependency_edge_count: 0,
+            dependency_rows: Vec::new(),
+            exported_surface_rows: Vec::new(),
+            runtime_requirements: Vec::new(),
+            foreword_index: Vec::new(),
+            foreword_registrations: Vec::new(),
+            entrypoints: Vec::new(),
+            routines: vec![AotRoutineArtifact {
+                package_id: "hostapi".to_string(),
+                module_id: "hostapi".to_string(),
+                routine_key: "hostapi#fn-0".to_string(),
+                symbol_name: "query".to_string(),
+                symbol_kind: "fn".to_string(),
+                exported: false,
+                is_async: false,
+                type_params: Vec::new(),
+                behavior_attrs: BTreeMap::new(),
+                params: vec![IrRoutineParam {
+                    binding_id: 0,
+                    mode: Some("edit".to_string()),
+                    name: "unknown".to_string(),
+                    ty: parse_routine_type_text("hostapi.raw.IUnknown").expect("type should parse"),
+                }],
+                return_type: Some(
+                    parse_routine_type_text("hostapi.raw.IUnknown")
+                        .expect("return type should parse"),
+                ),
+                intrinsic_impl: None,
+                native_impl: Some("raw.query".to_string()),
+                impl_target_type: None,
+                impl_trait_path: None,
+                availability: Vec::new(),
+                cleanup_footers: Vec::new(),
+                statements: Vec::new(),
+            }],
+            native_callbacks: vec![AotNativeCallbackArtifact {
+                package_id: "hostapi".to_string(),
+                module_id: "hostapi.callbacks".to_string(),
+                name: "window_proc".to_string(),
+                params: vec![IrRoutineParam {
+                    binding_id: 0,
+                    mode: Some("read".to_string()),
+                    name: "unknown".to_string(),
+                    ty: parse_routine_type_text("hostapi.raw.IUnknown")
+                        .expect("callback type should parse"),
+                }],
+                return_type: Some(parse_routine_type_text("I32").expect("type should parse")),
+                callback_type: None,
+                target: vec![
+                    "hostapi".to_string(),
+                    "callbacks".to_string(),
+                    "window_proc".to_string(),
+                ],
+                target_routine_key: Some("hostapi.callbacks#fn-0".to_string()),
+            }],
+            shackle_decls: vec![
+                AotShackleDeclArtifact {
+                    package_id: "hostapi".to_string(),
+                    module_id: "hostapi.raw".to_string(),
+                    exported: true,
+                    kind: "struct".to_string(),
+                    name: "IUnknownVTable".to_string(),
+                    params: Vec::new(),
+                    return_type: None,
+                    callback_type: None,
+                    binding: None,
+                    body_entries: Vec::new(),
+                    raw_layout: Some(ArcanaCabiBindingLayout {
+                        layout_id: "hostapi.raw.IUnknownVTable".to_string(),
+                        size: std::mem::size_of::<usize>(),
+                        align: std::mem::size_of::<usize>(),
+                        kind: ArcanaCabiBindingLayoutKind::Struct {
+                            fields: vec![ArcanaCabiBindingLayoutField {
+                                name: "QueryInterface".to_string(),
+                                ty: ArcanaCabiBindingRawType::FunctionPointer {
+                                    abi: "system".to_string(),
+                                    nullable: true,
+                                    params: vec![ArcanaCabiBindingRawType::Pointer {
+                                        mutable: true,
+                                        inner: Box::new(ArcanaCabiBindingRawType::Void),
+                                    }],
+                                    return_type: Box::new(ArcanaCabiBindingRawType::Scalar(
+                                        ArcanaCabiBindingScalarType::I32,
+                                    )),
+                                },
+                                offset: 0,
+                                bit_width: None,
+                                bit_offset: None,
+                            }],
+                        },
+                    }),
+                    import_target: None,
+                    thunk_target: None,
+                    surface_text: String::new(),
+                },
+                AotShackleDeclArtifact {
+                    package_id: "hostapi".to_string(),
+                    module_id: "hostapi.raw".to_string(),
+                    exported: true,
+                    kind: "type".to_string(),
+                    name: "IUnknown".to_string(),
+                    params: Vec::new(),
+                    return_type: None,
+                    callback_type: None,
+                    binding: Some("*mut c_void".to_string()),
+                    body_entries: Vec::new(),
+                    raw_layout: Some(ArcanaCabiBindingLayout {
+                        layout_id: "hostapi.raw.IUnknown".to_string(),
+                        size: std::mem::size_of::<usize>(),
+                        align: std::mem::size_of::<usize>(),
+                        kind: ArcanaCabiBindingLayoutKind::Interface {
+                            iid: None,
+                            vtable_layout_id: Some("hostapi.raw.IUnknownVTable".to_string()),
+                        },
+                    }),
+                    import_target: None,
+                    thunk_target: None,
+                    surface_text: String::new(),
+                },
+            ],
+            binding_layouts: vec![
+                ArcanaCabiBindingLayout {
+                    layout_id: "hostapi.raw.IUnknownVTable".to_string(),
+                    size: std::mem::size_of::<usize>(),
+                    align: std::mem::size_of::<usize>(),
+                    kind: ArcanaCabiBindingLayoutKind::Struct {
+                        fields: vec![ArcanaCabiBindingLayoutField {
+                            name: "QueryInterface".to_string(),
+                            ty: ArcanaCabiBindingRawType::FunctionPointer {
+                                abi: "system".to_string(),
+                                nullable: true,
+                                params: vec![ArcanaCabiBindingRawType::Pointer {
+                                    mutable: true,
+                                    inner: Box::new(ArcanaCabiBindingRawType::Void),
+                                }],
+                                return_type: Box::new(ArcanaCabiBindingRawType::Scalar(
+                                    ArcanaCabiBindingScalarType::I32,
+                                )),
+                            },
+                            offset: 0,
+                            bit_width: None,
+                            bit_offset: None,
+                        }],
+                    },
+                },
+                ArcanaCabiBindingLayout {
+                    layout_id: "hostapi.raw.IUnknown".to_string(),
+                    size: std::mem::size_of::<usize>(),
+                    align: std::mem::size_of::<usize>(),
+                    kind: ArcanaCabiBindingLayoutKind::Interface {
+                        iid: None,
+                        vtable_layout_id: Some("hostapi.raw.IUnknownVTable".to_string()),
+                    },
+                },
+            ],
+            owners: Vec::new(),
+            modules: vec![
+                AotPackageModuleArtifact {
+                    package_id: "hostapi".to_string(),
+                    module_id: "hostapi".to_string(),
+                    symbol_count: 0,
+                    item_count: 0,
+                    line_count: 0,
+                    non_empty_line_count: 0,
+                    directive_rows: Vec::new(),
+                    lang_item_rows: Vec::new(),
+                    exported_surface_rows: Vec::new(),
+                },
+                AotPackageModuleArtifact {
+                    package_id: "hostapi".to_string(),
+                    module_id: "hostapi.raw".to_string(),
+                    symbol_count: 0,
+                    item_count: 0,
+                    line_count: 0,
+                    non_empty_line_count: 0,
+                    directive_rows: Vec::new(),
+                    lang_item_rows: Vec::new(),
+                    exported_surface_rows: Vec::new(),
+                },
+            ],
+        };
+        let plan = NativePackagePlan {
+            target: AotEmitTarget::WindowsDllBundle,
+            root_artifact_file_name: "hostapi_binding.dll".to_string(),
+            runtime_binding: AotRuntimeBinding::Baked,
+            native_product: Some(AotNativeProduct {
+                name: "hostapi".to_string(),
+                role: ArcanaCabiProductRole::Binding,
+                contract_id: "arcana.cabi.binding.v1".to_string(),
+                contract_version: 1,
+            }),
+            artifact,
+            artifact_text: String::new(),
+            launch: NativeLaunchPlan::DynamicLibrary {
+                exports: Vec::new(),
+            },
+            routine_hints: BTreeMap::new(),
+        };
+
+        let manifest = parse_native_bundle_manifest(
+            &render_native_bundle_manifest(&plan).expect("binding manifest should render"),
+        )
+        .expect("binding manifest should parse");
+
+        let binding = manifest
+            .binding
+            .expect("binding metadata should be present");
+        assert_eq!(binding.imports.len(), 1);
+        assert_eq!(binding.imports[0].name, "raw.query");
+        assert_eq!(
+            binding.imports[0].params[0].input_type,
+            "hostapi.raw.IUnknown"
+        );
+        assert_eq!(
+            binding.imports[0].params[0].write_back_type.as_deref(),
+            Some("hostapi.raw.IUnknown")
+        );
+        assert_eq!(binding.callbacks.len(), 1);
+        assert_eq!(binding.callbacks[0].name, "window_proc");
+        assert_eq!(binding.layouts.len(), 2);
+        assert!(
+            binding
+                .layouts
+                .iter()
+                .any(|layout| layout.layout_id == "hostapi.raw.IUnknown")
+        );
+    }
+
+    #[test]
     fn collect_native_exports_excludes_dependency_generic_surface() {
         let artifact = AotPackageArtifact {
             format: AOT_INTERNAL_FORMAT.to_string(),
@@ -1037,6 +1294,7 @@ mod tests {
             ],
             native_callbacks: Vec::new(),
             shackle_decls: Vec::new(),
+            binding_layouts: Vec::new(),
             owners: Vec::new(),
             modules: vec![
                 AotPackageModuleArtifact {
@@ -1246,6 +1504,7 @@ mod tests {
             }],
             native_callbacks: Vec::new(),
             shackle_decls: Vec::new(),
+            binding_layouts: Vec::new(),
             owners: Vec::new(),
             modules: vec![AotPackageModuleArtifact {
                 package_id: test_package_id_for_module("tool"),
@@ -1421,6 +1680,7 @@ mod tests {
             ],
             native_callbacks: Vec::new(),
             shackle_decls: Vec::new(),
+            binding_layouts: Vec::new(),
             owners: Vec::new(),
             modules: vec![AotPackageModuleArtifact {
                 package_id: test_package_id_for_module("tool"),
@@ -1573,6 +1833,7 @@ mod tests {
             }],
             native_callbacks: Vec::new(),
             shackle_decls: Vec::new(),
+            binding_layouts: Vec::new(),
             owners: Vec::new(),
             modules: vec![AotPackageModuleArtifact {
                 package_id: test_package_id_for_module("tool"),

@@ -11,6 +11,10 @@ use std::rc::Rc;
 
 use serde::{Deserialize, Serialize};
 
+use arcana_cabi::{
+    ArcanaCabiBindingLayout, ArcanaCabiBindingLayoutField, ArcanaCabiBindingLayoutKind,
+    ArcanaCabiBindingRawType, ArcanaCabiBindingScalarType,
+};
 use arcana_hir::{
     HirAssignOp, HirAssignTarget, HirBinaryOp, HirChainConnector, HirChainIntroducer, HirChainStep,
     HirCleanupFooter, HirDirectiveKind, HirExpr, HirForewordApp, HirForewordArg,
@@ -244,7 +248,26 @@ pub struct IrShackleDecl {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binding: Option<String>,
     pub body_entries: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_layout: Option<ArcanaCabiBindingLayout>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub import_target: Option<IrShackleImportTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thunk_target: Option<IrShackleThunkTarget>,
     pub surface_text: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IrShackleImportTarget {
+    pub library: String,
+    pub symbol: String,
+    pub abi: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IrShackleThunkTarget {
+    pub target: String,
+    pub abi: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -6209,6 +6232,22 @@ fn lower_package(package: &HirPackageSummary) -> IrPackage {
                 callback_type: decl.callback_type.as_ref().map(lower_symbol_routine_type),
                 binding: decl.binding.clone(),
                 body_entries: decl.body_entries.clone(),
+                raw_layout: decl.raw_layout.clone(),
+                import_target: decl
+                    .import_target
+                    .as_ref()
+                    .map(|target| IrShackleImportTarget {
+                        library: target.library.clone(),
+                        symbol: target.symbol.clone(),
+                        abi: target.abi.clone(),
+                    }),
+                thunk_target: decl
+                    .thunk_target
+                    .as_ref()
+                    .map(|target| IrShackleThunkTarget {
+                        target: target.target.clone(),
+                        abi: target.abi.clone(),
+                    }),
                 surface_text: decl.surface_text.clone(),
             })
         })
@@ -6482,6 +6521,21 @@ pub fn lower_workspace_package_with_resolution(
                         .map(|ty| lower_resolved_routine_type(workspace, resolved_module, ty)),
                     binding: decl.binding.clone(),
                     body_entries: decl.body_entries.clone(),
+                    raw_layout: decl.raw_layout.clone(),
+                    import_target: decl.import_target.as_ref().map(|target| {
+                        IrShackleImportTarget {
+                            library: target.library.clone(),
+                            symbol: target.symbol.clone(),
+                            abi: target.abi.clone(),
+                        }
+                    }),
+                    thunk_target: decl
+                        .thunk_target
+                        .as_ref()
+                        .map(|target| IrShackleThunkTarget {
+                            target: target.target.clone(),
+                            abi: target.abi.clone(),
+                        }),
                     surface_text: decl.surface_text.clone(),
                 })
                 .collect::<Vec<_>>())
@@ -6490,6 +6544,17 @@ pub fn lower_workspace_package_with_resolution(
         .into_iter()
         .flatten()
         .collect();
+    if lowered.shackle_decls.iter().any(|decl| {
+        matches!(
+            decl.kind.as_str(),
+            "type" | "struct" | "union" | "callback" | "flags"
+        ) && decl.raw_layout.is_none()
+            || matches!(decl.kind.as_str(), "import fn" | "import_fn")
+                && decl.import_target.is_none()
+            || decl.kind == "thunk" && decl.thunk_target.is_none()
+    }) {
+        populate_typed_shackle_metadata(&mut lowered)?;
+    }
     lowered.owners = package
         .summary
         .modules
@@ -6570,11 +6635,644 @@ pub fn lower_workspace_package_with_resolution(
     Ok(lowered)
 }
 
+fn populate_typed_shackle_metadata(package: &mut IrPackage) -> Result<(), String> {
+    let snapshot = package.shackle_decls.clone();
+    let decls_by_id = snapshot
+        .iter()
+        .filter_map(|decl| binding_layout_id_for_decl(decl).map(|layout_id| (layout_id, decl)))
+        .collect::<BTreeMap<_, _>>();
+    let mut builder = IrBindingLayoutBuilder {
+        decls_by_id,
+        built: BTreeMap::new(),
+        building: BTreeSet::new(),
+    };
+    let mut raw_layouts = BTreeMap::<usize, ArcanaCabiBindingLayout>::new();
+    let mut import_targets = BTreeMap::<usize, IrShackleImportTarget>::new();
+    let mut thunk_targets = BTreeMap::<usize, IrShackleThunkTarget>::new();
+
+    for (index, decl) in snapshot.iter().enumerate() {
+        if let Some(layout_id) = binding_layout_id_for_decl(decl) {
+            builder.build(&layout_id)?;
+            let layout = builder.built.get(&layout_id).cloned().ok_or_else(|| {
+                format!("missing typed raw layout `{layout_id}` after IR lowering")
+            })?;
+            raw_layouts.insert(index, layout);
+        }
+        match decl.kind.as_str() {
+            "import fn" | "import_fn" => {
+                if let Some(binding) = decl.binding.as_deref() {
+                    import_targets.insert(index, parse_shackle_import_target(binding)?);
+                }
+            }
+            "thunk" => {
+                if let Some(binding) = decl.binding.as_ref() {
+                    thunk_targets.insert(
+                        index,
+                        IrShackleThunkTarget {
+                            target: binding.clone(),
+                            abi: "system".to_string(),
+                        },
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for (index, decl) in package.shackle_decls.iter_mut().enumerate() {
+        decl.raw_layout = raw_layouts.get(&index).cloned();
+        decl.import_target = import_targets.get(&index).cloned();
+        decl.thunk_target = thunk_targets.get(&index).cloned();
+    }
+    Ok(())
+}
+
+struct ParsedShackleField {
+    name: String,
+    ty: ArcanaCabiBindingRawType,
+    scalar: Option<ArcanaCabiBindingScalarType>,
+    bit_width: Option<u16>,
+}
+
+struct IrBindingLayoutBuilder<'a> {
+    decls_by_id: BTreeMap<String, &'a IrShackleDecl>,
+    built: BTreeMap<String, ArcanaCabiBindingLayout>,
+    building: BTreeSet<String>,
+}
+
+impl IrBindingLayoutBuilder<'_> {
+    fn build(&mut self, layout_id: &str) -> Result<(), String> {
+        if self.built.contains_key(layout_id) {
+            return Ok(());
+        }
+        let Some(decl) = self.decls_by_id.get(layout_id).copied() else {
+            return Ok(());
+        };
+        if !self.building.insert(layout_id.to_string()) {
+            return Err(format!(
+                "recursive shackle raw layout cycle at `{layout_id}`"
+            ));
+        }
+        let layout = match decl.kind.as_str() {
+            "type" => self.build_type_layout(decl)?,
+            "struct" => self.build_struct_layout(decl)?,
+            "union" => self.build_union_layout(decl)?,
+            "callback" => self.build_callback_layout(decl)?,
+            "flags" => self.build_flags_layout(decl)?,
+            other => {
+                return Err(format!(
+                    "unsupported shackle raw layout declaration kind `{other}` for `{layout_id}`"
+                ));
+            }
+        };
+        self.building.remove(layout_id);
+        self.built.insert(layout_id.to_string(), layout);
+        Ok(())
+    }
+
+    fn build_type_layout(
+        &mut self,
+        decl: &IrShackleDecl,
+    ) -> Result<ArcanaCabiBindingLayout, String> {
+        let layout_id = binding_layout_id(&decl.module_id, &decl.name);
+        let binding = decl
+            .binding
+            .as_deref()
+            .ok_or_else(|| format!("shackle type `{layout_id}` is missing a raw binding target"))?;
+        if let Some((element_type, len)) =
+            parse_fixed_array_type_expr(binding, &decl.module_id, self)?
+        {
+            let (element_size, element_align) = self.raw_type_size_align(&element_type)?;
+            return Ok(ArcanaCabiBindingLayout {
+                layout_id,
+                size: element_size.saturating_mul(len),
+                align: element_align,
+                kind: ArcanaCabiBindingLayoutKind::Array { element_type, len },
+            });
+        }
+        let target = parse_shackle_raw_type(binding, &decl.module_id, self)?;
+        let vtable_layout_id = companion_vtable_layout_id(&decl.module_id, &decl.name);
+        if self.decls_by_id.contains_key(&vtable_layout_id)
+            && matches!(target, ArcanaCabiBindingRawType::Pointer { .. })
+        {
+            self.build(&vtable_layout_id)?;
+            let size = std::mem::size_of::<usize>();
+            return Ok(ArcanaCabiBindingLayout {
+                layout_id,
+                size,
+                align: size,
+                kind: ArcanaCabiBindingLayoutKind::Interface {
+                    iid: None,
+                    vtable_layout_id: Some(vtable_layout_id),
+                },
+            });
+        }
+        let (size, align) = self.raw_type_size_align(&target)?;
+        Ok(ArcanaCabiBindingLayout {
+            layout_id,
+            size,
+            align,
+            kind: ArcanaCabiBindingLayoutKind::Alias { target },
+        })
+    }
+
+    fn build_struct_layout(
+        &mut self,
+        decl: &IrShackleDecl,
+    ) -> Result<ArcanaCabiBindingLayout, String> {
+        let mut fields = Vec::new();
+        let mut offset = 0usize;
+        let mut max_align = 1usize;
+        let mut active_bitfield: Option<(ArcanaCabiBindingScalarType, usize, usize, usize)> = None;
+        for line in &decl.body_entries {
+            let parsed = parse_shackle_struct_field(line, &decl.module_id, self)?;
+            if let Some(bit_width) = parsed.bit_width {
+                let scalar = parsed.scalar.ok_or_else(|| {
+                    format!(
+                        "bitfield `{}` on `{}` must use a fixed-width integer base type",
+                        parsed.name, decl.name
+                    )
+                })?;
+                let storage_size = scalar.size_bytes();
+                let storage_align = scalar.align_bytes();
+                let storage_bits = storage_size * 8;
+                let (storage_offset, next_bit_offset, total_used_bits) =
+                    if let Some((active_scalar, current_offset, current_bit_offset, used_bits)) =
+                        active_bitfield
+                    {
+                        if active_scalar == scalar
+                            && current_bit_offset + usize::from(bit_width) <= storage_bits
+                        {
+                            (
+                                current_offset,
+                                current_bit_offset,
+                                used_bits + usize::from(bit_width),
+                            )
+                        } else {
+                            offset = align_up(offset, storage_align);
+                            let start = offset;
+                            offset += storage_size;
+                            (start, 0, usize::from(bit_width))
+                        }
+                    } else {
+                        offset = align_up(offset, storage_align);
+                        let start = offset;
+                        offset += storage_size;
+                        (start, 0, usize::from(bit_width))
+                    };
+                max_align = max_align.max(storage_align);
+                fields.push(ArcanaCabiBindingLayoutField {
+                    name: parsed.name,
+                    ty: parsed.ty,
+                    offset: storage_offset,
+                    bit_width: Some(bit_width),
+                    bit_offset: Some(
+                        u16::try_from(next_bit_offset)
+                            .map_err(|_| format!("bitfield offset overflow on `{}`", decl.name))?,
+                    ),
+                });
+                let next = next_bit_offset + usize::from(bit_width);
+                active_bitfield = Some((scalar, storage_offset, next, total_used_bits));
+                if total_used_bits >= storage_bits {
+                    active_bitfield = None;
+                }
+                continue;
+            }
+            active_bitfield = None;
+            let (field_size, field_align) = self.raw_type_size_align(&parsed.ty)?;
+            offset = align_up(offset, field_align);
+            fields.push(ArcanaCabiBindingLayoutField {
+                name: parsed.name,
+                ty: parsed.ty,
+                offset,
+                bit_width: None,
+                bit_offset: None,
+            });
+            offset += field_size;
+            max_align = max_align.max(field_align);
+        }
+        Ok(ArcanaCabiBindingLayout {
+            layout_id: binding_layout_id(&decl.module_id, &decl.name),
+            size: align_up(offset, max_align),
+            align: max_align,
+            kind: ArcanaCabiBindingLayoutKind::Struct { fields },
+        })
+    }
+
+    fn build_union_layout(
+        &mut self,
+        decl: &IrShackleDecl,
+    ) -> Result<ArcanaCabiBindingLayout, String> {
+        let mut fields = Vec::new();
+        let mut size = 0usize;
+        let mut align = 1usize;
+        for line in &decl.body_entries {
+            let parsed = parse_shackle_struct_field(line, &decl.module_id, self)?;
+            if parsed.bit_width.is_some() {
+                return Err(format!(
+                    "shackle union `{}` does not support bitfields in the raw binding substrate",
+                    decl.name
+                ));
+            }
+            let (field_size, field_align) = self.raw_type_size_align(&parsed.ty)?;
+            size = size.max(field_size);
+            align = align.max(field_align);
+            fields.push(ArcanaCabiBindingLayoutField {
+                name: parsed.name,
+                ty: parsed.ty,
+                offset: 0,
+                bit_width: None,
+                bit_offset: None,
+            });
+        }
+        Ok(ArcanaCabiBindingLayout {
+            layout_id: binding_layout_id(&decl.module_id, &decl.name),
+            size: align_up(size, align),
+            align,
+            kind: ArcanaCabiBindingLayoutKind::Union { fields },
+        })
+    }
+
+    fn build_callback_layout(
+        &mut self,
+        decl: &IrShackleDecl,
+    ) -> Result<ArcanaCabiBindingLayout, String> {
+        let params = decl
+            .params
+            .iter()
+            .map(|param| parse_shackle_ir_raw_type(&param.ty, &decl.module_id, self))
+            .collect::<Result<Vec<_>, _>>()?;
+        let return_type = decl
+            .return_type
+            .as_ref()
+            .map(|ty| parse_shackle_ir_raw_type(ty, &decl.module_id, self))
+            .transpose()?
+            .unwrap_or(ArcanaCabiBindingRawType::Void);
+        Ok(ArcanaCabiBindingLayout {
+            layout_id: binding_layout_id(&decl.module_id, &decl.name),
+            size: std::mem::size_of::<usize>(),
+            align: std::mem::size_of::<usize>(),
+            kind: ArcanaCabiBindingLayoutKind::Callback {
+                abi: "system".to_string(),
+                params,
+                return_type,
+            },
+        })
+    }
+
+    fn build_flags_layout(
+        &mut self,
+        decl: &IrShackleDecl,
+    ) -> Result<ArcanaCabiBindingLayout, String> {
+        let layout_id = binding_layout_id(&decl.module_id, &decl.name);
+        let binding = decl.binding.as_deref().ok_or_else(|| {
+            format!("shackle flags `{layout_id}` is missing a repr binding target")
+        })?;
+        let Some(repr) = ArcanaCabiBindingScalarType::parse(binding) else {
+            return Err(format!(
+                "shackle flags `{layout_id}` repr `{binding}` must be a scalar integer type"
+            ));
+        };
+        Ok(ArcanaCabiBindingLayout {
+            layout_id,
+            size: repr.size_bytes(),
+            align: repr.align_bytes(),
+            kind: ArcanaCabiBindingLayoutKind::Flags { repr },
+        })
+    }
+
+    fn raw_type_size_align(
+        &mut self,
+        ty: &ArcanaCabiBindingRawType,
+    ) -> Result<(usize, usize), String> {
+        match ty {
+            ArcanaCabiBindingRawType::Void => Ok((0, 1)),
+            ArcanaCabiBindingRawType::Scalar(scalar) => {
+                Ok((scalar.size_bytes(), scalar.align_bytes()))
+            }
+            ArcanaCabiBindingRawType::Pointer { .. }
+            | ArcanaCabiBindingRawType::FunctionPointer { .. } => {
+                let size = std::mem::size_of::<usize>();
+                Ok((size, size))
+            }
+            ArcanaCabiBindingRawType::Named(layout_id) => {
+                self.build(layout_id)?;
+                let layout = self.built.get(layout_id).ok_or_else(|| {
+                    format!("missing referenced raw binding layout `{layout_id}`")
+                })?;
+                Ok((layout.size, layout.align))
+            }
+        }
+    }
+}
+
+fn binding_layout_id_for_decl(decl: &IrShackleDecl) -> Option<String> {
+    match decl.kind.as_str() {
+        "type" | "struct" | "union" | "callback" => {
+            Some(binding_layout_id(&decl.module_id, &decl.name))
+        }
+        "flags" if decl.binding.is_some() => Some(binding_layout_id(&decl.module_id, &decl.name)),
+        _ => None,
+    }
+}
+
+fn binding_layout_id(module_id: &str, name: &str) -> String {
+    format!("{module_id}.{name}")
+}
+
+fn companion_vtable_layout_id(module_id: &str, name: &str) -> String {
+    binding_layout_id(module_id, &format!("{name}VTable"))
+}
+
+fn align_up(value: usize, align: usize) -> usize {
+    if align <= 1 {
+        value
+    } else {
+        (value + (align - 1)) & !(align - 1)
+    }
+}
+
+fn split_signature_params(text: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut square_depth = 0usize;
+    let mut paren_depth = 0usize;
+    for ch in text.chars() {
+        match ch {
+            '[' => {
+                square_depth += 1;
+                current.push(ch);
+            }
+            ']' => {
+                square_depth = square_depth.saturating_sub(1);
+                current.push(ch);
+            }
+            '(' => {
+                paren_depth += 1;
+                current.push(ch);
+            }
+            ')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+                current.push(ch);
+            }
+            ',' if square_depth == 0 && paren_depth == 0 => {
+                let trimmed = current.trim();
+                if !trimmed.is_empty() {
+                    parts.push(trimmed.to_string());
+                }
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    let trimmed = current.trim();
+    if !trimmed.is_empty() {
+        parts.push(trimmed.to_string());
+    }
+    parts
+}
+
+fn split_signature_param_section(text: &str) -> Option<(String, String)> {
+    let mut nested_paren_depth = 0usize;
+    for (index, ch) in text.char_indices() {
+        match ch {
+            '(' => nested_paren_depth += 1,
+            ')' => {
+                if nested_paren_depth == 0 {
+                    return Some((text[..index].to_string(), text[index + 1..].to_string()));
+                }
+                nested_paren_depth -= 1;
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn sanitize_name(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        "_".to_string()
+    } else if out.chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
+        format!("_{out}")
+    } else {
+        out
+    }
+}
+
+fn parse_shackle_import_target(binding: &str) -> Result<IrShackleImportTarget, String> {
+    let (library, symbol) = binding.split_once('.').ok_or_else(|| {
+        format!("shackle import binding `{binding}` must be `<library>.<symbol>`")
+    })?;
+    if library.trim().is_empty() || symbol.trim().is_empty() {
+        return Err(format!(
+            "shackle import binding `{binding}` must use non-empty library and symbol names"
+        ));
+    }
+    Ok(IrShackleImportTarget {
+        library: library.trim().to_string(),
+        symbol: symbol.trim().to_string(),
+        abi: "system".to_string(),
+    })
+}
+
+fn parse_shackle_struct_field(
+    line: &str,
+    module_id: &str,
+    builder: &mut IrBindingLayoutBuilder<'_>,
+) -> Result<ParsedShackleField, String> {
+    let trimmed = line.trim().trim_end_matches(',');
+    let (name, ty_text) = trimmed
+        .split_once(':')
+        .ok_or_else(|| format!("malformed shackle struct field `{trimmed}`"))?;
+    let name = sanitize_name(name.trim());
+    let ty_text = ty_text.trim();
+    if let Some((base_text, width_text)) = ty_text.rsplit_once(" bits ") {
+        let raw = parse_shackle_raw_type(base_text.trim(), module_id, builder)?;
+        let bit_width = width_text
+            .trim()
+            .parse::<u16>()
+            .map_err(|err| format!("invalid shackle bitfield width `{width_text}`: {err}"))?;
+        return Ok(ParsedShackleField {
+            name,
+            scalar: raw_scalar_from_raw_type(&raw),
+            ty: raw,
+            bit_width: Some(bit_width),
+        });
+    }
+    let raw = parse_shackle_raw_type(ty_text, module_id, builder)?;
+    Ok(ParsedShackleField {
+        name,
+        scalar: raw_scalar_from_raw_type(&raw),
+        ty: raw,
+        bit_width: None,
+    })
+}
+
+fn raw_scalar_from_raw_type(ty: &ArcanaCabiBindingRawType) -> Option<ArcanaCabiBindingScalarType> {
+    match ty {
+        ArcanaCabiBindingRawType::Scalar(scalar) => Some(*scalar),
+        _ => None,
+    }
+}
+
+fn parse_fixed_array_type_expr(
+    text: &str,
+    module_id: &str,
+    builder: &mut IrBindingLayoutBuilder<'_>,
+) -> Result<Option<(ArcanaCabiBindingRawType, usize)>, String> {
+    let trimmed = text.trim();
+    if !trimmed.starts_with('[') || !trimmed.ends_with(']') {
+        return Ok(None);
+    }
+    let inner = &trimmed[1..trimmed.len() - 1];
+    let Some((element_text, len_text)) = inner.rsplit_once(';') else {
+        return Ok(None);
+    };
+    let len = len_text
+        .trim()
+        .parse::<usize>()
+        .map_err(|err| format!("invalid fixed array length `{}`: {err}", len_text.trim()))?;
+    let element_type = parse_shackle_raw_type(element_text.trim(), module_id, builder)?;
+    Ok(Some((element_type, len)))
+}
+
+fn parse_shackle_ir_raw_type(
+    ty: &IrRoutineType,
+    module_id: &str,
+    builder: &mut IrBindingLayoutBuilder<'_>,
+) -> Result<ArcanaCabiBindingRawType, String> {
+    match &ty.kind {
+        IrRoutineTypeKind::Path(path) => {
+            let rendered = ty.render();
+            if let Some(scalar) =
+                ArcanaCabiBindingScalarType::parse(path.root_name().unwrap_or(&rendered))
+            {
+                return Ok(ArcanaCabiBindingRawType::Scalar(scalar));
+            }
+            Ok(ArcanaCabiBindingRawType::Named(
+                resolve_shackle_named_layout_id(module_id, &rendered, builder),
+            ))
+        }
+        IrRoutineTypeKind::Apply { .. }
+        | IrRoutineTypeKind::Tuple(_)
+        | IrRoutineTypeKind::Ref { .. }
+        | IrRoutineTypeKind::Projection(_) => Err(format!(
+            "unsupported raw shackle signature type `{}`",
+            ty.render()
+        )),
+    }
+}
+
+fn parse_shackle_raw_type(
+    text: &str,
+    module_id: &str,
+    builder: &mut IrBindingLayoutBuilder<'_>,
+) -> Result<ArcanaCabiBindingRawType, String> {
+    let trimmed = text.trim();
+    if trimmed == "c_void" || trimmed == "()" {
+        return Ok(ArcanaCabiBindingRawType::Void);
+    }
+    if let Some(scalar) = ArcanaCabiBindingScalarType::parse(trimmed) {
+        return Ok(ArcanaCabiBindingRawType::Scalar(scalar));
+    }
+    if let Some(rest) = trimmed.strip_prefix("*mut ") {
+        return Ok(ArcanaCabiBindingRawType::Pointer {
+            mutable: true,
+            inner: Box::new(parse_shackle_raw_type(rest.trim(), module_id, builder)?),
+        });
+    }
+    if let Some(rest) = trimmed.strip_prefix("*const ") {
+        return Ok(ArcanaCabiBindingRawType::Pointer {
+            mutable: false,
+            inner: Box::new(parse_shackle_raw_type(rest.trim(), module_id, builder)?),
+        });
+    }
+    if let Some(function_pointer) = parse_shackle_function_pointer(trimmed, module_id, builder)? {
+        return Ok(function_pointer);
+    }
+    Ok(ArcanaCabiBindingRawType::Named(
+        resolve_shackle_named_layout_id(module_id, trimmed, builder),
+    ))
+}
+
+fn parse_shackle_function_pointer(
+    text: &str,
+    module_id: &str,
+    builder: &mut IrBindingLayoutBuilder<'_>,
+) -> Result<Option<ArcanaCabiBindingRawType>, String> {
+    let (nullable, inner) = if text.starts_with("Option<") && text.ends_with('>') {
+        (true, &text["Option<".len()..text.len() - 1])
+    } else {
+        (false, text)
+    };
+    let inner = inner.trim();
+    let inner = inner.strip_prefix("unsafe ").unwrap_or(inner).trim();
+    let Some(after_extern) = inner.strip_prefix("extern ") else {
+        return Ok(None);
+    };
+    let Some((abi_text, after_abi)) = after_extern.split_once(" fn(") else {
+        return Ok(None);
+    };
+    let Some((params_text, return_text)) = split_signature_param_section(after_abi) else {
+        return Err(format!("malformed shackle function pointer `{text}`"));
+    };
+    let params = split_signature_params(&params_text)
+        .into_iter()
+        .map(|param_text| parse_shackle_raw_type(&param_text, module_id, builder))
+        .collect::<Result<Vec<_>, _>>()?;
+    let return_type = if return_text.trim().is_empty() {
+        ArcanaCabiBindingRawType::Void
+    } else {
+        let return_text = return_text
+            .trim()
+            .strip_prefix("->")
+            .map(str::trim)
+            .unwrap_or("");
+        if return_text.is_empty() {
+            ArcanaCabiBindingRawType::Void
+        } else {
+            parse_shackle_raw_type(return_text, module_id, builder)?
+        }
+    };
+    Ok(Some(ArcanaCabiBindingRawType::FunctionPointer {
+        abi: abi_text.trim().trim_matches('"').to_string(),
+        nullable,
+        params,
+        return_type: Box::new(return_type),
+    }))
+}
+
+fn resolve_shackle_named_layout_id(
+    module_id: &str,
+    name: &str,
+    builder: &IrBindingLayoutBuilder<'_>,
+) -> String {
+    if name.contains('.') {
+        return name.to_string();
+    }
+    let local = binding_layout_id(module_id, name);
+    if builder.decls_by_id.contains_key(&local) {
+        return local;
+    }
+    name.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         ExecBindLineKind, ExecExpr, ExecStmt, IrModule, lower_hir, lower_package,
         lower_workspace_package, lower_workspace_package_with_resolution,
+    };
+    use arcana_cabi::{
+        ArcanaCabiBindingLayoutKind, ArcanaCabiBindingRawType, ArcanaCabiBindingScalarType,
     };
     use arcana_hir::{
         HirModule, build_package_layout, build_package_summary, build_workspace_package,
@@ -7768,5 +8466,110 @@ mod tests {
                 .render(),
             "app.raw.WNDPROC"
         );
+        let callback_layout = ir.shackle_decls[0]
+            .raw_layout
+            .as_ref()
+            .expect("callback should lower typed raw metadata");
+        assert!(matches!(
+            callback_layout.kind,
+            ArcanaCabiBindingLayoutKind::Callback { .. }
+        ));
+    }
+
+    #[test]
+    fn lower_workspace_package_with_resolution_lowers_typed_shackle_raw_metadata() {
+        let app_summary =
+            build_package_summary(
+                "app",
+                vec![lower_module_text(
+                "app.raw",
+                concat!(
+                    "export shackle struct Rect:\n",
+                    "    left: I32\n",
+                    "    top: I32\n",
+                    "    flags: U32 bits 3\n",
+                    "export shackle struct IUnknownVTable:\n",
+                    "    query_interface: unsafe extern \"system\" fn(*const c_void) -> I32\n",
+                    "export shackle type IUnknown = *mut c_void\n",
+                    "export shackle import fn CoInitializeEx() -> I32 = ole32.CoInitializeEx\n",
+                ),
+            )
+            .expect("raw module should lower")],
+            );
+        let app_layout = build_package_layout(
+            &app_summary,
+            BTreeMap::from([(
+                "app.raw".to_string(),
+                Path::new("C:/repo/app/src/raw.arc").to_path_buf(),
+            )]),
+            BTreeMap::new(),
+        )
+        .expect("app layout should build");
+        let app_workspace = build_workspace_package(
+            "app".to_string(),
+            Path::new("C:/repo/app").to_path_buf(),
+            BTreeSet::new(),
+            app_summary,
+            app_layout,
+        )
+        .expect("app workspace should build");
+
+        let workspace =
+            build_workspace_summary(vec![app_workspace]).expect("workspace should build");
+        let resolved = resolve_workspace(&workspace).expect("workspace should resolve");
+        let package = workspace.package("app").expect("app package should exist");
+
+        let ir = lower_workspace_package_with_resolution(&workspace, &resolved, package)
+            .expect("workspace lowering should succeed");
+        let rect = ir
+            .shackle_decls
+            .iter()
+            .find(|decl| decl.name == "Rect")
+            .expect("Rect layout should lower");
+        let rect_layout = rect
+            .raw_layout
+            .as_ref()
+            .expect("Rect should carry typed raw layout metadata");
+        let ArcanaCabiBindingLayoutKind::Struct { fields } = &rect_layout.kind else {
+            panic!("Rect should lower as a struct layout");
+        };
+        assert_eq!(fields.len(), 3);
+        assert_eq!(fields[2].name, "flags");
+        assert_eq!(fields[2].bit_width, Some(3));
+        assert_eq!(fields[2].bit_offset, Some(0));
+        assert_eq!(
+            fields[2].ty,
+            ArcanaCabiBindingRawType::Scalar(ArcanaCabiBindingScalarType::U32)
+        );
+
+        let interface = ir
+            .shackle_decls
+            .iter()
+            .find(|decl| decl.name == "IUnknown")
+            .expect("IUnknown layout should lower");
+        let interface_layout = interface
+            .raw_layout
+            .as_ref()
+            .expect("IUnknown should carry typed raw layout metadata");
+        let ArcanaCabiBindingLayoutKind::Interface {
+            vtable_layout_id, ..
+        } = &interface_layout.kind
+        else {
+            panic!("IUnknown should lower as an interface layout");
+        };
+        assert_eq!(vtable_layout_id.as_deref(), Some("app.raw.IUnknownVTable"));
+
+        let import = ir
+            .shackle_decls
+            .iter()
+            .find(|decl| decl.name == "CoInitializeEx")
+            .expect("import should lower");
+        let target = import
+            .import_target
+            .as_ref()
+            .expect("import should carry typed import target metadata");
+        assert_eq!(target.library, "ole32");
+        assert_eq!(target.symbol, "CoInitializeEx");
+        assert_eq!(target.abi, "system");
     }
 }

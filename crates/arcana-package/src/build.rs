@@ -1766,6 +1766,7 @@ mod tests {
                 routines: Vec::new(),
                 native_callbacks: Vec::new(),
                 shackle_decls: Vec::new(),
+                binding_layouts: Vec::new(),
                 owners: Vec::new(),
                 modules: Vec::new(),
             },

@@ -7,7 +7,10 @@ use arcana_cabi::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::native_abi::{NativeAbiType, NativeExport};
+use crate::native_abi::{
+    NativeAbiType, NativeBindingCallback, NativeBindingImport, NativeExport,
+    collect_native_binding_callbacks, collect_native_binding_imports,
+};
 use crate::native_plan::{NativeLaunchPlan, NativePackagePlan};
 
 pub const NATIVE_BUNDLE_MANIFEST_FORMAT: &str = "arcana-native-manifest-v3";
@@ -30,6 +33,8 @@ pub struct NativeBundleManifest {
     pub contract_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub contract_version: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub binding: Option<NativeBundleBindingManifest>,
     pub launch: NativeBundleLaunchManifest,
 }
 
@@ -75,8 +80,41 @@ pub struct NativeBundleParamManifest {
     pub write_back_type: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeBundleBindingManifest {
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub imports: Vec<NativeBundleBindingImportManifest>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub callbacks: Vec<NativeBundleBindingCallbackManifest>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub layouts: Vec<NativeBundleBindingLayoutManifest>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeBundleBindingImportManifest {
+    pub name: String,
+    pub symbol_name: String,
+    pub return_type: String,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub params: Vec<NativeBundleParamManifest>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeBundleBindingCallbackManifest {
+    pub name: String,
+    pub return_type: String,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub params: Vec<NativeBundleParamManifest>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeBundleBindingLayoutManifest {
+    pub layout_id: String,
+    pub detail_json: String,
+}
+
 pub fn render_native_bundle_manifest(plan: &NativePackagePlan) -> Result<String, String> {
-    toml::to_string(&native_bundle_manifest_for_plan(plan))
+    toml::to_string(&native_bundle_manifest_for_plan(plan)?)
         .map_err(|e| format!("failed to render native bundle manifest: {e}"))
 }
 
@@ -128,8 +166,10 @@ pub fn render_windows_dll_definition_file(plan: &NativePackagePlan) -> Result<St
     Ok(out)
 }
 
-fn native_bundle_manifest_for_plan(plan: &NativePackagePlan) -> NativeBundleManifest {
-    NativeBundleManifest {
+fn native_bundle_manifest_for_plan(
+    plan: &NativePackagePlan,
+) -> Result<NativeBundleManifest, String> {
+    Ok(NativeBundleManifest {
         format: NATIVE_BUNDLE_MANIFEST_FORMAT.to_string(),
         target: target_key(plan).to_string(),
         target_format: plan.target.format().to_string(),
@@ -153,8 +193,52 @@ fn native_bundle_manifest_for_plan(plan: &NativePackagePlan) -> NativeBundleMani
             .native_product
             .as_ref()
             .map(|product| product.contract_version),
+        binding: native_binding_manifest_for_plan(plan)?,
         launch: native_launch_manifest_for_plan(plan),
+    })
+}
+
+fn native_binding_manifest_for_plan(
+    plan: &NativePackagePlan,
+) -> Result<Option<NativeBundleBindingManifest>, String> {
+    let is_binding_product = plan
+        .native_product
+        .as_ref()
+        .is_some_and(|product| product.role.as_str() == "binding");
+    if !is_binding_product {
+        return Ok(None);
     }
+    let imports = collect_native_binding_imports(&plan.artifact)?
+        .into_iter()
+        .map(native_binding_import_manifest)
+        .collect::<Vec<_>>();
+    let callbacks = collect_native_binding_callbacks(&plan.artifact)?
+        .into_iter()
+        .map(native_binding_callback_manifest)
+        .collect::<Vec<_>>();
+    let layouts = plan
+        .artifact
+        .binding_layouts
+        .iter()
+        .map(|layout| {
+            serde_json::to_string(layout)
+                .map(|detail_json| NativeBundleBindingLayoutManifest {
+                    layout_id: layout.layout_id.clone(),
+                    detail_json,
+                })
+                .map_err(|e| {
+                    format!(
+                        "failed to serialize binding layout `{}` into native manifest: {e}",
+                        layout.layout_id
+                    )
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Some(NativeBundleBindingManifest {
+        imports,
+        callbacks,
+        layouts,
+    }))
 }
 
 fn native_launch_manifest_for_plan(plan: &NativePackagePlan) -> NativeBundleLaunchManifest {
@@ -204,6 +288,47 @@ fn native_export_manifest(export: &NativeExport) -> NativeBundleExportManifest {
                 write_back_type: param.write_back_type.as_ref().map(native_type_name),
             })
             .collect(),
+    }
+}
+
+fn native_binding_import_manifest(
+    import: NativeBindingImport,
+) -> NativeBundleBindingImportManifest {
+    NativeBundleBindingImportManifest {
+        name: import.name,
+        symbol_name: import.symbol_name,
+        return_type: import.return_type.render(),
+        params: import
+            .params
+            .iter()
+            .map(native_binding_param_manifest)
+            .collect(),
+    }
+}
+
+fn native_binding_callback_manifest(
+    callback: NativeBindingCallback,
+) -> NativeBundleBindingCallbackManifest {
+    NativeBundleBindingCallbackManifest {
+        name: callback.name,
+        return_type: callback.return_type.render(),
+        params: callback
+            .params
+            .iter()
+            .map(native_binding_param_manifest)
+            .collect(),
+    }
+}
+
+fn native_binding_param_manifest(
+    param: &arcana_cabi::ArcanaCabiBindingParam,
+) -> NativeBundleParamManifest {
+    NativeBundleParamManifest {
+        name: param.name.clone(),
+        source_mode: param.source_mode.as_str().to_string(),
+        pass_mode: param.pass_mode.as_str().to_string(),
+        input_type: param.input_type.render(),
+        write_back_type: param.write_back_type.as_ref().map(|ty| ty.render()),
     }
 }
 

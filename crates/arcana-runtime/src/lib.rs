@@ -15,10 +15,11 @@ use arcana_aot::{
     AotOwnerArtifact, AotPackageArtifact, parse_package_artifact, validate_package_artifact,
 };
 use arcana_cabi::{
-    ArcanaBytesView, ArcanaCabiBindingPayloadV1, ArcanaCabiBindingSignature,
-    ArcanaCabiBindingValueTag, ArcanaCabiBindingValueV1, ArcanaCabiExportParam,
-    ArcanaCabiOwnedBytesFreeFn, ArcanaCabiOwnedStrFreeFn, ArcanaCabiParamSourceMode,
-    ArcanaCabiType, ArcanaStrView, binding_write_back_slots, clone_owned_binding_bytes,
+    ArcanaBytesView, ArcanaCabiBindingLayout, ArcanaCabiBindingLayoutKind, ArcanaCabiBindingParam,
+    ArcanaCabiBindingPayloadV1, ArcanaCabiBindingRawType, ArcanaCabiBindingScalarType,
+    ArcanaCabiBindingSignature, ArcanaCabiBindingType, ArcanaCabiBindingValueTag,
+    ArcanaCabiBindingValueV1, ArcanaCabiOwnedBytesFreeFn, ArcanaCabiOwnedStrFreeFn,
+    ArcanaCabiParamSourceMode, ArcanaStrView, binding_write_back_slots, clone_owned_binding_bytes,
     clone_owned_binding_str, into_owned_bytes, into_owned_str, release_binding_output_value,
     validate_binding_transport_type,
 };
@@ -174,6 +175,8 @@ pub struct RuntimePackagePlan {
     pub native_callbacks: Vec<RuntimeNativeCallbackPlan>,
     #[serde(default)]
     pub shackle_decls: Vec<String>,
+    #[serde(default)]
+    pub binding_layouts: Vec<ArcanaCabiBindingLayout>,
     pub owners: Vec<RuntimeOwnerPlan>,
 }
 
@@ -5536,6 +5539,7 @@ pub fn plan_from_artifact(artifact: &AotPackageArtifact) -> Result<RuntimePackag
             .iter()
             .map(|decl| decl.surface_text.clone())
             .collect(),
+        binding_layouts: artifact.binding_layouts.clone(),
         owners: artifact.owners.iter().map(lower_owner).collect(),
     };
     validate_runtime_cleanup_footer_handlers(&plan)?;
@@ -11490,11 +11494,11 @@ fn runtime_binding_callback_specs_for_package(
 
 fn runtime_binding_param_metadata(
     param: &RuntimeParamPlan,
-) -> Result<ArcanaCabiExportParam, String> {
+) -> Result<ArcanaCabiBindingParam, String> {
     let source_mode = ArcanaCabiParamSourceMode::from_param_mode_text(param.mode.as_deref())?;
-    let input_type = ArcanaCabiType::parse(&param.ty.render())?;
+    let input_type = ArcanaCabiBindingType::parse(&param.ty.render())?;
     validate_binding_transport_type(&input_type)?;
-    Ok(ArcanaCabiExportParam::binding(
+    Ok(ArcanaCabiBindingParam::binding(
         param.name.clone(),
         source_mode,
         input_type,
@@ -11503,7 +11507,7 @@ fn runtime_binding_param_metadata(
 
 fn runtime_binding_params_metadata(
     params: &[RuntimeParamPlan],
-) -> Result<Vec<ArcanaCabiExportParam>, String> {
+) -> Result<Vec<ArcanaCabiBindingParam>, String> {
     params
         .iter()
         .map(runtime_binding_param_metadata)
@@ -11512,8 +11516,8 @@ fn runtime_binding_params_metadata(
 
 fn runtime_binding_return_type(
     return_type: Option<&IrRoutineType>,
-) -> Result<ArcanaCabiType, String> {
-    let ty = ArcanaCabiType::parse(
+) -> Result<ArcanaCabiBindingType, String> {
+    let ty = ArcanaCabiBindingType::parse(
         &return_type
             .map(IrRoutineType::render)
             .unwrap_or_else(|| "Unit".to_string()),
@@ -11661,7 +11665,12 @@ fn execute_runtime_binding_callback(
         .iter()
         .zip(args.iter())
         .map(|(param, value)| {
-            runtime_value_from_binding_input(&callback.package_id, &param.ty.render(), value)
+            runtime_value_from_binding_input(
+                &plan.binding_layouts,
+                &callback.package_id,
+                &param.ty.render(),
+                value,
+            )
         })
         .collect::<Result<Vec<_>, _>>()?;
     let mut state = RuntimeExecutionState::default();
@@ -11695,8 +11704,10 @@ fn execute_runtime_binding_callback(
             )),
         }));
     }
-    let write_backs = runtime_binding_callback_write_backs(callback, &outcome.final_args)?;
+    let write_backs =
+        runtime_binding_callback_write_backs(&plan.binding_layouts, callback, &outcome.final_args)?;
     let result = runtime_binding_output_from_runtime_value(
+        &plan.binding_layouts,
         &callback.package_id,
         callback
             .return_type
@@ -11731,6 +11742,7 @@ fn execute_runtime_native_binding_import(
         .zip(args.iter())
         .map(|(param, value)| {
             runtime_binding_input_from_runtime_value(
+                &plan.binding_layouts,
                 &routine.package_id,
                 &param.ty.render(),
                 value,
@@ -11755,11 +11767,13 @@ fn execute_runtime_native_binding_import(
                 &callback_specs,
                 &expected_imports,
                 &expected_callbacks,
+                &plan.binding_layouts,
                 &cabi_args,
             )
         })
     })?;
     let final_args = runtime_final_args_from_binding_import(
+        &plan.binding_layouts,
         &routine.package_id,
         &routine.params,
         args,
@@ -11773,6 +11787,7 @@ fn execute_runtime_native_binding_import(
         );
     })?;
     let value = runtime_value_from_binding_cabi_output(
+        &plan.binding_layouts,
         &routine.package_id,
         routine
             .return_type
@@ -11793,19 +11808,21 @@ fn execute_runtime_native_binding_import(
 }
 
 fn runtime_binding_input_from_runtime_value(
+    layouts: &[ArcanaCabiBindingLayout],
     package_id: &str,
     expected_type: &str,
     value: &RuntimeValue,
     storage: &mut RuntimeBindingArgStorage,
 ) -> Result<ArcanaCabiBindingValueV1, String> {
-    match (expected_type, value) {
-        ("Int", RuntimeValue::Int(value)) => Ok(ArcanaCabiBindingValueV1 {
+    let binding_type = ArcanaCabiBindingType::parse(expected_type)?;
+    match (&binding_type, value) {
+        (ArcanaCabiBindingType::Int, RuntimeValue::Int(value)) => Ok(ArcanaCabiBindingValueV1 {
             tag: ArcanaCabiBindingValueTag::Int as u32,
             reserved0: 0,
             reserved1: 0,
             payload: ArcanaCabiBindingPayloadV1 { int_value: *value },
         }),
-        ("Bool", RuntimeValue::Bool(value)) => Ok(ArcanaCabiBindingValueV1 {
+        (ArcanaCabiBindingType::Bool, RuntimeValue::Bool(value)) => Ok(ArcanaCabiBindingValueV1 {
             tag: ArcanaCabiBindingValueTag::Bool as u32,
             reserved0: 0,
             reserved1: 0,
@@ -11813,7 +11830,7 @@ fn runtime_binding_input_from_runtime_value(
                 bool_value: if *value { 1 } else { 0 },
             },
         }),
-        ("Str", RuntimeValue::Str(value)) => {
+        (ArcanaCabiBindingType::Str, RuntimeValue::Str(value)) => {
             storage.strings.push(value.clone());
             let stored = storage
                 .strings
@@ -11831,21 +11848,8 @@ fn runtime_binding_input_from_runtime_value(
                 },
             })
         }
-        ("Array[Int]", RuntimeValue::Array(values)) => {
-            let bytes = values
-                .iter()
-                .enumerate()
-                .map(|(index, value)| match value {
-                    RuntimeValue::Int(value) => u8::try_from(*value).map_err(|_| {
-                        format!(
-                            "binding byte argument index `{index}` is out of range 0..255: `{value}`"
-                        )
-                    }),
-                    other => Err(format!(
-                        "binding bytes argument expected Array[Int], found `{other:?}` at index `{index}`"
-                    )),
-                })
-                .collect::<Result<Vec<_>, _>>()?;
+        (ArcanaCabiBindingType::Bytes, RuntimeValue::Array(values)) => {
+            let bytes = runtime_binding_bytes_from_runtime_array(values, "binding byte argument")?;
             storage.bytes.push(bytes);
             let stored = storage
                 .bytes
@@ -11863,7 +11867,28 @@ fn runtime_binding_input_from_runtime_value(
                 },
             })
         }
-        ("Unit", RuntimeValue::Unit) => Ok(ArcanaCabiBindingValueV1::default()),
+        (ArcanaCabiBindingType::Unit, RuntimeValue::Unit) => {
+            Ok(ArcanaCabiBindingValueV1::default())
+        }
+        (ArcanaCabiBindingType::Named(layout_id), value) => {
+            let bytes = runtime_binding_encode_layout_value(layouts, layout_id, value)?;
+            storage.bytes.push(bytes);
+            let stored = storage
+                .bytes
+                .last()
+                .ok_or_else(|| "binding arg storage lost layout bytes".to_string())?;
+            Ok(ArcanaCabiBindingValueV1 {
+                tag: ArcanaCabiBindingValueTag::Layout as u32,
+                reserved0: 0,
+                reserved1: 0,
+                payload: ArcanaCabiBindingPayloadV1 {
+                    bytes_value: ArcanaBytesView {
+                        ptr: stored.as_ptr(),
+                        len: stored.len(),
+                    },
+                },
+            })
+        }
         (_, RuntimeValue::Opaque(RuntimeOpaqueValue::Binding(binding)))
             if binding.package_id == package_id && binding.type_name == expected_type =>
         {
@@ -11876,6 +11901,9 @@ fn runtime_binding_input_from_runtime_value(
                 },
             })
         }
+        (ty, value) if ty.clone().scalar().is_some() => {
+            runtime_binding_scalar_input_value(ty, value, expected_type)
+        }
         _ => Err(format!(
             "native binding argument expected `{expected_type}`, got `{}`",
             runtime_value_type_root(value).unwrap_or_else(|| format!("{value:?}"))
@@ -11884,29 +11912,36 @@ fn runtime_binding_input_from_runtime_value(
 }
 
 fn runtime_value_from_binding_input(
+    layouts: &[ArcanaCabiBindingLayout],
     package_id: &str,
     expected_type: &str,
     value: &ArcanaCabiBindingValueV1,
 ) -> Result<RuntimeValue, String> {
-    match (expected_type, value.tag()?) {
-        ("Int", ArcanaCabiBindingValueTag::Int) => {
+    let binding_type = ArcanaCabiBindingType::parse(expected_type)?;
+    match (&binding_type, value.tag()?) {
+        (ArcanaCabiBindingType::Int, ArcanaCabiBindingValueTag::Int) => {
             Ok(RuntimeValue::Int(unsafe { value.payload.int_value }))
         }
-        ("Bool", ArcanaCabiBindingValueTag::Bool) => {
+        (ArcanaCabiBindingType::Bool, ArcanaCabiBindingValueTag::Bool) => {
             Ok(RuntimeValue::Bool(unsafe { value.payload.bool_value != 0 }))
         }
-        ("Str", ArcanaCabiBindingValueTag::Str) => {
+        (ArcanaCabiBindingType::Str, ArcanaCabiBindingValueTag::Str) => {
             let view = unsafe { value.payload.str_value };
-            let bytes = unsafe { std::slice::from_raw_parts(view.ptr, view.len) };
+            let bytes = runtime_binding_input_bytes_view(
+                view.ptr.cast(),
+                view.len,
+                "native binding string arg",
+            )?;
             Ok(RuntimeValue::Str(
                 std::str::from_utf8(bytes)
                     .map_err(|err| format!("native binding string arg is not utf-8: {err}"))?
                     .to_string(),
             ))
         }
-        ("Array[Int]", ArcanaCabiBindingValueTag::Bytes) => {
+        (ArcanaCabiBindingType::Bytes, ArcanaCabiBindingValueTag::Bytes) => {
             let view = unsafe { value.payload.bytes_value };
-            let bytes = unsafe { std::slice::from_raw_parts(view.ptr, view.len) };
+            let bytes =
+                runtime_binding_input_bytes_view(view.ptr, view.len, "native binding bytes arg")?;
             Ok(RuntimeValue::Array(
                 bytes
                     .iter()
@@ -11914,14 +11949,23 @@ fn runtime_value_from_binding_input(
                     .collect(),
             ))
         }
-        ("Unit", ArcanaCabiBindingValueTag::Unit) => Ok(RuntimeValue::Unit),
-        (_, ArcanaCabiBindingValueTag::Opaque) => Ok(RuntimeValue::Opaque(
-            RuntimeOpaqueValue::Binding(RuntimeBindingOpaqueValue {
+        (ArcanaCabiBindingType::Unit, ArcanaCabiBindingValueTag::Unit) => Ok(RuntimeValue::Unit),
+        (ArcanaCabiBindingType::Named(layout_id), ArcanaCabiBindingValueTag::Layout) => {
+            let view = unsafe { value.payload.bytes_value };
+            let bytes =
+                runtime_binding_input_bytes_view(view.ptr, view.len, "native binding layout arg")?;
+            runtime_binding_decode_layout_value(layouts, layout_id, bytes)
+        }
+        (ArcanaCabiBindingType::Named(_), ArcanaCabiBindingValueTag::Opaque) => Ok(
+            RuntimeValue::Opaque(RuntimeOpaqueValue::Binding(RuntimeBindingOpaqueValue {
                 package_id: leak_runtime_binding_text(package_id),
                 type_name: leak_runtime_binding_text(expected_type),
                 handle: unsafe { value.payload.opaque_value },
-            }),
-        )),
+            })),
+        ),
+        (ty, actual) if ty.clone().scalar().is_some() => {
+            runtime_binding_runtime_value_from_scalar_tag(ty, actual, value)
+        }
         (_, actual) => Err(format!(
             "native binding callback expected `{expected_type}`, got tag `{actual:?}`"
         )),
@@ -11929,6 +11973,7 @@ fn runtime_value_from_binding_input(
 }
 
 fn runtime_value_from_binding_cabi_output(
+    layouts: &[ArcanaCabiBindingLayout],
     package_id: &str,
     expected_type: &str,
     value: &ArcanaCabiBindingValueV1,
@@ -11937,19 +11982,20 @@ fn runtime_value_from_binding_cabi_output(
     label: &str,
 ) -> Result<RuntimeValue, String> {
     let actual = value.tag()?;
-    match (expected_type, actual) {
-        ("Int", ArcanaCabiBindingValueTag::Int) => {
+    let binding_type = ArcanaCabiBindingType::parse(expected_type)?;
+    match (&binding_type, actual) {
+        (ArcanaCabiBindingType::Int, ArcanaCabiBindingValueTag::Int) => {
             Ok(RuntimeValue::Int(unsafe { value.payload.int_value }))
         }
-        ("Bool", ArcanaCabiBindingValueTag::Bool) => {
+        (ArcanaCabiBindingType::Bool, ArcanaCabiBindingValueTag::Bool) => {
             Ok(RuntimeValue::Bool(unsafe { value.payload.bool_value != 0 }))
         }
-        ("Str", ArcanaCabiBindingValueTag::Str) => {
+        (ArcanaCabiBindingType::Str, ArcanaCabiBindingValueTag::Str) => {
             let owned = unsafe { value.payload.owned_str_value };
             let text = clone_owned_binding_str(owned, owned_str_free)?;
             Ok(RuntimeValue::Str(text))
         }
-        ("Array[Int]", ArcanaCabiBindingValueTag::Bytes) => {
+        (ArcanaCabiBindingType::Bytes, ArcanaCabiBindingValueTag::Bytes) => {
             let owned = unsafe { value.payload.owned_bytes_value };
             let bytes = clone_owned_binding_bytes(owned, owned_bytes_free)?;
             Ok(RuntimeValue::Array(
@@ -11959,22 +12005,30 @@ fn runtime_value_from_binding_cabi_output(
                     .collect(),
             ))
         }
-        ("Unit", ArcanaCabiBindingValueTag::Unit) => Ok(RuntimeValue::Unit),
-        (_, ArcanaCabiBindingValueTag::Opaque) => Ok(RuntimeValue::Opaque(
-            RuntimeOpaqueValue::Binding(RuntimeBindingOpaqueValue {
+        (ArcanaCabiBindingType::Unit, ArcanaCabiBindingValueTag::Unit) => Ok(RuntimeValue::Unit),
+        (ArcanaCabiBindingType::Named(layout_id), ArcanaCabiBindingValueTag::Layout) => {
+            let owned = unsafe { value.payload.owned_bytes_value };
+            let bytes = clone_owned_binding_bytes(owned, owned_bytes_free)?;
+            runtime_binding_decode_layout_value(layouts, layout_id, &bytes)
+        }
+        (ArcanaCabiBindingType::Named(_), ArcanaCabiBindingValueTag::Opaque) => Ok(
+            RuntimeValue::Opaque(RuntimeOpaqueValue::Binding(RuntimeBindingOpaqueValue {
                 package_id: leak_runtime_binding_text(package_id),
                 type_name: leak_runtime_binding_text(expected_type),
                 handle: unsafe { value.payload.opaque_value },
-            }),
-        )),
+            })),
+        ),
+        (ty, actual) if ty.clone().scalar().is_some() => {
+            runtime_binding_runtime_value_from_scalar_tag(ty, actual, value)
+        }
         (_, ArcanaCabiBindingValueTag::Str) => {
             let _ = release_binding_output_value(*value, owned_bytes_free, owned_str_free);
             Err(format!("{label} expected `{expected_type}`, got tag `Str`"))
         }
-        (_, ArcanaCabiBindingValueTag::Bytes) => {
+        (_, ArcanaCabiBindingValueTag::Bytes | ArcanaCabiBindingValueTag::Layout) => {
             let _ = release_binding_output_value(*value, owned_bytes_free, owned_str_free);
             Err(format!(
-                "{label} expected `{expected_type}`, got tag `Bytes`"
+                "{label} expected `{expected_type}`, got tag `{actual:?}`"
             ))
         }
         (_, actual) => Err(format!(
@@ -11984,6 +12038,7 @@ fn runtime_value_from_binding_cabi_output(
 }
 
 fn runtime_binding_callback_write_backs(
+    layouts: &[ArcanaCabiBindingLayout],
     callback: &RuntimeNativeCallbackPlan,
     final_args: &[RuntimeValue],
 ) -> Result<Vec<ArcanaCabiBindingValueV1>, String> {
@@ -12002,6 +12057,7 @@ fn runtime_binding_callback_write_backs(
             continue;
         }
         match runtime_binding_output_from_runtime_value(
+            layouts,
             &callback.package_id,
             &param.ty.render(),
             value.clone(),
@@ -12017,6 +12073,7 @@ fn runtime_binding_callback_write_backs(
 }
 
 fn runtime_final_args_from_binding_import(
+    layouts: &[ArcanaCabiBindingLayout],
     package_id: &str,
     params: &[RuntimeParamPlan],
     args: &[RuntimeValue],
@@ -12035,6 +12092,7 @@ fn runtime_final_args_from_binding_import(
             continue;
         }
         match runtime_value_from_binding_cabi_output(
+            layouts,
             package_id,
             &param.ty.render(),
             &outcome.write_backs[index],
@@ -12053,19 +12111,21 @@ fn runtime_final_args_from_binding_import(
 }
 
 fn runtime_binding_output_from_runtime_value(
+    layouts: &[ArcanaCabiBindingLayout],
     package_id: &str,
     expected_type: &str,
     value: RuntimeValue,
 ) -> Result<ArcanaCabiBindingValueV1, String> {
     let actual_type = runtime_value_type_root(&value).unwrap_or_else(|| format!("{value:?}"));
-    match (expected_type, value) {
-        ("Int", RuntimeValue::Int(value)) => Ok(ArcanaCabiBindingValueV1 {
+    let binding_type = ArcanaCabiBindingType::parse(expected_type)?;
+    match (&binding_type, value) {
+        (ArcanaCabiBindingType::Int, RuntimeValue::Int(value)) => Ok(ArcanaCabiBindingValueV1 {
             tag: ArcanaCabiBindingValueTag::Int as u32,
             reserved0: 0,
             reserved1: 0,
             payload: ArcanaCabiBindingPayloadV1 { int_value: value },
         }),
-        ("Bool", RuntimeValue::Bool(value)) => Ok(ArcanaCabiBindingValueV1 {
+        (ArcanaCabiBindingType::Bool, RuntimeValue::Bool(value)) => Ok(ArcanaCabiBindingValueV1 {
             tag: ArcanaCabiBindingValueTag::Bool as u32,
             reserved0: 0,
             reserved1: 0,
@@ -12073,7 +12133,7 @@ fn runtime_binding_output_from_runtime_value(
                 bool_value: if value { 1 } else { 0 },
             },
         }),
-        ("Str", RuntimeValue::Str(value)) => Ok(ArcanaCabiBindingValueV1 {
+        (ArcanaCabiBindingType::Str, RuntimeValue::Str(value)) => Ok(ArcanaCabiBindingValueV1 {
             tag: ArcanaCabiBindingValueTag::Str as u32,
             reserved0: 0,
             reserved1: 0,
@@ -12081,30 +12141,32 @@ fn runtime_binding_output_from_runtime_value(
                 owned_str_value: into_owned_str(value),
             },
         }),
-        ("Array[Int]", RuntimeValue::Array(values)) => Ok(ArcanaCabiBindingValueV1 {
-            tag: ArcanaCabiBindingValueTag::Bytes as u32,
-            reserved0: 0,
-            reserved1: 0,
-            payload: ArcanaCabiBindingPayloadV1 {
-                owned_bytes_value: into_owned_bytes(
-                    values
-                        .into_iter()
-                        .enumerate()
-                        .map(|(index, value)| match value {
-                            RuntimeValue::Int(value) => u8::try_from(value).map_err(|_| {
-                                format!(
-                                    "binding byte output index `{index}` is out of range 0..255: `{value}`"
-                                )
-                            }),
-                            other => Err(format!(
-                                "binding bytes output expected Array[Int], found `{other:?}` at index `{index}`"
-                            )),
-                        })
-                        .collect::<Result<Vec<_>, _>>()?,
-                ),
-            },
-        }),
-        ("Unit", RuntimeValue::Unit) => Ok(ArcanaCabiBindingValueV1::default()),
+        (ArcanaCabiBindingType::Bytes, RuntimeValue::Array(values)) => {
+            let bytes =
+                runtime_binding_bytes_from_owned_runtime_array(values, "binding bytes output")?;
+            Ok(ArcanaCabiBindingValueV1 {
+                tag: ArcanaCabiBindingValueTag::Bytes as u32,
+                reserved0: 0,
+                reserved1: 0,
+                payload: ArcanaCabiBindingPayloadV1 {
+                    owned_bytes_value: into_owned_bytes(bytes),
+                },
+            })
+        }
+        (ArcanaCabiBindingType::Unit, RuntimeValue::Unit) => {
+            Ok(ArcanaCabiBindingValueV1::default())
+        }
+        (ArcanaCabiBindingType::Named(layout_id), value) => {
+            let bytes = runtime_binding_encode_layout_value(layouts, layout_id, &value)?;
+            Ok(ArcanaCabiBindingValueV1 {
+                tag: ArcanaCabiBindingValueTag::Layout as u32,
+                reserved0: 0,
+                reserved1: 0,
+                payload: ArcanaCabiBindingPayloadV1 {
+                    owned_bytes_value: into_owned_bytes(bytes),
+                },
+            })
+        }
         (_, RuntimeValue::Opaque(RuntimeOpaqueValue::Binding(binding)))
             if binding.package_id == package_id && binding.type_name == expected_type =>
         {
@@ -12117,10 +12179,1038 @@ fn runtime_binding_output_from_runtime_value(
                 },
             })
         }
+        (ty, value) if ty.clone().scalar().is_some() => {
+            runtime_binding_scalar_output_value(ty, value, expected_type)
+        }
         _ => Err(format!(
             "native binding output expected `{expected_type}`, got `{}`",
             actual_type
         )),
+    }
+}
+
+fn runtime_binding_bytes_from_runtime_array(
+    values: &[RuntimeValue],
+    label: &str,
+) -> Result<Vec<u8>, String> {
+    values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| match value {
+            RuntimeValue::Int(value) => u8::try_from(*value)
+                .map_err(|_| format!("{label} index `{index}` is out of range 0..255: `{value}`")),
+            other => Err(format!(
+                "{label} expected Array[Int], found `{other:?}` at index `{index}`"
+            )),
+        })
+        .collect()
+}
+
+fn runtime_binding_bytes_from_owned_runtime_array(
+    values: Vec<RuntimeValue>,
+    label: &str,
+) -> Result<Vec<u8>, String> {
+    values
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| match value {
+            RuntimeValue::Int(value) => u8::try_from(value)
+                .map_err(|_| format!("{label} index `{index}` is out of range 0..255: `{value}`")),
+            other => Err(format!(
+                "{label} expected Array[Int], found `{other:?}` at index `{index}`"
+            )),
+        })
+        .collect()
+}
+
+fn runtime_binding_scalar_input_value(
+    expected_type: &ArcanaCabiBindingType,
+    value: &RuntimeValue,
+    expected_text: &str,
+) -> Result<ArcanaCabiBindingValueV1, String> {
+    match expected_type {
+        ArcanaCabiBindingType::I8 => Ok(ArcanaCabiBindingValueV1 {
+            tag: ArcanaCabiBindingValueTag::I8 as u32,
+            reserved0: 0,
+            reserved1: 0,
+            payload: ArcanaCabiBindingPayloadV1 {
+                i8_value: runtime_binding_expect_int_range(
+                    value,
+                    i8::MIN as i64,
+                    i8::MAX as i64,
+                    expected_text,
+                )? as i8,
+            },
+        }),
+        ArcanaCabiBindingType::U8 => Ok(ArcanaCabiBindingValueV1 {
+            tag: ArcanaCabiBindingValueTag::U8 as u32,
+            reserved0: 0,
+            reserved1: 0,
+            payload: ArcanaCabiBindingPayloadV1 {
+                u8_value: u8::try_from(runtime_binding_expect_int_range(
+                    value,
+                    0,
+                    u8::MAX as i64,
+                    expected_text,
+                )?)
+                .map_err(|_| format!("native binding argument expected `{expected_text}`"))?,
+            },
+        }),
+        ArcanaCabiBindingType::I16 => Ok(ArcanaCabiBindingValueV1 {
+            tag: ArcanaCabiBindingValueTag::I16 as u32,
+            reserved0: 0,
+            reserved1: 0,
+            payload: ArcanaCabiBindingPayloadV1 {
+                i16_value: runtime_binding_expect_int_range(
+                    value,
+                    i16::MIN as i64,
+                    i16::MAX as i64,
+                    expected_text,
+                )? as i16,
+            },
+        }),
+        ArcanaCabiBindingType::U16 => Ok(ArcanaCabiBindingValueV1 {
+            tag: ArcanaCabiBindingValueTag::U16 as u32,
+            reserved0: 0,
+            reserved1: 0,
+            payload: ArcanaCabiBindingPayloadV1 {
+                u16_value: u16::try_from(runtime_binding_expect_int_range(
+                    value,
+                    0,
+                    u16::MAX as i64,
+                    expected_text,
+                )?)
+                .map_err(|_| format!("native binding argument expected `{expected_text}`"))?,
+            },
+        }),
+        ArcanaCabiBindingType::I32 => Ok(ArcanaCabiBindingValueV1 {
+            tag: ArcanaCabiBindingValueTag::I32 as u32,
+            reserved0: 0,
+            reserved1: 0,
+            payload: ArcanaCabiBindingPayloadV1 {
+                i32_value: runtime_binding_expect_int_range(
+                    value,
+                    i32::MIN as i64,
+                    i32::MAX as i64,
+                    expected_text,
+                )? as i32,
+            },
+        }),
+        ArcanaCabiBindingType::U32 => Ok(ArcanaCabiBindingValueV1 {
+            tag: ArcanaCabiBindingValueTag::U32 as u32,
+            reserved0: 0,
+            reserved1: 0,
+            payload: ArcanaCabiBindingPayloadV1 {
+                u32_value: u32::try_from(runtime_binding_expect_int_range(
+                    value,
+                    0,
+                    u32::MAX as i64,
+                    expected_text,
+                )?)
+                .map_err(|_| format!("native binding argument expected `{expected_text}`"))?,
+            },
+        }),
+        ArcanaCabiBindingType::I64 => Ok(ArcanaCabiBindingValueV1 {
+            tag: ArcanaCabiBindingValueTag::I64 as u32,
+            reserved0: 0,
+            reserved1: 0,
+            payload: ArcanaCabiBindingPayloadV1 {
+                i64_value: runtime_binding_expect_int_range(
+                    value,
+                    i64::MIN,
+                    i64::MAX,
+                    expected_text,
+                )?,
+            },
+        }),
+        ArcanaCabiBindingType::U64 => Ok(ArcanaCabiBindingValueV1 {
+            tag: ArcanaCabiBindingValueTag::U64 as u32,
+            reserved0: 0,
+            reserved1: 0,
+            payload: ArcanaCabiBindingPayloadV1 {
+                u64_value: u64::try_from(runtime_binding_expect_int_range(
+                    value,
+                    0,
+                    i64::MAX,
+                    expected_text,
+                )?)
+                .map_err(|_| format!("native binding argument expected `{expected_text}`"))?,
+            },
+        }),
+        ArcanaCabiBindingType::ISize => Ok(ArcanaCabiBindingValueV1 {
+            tag: ArcanaCabiBindingValueTag::ISize as u32,
+            reserved0: 0,
+            reserved1: 0,
+            payload: ArcanaCabiBindingPayloadV1 {
+                isize_value: runtime_binding_expect_int_range(
+                    value,
+                    isize::MIN as i64,
+                    isize::MAX as i64,
+                    expected_text,
+                )? as isize,
+            },
+        }),
+        ArcanaCabiBindingType::USize => Ok(ArcanaCabiBindingValueV1 {
+            tag: ArcanaCabiBindingValueTag::USize as u32,
+            reserved0: 0,
+            reserved1: 0,
+            payload: ArcanaCabiBindingPayloadV1 {
+                usize_value: usize::try_from(runtime_binding_expect_int_range(
+                    value,
+                    0,
+                    i64::MAX,
+                    expected_text,
+                )?)
+                .map_err(|_| format!("native binding argument expected `{expected_text}`"))?,
+            },
+        }),
+        ArcanaCabiBindingType::F32 => Ok(ArcanaCabiBindingValueV1 {
+            tag: ArcanaCabiBindingValueTag::F32 as u32,
+            reserved0: 0,
+            reserved1: 0,
+            payload: ArcanaCabiBindingPayloadV1 {
+                f32_value: runtime_binding_expect_float(value, ParsedFloatKind::F32, expected_text)?
+                    as f32,
+            },
+        }),
+        ArcanaCabiBindingType::F64 => Ok(ArcanaCabiBindingValueV1 {
+            tag: ArcanaCabiBindingValueTag::F64 as u32,
+            reserved0: 0,
+            reserved1: 0,
+            payload: ArcanaCabiBindingPayloadV1 {
+                f64_value: runtime_binding_expect_float(
+                    value,
+                    ParsedFloatKind::F64,
+                    expected_text,
+                )?,
+            },
+        }),
+        _ => Err(format!(
+            "native binding argument expected `{expected_text}`"
+        )),
+    }
+}
+
+fn runtime_binding_scalar_output_value(
+    expected_type: &ArcanaCabiBindingType,
+    value: RuntimeValue,
+    expected_text: &str,
+) -> Result<ArcanaCabiBindingValueV1, String> {
+    runtime_binding_scalar_input_value(expected_type, &value, expected_text)
+}
+
+fn runtime_binding_runtime_value_from_scalar_tag(
+    expected_type: &ArcanaCabiBindingType,
+    actual_tag: ArcanaCabiBindingValueTag,
+    value: &ArcanaCabiBindingValueV1,
+) -> Result<RuntimeValue, String> {
+    match (expected_type, actual_tag) {
+        (ArcanaCabiBindingType::I8, ArcanaCabiBindingValueTag::I8) => {
+            Ok(RuntimeValue::Int(i64::from(unsafe {
+                value.payload.i8_value
+            })))
+        }
+        (ArcanaCabiBindingType::U8, ArcanaCabiBindingValueTag::U8) => {
+            Ok(RuntimeValue::Int(i64::from(unsafe {
+                value.payload.u8_value
+            })))
+        }
+        (ArcanaCabiBindingType::I16, ArcanaCabiBindingValueTag::I16) => {
+            Ok(RuntimeValue::Int(i64::from(unsafe {
+                value.payload.i16_value
+            })))
+        }
+        (ArcanaCabiBindingType::U16, ArcanaCabiBindingValueTag::U16) => {
+            Ok(RuntimeValue::Int(i64::from(unsafe {
+                value.payload.u16_value
+            })))
+        }
+        (ArcanaCabiBindingType::I32, ArcanaCabiBindingValueTag::I32) => {
+            Ok(RuntimeValue::Int(i64::from(unsafe {
+                value.payload.i32_value
+            })))
+        }
+        (ArcanaCabiBindingType::U32, ArcanaCabiBindingValueTag::U32) => {
+            Ok(RuntimeValue::Int(i64::from(unsafe {
+                value.payload.u32_value
+            })))
+        }
+        (ArcanaCabiBindingType::I64, ArcanaCabiBindingValueTag::I64) => {
+            Ok(RuntimeValue::Int(unsafe { value.payload.i64_value }))
+        }
+        (ArcanaCabiBindingType::U64, ArcanaCabiBindingValueTag::U64) => {
+            let raw = unsafe { value.payload.u64_value };
+            let int = i64::try_from(raw).map_err(|_| {
+                format!("native binding scalar `U64` value `{raw}` does not fit Arcana Int carrier")
+            })?;
+            Ok(RuntimeValue::Int(int))
+        }
+        (ArcanaCabiBindingType::ISize, ArcanaCabiBindingValueTag::ISize) => Ok(RuntimeValue::Int(
+            unsafe { value.payload.isize_value } as i64,
+        )),
+        (ArcanaCabiBindingType::USize, ArcanaCabiBindingValueTag::USize) => {
+            let raw = unsafe { value.payload.usize_value };
+            let int = i64::try_from(raw).map_err(|_| {
+                format!(
+                    "native binding scalar `USize` value `{raw}` does not fit Arcana Int carrier"
+                )
+            })?;
+            Ok(RuntimeValue::Int(int))
+        }
+        (ArcanaCabiBindingType::F32, ArcanaCabiBindingValueTag::F32) => Ok(make_runtime_float(
+            ParsedFloatKind::F32,
+            f64::from(unsafe { value.payload.f32_value }),
+        )),
+        (ArcanaCabiBindingType::F64, ArcanaCabiBindingValueTag::F64) => {
+            Ok(make_runtime_float(ParsedFloatKind::F64, unsafe {
+                value.payload.f64_value
+            }))
+        }
+        _ => Err(format!(
+            "native binding value expected `{}`, got tag `{actual_tag:?}`",
+            expected_type.render()
+        )),
+    }
+}
+
+fn runtime_binding_expect_int_range(
+    value: &RuntimeValue,
+    min: i64,
+    max: i64,
+    expected_text: &str,
+) -> Result<i64, String> {
+    let RuntimeValue::Int(value) = value else {
+        return Err(format!(
+            "native binding argument expected `{expected_text}`, got `{}`",
+            runtime_value_type_root(value).unwrap_or_else(|| format!("{value:?}"))
+        ));
+    };
+    if *value < min || *value > max {
+        return Err(format!(
+            "native binding argument `{expected_text}` value `{value}` is out of range {min}..{max}"
+        ));
+    }
+    Ok(*value)
+}
+
+fn runtime_binding_expect_float(
+    value: &RuntimeValue,
+    kind: ParsedFloatKind,
+    expected_text: &str,
+) -> Result<f64, String> {
+    let RuntimeValue::Float {
+        text,
+        kind: actual_kind,
+    } = value
+    else {
+        return Err(format!(
+            "native binding argument expected `{expected_text}`, got `{}`",
+            runtime_value_type_root(value).unwrap_or_else(|| format!("{value:?}"))
+        ));
+    };
+    parse_runtime_float_text(text, *actual_kind).map(|value| match kind {
+        ParsedFloatKind::F32 => f64::from(value as f32),
+        ParsedFloatKind::F64 => value,
+    })
+}
+
+fn runtime_binding_input_bytes_view<'a>(
+    ptr: *const u8,
+    len: usize,
+    label: &str,
+) -> Result<&'a [u8], String> {
+    if ptr.is_null() {
+        if len == 0 {
+            return Ok(&[]);
+        }
+        return Err(format!("{label} returned null data with len {len}"));
+    }
+    Ok(unsafe { std::slice::from_raw_parts(ptr, len) })
+}
+
+fn runtime_binding_layout_by_id<'a>(
+    layouts: &'a [ArcanaCabiBindingLayout],
+    layout_id: &str,
+) -> Result<&'a ArcanaCabiBindingLayout, String> {
+    layouts
+        .iter()
+        .find(|layout| layout.layout_id == layout_id)
+        .ok_or_else(|| format!("binding layout `{layout_id}` is not present in runtime plan"))
+}
+
+fn runtime_binding_encode_layout_value(
+    layouts: &[ArcanaCabiBindingLayout],
+    layout_id: &str,
+    value: &RuntimeValue,
+) -> Result<Vec<u8>, String> {
+    let layout = runtime_binding_layout_by_id(layouts, layout_id)?;
+    let mut buffer = vec![0u8; layout.size];
+    runtime_binding_encode_layout_into(layouts, layout, value, &mut buffer)?;
+    Ok(buffer)
+}
+
+fn runtime_binding_decode_layout_value(
+    layouts: &[ArcanaCabiBindingLayout],
+    layout_id: &str,
+    bytes: &[u8],
+) -> Result<RuntimeValue, String> {
+    let layout = runtime_binding_layout_by_id(layouts, layout_id)?;
+    if bytes.len() != layout.size {
+        return Err(format!(
+            "binding layout `{layout_id}` size mismatch: expected {}, got {}",
+            layout.size,
+            bytes.len()
+        ));
+    }
+    runtime_binding_decode_layout_from(layouts, layout, bytes)
+}
+
+fn runtime_binding_encode_layout_into(
+    layouts: &[ArcanaCabiBindingLayout],
+    layout: &ArcanaCabiBindingLayout,
+    value: &RuntimeValue,
+    buffer: &mut [u8],
+) -> Result<(), String> {
+    if buffer.len() != layout.size {
+        return Err(format!(
+            "binding layout `{}` output buffer size mismatch: expected {}, got {}",
+            layout.layout_id,
+            layout.size,
+            buffer.len()
+        ));
+    }
+    match &layout.kind {
+        ArcanaCabiBindingLayoutKind::Alias { target } => {
+            let bytes = runtime_binding_encode_raw_type(layouts, target, value, &layout.layout_id)?;
+            if bytes.len() != layout.size {
+                return Err(format!(
+                    "binding layout `{}` alias size mismatch: expected {}, got {}",
+                    layout.layout_id,
+                    layout.size,
+                    bytes.len()
+                ));
+            }
+            buffer.copy_from_slice(&bytes);
+            Ok(())
+        }
+        ArcanaCabiBindingLayoutKind::Struct { fields } => {
+            let RuntimeValue::Record {
+                name,
+                fields: record_fields,
+            } = value
+            else {
+                return Err(format!(
+                    "binding layout `{}` expected struct record value, got `{}`",
+                    layout.layout_id,
+                    runtime_value_type_root(value).unwrap_or_else(|| format!("{value:?}"))
+                ));
+            };
+            if name != &layout.layout_id {
+                return Err(format!(
+                    "binding layout `{}` expected record `{}`, got `{name}`",
+                    layout.layout_id, layout.layout_id
+                ));
+            }
+            for field in fields {
+                let field_value = record_fields.get(&field.name).ok_or_else(|| {
+                    format!(
+                        "binding layout `{}` is missing field `{}`",
+                        layout.layout_id, field.name
+                    )
+                })?;
+                if let Some(bit_width) = field.bit_width {
+                    runtime_binding_encode_bitfield(layout, field, bit_width, field_value, buffer)?;
+                } else {
+                    let field_size = runtime_binding_raw_type_size(layouts, &field.ty)?;
+                    let end = field.offset + field_size;
+                    let bytes = runtime_binding_encode_raw_type(
+                        layouts,
+                        &field.ty,
+                        field_value,
+                        &format!("{}::{}", layout.layout_id, field.name),
+                    )?;
+                    buffer[field.offset..end].copy_from_slice(&bytes);
+                }
+            }
+            Ok(())
+        }
+        ArcanaCabiBindingLayoutKind::Union { fields } => {
+            let RuntimeValue::Record {
+                name,
+                fields: record_fields,
+            } = value
+            else {
+                return Err(format!(
+                    "binding layout `{}` expected union record value, got `{}`",
+                    layout.layout_id,
+                    runtime_value_type_root(value).unwrap_or_else(|| format!("{value:?}"))
+                ));
+            };
+            if name != &layout.layout_id {
+                return Err(format!(
+                    "binding layout `{}` expected record `{}`, got `{name}`",
+                    layout.layout_id, layout.layout_id
+                ));
+            }
+            if record_fields.len() != 1 {
+                return Err(format!(
+                    "binding union `{}` must initialize exactly one field, got {}",
+                    layout.layout_id,
+                    record_fields.len()
+                ));
+            }
+            let (field_name, field_value) = record_fields.iter().next().ok_or_else(|| {
+                format!(
+                    "binding union `{}` must initialize at least one field",
+                    layout.layout_id
+                )
+            })?;
+            let field = fields
+                .iter()
+                .find(|field| field.name == *field_name)
+                .ok_or_else(|| {
+                    format!(
+                        "binding union `{}` has no field `{field_name}`",
+                        layout.layout_id
+                    )
+                })?;
+            let field_size = runtime_binding_raw_type_size(layouts, &field.ty)?;
+            let bytes = runtime_binding_encode_raw_type(
+                layouts,
+                &field.ty,
+                field_value,
+                &format!("{}::{}", layout.layout_id, field.name),
+            )?;
+            buffer[field.offset..field.offset + field_size].copy_from_slice(&bytes);
+            Ok(())
+        }
+        ArcanaCabiBindingLayoutKind::Array { element_type, len } => {
+            let RuntimeValue::Array(values) = value else {
+                return Err(format!(
+                    "binding layout `{}` expected array value, got `{}`",
+                    layout.layout_id,
+                    runtime_value_type_root(value).unwrap_or_else(|| format!("{value:?}"))
+                ));
+            };
+            if values.len() != *len {
+                return Err(format!(
+                    "binding array `{}` expected {len} elements, got {}",
+                    layout.layout_id,
+                    values.len()
+                ));
+            }
+            let element_size = runtime_binding_raw_type_size(layouts, element_type)?;
+            for (index, item) in values.iter().enumerate() {
+                let bytes = runtime_binding_encode_raw_type(
+                    layouts,
+                    element_type,
+                    item,
+                    &format!("{}[{index}]", layout.layout_id),
+                )?;
+                let start = index * element_size;
+                buffer[start..start + element_size].copy_from_slice(&bytes);
+            }
+            Ok(())
+        }
+        ArcanaCabiBindingLayoutKind::Enum { repr, .. }
+        | ArcanaCabiBindingLayoutKind::Flags { repr } => {
+            let bytes = runtime_binding_encode_scalar_bytes(*repr, value, &layout.layout_id)?;
+            buffer.copy_from_slice(&bytes);
+            Ok(())
+        }
+        ArcanaCabiBindingLayoutKind::Callback { .. }
+        | ArcanaCabiBindingLayoutKind::Interface { .. } => {
+            let raw = runtime_binding_pointer_value(value, &layout.layout_id)?;
+            let bytes = runtime_binding_encode_pointer_bytes(layout.size, raw, &layout.layout_id)?;
+            buffer.copy_from_slice(&bytes);
+            Ok(())
+        }
+    }
+}
+
+fn runtime_binding_decode_layout_from(
+    layouts: &[ArcanaCabiBindingLayout],
+    layout: &ArcanaCabiBindingLayout,
+    bytes: &[u8],
+) -> Result<RuntimeValue, String> {
+    match &layout.kind {
+        ArcanaCabiBindingLayoutKind::Alias { target } => {
+            runtime_binding_decode_raw_type(layouts, target, bytes, &layout.layout_id)
+        }
+        ArcanaCabiBindingLayoutKind::Struct { fields } => {
+            let mut values = BTreeMap::new();
+            for field in fields {
+                let value = if let Some(bit_width) = field.bit_width {
+                    runtime_binding_decode_bitfield(layout, field, bit_width, bytes)?
+                } else {
+                    let field_size = runtime_binding_raw_type_size(layouts, &field.ty)?;
+                    runtime_binding_decode_raw_type(
+                        layouts,
+                        &field.ty,
+                        &bytes[field.offset..field.offset + field_size],
+                        &format!("{}::{}", layout.layout_id, field.name),
+                    )?
+                };
+                values.insert(field.name.clone(), value);
+            }
+            Ok(RuntimeValue::Record {
+                name: layout.layout_id.clone(),
+                fields: values,
+            })
+        }
+        ArcanaCabiBindingLayoutKind::Union { fields } => {
+            let mut values = BTreeMap::new();
+            for field in fields {
+                let field_size = runtime_binding_raw_type_size(layouts, &field.ty)?;
+                let value = runtime_binding_decode_raw_type(
+                    layouts,
+                    &field.ty,
+                    &bytes[field.offset..field.offset + field_size],
+                    &format!("{}::{}", layout.layout_id, field.name),
+                )?;
+                values.insert(field.name.clone(), value);
+            }
+            Ok(RuntimeValue::Record {
+                name: layout.layout_id.clone(),
+                fields: values,
+            })
+        }
+        ArcanaCabiBindingLayoutKind::Array { element_type, len } => {
+            let element_size = runtime_binding_raw_type_size(layouts, element_type)?;
+            let mut values = Vec::with_capacity(*len);
+            for index in 0..*len {
+                let start = index * element_size;
+                values.push(runtime_binding_decode_raw_type(
+                    layouts,
+                    element_type,
+                    &bytes[start..start + element_size],
+                    &format!("{}[{index}]", layout.layout_id),
+                )?);
+            }
+            Ok(RuntimeValue::Array(values))
+        }
+        ArcanaCabiBindingLayoutKind::Enum { repr, .. }
+        | ArcanaCabiBindingLayoutKind::Flags { repr } => {
+            runtime_binding_decode_scalar_bytes(*repr, bytes, &layout.layout_id)
+        }
+        ArcanaCabiBindingLayoutKind::Callback { .. }
+        | ArcanaCabiBindingLayoutKind::Interface { .. } => Ok(RuntimeValue::Int(
+            runtime_binding_decode_pointer_bytes(bytes, &layout.layout_id)?,
+        )),
+    }
+}
+
+fn runtime_binding_encode_raw_type(
+    layouts: &[ArcanaCabiBindingLayout],
+    ty: &ArcanaCabiBindingRawType,
+    value: &RuntimeValue,
+    context: &str,
+) -> Result<Vec<u8>, String> {
+    match ty {
+        ArcanaCabiBindingRawType::Void => Ok(Vec::new()),
+        ArcanaCabiBindingRawType::Scalar(scalar) => {
+            runtime_binding_encode_scalar_bytes(*scalar, value, context)
+        }
+        ArcanaCabiBindingRawType::Named(layout_id) => {
+            runtime_binding_encode_layout_value(layouts, layout_id, value)
+        }
+        ArcanaCabiBindingRawType::Pointer { .. }
+        | ArcanaCabiBindingRawType::FunctionPointer { .. } => {
+            let raw = runtime_binding_pointer_value(value, context)?;
+            runtime_binding_encode_pointer_bytes(
+                runtime_binding_raw_type_size(layouts, ty)?,
+                raw,
+                context,
+            )
+        }
+    }
+}
+
+fn runtime_binding_decode_raw_type(
+    layouts: &[ArcanaCabiBindingLayout],
+    ty: &ArcanaCabiBindingRawType,
+    bytes: &[u8],
+    context: &str,
+) -> Result<RuntimeValue, String> {
+    match ty {
+        ArcanaCabiBindingRawType::Void => Ok(RuntimeValue::Unit),
+        ArcanaCabiBindingRawType::Scalar(scalar) => {
+            runtime_binding_decode_scalar_bytes(*scalar, bytes, context)
+        }
+        ArcanaCabiBindingRawType::Named(layout_id) => {
+            runtime_binding_decode_layout_value(layouts, layout_id, bytes)
+        }
+        ArcanaCabiBindingRawType::Pointer { .. }
+        | ArcanaCabiBindingRawType::FunctionPointer { .. } => Ok(RuntimeValue::Int(
+            runtime_binding_decode_pointer_bytes(bytes, context)?,
+        )),
+    }
+}
+
+fn runtime_binding_raw_type_size(
+    layouts: &[ArcanaCabiBindingLayout],
+    ty: &ArcanaCabiBindingRawType,
+) -> Result<usize, String> {
+    Ok(match ty {
+        ArcanaCabiBindingRawType::Void => 0,
+        ArcanaCabiBindingRawType::Scalar(scalar) => scalar.size_bytes(),
+        ArcanaCabiBindingRawType::Named(layout_id) => {
+            runtime_binding_layout_by_id(layouts, layout_id)?.size
+        }
+        ArcanaCabiBindingRawType::Pointer { .. }
+        | ArcanaCabiBindingRawType::FunctionPointer { .. } => std::mem::size_of::<usize>(),
+    })
+}
+
+fn runtime_binding_encode_scalar_bytes(
+    scalar: ArcanaCabiBindingScalarType,
+    value: &RuntimeValue,
+    context: &str,
+) -> Result<Vec<u8>, String> {
+    match scalar {
+        ArcanaCabiBindingScalarType::Bool => match value {
+            RuntimeValue::Bool(value) => Ok(vec![u8::from(*value)]),
+            _ => Err(format!(
+                "{context} expected Bool, got `{}`",
+                runtime_value_type_root(value).unwrap_or_else(|| format!("{value:?}"))
+            )),
+        },
+        ArcanaCabiBindingScalarType::Int | ArcanaCabiBindingScalarType::I64 => Ok(
+            runtime_binding_expect_int_range(value, i64::MIN, i64::MAX, context)?
+                .to_ne_bytes()
+                .to_vec(),
+        ),
+        ArcanaCabiBindingScalarType::I8 => {
+            Ok(
+                (runtime_binding_expect_int_range(value, i8::MIN as i64, i8::MAX as i64, context)?
+                    as i8)
+                    .to_ne_bytes()
+                    .to_vec(),
+            )
+        }
+        ArcanaCabiBindingScalarType::U8 => Ok([u8::try_from(runtime_binding_expect_int_range(
+            value,
+            0,
+            u8::MAX as i64,
+            context,
+        )?)
+        .map_err(|_| format!("{context} expected U8"))?]
+        .to_vec()),
+        ArcanaCabiBindingScalarType::I16 => Ok((runtime_binding_expect_int_range(
+            value,
+            i16::MIN as i64,
+            i16::MAX as i64,
+            context,
+        )? as i16)
+            .to_ne_bytes()
+            .to_vec()),
+        ArcanaCabiBindingScalarType::U16 => Ok((u16::try_from(runtime_binding_expect_int_range(
+            value,
+            0,
+            u16::MAX as i64,
+            context,
+        )?)
+        .map_err(|_| format!("{context} expected U16"))?)
+        .to_ne_bytes()
+        .to_vec()),
+        ArcanaCabiBindingScalarType::I32 => Ok((runtime_binding_expect_int_range(
+            value,
+            i32::MIN as i64,
+            i32::MAX as i64,
+            context,
+        )? as i32)
+            .to_ne_bytes()
+            .to_vec()),
+        ArcanaCabiBindingScalarType::U32 => Ok((u32::try_from(runtime_binding_expect_int_range(
+            value,
+            0,
+            u32::MAX as i64,
+            context,
+        )?)
+        .map_err(|_| format!("{context} expected U32"))?)
+        .to_ne_bytes()
+        .to_vec()),
+        ArcanaCabiBindingScalarType::U64 => Ok((u64::try_from(runtime_binding_expect_int_range(
+            value,
+            0,
+            i64::MAX,
+            context,
+        )?)
+        .map_err(|_| format!("{context} expected U64"))?)
+        .to_ne_bytes()
+        .to_vec()),
+        ArcanaCabiBindingScalarType::ISize => Ok((runtime_binding_expect_int_range(
+            value,
+            isize::MIN as i64,
+            isize::MAX as i64,
+            context,
+        )? as isize)
+            .to_ne_bytes()
+            .to_vec()),
+        ArcanaCabiBindingScalarType::USize => Ok((usize::try_from(
+            runtime_binding_expect_int_range(value, 0, i64::MAX, context)?,
+        )
+        .map_err(|_| format!("{context} expected USize"))?)
+        .to_ne_bytes()
+        .to_vec()),
+        ArcanaCabiBindingScalarType::F32 => {
+            Ok(
+                (runtime_binding_expect_float(value, ParsedFloatKind::F32, context)? as f32)
+                    .to_ne_bytes()
+                    .to_vec(),
+            )
+        }
+        ArcanaCabiBindingScalarType::F64 => {
+            Ok(
+                runtime_binding_expect_float(value, ParsedFloatKind::F64, context)?
+                    .to_ne_bytes()
+                    .to_vec(),
+            )
+        }
+    }
+}
+
+fn runtime_binding_decode_scalar_bytes(
+    scalar: ArcanaCabiBindingScalarType,
+    bytes: &[u8],
+    context: &str,
+) -> Result<RuntimeValue, String> {
+    if bytes.len() != scalar.size_bytes() {
+        return Err(format!(
+            "{context} expected {} bytes for {}, got {}",
+            scalar.size_bytes(),
+            scalar.render(),
+            bytes.len()
+        ));
+    }
+    Ok(match scalar {
+        ArcanaCabiBindingScalarType::Bool => RuntimeValue::Bool(bytes[0] != 0),
+        ArcanaCabiBindingScalarType::Int | ArcanaCabiBindingScalarType::I64 => {
+            RuntimeValue::Int(i64::from_ne_bytes(bytes.try_into().expect("checked len")))
+        }
+        ArcanaCabiBindingScalarType::I8 => RuntimeValue::Int(i64::from(i8::from_ne_bytes(
+            bytes.try_into().expect("checked len"),
+        ))),
+        ArcanaCabiBindingScalarType::U8 => RuntimeValue::Int(i64::from(u8::from_ne_bytes(
+            bytes.try_into().expect("checked len"),
+        ))),
+        ArcanaCabiBindingScalarType::I16 => RuntimeValue::Int(i64::from(i16::from_ne_bytes(
+            bytes.try_into().expect("checked len"),
+        ))),
+        ArcanaCabiBindingScalarType::U16 => RuntimeValue::Int(i64::from(u16::from_ne_bytes(
+            bytes.try_into().expect("checked len"),
+        ))),
+        ArcanaCabiBindingScalarType::I32 => RuntimeValue::Int(i64::from(i32::from_ne_bytes(
+            bytes.try_into().expect("checked len"),
+        ))),
+        ArcanaCabiBindingScalarType::U32 => RuntimeValue::Int(i64::from(u32::from_ne_bytes(
+            bytes.try_into().expect("checked len"),
+        ))),
+        ArcanaCabiBindingScalarType::U64 => {
+            let raw = u64::from_ne_bytes(bytes.try_into().expect("checked len"));
+            RuntimeValue::Int(i64::try_from(raw).map_err(|_| {
+                format!("{context} U64 value `{raw}` does not fit Arcana Int carrier")
+            })?)
+        }
+        ArcanaCabiBindingScalarType::ISize => {
+            RuntimeValue::Int(isize::from_ne_bytes(bytes.try_into().expect("checked len")) as i64)
+        }
+        ArcanaCabiBindingScalarType::USize => {
+            let raw = usize::from_ne_bytes(bytes.try_into().expect("checked len"));
+            RuntimeValue::Int(i64::try_from(raw).map_err(|_| {
+                format!("{context} USize value `{raw}` does not fit Arcana Int carrier")
+            })?)
+        }
+        ArcanaCabiBindingScalarType::F32 => make_runtime_float(
+            ParsedFloatKind::F32,
+            f64::from(f32::from_ne_bytes(bytes.try_into().expect("checked len"))),
+        ),
+        ArcanaCabiBindingScalarType::F64 => make_runtime_float(
+            ParsedFloatKind::F64,
+            f64::from_ne_bytes(bytes.try_into().expect("checked len")),
+        ),
+    })
+}
+
+fn runtime_binding_encode_bitfield(
+    layout: &ArcanaCabiBindingLayout,
+    field: &arcana_cabi::ArcanaCabiBindingLayoutField,
+    bit_width: u16,
+    value: &RuntimeValue,
+    buffer: &mut [u8],
+) -> Result<(), String> {
+    let ArcanaCabiBindingRawType::Scalar(scalar) = &field.ty else {
+        return Err(format!(
+            "binding layout `{}` bitfield `{}` must use a scalar base type",
+            layout.layout_id, field.name
+        ));
+    };
+    let storage_size = scalar.size_bytes();
+    let storage = &buffer[field.offset..field.offset + storage_size];
+    let mut current = runtime_binding_decode_integer_storage(*scalar, storage)?;
+    let raw_value = runtime_binding_integer_from_value(value, &field.name)?;
+    let bit_offset = usize::from(field.bit_offset.unwrap_or(0));
+    let mask = if bit_width == 64 {
+        u64::MAX
+    } else {
+        ((1u128 << bit_width) - 1) as u64
+    };
+    current &= !(mask << bit_offset);
+    current |= (raw_value & mask) << bit_offset;
+    let encoded = runtime_binding_encode_integer_storage(*scalar, current)?;
+    buffer[field.offset..field.offset + storage_size].copy_from_slice(&encoded);
+    Ok(())
+}
+
+fn runtime_binding_decode_bitfield(
+    layout: &ArcanaCabiBindingLayout,
+    field: &arcana_cabi::ArcanaCabiBindingLayoutField,
+    bit_width: u16,
+    bytes: &[u8],
+) -> Result<RuntimeValue, String> {
+    let ArcanaCabiBindingRawType::Scalar(scalar) = &field.ty else {
+        return Err(format!(
+            "binding layout `{}` bitfield `{}` must use a scalar base type",
+            layout.layout_id, field.name
+        ));
+    };
+    let storage = &bytes[field.offset..field.offset + scalar.size_bytes()];
+    let raw = runtime_binding_decode_integer_storage(*scalar, storage)?;
+    let bit_offset = usize::from(field.bit_offset.unwrap_or(0));
+    let mask = if bit_width == 64 {
+        u64::MAX
+    } else {
+        ((1u128 << bit_width) - 1) as u64
+    };
+    let value = (raw >> bit_offset) & mask;
+    if runtime_binding_scalar_is_signed(*scalar) {
+        let shift = 64usize.saturating_sub(bit_width as usize);
+        Ok(RuntimeValue::Int(((value << shift) as i64) >> shift))
+    } else {
+        Ok(RuntimeValue::Int(i64::try_from(value).map_err(|_| {
+            format!(
+                "binding layout `{}` bitfield `{}` value `{value}` does not fit Arcana Int carrier",
+                layout.layout_id, field.name
+            )
+        })?))
+    }
+}
+
+fn runtime_binding_integer_from_value(value: &RuntimeValue, context: &str) -> Result<u64, String> {
+    let RuntimeValue::Int(value) = value else {
+        return Err(format!(
+            "{context} expected Int-compatible bitfield value, got `{}`",
+            runtime_value_type_root(value).unwrap_or_else(|| format!("{value:?}"))
+        ));
+    };
+    Ok(*value as u64)
+}
+
+fn runtime_binding_encode_integer_storage(
+    scalar: ArcanaCabiBindingScalarType,
+    value: u64,
+) -> Result<Vec<u8>, String> {
+    Ok(match scalar {
+        ArcanaCabiBindingScalarType::I8
+        | ArcanaCabiBindingScalarType::U8
+        | ArcanaCabiBindingScalarType::Bool => vec![value as u8],
+        ArcanaCabiBindingScalarType::I16 | ArcanaCabiBindingScalarType::U16 => {
+            (value as u16).to_ne_bytes().to_vec()
+        }
+        ArcanaCabiBindingScalarType::I32 | ArcanaCabiBindingScalarType::U32 => {
+            (value as u32).to_ne_bytes().to_vec()
+        }
+        ArcanaCabiBindingScalarType::Int
+        | ArcanaCabiBindingScalarType::I64
+        | ArcanaCabiBindingScalarType::U64 => value.to_ne_bytes().to_vec(),
+        ArcanaCabiBindingScalarType::ISize | ArcanaCabiBindingScalarType::USize => {
+            (value as usize).to_ne_bytes().to_vec()
+        }
+        ArcanaCabiBindingScalarType::F32 | ArcanaCabiBindingScalarType::F64 => {
+            return Err("floating-point scalars cannot back bitfield storage".to_string());
+        }
+    })
+}
+
+fn runtime_binding_decode_integer_storage(
+    scalar: ArcanaCabiBindingScalarType,
+    bytes: &[u8],
+) -> Result<u64, String> {
+    Ok(match scalar {
+        ArcanaCabiBindingScalarType::I8
+        | ArcanaCabiBindingScalarType::U8
+        | ArcanaCabiBindingScalarType::Bool => u64::from(bytes[0]),
+        ArcanaCabiBindingScalarType::I16 | ArcanaCabiBindingScalarType::U16 => {
+            u64::from(u16::from_ne_bytes(bytes.try_into().expect("checked len")))
+        }
+        ArcanaCabiBindingScalarType::I32 | ArcanaCabiBindingScalarType::U32 => {
+            u64::from(u32::from_ne_bytes(bytes.try_into().expect("checked len")))
+        }
+        ArcanaCabiBindingScalarType::Int
+        | ArcanaCabiBindingScalarType::I64
+        | ArcanaCabiBindingScalarType::U64 => {
+            u64::from_ne_bytes(bytes.try_into().expect("checked len"))
+        }
+        ArcanaCabiBindingScalarType::ISize | ArcanaCabiBindingScalarType::USize => {
+            usize::from_ne_bytes(bytes.try_into().expect("checked len")) as u64
+        }
+        ArcanaCabiBindingScalarType::F32 | ArcanaCabiBindingScalarType::F64 => {
+            return Err("floating-point scalars cannot back bitfield storage".to_string());
+        }
+    })
+}
+
+fn runtime_binding_scalar_is_signed(scalar: ArcanaCabiBindingScalarType) -> bool {
+    matches!(
+        scalar,
+        ArcanaCabiBindingScalarType::Int
+            | ArcanaCabiBindingScalarType::I8
+            | ArcanaCabiBindingScalarType::I16
+            | ArcanaCabiBindingScalarType::I32
+            | ArcanaCabiBindingScalarType::I64
+            | ArcanaCabiBindingScalarType::ISize
+    )
+}
+
+fn runtime_binding_pointer_value(value: &RuntimeValue, context: &str) -> Result<u64, String> {
+    match value {
+        RuntimeValue::Int(value) if *value >= 0 => Ok(*value as u64),
+        RuntimeValue::Opaque(RuntimeOpaqueValue::Binding(binding)) => Ok(binding.handle),
+        _ => Err(format!(
+            "{context} expected pointer-compatible Int or binding opaque, got `{}`",
+            runtime_value_type_root(value).unwrap_or_else(|| format!("{value:?}"))
+        )),
+    }
+}
+
+fn runtime_binding_encode_pointer_bytes(
+    size: usize,
+    value: u64,
+    context: &str,
+) -> Result<Vec<u8>, String> {
+    match size {
+        4 => Ok((u32::try_from(value).map_err(|_| {
+            format!("{context} pointer value `{value}` does not fit 32-bit pointer")
+        })?)
+        .to_ne_bytes()
+        .to_vec()),
+        8 => Ok(value.to_ne_bytes().to_vec()),
+        other => Err(format!("{context} uses unsupported pointer size `{other}`")),
+    }
+}
+
+fn runtime_binding_decode_pointer_bytes(bytes: &[u8], context: &str) -> Result<i64, String> {
+    match bytes.len() {
+        4 => Ok(i64::from(u32::from_ne_bytes(
+            bytes.try_into().expect("checked len"),
+        ))),
+        8 => {
+            let raw = u64::from_ne_bytes(bytes.try_into().expect("checked len"));
+            i64::try_from(raw).map_err(|_| {
+                format!("{context} pointer value `{raw}` does not fit Arcana Int carrier")
+            })
+        }
+        other => Err(format!("{context} uses unsupported pointer size `{other}`")),
     }
 }
 
@@ -30410,6 +31500,363 @@ pub(crate) fn ensure_audio_buffer_matches_device(
     Err(format!(
         "AudioBuffer format {buffer_sample_rate_hz} Hz / {buffer_channels} channel(s) does not match AudioDevice format {device_sample_rate_hz} Hz / {device_channels} channel(s)"
     ))
+}
+
+#[cfg(all(test, windows))]
+mod raw_binding_tests {
+    use super::*;
+    use crate::native_product_loader::RuntimeBindingImportOutcome;
+    use std::collections::BTreeMap;
+
+    unsafe extern "system" fn test_free_owned_bytes(ptr: *mut u8, len: usize) {
+        unsafe {
+            arcana_cabi::free_owned_bytes(ptr, len);
+        }
+    }
+
+    unsafe extern "system" fn test_free_owned_str(ptr: *mut u8, len: usize) {
+        unsafe {
+            arcana_cabi::free_owned_str(ptr, len);
+        }
+    }
+
+    fn sample_binding_layouts() -> Vec<ArcanaCabiBindingLayout> {
+        vec![
+            ArcanaCabiBindingLayout {
+                layout_id: "hostapi.raw.Rect".to_string(),
+                size: 12,
+                align: 4,
+                kind: ArcanaCabiBindingLayoutKind::Struct {
+                    fields: vec![
+                        arcana_cabi::ArcanaCabiBindingLayoutField {
+                            name: "left".to_string(),
+                            ty: ArcanaCabiBindingRawType::Scalar(ArcanaCabiBindingScalarType::I32),
+                            offset: 0,
+                            bit_width: None,
+                            bit_offset: None,
+                        },
+                        arcana_cabi::ArcanaCabiBindingLayoutField {
+                            name: "top".to_string(),
+                            ty: ArcanaCabiBindingRawType::Scalar(ArcanaCabiBindingScalarType::I32),
+                            offset: 4,
+                            bit_width: None,
+                            bit_offset: None,
+                        },
+                        arcana_cabi::ArcanaCabiBindingLayoutField {
+                            name: "flags".to_string(),
+                            ty: ArcanaCabiBindingRawType::Scalar(ArcanaCabiBindingScalarType::U32),
+                            offset: 8,
+                            bit_width: Some(3),
+                            bit_offset: Some(0),
+                        },
+                    ],
+                },
+            },
+            ArcanaCabiBindingLayout {
+                layout_id: "hostapi.raw.Words".to_string(),
+                size: 8,
+                align: 2,
+                kind: ArcanaCabiBindingLayoutKind::Array {
+                    element_type: ArcanaCabiBindingRawType::Scalar(
+                        ArcanaCabiBindingScalarType::U16,
+                    ),
+                    len: 4,
+                },
+            },
+            ArcanaCabiBindingLayout {
+                layout_id: "hostapi.raw.Mode".to_string(),
+                size: 4,
+                align: 4,
+                kind: ArcanaCabiBindingLayoutKind::Enum {
+                    repr: ArcanaCabiBindingScalarType::U32,
+                    variants: vec![
+                        arcana_cabi::ArcanaCabiBindingLayoutEnumVariant {
+                            name: "Idle".to_string(),
+                            value: 0,
+                        },
+                        arcana_cabi::ArcanaCabiBindingLayoutEnumVariant {
+                            name: "Busy".to_string(),
+                            value: 1,
+                        },
+                    ],
+                },
+            },
+            ArcanaCabiBindingLayout {
+                layout_id: "hostapi.raw.ValueUnion".to_string(),
+                size: 4,
+                align: 4,
+                kind: ArcanaCabiBindingLayoutKind::Union {
+                    fields: vec![
+                        arcana_cabi::ArcanaCabiBindingLayoutField {
+                            name: "as_int".to_string(),
+                            ty: ArcanaCabiBindingRawType::Scalar(ArcanaCabiBindingScalarType::I32),
+                            offset: 0,
+                            bit_width: None,
+                            bit_offset: None,
+                        },
+                        arcana_cabi::ArcanaCabiBindingLayoutField {
+                            name: "as_word".to_string(),
+                            ty: ArcanaCabiBindingRawType::Scalar(ArcanaCabiBindingScalarType::U16),
+                            offset: 0,
+                            bit_width: None,
+                            bit_offset: None,
+                        },
+                    ],
+                },
+            },
+            ArcanaCabiBindingLayout {
+                layout_id: "hostapi.raw.WindowProc".to_string(),
+                size: std::mem::size_of::<usize>(),
+                align: std::mem::size_of::<usize>(),
+                kind: ArcanaCabiBindingLayoutKind::Callback {
+                    abi: "system".to_string(),
+                    params: vec![ArcanaCabiBindingRawType::Scalar(
+                        ArcanaCabiBindingScalarType::I32,
+                    )],
+                    return_type: ArcanaCabiBindingRawType::Scalar(ArcanaCabiBindingScalarType::I32),
+                },
+            },
+            ArcanaCabiBindingLayout {
+                layout_id: "hostapi.raw.IUnknownVTable".to_string(),
+                size: std::mem::size_of::<usize>() * 3,
+                align: std::mem::size_of::<usize>(),
+                kind: ArcanaCabiBindingLayoutKind::Struct {
+                    fields: vec![arcana_cabi::ArcanaCabiBindingLayoutField {
+                        name: "query_interface".to_string(),
+                        ty: ArcanaCabiBindingRawType::FunctionPointer {
+                            abi: "system".to_string(),
+                            nullable: false,
+                            params: vec![ArcanaCabiBindingRawType::Pointer {
+                                mutable: false,
+                                inner: Box::new(ArcanaCabiBindingRawType::Void),
+                            }],
+                            return_type: Box::new(ArcanaCabiBindingRawType::Scalar(
+                                ArcanaCabiBindingScalarType::I32,
+                            )),
+                        },
+                        offset: 0,
+                        bit_width: None,
+                        bit_offset: None,
+                    }],
+                },
+            },
+            ArcanaCabiBindingLayout {
+                layout_id: "hostapi.raw.IUnknown".to_string(),
+                size: std::mem::size_of::<usize>(),
+                align: std::mem::size_of::<usize>(),
+                kind: ArcanaCabiBindingLayoutKind::Interface {
+                    iid: Some("00000000-0000-0000-C000-000000000046".to_string()),
+                    vtable_layout_id: Some("hostapi.raw.IUnknownVTable".to_string()),
+                },
+            },
+        ]
+    }
+
+    fn rect_value(left: i64, top: i64, flags: i64) -> RuntimeValue {
+        RuntimeValue::Record {
+            name: "hostapi.raw.Rect".to_string(),
+            fields: BTreeMap::from([
+                ("left".to_string(), RuntimeValue::Int(left)),
+                ("top".to_string(), RuntimeValue::Int(top)),
+                ("flags".to_string(), RuntimeValue::Int(flags)),
+            ]),
+        }
+    }
+
+    #[test]
+    fn raw_binding_runtime_round_trips_layout_values() {
+        let layouts = sample_binding_layouts();
+
+        let rect = rect_value(12, -8, 5);
+        let encoded = runtime_binding_output_from_runtime_value(
+            &layouts,
+            "hostapi",
+            "hostapi.raw.Rect",
+            rect.clone(),
+        )
+        .expect("struct output should encode");
+        assert_eq!(
+            encoded.tag().expect("tag should parse"),
+            ArcanaCabiBindingValueTag::Layout
+        );
+        let decoded = runtime_value_from_binding_cabi_output(
+            &layouts,
+            "hostapi",
+            "hostapi.raw.Rect",
+            &encoded,
+            test_free_owned_bytes,
+            test_free_owned_str,
+            "struct result",
+        )
+        .expect("struct output should decode");
+        assert_eq!(decoded, rect);
+
+        let words = RuntimeValue::Array(vec![
+            RuntimeValue::Int(1),
+            RuntimeValue::Int(2),
+            RuntimeValue::Int(3),
+            RuntimeValue::Int(4),
+        ]);
+        let encoded = runtime_binding_output_from_runtime_value(
+            &layouts,
+            "hostapi",
+            "hostapi.raw.Words",
+            words.clone(),
+        )
+        .expect("array output should encode");
+        let decoded = runtime_value_from_binding_cabi_output(
+            &layouts,
+            "hostapi",
+            "hostapi.raw.Words",
+            &encoded,
+            test_free_owned_bytes,
+            test_free_owned_str,
+            "array result",
+        )
+        .expect("array output should decode");
+        assert_eq!(decoded, words);
+
+        let union = RuntimeValue::Record {
+            name: "hostapi.raw.ValueUnion".to_string(),
+            fields: BTreeMap::from([("as_word".to_string(), RuntimeValue::Int(7))]),
+        };
+        let encoded = runtime_binding_output_from_runtime_value(
+            &layouts,
+            "hostapi",
+            "hostapi.raw.ValueUnion",
+            union.clone(),
+        )
+        .expect("union output should encode");
+        let decoded = runtime_value_from_binding_cabi_output(
+            &layouts,
+            "hostapi",
+            "hostapi.raw.ValueUnion",
+            &encoded,
+            test_free_owned_bytes,
+            test_free_owned_str,
+            "union result",
+        )
+        .expect("union output should decode");
+        let RuntimeValue::Record { fields, .. } = decoded else {
+            panic!("decoded union should remain a record");
+        };
+        assert_eq!(fields.get("as_word"), Some(&RuntimeValue::Int(7)));
+
+        let callback_value = RuntimeValue::Int(0x1234);
+        let encoded = runtime_binding_output_from_runtime_value(
+            &layouts,
+            "hostapi",
+            "hostapi.raw.WindowProc",
+            callback_value.clone(),
+        )
+        .expect("callback pointer should encode");
+        let decoded = runtime_value_from_binding_cabi_output(
+            &layouts,
+            "hostapi",
+            "hostapi.raw.WindowProc",
+            &encoded,
+            test_free_owned_bytes,
+            test_free_owned_str,
+            "callback result",
+        )
+        .expect("callback pointer should decode");
+        assert_eq!(decoded, callback_value);
+
+        let enum_value = RuntimeValue::Int(1);
+        let encoded = runtime_binding_output_from_runtime_value(
+            &layouts,
+            "hostapi",
+            "hostapi.raw.Mode",
+            enum_value.clone(),
+        )
+        .expect("enum value should encode");
+        let decoded = runtime_value_from_binding_cabi_output(
+            &layouts,
+            "hostapi",
+            "hostapi.raw.Mode",
+            &encoded,
+            test_free_owned_bytes,
+            test_free_owned_str,
+            "enum result",
+        )
+        .expect("enum value should decode");
+        assert_eq!(decoded, enum_value);
+
+        let interface_value = RuntimeValue::Int(0x2468);
+        let encoded = runtime_binding_output_from_runtime_value(
+            &layouts,
+            "hostapi",
+            "hostapi.raw.IUnknown",
+            interface_value.clone(),
+        )
+        .expect("interface pointer should encode");
+        let decoded = runtime_value_from_binding_cabi_output(
+            &layouts,
+            "hostapi",
+            "hostapi.raw.IUnknown",
+            &encoded,
+            test_free_owned_bytes,
+            test_free_owned_str,
+            "interface result",
+        )
+        .expect("interface pointer should decode");
+        assert_eq!(decoded, interface_value);
+    }
+
+    #[test]
+    fn raw_binding_runtime_rejects_multi_field_union_values() {
+        let layouts = sample_binding_layouts();
+        let err = match runtime_binding_output_from_runtime_value(
+            &layouts,
+            "hostapi",
+            "hostapi.raw.ValueUnion",
+            RuntimeValue::Record {
+                name: "hostapi.raw.ValueUnion".to_string(),
+                fields: BTreeMap::from([
+                    ("as_int".to_string(), RuntimeValue::Int(1)),
+                    ("as_word".to_string(), RuntimeValue::Int(2)),
+                ]),
+            },
+        ) {
+            Ok(_) => panic!("union output should require exactly one active field"),
+            Err(err) => err,
+        };
+        assert!(err.contains("exactly one field"), "{err}");
+    }
+
+    #[test]
+    fn raw_binding_runtime_applies_named_layout_write_backs() {
+        let layouts = sample_binding_layouts();
+        let updated = rect_value(32, 48, 3);
+        let write_back = runtime_binding_output_from_runtime_value(
+            &layouts,
+            "hostapi",
+            "hostapi.raw.Rect",
+            updated.clone(),
+        )
+        .expect("write-back value should encode");
+        let outcome = RuntimeBindingImportOutcome {
+            result: ArcanaCabiBindingValueV1::default(),
+            write_backs: vec![write_back],
+            owned_bytes_free: test_free_owned_bytes,
+            owned_str_free: test_free_owned_str,
+        };
+        let params = vec![arcana_ir::IrRoutineParam {
+            binding_id: 0,
+            mode: Some("edit".to_string()),
+            name: "rect".to_string(),
+            ty: parse_routine_type_text("hostapi.raw.Rect").expect("type should parse"),
+        }];
+        let final_args = runtime_final_args_from_binding_import(
+            &layouts,
+            "hostapi",
+            &params,
+            &[rect_value(1, 2, 0)],
+            &outcome,
+        )
+        .expect("named layout write-back should decode");
+        assert_eq!(final_args, vec![updated]);
+    }
 }
 
 #[cfg(test)]

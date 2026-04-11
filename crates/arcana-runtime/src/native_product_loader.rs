@@ -6,17 +6,18 @@ use std::path::{Path, PathBuf};
 use arcana_cabi::{
     ARCANA_CABI_CONTRACT_VERSION_V1, ARCANA_CABI_GET_PRODUCT_API_V1_SYMBOL,
     ArcanaCabiBindingCallback, ArcanaCabiBindingCallbackEntryV1, ArcanaCabiBindingImport,
-    ArcanaCabiBindingImportEntryV1, ArcanaCabiBindingImportFn, ArcanaCabiBindingOpsV1,
+    ArcanaCabiBindingImportEntryV1, ArcanaCabiBindingImportFn, ArcanaCabiBindingLayout,
+    ArcanaCabiBindingLayoutEntryV1, ArcanaCabiBindingOpsV1, ArcanaCabiBindingParam,
     ArcanaCabiBindingRegisterCallbackFn, ArcanaCabiBindingSignature,
-    ArcanaCabiBindingSignatureKind, ArcanaCabiBindingUnregisterCallbackFn,
+    ArcanaCabiBindingSignatureKind, ArcanaCabiBindingType, ArcanaCabiBindingUnregisterCallbackFn,
     ArcanaCabiBindingValueV1, ArcanaCabiChildOpsV1, ArcanaCabiChildRunEntrypointFn,
-    ArcanaCabiCreateInstanceFn, ArcanaCabiDestroyInstanceFn, ArcanaCabiExportParam,
-    ArcanaCabiInstanceOpsV1, ArcanaCabiLastErrorAllocFn, ArcanaCabiOwnedBytesFreeFn,
-    ArcanaCabiOwnedStrFreeFn, ArcanaCabiParamSourceMode, ArcanaCabiPassMode,
-    ArcanaCabiPluginDescribeInstanceFn, ArcanaCabiPluginOpsV1, ArcanaCabiPluginUseInstanceFn,
-    ArcanaCabiProductApiV1, ArcanaCabiProductRole, ArcanaCabiType, binding_write_back_slots,
+    ArcanaCabiCreateInstanceFn, ArcanaCabiDestroyInstanceFn, ArcanaCabiInstanceOpsV1,
+    ArcanaCabiLastErrorAllocFn, ArcanaCabiOwnedBytesFreeFn, ArcanaCabiOwnedStrFreeFn,
+    ArcanaCabiParamSourceMode, ArcanaCabiPassMode, ArcanaCabiPluginDescribeInstanceFn,
+    ArcanaCabiPluginOpsV1, ArcanaCabiPluginUseInstanceFn, ArcanaCabiProductApiV1,
+    ArcanaCabiProductRole, binding_write_back_slots, compare_binding_layouts,
     compare_binding_signatures, release_binding_output_value, validate_binding_callbacks,
-    validate_binding_imports, validate_binding_write_backs,
+    validate_binding_imports, validate_binding_layouts, validate_binding_write_backs,
 };
 use serde::Deserialize;
 
@@ -560,6 +561,7 @@ impl RuntimeNativeProductCatalog {
         callback_specs: &[RuntimeBindingCallbackRegistrationSpec],
         expected_imports: &[ArcanaCabiBindingSignature],
         expected_callbacks: &[ArcanaCabiBindingSignature],
+        expected_layouts: &[ArcanaCabiBindingLayout],
         args: &[ArcanaCabiBindingValueV1],
     ) -> Result<RuntimeBindingImportOutcome, String> {
         #[cfg(windows)]
@@ -569,6 +571,7 @@ impl RuntimeNativeProductCatalog {
                 callback_specs,
                 expected_imports,
                 expected_callbacks,
+                expected_layouts,
             )?;
             let import = binding.imports.get(import_name).ok_or_else(|| {
                 format!(
@@ -663,6 +666,7 @@ impl RuntimeNativeProductCatalog {
                 callback_specs,
                 expected_imports,
                 expected_callbacks,
+                expected_layouts,
                 args,
             );
             Err("native binding products currently require a Windows host".to_string())
@@ -686,6 +690,7 @@ impl RuntimeNativeProductCatalog {
         callback_specs: &[RuntimeBindingCallbackRegistrationSpec],
         expected_imports: &[ArcanaCabiBindingSignature],
         expected_callbacks: &[ArcanaCabiBindingSignature],
+        expected_layouts: &[ArcanaCabiBindingLayout],
     ) -> Result<&mut ActiveBindingProduct, String> {
         let matches = self
             .products
@@ -734,6 +739,7 @@ impl RuntimeNativeProductCatalog {
                     .map(ArcanaCabiBindingCallback::signature)
                     .collect::<Vec<_>>(),
             )?;
+            compare_binding_layouts(expected_layouts, &library.binding_layouts)?;
             let instance = library.create_instance()?;
             let register_callback = library.binding_register_callback.ok_or_else(|| {
                 format!(
@@ -1447,6 +1453,7 @@ struct LoadedNativeLibrary {
     plugin_use_instance: Option<ArcanaCabiPluginUseInstanceFn>,
     binding_imports: Vec<ArcanaCabiBindingImport>,
     binding_callbacks: Vec<ArcanaCabiBindingCallback>,
+    binding_layouts: Vec<ArcanaCabiBindingLayout>,
     binding_register_callback: Option<ArcanaCabiBindingRegisterCallbackFn>,
     binding_unregister_callback: Option<ArcanaCabiBindingUnregisterCallbackFn>,
     last_error_alloc: Option<ArcanaCabiLastErrorAllocFn>,
@@ -1607,6 +1614,7 @@ impl LoadedNativeLibrary {
             plugin_use_instance,
             binding_imports,
             binding_callbacks,
+            binding_layouts,
             binding_register_callback,
             binding_unregister_callback,
             last_error_alloc,
@@ -1632,6 +1640,7 @@ impl LoadedNativeLibrary {
                     Some(child_ops.run_entrypoint),
                     None,
                     None,
+                    Vec::new(),
                     Vec::new(),
                     Vec::new(),
                     None,
@@ -1662,6 +1671,7 @@ impl LoadedNativeLibrary {
                     Some(plugin_ops.use_instance),
                     Vec::new(),
                     Vec::new(),
+                    Vec::new(),
                     None,
                     None,
                     Some(plugin_ops.last_error_alloc),
@@ -1687,8 +1697,11 @@ impl LoadedNativeLibrary {
                 let callbacks = unsafe {
                     read_binding_callbacks(binding_ops.callbacks, binding_ops.callback_count)?
                 };
+                let layouts =
+                    unsafe { read_binding_layouts(binding_ops.layouts, binding_ops.layout_count)? };
                 validate_binding_imports(&imports)?;
                 validate_binding_callbacks(&callbacks)?;
+                validate_binding_layouts(&layouts)?;
                 (
                     binding_ops.base.create_instance,
                     binding_ops.base.destroy_instance,
@@ -1697,6 +1710,7 @@ impl LoadedNativeLibrary {
                     None,
                     imports,
                     callbacks,
+                    layouts,
                     Some(binding_ops.register_callback),
                     Some(binding_ops.unregister_callback),
                     Some(binding_ops.last_error_alloc),
@@ -1738,6 +1752,7 @@ impl LoadedNativeLibrary {
             plugin_use_instance,
             binding_imports,
             binding_callbacks,
+            binding_layouts,
             binding_register_callback,
             binding_unregister_callback,
             last_error_alloc,
@@ -1772,7 +1787,7 @@ unsafe fn read_binding_imports(
                 symbol_name: unsafe {
                     read_cabi_c_string(entry.symbol_name, "binding import symbol")
                 }?,
-                return_type: ArcanaCabiType::parse(&unsafe {
+                return_type: ArcanaCabiBindingType::parse(&unsafe {
                     read_cabi_c_string(entry.return_type, "binding import return type")
                 }?)?,
                 params: unsafe { read_binding_params(entry.params, entry.param_count) }?,
@@ -1795,7 +1810,7 @@ unsafe fn read_binding_callbacks(
         .map(|entry| {
             Ok(ArcanaCabiBindingCallback {
                 name: unsafe { read_cabi_c_string(entry.name, "binding callback name") }?,
-                return_type: ArcanaCabiType::parse(&unsafe {
+                return_type: ArcanaCabiBindingType::parse(&unsafe {
                     read_cabi_c_string(entry.return_type, "binding callback return type")
                 }?)?,
                 params: unsafe { read_binding_params(entry.params, entry.param_count) }?,
@@ -1808,7 +1823,7 @@ unsafe fn read_binding_callbacks(
 unsafe fn read_binding_params(
     entries: *const arcana_cabi::ArcanaCabiExportParamV1,
     count: usize,
-) -> Result<Vec<ArcanaCabiExportParam>, String> {
+) -> Result<Vec<ArcanaCabiBindingParam>, String> {
     if count == 0 {
         return Ok(Vec::new());
     }
@@ -1819,11 +1834,11 @@ unsafe fn read_binding_params(
             let write_back_type = if entry.write_back_type.is_null() {
                 None
             } else {
-                Some(ArcanaCabiType::parse(&unsafe {
+                Some(ArcanaCabiBindingType::parse(&unsafe {
                     read_cabi_c_string(entry.write_back_type, "binding param write-back type")
                 }?)?)
             };
-            Ok(ArcanaCabiExportParam {
+            Ok(ArcanaCabiBindingParam {
                 name: unsafe { read_cabi_c_string(entry.name, "binding param name") }?,
                 source_mode: ArcanaCabiParamSourceMode::parse(&unsafe {
                     read_cabi_c_string(entry.source_mode, "binding param source mode")
@@ -1831,11 +1846,43 @@ unsafe fn read_binding_params(
                 pass_mode: ArcanaCabiPassMode::parse(&unsafe {
                     read_cabi_c_string(entry.pass_mode, "binding param pass mode")
                 }?)?,
-                input_type: ArcanaCabiType::parse(&unsafe {
+                input_type: ArcanaCabiBindingType::parse(&unsafe {
                     read_cabi_c_string(entry.input_type, "binding param input type")
                 }?)?,
                 write_back_type,
             })
+        })
+        .collect()
+}
+
+#[cfg(windows)]
+unsafe fn read_binding_layouts(
+    entries: *const ArcanaCabiBindingLayoutEntryV1,
+    count: usize,
+) -> Result<Vec<ArcanaCabiBindingLayout>, String> {
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    let slice = unsafe { std::slice::from_raw_parts(entries, count) };
+    slice
+        .iter()
+        .map(|entry| {
+            let layout_id = unsafe { read_cabi_c_string(entry.layout_id, "binding layout id") }?;
+            let detail_json =
+                unsafe { read_cabi_c_string(entry.detail_json, "binding layout detail_json") }?;
+            let layout = serde_json::from_str::<ArcanaCabiBindingLayout>(&detail_json)
+                .map_err(|err| {
+                    format!(
+                        "binding layout `{layout_id}` detail_json is not valid ArcanaCabiBindingLayout JSON: {err}"
+                    )
+                })?;
+            if layout.layout_id != layout_id {
+                return Err(format!(
+                    "binding layout entry id mismatch: entry says `{layout_id}`, detail_json says `{}`",
+                    layout.layout_id
+                ));
+            }
+            Ok(layout)
         })
         .collect()
 }
@@ -2083,6 +2130,7 @@ mod tests {
                 package_image_text: None,
                 binding_imports: Vec::new(),
                 binding_callbacks: Vec::new(),
+                binding_layouts: Vec::new(),
                 binding_shackle_decls: Vec::new(),
             },
             &project_dir,
