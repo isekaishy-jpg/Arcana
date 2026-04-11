@@ -32,7 +32,6 @@ export record FontSource:
     full_name: Str
     postscript_name: Str
     installed: Bool
-    bytes: Array[Int]
 
 export record FontMatch:
     id: arcana_text.types.FontFaceId
@@ -51,6 +50,8 @@ export enum TextAlign:
     Left
     Center
     Right
+    Justified
+    End
 
 export enum TextDirection:
     LeftToRight
@@ -66,10 +67,59 @@ export enum ScriptClass:
     Han
     Hangul
     Devanagari
+    Adlam
+    Bengali
+    Bopomofo
+    CanadianAboriginal
+    Chakma
+    Cherokee
+    Ethiopic
+    Gujarati
+    Gurmukhi
+    Hiragana
+    Katakana
+    Javanese
+    Kannada
+    Khmer
+    Lao
+    Malayalam
+    Mongolian
+    Myanmar
+    Oriya
+    Sinhala
+    Tamil
+    Telugu
+    Thaana
+    Thai
+    Tibetan
+    Tifinagh
+    Vai
+    Yi
 
 export enum TextWrap:
     NoWrap
+    Glyph
     Word
+    WordOrGlyph
+
+export enum EllipsizeMode:
+    None
+    Start
+    Middle
+    End
+
+export enum EllipsizeLimitKind:
+    None
+    Lines
+    Height
+
+export record EllipsizeHeightLimit:
+    kind: arcana_text.types.EllipsizeLimitKind
+    value: Int
+
+export enum Hinting:
+    Disabled
+    Enabled
 
 export enum RasterMode:
     Alpha
@@ -91,6 +141,11 @@ export enum TextBaseline:
     Alphabetic
     Ideographic
 
+export enum UnderlineStyle:
+    None
+    Single
+    Double
+
 export record TextRange:
     start: Int
     end: Int
@@ -99,6 +154,15 @@ export record SpanStyle:
     color: Int
     background_enabled: Bool
     background_color: Int
+    underline: arcana_text.types.UnderlineStyle
+    underline_color_enabled: Bool
+    underline_color: Int
+    strikethrough_enabled: Bool
+    strikethrough_color_enabled: Bool
+    strikethrough_color: Int
+    overline_enabled: Bool
+    overline_color_enabled: Bool
+    overline_color: Int
     size: Int
     letter_spacing: Int
     line_height: Int
@@ -110,6 +174,15 @@ export record TextStyle:
     color: Int
     background_enabled: Bool
     background_color: Int
+    underline: arcana_text.types.UnderlineStyle
+    underline_color_enabled: Bool
+    underline_color: Int
+    strikethrough_enabled: Bool
+    strikethrough_color_enabled: Bool
+    strikethrough_color: Int
+    overline_enabled: Bool
+    overline_color_enabled: Bool
+    overline_color: Int
     size: Int
     letter_spacing: Int
     line_height: Int
@@ -122,6 +195,9 @@ export record ParagraphStyle:
     max_lines: Int
     ellipsis: Str
     wrap: arcana_text.types.TextWrap
+    ellipsize_mode: arcana_text.types.EllipsizeMode
+    ellipsize_limit: arcana_text.types.EllipsizeHeightLimit
+    hinting: arcana_text.types.Hinting
 
 export record LayoutConfig:
     max_width: Int
@@ -129,11 +205,16 @@ export record LayoutConfig:
     max_lines: Int
     ellipsis: Str
     wrap: arcana_text.types.TextWrap
+    tab_width: Int
+    ellipsize_mode: arcana_text.types.EllipsizeMode
+    ellipsize_limit: arcana_text.types.EllipsizeHeightLimit
+    hinting: arcana_text.types.Hinting
 
 export record RasterConfig:
     mode: arcana_text.types.RasterMode
     clip_range: arcana_text.types.TextRange
     draw_backgrounds: Bool
+    hinting: arcana_text.types.Hinting
 
 export record Cursor:
     offset: Int
@@ -142,6 +223,11 @@ export record Cursor:
 export record Selection:
     anchor: Int
     focus: Int
+
+export enum SelectionMode:
+    Normal
+    Word
+    Line
 
 export record CompositionRange:
     range: arcana_text.types.TextRange
@@ -197,6 +283,8 @@ export record ShapedGlyph:
     weight: Int
     width_milli: Int
     slant_milli: Int
+    feature_signature: Int
+    axis_signature: Int
     advance: Int
     x_advance: Int
     y_advance: Int
@@ -250,6 +338,8 @@ export record LayoutGlyph:
     weight: Int
     width_milli: Int
     slant_milli: Int
+    feature_signature: Int
+    axis_signature: Int
     ink_offset: (Int, Int)
     ink_size: (Int, Int)
     caret_stop_before: Bool
@@ -265,6 +355,19 @@ export record LayoutRun:
     script: arcana_text.types.ScriptClass
     bidi_level: Int
     language_tag: Str
+    color: Int
+    baseline: Int
+    font_size: Int
+    line_height_milli: Int
+    underline: arcana_text.types.UnderlineStyle
+    underline_color_enabled: Bool
+    underline_color: Int
+    strikethrough_enabled: Bool
+    strikethrough_color_enabled: Bool
+    strikethrough_color: Int
+    overline_enabled: Bool
+    overline_color_enabled: Bool
+    overline_color: Int
     family: Str
     face_id: arcana_text.types.FontFaceId
     glyphs: List[arcana_text.types.LayoutGlyph]
@@ -292,6 +395,22 @@ export record UnresolvedGlyph:
     glyph: Str
     reason: Str
 
+export record PreparedRun:
+    run: arcana_text.types.ShapedRun
+    unresolved: List[arcana_text.types.UnresolvedGlyph]
+
+export record PreparedLayoutLine:
+    start: Int
+    end: Int
+    size: (Int, Int)
+    signature: Int
+    stopped: Bool
+    lines: List[arcana_text.types.SnapshotLine]
+    runs: List[arcana_text.types.LayoutRun]
+    glyphs: List[arcana_text.types.LayoutGlyph]
+    unresolved: List[arcana_text.types.UnresolvedGlyph]
+    fonts_used: List[arcana_text.types.FontMatch]
+
 export record GlyphDraw:
     text: Str
     position: (Int, Int)
@@ -300,6 +419,11 @@ export record GlyphDraw:
     background_enabled: Bool
     background_color: Int
     family: Str
+
+export record DecorationDraw:
+    position: (Int, Int)
+    size: (Int, Int)
+    color: Int
 
 export record GlyphSurface:
     size: (Int, Int)
@@ -340,6 +464,15 @@ export fn axis_signature(read axes: List[arcana_text.types.FontAxis]) -> Int:
 
 export fn default_text_style(color: Int) -> arcana_text.types.TextStyle:
     let mut style = arcana_text.types.TextStyle :: color = color, background_enabled = false, background_color = 0 :: call
+    style.underline = arcana_text.types.UnderlineStyle.None :: :: call
+    style.underline_color_enabled = false
+    style.underline_color = color
+    style.strikethrough_enabled = false
+    style.strikethrough_color_enabled = false
+    style.strikethrough_color = color
+    style.overline_enabled = false
+    style.overline_color_enabled = false
+    style.overline_color = color
     style.size = 18
     style.letter_spacing = 0
     style.line_height = 0
@@ -350,20 +483,32 @@ export fn default_text_style(color: Int) -> arcana_text.types.TextStyle:
 
 export fn default_paragraph_style() -> arcana_text.types.ParagraphStyle:
     let mut paragraph = arcana_text.types.ParagraphStyle :: align = (arcana_text.types.TextAlign.Left :: :: call), max_lines = 0, ellipsis = "..." :: call
-    paragraph.wrap = arcana_text.types.TextWrap.Word :: :: call
+    paragraph.wrap = arcana_text.types.TextWrap.WordOrGlyph :: :: call
+    paragraph.ellipsize_mode = arcana_text.types.EllipsizeMode.None :: :: call
+    paragraph.ellipsize_limit = (arcana_text.types.EllipsizeHeightLimit :: kind = (arcana_text.types.EllipsizeLimitKind.None :: :: call), value = 0 :: call)
+    paragraph.hinting = arcana_text.types.Hinting.Disabled :: :: call
     return paragraph
 
 export fn default_layout_config(max_width: Int, read paragraph: arcana_text.types.ParagraphStyle) -> arcana_text.types.LayoutConfig:
     let mut config = arcana_text.types.LayoutConfig :: max_width = max_width, align = paragraph.align, max_lines = paragraph.max_lines :: call
     config.ellipsis = paragraph.ellipsis
     config.wrap = paragraph.wrap
+    config.tab_width = 8
+    config.ellipsize_mode = paragraph.ellipsize_mode
+    config.ellipsize_limit = paragraph.ellipsize_limit
+    config.hinting = paragraph.hinting
     return config
 
 export fn default_raster_config() -> arcana_text.types.RasterConfig:
-    return arcana_text.types.RasterConfig :: mode = (arcana_text.types.RasterMode.Alpha :: :: call), clip_range = (arcana_text.types.TextRange :: start = 0, end = 0 :: call), draw_backgrounds = true :: call
+    let mut config = arcana_text.types.RasterConfig :: mode = (arcana_text.types.RasterMode.Alpha :: :: call), clip_range = (arcana_text.types.TextRange :: start = 0, end = 0 :: call), draw_backgrounds = true :: call
+    config.hinting = arcana_text.types.Hinting.Disabled :: :: call
+    return config
 
 export fn default_cursor() -> arcana_text.types.Cursor:
     return arcana_text.types.Cursor :: offset = 0, preferred_x = 0 :: call
 
 export fn default_selection() -> arcana_text.types.Selection:
     return arcana_text.types.Selection :: anchor = 0, focus = 0 :: call
+
+export fn default_selection_mode() -> arcana_text.types.SelectionMode:
+    return arcana_text.types.SelectionMode.Normal :: :: call

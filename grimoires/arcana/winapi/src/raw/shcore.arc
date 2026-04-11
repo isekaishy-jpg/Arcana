@@ -1,0 +1,1 @@
+export shackle import fn GetDpiForMonitor(monitor: arcana_winapi.raw.types.HMONITOR, dpi_type: arcana_winapi.raw.types.UINT, dpi_x: arcana_winapi.raw.types.PUINT, dpi_y: arcana_winapi.raw.types.PUINT) -> arcana_winapi.raw.types.HRESULT = shcore.GetDpiForMonitor

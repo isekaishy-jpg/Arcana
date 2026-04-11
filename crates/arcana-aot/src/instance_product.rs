@@ -928,10 +928,21 @@ fn render_binding_import_impl_body(
     }
     match decl.kind.as_str() {
         "fn" => {
-            for line in &decl.body_entries {
-                out.push_str("    ");
-                out.push_str(line);
-                out.push('\n');
+            if decl.binding.as_deref() == Some(import.name.as_str()) {
+                for line in &decl.body_entries {
+                    out.push_str("    ");
+                    out.push_str(line);
+                    out.push('\n');
+                }
+            } else {
+                let args = render_direct_shackle_import_call_args(spec, import, decl)?;
+                let call = format!("{}({args})", decl.name);
+                out.push_str(&render_binding_result_expr(
+                    import,
+                    &call,
+                    decl,
+                    /*is_statement*/ import.return_type == ArcanaCabiBindingType::Unit,
+                )?);
             }
         }
         "import fn" | "import_fn" => {
@@ -1107,7 +1118,7 @@ fn render_generated_binding_preamble(
 ) -> String {
     let mut out = String::new();
     out.push_str(concat!(
-        "#![allow(dead_code, non_camel_case_types, non_snake_case, non_upper_case_globals)]\n\n",
+        "#![allow(dead_code, non_camel_case_types, non_snake_case, non_upper_case_globals, unsafe_op_in_unsafe_fn)]\n\n",
         "use std::cell::RefCell;\n",
         "use std::collections::BTreeMap;\n",
         "use std::ffi::{c_char, c_void, CStr};\n",
@@ -1802,7 +1813,7 @@ fn render_shackle_const_decl(
             .as_ref()
             .map(|ty| render_shackle_rust_type(spec, ty))
             .unwrap_or_else(|| "()".to_string()),
-        binding
+        rewrite_shackle_expr_binding(spec, binding)
     ))
 }
 
@@ -1810,11 +1821,17 @@ fn render_shackle_raw_decl(
     spec: &AotInstanceProductSpec,
     decl: &AotShackleDeclArtifact,
 ) -> Result<String, String> {
+    if let Some(layout) = decl.raw_layout.as_ref() {
+        return render_shackle_typed_raw_decl(spec, decl, layout);
+    }
     if !decl.body_entries.is_empty() {
         let mut out = String::new();
         match decl.kind.as_str() {
             "struct" => {
-                out.push_str(&format!("#[repr(C)]\npub(crate) struct {} {{\n", decl.name));
+                out.push_str(&format!(
+                    "#[derive(Clone, Copy)]\n#[repr(C)]\npub(crate) struct {} {{\n",
+                    decl.name
+                ));
                 for line in &decl.body_entries {
                     out.push_str("    ");
                     out.push_str(&render_shackle_struct_field(line));
@@ -1823,7 +1840,10 @@ fn render_shackle_raw_decl(
                 out.push_str("}\n\n");
             }
             "union" => {
-                out.push_str(&format!("#[repr(C)]\npub(crate) union {} {{\n", decl.name));
+                out.push_str(&format!(
+                    "#[derive(Clone, Copy)]\n#[repr(C)]\npub(crate) union {} {{\n",
+                    decl.name
+                ));
                 for line in &decl.body_entries {
                     out.push_str("    ");
                     out.push_str(&render_shackle_struct_field(line));
@@ -1866,6 +1886,212 @@ fn rewrite_shackle_type_binding(spec: &AotInstanceProductSpec, binding: &str) ->
         .replace(&package_prefix, "crate::")
         .replace("c_void", "std::ffi::c_void")
         .replace('.', "::")
+}
+
+fn rewrite_shackle_expr_binding(spec: &AotInstanceProductSpec, binding: &str) -> String {
+    let trimmed = binding.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if !trimmed.contains(&format!("{}.", spec.package_name)) {
+        return trimmed.to_string();
+    }
+    let segments = trimmed.split('.').collect::<Vec<_>>();
+    for split in (1..=segments.len()).rev() {
+        let candidate = segments[..split].join(".");
+        if spec
+            .binding_shackle_decls
+            .iter()
+            .any(|decl| format!("{}.{}", decl.module_id, decl.name) == candidate)
+        {
+            let mut rendered = rewrite_shackle_type_binding(spec, &candidate);
+            if split < segments.len() {
+                rendered.push('.');
+                rendered.push_str(&segments[split..].join("."));
+            }
+            return rendered;
+        }
+    }
+    rewrite_shackle_type_binding(spec, trimmed)
+}
+
+fn render_shackle_typed_raw_decl(
+    spec: &AotInstanceProductSpec,
+    decl: &AotShackleDeclArtifact,
+    layout: &arcana_cabi::ArcanaCabiBindingLayout,
+) -> Result<String, String> {
+    use arcana_cabi::ArcanaCabiBindingLayoutKind;
+
+    Ok(match &layout.kind {
+        ArcanaCabiBindingLayoutKind::Alias { target } => format!(
+            "pub(crate) type {} = {};\n\n",
+            decl.name,
+            render_shackle_binding_raw_type(spec, target)
+        ),
+        ArcanaCabiBindingLayoutKind::Array { element_type, len } => format!(
+            "pub(crate) type {} = [{}; {}];\n\n",
+            decl.name,
+            render_shackle_binding_raw_type(spec, element_type),
+            len
+        ),
+        ArcanaCabiBindingLayoutKind::Enum { repr, variants } => {
+            let value_set_ty = format!("{}__ValueSet", decl.name);
+            let mut out = String::new();
+            out.push_str(&format!(
+                "pub(crate) type {} = {};\n\n",
+                decl.name,
+                render_shackle_binding_scalar_type(*repr)
+            ));
+            out.push_str("#[allow(non_snake_case)]\n");
+            out.push_str(&format!("pub(crate) struct {value_set_ty} {{\n"));
+            for variant in variants {
+                out.push_str(&format!(
+                    "    pub(crate) {}: {},\n",
+                    variant.name, decl.name
+                ));
+            }
+            out.push_str("}\n\n");
+            out.push_str("#[allow(non_upper_case_globals)]\n");
+            out.push_str(&format!(
+                "pub(crate) const {}: {} = {} {{\n",
+                decl.name, value_set_ty, value_set_ty
+            ));
+            for variant in variants {
+                out.push_str(&format!(
+                    "    {}: {} as {},\n",
+                    variant.name, variant.value, decl.name
+                ));
+            }
+            out.push_str("};\n\n");
+            out
+        }
+        ArcanaCabiBindingLayoutKind::Flags { repr } => format!(
+            "pub(crate) type {} = {};\n\n",
+            decl.name,
+            render_shackle_binding_scalar_type(*repr)
+        ),
+        ArcanaCabiBindingLayoutKind::Struct { fields } => {
+            let mut out = String::new();
+            out.push_str("#[allow(non_snake_case)]\n");
+            out.push_str(&format!(
+                "#[derive(Clone, Copy)]\n#[repr(C)]\npub(crate) struct {} {{\n",
+                decl.name
+            ));
+            for field in fields {
+                out.push_str(&format!(
+                    "    pub(crate) {}: {},\n",
+                    field.name,
+                    render_shackle_binding_raw_type(spec, &field.ty)
+                ));
+            }
+            out.push_str("}\n\n");
+            out
+        }
+        ArcanaCabiBindingLayoutKind::Union { fields } => {
+            let mut out = String::new();
+            out.push_str("#[allow(non_snake_case)]\n");
+            out.push_str(&format!(
+                "#[derive(Clone, Copy)]\n#[repr(C)]\npub(crate) union {} {{\n",
+                decl.name
+            ));
+            for field in fields {
+                out.push_str(&format!(
+                    "    pub(crate) {}: {},\n",
+                    field.name,
+                    render_shackle_binding_raw_type(spec, &field.ty)
+                ));
+            }
+            out.push_str("}\n\n");
+            out
+        }
+        ArcanaCabiBindingLayoutKind::Callback {
+            abi,
+            params,
+            return_type,
+        } => format!(
+            "pub(crate) type {} = {};\n\n",
+            decl.name,
+            render_shackle_binding_function_pointer_type(spec, abi, true, params, return_type)
+        ),
+        ArcanaCabiBindingLayoutKind::Interface { .. } => {
+            let rendered_binding = decl
+                .binding
+                .as_deref()
+                .map(|binding| rewrite_shackle_type_binding(spec, binding))
+                .unwrap_or_else(|| "*mut std::ffi::c_void".to_string());
+            format!("pub(crate) type {} = {};\n\n", decl.name, rendered_binding)
+        }
+    })
+}
+
+fn render_shackle_binding_raw_type(
+    spec: &AotInstanceProductSpec,
+    ty: &arcana_cabi::ArcanaCabiBindingRawType,
+) -> String {
+    use arcana_cabi::ArcanaCabiBindingRawType;
+
+    match ty {
+        ArcanaCabiBindingRawType::Void => "std::ffi::c_void".to_string(),
+        ArcanaCabiBindingRawType::Scalar(scalar) => render_shackle_binding_scalar_type(*scalar),
+        ArcanaCabiBindingRawType::Named(name) => rewrite_shackle_type_binding(spec, name),
+        ArcanaCabiBindingRawType::Pointer { mutable, inner } => format!(
+            "*{} {}",
+            if *mutable { "mut" } else { "const" },
+            render_shackle_binding_raw_type(spec, inner)
+        ),
+        ArcanaCabiBindingRawType::FunctionPointer {
+            abi,
+            nullable,
+            params,
+            return_type,
+        } => {
+            render_shackle_binding_function_pointer_type(spec, abi, *nullable, params, return_type)
+        }
+    }
+}
+
+fn render_shackle_binding_function_pointer_type(
+    spec: &AotInstanceProductSpec,
+    abi: &str,
+    nullable: bool,
+    params: &[arcana_cabi::ArcanaCabiBindingRawType],
+    return_type: &arcana_cabi::ArcanaCabiBindingRawType,
+) -> String {
+    let params = params
+        .iter()
+        .map(|param| render_shackle_binding_raw_type(spec, param))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut rendered = format!("unsafe extern {:?} fn({params})", abi);
+    if !matches!(return_type, arcana_cabi::ArcanaCabiBindingRawType::Void) {
+        rendered.push_str(" -> ");
+        rendered.push_str(&render_shackle_binding_raw_type(spec, return_type));
+    }
+    if nullable {
+        format!("Option<{rendered}>")
+    } else {
+        rendered
+    }
+}
+
+fn render_shackle_binding_scalar_type(scalar: arcana_cabi::ArcanaCabiBindingScalarType) -> String {
+    use arcana_cabi::ArcanaCabiBindingScalarType;
+
+    match scalar {
+        ArcanaCabiBindingScalarType::Int | ArcanaCabiBindingScalarType::I64 => "i64".to_string(),
+        ArcanaCabiBindingScalarType::Bool => "bool".to_string(),
+        ArcanaCabiBindingScalarType::I8 => "i8".to_string(),
+        ArcanaCabiBindingScalarType::U8 => "u8".to_string(),
+        ArcanaCabiBindingScalarType::I16 => "i16".to_string(),
+        ArcanaCabiBindingScalarType::U16 => "u16".to_string(),
+        ArcanaCabiBindingScalarType::I32 => "i32".to_string(),
+        ArcanaCabiBindingScalarType::U32 => "u32".to_string(),
+        ArcanaCabiBindingScalarType::U64 => "u64".to_string(),
+        ArcanaCabiBindingScalarType::ISize => "isize".to_string(),
+        ArcanaCabiBindingScalarType::USize => "usize".to_string(),
+        ArcanaCabiBindingScalarType::F32 => "f32".to_string(),
+        ArcanaCabiBindingScalarType::F64 => "f64".to_string(),
+    }
 }
 
 fn render_shackle_rust_params(
@@ -2170,7 +2396,8 @@ fn render_shackle_struct_field(line: &str) -> String {
     {
         trimmed.to_string()
     } else {
-        format!("pub(crate) {trimmed}")
+        let suffix = if trimmed.ends_with(',') { "" } else { "," };
+        format!("pub(crate) {trimmed}{suffix}")
     }
 }
 
@@ -2360,7 +2587,8 @@ mod tests {
     use crate::native_abi::{NativeBindingCallback, NativeBindingImport};
     use arcana_cabi::{
         ARCANA_CABI_BINDING_CONTRACT_ID, ARCANA_CABI_CHILD_CONTRACT_ID,
-        ARCANA_CABI_PLUGIN_CONTRACT_ID, ArcanaCabiBindingLayout, ArcanaCabiBindingLayoutField,
+        ARCANA_CABI_PLUGIN_CONTRACT_ID, ArcanaCabiBindingLayout,
+        ArcanaCabiBindingLayoutEnumVariant, ArcanaCabiBindingLayoutField,
         ArcanaCabiBindingLayoutKind, ArcanaCabiBindingRawType, ArcanaCabiBindingScalarType,
         ArcanaCabiProductRole,
     };
@@ -2526,6 +2754,81 @@ mod tests {
         assert!(lib_rs.contains("pub(crate) mod raw"));
         assert!(lib_rs.contains("pub(crate) mod types"));
         assert!(lib_rs.contains("pub(crate) type PHMODULE = *mut crate::raw::types::HMODULE;"));
+    }
+
+    #[test]
+    fn generated_binding_instance_product_renders_typed_raw_enums_and_enum_const_bindings() {
+        let mut spec = binding_spec();
+        let mut decls = spec.binding_shackle_decls.clone();
+        decls.extend([
+            AotShackleDeclArtifact {
+                package_id: "arcana_winapi".to_string(),
+                module_id: "arcana_winapi.raw.types".to_string(),
+                exported: true,
+                kind: "type".to_string(),
+                name: "DWRITE_FACTORY_TYPE".to_string(),
+                params: Vec::new(),
+                return_type: None,
+                callback_type: None,
+                binding: Some("U32".to_string()),
+                body_entries: vec!["Shared = 0".to_string(), "Isolated = 1".to_string()],
+                raw_layout: Some(ArcanaCabiBindingLayout {
+                    layout_id: "arcana_winapi.raw.types.DWRITE_FACTORY_TYPE".to_string(),
+                    size: 4,
+                    align: 4,
+                    kind: ArcanaCabiBindingLayoutKind::Enum {
+                        repr: ArcanaCabiBindingScalarType::U32,
+                        variants: vec![
+                            ArcanaCabiBindingLayoutEnumVariant {
+                                name: "Shared".to_string(),
+                                value: 0,
+                            },
+                            ArcanaCabiBindingLayoutEnumVariant {
+                                name: "Isolated".to_string(),
+                                value: 1,
+                            },
+                        ],
+                    },
+                }),
+                import_target: None,
+                thunk_target: None,
+                surface_text: String::new(),
+            },
+            AotShackleDeclArtifact {
+                package_id: "arcana_winapi".to_string(),
+                module_id: "arcana_winapi.raw.constants".to_string(),
+                exported: true,
+                kind: "const".to_string(),
+                name: "DWRITE_FACTORY_TYPE_SHARED".to_string(),
+                params: Vec::new(),
+                return_type: Some(
+                    arcana_ir::parse_routine_type_text(
+                        "arcana_winapi.raw.types.DWRITE_FACTORY_TYPE",
+                    )
+                    .expect("type should parse"),
+                ),
+                callback_type: None,
+                binding: Some("arcana_winapi.raw.types.DWRITE_FACTORY_TYPE.Shared".to_string()),
+                body_entries: Vec::new(),
+                raw_layout: None,
+                import_target: None,
+                thunk_target: None,
+                surface_text: String::new(),
+            },
+        ]);
+        spec.binding_shackle_decls = decls;
+
+        let lib_rs = render_instance_product_lib_rs(&spec).expect("lib.rs should render");
+
+        assert!(lib_rs.contains("pub(crate) type DWRITE_FACTORY_TYPE = u32;"));
+        assert!(lib_rs.contains("pub(crate) struct DWRITE_FACTORY_TYPE__ValueSet"));
+        assert!(
+            lib_rs.contains("pub(crate) const DWRITE_FACTORY_TYPE: DWRITE_FACTORY_TYPE__ValueSet")
+        );
+        assert!(lib_rs.contains("Shared: 0 as DWRITE_FACTORY_TYPE"));
+        assert!(lib_rs.contains(
+            "pub(crate) const DWRITE_FACTORY_TYPE_SHARED: crate::raw::types::DWRITE_FACTORY_TYPE = crate::raw::types::DWRITE_FACTORY_TYPE.Shared;"
+        ));
     }
 
     #[test]

@@ -1,0 +1,1 @@
+export shackle import fn D3D12CreateDevice(adapter: arcana_winapi.raw.types.LPVOID, minimum_feature_level: arcana_winapi.raw.types.UINT, iid: arcana_winapi.raw.types.REFIID, device: arcana_winapi.raw.types.PPVOID) -> arcana_winapi.raw.types.HRESULT = d3d12.D3D12CreateDevice

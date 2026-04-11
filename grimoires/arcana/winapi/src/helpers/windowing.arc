@@ -1,0 +1,9 @@
+export native fn hidden_window_roundtrip(read code: Int) -> Int = helpers.windowing.hidden_window_roundtrip
+export native fn hidden_window_dpi() -> arcana_winapi.raw.types.UINT = helpers.windowing.hidden_window_dpi
+export native fn hidden_window_monitor_dpi() -> arcana_winapi.raw.types.UINT = helpers.windowing.hidden_window_monitor_dpi
+export native fn hidden_window_dark_mode_roundtrip() -> Bool = helpers.windowing.hidden_window_dark_mode_roundtrip
+export native fn hidden_window_client_rect() -> arcana_winapi.raw.types.RECT = helpers.windowing.hidden_window_client_rect
+export native fn hidden_window_frame_rect() -> arcana_winapi.raw.types.RECT = helpers.windowing.hidden_window_frame_rect
+export native fn clipboard_open_roundtrip() -> Bool = helpers.windowing.clipboard_open_roundtrip
+export native fn enable_file_drop_roundtrip() -> Bool = helpers.windowing.enable_file_drop_roundtrip
+export native fn ime_composition_bytes() -> Int = helpers.windowing.ime_composition_bytes

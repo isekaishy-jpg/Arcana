@@ -1152,6 +1152,8 @@ pub fn validate_binding_layouts(layouts: &[ArcanaCabiBindingLayout]) -> Result<(
                 layout.layout_id, layout.align
             ));
         }
+    }
+    for layout in layouts {
         validate_binding_layout_kind(layout, &ids)?;
     }
     Ok(())

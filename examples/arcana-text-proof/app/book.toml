@@ -2,4 +2,5 @@ name = "app"
 kind = "app"
 
 [deps]
+arcana_desktop = { path = "../../../grimoires/libs/arcana-desktop", native_child = "default" }
 arcana_text = { path = "../../../grimoires/libs/arcana-text" }

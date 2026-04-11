@@ -1,0 +1,1 @@
+export shackle import fn CreateDXGIFactory2(flags: arcana_winapi.raw.types.UINT, iid: arcana_winapi.raw.types.REFIID, factory: arcana_winapi.raw.types.PPVOID) -> arcana_winapi.raw.types.HRESULT = dxgi.CreateDXGIFactory2

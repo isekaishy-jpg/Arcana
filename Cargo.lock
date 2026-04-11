@@ -50,6 +50,7 @@ dependencies = [
 name = "arcana-frontend"
 version = "0.1.0"
 dependencies = [
+ "arcana-cabi",
  "arcana-hir",
  "arcana-ir",
  "arcana-language-law",

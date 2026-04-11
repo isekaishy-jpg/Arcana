@@ -552,6 +552,380 @@ fn execute_main_runs_arcana_winapi_binding_smoke() {
 }
 
 #[cfg(windows)]
+fn run_arcana_winapi_helper_app(app_name: &str, shelf_text: &str) -> i64 {
+    let dir = temp_workspace_dir(app_name);
+    let winapi_path = path_text(&repo_root().join("grimoires").join("arcana").join("winapi"));
+    write_file(
+        &dir.join("book.toml"),
+        &format!(
+            concat!(
+                "name = \"app\"\n",
+                "kind = \"app\"\n",
+                "[deps]\n",
+                "arcana_winapi = {{ path = \"{winapi_path}\" }}\n",
+            ),
+            winapi_path = winapi_path,
+        ),
+    );
+    write_file(&dir.join("src").join("shelf.arc"), shelf_text);
+    write_file(&dir.join("src").join("types.arc"), "// test types\n");
+
+    let (plan, bundle_dir) = build_workspace_plan_and_bundle_dir_for_member(&dir, "app");
+    let mut host = BufferedHost {
+        cwd: path_text(&dir),
+        env: BTreeMap::from([(
+            ARCANA_NATIVE_BUNDLE_DIR_ENV.to_string(),
+            path_text(&bundle_dir),
+        )]),
+        ..BufferedHost::default()
+    };
+
+    reset_runtime_native_products_cache();
+    let code = execute_main(&plan, &mut host).expect("runtime should execute winapi helper app");
+    reset_runtime_native_products_cache();
+
+    let _ = fs::remove_dir_all(&dir);
+    i64::from(code)
+}
+
+#[cfg(windows)]
+#[test]
+fn execute_main_runs_arcana_winapi_windowing_helper_smoke() {
+    let code = run_arcana_winapi_helper_app(
+        "runtime_arcana_winapi_windowing_helper_surface",
+        concat!(
+            "use arcana_winapi.helpers.com as com\n",
+            "use arcana_winapi.helpers.errors as errors\n",
+            "use arcana_winapi.helpers.strings as strings\n",
+            "use arcana_winapi.helpers.windowing as windowing\n",
+            "use arcana_winapi.raw.constants as raw_constants\n",
+            "fn main() -> Int:\n",
+            "    if (strings.utf16_units :: \"Arcana\" :: call) != 6:\n",
+            "        return 1\n",
+            "    if (strings.utf16_units_with_nul :: \"Arcana\" :: call) != 7:\n",
+            "        return 2\n",
+            "    let s_ok = errors.hresult_succeeded :: raw_constants.S_OK :: call\n",
+            "    if s_ok == false:\n",
+            "        return 3\n",
+            "    let failed = errors.hresult_failed :: raw_constants.S_OK :: call\n",
+            "    if failed:\n",
+            "        return 4\n",
+            "    let guid_data = array yield arcana_winapi.raw.types.GUID_DATA4 -return 0\n",
+            "        [0] = (U8 :: 1 :: call)\n",
+            "        [1] = (U8 :: 2 :: call)\n",
+            "        [2] = (U8 :: 3 :: call)\n",
+            "        [3] = (U8 :: 4 :: call)\n",
+            "        [4] = (U8 :: 5 :: call)\n",
+            "        [5] = (U8 :: 6 :: call)\n",
+            "        [6] = (U8 :: 7 :: call)\n",
+            "        [7] = (U8 :: 8 :: call)\n",
+            "    let guid = struct yield arcana_winapi.raw.types.GUID -return 0\n",
+            "        data1 = (U32 :: 305419896 :: call)\n",
+            "        data2 = (U16 :: 4660 :: call)\n",
+            "        data3 = (U16 :: 22136 :: call)\n",
+            "        data4 = guid_data\n",
+            "    let guid_text = com.guid_to_text :: guid :: call\n",
+            "    if (strings.utf16_units :: guid_text :: call) <= 0:\n",
+            "        return 5\n",
+            "    let key = com.make_property_key :: guid, (U32 :: 42 :: call) :: call\n",
+            "    let key_pid = com.property_key_pid :: key :: call\n",
+            "    if (Int :: key_pid :: call) != 42:\n",
+            "        return 6\n",
+            "    let hr = com.initialize_multithreaded :: :: call\n",
+            "    let changed_mode = hr == raw_constants.RPC_E_CHANGED_MODE\n",
+            "    let init_failed = errors.hresult_failed :: hr :: call\n",
+            "    if (changed_mode == false) and init_failed:\n",
+            "        return 7\n",
+            "    if changed_mode == false:\n",
+            "        com.uninitialize :: :: call\n",
+            "    if (windowing.hidden_window_roundtrip :: 11 :: call) != 42:\n",
+            "        return 8\n",
+            "    let dpi = windowing.hidden_window_dpi :: :: call\n",
+            "    if (Int :: dpi :: call) <= 0:\n",
+            "        return 9\n",
+            "    let monitor_dpi = windowing.hidden_window_monitor_dpi :: :: call\n",
+            "    if (Int :: monitor_dpi :: call) <= 0:\n",
+            "        return 10\n",
+            "    let _dark_mode = windowing.hidden_window_dark_mode_roundtrip :: :: call\n",
+            "    let client_rect = windowing.hidden_window_client_rect :: :: call\n",
+            "    if client_rect.right <= client_rect.left:\n",
+            "        return 11\n",
+            "    let frame_rect = windowing.hidden_window_frame_rect :: :: call\n",
+            "    if frame_rect.right <= frame_rect.left:\n",
+            "        return 12\n",
+            "    if windowing.clipboard_open_roundtrip :: :: call == false:\n",
+            "        return 13\n",
+            "    if windowing.enable_file_drop_roundtrip :: :: call == false:\n",
+            "        return 14\n",
+            "    if (windowing.ime_composition_bytes :: :: call) < 0:\n",
+            "        return 15\n",
+            "    return 0\n",
+        ),
+    );
+
+    assert_eq!(code, 0);
+}
+
+#[cfg(windows)]
+#[test]
+fn execute_main_runs_arcana_winapi_graphics_gdi_helper_smoke() {
+    let code = run_arcana_winapi_helper_app(
+        "runtime_arcana_winapi_graphics_gdi_helper_surface",
+        concat!(
+            "use arcana_winapi.helpers.graphics as graphics\n",
+            "fn main() -> Int:\n",
+            "    if (graphics.gdi_memory_surface_stride :: 8, 8 :: call) != 32:\n",
+            "        return 1\n",
+            "    if graphics.gdi_hidden_window_present :: :: call == false:\n",
+            "        return 2\n",
+            "    return 0\n",
+        ),
+    );
+
+    assert_eq!(code, 0);
+}
+
+#[cfg(windows)]
+#[test]
+fn execute_main_runs_arcana_winapi_graphics_dxgi_helper_smoke() {
+    let code = run_arcana_winapi_helper_app(
+        "runtime_arcana_winapi_graphics_dxgi_helper_surface",
+        concat!(
+            "use arcana_winapi.helpers.graphics as graphics\n",
+            "fn main() -> Int:\n",
+            "    if (graphics.dxgi_adapter_count :: :: call) < 0:\n",
+            "        return 1\n",
+            "    if graphics.bootstrap_dxgi_hidden_window_swapchain :: :: call == false:\n",
+            "        return 2\n",
+            "    return 0\n",
+        ),
+    );
+
+    assert_eq!(code, 0);
+}
+
+#[cfg(windows)]
+#[test]
+fn execute_main_runs_arcana_winapi_graphics_d3d12_helper_smoke() {
+    let code = run_arcana_winapi_helper_app(
+        "runtime_arcana_winapi_graphics_d3d12_helper_surface",
+        concat!(
+            "use arcana_winapi.helpers.graphics as graphics\n",
+            "fn main() -> Int:\n",
+            "    if (graphics.dxgi_adapter_count :: :: call) < 0:\n",
+            "        return 1\n",
+            "    if graphics.bootstrap_d3d12_warp :: :: call == false:\n",
+            "        return 2\n",
+            "    return 0\n",
+        ),
+    );
+
+    assert_eq!(code, 0);
+}
+
+#[cfg(windows)]
+#[test]
+fn execute_main_runs_arcana_winapi_graphics_d2d_wic_helper_smoke() {
+    let code = run_arcana_winapi_helper_app(
+        "runtime_arcana_winapi_graphics_d2d_wic_helper_surface",
+        concat!(
+            "use arcana_winapi.helpers.graphics as graphics\n",
+            "fn main() -> Int:\n",
+            "    if graphics.bootstrap_d2d_factory :: :: call == false:\n",
+            "        return 1\n",
+            "    if graphics.bootstrap_wic_factory :: :: call == false:\n",
+            "        return 2\n",
+            "    return 0\n",
+        ),
+    );
+
+    assert_eq!(code, 0);
+}
+
+#[cfg(windows)]
+#[test]
+fn execute_main_runs_arcana_winapi_graphics_helper_smoke() {
+    let code = run_arcana_winapi_helper_app(
+        "runtime_arcana_winapi_graphics_helper_surface",
+        concat!(
+            "use arcana_winapi.helpers.graphics as graphics\n",
+            "fn main() -> Int:\n",
+            "    if (graphics.gdi_memory_surface_stride :: 8, 8 :: call) != 32:\n",
+            "        return 1\n",
+            "    if graphics.gdi_hidden_window_present :: :: call == false:\n",
+            "        return 2\n",
+            "    if (graphics.dxgi_adapter_count :: :: call) < 0:\n",
+            "        return 3\n",
+            "    if graphics.bootstrap_d3d12_warp :: :: call == false:\n",
+            "        return 4\n",
+            "    if graphics.bootstrap_dxgi_hidden_window_swapchain :: :: call == false:\n",
+            "        return 5\n",
+            "    if graphics.bootstrap_d2d_factory :: :: call == false:\n",
+            "        return 6\n",
+            "    if graphics.bootstrap_wic_factory :: :: call == false:\n",
+            "        return 7\n",
+            "    return 0\n",
+        ),
+    );
+
+    assert_eq!(code, 0);
+}
+
+#[cfg(windows)]
+#[test]
+fn execute_main_runs_arcana_winapi_text_helper_smoke() {
+    let code = run_arcana_winapi_helper_app(
+        "runtime_arcana_winapi_text_helper_surface",
+        concat!(
+            "use arcana_winapi.helpers.text as text\n",
+            "fn main() -> Int:\n",
+            "    if (text.directwrite_system_font_count :: :: call) <= 0:\n",
+            "        return 1\n",
+            "    if text.bootstrap_text_layout :: :: call == false:\n",
+            "        return 2\n",
+            "    return 0\n",
+        ),
+    );
+
+    assert_eq!(code, 0);
+}
+
+#[cfg(windows)]
+#[test]
+fn execute_main_runs_arcana_winapi_audio_helper_smoke() {
+    let code = run_arcana_winapi_helper_app(
+        "runtime_arcana_winapi_audio_helper_surface",
+        concat!(
+            "use arcana_winapi.helpers.audio as audio\n",
+            "fn main() -> Int:\n",
+            "    if (audio.render_device_count :: :: call) < 0:\n",
+            "        return 1\n",
+            "    let _wasapi = audio.bootstrap_wasapi_default_render :: :: call\n",
+            "    let _render_client = audio.bootstrap_wasapi_render_client :: :: call\n",
+            "    let _endpoint = audio.bootstrap_endpoint_volume :: :: call\n",
+            "    let _session = audio.bootstrap_session_policy_game_effects :: :: call\n",
+            "    if audio.register_pro_audio_thread :: :: call == false:\n",
+            "        return 2\n",
+            "    let _xaudio = audio.bootstrap_xaudio2 :: :: call\n",
+            "    let _x3 = audio.bootstrap_x3daudio :: :: call\n",
+            "    return 0\n",
+        ),
+    );
+
+    assert_eq!(code, 0);
+}
+
+#[cfg(windows)]
+#[test]
+fn execute_main_runs_arcana_winapi_helper_surface_smoke() {
+    let code = run_arcana_winapi_helper_app(
+        "runtime_arcana_winapi_helper_surface",
+        concat!(
+            "use arcana_winapi.helpers.audio as audio\n",
+            "use arcana_winapi.helpers.com as com\n",
+            "use arcana_winapi.helpers.errors as errors\n",
+            "use arcana_winapi.helpers.graphics as graphics\n",
+            "use arcana_winapi.helpers.strings as strings\n",
+            "use arcana_winapi.helpers.text as text\n",
+            "use arcana_winapi.helpers.windowing as windowing\n",
+            "use arcana_winapi.raw.constants as raw_constants\n",
+            "use arcana_winapi.raw.types as raw_types\n",
+            "fn main() -> Int:\n",
+            "    if (strings.utf16_units :: \"Arcana\" :: call) != 6:\n",
+            "        return 1\n",
+            "    if (strings.utf16_units_with_nul :: \"Arcana\" :: call) != 7:\n",
+            "        return 2\n",
+            "    let s_ok = errors.hresult_succeeded :: raw_constants.S_OK :: call\n",
+            "    if s_ok == false:\n",
+            "        return 3\n",
+            "    let failed = errors.hresult_failed :: raw_constants.S_OK :: call\n",
+            "    if failed:\n",
+            "        return 4\n",
+            "    let guid_data = array yield arcana_winapi.raw.types.GUID_DATA4 -return 0\n",
+            "        [0] = (U8 :: 1 :: call)\n",
+            "        [1] = (U8 :: 2 :: call)\n",
+            "        [2] = (U8 :: 3 :: call)\n",
+            "        [3] = (U8 :: 4 :: call)\n",
+            "        [4] = (U8 :: 5 :: call)\n",
+            "        [5] = (U8 :: 6 :: call)\n",
+            "        [6] = (U8 :: 7 :: call)\n",
+            "        [7] = (U8 :: 8 :: call)\n",
+            "    let guid = struct yield arcana_winapi.raw.types.GUID -return 0\n",
+            "        data1 = (U32 :: 305419896 :: call)\n",
+            "        data2 = (U16 :: 4660 :: call)\n",
+            "        data3 = (U16 :: 22136 :: call)\n",
+            "        data4 = guid_data\n",
+            "    let guid_text = com.guid_to_text :: guid :: call\n",
+            "    if (strings.utf16_units :: guid_text :: call) <= 0:\n",
+            "        return 5\n",
+            "    let key = com.make_property_key :: guid, (U32 :: 42 :: call) :: call\n",
+            "    let key_pid = com.property_key_pid :: key :: call\n",
+            "    if (Int :: key_pid :: call) != 42:\n",
+            "        return 6\n",
+            "    let hr = com.initialize_multithreaded :: :: call\n",
+            "    let changed_mode = hr == raw_constants.RPC_E_CHANGED_MODE\n",
+            "    let init_failed = errors.hresult_failed :: hr :: call\n",
+            "    if (changed_mode == false) and init_failed:\n",
+            "        return 7\n",
+            "    if changed_mode == false:\n",
+            "        com.uninitialize :: :: call\n",
+            "    if (windowing.hidden_window_roundtrip :: 11 :: call) != 42:\n",
+            "        return 8\n",
+            "    let dpi = windowing.hidden_window_dpi :: :: call\n",
+            "    if (Int :: dpi :: call) <= 0:\n",
+            "        return 9\n",
+            "    let monitor_dpi = windowing.hidden_window_monitor_dpi :: :: call\n",
+            "    if (Int :: monitor_dpi :: call) <= 0:\n",
+            "        return 10\n",
+            "    let _dark_mode = windowing.hidden_window_dark_mode_roundtrip :: :: call\n",
+            "    let client_rect = windowing.hidden_window_client_rect :: :: call\n",
+            "    if client_rect.right <= client_rect.left:\n",
+            "        return 11\n",
+            "    let frame_rect = windowing.hidden_window_frame_rect :: :: call\n",
+            "    if frame_rect.right <= frame_rect.left:\n",
+            "        return 12\n",
+            "    if windowing.clipboard_open_roundtrip :: :: call == false:\n",
+            "        return 13\n",
+            "    if windowing.enable_file_drop_roundtrip :: :: call == false:\n",
+            "        return 14\n",
+            "    if (windowing.ime_composition_bytes :: :: call) < 0:\n",
+            "        return 15\n",
+            "    if (graphics.gdi_memory_surface_stride :: 8, 8 :: call) != 32:\n",
+            "        return 16\n",
+            "    if graphics.gdi_hidden_window_present :: :: call == false:\n",
+            "        return 17\n",
+            "    if (graphics.dxgi_adapter_count :: :: call) < 0:\n",
+            "        return 18\n",
+            "    if graphics.bootstrap_d3d12_warp :: :: call == false:\n",
+            "        return 19\n",
+            "    if graphics.bootstrap_dxgi_hidden_window_swapchain :: :: call == false:\n",
+            "        return 20\n",
+            "    if graphics.bootstrap_d2d_factory :: :: call == false:\n",
+            "        return 21\n",
+            "    if graphics.bootstrap_wic_factory :: :: call == false:\n",
+            "        return 22\n",
+            "    if (text.directwrite_system_font_count :: :: call) <= 0:\n",
+            "        return 23\n",
+            "    if text.bootstrap_text_layout :: :: call == false:\n",
+            "        return 24\n",
+            "    if (audio.render_device_count :: :: call) < 0:\n",
+            "        return 25\n",
+            "    let _wasapi = audio.bootstrap_wasapi_default_render :: :: call\n",
+            "    let _render_client = audio.bootstrap_wasapi_render_client :: :: call\n",
+            "    let _endpoint = audio.bootstrap_endpoint_volume :: :: call\n",
+            "    let _session = audio.bootstrap_session_policy_game_effects :: :: call\n",
+            "    if audio.register_pro_audio_thread :: :: call == false:\n",
+            "        return 26\n",
+            "    let _xaudio = audio.bootstrap_xaudio2 :: :: call\n",
+            "    let _x3 = audio.bootstrap_x3daudio :: :: call\n",
+            "    return 0\n",
+        ),
+    );
+
+    assert_eq!(code, 0);
+}
+
+#[cfg(windows)]
 #[test]
 fn execute_main_reports_arcana_winapi_binding_errors() {
     let dir = temp_workspace_dir("runtime_arcana_winapi_binding_error");

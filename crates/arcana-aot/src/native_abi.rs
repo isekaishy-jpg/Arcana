@@ -478,11 +478,11 @@ pub fn parse_native_binding_return_type(
 
 fn parse_native_type(ty: &IrRoutineType) -> Result<NativeAbiType, String> {
     match &ty.kind {
-        IrRoutineTypeKind::Path(path) => match path.root_name() {
-            Some("Int") => Ok(NativeAbiType::Int),
-            Some("Bool") => Ok(NativeAbiType::Bool),
-            Some("Str") => Ok(NativeAbiType::Str),
-            Some("Unit") => Ok(NativeAbiType::Unit),
+        IrRoutineTypeKind::Path(path) => match path.segments.as_slice() {
+            [name] if name == "Int" => Ok(NativeAbiType::Int),
+            [name] if name == "Bool" => Ok(NativeAbiType::Bool),
+            [name] if name == "Str" => Ok(NativeAbiType::Str),
+            [name] if name == "Unit" => Ok(NativeAbiType::Unit),
             _ => Ok(NativeAbiType::Opaque(ty.render())),
         },
         IrRoutineTypeKind::Apply { base, args } => match base.root_name() {
@@ -505,23 +505,23 @@ fn parse_native_type(ty: &IrRoutineType) -> Result<NativeAbiType, String> {
 
 fn parse_native_binding_type(ty: &IrRoutineType) -> Result<NativeBindingType, String> {
     match &ty.kind {
-        IrRoutineTypeKind::Path(path) => match path.root_name() {
-            Some("Int") => Ok(NativeBindingType::Int),
-            Some("Bool") => Ok(NativeBindingType::Bool),
-            Some("Str") => Ok(NativeBindingType::Str),
-            Some("Unit") => Ok(NativeBindingType::Unit),
-            Some("I8") => Ok(NativeBindingType::I8),
-            Some("U8") => Ok(NativeBindingType::U8),
-            Some("I16") => Ok(NativeBindingType::I16),
-            Some("U16") => Ok(NativeBindingType::U16),
-            Some("I32") => Ok(NativeBindingType::I32),
-            Some("U32") => Ok(NativeBindingType::U32),
-            Some("I64") => Ok(NativeBindingType::I64),
-            Some("U64") => Ok(NativeBindingType::U64),
-            Some("ISize") => Ok(NativeBindingType::ISize),
-            Some("USize") => Ok(NativeBindingType::USize),
-            Some("F32") => Ok(NativeBindingType::F32),
-            Some("F64") => Ok(NativeBindingType::F64),
+        IrRoutineTypeKind::Path(path) => match path.segments.as_slice() {
+            [name] if name == "Int" => Ok(NativeBindingType::Int),
+            [name] if name == "Bool" => Ok(NativeBindingType::Bool),
+            [name] if name == "Str" => Ok(NativeBindingType::Str),
+            [name] if name == "Unit" => Ok(NativeBindingType::Unit),
+            [name] if name == "I8" => Ok(NativeBindingType::I8),
+            [name] if name == "U8" => Ok(NativeBindingType::U8),
+            [name] if name == "I16" => Ok(NativeBindingType::I16),
+            [name] if name == "U16" => Ok(NativeBindingType::U16),
+            [name] if name == "I32" => Ok(NativeBindingType::I32),
+            [name] if name == "U32" => Ok(NativeBindingType::U32),
+            [name] if name == "I64" => Ok(NativeBindingType::I64),
+            [name] if name == "U64" => Ok(NativeBindingType::U64),
+            [name] if name == "ISize" => Ok(NativeBindingType::ISize),
+            [name] if name == "USize" => Ok(NativeBindingType::USize),
+            [name] if name == "F32" => Ok(NativeBindingType::F32),
+            [name] if name == "F64" => Ok(NativeBindingType::F64),
             _ => Ok(NativeBindingType::Named(ty.render())),
         },
         IrRoutineTypeKind::Apply { base, args } => match base.root_name() {
@@ -598,6 +598,11 @@ pub fn collect_binding_layouts(
                 )?;
             }
         }
+    }
+    for (layout_id, layout) in &available {
+        collected
+            .entry(layout_id.clone())
+            .or_insert_with(|| layout.clone());
     }
     let layouts = collected.into_values().collect::<Vec<_>>();
     validate_binding_layouts(&layouts)?;
@@ -1153,6 +1158,9 @@ fn parse_shackle_ir_raw_type(
     match &ty.kind {
         IrRoutineTypeKind::Path(path) => {
             let rendered = ty.render();
+            if matches!(path.root_name(), Some("Unit") | Some("c_void")) || rendered == "()" {
+                return Ok(ArcanaCabiBindingRawType::Void);
+            }
             if let Some(scalar) =
                 ArcanaCabiBindingScalarType::parse(path.root_name().unwrap_or(&rendered))
             {

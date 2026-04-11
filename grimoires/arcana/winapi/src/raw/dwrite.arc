@@ -1,0 +1,1 @@
+export shackle import fn DWriteCreateFactory(factory_type: arcana_winapi.raw.types.DWRITE_FACTORY_TYPE, iid: arcana_winapi.raw.types.REFIID, factory: arcana_winapi.raw.types.PPVOID) -> arcana_winapi.raw.types.HRESULT = dwrite.DWriteCreateFactory

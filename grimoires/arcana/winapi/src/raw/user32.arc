@@ -1,5 +1,3 @@
-export shackle callback WNDPROC(read window: arcana_winapi.types.HiddenWindow, message: Int, wparam: Int, lparam: Int) -> Int
-
 export shackle import fn RegisterClassW(class: arcana_winapi.raw.types.PCWNDCLASSW) -> arcana_winapi.raw.types.ATOM = user32.RegisterClassW
 export shackle import fn CreateWindowExW(ex_style: arcana_winapi.raw.types.DWORD, class_name: arcana_winapi.raw.types.LPCWSTR, window_name: arcana_winapi.raw.types.LPCWSTR, style: arcana_winapi.raw.types.DWORD, x: arcana_winapi.raw.types.LONG, y: arcana_winapi.raw.types.LONG, width: arcana_winapi.raw.types.LONG, height: arcana_winapi.raw.types.LONG, parent: arcana_winapi.raw.types.HWND, menu: arcana_winapi.raw.types.HMENU, instance: arcana_winapi.raw.types.HMODULE, param: arcana_winapi.raw.types.LPVOID) -> arcana_winapi.raw.types.HWND = user32.CreateWindowExW
 export shackle import fn DestroyWindow(window: arcana_winapi.raw.types.HWND) -> arcana_winapi.raw.types.BOOL = user32.DestroyWindow
@@ -10,3 +8,11 @@ export shackle import fn DispatchMessageW(message: arcana_winapi.raw.types.PCMSG
 export shackle import fn GetWindowLongPtrW(window: arcana_winapi.raw.types.HWND, index: arcana_winapi.raw.types.LONG) -> arcana_winapi.raw.types.LONG_PTR = user32.GetWindowLongPtrW
 export shackle import fn SetWindowLongPtrW(window: arcana_winapi.raw.types.HWND, index: arcana_winapi.raw.types.LONG, value: arcana_winapi.raw.types.LONG_PTR) -> arcana_winapi.raw.types.LONG_PTR = user32.SetWindowLongPtrW
 export shackle import fn DefWindowProcW(window: arcana_winapi.raw.types.HWND, message: arcana_winapi.raw.types.UINT, wparam: arcana_winapi.raw.types.WPARAM, lparam: arcana_winapi.raw.types.LPARAM) -> arcana_winapi.raw.types.LRESULT = user32.DefWindowProcW
+export shackle import fn GetClientRect(window: arcana_winapi.raw.types.HWND, rect: arcana_winapi.raw.types.LPRECT) -> arcana_winapi.raw.types.BOOL = user32.GetClientRect
+export shackle import fn MonitorFromWindow(window: arcana_winapi.raw.types.HWND, flags: arcana_winapi.raw.types.DWORD) -> arcana_winapi.raw.types.HMONITOR = user32.MonitorFromWindow
+export shackle import fn GetDpiForWindow(window: arcana_winapi.raw.types.HWND) -> arcana_winapi.raw.types.UINT = user32.GetDpiForWindow
+export shackle import fn OpenClipboard(owner: arcana_winapi.raw.types.HWND) -> arcana_winapi.raw.types.BOOL = user32.OpenClipboard
+export shackle import fn CloseClipboard() -> arcana_winapi.raw.types.BOOL = user32.CloseClipboard
+export shackle import fn DragAcceptFiles(window: arcana_winapi.raw.types.HWND, accept: arcana_winapi.raw.types.BOOL) = user32.DragAcceptFiles
+export shackle import fn GetDC(window: arcana_winapi.raw.types.HWND) -> arcana_winapi.raw.types.HDC = user32.GetDC
+export shackle import fn ReleaseDC(window: arcana_winapi.raw.types.HWND, device: arcana_winapi.raw.types.HDC) -> arcana_winapi.raw.types.I32 = user32.ReleaseDC

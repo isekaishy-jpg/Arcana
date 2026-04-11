@@ -3196,6 +3196,68 @@ fn type_result_payloads_for_construct(ty: &HirType) -> Option<(HirType, HirType)
         .then(|| (args[0].clone(), args[1].clone()))
 }
 
+fn hir_type_from_binding_scalar_for_scope(scalar: ArcanaCabiBindingScalarType) -> HirType {
+    let span = Default::default();
+    let name = match scalar {
+        ArcanaCabiBindingScalarType::Int => "Int",
+        ArcanaCabiBindingScalarType::Bool => "Bool",
+        ArcanaCabiBindingScalarType::I8 => "I8",
+        ArcanaCabiBindingScalarType::U8 => "U8",
+        ArcanaCabiBindingScalarType::I16 => "I16",
+        ArcanaCabiBindingScalarType::U16 => "U16",
+        ArcanaCabiBindingScalarType::I32 => "I32",
+        ArcanaCabiBindingScalarType::U32 => "U32",
+        ArcanaCabiBindingScalarType::I64 => "I64",
+        ArcanaCabiBindingScalarType::U64 => "U64",
+        ArcanaCabiBindingScalarType::ISize => "ISize",
+        ArcanaCabiBindingScalarType::USize => "USize",
+        ArcanaCabiBindingScalarType::F32 => "F32",
+        ArcanaCabiBindingScalarType::F64 => "F64",
+    };
+    HirType {
+        kind: HirTypeKind::Path(HirPath {
+            segments: vec![name.to_string()],
+            span,
+        }),
+        span,
+    }
+}
+
+fn hir_type_from_binding_raw_type_for_scope(ty: &ArcanaCabiBindingRawType) -> Option<HirType> {
+    match ty {
+        ArcanaCabiBindingRawType::Scalar(scalar) => {
+            Some(hir_type_from_binding_scalar_for_scope(*scalar))
+        }
+        ArcanaCabiBindingRawType::Named(layout_id) => Some(HirType {
+            span: Default::default(),
+            kind: HirTypeKind::Path(HirPath {
+                segments: layout_id.split('.').map(str::to_string).collect(),
+                span: Default::default(),
+            }),
+        }),
+        ArcanaCabiBindingRawType::Void
+        | ArcanaCabiBindingRawType::Pointer { .. }
+        | ArcanaCabiBindingRawType::FunctionPointer { .. } => None,
+    }
+}
+
+fn shackle_decl_fields_for_scope(
+    scope: &ResolvedRenderScope<'_>,
+    path: &[String],
+) -> Option<BTreeMap<String, HirType>> {
+    let decl_ref = lookup_shackle_decl_path(scope.workspace, scope.resolved_module, path)?;
+    let fields = match &decl_ref.decl.raw_layout.as_ref()?.kind {
+        ArcanaCabiBindingLayoutKind::Struct { fields }
+        | ArcanaCabiBindingLayoutKind::Union { fields } => fields,
+        _ => return None,
+    };
+    let mut lowered = BTreeMap::new();
+    for ArcanaCabiBindingLayoutField { name, ty, .. } in fields {
+        lowered.insert(name.clone(), hir_type_from_binding_raw_type_for_scope(ty)?);
+    }
+    Some(lowered)
+}
+
 fn resolve_construct_target_shape_for_scope(
     scope: &ResolvedRenderScope<'_>,
     path: &[String],
@@ -3211,6 +3273,9 @@ fn resolve_construct_target_shape_for_scope(
             );
         }
         return Some(ResolvedConstructTargetShape::Record(lowered));
+    }
+    if let Some(fields) = shackle_decl_fields_for_scope(scope, path) {
+        return Some(ResolvedConstructTargetShape::Record(fields));
     }
     let (variant_name, enum_path) = path.split_last()?;
     let resolved = lookup_symbol_path(scope.workspace, scope.resolved_module, enum_path)?;
@@ -3229,18 +3294,23 @@ fn resolve_record_target_fields_for_scope(
     scope: &ResolvedRenderScope<'_>,
     path: &[String],
 ) -> Option<BTreeMap<String, HirType>> {
-    let resolved = lookup_symbol_path(scope.workspace, scope.resolved_module, path)?;
-    let HirSymbolBody::Record { fields } = &resolved.symbol.body else {
-        return None;
-    };
-    let mut lowered = BTreeMap::new();
-    for field in fields {
-        lowered.insert(
-            field.name.clone(),
-            canonicalize_scope_hir_type(scope, &field.ty)?,
-        );
+    if let Some(resolved) = lookup_symbol_path(scope.workspace, scope.resolved_module, path) {
+        let fields = match &resolved.symbol.body {
+            HirSymbolBody::Record { fields }
+            | HirSymbolBody::Struct { fields }
+            | HirSymbolBody::Union { fields } => fields,
+            _ => return None,
+        };
+        let mut lowered = BTreeMap::new();
+        for field in fields {
+            lowered.insert(
+                field.name.clone(),
+                canonicalize_scope_hir_type(scope, &field.ty)?,
+            );
+        }
+        return Some(lowered);
     }
-    Some(lowered)
+    shackle_decl_fields_for_scope(scope, path)
 }
 
 fn resolve_record_fields_for_hir_type(
@@ -3257,6 +3327,17 @@ fn resolve_record_fields_for_hir_type(
 fn canonical_scope_type_from_path(scope: &ResolvedRenderScope<'_>, path: &[String]) -> HirType {
     let segments = lookup_symbol_path(scope.workspace, scope.resolved_module, path)
         .map(resolved_symbol_path)
+        .or_else(|| {
+            lookup_shackle_decl_path(scope.workspace, scope.resolved_module, path).map(|resolved| {
+                let mut path = resolved
+                    .module_id
+                    .split('.')
+                    .map(str::to_string)
+                    .collect::<Vec<_>>();
+                path.push(resolved.decl.name.clone());
+                path
+            })
+        })
         .unwrap_or_else(|| path.to_vec());
     HirType {
         kind: HirTypeKind::Path(HirPath {

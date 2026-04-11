@@ -5283,6 +5283,14 @@ mod tests {
         matches!(expr, HirExpr::StrLiteral { text: value } if value == text)
     }
 
+    fn repo_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("repo root should exist")
+            .to_path_buf()
+    }
+
     #[test]
     fn lower_module_handles_opaque_type_declarations() {
         let module = lower_module_text(
@@ -5303,6 +5311,41 @@ mod tests {
         let policy = module.symbols[1].opaque_policy.expect("opaque policy");
         assert_eq!(policy.ownership, super::HirOpaqueOwnershipPolicy::Move);
         assert_eq!(policy.boundary, super::HirOpaqueBoundaryPolicy::Safe);
+    }
+
+    #[test]
+    fn lower_real_winapi_raw_types_preserves_alias_and_struct_layouts() {
+        let source =
+            std::fs::read_to_string(repo_root().join("grimoires/arcana/winapi/src/raw/types.arc"))
+                .expect("winapi raw types source should load");
+        let module = lower_module_text("arcana_winapi.raw.types", &source)
+            .expect("winapi raw types module should lower");
+
+        let hwnd = module
+            .shackle_decls
+            .iter()
+            .find(|decl| decl.name == "HWND")
+            .expect("HWND decl should exist");
+        let bitmapinfoheader = module
+            .shackle_decls
+            .iter()
+            .find(|decl| decl.name == "BITMAPINFOHEADER")
+            .expect("BITMAPINFOHEADER decl should exist");
+
+        assert_eq!(hwnd.kind, HirShackleDeclKind::Type);
+        assert_eq!(
+            hwnd.raw_layout
+                .as_ref()
+                .map(|layout| layout.layout_id.as_str()),
+            Some("arcana_winapi.raw.types.HWND")
+        );
+        assert_eq!(
+            bitmapinfoheader
+                .raw_layout
+                .as_ref()
+                .map(|layout| layout.layout_id.as_str()),
+            Some("arcana_winapi.raw.types.BITMAPINFOHEADER")
+        );
     }
 
     fn chain_step_texts(steps: &[HirChainStep]) -> Vec<String> {

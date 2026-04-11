@@ -1005,6 +1005,7 @@ fn link_ir_packages(
     let mut package_direct_dep_ids = root.package_direct_dep_ids.clone();
     let mut routines = root.routines.clone();
     let mut native_callbacks = root.native_callbacks.clone();
+    let mut shackle_decls = root.shackle_decls.clone();
     let mut owners = root.owners.clone();
 
     for package in linked {
@@ -1014,6 +1015,7 @@ fn link_ir_packages(
         dependency_rows.extend(package.dependency_rows);
         routines.extend(package.routines);
         native_callbacks.extend(package.native_callbacks);
+        shackle_decls.extend(package.shackle_decls);
         owners.extend(package.owners);
     }
 
@@ -1046,6 +1048,13 @@ fn link_ir_packages(
                 ))
             })
     });
+    shackle_decls.sort_by(|left, right| {
+        left.package_id
+            .cmp(&right.package_id)
+            .then_with(|| left.module_id.cmp(&right.module_id))
+            .then_with(|| left.kind.cmp(&right.kind))
+            .then_with(|| left.name.cmp(&right.name))
+    });
 
     let mut linked_package = IrPackage {
         package_id: root.package_id,
@@ -1065,7 +1074,7 @@ fn link_ir_packages(
         entrypoints: root.entrypoints,
         routines,
         native_callbacks,
-        shackle_decls: Vec::new(),
+        shackle_decls,
         owners,
     };
     disambiguate_package_routine_keys(&mut linked_package)

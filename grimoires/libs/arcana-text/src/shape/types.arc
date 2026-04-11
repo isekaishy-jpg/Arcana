@@ -48,6 +48,12 @@ export fn empty_matches() -> List[arcana_text.types.FontMatch]:
 export fn empty_plan_keys() -> List[arcana_text.types.ShapePlanKey]:
     return std.collections.list.empty[arcana_text.types.ShapePlanKey] :: :: call
 
+export fn fallback_placeholder(read range: arcana_text.types.TextRange) -> arcana_text.types.PlaceholderSpec:
+    let mut spec = arcana_text.types.PlaceholderSpec :: range = range, size = (0, 0), alignment = (arcana_text.types.PlaceholderAlignment.Baseline :: :: call) :: call
+    spec.baseline = arcana_text.types.TextBaseline.Alphabetic :: :: call
+    spec.baseline_offset = 0
+    return spec
+
 export fn push_unique_match(edit out: List[arcana_text.types.FontMatch], read value: arcana_text.types.FontMatch):
     if value.id.source_index < 0:
         return

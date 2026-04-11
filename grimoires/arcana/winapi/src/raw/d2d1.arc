@@ -1,0 +1,1 @@
+export shackle import fn D2D1CreateFactory(factory_type: arcana_winapi.raw.types.D2D1_FACTORY_TYPE, iid: arcana_winapi.raw.types.REFIID, options: arcana_winapi.raw.types.PCD2D1_FACTORY_OPTIONS, factory: arcana_winapi.raw.types.PPVOID) -> arcana_winapi.raw.types.HRESULT = d2d1.D2D1CreateFactory

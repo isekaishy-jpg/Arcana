@@ -18,6 +18,10 @@ mod where_clause;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use arcana_cabi::{
+    ArcanaCabiBindingLayout, ArcanaCabiBindingLayoutField, ArcanaCabiBindingLayoutKind,
+    ArcanaCabiBindingRawType, ArcanaCabiBindingScalarType,
+};
 use arcana_hir::{
     HirAssignTarget, HirBinaryOp, HirChainStep, HirExpr, HirHeaderAttachment, HirImplDecl,
     HirLocalTypeLookup, HirMatchPattern, HirModule, HirModuleSummary, HirPath, HirPhraseArg,
@@ -660,6 +664,173 @@ fn same_signed_numeric_widen(
         }
         _ => None,
     }
+}
+
+fn numeric_type_class_from_binding_scalar(
+    scalar: ArcanaCabiBindingScalarType,
+) -> Option<NumericTypeClass> {
+    match scalar {
+        ArcanaCabiBindingScalarType::Int => Some(NumericTypeClass::Int),
+        ArcanaCabiBindingScalarType::Bool => None,
+        ArcanaCabiBindingScalarType::I8 => Some(NumericTypeClass::I8),
+        ArcanaCabiBindingScalarType::U8 => Some(NumericTypeClass::U8),
+        ArcanaCabiBindingScalarType::I16 => Some(NumericTypeClass::I16),
+        ArcanaCabiBindingScalarType::U16 => Some(NumericTypeClass::U16),
+        ArcanaCabiBindingScalarType::I32 => Some(NumericTypeClass::I32),
+        ArcanaCabiBindingScalarType::U32 => Some(NumericTypeClass::U32),
+        ArcanaCabiBindingScalarType::I64 => Some(NumericTypeClass::I64),
+        ArcanaCabiBindingScalarType::U64 => Some(NumericTypeClass::U64),
+        ArcanaCabiBindingScalarType::ISize => Some(NumericTypeClass::ISize),
+        ArcanaCabiBindingScalarType::USize => Some(NumericTypeClass::USize),
+        ArcanaCabiBindingScalarType::F32 => Some(NumericTypeClass::F32),
+        ArcanaCabiBindingScalarType::F64 => Some(NumericTypeClass::F64),
+    }
+}
+
+fn shackle_decl_numeric_type_class(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    path: &[String],
+) -> Option<NumericTypeClass> {
+    fn from_layout(
+        workspace: &HirWorkspaceSummary,
+        resolved_module: &HirResolvedModule,
+        layout: &ArcanaCabiBindingLayout,
+    ) -> Option<NumericTypeClass> {
+        match &layout.kind {
+            ArcanaCabiBindingLayoutKind::Alias { target } => match target {
+                ArcanaCabiBindingRawType::Scalar(scalar) => {
+                    numeric_type_class_from_binding_scalar(*scalar)
+                }
+                ArcanaCabiBindingRawType::Named(layout_id) => {
+                    let path = layout_id.split('.').map(str::to_string).collect::<Vec<_>>();
+                    shackle_decl_numeric_type_class(workspace, resolved_module, &path)
+                }
+                ArcanaCabiBindingRawType::Void
+                | ArcanaCabiBindingRawType::Pointer { .. }
+                | ArcanaCabiBindingRawType::FunctionPointer { .. } => None,
+            },
+            ArcanaCabiBindingLayoutKind::Enum { repr, .. }
+            | ArcanaCabiBindingLayoutKind::Flags { repr } => {
+                numeric_type_class_from_binding_scalar(*repr)
+            }
+            ArcanaCabiBindingLayoutKind::Struct { .. }
+            | ArcanaCabiBindingLayoutKind::Union { .. }
+            | ArcanaCabiBindingLayoutKind::Array { .. }
+            | ArcanaCabiBindingLayoutKind::Callback { .. }
+            | ArcanaCabiBindingLayoutKind::Interface { .. } => None,
+        }
+    }
+
+    let decl_ref = lookup_shackle_decl_path(workspace, resolved_module, path)?;
+    let layout = decl_ref.decl.raw_layout.as_ref()?;
+    from_layout(workspace, resolved_module, layout)
+}
+
+fn hir_type_from_binding_scalar_type(scalar: ArcanaCabiBindingScalarType, span: Span) -> HirType {
+    let name = match scalar {
+        ArcanaCabiBindingScalarType::Int => "Int",
+        ArcanaCabiBindingScalarType::Bool => "Bool",
+        ArcanaCabiBindingScalarType::I8 => "I8",
+        ArcanaCabiBindingScalarType::U8 => "U8",
+        ArcanaCabiBindingScalarType::I16 => "I16",
+        ArcanaCabiBindingScalarType::U16 => "U16",
+        ArcanaCabiBindingScalarType::I32 => "I32",
+        ArcanaCabiBindingScalarType::U32 => "U32",
+        ArcanaCabiBindingScalarType::I64 => "I64",
+        ArcanaCabiBindingScalarType::U64 => "U64",
+        ArcanaCabiBindingScalarType::ISize => "ISize",
+        ArcanaCabiBindingScalarType::USize => "USize",
+        ArcanaCabiBindingScalarType::F32 => "F32",
+        ArcanaCabiBindingScalarType::F64 => "F64",
+    };
+    HirType {
+        kind: HirTypeKind::Path(HirPath {
+            segments: vec![name.to_string()],
+            span,
+        }),
+        span,
+    }
+}
+
+fn hir_type_from_binding_raw_type(ty: &ArcanaCabiBindingRawType, span: Span) -> Option<HirType> {
+    match ty {
+        ArcanaCabiBindingRawType::Scalar(scalar) => {
+            Some(hir_type_from_binding_scalar_type(*scalar, span))
+        }
+        ArcanaCabiBindingRawType::Named(layout_id) => Some(HirType {
+            kind: HirTypeKind::Path(HirPath {
+                segments: layout_id.split('.').map(str::to_string).collect(),
+                span,
+            }),
+            span,
+        }),
+        ArcanaCabiBindingRawType::Void
+        | ArcanaCabiBindingRawType::Pointer { .. }
+        | ArcanaCabiBindingRawType::FunctionPointer { .. } => None,
+    }
+}
+
+fn shackle_layout_fields(
+    kind: &ArcanaCabiBindingLayoutKind,
+    span: Span,
+) -> Option<BTreeMap<String, HirType>> {
+    let fields = match kind {
+        ArcanaCabiBindingLayoutKind::Struct { fields }
+        | ArcanaCabiBindingLayoutKind::Union { fields } => fields,
+        _ => return None,
+    };
+    let mut lowered = BTreeMap::new();
+    for ArcanaCabiBindingLayoutField { name, ty, .. } in fields {
+        lowered.insert(name.clone(), hir_type_from_binding_raw_type(ty, span)?);
+    }
+    Some(lowered)
+}
+
+fn shackle_decl_fields(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    path: &[String],
+) -> Option<BTreeMap<String, HirType>> {
+    let decl_ref = lookup_shackle_decl_path(workspace, resolved_module, path)?;
+    shackle_layout_fields(&decl_ref.decl.raw_layout.as_ref()?.kind, Span::default())
+}
+
+fn shackle_nominal_region_fields(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    path: &[String],
+    kind: arcana_hir::HirNominalFieldRegionKind,
+) -> Option<BTreeMap<String, HirType>> {
+    let decl_ref = lookup_shackle_decl_path(workspace, resolved_module, path)?;
+    match (&kind, &decl_ref.decl.raw_layout.as_ref()?.kind) {
+        (
+            arcana_hir::HirNominalFieldRegionKind::Struct,
+            ArcanaCabiBindingLayoutKind::Struct { .. },
+        )
+        | (
+            arcana_hir::HirNominalFieldRegionKind::Union,
+            ArcanaCabiBindingLayoutKind::Union { .. },
+        ) => shackle_layout_fields(&decl_ref.decl.raw_layout.as_ref()?.kind, Span::default()),
+        _ => None,
+    }
+}
+
+fn shackle_array_target_shape(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    path: &[String],
+) -> Option<(HirType, usize)> {
+    let decl_ref = lookup_shackle_decl_path(workspace, resolved_module, path)?;
+    let ArcanaCabiBindingLayoutKind::Array { element_type, len } =
+        &decl_ref.decl.raw_layout.as_ref()?.kind
+    else {
+        return None;
+    };
+    Some((
+        hir_type_from_binding_raw_type(element_type, Span::default())?,
+        *len,
+    ))
 }
 
 fn numeric_types_compatible(left: NumericTypeClass, right: NumericTypeClass) -> bool {
@@ -1345,7 +1516,39 @@ fn numeric_type_class_for_hir_type(
 ) -> Option<NumericTypeClass> {
     let canonical =
         canonicalize_local_hir_type(workspace, resolved_module, ty).unwrap_or_else(|| ty.clone());
-    numeric_type_class_from_name(hir_type_root_name(&canonical)?)
+    if let Some(name) = hir_type_root_name(&canonical)
+        && let Some(class) = numeric_type_class_from_name(name)
+    {
+        return Some(class);
+    }
+    let path = match &canonical.kind {
+        HirTypeKind::Path(path) => &path.segments,
+        HirTypeKind::Apply { base, .. } => &base.segments,
+        HirTypeKind::Ref { .. } | HirTypeKind::Tuple(_) | HirTypeKind::Projection(_) => {
+            return None;
+        }
+    };
+    shackle_decl_numeric_type_class(workspace, resolved_module, path)
+}
+
+fn hir_types_match_or_numeric_compatible(
+    workspace: &HirWorkspaceSummary,
+    resolved_module: &HirResolvedModule,
+    expected: &HirType,
+    actual: &HirType,
+) -> bool {
+    if canonical_hir_type_key(workspace, resolved_module, expected)
+        == canonical_hir_type_key(workspace, resolved_module, actual)
+    {
+        return true;
+    }
+    match (
+        numeric_type_class_for_hir_type(workspace, resolved_module, expected),
+        numeric_type_class_for_hir_type(workspace, resolved_module, actual),
+    ) {
+        (Some(expected), Some(actual)) => numeric_types_compatible(expected, actual),
+        _ => false,
+    }
 }
 
 fn infer_numeric_expr_type_class(
@@ -1892,7 +2095,7 @@ fn infer_expr_value_type(
     }
     if let HirExpr::ArrayRegion(region) = expr
         && let Some(path) = flatten_callable_expr_path(&region.target)
-        && lookup_symbol_path(workspace, resolved_module, &path).is_some()
+        && resolve_array_target_shape(workspace, resolved_module, &path).is_some()
     {
         return Some(canonical_type_from_path(
             workspace,
@@ -10396,8 +10599,12 @@ fn validate_construct_region_semantics(
                 .and_then(|ty| canonicalize_local_hir_type(workspace, resolved_module, &ty));
         match (expected_ty, actual_ty) {
             (Some(expected_ty), Some(actual_ty))
-                if canonical_hir_type_key(workspace, resolved_module, &expected_ty)
-                    != canonical_hir_type_key(workspace, resolved_module, &actual_ty) =>
+                if !hir_types_match_or_numeric_compatible(
+                    workspace,
+                    resolved_module,
+                    &expected_ty,
+                    &actual_ty,
+                ) =>
             {
                 diagnostics.push(Diagnostic {
                     path: module_path.to_path_buf(),
@@ -10600,7 +10807,36 @@ fn validate_record_region_semantics(
         });
         return;
     };
-    let Some(resolved) = lookup_symbol_path(workspace, resolved_module, &target_path) else {
+    let fields = if let Some(resolved) =
+        lookup_symbol_path(workspace, resolved_module, &target_path)
+    {
+        match (&region.kind, &resolved.symbol.body) {
+            (arcana_hir::HirNominalFieldRegionKind::Record, HirSymbolBody::Record { fields })
+            | (arcana_hir::HirNominalFieldRegionKind::Struct, HirSymbolBody::Struct { fields })
+            | (arcana_hir::HirNominalFieldRegionKind::Union, HirSymbolBody::Union { fields }) => {
+                fields
+                    .iter()
+                    .map(|field| (field.name.clone(), field.ty.clone()))
+                    .collect::<BTreeMap<_, _>>()
+            }
+            _ => {
+                diagnostics.push(Diagnostic {
+                    path: module_path.to_path_buf(),
+                    line: region.span.line,
+                    column: region.span.column,
+                    message: format!(
+                        "{region_kind} target `{}` must resolve to a {region_kind}",
+                        target_path.join(".")
+                    ),
+                });
+                return;
+            }
+        }
+    } else if let Some(fields) =
+        shackle_nominal_region_fields(workspace, resolved_module, &target_path, region.kind)
+    {
+        fields
+    } else {
         diagnostics.push(Diagnostic {
             path: module_path.to_path_buf(),
             line: region.span.line,
@@ -10611,26 +10847,6 @@ fn validate_record_region_semantics(
             ),
         });
         return;
-    };
-    let fields = match (&region.kind, &resolved.symbol.body) {
-        (arcana_hir::HirNominalFieldRegionKind::Record, HirSymbolBody::Record { fields })
-        | (arcana_hir::HirNominalFieldRegionKind::Struct, HirSymbolBody::Struct { fields })
-        | (arcana_hir::HirNominalFieldRegionKind::Union, HirSymbolBody::Union { fields }) => fields
-            .iter()
-            .map(|field| (field.name.clone(), field.ty.clone()))
-            .collect::<BTreeMap<_, _>>(),
-        _ => {
-            diagnostics.push(Diagnostic {
-                path: module_path.to_path_buf(),
-                line: region.span.line,
-                column: region.span.column,
-                message: format!(
-                    "{region_kind} target `{}` must resolve to a {region_kind}",
-                    target_path.join(".")
-                ),
-            });
-            return;
-        }
     };
     if matches!(region.kind, arcana_hir::HirNominalFieldRegionKind::Union)
         && scope.unsafe_trace.is_none()
@@ -10649,8 +10865,12 @@ fn validate_record_region_semantics(
                 .and_then(|ty| canonicalize_local_hir_type(workspace, resolved_module, &ty));
         match (expected_ty, actual_ty) {
             (Some(expected_ty), Some(actual_ty))
-                if canonical_hir_type_key(workspace, resolved_module, &expected_ty)
-                    != canonical_hir_type_key(workspace, resolved_module, &actual_ty) =>
+                if !hir_types_match_or_numeric_compatible(
+                    workspace,
+                    resolved_module,
+                    &expected_ty,
+                    &actual_ty,
+                ) =>
             {
                 diagnostics.push(Diagnostic {
                     path: module_path.to_path_buf(),
@@ -10886,8 +11106,12 @@ fn validate_array_region_semantics(
                 .and_then(|ty| canonicalize_local_hir_type(workspace, resolved_module, &ty));
         match (expected_ty, actual_ty) {
             (Some(expected_ty), Some(actual_ty))
-                if canonical_hir_type_key(workspace, resolved_module, &expected_ty)
-                    != canonical_hir_type_key(workspace, resolved_module, &actual_ty) =>
+                if !hir_types_match_or_numeric_compatible(
+                    workspace,
+                    resolved_module,
+                    &expected_ty,
+                    &actual_ty,
+                ) =>
             {
                 diagnostics.push(Diagnostic {
                     path: module_path.to_path_buf(),
@@ -10928,8 +11152,7 @@ fn validate_array_region_semantics(
     {
         let target_ty =
             canonical_type_from_path(workspace, resolved_module, &target_path, region.span);
-        if canonical_hir_type_key(workspace, resolved_module, &base_ty)
-            != canonical_hir_type_key(workspace, resolved_module, &target_ty)
+        if !hir_types_match_or_numeric_compatible(workspace, resolved_module, &target_ty, &base_ty)
         {
             diagnostics.push(Diagnostic {
                 path: module_path.to_path_buf(),
@@ -12378,7 +12601,7 @@ fn validate_returned_expr_type(
         return;
     };
     let expected_key = canonical_hir_type_key(workspace, resolved_module, expected_ty);
-    if canonical_hir_type_key(workspace, resolved_module, &actual_ty) != expected_key {
+    if !hir_types_match_or_numeric_compatible(workspace, resolved_module, expected_ty, &actual_ty) {
         push_type_contract_diagnostic(
             module_path,
             span,
@@ -12576,7 +12799,8 @@ fn validate_bind_refinement_stability_semantics(
         return;
     };
     let expected_key = canonical_hir_type_key(workspace, resolved_module, existing_ty);
-    if canonical_hir_type_key(workspace, resolved_module, &payload_ty) != expected_key {
+    if !hir_types_match_or_numeric_compatible(workspace, resolved_module, existing_ty, &payload_ty)
+    {
         diagnostics.push(Diagnostic {
             path: module_path.to_path_buf(),
             line: modifier.span.line,
@@ -12709,6 +12933,9 @@ fn resolve_construct_target_shape(
             _ => {}
         }
     }
+    if let Some(fields) = shackle_decl_fields(workspace, resolved_module, path) {
+        return Some(ConstructTargetShape::Record { fields });
+    }
     let (variant_name, enum_path) = path.split_last()?;
     let resolved = lookup_symbol_path(workspace, resolved_module, enum_path)?;
     let HirSymbolBody::Enum { variants } = &resolved.symbol.body else {
@@ -12727,19 +12954,21 @@ fn resolve_record_target_fields(
     resolved_module: &HirResolvedModule,
     path: &[String],
 ) -> Option<BTreeMap<String, HirType>> {
-    let resolved = lookup_symbol_path(workspace, resolved_module, path)?;
-    let fields = match &resolved.symbol.body {
-        HirSymbolBody::Record { fields }
-        | HirSymbolBody::Struct { fields }
-        | HirSymbolBody::Union { fields } => fields,
-        _ => return None,
-    };
-    Some(
-        fields
-            .iter()
-            .map(|field| (field.name.clone(), field.ty.clone()))
-            .collect(),
-    )
+    if let Some(resolved) = lookup_symbol_path(workspace, resolved_module, path) {
+        let fields = match &resolved.symbol.body {
+            HirSymbolBody::Record { fields }
+            | HirSymbolBody::Struct { fields }
+            | HirSymbolBody::Union { fields } => fields,
+            _ => return None,
+        };
+        return Some(
+            fields
+                .iter()
+                .map(|field| (field.name.clone(), field.ty.clone()))
+                .collect(),
+        );
+    }
+    shackle_decl_fields(workspace, resolved_module, path)
 }
 
 fn resolve_construct_result_type(
@@ -12794,11 +13023,13 @@ fn resolve_array_target_shape(
     resolved_module: &HirResolvedModule,
     path: &[String],
 ) -> Option<(HirType, usize)> {
-    let resolved = lookup_symbol_path(workspace, resolved_module, path)?;
-    match &resolved.symbol.body {
-        HirSymbolBody::Array { element_ty, len } => Some((element_ty.clone(), *len)),
-        _ => None,
+    if let Some(resolved) = lookup_symbol_path(workspace, resolved_module, path) {
+        return match &resolved.symbol.body {
+            HirSymbolBody::Array { element_ty, len } => Some((element_ty.clone(), *len)),
+            _ => None,
+        };
     }
+    shackle_array_target_shape(workspace, resolved_module, path)
 }
 
 fn unsafe_trace_from_forewords(apps: &[arcana_hir::HirForewordApp]) -> Option<String> {
@@ -17029,20 +17260,19 @@ fn validate_expr_semantics(
                         }
                     } else if let (Some(left_kind), Some(right_kind)) =
                         (left_numeric, right_numeric)
+                        && !numeric_types_compatible(left_kind, right_kind)
                     {
-                        if !numeric_types_compatible(left_kind, right_kind) {
-                            push_type_contract_diagnostic(
-                                module_path,
-                                span,
-                                diagnostics,
-                                format!(
-                                    "operands of `{}` must use compatible numeric widths within the same signed lane, found `{}` and `{}`",
-                                    binary_op_token(*op),
-                                    left_kind.label(),
-                                    right_kind.label()
-                                ),
-                            );
-                        }
+                        push_type_contract_diagnostic(
+                            module_path,
+                            span,
+                            diagnostics,
+                            format!(
+                                "operands of `{}` must use compatible numeric widths within the same signed lane, found `{}` and `{}`",
+                                binary_op_token(*op),
+                                left_kind.label(),
+                                right_kind.label()
+                            ),
+                        );
                     }
                 }
             }
@@ -17445,6 +17675,9 @@ fn value_path_exists(
     if path.is_empty() {
         return false;
     }
+    if lookup_shackle_decl_path(workspace, resolved_module, path).is_some() {
+        return true;
+    }
     if let Some(binding) = resolved_module.bindings.get(&path[0])
         && target_path_exists(workspace, &binding.target, &path[1..])
     {
@@ -17551,6 +17784,14 @@ fn module_path_exists(
 fn module_value_member_exists(module: &HirModuleSummary, member: &str, tail: &[String]) -> bool {
     if let Some(symbol) = module.symbols.iter().find(|symbol| symbol.name == member)
         && symbol_tail_exists(symbol, tail)
+    {
+        return true;
+    }
+    if tail.is_empty()
+        && module
+            .shackle_decls
+            .iter()
+            .any(|decl| decl.name == member && decl.exported)
     {
         return true;
     }
@@ -23508,6 +23749,71 @@ mod tests {
             ],
         );
         check_path(&root.join("app")).expect("typed dependency shackle callback should check");
+        fs::remove_dir_all(root).expect("cleanup should succeed");
+    }
+
+    #[test]
+    fn check_path_accepts_typed_native_callback_from_dependency_audio_shackle_callback() {
+        let root = make_temp_workspace(
+            "typed_native_audio_callback_dependency_shackle",
+            &["app", "hostapi"],
+            &[
+                (
+                    "app/book.toml",
+                    concat!(
+                        "name = \"app\"\n",
+                        "kind = \"app\"\n",
+                        "[deps]\n",
+                        "hostapi = { path = \"../hostapi\" }\n",
+                    ),
+                ),
+                (
+                    "app/src/shelf.arc",
+                    concat!(
+                        "native callback on_error: hostapi.raw.callbacks.XAUDIO2_ENGINE_ON_CRITICAL_ERROR = app.callbacks.handle_error\n",
+                        "fn main() -> Int:\n",
+                        "    return 0\n",
+                    ),
+                ),
+                (
+                    "app/src/callbacks.arc",
+                    "fn handle_error(read error: hostapi.raw.types.HRESULT) -> Unit:\n    return\n",
+                ),
+                ("app/src/types.arc", ""),
+                (
+                    "hostapi/book.toml",
+                    concat!(
+                        "name = \"hostapi\"\n",
+                        "kind = \"lib\"\n",
+                        "[native.products.default]\n",
+                        "kind = \"dll\"\n",
+                        "role = \"binding\"\n",
+                        "producer = \"arcana-source\"\n",
+                        "file = \"hostapi_binding.dll\"\n",
+                        "contract = \"arcana.cabi.binding.v1\"\n",
+                    ),
+                ),
+                ("hostapi/src/book.arc", "// hostapi root\n"),
+                ("hostapi/src/types.arc", ""),
+                (
+                    "hostapi/src/raw.arc",
+                    concat!(
+                        "reexport hostapi.raw.callbacks\n",
+                        "reexport hostapi.raw.types\n",
+                    ),
+                ),
+                (
+                    "hostapi/src/raw/callbacks.arc",
+                    "export shackle callback XAUDIO2_ENGINE_ON_CRITICAL_ERROR(read error: hostapi.raw.types.HRESULT) -> Unit\n",
+                ),
+                (
+                    "hostapi/src/raw/types.arc",
+                    "export shackle type HRESULT = I32\n",
+                ),
+            ],
+        );
+        check_path(&root.join("app"))
+            .expect("typed dependency audio shackle callback should check");
         fs::remove_dir_all(root).expect("cleanup should succeed");
     }
 

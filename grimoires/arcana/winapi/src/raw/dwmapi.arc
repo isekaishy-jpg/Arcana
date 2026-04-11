@@ -1,0 +1,2 @@
+export shackle import fn DwmGetWindowAttribute(window: arcana_winapi.raw.types.HWND, attribute: arcana_winapi.raw.types.DWORD, value: arcana_winapi.raw.types.LPVOID, size: arcana_winapi.raw.types.DWORD) -> arcana_winapi.raw.types.HRESULT = dwmapi.DwmGetWindowAttribute
+export shackle import fn DwmSetWindowAttribute(window: arcana_winapi.raw.types.HWND, attribute: arcana_winapi.raw.types.DWORD, value: arcana_winapi.raw.types.LPCVOID, size: arcana_winapi.raw.types.DWORD) -> arcana_winapi.raw.types.HRESULT = dwmapi.DwmSetWindowAttribute

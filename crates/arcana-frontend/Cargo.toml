@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+arcana-cabi.workspace = true
 arcana-hir.workspace = true
 arcana-ir.workspace = true
 arcana-language-law.workspace = true

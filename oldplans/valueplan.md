@@ -1,0 +1,130 @@
+# Arcana Surface Phase: `struct`, `union`, `array`, `#unsafe`, Float Numerics, Fixed-Width Ints, and Bitfields
+
+## Summary
+- Land the general Arcana surface needed before the broader WinAPI/CABI expansion: first-class `struct`, `union`, and fixed-length nominal `array`; declaration/statement `#unsafe["trace.id"]`; float numerics; fixed-width integer numerics; and declared bitfields.
+- Keep `record` and `struct` distinct:
+  - `record` stays semantic product data.
+  - `struct` becomes the general layout-bearing product type.
+  - `union` becomes the overlapping-storage raw type.
+  - `array` becomes the fixed-length nominal layout-bearing sequence type with value semantics in Arcana.
+- This phase is language/toolchain surface only. It is the prerequisite for later `arcana-cabi` and `shackle` transport work, not the transport rewrite itself.
+
+## Public Surface Changes
+- Add new first-class symbol kinds `struct`, `union`, and `array` alongside `record`.
+- `struct` and `union` become region-head-owning types.
+  - Add `struct yield`, `struct deliver`, `struct place`.
+  - Add `union yield`, `union deliver`, `union place`.
+- `array` becomes a first-class declaration kind with fixed length only.
+  - Declaration header carries element type and compile-time length: `array Name[Elem, Len]:`.
+  - `array` is callable.
+  - `array` also gets `array yield`, `array deliver`, and `array place` headed regions.
+  - `array` has value semantics in Arcana and never decays to a pointer in the source language.
+- `struct` is callable.
+  - Qualified phrase `:: call` may target a `struct` type path.
+  - Generic `construct` resolution extends to `struct` targets.
+- `union` is not callable in this phase.
+  - `construct` does not target unions.
+  - `union` construction happens only through its dedicated headed regions.
+- `array` constructor/call surface:
+  - Callable `array` construction uses positional arguments only and requires exactly `Len` elements.
+  - `array` regions use indexed contribution lines with bracket syntax: `[index] = expr`.
+  - `array ... from <base_expr>` is allowed; omitted indices copy from the base only when the base has the same nominal array type.
+- Add `#unsafe["trace.id"]` as a new foreword contract.
+  - Legal on function-like declarations and on any statement.
+  - Statement-level `#unsafe[...]` is allowed before `let`, assign, return, expr, region, and block-owning statements.
+  - Payload is exactly one non-empty string trace id.
+  - Unsafe context inherits into nested blocks and regions.
+- Add builtin numeric types `F32` and `F64`.
+  - Decimal float literals are supported.
+  - Unsuffixed decimal literals default to `F64`.
+  - `f32` and `f64` suffixes are supported.
+  - Float literal grammar in this phase is decimal-point only, no exponent notation.
+- Add fixed-width integer builtins in this same phase:
+  - `I8`, `U8`, `I16`, `U16`, `I32`, `U32`, `I64`, `U64`, `ISize`, `USize`
+  - Existing integer literals remain `Int` by default.
+  - Width-specific integer values use explicit callable conversions in this phase; no integer literal suffix family is added now.
+- Add explicit numeric conversions via callable builtins.
+  - `F32 :: value :: call`
+  - `F64 :: value :: call`
+  - `Int :: value :: call`
+  - `I8/U8/.../USize :: value :: call`
+- Add declared bitfields to `struct`.
+  - Syntax uses field suffix width form: `name: U32 bits 3`
+  - Bitfields are allowed only in `struct` in this phase.
+  - Bitfield bases must be fixed-width integer builtins.
+  - Bitfield reads and writes on declared `struct` fields are safe by default.
+
+## Implementation Changes
+- Syntax/HIR/frontend:
+  - Extend symbol kinds, foreword targets, parsed bodies, headed-region parsing, constructor-shape resolution, and member-access validation for `struct`, `union`, and `array`.
+  - Extend statement foreword validation so `#unsafe[...]` is a valid statement-level contract in addition to the existing `#chain` rule.
+  - Keep `record != struct` and `record != array`; do not alias these kinds internally.
+- Typing and execution rules:
+  - `struct` field access and field writes reuse the current record-style member surface.
+  - `union` field access uses the same member syntax, but any union construction, field read, or field write requires an active unsafe context.
+  - Declaring a `union` type is safe; executable union usage is what is gated.
+  - Do not add active-field tracking in this phase. Union checking is declaration/field/type checking plus unsafe gating, not flow-sensitive active-member analysis.
+  - `array` values participate in ordinary indexing and indexed assignment using the existing `xs[i]` surface.
+  - `array` indexing is bounds-checked by the same deterministic rules used for existing `Array[T]`.
+  - Nominal `array` values do not implicitly convert to builtin `Array[T]` and builtin `Array[T]` does not implicitly convert to nominal `array`.
+- Numeric semantics:
+  - Support `F32`/`F64` and the fixed-width ints in builtin type tables, literal typing, HIR/IR expression typing, and execution.
+  - Float operators in this phase: unary `-`, binary `+ - * /`, and comparisons with same-type operands only.
+  - Fixed-width integer operators in this phase follow `Int` arithmetic/bitwise behavior where the operator is meaningful.
+  - No implicit numeric coercions in this phase.
+  - Same-type arithmetic/comparison only for floats; cross-type numeric work uses explicit callable conversions.
+- Array semantics:
+  - `array Name[Elem, Len]:` defines a nominal fixed-length value type, not a generic builtin container alias.
+  - Callable construction uses exact positional arity `Len`.
+  - Region construction accepts sparse indexed contributions and optional `from <base_expr>` copying from the same nominal array type.
+  - Index expressions inside array regions must resolve to compile-time integer literals in this phase.
+- Bitfield semantics:
+  - Bitfield fields are explicit declared members of `struct`, not a separate runtime object family.
+  - Bitfield layout is frozen in declaration order within each contiguous run of bitfield fields.
+  - A bitfield that does not fit in the remaining bits of its base storage unit starts a new storage unit of that same base type.
+  - No anonymous bitfields and no zero-width bitfields in this phase.
+  - Normal member read/write syntax lowers to masked bitfield get/set logic; there is no separate user-visible bitfield operator family in this phase.
+- Constructor surface:
+  - `resolve_construct_target_shape` and the equivalent IR/runtime constructor lanes must accept `struct` targets alongside `record` and single-payload enum variants.
+  - `array` gets its own constructor lane; it is not accepted by generic `construct` in this phase.
+  - `union` uses only its dedicated unsafe region heads in this phase.
+
+## Test Plan
+- Parser/HIR tests:
+  - `struct`, `union`, and `array` declarations parse and lower as new symbol kinds.
+  - `struct yield/deliver/place`, `union yield/deliver/place`, and `array yield/deliver/place` parse and lower correctly.
+  - `#unsafe["trace.id"]` parses on declarations and on ordinary statements.
+  - Float literals parse as `F64` by default and honor `f32`/`f64` suffixes.
+  - Fixed-width integer type names resolve as builtins.
+  - Bitfield field syntax parses and lowers inside `struct`.
+- Frontend/typechecking tests:
+  - `record`, `struct`, and `array` stay distinct in symbol resolution and constructor diagnostics.
+  - `struct` and `array` are callable; `union` is rejected as callable.
+  - Union construction, field read, and field write fail without active `#unsafe[...]`.
+  - The same union operations succeed with declaration-level or statement-level `#unsafe[...]`.
+  - Invalid `#unsafe` payloads fail with clear diagnostics.
+  - Float arithmetic/comparison typechecks for same-type operands and rejects implicit mixed-type math.
+  - Fixed-width integer conversions and operations typecheck under explicit conversion rules.
+  - Declared bitfield fields typecheck for valid base types and widths.
+  - Bitfield reads/writes typecheck as ordinary member access on `struct`.
+  - `array` callable construction enforces exact arity.
+  - `array` region indices must be compile-time integer literals and in-range.
+- IR/runtime tests:
+  - Struct construction, field reads/writes, and place/deliver behavior execute correctly.
+  - Nominal fixed-length array construction, indexing, indexed assignment, and region/base-copy behavior execute correctly.
+  - Float literals, arithmetic, comparison, and explicit conversions execute correctly.
+  - Fixed-width integer explicit conversions and bitwise/arithmetic execution behave deterministically.
+  - Union construction and field access execute only when lowered from unsafe-approved source.
+  - Bitfield reads/writes execute with correct masked/shifted behavior for declared layouts.
+- Regression tests:
+  - Existing `record`, `construct`, `Array[T]`, list literals, indexing/slicing, `#chain`, and `Int` behavior remain unchanged.
+  - Existing `shackle struct/union/flags` parsing continues to coexist with the new general-language `struct`/`union`/`array` kinds.
+
+## Assumptions And Defaults
+- `record` remains the semantic Arcana data type; `struct` is the layout-bearing product type; `array` is the nominal fixed-length layout-bearing sequence type; `union` is the overlapping-storage raw type.
+- `union` is executable in general Arcana in this phase, but only behind `#unsafe[...]`.
+- `#unsafe[...]` is foreword-based only in this phase; there is no separate `unsafe:` block syntax or expression-form unsafe surface.
+- The unsafe trace id is stored and surfaced in diagnostics but is not semantically interpreted beyond being required and non-empty.
+- Fixed-length nominal `array` is separate from builtin `Array[T]`; dynamic/runtime-sized array behavior remains on builtin `Array[T]`.
+- Bitfields are explicit declared `struct` members, safe for declared access, and use a single frozen packing rule set in this phase; unsafe remains for unions and raw aliasing, not ordinary declared bitfield access.
+- Integer literals remain `Int` by default; fixed-width integers and floats rely on explicit callable conversions where type context does not already determine the target type.

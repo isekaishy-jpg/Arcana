@@ -1,0 +1,1 @@
+export shackle import fn XAudio2Create(engine: arcana_winapi.raw.types.PIXAUDIO2, flags: arcana_winapi.raw.types.UINT32, processor: arcana_winapi.raw.types.UINT32) -> arcana_winapi.raw.types.HRESULT = xaudio2.XAudio2Create

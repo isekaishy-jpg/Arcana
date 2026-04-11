@@ -1,3 +1,10 @@
+reexport arcana_winapi.helpers.strings
+reexport arcana_winapi.helpers.errors
+reexport arcana_winapi.helpers.com
+reexport arcana_winapi.helpers.windowing
+reexport arcana_winapi.helpers.graphics
+reexport arcana_winapi.helpers.text
+reexport arcana_winapi.helpers.audio
 reexport arcana_winapi.foundation
 reexport arcana_winapi.fonts
 reexport arcana_winapi.windows

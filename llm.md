@@ -353,6 +353,219 @@ let pair = (1, 2)
 let (left, right) = pair
 ```
 
+## Value Surface
+
+### What it is
+
+Arcana now has a broader first-class value surface than the older `record + Int/Bool/Str` subset. `record` remains semantic data; `struct`, `union`, and nominal fixed `array` are the current layout-bearing value kinds.
+
+### Current surface shape
+
+- Declaration kinds:
+  - `record`
+  - `struct`
+  - `union`
+  - `array Name[Elem, Len]:`
+- `struct` and `array` are callable construction targets.
+- `union` is a real declaration kind, but it is not callable.
+- Region heads now include:
+  - `record yield` / `record deliver` / `record place`
+  - `struct yield` / `struct deliver` / `struct place`
+  - `union yield` / `union deliver` / `union place`
+  - `array yield` / `array deliver` / `array place`
+  - `construct yield` / `construct deliver` / `construct place`
+- `record` remains distinct from `struct`; do not treat them as aliases in analysis or rewrites.
+- `array` is nominal fixed-length value storage, not the same thing as builtin `Array[T]`.
+- Numeric builtin surface now includes:
+  - `Int`, `Bool`
+  - `I8/U8`
+  - `I16/U16`
+  - `I32/U32`
+  - `I64/U64`
+  - `ISize/USize`
+  - `F32/F64`
+- Decimal float literals are supported:
+  - unsuffixed decimal literals default to `F64`
+  - `f32` / `f64` suffixes are supported
+- Bitfields are declared on `struct` fields with:
+  - `name: U32 bits 3`
+
+### Hard limits / rejections
+
+- `union` construction, reads, and writes require an active `#unsafe["trace.id"]` foreword in scope.
+- `union` is not callable in the current surface.
+- `struct` and `array` are callable; `record` construction still follows the existing record/construct region surface.
+- `array yield` is expression-form only in expression position, just like `construct yield` and `record/struct/union yield`.
+- Bitfields are currently allowed only on `struct`.
+- Bitfield bases must be fixed-width integer types.
+- Floats do not support `%`, shifts, or bitwise operators.
+- There are no implicit mixed signed/unsigned conversions.
+- Current widening is same-signed only.
+- `I128` / `U128` are not part of the current crate-side surface.
+
+### Rust lookup
+
+- Syntax:
+  - [crates/arcana-syntax/src/lib.rs](C:/Users/Weaver/Documents/GitHub/Arcana/crates/arcana-syntax/src/lib.rs)
+  - `parse_array_symbol`
+  - `parse_array_signature`
+  - `parse_headed_region_statement`
+  - `parse_record_yield_expression`
+  - `parse_array_yield_expression`
+  - float literal parsing in `parse_expression`
+  - `builtin_type_info`
+- Frontend:
+  - [crates/arcana-frontend/src/lib.rs](C:/Users/Weaver/Documents/GitHub/Arcana/crates/arcana-frontend/src/lib.rs)
+  - struct/union/array symbol/type validation in the main semantic pass
+  - unsafe gating around union use
+  - bitfield validation and struct layout checks
+  - numeric widening/conversion validation
+- Runtime:
+  - [crates/arcana-runtime/src/lib.rs](C:/Users/Weaver/Documents/GitHub/Arcana/crates/arcana-runtime/src/lib.rs)
+  - struct/array evaluation paths
+  - struct bitfield layout helpers
+  - float/fixed-width numeric execution
+- Representative tests:
+  - [crates/arcana-syntax/src/lib.rs](C:/Users/Weaver/Documents/GitHub/Arcana/crates/arcana-syntax/src/lib.rs)
+  - `parse_module_accepts_member_access_plus_decimal_float_literal`
+  - `parse_module_accepts_nested_qualified_phrase_inside_named_arg`
+  - [crates/arcana-frontend/src/lib.rs](C:/Users/Weaver/Documents/GitHub/Arcana/crates/arcana-frontend/src/lib.rs)
+  - `check_path_accepts_struct_array_float_and_bitfield_surface`
+  - `check_path_rejects_union_usage_without_unsafe`
+  - `check_path_accepts_union_usage_with_unsafe`
+  - [crates/arcana-runtime/src/tests.rs](C:/Users/Weaver/Documents/GitHub/Arcana/crates/arcana-runtime/src/tests.rs)
+  - `execute_main_runs_value_surface_struct_array_and_float_routines`
+  - `execute_main_runs_struct_bitfield_layout_semantics`
+
+### Minimal examples
+
+```arc
+struct Vec2:
+    x: F32
+    y: F32
+
+let point = Vec2 :: x = 1.5f32, y = 2.5f32 :: call
+```
+
+```arc
+array Trio[Int, 3]:
+
+let ys = array yield Trio -return 0
+    [0] = 1
+    [1] = 2
+    [2] = 3
+```
+
+## Access Capabilities
+
+### What it is
+
+Arcana now uses one explicit capability model for place access and ownership flow. The current general access modes are `read`, `edit`, `take`, and `hold`.
+
+### Current surface shape
+
+- Parameter/access modes:
+  - `read`
+  - `edit`
+  - `take`
+  - `hold`
+- Capability expressions:
+  - `&read x`
+  - `&edit x`
+  - `&take x`
+  - `&hold x`
+- Capability type forms:
+  - `&read[T, 'a]`
+  - `&edit[T, 'a]`
+  - `&take[T, 'a]`
+  - `&hold[T, 'a]`
+- Explicit borrowed-slice forms are supported:
+  - `&read x[a..b]`
+  - `&edit x[a..b]`
+- Unary `*` is the capability-use surface:
+  - deref/project through `&read` / `&edit`
+  - redeem `&take`
+  - temporarily project through `&hold`
+- `reclaim x` is the explicit hold-ending statement form.
+- Owner exit retention is now spelled `retain [...]`; do not describe the owner surface as `hold [...]`.
+- Plain `hold` params are valid call-boundary modes and are ephemeral for the duration of the call unless an explicit `&hold[...]` capability is created and kept.
+
+### Hard limits / rejections
+
+- Old canonical borrow spellings are no longer the language contract:
+  - bare `&x`
+  - bare `&mut x`
+  - `&'a T`
+  - `&'a mut T`
+- `&read[...]` is duplicable/shared.
+- `&edit[...]`, `&take[...]`, and `&hold[...]` are linear.
+- `&edit` cannot be created from an immutable local.
+- `&take x` reserves `x` immediately; direct use after creation is rejected.
+- `&hold x` suspends direct use of `x` until explicit `reclaim`.
+- Unreclaimed `&hold[...]` capability locals are rejected at scope exit.
+- `reclaim` must target a local `&hold[...]` capability binding, not an arbitrary expression.
+- Assignment through `*` is only allowed for `&edit[...]` and `&hold[...]`.
+- String slices are read-only; `&edit x[a..b]` is rejected for `Str`.
+- Borrowed slices require contiguous backing; `List` does not currently satisfy that surface.
+
+### Rust lookup
+
+- Syntax:
+  - [crates/arcana-syntax/src/lib.rs](C:/Users/Weaver/Documents/GitHub/Arcana/crates/arcana-syntax/src/lib.rs)
+  - `parse_capability_unary`
+  - `parse_statement`
+  - `StatementKind::Reclaim`
+- HIR:
+  - [crates/arcana-hir/src/lib.rs](C:/Users/Weaver/Documents/GitHub/Arcana/crates/arcana-hir/src/lib.rs)
+  - `HirUnaryOp::CapabilityRead`
+  - `HirUnaryOp::CapabilityEdit`
+  - `HirUnaryOp::CapabilityTake`
+  - `HirUnaryOp::CapabilityHold`
+  - `HirStatementKind::Reclaim`
+- Frontend:
+  - [crates/arcana-frontend/src/lib.rs](C:/Users/Weaver/Documents/GitHub/Arcana/crates/arcana-frontend/src/lib.rs)
+  - capability conflict validation in the unary-op checks
+  - `validate_reclaim_expr_semantics`
+  - `reclaim_expr_hold_token`
+  - `validate_unreclaimed_hold_tokens`
+  - writable-capability checks for assignment-through-deref
+- Runtime:
+  - [crates/arcana-runtime/src/lib.rs](C:/Users/Weaver/Documents/GitHub/Arcana/crates/arcana-runtime/src/lib.rs)
+  - runtime reference-mode selection from unary capability ops
+  - `reclaim_hold_capability_root_local`
+  - `reclaim_held_target_local`
+  - `redeem_take_reference`
+  - runtime hold/take scope validation
+- Representative tests:
+  - [crates/arcana-syntax/src/lib.rs](C:/Users/Weaver/Documents/GitHub/Arcana/crates/arcana-syntax/src/lib.rs)
+  - `parse_module_collects_capability_and_deref_expressions`
+  - `parse_module_collects_reclaim_statement`
+  - `parse_module_collects_deferred_reclaim_statement`
+  - [crates/arcana-frontend/src/lib.rs](C:/Users/Weaver/Documents/GitHub/Arcana/crates/arcana-frontend/src/lib.rs)
+  - `check_path_accepts_hold_capability_with_reclaim`
+  - `check_path_accepts_plain_hold_param_for_call_duration_only`
+  - `check_path_rejects_use_after_take_capability_creation`
+  - `check_path_rejects_reclaim_of_nonlocal_hold_expression`
+  - [crates/arcana-runtime/src/tests.rs](C:/Users/Weaver/Documents/GitHub/Arcana/crates/arcana-runtime/src/tests.rs)
+  - `execute_main_runs_hold_capability_reclaim_flow`
+  - `execute_main_runs_deferred_hold_reclaim_flow`
+  - `execute_main_runs_take_capability_once`
+  - `execute_main_runs_plain_hold_param_for_call_duration_only`
+
+### Minimal examples
+
+```arc
+let x_ref = &read local_x
+let y_cap = &edit local_y
+let sum = *x_ref + *y_cap
+```
+
+```arc
+let held = &hold x
+*held = 2
+reclaim held
+```
+
 ## Headed Regions
 
 ### What it is
@@ -366,18 +579,24 @@ Headed regions are parsed by `parse_headed_region_statement`. They are region-fo
   - `bind`
   - `construct`
   - `record`
+  - `struct`
+  - `union`
+  - `array`
   - statement-form `Memory`
-- `construct yield` and `record yield` are expression-form.
+- `construct yield`, `record yield`, `struct yield`, `union yield`, and `array yield` are expression-form.
 - `construct deliver` and `construct place` are statement-form region heads.
 - `record deliver` and `record place` are statement-form region heads.
+- `struct deliver` and `struct place` are statement-form region heads.
+- `union deliver` and `union place` are statement-form region heads.
+- `array deliver` and `array place` are statement-form region heads.
 - Statement-form `Memory` uses `parse_memory_spec_decl`, not `parse_memory_phrase`.
 
 ### Hard limits / rejections
 
 - `recycle` and `bind` require indented region bodies.
 - `construct yield` is rejected in statement position.
-- `record yield` is rejected in statement position.
-- Expression position only allows `construct yield` and `record yield`; `parse_construct_yield_expression` and `parse_record_yield_expression` reject other completions there.
+- `record yield`, `struct yield`, `union yield`, and `array yield` are rejected in statement position.
+- Expression position only allows `construct yield`, `record yield`, `struct yield`, `union yield`, and `array yield`; `parse_construct_yield_expression`, `parse_record_yield_expression`, and `parse_array_yield_expression` reject other completions there.
 - Nested headed regions are rejected in v1; frontend tracks headed-region depth and rejects a headed region that appears inside another headed region.
 - Frontend headed-region validation is extensive. Representative constraints:
   - `recycle -break` and `recycle -continue` only make sense inside loops
@@ -385,9 +604,11 @@ Headed regions are parsed by `parse_headed_region_statement`. They are region-fo
   - `bind -default`, `bind -preserve`, and `bind -replace` are restricted to the appropriate gate forms
   - `bind -break` and `bind -continue` are restricted to `require <expr>` lines
   - `construct place` target type must match constructor result type
-  - `record` targets must resolve to records
-  - `record place` target type must match record result type
-  - `record ... from ...` only copies same-name, exact-type fields from the base
+  - `record` / `struct` / `union` targets must resolve to the matching nominal kind
+  - `record place`, `struct place`, and `union place` target types must match the region result type
+  - `record` / `struct` / `union ... from ...` only copy same-name, exact-type fields from the base
+  - `array ... from ...` requires the same nominal array type
+  - array region indices are compile-time integer literals in-range
 
 ### Rust lookup
 
@@ -400,6 +621,8 @@ Headed regions are parsed by `parse_headed_region_statement`. They are region-fo
   - `parse_construct_yield_expression`
   - `parse_record_region`
   - `parse_record_yield_expression`
+  - `parse_array_region`
+  - `parse_array_yield_expression`
   - `parse_memory_spec_decl`
 - Frontend:
   - `crates/arcana-frontend/src/lib.rs`
@@ -411,6 +634,7 @@ Headed regions are parsed by `parse_headed_region_statement`. They are region-fo
   - `validate_construct_contribution_semantics`
   - `validate_construct_region_semantics`
   - `validate_record_region_semantics`
+  - `validate_array_region_semantics`
 - Runtime:
   - `crates/arcana-runtime/src/lib.rs`
   - `resolve_named_owner_exit_target`
@@ -423,6 +647,8 @@ Headed regions are parsed by `parse_headed_region_statement`. They are region-fo
   - `check_sources_rejects_headed_region_semantic_violations`
   - `check_path_accepts_same_region_headed_bindings_and_matching_construct_place`
   - `check_path_accepts_record_headed_regions_with_base_copy`
+  - `check_path_accepts_struct_array_float_and_bitfield_surface`
+  - `check_path_accepts_union_usage_with_unsafe`
   - `crates/arcana-ir/src/lib.rs`
   - `lower_workspace_package_with_resolution_collects_record_copied_fields`
   - `crates/arcana-runtime/src/tests.rs`
@@ -432,6 +658,7 @@ Headed regions are parsed by `parse_headed_region_statement`. They are region-fo
   - `execute_main_construct_regions_preserve_direct_values_and_payload_acquisition`
   - `execute_main_runs_record_headed_regions_with_base_copy`
   - `execute_main_runs_record_headed_regions_with_cross_record_lift`
+  - `execute_main_runs_value_surface_struct_array_and_float_routines`
 
 ### Minimal example
 
@@ -603,8 +830,8 @@ Objects and owners are the current owner-state surface. Owners are parsed by `pa
 - Owner exits from `parse_owner_exit_decl`:
   - `exit when <expr>`
   - `<name>: when <expr>`
-- Optional hold list:
-  - `hold [Counter]`
+- Optional retain list:
+  - `retain [Counter]`
 - Availability attachments are bare path lines parsed by `parse_availability_attachment`.
 - Owner activation is frontend-recognized only for qualified phrases whose qualifier is `call` and whose subject resolves to an owner; see `resolve_owner_activation_expr`.
 
@@ -678,7 +905,7 @@ obj Counter:
     value: Int
 
 create Session [Counter] scope-exit:
-    done: when false hold [Counter]
+    done: when false retain [Counter]
 
 Session
 Counter
@@ -735,6 +962,19 @@ Binding products are the current package-owned foreign seam for library packages
     - `arcana_winapi.foundation`
     - `arcana_winapi.fonts`
     - `arcana_winapi.windows`
+- The current raw module set includes:
+  - desktop/kernel families:
+    - `callbacks`, `constants`, `kernel32`, `user32`, `gdi32`, `dwmapi`, `shcore`, `shell32`, `imm32`
+  - COM/graphics/text families:
+    - `ole32`, `combase`, `dxgi`, `d3d12`, `dwrite`, `d2d1`, `wic`
+  - audio families:
+    - `mmdeviceapi`, `audioclient`, `audiopolicy`, `endpointvolume`, `avrt`, `mmreg`, `ksmedia`, `propsys`, `xaudio2`, `x3daudio`
+  - shared layout families:
+    - `types`
+- The current helper surface covers:
+  - `strings`, `errors`, `com`, `windowing`, `graphics`, `text`, `audio`
+  - windowing helpers include hidden window lifecycle, message pump, DPI/monitor, dark mode, clipboard, file-drop, and IME
+  - graphics/text/audio helpers include GDI present, DXGI hidden-window swapchain bootstrap, D3D12 bootstrap, DirectWrite/Direct2D/WIC bootstrap, MMDevice/WASAPI/render-client/endpoint-volume/session-policy bootstrap, AVRT registration, and XAudio2/X3DAudio bootstrap
 - In HIR, exported `shackle import fn`, exported `shackle fn`, and exported `shackle const` are projected into visible symbol surface so dependent packages can call/read them through ordinary path resolution.
 - Current binding CABI semantics are symmetric for imports and callbacks:
   - same param metadata model
@@ -753,14 +993,21 @@ Binding products are the current package-owned foreign seam for library packages
   - `native callback`
   - `shackle`
 - Exported `shackle` items that collide with an existing symbol name in the same module are rejected during HIR lowering.
-- The public binding transport model is still the current v1 CABI tag set:
-  - `Int`
-  - `Bool`
-  - `Str`
-  - `Bytes`
-  - `Opaque`
-  - `Unit`
-- Do not assume arbitrary raw layout transport across the runtime value model. The raw Win32 layer is carried by `shackle` declarations and generated binding code, not by inventing new runtime value tags in `arcana-runtime`.
+- The public binding transport model is the revised raw-capable binding v1 model:
+  - scalar tags: `Int`, `Bool`, `I8/U8`, `I16/U16`, `I32/U32`, `I64/U64`, `ISize/USize`, `F32/F64`
+  - view/owned tags: `Str`, `Bytes`
+  - handle/control tags: `Opaque`, `Unit`
+  - raw layout tag: `Layout`
+- Stable raw layout ids now flow through binding metadata and generated binding products for:
+  - aliases
+  - structs
+  - unions
+  - fixed arrays
+  - flags/enums
+  - callbacks / function-pointer signatures
+  - COM-style interface pointers
+  - named bitfields
+- Pointer/function-pointer semantics remain a binding/`shackle` concern. Arcana still does not have a general pointer language model.
 
 ### Rust lookup
 
@@ -800,12 +1047,18 @@ Binding products are the current package-owned foreign seam for library packages
   - `crates/arcana-frontend/src/lib.rs`
   - `check_path_rejects_shackle_without_binding_product`
   - `check_path_accepts_typed_native_callback_from_dependency_shackle_callback`
+  - `check_path_accepts_typed_native_callback_from_dependency_audio_shackle_callback`
   - `check_path_accepts_dependency_shackle_types_in_type_surface`
   - `check_path_accepts_dependency_shackle_import_fns_and_consts`
   - `crates/arcana-ir/src/lib.rs`
   - `lower_workspace_package_with_resolution_carries_shackle_decls_and_typed_callbacks`
   - `crates/arcana-runtime/src/tests.rs`
   - `execute_main_runs_arcana_winapi_binding_smoke`
+  - `execute_main_runs_arcana_winapi_windowing_helper_smoke`
+  - `execute_main_runs_arcana_winapi_graphics_dxgi_helper_smoke`
+  - `execute_main_runs_arcana_winapi_graphics_helper_smoke`
+  - `execute_main_runs_arcana_winapi_text_helper_smoke`
+  - `execute_main_runs_arcana_winapi_audio_helper_smoke`
   - `execute_main_reports_arcana_winapi_binding_errors`
   - `execute_main_runs_dependency_shackle_import_fn_and_const_surface`
 

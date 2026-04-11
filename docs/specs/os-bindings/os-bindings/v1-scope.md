@@ -67,33 +67,62 @@ This scope freezes the pre-selfhost generic OS-binding seam for Arcana library p
 - The first proof lane is Windows only.
 - The transitional handwritten `crates/arcana-winapi` bridge is removed; `grimoires/arcana/winapi` owns the Win32 binding implementation directly.
 
-## `arcana_winapi` v1 Proof Slice
+## `arcana_winapi` v1 Surface
 
 `arcana_winapi` is the first public OS-binding grimoire.
 
 Its public package shape is:
-- `arcana_winapi.raw.*` for raw binding-facing surface such as exported callback signatures
+- `arcana_winapi.raw.*` for public raw Win32-facing surface
 - `arcana_winapi.helpers.*` for thin Win32 helper routines consumers should build on
 - compatibility wrappers like `arcana_winapi.foundation`, `arcana_winapi.fonts`, and `arcana_winapi.windows` remain available during the migration
 
-Its v1 proof slice covers:
-- foundation helpers
-  - UTF-16 length utility
-  - current module handle/path
-  - normalized error transport
-- fonts
-  - system font catalog enumeration
-  - family/face/full-name/PostScript/path metadata
-  - stable file-path lookup when DirectWrite exposes it
-- desktop-shell proof
-  - hidden/basic window creation
+Its current v1 raw surface covers:
+- core type/layout families in `arcana_winapi.raw.types`
+  - handles, pointers, GUIDs, messages, monitors, IME/bitmap layouts
+  - DXGI, D3D12, DirectWrite, Direct2D, WIC, and audio-facing COM/layout families
+- raw Win32 module families
+  - `kernel32`, `user32`, `gdi32`, `dwmapi`, `shcore`, `shell32`, `imm32`
+  - `ole32`, `combase`
+  - `dxgi`, `d3d12`, `dwrite`, `d2d1`, `wic`
+  - `mmdeviceapi`, `audioclient`, `audiopolicy`, `endpointvolume`, `avrt`, `mmreg`, `ksmedia`, `propsys`, `xaudio2`, `x3daudio`
+- exported callback/type surface
+  - window-proc callback declaration through `arcana_winapi.raw.callbacks.WNDPROC`
+  - representative audio callback declarations such as `XAUDIO2_ENGINE_ON_CRITICAL_ERROR` and `XAUDIO2_VOICE_ON_BUFFER_END`
+  - raw COM-style interface/vtable layouts for the supported graphics/text/audio families
+
+Its current helper surface covers:
+- strings/errors/com
+  - UTF-16 helpers
+  - HRESULT helpers
+  - COM init/uninit, GUID text, property-key helpers
+- windowing
+  - hidden window creation/destruction
   - message posting/pumping
-  - explicit callback registration/trampoline for window procedures
+  - DPI/monitor queries
+  - dark-mode attribute roundtrip
+  - client/frame rect queries
+  - clipboard, file-drop, and IME helper routines
+- graphics/text
+  - GDI software-present path
+  - DXGI adapter enumeration
+  - DXGI hidden-window swapchain bootstrap
+  - D3D12 WARP bootstrap including queue/allocator/list/fence setup
+  - Direct2D and WIC factory bootstrap
+  - DirectWrite system font count and text-layout bootstrap
+- audio
+  - MMDevice enumeration/default render bootstrap
+  - WASAPI default render bootstrap
+  - WASAPI render-client bootstrap
+  - endpoint volume bootstrap
+  - session policy bootstrap
+  - AVRT registration helper
+  - XAudio2 and X3DAudio bootstrap helpers
 
 ## Boundaries
 
 - `arcana_text` may consume `arcana_winapi` for host-installed font discovery and related metadata.
 - Future `arcana_desktop` migration may consume `arcana_winapi` for incremental Win32 ownership work.
+- Future graphics/audio grimoires such as `arcana_graphics`, `arcana_hal`, and `arcana_audio` may consume the raw/helper surface without reviving handwritten Rust bridge layers.
 - `arcana_text` and `arcana_desktop` must not regain direct runtime special cases once this seam exists.
 - No library package should talk to `windows-sys` directly in the library binding seam.
 - Existing `windows-sys` usage in rewrite runtime host code and Windows-only CLI/runtime test harnesses is transitional host debt, not part of the library binding seam.

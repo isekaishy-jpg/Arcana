@@ -1,3 +1,12 @@
 export shackle import fn GetLastError() -> arcana_winapi.raw.types.DWORD = kernel32.GetLastError
 export shackle import fn GetModuleFileNameW(module: arcana_winapi.raw.types.HMODULE, buffer: arcana_winapi.raw.types.LPWSTR, size: arcana_winapi.raw.types.DWORD) -> arcana_winapi.raw.types.DWORD = kernel32.GetModuleFileNameW
 export shackle import fn GetModuleHandleExW(flags: arcana_winapi.raw.types.DWORD, address: arcana_winapi.raw.types.LPCVOID, module: arcana_winapi.raw.types.PHMODULE) -> arcana_winapi.raw.types.BOOL = kernel32.GetModuleHandleExW
+export shackle import fn LoadLibraryW(path: arcana_winapi.raw.types.LPCWSTR) -> arcana_winapi.raw.types.HMODULE = kernel32.LoadLibraryW
+export shackle import fn FreeLibrary(module: arcana_winapi.raw.types.HMODULE) -> arcana_winapi.raw.types.BOOL = kernel32.FreeLibrary
+export shackle import fn GetProcAddress(module: arcana_winapi.raw.types.HMODULE, name: arcana_winapi.raw.types.LPCSTR) -> arcana_winapi.raw.types.LPVOID = kernel32.GetProcAddress
+export shackle import fn CloseHandle(handle: arcana_winapi.raw.types.HANDLE) -> arcana_winapi.raw.types.BOOL = kernel32.CloseHandle
+export shackle import fn CreateEventW(attributes: arcana_winapi.raw.types.LPVOID, manual_reset: arcana_winapi.raw.types.BOOL, initial_state: arcana_winapi.raw.types.BOOL, name: arcana_winapi.raw.types.LPCWSTR) -> arcana_winapi.raw.types.HANDLE = kernel32.CreateEventW
+export shackle import fn SetEvent(handle: arcana_winapi.raw.types.HANDLE) -> arcana_winapi.raw.types.BOOL = kernel32.SetEvent
+export shackle import fn ResetEvent(handle: arcana_winapi.raw.types.HANDLE) -> arcana_winapi.raw.types.BOOL = kernel32.ResetEvent
+export shackle import fn WaitForSingleObject(handle: arcana_winapi.raw.types.HANDLE, milliseconds: arcana_winapi.raw.types.DWORD) -> arcana_winapi.raw.types.DWORD = kernel32.WaitForSingleObject
+export shackle import fn GetCurrentThreadId() -> arcana_winapi.raw.types.DWORD = kernel32.GetCurrentThreadId

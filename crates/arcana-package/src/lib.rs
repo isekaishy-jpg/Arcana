@@ -3740,6 +3740,51 @@ mod tests {
         );
         write_file(&dir.join("src").join("types.arc"), "// test types\n");
 
+        let workspace = load_workspace_hir(&dir).expect("workspace hir should load");
+        let winapi = workspace
+            .packages
+            .values()
+            .find(|package| package.summary.package_name == "arcana_winapi")
+            .expect("arcana_winapi package should exist");
+        assert!(
+            winapi.summary.modules.iter().any(|module| module.module_id
+                == "arcana_winapi.raw.types"
+                && module
+                    .shackle_decls
+                    .iter()
+                    .any(|decl| decl.name == "HWND" && decl.raw_layout.is_some())),
+            "arcana_winapi.raw.types should carry HWND raw layout metadata"
+        );
+        let resolved = arcana_hir::resolve_workspace(&workspace).expect("workspace should resolve");
+        let resolved_winapi = workspace
+            .packages
+            .values()
+            .find(|package| package.summary.package_name == "arcana_winapi")
+            .expect("arcana_winapi package should still exist");
+        let winapi_ir = arcana_ir::lower_workspace_package_with_resolution(
+            &workspace,
+            &resolved,
+            resolved_winapi,
+        )
+        .expect("arcana_winapi IR should lower");
+        assert!(
+            winapi_ir
+                .shackle_decls
+                .iter()
+                .any(|decl| decl.module_id == "arcana_winapi.raw.types"
+                    && decl.name == "HWND"
+                    && decl.raw_layout.is_some()),
+            "arcana_winapi IR should carry HWND raw layout metadata"
+        );
+        let winapi_artifact = arcana_aot::compile_package(&winapi_ir);
+        assert!(
+            winapi_artifact
+                .binding_layouts
+                .iter()
+                .any(|layout| layout.layout_id == "arcana_winapi.raw.types.HWND"),
+            "direct winapi artifact should keep HWND binding layout"
+        );
+
         let graph = load_workspace_graph(&dir).expect("load graph");
         let order = plan_workspace(&graph).expect("plan");
         let prepared = prepare_test_build(&graph);
