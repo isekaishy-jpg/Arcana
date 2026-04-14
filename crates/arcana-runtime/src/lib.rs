@@ -10528,12 +10528,12 @@ fn execute_call_by_path(
         .map(|arg| arg.value.clone())
         .collect::<Vec<_>>();
     let edit_indices = edit_arg_indices(intrinsic);
-    for index in 0..values.len() {
+    for (index, value) in values.iter_mut().enumerate() {
         if edit_indices.contains(&index) {
             continue;
         }
-        values[index] = read_runtime_value_if_ref(
-            values[index].clone(),
+        *value = read_runtime_value_if_ref(
+            value.clone(),
             scopes,
             plan,
             current_package_id,

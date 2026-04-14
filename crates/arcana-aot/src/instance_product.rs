@@ -2590,7 +2590,7 @@ fn render_shackle_rust_type(
     use arcana_ir::IrRoutineTypeKind;
 
     match &ty.kind {
-        IrRoutineTypeKind::Path(path) => render_shackle_rust_path(spec, &path.segments),
+        IrRoutineTypeKind::Path(path) => render_shackle_rust_named_text(spec, &path.render()),
         IrRoutineTypeKind::Apply { base, args }
             if base.root_name() == Some("View") && args.len() == 2 =>
         {
@@ -2623,8 +2623,17 @@ fn render_shackle_rust_type(
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
-        IrRoutineTypeKind::Projection(projection) => projection.render().replace('.', "::"),
+        IrRoutineTypeKind::Projection(projection) => {
+            render_shackle_rust_named_text(spec, &projection.render())
+        }
     }
+}
+
+fn render_shackle_rust_named_text(spec: &AotInstanceProductSpec, text: &str) -> String {
+    if binding_named_type_is_layoutless_opaque(spec, text) {
+        return "u64".to_string();
+    }
+    rewrite_shackle_type_binding(spec, text)
 }
 
 fn render_shackle_rust_path(spec: &AotInstanceProductSpec, segments: &[String]) -> String {
@@ -3245,12 +3254,37 @@ mod tests {
 
     #[test]
     fn generated_binding_instance_product_treats_layoutless_named_types_as_opaque_handles() {
-        let lib_rs = render_instance_product_lib_rs(&binding_spec()).expect("lib.rs should render");
+        let mut spec = binding_spec();
+        spec.binding_shackle_decls.push(AotShackleDeclArtifact {
+            package_id: "arcana_winapi".to_string(),
+            module_id: "arcana_winapi.foundation".to_string(),
+            exported: false,
+            kind: "fn".to_string(),
+            name: "helper_uses_module_handle".to_string(),
+            params: vec![arcana_ir::IrRoutineParam {
+                binding_id: 0,
+                mode: Some("read".to_string()),
+                name: "module".to_string(),
+                ty: arcana_ir::parse_routine_type_text("arcana_winapi.types.ModuleHandle")
+                    .expect("type should parse"),
+            }],
+            return_type: Some(
+                arcana_ir::parse_routine_type_text("Int").expect("type should parse"),
+            ),
+            callback_type: None,
+            binding: None,
+            body_entries: vec!["return 0".to_string()],
+            raw_layout: None,
+            import_target: None,
+            thunk_target: None,
+            surface_text: String::new(),
+        });
+        let lib_rs = render_instance_product_lib_rs(&spec).expect("lib.rs should render");
 
         assert!(lib_rs.contains("fn binding_opaque(value: u64)"));
         assert!(lib_rs.contains("fn read_opaque_arg(value: &ArcanaCabiBindingValueV1"));
         assert!(lib_rs.contains("let module = read_opaque_arg(&args[0], \"module\")?;"));
-        assert!(lib_rs.contains("fn foundation_module_path_impl(module: u64)"));
+        assert!(lib_rs.contains("fn helper_uses_module_handle(module: u64)"));
     }
 
     #[test]

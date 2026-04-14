@@ -2,6 +2,7 @@
 
 macro_rules! define_intrinsic_enum {
     ($name:ident { $($variant:ident),* $(,)? }) => {
+        #[allow(clippy::enum_variant_names)]
         #[derive(Clone, Copy, Debug, PartialEq, Eq)]
         pub(crate) enum $name {
             $($variant),*

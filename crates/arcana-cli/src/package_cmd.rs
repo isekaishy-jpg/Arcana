@@ -12,6 +12,7 @@ use arcana_package::{
 use crate::build_context::{build_execution_context_for_target, render_build_progress};
 
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn package_workspace(
     workspace_dir: PathBuf,
     target: BuildTarget,
@@ -122,6 +123,8 @@ fn default_package_member(
 
 #[cfg(test)]
 mod tests {
+    #![allow(dead_code, unused_imports)]
+
     #[cfg(all(windows, feature = "legacy-native-host-tests"))]
     use std::ffi::{CStr, c_char, c_void};
     use std::fs;

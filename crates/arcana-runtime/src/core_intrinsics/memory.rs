@@ -3740,7 +3740,7 @@ pub(super) fn execute(
                 .get(&handle)
                 .ok_or_else(|| format!("invalid StrView handle `{}`", handle.0))?
                 .clone();
-            let scopes = scopes.as_deref_mut().ok_or_else(|| {
+            let scopes = scopes.as_mut().ok_or_else(|| {
                 "str_view_to_str on borrowed StrView requires runtime call context".to_string()
             })?;
             Ok(RuntimeValue::Str(runtime_str_view_text(

@@ -541,7 +541,7 @@ fn parse_native_binding_type(ty: &IrRoutineType) -> Result<NativeBindingType, St
                         return Err(format!(
                             "unsupported native binding view family `{}`",
                             args[1].render()
-                        ))
+                        ));
                     }
                 };
                 Ok(NativeBindingType::View(ArcanaCabiBindingViewType {

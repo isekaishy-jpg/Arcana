@@ -1565,7 +1565,7 @@ fn opaque_lang_family_for_hir_path(
                 if opaque_lang_item_target_matches_symbol(
                     module,
                     &lang_item.target,
-                    &symbol_ref.module_id,
+                    symbol_ref.module_id,
                     &symbol_ref.symbol.name,
                 ) {
                     return Some(family);

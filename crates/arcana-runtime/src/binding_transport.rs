@@ -2162,7 +2162,7 @@ pub(super) fn runtime_utf16_units_from_binding_bytes(
     bytes: &[u8],
     label: &str,
 ) -> Result<Vec<u16>, String> {
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         return Err(format!(
             "{label} length {} is not a multiple of 2 for Utf16 transport",
             bytes.len()

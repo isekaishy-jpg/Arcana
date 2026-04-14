@@ -361,8 +361,7 @@ impl ArcanaCabiBindingType {
             "Unit" => Self::Unit,
             _ if trimmed.starts_with("View[") && trimmed.ends_with(']') => {
                 let inner = &trimmed["View[".len()..trimmed.len() - 1];
-                let (element_type, family) =
-                    split_top_level_pair_args_with_context(inner, "View")?;
+                let (element_type, family) = split_top_level_pair_args_with_context(inner, "View")?;
                 Self::View(ArcanaCabiBindingViewType {
                     element_type: Box::new(Self::parse(element_type)?),
                     family: ArcanaCabiViewFamily::parse(family)?,
@@ -556,9 +555,10 @@ impl ArcanaCabiBindingParam {
             ArcanaCabiParamSourceMode::Edit if input_type.supports_in_place_edit() => {
                 (ArcanaCabiPassMode::In, None)
             }
-            ArcanaCabiParamSourceMode::Edit => {
-                (ArcanaCabiPassMode::InWithWriteBack, Some(input_type.clone()))
-            }
+            ArcanaCabiParamSourceMode::Edit => (
+                ArcanaCabiPassMode::InWithWriteBack,
+                Some(input_type.clone()),
+            ),
             ArcanaCabiParamSourceMode::Read | ArcanaCabiParamSourceMode::Take => {
                 (ArcanaCabiPassMode::In, None)
             }
@@ -669,14 +669,7 @@ pub const fn raw_view(
 }
 
 pub const fn contiguous_u8_view(ptr: *const u8, len: usize, flags: u32) -> ArcanaViewV1 {
-    raw_view(
-        ptr,
-        len,
-        1,
-        ARCANA_CABI_VIEW_FAMILY_CONTIGUOUS,
-        1,
-        flags,
-    )
+    raw_view(ptr, len, 1, ARCANA_CABI_VIEW_FAMILY_CONTIGUOUS, 1, flags)
 }
 
 #[repr(C)]
@@ -784,12 +777,8 @@ pub type ArcanaCabiBindingMappedViewReadByteFn = unsafe extern "system" fn(
     index: usize,
     out_value: *mut u8,
 ) -> i32;
-pub type ArcanaCabiBindingMappedViewWriteByteFn = unsafe extern "system" fn(
-    instance: *mut c_void,
-    handle: u64,
-    index: usize,
-    value: u8,
-) -> i32;
+pub type ArcanaCabiBindingMappedViewWriteByteFn =
+    unsafe extern "system" fn(instance: *mut c_void, handle: u64, index: usize, value: u8) -> i32;
 pub type ArcanaCabiBindingInvokeImportFn = unsafe extern "system" fn(
     import_name: *const c_char,
     instance: *mut c_void,
@@ -2021,12 +2010,12 @@ fn binding_signatures_by_name(
 #[cfg(test)]
 mod tests {
     use super::{
-        ArcanaCabiBindingCallback, ArcanaCabiBindingLayout, ArcanaCabiBindingLayoutField,
-        ArcanaCabiBindingLayoutKind, ArcanaCabiBindingParam, ArcanaCabiBindingRawType,
-        ArcanaCabiBindingScalarType, ArcanaCabiBindingSignature, ArcanaCabiBindingSignatureKind,
-        ArcanaCabiBindingType, ArcanaCabiBindingValueTag, ArcanaCabiBindingValueV1,
-        ArcanaCabiBindingViewType, ArcanaCabiParamSourceMode, ArcanaCabiViewFamily, ArcanaViewV1,
-        ARCANA_CABI_VIEW_FAMILY_CONTIGUOUS, ARCANA_CABI_VIEW_FLAG_UTF8, binding_write_back_slots,
+        ARCANA_CABI_VIEW_FAMILY_CONTIGUOUS, ARCANA_CABI_VIEW_FLAG_UTF8, ArcanaCabiBindingCallback,
+        ArcanaCabiBindingLayout, ArcanaCabiBindingLayoutField, ArcanaCabiBindingLayoutKind,
+        ArcanaCabiBindingParam, ArcanaCabiBindingRawType, ArcanaCabiBindingScalarType,
+        ArcanaCabiBindingSignature, ArcanaCabiBindingSignatureKind, ArcanaCabiBindingType,
+        ArcanaCabiBindingValueTag, ArcanaCabiBindingValueV1, ArcanaCabiBindingViewType,
+        ArcanaCabiParamSourceMode, ArcanaCabiViewFamily, ArcanaViewV1, binding_write_back_slots,
         clone_owned_binding_bytes, clone_owned_binding_str, compare_binding_layouts,
         compare_binding_signatures, free_owned_bytes, free_owned_str, into_owned_bytes,
         into_owned_str, release_binding_output_value, render_c_descriptor_type_defs,
@@ -2130,15 +2119,13 @@ mod tests {
 
     #[test]
     fn binding_view_types_parse_render_and_validate() {
-        let parsed = ArcanaCabiBindingType::parse("View[U8, Mapped]")
-            .expect("View type should parse");
+        let parsed =
+            ArcanaCabiBindingType::parse("View[U8, Mapped]").expect("View type should parse");
         assert_eq!(parsed.render(), "View[U8, Mapped]");
         validate_binding_transport_type(&parsed).expect("U8 mapped view should validate");
 
         let named = ArcanaCabiBindingType::View(ArcanaCabiBindingViewType {
-            element_type: Box::new(ArcanaCabiBindingType::Named(
-                "hostapi.raw.Rect".to_string(),
-            )),
+            element_type: Box::new(ArcanaCabiBindingType::Named("hostapi.raw.Rect".to_string())),
             family: ArcanaCabiViewFamily::Strided,
         });
         validate_binding_transport_type(&named).expect("named strided view should validate");
@@ -2233,7 +2220,8 @@ mod tests {
             },
         };
         assert_eq!(
-            view_total_bytes(unsafe { value.payload.view_value }).expect("view span should compute"),
+            view_total_bytes(unsafe { value.payload.view_value })
+                .expect("view span should compute"),
             4
         );
         release_binding_output_value(value, test_free_owned_bytes, test_free_owned_str)

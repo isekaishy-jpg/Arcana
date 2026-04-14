@@ -5186,7 +5186,10 @@ mod tests {
         let status = status(&first_statuses, "app");
         let artifact_path = graph.root_dir.join(&status.artifact_rel_path);
         let stale = fs::read_to_string(&artifact_path).expect("artifact should exist");
-        let malformed = stale.replace("module=app:import:arcana_process.io:", "module=app:import::");
+        let malformed = stale.replace(
+            "module=app:import:arcana_process.io:",
+            "module=app:import::",
+        );
         fs::write(&artifact_path, malformed).expect("artifact should be rewritten");
         let existing = read_lockfile(&lock_path)
             .expect("read lock")

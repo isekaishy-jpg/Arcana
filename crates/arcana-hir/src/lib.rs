@@ -31,8 +31,8 @@ use arcana_cabi::{
     ArcanaCabiBindingLayoutKind, ArcanaCabiBindingRawType, ArcanaCabiBindingScalarType,
 };
 use arcana_syntax::{
-    ConstructCompletionKind, HeadedModifierKeyword, MemoryDetailKey, MemoryFamily,
-    AssignOp as ParsedAssignOp, DirectiveKind as ParsedDirectiveKind, Expr as ParsedExpr,
+    AssignOp as ParsedAssignOp, ConstructCompletionKind, DirectiveKind as ParsedDirectiveKind,
+    Expr as ParsedExpr, HeadedModifierKeyword, MemoryDetailKey, MemoryFamily,
     OpaqueBoundaryPolicy as ParsedOpaqueBoundaryPolicy,
     OpaqueOwnershipPolicy as ParsedOpaqueOwnershipPolicy,
     OpaqueTypePolicy as ParsedOpaqueTypePolicy, ParamMode as ParsedParamMode, ParsedModule,
@@ -2317,9 +2317,7 @@ fn infer_projection_hir_type<L: HirLocalTypeLookup>(
                 vec![elem, ambient_path_hir_type(&["Contiguous"])],
             ))
         }
-        HirTypeKind::Path(path)
-            if hir_path_matches_any(path, &[&["Bytes"], &["ByteBuffer"]]) =>
-        {
+        HirTypeKind::Path(path) if hir_path_matches_any(path, &[&["Bytes"], &["ByteBuffer"]]) => {
             Some(ambient_apply_hir_type(
                 &["View"],
                 vec![
@@ -2328,9 +2326,7 @@ fn infer_projection_hir_type<L: HirLocalTypeLookup>(
                 ],
             ))
         }
-        HirTypeKind::Path(path)
-            if hir_path_matches_any(path, &[&["Utf16"], &["Utf16Buffer"]]) =>
-        {
+        HirTypeKind::Path(path) if hir_path_matches_any(path, &[&["Utf16"], &["Utf16Buffer"]]) => {
             Some(ambient_apply_hir_type(
                 &["View"],
                 vec![
@@ -2339,8 +2335,7 @@ fn infer_projection_hir_type<L: HirLocalTypeLookup>(
                 ],
             ))
         }
-        HirTypeKind::Apply { base, args } if hir_path_matches_any(base, &[&["View"]]) =>
-        {
+        HirTypeKind::Apply { base, args } if hir_path_matches_any(base, &[&["View"]]) => {
             let elem = args
                 .first()
                 .cloned()
@@ -2351,18 +2346,16 @@ fn infer_projection_hir_type<L: HirLocalTypeLookup>(
                 .unwrap_or_else(|| ambient_path_hir_type(&["Contiguous"]));
             Some(ambient_apply_hir_type(&["View"], vec![elem, family]))
         }
-        HirTypeKind::Path(path) if hir_path_matches_any(path, &[&["Str"]]) => Some(
-            ambient_apply_hir_type(
+        HirTypeKind::Path(path) if hir_path_matches_any(path, &[&["Str"]]) => {
+            Some(ambient_apply_hir_type(
                 &["View"],
                 vec![
                     builtin_hir_type("U8"),
                     ambient_path_hir_type(&["Contiguous"]),
                 ],
-            ),
-        ),
-        HirTypeKind::Path(path)
-            if hir_path_matches_any(path, &[&["std", "memory", "View"]]) =>
-        {
+            ))
+        }
+        HirTypeKind::Path(path) if hir_path_matches_any(path, &[&["std", "memory", "View"]]) => {
             Some(ambient_apply_hir_type(
                 &["View"],
                 vec![
@@ -2800,14 +2793,7 @@ pub fn infer_receiver_expr_type<L: HirLocalTypeLookup>(
         }
         HirExpr::Slice { expr, family, .. } => {
             if matches!(family, HirProjectionFamily::Strided) {
-                infer_projection_hir_type(
-                    workspace,
-                    resolved_module,
-                    locals,
-                    expr,
-                    *family,
-                    false,
-                )
+                infer_projection_hir_type(workspace, resolved_module, locals, expr, *family, false)
             } else {
                 infer_slice_hir_type(workspace, resolved_module, locals, expr)
             }
@@ -6884,8 +6870,11 @@ mod tests {
         let std_summary = build_package_summary(
             "std",
             vec![
-                lower_module_text("arcana_process.io", "export fn print() -> Int:\n    return 0\n")
-                    .expect("arcana_process.io should lower"),
+                lower_module_text(
+                    "arcana_process.io",
+                    "export fn print() -> Int:\n    return 0\n",
+                )
+                .expect("arcana_process.io should lower"),
             ],
         );
         let std_layout = build_package_layout(
@@ -7141,8 +7130,11 @@ mod tests {
         let std_summary = build_package_summary(
             "std",
             vec![
-                lower_module_text("arcana_process.io", "export fn print() -> Int:\n    return 0\n")
-                    .expect("arcana_process.io should lower"),
+                lower_module_text(
+                    "arcana_process.io",
+                    "export fn print() -> Int:\n    return 0\n",
+                )
+                .expect("arcana_process.io should lower"),
                 lower_module_text("std.text", "export fn len() -> Int:\n    return 0\n")
                     .expect("std.text should lower"),
             ],
@@ -7210,8 +7202,11 @@ mod tests {
         let std_summary = build_package_summary(
             "std",
             vec![
-                lower_module_text("arcana_process.io", "export fn print() -> Int:\n    return 0\n")
-                    .expect("arcana_process.io should lower"),
+                lower_module_text(
+                    "arcana_process.io",
+                    "export fn print() -> Int:\n    return 0\n",
+                )
+                .expect("arcana_process.io should lower"),
             ],
         );
         let std_layout = build_package_layout(
