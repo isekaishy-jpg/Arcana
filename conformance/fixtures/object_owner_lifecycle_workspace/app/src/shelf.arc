@@ -9,7 +9,7 @@ obj Counter:
         self.value += ctx.base
 
 create Session [Counter] scope-exit:
-    done: when Counter.value == 3 hold [Counter]
+    done: when Counter.value == 3 retain [Counter]
 
 Session
 Counter

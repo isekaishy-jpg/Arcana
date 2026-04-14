@@ -6,6 +6,5 @@ edition.workspace = true
 [dependencies]
 arcana-cabi.workspace = true
 arcana-hir.workspace = true
-arcana-language-law.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -34,15 +34,15 @@ use arcana_hir::{
     render_symbol_signature, resolve_workspace, visible_package_root_for_module,
 };
 use arcana_ir::{is_runtime_main_entry_symbol, validate_runtime_main_entry_symbol};
-use arcana_language_law::{
-    HeadedModifierKeyword, MemoryDetailValueKind, MemoryFamily, memory_detail_descriptor,
-    memory_family_descriptor, memory_modifier_allowed,
-};
 use arcana_package::{
     WorkspaceFingerprints, WorkspaceGraph, load_workspace_hir as load_package_workspace_hir,
     load_workspace_hir_from_graph as load_package_workspace_hir_from_graph,
 };
-use arcana_syntax::{BuiltinOwnershipClass, Span, builtin_ownership_class, is_builtin_type_name};
+use arcana_syntax::{
+    BuiltinOwnershipClass, HeadedModifierKeyword, MemoryDetailValueKind, MemoryFamily, Span,
+    builtin_ownership_class, is_builtin_type_name, memory_detail_descriptor,
+    memory_family_descriptor, memory_modifier_allowed,
+};
 use semantic_types::{SemanticArena, SemanticLocalBindingId, TypeId};
 use surface::{SurfaceSymbolUse, lookup_symbol_path, split_simple_path};
 use trait_contracts::validate_impl_trait_where_requirements_structured;

@@ -30,10 +30,8 @@ use arcana_cabi::{
     ArcanaCabiBindingLayout, ArcanaCabiBindingLayoutEnumVariant, ArcanaCabiBindingLayoutField,
     ArcanaCabiBindingLayoutKind, ArcanaCabiBindingRawType, ArcanaCabiBindingScalarType,
 };
-use arcana_language_law::{
-    ConstructCompletionKind, HeadedModifierKeyword, MemoryDetailKey, MemoryFamily,
-};
 use arcana_syntax::{
+    ConstructCompletionKind, HeadedModifierKeyword, MemoryDetailKey, MemoryFamily,
     AssignOp as ParsedAssignOp, DirectiveKind as ParsedDirectiveKind, Expr as ParsedExpr,
     OpaqueBoundaryPolicy as ParsedOpaqueBoundaryPolicy,
     OpaqueOwnershipPolicy as ParsedOpaqueOwnershipPolicy,

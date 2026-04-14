@@ -4,7 +4,7 @@ obj Counter:
         return
 
 create Session [Counter] scope-exit:
-    done: when false hold [Counter]
+    done: when false retain [Counter]
 
 fn main() -> Int:
     return 0

@@ -1,13 +1,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use arcana_cabi::{ArcanaCabiBindingRawType, ArcanaCabiBindingScalarType};
-use arcana_language_law::{
-    ConstructCompletionKind, HeadedModifierKeyword, MemoryDetailKey, MemoryFamily,
-};
-
 pub mod freeze;
+mod language_contract;
 pub mod surface_text;
 pub mod type_surface;
+
+pub use language_contract::{
+    ConstructCompletionKind, HeadedModifierKeyword, HeadedRegionHead, MemoryDetailDescriptor,
+    MemoryDetailKey, MemoryDetailValueKind, MemoryFamily, MemoryFamilyDescriptor,
+    memory_detail_descriptor, memory_family_descriptor, memory_family_descriptors,
+    memory_modifier_allowed,
+};
 
 pub use surface_text::{ParsedSurfaceText, SurfaceTextToken, parse_surface_text};
 pub use type_surface::{
@@ -4511,24 +4515,8 @@ fn unknown_headed_region_error(entry: &RawBlockEntry) -> Result<Option<String>, 
         return Ok(None);
     };
     if !is_identifier(head)
-        || matches!(
-            head,
-            "if" | "while"
-                | "for"
-                | "let"
-                | "return"
-                | "defer"
-                | "break"
-                | "continue"
-                | "recycle"
-                | "bind"
-                | "construct"
-                | "record"
-                | "struct"
-                | "union"
-                | "array"
-                | "Memory"
-        )
+        || is_non_headed_reserved_statement_head(head)
+        || HeadedRegionHead::parse(head).is_some()
     {
         return Ok(None);
     }
@@ -4544,7 +4532,7 @@ fn unknown_headed_region_error(entry: &RawBlockEntry) -> Result<Option<String>, 
 }
 
 fn parse_module_memory_spec(entry: &RawBlockEntry) -> Result<Option<MemorySpecDecl>, String> {
-    if !entry.text.starts_with("Memory ") {
+    if parse_headed_region_head(&entry.text) != Some(HeadedRegionHead::Memory) {
         return Ok(None);
     }
     Ok(Some(parse_memory_spec_decl(entry, true)?))
@@ -4554,10 +4542,14 @@ fn parse_headed_region_statement(
     entry: &RawBlockEntry,
     loop_depth: usize,
 ) -> Result<Option<Statement>, String> {
-    if entry.text == "recycle" || entry.text.starts_with("recycle ") {
+    let Some(head) = parse_headed_region_head(&entry.text) else {
+        return Ok(None);
+    };
+
+    if head == HeadedRegionHead::Recycle {
         let (header, default_modifier) =
             parse_headed_modifier_suffix(&entry.text, HeadedModifierMode::Recycle, entry.span)?;
-        if header != "recycle" {
+        if header != head.as_str() {
             return Err(format!(
                 "{}:{}: malformed `recycle` header",
                 entry.span.line, entry.span.column
@@ -4585,10 +4577,10 @@ fn parse_headed_region_statement(
         }));
     }
 
-    if entry.text == "bind" || entry.text.starts_with("bind ") {
+    if head == HeadedRegionHead::Bind {
         let (header, default_modifier) =
             parse_headed_modifier_suffix(&entry.text, HeadedModifierMode::Bind, entry.span)?;
-        if header != "bind" {
+        if header != head.as_str() {
             return Err(format!(
                 "{}:{}: malformed `bind` header",
                 entry.span.line, entry.span.column
@@ -4616,10 +4608,7 @@ fn parse_headed_region_statement(
         }));
     }
 
-    if entry.text.starts_with("record ")
-        || entry.text.starts_with("struct ")
-        || entry.text.starts_with("union ")
-    {
+    if head.is_record_like() {
         let region = parse_record_region(&entry.text, &entry.children, entry.span)?;
         if matches!(region.completion, ConstructCompletionKind::Yield) {
             return Err(format!(
@@ -4638,7 +4627,7 @@ fn parse_headed_region_statement(
         }));
     }
 
-    if entry.text.starts_with("array ") {
+    if head == HeadedRegionHead::Array {
         let region = parse_array_region(&entry.text, &entry.children, entry.span)?;
         if matches!(region.completion, ConstructCompletionKind::Yield) {
             return Err(format!(
@@ -4655,7 +4644,7 @@ fn parse_headed_region_statement(
         }));
     }
 
-    if entry.text.starts_with("construct ") {
+    if head == HeadedRegionHead::Construct {
         let region = parse_construct_region(&entry.text, &entry.children, entry.span)?;
         if matches!(region.completion, ConstructCompletionKind::Yield) {
             return Err(format!(
@@ -4672,7 +4661,7 @@ fn parse_headed_region_statement(
         }));
     }
 
-    if entry.text.starts_with("Memory ") {
+    if head == HeadedRegionHead::Memory {
         return Ok(Some(Statement {
             kind: StatementKind::MemorySpec(parse_memory_spec_decl(entry, false)?),
             availability: Vec::new(),
@@ -4690,7 +4679,7 @@ fn parse_construct_yield_expression(
     attached: &[RawBlockEntry],
     span: Span,
 ) -> Result<Option<Expr>, String> {
-    if !text.starts_with("construct ") {
+    if parse_headed_region_head(text) != Some(HeadedRegionHead::Construct) {
         return Ok(None);
     }
     if attached.is_empty() {
@@ -4711,7 +4700,10 @@ fn parse_record_yield_expression(
     attached: &[RawBlockEntry],
     span: Span,
 ) -> Result<Option<Expr>, String> {
-    if !text.starts_with("record ") && !text.starts_with("struct ") && !text.starts_with("union ") {
+    let Some(head) = parse_headed_region_head(text) else {
+        return Ok(None);
+    };
+    if !head.is_record_like() {
         return Ok(None);
     }
     if attached.is_empty() {
@@ -4734,7 +4726,7 @@ fn parse_array_yield_expression(
     attached: &[RawBlockEntry],
     span: Span,
 ) -> Result<Option<Expr>, String> {
-    if !text.starts_with("array ") || attached.is_empty() {
+    if parse_headed_region_head(text) != Some(HeadedRegionHead::Array) || attached.is_empty() {
         return Ok(None);
     }
     let region = parse_array_region(text, attached, span)?;
@@ -5498,6 +5490,18 @@ fn split_first_token(text: &str) -> Option<(&str, &str)> {
         }
     }
     Some((trimmed, ""))
+}
+
+fn parse_headed_region_head(text: &str) -> Option<HeadedRegionHead> {
+    let (head, _) = split_first_token(text.trim())?;
+    HeadedRegionHead::parse(head)
+}
+
+fn is_non_headed_reserved_statement_head(head: &str) -> bool {
+    matches!(
+        head,
+        "if" | "while" | "for" | "let" | "return" | "defer" | "break" | "continue"
+    )
 }
 
 fn parse_expression(text: &str, attached: &[RawBlockEntry], span: Span) -> Result<Expr, String> {
@@ -6554,7 +6558,9 @@ fn parse_projection_named_fields<'a>(
             return Err(format!("{context} field `{field}` must use `name: value`"));
         };
         if !is_identifier(name) {
-            return Err(format!("{context} field name `{name}` is not a valid identifier"));
+            return Err(format!(
+                "{context} field name `{name}` is not a valid identifier"
+            ));
         }
         if value.trim().is_empty() {
             return Err(format!("{context} field `{name}` is missing a value"));

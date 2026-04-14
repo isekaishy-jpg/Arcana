@@ -1,9 +1,12 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum HeadedRegionHead {
     Recycle,
-    Record,
-    Construct,
     Bind,
+    Array,
+    Record,
+    Struct,
+    Union,
+    Construct,
     Memory,
 }
 
@@ -11,9 +14,12 @@ impl HeadedRegionHead {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Recycle => "recycle",
-            Self::Record => "record",
-            Self::Construct => "construct",
             Self::Bind => "bind",
+            Self::Array => "array",
+            Self::Record => "record",
+            Self::Struct => "struct",
+            Self::Union => "union",
+            Self::Construct => "construct",
             Self::Memory => "Memory",
         }
     }
@@ -21,12 +27,26 @@ impl HeadedRegionHead {
     pub fn parse(text: &str) -> Option<Self> {
         match text {
             "recycle" => Some(Self::Recycle),
-            "record" => Some(Self::Record),
-            "construct" => Some(Self::Construct),
             "bind" => Some(Self::Bind),
+            "array" => Some(Self::Array),
+            "record" => Some(Self::Record),
+            "struct" => Some(Self::Struct),
+            "union" => Some(Self::Union),
+            "construct" => Some(Self::Construct),
             "Memory" => Some(Self::Memory),
             _ => None,
         }
+    }
+
+    pub const fn is_record_like(self) -> bool {
+        matches!(self, Self::Record | Self::Struct | Self::Union)
+    }
+
+    pub const fn supports_expression_yield(self) -> bool {
+        matches!(
+            self,
+            Self::Construct | Self::Array | Self::Record | Self::Struct | Self::Union
+        )
     }
 }
 

@@ -7,7 +7,6 @@ edition.workspace = true
 arcana-cabi.workspace = true
 arcana-hir.workspace = true
 arcana-ir.workspace = true
-arcana-language-law.workspace = true
 arcana-package.workspace = true
 arcana-syntax.workspace = true
 serde.workspace = true

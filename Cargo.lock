@@ -52,7 +52,6 @@ dependencies = [
  "arcana-cabi",
  "arcana-hir",
  "arcana-ir",
- "arcana-language-law",
  "arcana-package",
  "arcana-syntax",
  "serde",
@@ -66,7 +65,6 @@ name = "arcana-hir"
 version = "0.1.0"
 dependencies = [
  "arcana-cabi",
- "arcana-language-law",
  "arcana-syntax",
 ]
 
@@ -76,14 +74,9 @@ version = "0.1.0"
 dependencies = [
  "arcana-cabi",
  "arcana-hir",
- "arcana-language-law",
  "serde",
  "serde_json",
 ]
-
-[[package]]
-name = "arcana-language-law"
-version = "0.1.0"
 
 [[package]]
 name = "arcana-package"
@@ -110,8 +103,8 @@ dependencies = [
  "arcana-cabi",
  "arcana-frontend",
  "arcana-ir",
- "arcana-language-law",
  "arcana-package",
+ "arcana-syntax",
  "libloading",
  "pathdiff",
  "serde",
@@ -127,7 +120,6 @@ name = "arcana-syntax"
 version = "0.1.0"
 dependencies = [
  "arcana-cabi",
- "arcana-language-law",
 ]
 
 [[package]]

@@ -1,6 +1,0 @@
-[package]
-name = "arcana-language-law"
-version.workspace = true
-edition.workspace = true
-
-[dependencies]

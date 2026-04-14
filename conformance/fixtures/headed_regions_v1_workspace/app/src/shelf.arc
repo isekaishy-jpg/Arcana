@@ -19,7 +19,7 @@ obj Counter:
     value: Int
 
 create Session [Counter] scope-exit:
-    done: when false hold [Counter]
+    done: when false retain [Counter]
 
 fn main() -> Int:
     Memory frame:scratch -alloc

@@ -2,7 +2,7 @@ obj Counter:
     value: Int
 
 create Session [Counter] scope-exit:
-    done: when Counter.value >= 10 hold [Counter]
+    done: when Counter.value >= 10 retain [Counter]
 
 Session
 Counter

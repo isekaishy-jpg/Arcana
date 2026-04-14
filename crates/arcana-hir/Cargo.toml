@@ -5,5 +5,4 @@ edition.workspace = true
 
 [dependencies]
 arcana-cabi.workspace = true
-arcana-language-law.workspace = true
 arcana-syntax.workspace = true

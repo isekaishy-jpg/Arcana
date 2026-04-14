@@ -5073,11 +5073,11 @@ fn execute_main_memory_specs_apply_runtime_policies() {
 fn runtime_memory_spec_materialization_uses_descriptor_hook_registry() {
     let mut state = RuntimeExecutionState::default();
     let arena_descriptor =
-        arcana_language_law::memory_family_descriptor(arcana_language_law::MemoryFamily::Arena);
+        arcana_syntax::memory_family_descriptor(arcana_syntax::MemoryFamily::Arena);
     let frame_descriptor =
-        arcana_language_law::memory_family_descriptor(arcana_language_law::MemoryFamily::Frame);
+        arcana_syntax::memory_family_descriptor(arcana_syntax::MemoryFamily::Frame);
     let pool_descriptor =
-        arcana_language_law::memory_family_descriptor(arcana_language_law::MemoryFamily::Pool);
+        arcana_syntax::memory_family_descriptor(arcana_syntax::MemoryFamily::Pool);
 
     let arena_value = super::materialize_runtime_memory_spec_handle(
         &super::RuntimeMemorySpecMaterialization {

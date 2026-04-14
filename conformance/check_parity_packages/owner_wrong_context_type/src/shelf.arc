@@ -7,7 +7,7 @@ obj Counter:
         self.value = ctx.base
 
 create Session [Counter] scope-exit:
-    done: when false hold [Counter]
+    done: when false retain [Counter]
 
 Session
 Counter

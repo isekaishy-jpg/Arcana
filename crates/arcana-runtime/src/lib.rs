@@ -48,7 +48,7 @@ use arcana_ir::{
     IrRoutineType, IrRoutineTypeKind, parse_memory_spec_surface_row, parse_routine_type_text,
     parse_struct_bitfield_layout_row, validate_runtime_main_entry_contract,
 };
-use arcana_language_law::{
+use arcana_syntax::{
     MemoryDetailKey, MemoryDetailValueKind, MemoryFamily, memory_detail_descriptor,
     memory_family_descriptor,
 };
