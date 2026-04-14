@@ -5,7 +5,7 @@ use std::process::Command;
 
 use arcana_frontend::check_workspace_graph;
 use arcana_package::{
-    BuildDisposition, BuildTarget, GrimoireKind, WorkspaceGraph, default_distribution_dir,
+    BuildDisposition, BuildTarget, GrimoireKind, WorkspaceGraph, default_non_release_bundle_dir,
     distribution_bundle_is_ready, execute_build_with_context_and_progress, load_workspace_graph,
     plan_build_for_target_with_context, plan_workspace, prepare_build_from_workspace,
     read_lockfile, stage_distribution_bundle, write_lockfile,
@@ -98,8 +98,11 @@ pub(crate) fn prepare_run_workspace(
     let artifact_path = graph.root_dir.join(status.artifact_rel_path());
     let working_dir = match target {
         BuildTarget::WindowsExe => {
-            let bundle_dir =
-                default_distribution_dir(&graph, &runnable_member_name, &BuildTarget::WindowsExe);
+            let bundle_dir = default_non_release_bundle_dir(
+                &graph,
+                &runnable_member_name,
+                &BuildTarget::WindowsExe,
+            );
             let root_file_name = artifact_path
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -269,6 +272,20 @@ mod tests {
 
         let prepared = prepare_run_workspace(&dir, BuildTarget::windows_exe(), None)
             .expect("windows exe run should build");
+        let bundle_dir = prepared
+            .working_dir
+            .clone()
+            .expect("windows exe run should stage a non-release bundle");
+        assert!(
+            bundle_dir.starts_with(repo_root().join("target")),
+            "expected staged run bundle under repo target, got {}",
+            bundle_dir.display()
+        );
+        assert!(
+            !bundle_dir.starts_with(repo_root().join("dist")),
+            "did not expect staged run bundle under repo dist: {}",
+            bundle_dir.display()
+        );
         let code = run_native_executable(
             &prepared.artifact_path,
             prepared.working_dir.as_deref(),
@@ -315,6 +332,11 @@ mod tests {
             .working_dir
             .clone()
             .expect("windows exe run should stage a bundle");
+        assert!(
+            bundle_dir.starts_with(repo_root().join("target")),
+            "expected staged run bundle under repo target, got {}",
+            bundle_dir.display()
+        );
         let marker = bundle_dir.join("runner-reuse-marker.txt");
         fs::write(&marker, "keep\n").expect("marker file should write");
 

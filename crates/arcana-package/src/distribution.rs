@@ -34,7 +34,9 @@ use crate::build::{BuildStatus, package_asset_bundle_dir, selected_native_produc
 use crate::build_identity::read_cached_output_metadata;
 use crate::{
     BuildOutputKey, BuildTarget, NativeProductProducer, PackageResult, WorkspaceGraph,
-    WorkspaceMember, collect_validated_support_file_paths, validate_support_file_relative_path,
+    WorkspaceMember, collect_validated_support_file_paths, repo_root,
+    validate_support_file_relative_path, workspace_release_output_root,
+    workspace_target_output_root,
 };
 
 pub const DISTRIBUTION_BUNDLE_FORMAT: &str = "arcana-distribution-bundle-v2";
@@ -198,9 +200,34 @@ pub fn default_distribution_dir_for_build(
         .member(member)
         .map(distribution_member_dir_name)
         .unwrap_or_else(|| sanitize_distribution_component(member));
-    let mut dir = graph
-        .root_dir
-        .join("dist")
+    let mut dir = workspace_release_output_root(&graph.root_dir)
+        .join(member_dir)
+        .join(build_key.target.key());
+    if let Some(product) = build_key.product() {
+        dir = dir.join(product);
+    }
+    dir
+}
+
+pub fn default_non_release_bundle_dir(
+    graph: &WorkspaceGraph,
+    member: &str,
+    target: &BuildTarget,
+) -> PathBuf {
+    default_non_release_bundle_dir_for_build(graph, member, &BuildOutputKey::target(target.clone()))
+}
+
+pub fn default_non_release_bundle_dir_for_build(
+    graph: &WorkspaceGraph,
+    member: &str,
+    build_key: &BuildOutputKey,
+) -> PathBuf {
+    let member_dir = graph
+        .member(member)
+        .map(distribution_member_dir_name)
+        .unwrap_or_else(|| sanitize_distribution_component(member));
+    let mut dir = workspace_target_output_root(&graph.root_dir)
+        .join("bundle-stage")
         .join(member_dir)
         .join(build_key.target.key());
     if let Some(product) = build_key.product() {
@@ -219,10 +246,9 @@ pub(crate) fn append_internal_native_bundle_support(
         return Ok(());
     }
     let temp_root = unique_native_build_dir(
-        &graph
-            .root_dir
-            .join(".arcana")
-            .join("internal-native-support"),
+        &workspace_target_output_root(&graph.root_dir)
+            .join("internal-native-support")
+            .join(short_path_fingerprint(&graph.root_dir)),
         &format!("{}_{}", root_member.name, build_key.storage_key()),
     );
     fs::create_dir_all(&temp_root).map_err(|e| {
@@ -1733,14 +1759,6 @@ fn windows_system_dll_allowed(name: &str) -> bool {
         )
 }
 
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .expect("workspace root should exist")
-        .to_path_buf()
-}
-
 fn short_path_fingerprint(path: &Path) -> String {
     let mut hasher = Sha256::new();
     hasher.update(path.as_os_str().to_string_lossy().as_bytes());
@@ -2390,7 +2408,28 @@ fn native_product_probe(event: &str, message: impl AsRef<str>) {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     use super::*;
+
+    fn temp_workspace_dir(label: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos();
+        repo_root()
+            .join("target")
+            .join("arcana-package-distribution-tests")
+            .join(format!("{label}_{unique}"))
+    }
+
+    fn write_file(path: &Path, text: &str) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("parent directories should be created");
+        }
+        fs::write(path, text).expect("file should write");
+    }
 
     #[test]
     fn unique_native_build_dir_uses_distinct_paths_for_same_label() {
@@ -2422,6 +2461,44 @@ mod tests {
             first.ends_with(PathBuf::from("arcana-cargo-targets").join("rust-cdylib")),
             "shared rust-cdylib target dir should stay under target/arcana-cargo-targets"
         );
+    }
+
+    #[test]
+    fn workspace_output_dirs_anchor_to_repo_root() {
+        let dir = temp_workspace_dir("repo_output_roots");
+        write_file(&dir.join("book.toml"), "name = \"app\"\nkind = \"app\"\n");
+        write_file(
+            &dir.join("src").join("shelf.arc"),
+            "fn main() -> Int:\n    return 0\n",
+        );
+        write_file(&dir.join("src").join("types.arc"), "// types\n");
+
+        let graph = crate::load_workspace_graph(&dir).expect("workspace graph should load");
+        let dist_dir = default_distribution_dir(&graph, "app", &BuildTarget::windows_exe());
+        let stage_dir = default_non_release_bundle_dir(&graph, "app", &BuildTarget::windows_exe());
+
+        assert!(
+            dist_dir.starts_with(repo_root().join("dist")),
+            "expected release bundles under repo dist, got {}",
+            dist_dir.display()
+        );
+        assert!(
+            stage_dir.starts_with(repo_root().join("target")),
+            "expected non-release bundles under repo target, got {}",
+            stage_dir.display()
+        );
+        assert!(
+            !dist_dir.starts_with(&dir),
+            "did not expect release bundles under workspace root {}",
+            dist_dir.display()
+        );
+        assert!(
+            !stage_dir.starts_with(&dir),
+            "did not expect non-release bundles under workspace root {}",
+            stage_dir.display()
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[cfg(windows)]

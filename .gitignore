@@ -1,7 +1,6 @@
-target/
-.arcana/
-**/.arcana/
-**/dist/
+/target/
+/dist/
+/oldplans/
 .tmp-package-workspaces/
 tmp/
 scratch/

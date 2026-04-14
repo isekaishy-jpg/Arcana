@@ -600,7 +600,9 @@ mod tests {
     fn should_skip_workspace_copy(path: &Path) -> bool {
         path.file_name()
             .and_then(|name| name.to_str())
-            .is_some_and(|name| name == ".arcana" || name == "dist" || name == "Arcana.lock")
+            .is_some_and(|name| {
+                name == ".arcana" || name == "target" || name == "dist" || name == "Arcana.lock"
+            })
     }
 
     fn copy_dir_filtered(src: &Path, dst: &Path) {
@@ -966,6 +968,11 @@ mod tests {
 
         let bundle = package_workspace(dir.clone(), BuildTarget::windows_exe(), None, None)
             .expect("package should succeed");
+        assert!(
+            bundle.bundle_dir.starts_with(repo_root().join("dist")),
+            "expected packaged bundle under repo dist, got {}",
+            bundle.bundle_dir.display()
+        );
         let exe_path = bundle.bundle_dir.join(&bundle.root_artifact);
         let status = Command::new(&exe_path)
             .arg("alpha")

@@ -32,8 +32,9 @@ pub use build::{
 };
 pub use distribution::{
     DISTRIBUTION_BUNDLE_FORMAT, DistributionBundle, default_distribution_dir,
-    default_distribution_dir_for_build, distribution_bundle_is_ready, stage_distribution_bundle,
-    stage_distribution_bundle_for_build,
+    default_distribution_dir_for_build, default_non_release_bundle_dir,
+    default_non_release_bundle_dir_for_build, distribution_bundle_is_ready,
+    stage_distribution_bundle, stage_distribution_bundle_for_build,
 };
 pub use fingerprint::{
     MemberFingerprints, WorkspaceFingerprints, compute_workspace_fingerprints,
@@ -46,12 +47,61 @@ pub(crate) const LOCKFILE_VERSION: i64 = 4;
 pub(crate) const LEGACY_LOCKFILE_VERSION: i64 = 3;
 pub(crate) const OLDER_LOCKFILE_VERSION: i64 = 2;
 pub(crate) const OLDEST_LOCKFILE_VERSION: i64 = 1;
-pub(crate) const CACHE_DIR: &str = ".arcana";
 pub(crate) const ARTIFACT_DIR: &str = "artifacts";
 pub(crate) const LOGS_DIR: &str = "logs";
+pub(crate) const TARGET_OUTPUT_NAMESPACE: &str = "arcana";
 pub(crate) const DEFAULT_REGISTRY_NAME: &str = "local";
 pub(crate) const LOCAL_REGISTRY_METADATA_FILE: &str = "package.toml";
 pub(crate) const LOCAL_REGISTRY_SNAPSHOT_DIR: &str = "snapshot";
+
+pub(crate) fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root should exist")
+        .to_path_buf()
+}
+
+fn normalize_output_path(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let text = path.to_string_lossy();
+        if let Some(stripped) = text.strip_prefix("\\\\?\\") {
+            return PathBuf::from(stripped);
+        }
+    }
+
+    path.to_path_buf()
+}
+
+pub(crate) fn workspace_output_anchor_root(workspace_root: &Path) -> PathBuf {
+    let repo_root = normalize_output_path(&repo_root());
+    let workspace_root = normalize_output_path(workspace_root);
+    if workspace_root.starts_with(&repo_root) {
+        repo_root
+    } else {
+        workspace_root
+    }
+}
+
+pub(crate) fn workspace_target_output_root(workspace_root: &Path) -> PathBuf {
+    workspace_output_anchor_root(workspace_root)
+        .join("target")
+        .join(TARGET_OUTPUT_NAMESPACE)
+}
+
+pub(crate) fn workspace_release_output_root(workspace_root: &Path) -> PathBuf {
+    workspace_output_anchor_root(workspace_root).join("dist")
+}
+
+pub(crate) fn render_workspace_output_path(workspace_root: &Path, output_path: &Path) -> String {
+    let workspace_root = normalize_output_path(workspace_root);
+    let output_path = normalize_output_path(output_path);
+    diff_paths(&output_path, &workspace_root)
+        .unwrap_or_else(|| output_path.to_path_buf())
+        .to_string_lossy()
+        .replace('\\', "/")
+}
 
 pub(crate) fn collect_validated_support_file_paths<'a, I>(paths: I) -> PackageResult<Vec<String>>
 where
@@ -3171,6 +3221,7 @@ fn relative_from_root(path: &Path, root: &Path) -> PackageResult<String> {
 mod tests {
     use super::*;
     use arcana_aot::{AOT_WINDOWS_DLL_FORMAT, AOT_WINDOWS_EXE_FORMAT, parse_package_artifact};
+    use sha2::{Digest, Sha256};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn repo_root() -> PathBuf {
@@ -3202,6 +3253,48 @@ mod tests {
 
     fn path_text(path: &Path) -> String {
         path.to_string_lossy().replace('\\', "/")
+    }
+
+    fn sanitize_package_name_for_test(text: &str) -> String {
+        text.chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                    ch
+                } else {
+                    '_'
+                }
+            })
+            .collect()
+    }
+
+    fn short_package_id_hash_for_test(package_id: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(b"arcana_package_id_v1\n");
+        hasher.update(package_id.as_bytes());
+        let digest = format!("{:x}", hasher.finalize());
+        digest.chars().take(12).collect()
+    }
+
+    fn expected_target_artifact_path_text(
+        workspace_root: &Path,
+        package_name: &str,
+        package_id: &str,
+        build_key: &BuildOutputKey,
+        fingerprint: &str,
+        file_name: &str,
+    ) -> String {
+        let package_dir = format!(
+            "{}_{}",
+            sanitize_package_name_for_test(package_name),
+            short_package_id_hash_for_test(package_id)
+        );
+        let artifact_path = workspace_target_output_root(workspace_root)
+            .join(ARTIFACT_DIR)
+            .join(package_dir)
+            .join(build_key.storage_key())
+            .join(fingerprint.replace(':', "_"))
+            .join(file_name);
+        render_workspace_output_path(workspace_root, &artifact_path)
     }
 
     fn write_grimoire(dir: &Path, kind: GrimoireKind, name: &str, deps: &[(&str, &str)]) {
@@ -4839,7 +4932,7 @@ mod tests {
                     "[api_fingerprints]\n",
                     "\"app\" = \"api\"\n\n",
                     "[artifacts]\n",
-                    "\"app\" = \".arcana/artifacts/app/internal-aot/fp/app.artifact.toml\"\n\n",
+                    "\"app\" = \"target/arcana/artifacts/app/internal-aot/fp/app.artifact.toml\"\n\n",
                     "[artifact_hashes]\n",
                     "\"app\" = \"sha256:deadbeef\"\n",
                 ),
@@ -4880,7 +4973,7 @@ mod tests {
                 "[api_fingerprints]\n",
                 "\"app\" = \"api\"\n\n",
                 "[artifacts]\n",
-                "\"app\" = \".arcana/artifacts/app/internal-aot/fp/app.artifact.toml\"\n\n",
+                "\"app\" = \"target/arcana/artifacts/app/internal-aot/fp/app.artifact.toml\"\n\n",
                 "[artifact_hashes]\n",
                 "\"app\" = \"sha256:deadbeef\"\n",
             ),
@@ -4925,14 +5018,14 @@ mod tests {
                     "[builds.\"path:.\".\"internal-aot\"]\n",
                     "fingerprint = \"fp-app\"\n",
                     "api_fingerprint = \"api-app\"\n",
-                    "artifact = \".arcana/artifacts/app/internal-aot/app.artifact.toml\"\n",
+                    "artifact = \"target/arcana/artifacts/app/internal-aot/app.artifact.toml\"\n",
                     "artifact_hash = \"sha256:app\"\n",
                     "format = \"{format}\"\n",
                     "toolchain = \"toolchain-1\"\n\n",
                     "[builds.\"{git_id}\".\"internal-aot\"]\n",
                     "fingerprint = \"fp-tool\"\n",
                     "api_fingerprint = \"api-tool\"\n",
-                    "artifact = \".arcana/artifacts/tool/internal-aot/lib.artifact.toml\"\n",
+                    "artifact = \"target/arcana/artifacts/tool/internal-aot/lib.artifact.toml\"\n",
                     "artifact_hash = \"sha256:tool\"\n",
                     "format = \"{format}\"\n",
                     "toolchain = \"toolchain-1\"\n",
@@ -4983,7 +5076,7 @@ mod tests {
                 "[api_fingerprints]\n",
                 "\"app\" = \"api\"\n\n",
                 "[artifacts]\n",
-                "\"app\" = \".arcana/artifacts/app/windows-exe/fp/app.exe\"\n\n",
+                "\"app\" = \"target/arcana/artifacts/app/windows-exe/fp/app.exe\"\n\n",
                 "[artifact_hashes]\n",
                 "\"app\" = \"sha256:deadbeef\"\n",
             ),
@@ -5256,13 +5349,21 @@ mod tests {
         let lock_path = write_lockfile(&graph, &order, &first_statuses).expect("lockfile");
 
         let stale_lock = fs::read_to_string(&lock_path).expect("lockfile should exist");
+        let future_artifact = expected_target_artifact_path_text(
+            &graph.root_dir,
+            "app",
+            &member_id(&graph, "app"),
+            &BuildOutputKey::target(BuildTarget::Other("future-exe".to_string())),
+            "future-fp",
+            "app.exe",
+        );
         fs::write(
             &lock_path,
             format!(
                 "{stale_lock}\n[builds.\"path:.\".\"future-exe\"]\n\
 fingerprint = \"future-fp\"\n\
 api_fingerprint = \"future-api\"\n\
-artifact = \".arcana/artifacts/app/future-exe/future-fp/app.exe\"\n\
+artifact = \"{future_artifact}\"\n\
 artifact_hash = \"sha256:future\"\n\
 format = \"arcana-native-exe-v1\"\n\
 toolchain = \"future-toolchain\"\n"
@@ -5279,7 +5380,7 @@ toolchain = \"future-toolchain\"\n"
 
         let rendered = fs::read_to_string(&lock_path).expect("lockfile should exist");
         assert!(rendered.contains("[builds.\"path:.\".\"future-exe\"]"));
-        assert!(rendered.contains(".arcana/artifacts/app/future-exe/future-fp/app.exe"));
+        assert!(rendered.contains(&future_artifact));
 
         let _ = fs::remove_dir_all(&dir);
     }

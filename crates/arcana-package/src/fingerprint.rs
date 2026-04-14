@@ -12,7 +12,7 @@ use arcana_hir::{
 use arcana_syntax::is_builtin_type_name;
 use sha2::{Digest, Sha256};
 
-use crate::{CACHE_DIR, PackageResult, WorkspaceGraph, WorkspaceMember};
+use crate::{PackageResult, WorkspaceGraph, WorkspaceMember, workspace_target_output_root};
 
 fn quote_fingerprint_text(text: impl ToString) -> String {
     let escaped = text.to_string().replace('\\', "\\\\").replace('|', "\\|");
@@ -372,7 +372,7 @@ struct PackageAssetFingerprintCache {
 impl PackageAssetFingerprintCache {
     fn new(workspace_root: &Path) -> Self {
         Self {
-            cache_root: workspace_root.join(CACHE_DIR).join("asset-fingerprints-v1"),
+            cache_root: workspace_target_output_root(workspace_root).join("asset-fingerprints-v1"),
         }
     }
 

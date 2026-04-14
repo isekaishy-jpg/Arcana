@@ -29,9 +29,10 @@ use crate::fingerprint::{
     WorkspaceFingerprints, compute_workspace_fingerprints, package_uses_implicit_std,
 };
 use crate::{
-    ARTIFACT_DIR, BuildOutputKey, BuildTarget, CACHE_DIR, GrimoireKind, LOCKFILE_VERSION, LOGS_DIR,
+    ARTIFACT_DIR, BuildOutputKey, BuildTarget, GrimoireKind, LOCKFILE_VERSION, LOGS_DIR,
     LockNativeProductEntry, LockTargetEntry, Lockfile, NativeProductProducer, NativeProductSpec,
     PackageResult, WorkspaceGraph, collect_validated_support_file_paths,
+    render_workspace_output_path, workspace_target_output_root,
 };
 use sha2::{Digest, Sha256};
 
@@ -275,7 +276,8 @@ where
             crate::distribution::native_product_closure_digest(graph, name, &member_build_key)?;
         let fingerprint = member_fingerprints.source().to_string();
         let api_fingerprint = member_fingerprints.api().to_string();
-        let artifact_rel_path = artifact_rel_path(member, &fingerprint, &member_build_key)?;
+        let artifact_rel_path =
+            artifact_rel_path(&graph.root_dir, member, &fingerprint, &member_build_key)?;
         let existing = existing_lock
             .and_then(|lock| lock.members.get(name))
             .and_then(|member| member.build(&member_build_key));
@@ -420,11 +422,11 @@ where
 {
     validate_prepared_snapshot_with_context(prepared, statuses, context)?;
 
-    let cache_root = graph.root_dir.join(CACHE_DIR);
-    fs::create_dir_all(cache_root.join(LOGS_DIR)).map_err(|e| {
+    let target_root = workspace_target_output_root(&graph.root_dir);
+    fs::create_dir_all(target_root.join(LOGS_DIR)).map_err(|e| {
         format!(
             "failed to create cache logs directory `{}`: {e}",
-            cache_root.join(LOGS_DIR).display()
+            target_root.join(LOGS_DIR).display()
         )
     })?;
 
@@ -578,9 +580,7 @@ where
         })?;
     }
 
-    let summary_path = graph
-        .root_dir
-        .join(CACHE_DIR)
+    let summary_path = workspace_target_output_root(&graph.root_dir)
         .join(LOGS_DIR)
         .join("build-last.txt");
     if let Some(parent) = summary_path.parent() {
@@ -1417,6 +1417,7 @@ fn write_emission_support_files(
 }
 
 fn artifact_rel_path(
+    workspace_root: &Path,
     member: &crate::WorkspaceMember,
     fingerprint: &str,
     build_key: &BuildOutputKey,
@@ -1437,12 +1438,13 @@ fn artifact_rel_path(
         sanitize_package_name(&member.name),
         short_package_id_hash(&member.package_id)
     );
-    Ok(format!(
-        "{CACHE_DIR}/{ARTIFACT_DIR}/{package_dir}/{}/{}/{}",
-        build_key.storage_key(),
-        sanitize_fingerprint(fingerprint),
-        artifact_file_name,
-    ))
+    let artifact_path = workspace_target_output_root(workspace_root)
+        .join(ARTIFACT_DIR)
+        .join(package_dir)
+        .join(build_key.storage_key())
+        .join(sanitize_fingerprint(fingerprint))
+        .join(artifact_file_name);
+    Ok(render_workspace_output_path(workspace_root, &artifact_path))
 }
 
 fn sanitize_fingerprint(text: &str) -> String {

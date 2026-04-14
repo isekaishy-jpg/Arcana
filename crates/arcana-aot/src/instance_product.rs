@@ -3542,9 +3542,9 @@ mod tests {
 
         let lib_rs = render_instance_product_lib_rs(&spec).expect("lib.rs should render");
 
-        assert!(lib_rs.contains("pub fn GetCurrentProcessId() -> i64;"));
+        assert!(lib_rs.contains("pub fn GetCurrentProcessId() -> Int;"));
         assert!(lib_rs.contains("Ok(binding_int(unsafe { GetCurrentProcessId() } as i64))"));
-        assert!(lib_rs.contains("pub(crate) const MAGIC: i64 = 7;"));
+        assert!(lib_rs.contains("pub(crate) const MAGIC: Int = 7;"));
         assert!(lib_rs.contains("Ok(binding_int(MAGIC as i64))"));
     }
 
